@@ -127,15 +127,20 @@ export function PromoteLocalIssueDialog({
     });
   }, [canPublishForge, canPublishJira]);
 
-  // The promote in flight: its destination, so the hold reason can't follow a
-  // force-switched toggle, and its issue, since the host reuses this dialog
-  // across local issues and another issue's publish must not freeze this count.
+  // The promote in flight: its destination and the comments it carries, so its
+  // dialog keeps showing that run whatever the toggles do meanwhile, and its
+  // issue, since the host reuses this dialog across local issues.
   const [pendingPub, setPendingPub] = useState<{
     to: Destination;
     issueId: string;
+    count: number;
   } | null>(null);
-  const pendingTo = pendingPub?.to ?? null;
-  const pending = pendingPub !== null;
+  const ownPub =
+    pendingPub !== null && pendingPub.issueId === issue.id ? pendingPub : null;
+  const ownPendingTo = ownPub?.to ?? null;
+  // Any other issue's dialog holds only its Publish.
+  const otherPublishing =
+    pendingPub !== null && pendingPub.issueId !== issue.id;
   // Both destinations hold offline rather than park: the local issue closes
   // before the create, so a parked create lost to an app quit would strand it
   // closed with no successor. A create that parks anyway (the connection dropped
@@ -150,23 +155,26 @@ export function PromoteLocalIssueDialog({
     jira: jiraCreate.isPaused,
   };
   const pendingReason =
-    pendingTo === null
+    ownPendingTo === null
       ? undefined
       : pendingWriteReason(
-          createPaused[pendingTo],
-          `Creating the ${destinationLabel[pendingTo]} issue…`,
+          createPaused[ownPendingTo],
+          `Creating the ${destinationLabel[ownPendingTo]} issue…`,
         );
 
   const carried = issue.comments.filter((c) => c.body.trim());
   // Retained through the close fade, so the look holds while the live state
-  // clears; the count also freezes while this issue's publish runs.
-  const shownPendingTo = useRetained(pendingTo, open);
+  // clears; while this issue's run is in flight, the count is the one it carries.
+  const shownPendingTo = useRetained(ownPendingTo, open);
   const shownPending = shownPendingTo !== null;
   const shownPendingReason = useRetained(pendingReason, open);
+  const shownOtherPublishing = useRetained(otherPublishing, open);
   const shownCarriedCount = useRetained(
-    carried.length,
-    open && !(pending && pendingPub?.issueId === issue.id),
+    ownPub ? ownPub.count : carried.length,
+    open,
   );
+  // The destination the dialog shows: the run's own while one is in flight.
+  const shownTarget = shownPendingTo ?? destination;
 
   /** Whether a settle may still close and navigate: its repo is the live one AND
    *  this local issue is still selected. The host keeps one `promoteOpen` state
@@ -180,17 +188,17 @@ export function PromoteLocalIssueDialog({
     );
   }
 
-  const targetLabel = destinationLabel[destination];
+  const targetLabel = destinationLabel[shownTarget];
   // The auto-resolved Jira type; absent until types load. Its absence disables
   // the Jira submit so we never fire a create with no type.
   const jiraTypeId = creatableTypes[0]?.id ?? null;
-  const jiraReady = destination !== "jira" || jiraTypeId !== null;
+  const jiraReady = shownTarget !== "jira" || jiraTypeId !== null;
   // Explain WHY the Jira submit is dead (never a title on a disabled button):
   // still loading the project's types, or the project has none we can create.
-  const jiraLoadingTypes = destination === "jira" && jiraTypes.isPending;
-  const jiraTypesError = destination === "jira" && jiraTypes.isError;
+  const jiraLoadingTypes = shownTarget === "jira" && jiraTypes.isPending;
+  const jiraTypesError = shownTarget === "jira" && jiraTypes.isError;
   const jiraNoTypes =
-    destination === "jira" &&
+    shownTarget === "jira" &&
     !jiraTypes.isPending &&
     !jiraTypes.isError &&
     creatableTypes.length === 0;
@@ -393,9 +401,14 @@ export function PromoteLocalIssueDialog({
   }
 
   async function promote() {
-    // The look is retained through the close fade; this live gate adds `open`.
-    if (!open || refuseWhileOffline()) return;
-    setPendingPub({ to: destination, issueId: issue.id });
+    // The look is retained through the close fade; these live gates add `open`
+    // and one run at a time, since `pendingPub` holds a single run.
+    if (!open || pendingPub !== null || refuseWhileOffline()) return;
+    setPendingPub({
+      to: destination,
+      issueId: issue.id,
+      count: carried.length,
+    });
     try {
       if (destination === "jira") await promoteJira();
       else await promoteForge();
@@ -403,6 +416,21 @@ export function PromoteLocalIssueDialog({
       setPendingPub(null);
     }
   }
+
+  const publishReason = (() => {
+    switch (true) {
+      case shownPending:
+        return shownPendingReason;
+      // Offline outranks another issue's run: nothing publishes until the
+      // connection returns.
+      case !!offlineHold:
+        return offlineHold;
+      case shownOtherPublishing:
+        return "Another local issue is still being published.";
+      default:
+        return undefined;
+    }
+  })();
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -429,15 +457,19 @@ export function PromoteLocalIssueDialog({
             {/* Segmented toggle: two Tab-focusable buttons with aria-pressed,
                 matching the app's existing segmented-tab idiom (each is its own
                 tab stop; Enter/Space toggles). */}
-            <div className="flex gap-2" aria-label="Publish destination">
+            <div
+              className="flex gap-2"
+              role="group"
+              aria-label="Publish destination"
+            >
               <DisabledReasonButton
-                variant={destination === "forge" ? "secondary" : "outline"}
+                variant={shownTarget === "forge" ? "secondary" : "outline"}
                 wrapperClassName="flex-1"
                 className={cn(
                   "w-full",
-                  destination === "forge" && "font-medium",
+                  shownTarget === "forge" && "font-medium",
                 )}
-                aria-pressed={destination === "forge"}
+                aria-pressed={shownTarget === "forge"}
                 onClick={() => {
                   userPicked.current = true;
                   setDestination("forge");
@@ -448,13 +480,13 @@ export function PromoteLocalIssueDialog({
                 {remoteLabel}
               </DisabledReasonButton>
               <DisabledReasonButton
-                variant={destination === "jira" ? "secondary" : "outline"}
+                variant={shownTarget === "jira" ? "secondary" : "outline"}
                 wrapperClassName="flex-1"
                 className={cn(
                   "w-full",
-                  destination === "jira" && "font-medium",
+                  shownTarget === "jira" && "font-medium",
                 )}
-                aria-pressed={destination === "jira"}
+                aria-pressed={shownTarget === "jira"}
                 onClick={() => {
                   userPicked.current = true;
                   setDestination("jira");
@@ -506,8 +538,13 @@ export function PromoteLocalIssueDialog({
           </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
-            disabled={shownPending || !jiraReady || !!offlineHold}
-            reason={shownPending ? shownPendingReason : offlineHold}
+            disabled={
+              shownPending ||
+              shownOtherPublishing ||
+              !jiraReady ||
+              !!offlineHold
+            }
+            reason={publishReason}
           >
             {shownPending && <Spinner data-icon="inline-start" />}
             Publish to {targetLabel}
