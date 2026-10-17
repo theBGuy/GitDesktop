@@ -49,10 +49,10 @@ export type UnpushedSnapshot<C> = {
   hasNextPage: boolean;
 };
 
-/** The full agreement predicate every unpushed consumer gates on: the log's
- *  head equals status's oid, and in no-upstream mode the count read is not
- *  errored and at least as fresh as the log (it carries no HEAD, so
- *  freshness is its only axis). */
+/** The agreement predicate the unpushed set and the squash / Edit history
+ *  gates read: the log's head equals status's oid, and in no-upstream mode
+ *  the count read is not errored and at least as fresh as the log (it
+ *  carries no HEAD, so freshness is its only axis). */
 export function viewAgrees(args: {
   logHead: string | undefined;
   statusOid: string | null | undefined;
@@ -143,13 +143,14 @@ export function advanceSnapshot<C>(
   return live;
 }
 
-/** The commits+count+hasNextPage every unpushed-derived consumer reads: live
- *  when the view agrees; during a mismatch, the last agreeing snapshot only
- *  while the live log's head is still the snapshot's head (status moved
- *  first) in the same repo and status branch. Once the log has moved
- *  (commits added on top, a reset, rebase, checkout or rewrite), the live
- *  commits with count 0: nothing marked or editable, so an open Edit history
- *  can't replay a set that would drop the log's newer commits.
+/** The commits+count+hasNextPage the unpushed markers, squash and Edit
+ *  history read: live when the view agrees; during a mismatch, the last
+ *  agreeing snapshot only while the live log's head is still the snapshot's
+ *  head (status moved first, or a no-upstream count read trails the log) in
+ *  the same repo and status branch. Once the log has moved (commits added on
+ *  top, a reset, rebase, checkout or rewrite), the live commits with count 0:
+ *  nothing marked or editable, so an open Edit history can't replay a set
+ *  that would drop commits the log already shows.
  *  Upstream mode caps a served snapshot whose head isn't status's oid at
  *  `max(0, liveAhead - 1)`: a `commit && push` inside one poll reports the
  *  new oid with ahead 0 over the old log, where the uncapped snapshot would

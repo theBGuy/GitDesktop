@@ -1,9 +1,10 @@
 // Pins the History panel's unpushed/editable view
 // (src/features/history/editable-set.ts): the log and status refetch apart, so
-// the unpushed consumers read them only as a pair that agrees on HEAD, keep
-// the last agreeing set through a mismatch only while the log still shows its
-// head (status moved first), and fall to nothing editable otherwise; plus the
-// sync gates that refetch the trailing side without looping.
+// the unpushed consumers read them only as a pair that agrees on HEAD (and,
+// without an upstream, on a count read as fresh as the log), keep the last
+// agreeing set through a mismatch only while the log still shows its head,
+// and fall to nothing editable otherwise; plus the sync gates that refetch the
+// trailing side without looping.
 //
 // Not testable here: the component's ref holding the last-seen oid (its update
 // rule is `observeHeadOid`, pinned below), the render-time setState loop,

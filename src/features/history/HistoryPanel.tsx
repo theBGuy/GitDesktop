@@ -595,10 +595,10 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
     logAt: log.dataUpdatedAt,
   });
   // The last agreeing unpushed view, advanced only on agreement so a
-  // mismatch window keeps serving the set both reads vouched for; null until
-  // the first agreement so a mismatched first render marks nothing. The
-  // render-time setState settles only because advanceSnapshot returns `prev`
-  // for an unchanged input.
+  // mismatch window in which the log still starts at its head keeps serving
+  // the set both reads vouched for; null until the first agreement so a
+  // mismatched first render marks nothing. The render-time setState settles
+  // only because advanceSnapshot returns `prev` for an unchanged input.
   const [snapshot, setSnapshot] =
     useState<UnpushedSnapshot<CommitSummary> | null>(null);
   const nextSnap = advanceSnapshot(
@@ -776,11 +776,12 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   // Why squash is unavailable — in particular the easy-to-miss case where a client
   // filter hides commits between the selected ones, so a range that looks adjacent
   // in the filtered view isn't adjacent in real history. Nothing when agreement
-  // alone holds it: the range is adjacent and unpushed.
+  // alone holds it, or while the reads disagree: the unpushed set is unknown then.
   const squashDisabledHint = (() => {
     if (squashAllowed) return "";
     if (query && !contiguousInHistory)
       return " (clear the filter — a squash range must be adjacent in history)";
+    if (!agreed) return "";
     return " (must be adjacent and unpushed)";
   })();
 
