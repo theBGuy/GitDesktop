@@ -416,6 +416,22 @@ test("(10) fork with an upstream remote while status is pending: no update", () 
   assert.deepEqual(settled.pullOptions, { disabled: false, reason: undefined });
 });
 
+test("busy reason: the sync reason by default, the caller's when given, none when idle", () => {
+  const controls = (d) => [d.fetch, d.pull, d.push, d.pullOptions];
+  for (const h of controls(deriveSyncControls(input({ busy: true }))))
+    assert.deepEqual(h, { disabled: true, reason: SYNC_BUSY_REASON });
+  const custom = deriveSyncControls(
+    input({ busy: true, busyReason: "A push is running." }),
+  );
+  for (const h of controls(custom))
+    assert.deepEqual(h, { disabled: true, reason: "A push is running." });
+  // The reason never changes what is held: the hotkeys still read `busy` alone.
+  assert.deepEqual(custom.hotkeys, NO_HOTKEYS);
+  const idle = deriveSyncControls(input({ busyReason: "A push is running." }));
+  for (const h of controls(idle))
+    assert.deepEqual(h, { disabled: false, reason: undefined });
+});
+
 test("hold precedence: busy > offline > unknown read > description", () => {
   const busy = deriveSyncControls(
     input({ head: undefined, busy: true, offlineHold: "offline" }),

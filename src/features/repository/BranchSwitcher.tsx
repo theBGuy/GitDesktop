@@ -49,8 +49,13 @@ import {
   rowTrackingMatches,
 } from "@/lib/git/push-tracking";
 import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  type BranchPushState,
+  branchPublishLabel,
+  branchPushLabel,
   branchRewriteStatusOptions,
   forgeFeatureReady,
+  isBranchPushActive,
   REMOTE_BRANCHES_STALE_TIME,
   remoteBranchesOptions,
   repoKeys,
@@ -69,6 +74,8 @@ import {
   useForgeStatus,
   useHardResetToCommit,
   useMergeBranch,
+  usePendingBranchPushes,
+  usePendingBranchPushIds,
   usePendingLocalPrWrites,
   usePrList,
   usePush,
@@ -100,6 +107,8 @@ import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   OFFLINE_ITEM_REASON,
+  pendingItemReason,
+  pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -206,6 +215,14 @@ interface BranchPr {
    *  can't stand in for "merged into the default branch". */
   base: string;
   select: SelectedPr;
+}
+
+/** A publish's fork-PR detection: the row it paints, the remote it would publish
+ *  to (null = git's own routing), and the repo it runs in. */
+interface PublishDetect {
+  branch: string;
+  remote: string | null;
+  repo: string;
 }
 
 /** Sentence-initial state words for the badge's own hint — the audit chip's
@@ -377,9 +394,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     remote?: string;
     repo: string;
   } | null>(null);
-  // A fork-PR detection in flight — rides `busy`, so the menu items that started
-  // it can't fire twice.
-  const [detecting, setDetecting] = useState(false);
+  // A publish's fork-PR detection in flight, with the repo it runs in: it paints
+  // the row's spinner and counts as a running push. The ref mirrors it for the
+  // fire-time guard and the hotkey continuations, which a stale render misleads.
+  const [publishDetect, setPublishDetect] = useState<PublishDetect | null>(
+    null,
+  );
+  const publishDetectRef = useRef<PublishDetect | null>(null);
   // The pending switch target. `remote` is set only for remote-only rows, which
   // check out via `--track <remote>/<name>` (honoring the row's promised remote
   // + dodging multi-remote DWIM ambiguity); local switches leave it null.
@@ -856,6 +877,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     onActivate: (b) => setActiveBranch(b.name),
     rowKey: (b) => b.name,
   });
+  // A row focused without the arrows (a context menu's close hands focus back to
+  // it, a click, Tab) becomes the arrows' cursor, so the next arrow moves from it.
+  const focusRow = (name: string) => {
+    if (activeBranch !== name) setActiveBranch(name);
+  };
   const stashes = stashCount.data ?? 0;
   const hasChanges = (status.data?.entries.length ?? 0) > 0;
   // Which switch attempt is current. `switchTo` can suspend on the worktree
@@ -1394,6 +1420,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     options: MergeRunOptions,
   ) {
     const pickedIn = picker?.repo;
+    // A merge would queue on the network lock a running push holds (the picker
+    // can predate the push). Refused before the picker closes, so the picked
+    // branch and options survive; a switched repo keeps its own refusal below.
+    if (mode !== "rebase" && pickedIn === repoPath && pushAlreadyActive())
+      return;
     setPicker(null);
     const nothing =
       mode === "rebase" ? "nothing was rebased" : "nothing was merged";
@@ -1695,13 +1726,27 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // doUpdateFromUpstream. Whether this publishes (-u) or plain pushes is decided
   // backend-side from the branch's tracking state. The publish arms pass an
   // explicit `remote` (the chosen destination); a tracked push passes none and
-  // the backend resolves to the branch's own upstream remote.
+  // the backend resolves to the branch's own upstream remote. The list stays
+  // open: a push holds only the network lock, so the row shows its progress and
+  // the rest of the list stays usable.
   function doPushBranch(branch: Branch, remote?: string) {
-    setOpen(false);
-    if (refuseWhileOffline()) return;
+    if (refuseWhileOffline() || pushAlreadyActive()) return;
     if (branch.upstream && !branch.upstreamGone)
       void runPushBranch(branch, remote);
     else void beginPublishBranch(branch, remote);
+  }
+
+  // One push at a time, re-checked where each push route fires: a menu can be
+  // stale under the pointer, and the backend would queue a second push behind
+  // the first, then run it. Reads the cache and the detection ref live.
+  function pushAlreadyActive(): boolean {
+    if (
+      !isBranchPushActive(queryClient, repoPath) &&
+      publishDetectRef.current?.repo !== repoPath
+    )
+      return false;
+    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+    return true;
   }
 
   // Publishing a branch that is really a local copy of a fork PR's head pushes a
@@ -1710,11 +1755,20 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // failure is indistinguishable from no match and just publishes.
   async function beginPublishBranch(branch: Branch, remote?: string) {
     const publishIn = repoPath;
-    setDetecting(true);
+    const mine: PublishDetect = {
+      branch: branch.name,
+      remote: remote ?? null,
+      repo: publishIn,
+    };
+    publishDetectRef.current = mine;
+    setPublishDetect(mine);
     const match = await forgeDetectForkPrForBranch(repoPath, branch.name).catch(
       () => null,
     );
-    setDetecting(false);
+    // Compare-and-clear, so a newer detection (in another repo) keeps its slot.
+    // Before any dispatch: the push's own guard must not see this detection.
+    if (publishDetectRef.current === mine) publishDetectRef.current = null;
+    setPublishDetect((cur) => (cur === mine ? null : cur));
     // `push` builds from the live repo's options once the detection resolves,
     // while the branch and the fork match belong to this one: a switch during
     // the round-trip refuses rather than publish there.
@@ -1725,13 +1779,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       );
       return;
     }
-    if (match) setForkGuard({ match, branch, remote, repo: publishIn });
-    else void runPushBranch(branch, remote);
+    if (match) {
+      // The guard dialog takes over from the list.
+      setOpen(false);
+      setForkGuard({ match, branch, remote, repo: publishIn });
+    } else void runPushBranch(branch, remote);
   }
 
   async function runPushBranch(branch: Branch, remote?: string) {
-    // The fork-PR guard's "Publish anyway" lands here after its own dialog.
-    if (refuseWhileOffline()) return;
+    // The fork-PR guard's "Publish anyway" and the detection's fall-through land
+    // here without passing doPushBranch.
+    if (refuseWhileOffline() || pushAlreadyActive()) return;
     const publishing = !branch.upstream || branch.upstreamGone;
     try {
       await push.mutateAsync({
@@ -1760,22 +1818,85 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         map.set(w.head, w.base ?? "");
     return map;
   }, [localWrites]);
-  // Stamped by the update items, read by the popup's click-capture handler.
+  // Stamped by the update and push items, read by the popup's click-capture
+  // handler.
   const fallThroughGuardUntil = useRef(0);
+  // A push holds only the network lock, so it stays out of `busy`: its own row
+  // and the items that would queue on that lock hold on `pushActive` instead.
   const busy =
-    detecting ||
     checkout.isPending ||
     checkoutRemote.isPending ||
     mergeBranch.isPending ||
     rebaseBranch.isPending ||
     rebaseOnto.isPending ||
-    push.isPending ||
     // Only an in-place update holds the surface; other rows update in parallel.
     (currentName !== null && updatingBase.has(currentName)) ||
     resetToUpstream.isPending ||
     hardReset.isPending ||
     switchAutostash.isPending ||
     recovery.pending;
+
+  // Every push in flight in this repo, from the mutation cache, so a reopened
+  // list or a switch back still shows a push an earlier render started.
+  const pendingPushes = usePendingBranchPushes(repoPath);
+  const pendingPushIds = usePendingBranchPushIds();
+  // A HEAD push (the header's plain push) names no branch, so each is latched to
+  // the branch current when it first shows here: a checkout mid-push must not
+  // walk its spinner onto another row. State adjusted in render (never a ref:
+  // the compiler would skip the component), keyed on the mutation id so the
+  // adjust is idempotent. An id leaves only once it is pending in NO repo, so a
+  // switch away and back still finds it latched.
+  const [pushLatch, setPushLatch] = useState<Readonly<Record<number, string>>>(
+    {},
+  );
+  // Only an id still pending somewhere may be latched: the prune drops any other.
+  const newPushLatches: [number, string][] = [];
+  if (currentName !== null) {
+    for (const p of pendingPushes) {
+      if (
+        p.branch === null &&
+        p.mutationId !== null &&
+        pendingPushIds.includes(p.mutationId) &&
+        !Object.hasOwn(pushLatch, p.mutationId)
+      )
+        newPushLatches.push([p.mutationId, currentName]);
+    }
+  }
+  const settledLatch = Object.keys(pushLatch).some(
+    (id) => !pendingPushIds.includes(Number(id)),
+  );
+  if (newPushLatches.length > 0 || settledLatch) {
+    setPushLatch({
+      ...Object.fromEntries(
+        Object.entries(pushLatch).filter(([id]) =>
+          pendingPushIds.includes(Number(id)),
+        ),
+      ),
+      ...Object.fromEntries(newPushLatches),
+    });
+  }
+  /** The branch a pending push paints: its own, or the one its HEAD push
+   *  latched. */
+  const pushBranchOf = (p: BranchPushState): string | null =>
+    p.branch ??
+    (p.mutationId !== null && Object.hasOwn(pushLatch, p.mutationId)
+      ? pushLatch[p.mutationId]
+      : null);
+  // A detection of THIS repo counts as a push: the publish it decides is next.
+  const detectingBranch =
+    publishDetect !== null && publishDetect.repo === repoPath
+      ? publishDetect.branch
+      : null;
+  // "A push is running" in this repo — what one-push-at-a-time and the items
+  // that would queue on the network lock hold on.
+  const pushActive = pendingPushes.length > 0 || detectingBranch !== null;
+  // Feeds the parked-write copy: a push parked offline is waiting, not running.
+  const pushPaused = pendingPushes.some((p) => p.paused);
+  const pushOnBranch = (name: string) =>
+    pendingPushes.find((p) => pushBranchOf(p) === name);
+  const branchPushing = (name: string) =>
+    detectingBranch === name || pushOnBranch(name) !== undefined;
+  const currentRowPushing = currentName !== null && branchPushing(currentName);
 
   // Every "there is none" reason below derives from a query whose empty answer
   // and whose UNANSWERED state are the same value — `?? null` for the names,
@@ -1832,17 +1953,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Why each multi-condition menu row is held, arms in the order that row's own
   // `disabled` expression tests them. Null where the label already carries the
   // reason — a row must not say it twice.
-  const renameCurrentBlockedReason =
-    headUnread ??
-    (currentName && isSessionBranchName(currentName)
-      ? "Agent-session branches can't be renamed — renaming one breaks the session's Resume."
-      : "HEAD is detached — there's no current branch to rename.");
+  const renameCurrentBlockedReason = (() => {
+    switch (true) {
+      // A rename moves the ref the running push is sending.
+      case currentRowPushing:
+        return pendingWriteReason(pushPaused, "A push is running.");
+      case headUnread !== null:
+        return headUnread;
+      case currentName !== null && isSessionBranchName(currentName):
+        return "Agent-session branches can't be renamed — renaming one breaks the session's Resume.";
+      default:
+        return "HEAD is detached — there's no current branch to rename.";
+    }
+  })();
   const deleteCurrentBlockedReason = (() => {
     if (!currentName)
       return (
         headUnread ?? "HEAD is detached — there's no current branch to delete."
       );
-    // The remaining arm is branch protection, which the label already states.
+    // Branch protection: the label already states it.
+    if (isDeletionBlocked(rulesConfig, currentName)) return null;
+    // A delete removes the ref the running push is sending.
+    if (currentRowPushing)
+      return pendingWriteReason(pushPaused, "A push is running.");
     return null;
   })();
   const updateFromDefaultBlockedReason = (() => {
@@ -1851,6 +1984,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (!currentName)
       return headUnread ?? "HEAD is detached — there's no branch to update.";
     if (defaultName === currentName) return `You're already on ${defaultName}.`;
+    // An in-place update waits on the network lock a push holds.
+    if (pushActive) return pendingWriteReason(pushPaused, "A push is running.");
     if (busy) return "Another git operation is running.";
     // The remaining arm is the promotion rule, which the label already states.
     return null;
@@ -1864,6 +1999,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (!branchesUnread) return "There are no other branches to merge from.";
       if (canMergeIntoCurrent) return branchesUnread;
     }
+    // A merge waits on the network lock a push holds.
+    if (pushActive) return pendingWriteReason(pushPaused, "A push is running.");
     if (lockCurrent) return null; // the label says "(requires PR)"
     if (!canMergeIntoCurrent)
       return `A branch rule doesn't allow merge commits on ${currentName}.`;
@@ -1874,6 +2011,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (!branchesUnread) return "There are no other branches to merge from.";
       if (canSquashIntoCurrent) return branchesUnread;
     }
+    if (pushActive) return pendingWriteReason(pushPaused, "A push is running.");
     if (lockCurrent)
       return `A branch rule requires a pull request to change ${currentName}.`;
     if (!canSquashIntoCurrent)
@@ -2109,7 +2247,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "rename-branch",
     () => currentName && openRename(currentName),
-    Boolean(currentName) && !isSessionBranchName(currentName ?? ""),
+    Boolean(currentName) &&
+      !isSessionBranchName(currentName ?? "") &&
+      !currentRowPushing,
   );
   useHotkeyAction(
     "delete-branch",
@@ -2117,7 +2257,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       setOpen(false);
       if (currentName) openDelete(currentName);
     },
-    Boolean(currentName && !isDeletionBlocked(rulesConfig, currentName)),
+    Boolean(currentName && !isDeletionBlocked(rulesConfig, currentName)) &&
+      !currentRowPushing,
   );
   useHotkeyAction("cleanup-branches", () => {
     setOpen(false);
@@ -2132,6 +2273,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       defaultName &&
         defaultName !== currentName &&
         !busy &&
+        // In place, so it would queue on a push's network lock.
+        !pushActive &&
         currentName &&
         !currentPromotion,
     ),
@@ -2188,18 +2331,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       !defaultBranchRow?.upstreamGone &&
       !busy &&
       // `busy` holds only the current branch's update; this one holds on the
-      // same per-branch read the row items use.
-      !(defaultBranchRow && updatingBase.has(defaultBranchRow.name)),
+      // same per-branch reads the row items use: its own update, its own push.
+      !(defaultBranchRow && updatingBase.has(defaultBranchRow.name)) &&
+      !(defaultBranchRow && branchPushing(defaultBranchRow.name)) &&
+      // Only an update of the CURRENT branch runs in place, on the network lock.
+      !(pushActive && defaultName === currentName),
   );
   useHotkeyAction(
     "merge-into-current",
     () => openPicker("merge"),
-    otherBranches.length > 0 && canMergeIntoCurrent,
+    otherBranches.length > 0 && canMergeIntoCurrent && !pushActive,
   );
   useHotkeyAction(
     "squash-merge-into-current",
     () => openPicker("squash"),
-    otherBranches.length > 0 && canSquashIntoCurrent,
+    otherBranches.length > 0 && canSquashIntoCurrent && !pushActive,
   );
   useHotkeyAction(
     "rebase-current",
@@ -2299,6 +2445,31 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // An update in flight on THIS row holds only its own update items.
     const rowUpdateBase = updatingBase.get(branch.name);
     const rowUpdating = rowUpdateBase !== undefined;
+    // A push (or its fork check) in flight on THIS row holds the items that
+    // move or remove its ref; other rows hold only what would queue behind it.
+    const rowDetecting = detectingBranch === branch.name;
+    const rowPush = pushOnBranch(branch.name);
+    const rowPushing = rowDetecting || rowPush !== undefined;
+    const rowPushReason = pendingItemReason(
+      rowPush?.paused ?? false,
+      "pushing…",
+    );
+    const pushRunningReason = pendingItemReason(
+      pushPaused,
+      "a push is running",
+    );
+    const rowSpinnerLabel = (() => {
+      switch (true) {
+        case rowUpdating:
+          return `Updating from ${rowUpdateBase}`;
+        case rowDetecting:
+          return branchPublishLabel(publishDetect?.remote ?? null);
+        case rowPush !== undefined:
+          return branchPushLabel(rowPush, branch);
+        default:
+          return null;
+      }
+    })();
     // Archiving hides a branch from the branch surfaces, so it's refused for a
     // branch that is somewhere in use: the one you're on, the default, and one
     // another worktree has checked out. Unarchiving is never refused — an
@@ -2320,13 +2491,32 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // alone holds carry the reason in the label. A structural reason always
     // wins — this arm shows only where nothing else explains the dimming.
     const busySuffix = busy ? " (operation in progress)" : "";
-    // The update items hold on their own row's update, and on the CURRENT row
-    // also on `busy`: an in-place merge must not start under another HEAD-moving
-    // op. Other rows stay free of `busy` so updates run in parallel.
-    const rowUpdateHeld = rowUpdating || (branch.isCurrent && busy);
+    // Push and Publish: one push at a time, never while this row updates.
+    const pushItemSuffix = (() => {
+      switch (true) {
+        case rowPushing:
+          return ` (${rowPushReason})`;
+        case rowUpdating:
+          return " (updating…)";
+        case pushActive:
+          return ` (${pushRunningReason})`;
+        default:
+          return busySuffix || offlineSuffix;
+      }
+    })();
+    const pushItemDisabled =
+      rowPushing || rowUpdating || pushActive || busy || !!offlineHold;
+    // The update items hold on their own row's update and push, and on the
+    // CURRENT row also on `busy` and any push: an in-place merge must not start
+    // under another HEAD-moving op, and it waits on a push's network lock. Other
+    // rows update in a throwaway worktree, in parallel and off that lock.
+    const rowUpdateHeld =
+      rowUpdating || rowPushing || (branch.isCurrent && (busy || pushActive));
     const updateHeldReason = (() => {
       if (rowUpdating) return "updating…";
+      if (rowPushing) return rowPushReason;
       if (branch.isCurrent && busy) return "operation in progress";
+      if (branch.isCurrent && pushActive) return pushRunningReason;
       return undefined;
     })();
     const rowWorktreeRemoving = Boolean(
@@ -2369,6 +2559,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (branch.archived) return null;
       if (branch.isCurrent) return "current branch";
       if (branch.name === defaultName) return "default branch";
+      // Ahead of the removal arm, whose null would leave the item enabled.
+      if (rowPushing) return rowPushReason;
       if (removals.some((r) => r.branch === branch.name && !r.promotePhase))
         return null;
       if (userWorktrees.data === undefined && !userWorktrees.isError)
@@ -2455,6 +2647,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               type="button"
               data-row={branch.name}
               className="flex w-full flex-col gap-y-0.5 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+              onFocus={() => focusRow(branch.name)}
               onClick={() => {
                 if (!branch.isCurrent) void switchTo(branch.name);
               }}
@@ -2650,13 +2843,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     );
                   })()}
                 {/* The spinner takes the date's auto margin so the two sit
-                    together in the row's right cluster. */}
-                {rowUpdating && (
+                    together in the row's right cluster. One slot: an update
+                    in flight wins over a push. */}
+                {rowSpinnerLabel !== null && (
                   <span
                     role="img"
-                    aria-label={`Updating from ${rowUpdateBase}`}
+                    aria-label={rowSpinnerLabel}
                     className="ml-auto flex shrink-0 items-center text-muted-foreground"
-                    title={`Updating from ${rowUpdateBase}`}
+                    title={rowSpinnerLabel}
                   >
                     <CircleNotchIcon className="size-3 animate-spin" />
                   </span>
@@ -2665,7 +2859,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   <span
                     className={cn(
                       "shrink-0 text-[11px] text-muted-foreground",
-                      !rowUpdating && "ml-auto",
+                      rowSpinnerLabel === null && "ml-auto",
                     )}
                   >
                     <RelativeTime date={branch.lastCommitDate} />
@@ -2683,6 +2877,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             <>
               {canUpdate && (
                 <ContextMenuItem
+                  className={MENU_HELD_ROW_CLASS}
                   disabled={
                     rowUpdateHeld || rowPromotion || rowWorktreeRemoving
                   }
@@ -2717,15 +2912,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   }
                   if (resetTip) {
                     const holder = worktreeByBranch.get(branch.name);
+                    // A reset rewrites the ref a running push is sending.
+                    const resetSuffix = (() => {
+                      switch (true) {
+                        case inWorktree:
+                          return ` (checked out in ${holder})`;
+                        case rowPushing:
+                          return ` (${rowPushReason})`;
+                        default:
+                          return busySuffix;
+                      }
+                    })();
                     return (
                       <ContextMenuItem
-                        disabled={busy || inWorktree}
+                        className={MENU_HELD_ROW_CLASS}
+                        disabled={busy || inWorktree || rowPushing}
                         onClick={() => void doResetToUpstream(branch, resetTip)}
                       >
-                        Reset to {base}…
-                        {inWorktree
-                          ? ` (checked out in ${holder})`
-                          : busySuffix}
+                        Reset to {base}…{resetSuffix}
                       </ContextMenuItem>
                     );
                   }
@@ -2739,6 +2943,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   }
                   return (
                     <ContextMenuItem
+                      className={MENU_HELD_ROW_CLASS}
                       disabled={rowUpdateHeld || rowWorktreeRemoving}
                       onClick={() => {
                         fallThroughGuardUntil.current = Date.now() + 300;
@@ -2758,12 +2963,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               {pushable && (
                 <ContextMenuItem
                   className={MENU_HELD_ROW_CLASS}
-                  disabled={busy || branch.upstreamBehind > 0 || !!offlineHold}
-                  onClick={() => doPushBranch(branch)}
+                  disabled={pushItemDisabled || branch.upstreamBehind > 0}
+                  onClick={() => {
+                    // The list stays open under the closing menu.
+                    fallThroughGuardUntil.current = Date.now() + 300;
+                    doPushBranch(branch);
+                  }}
                 >
                   {branch.upstreamBehind > 0
                     ? `Push to ${branch.upstream} (diverged)`
-                    : `Push to ${branch.upstream}${busySuffix || offlineSuffix}`}
+                    : `Push to ${branch.upstream}${pushItemSuffix}`}
                 </ContextMenuItem>
               )}
               {/* Publish an unpushed / upstream-deleted branch: one remote → a
@@ -2773,23 +2982,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               {publishRemotes.length === 1 ? (
                 <ContextMenuItem
                   className={MENU_HELD_ROW_CLASS}
-                  disabled={busy || !!offlineHold}
-                  onClick={() => doPushBranch(branch, publishRemotes[0])}
+                  disabled={pushItemDisabled}
+                  onClick={() => {
+                    fallThroughGuardUntil.current = Date.now() + 300;
+                    doPushBranch(branch, publishRemotes[0]);
+                  }}
                 >
                   {publishRemotes[0] === "origin"
-                    ? `Publish branch${busySuffix || offlineSuffix}`
-                    : `Publish to ${publishRemotes[0]}${busySuffix || offlineSuffix}`}
+                    ? `Publish branch${pushItemSuffix}`
+                    : `Publish to ${publishRemotes[0]}${pushItemSuffix}`}
                 </ContextMenuItem>
               ) : (
                 publishRemotes.map((r) => (
                   <ContextMenuItem
                     key={r}
                     className={MENU_HELD_ROW_CLASS}
-                    disabled={busy || !!offlineHold}
-                    onClick={() => doPushBranch(branch, r)}
+                    disabled={pushItemDisabled}
+                    onClick={() => {
+                      fallThroughGuardUntil.current = Date.now() + 300;
+                      doPushBranch(branch, r);
+                    }}
                   >
                     Publish to {r}
-                    {busySuffix || offlineSuffix}
+                    {pushItemSuffix}
                   </ContextMenuItem>
                 ))
               )}
@@ -2797,10 +3012,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             </>
           )}
           <ContextMenuItem
-            disabled={rowUpdating}
+            className={MENU_HELD_ROW_CLASS}
+            disabled={rowUpdating || rowPushing}
             onClick={() => openRename(branch.name)}
           >
-            Rename branch…{rowUpdating ? " (updating…)" : ""}
+            Rename branch…
+            {(() => {
+              switch (true) {
+                case rowUpdating:
+                  return " (updating…)";
+                case rowPushing:
+                  return ` (${rowPushReason})`;
+                default:
+                  return "";
+              }
+            })()}
           </ContextMenuItem>
           <ContextMenuItem
             onClick={() => copyText(branch.name, "Branch name copied")}
@@ -2808,6 +3034,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             Copy branch name
           </ContextMenuItem>
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             disabled={archiveBlockedReason !== null}
             onClick={() => void setArchived(branch.name, !branch.archived)}
           >
@@ -2914,17 +3141,25 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             </>
           )}
           <ContextMenuItem
-            disabled={deletionBlocked || inWorktree}
+            className={MENU_HELD_ROW_CLASS}
+            disabled={deletionBlocked || inWorktree || rowPushing}
             onClick={() => {
               setOpen(false);
               openDelete(branch.name);
             }}
           >
-            {deletionBlocked
-              ? "Delete branch… (protected)"
-              : inWorktree
-                ? `Delete branch… (${rowCopy.held})`
-                : "Delete branch…"}
+            {(() => {
+              switch (true) {
+                case deletionBlocked:
+                  return "Delete branch… (protected)";
+                case inWorktree:
+                  return `Delete branch… (${rowCopy.held})`;
+                case rowPushing:
+                  return `Delete branch… (${rowPushReason})`;
+                default:
+                  return "Delete branch…";
+              }
+            })()}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
@@ -2946,6 +3181,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               data-row={branch.name}
               title={`Check out ${branch.name} — creates a local branch tracking ${branch.remote}/${branch.name}`}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+              onFocus={() => focusRow(branch.name)}
               onClick={() => void switchTo(branch.name, branch.remote)}
             >
               <CloudArrowDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -2982,7 +3218,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               the connection can drop between render and press. */}
           <ContextMenuItem
             className={MENU_HELD_ROW_CLASS}
-            disabled={deletionBlocked || !!offlineHold}
+            // A remote delete is a push, so it would queue on the network lock.
+            disabled={deletionBlocked || pushActive || !!offlineHold}
             onClick={() => {
               setOpen(false);
               setRemoteDeleteTarget({
@@ -2992,9 +3229,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               });
             }}
           >
-            {deletionBlocked
-              ? `Delete on ${branch.remote}… (protected)`
-              : `Delete on ${branch.remote}…${offlineSuffix}`}
+            {(() => {
+              switch (true) {
+                case deletionBlocked:
+                  return `Delete on ${branch.remote}… (protected)`;
+                case pushActive:
+                  return `Delete on ${branch.remote}… (${pendingItemReason(pushPaused, "a push is running")})`;
+                default:
+                  return `Delete on ${branch.remote}…${offlineSuffix}`;
+              }
+            })()}
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
@@ -3136,9 +3380,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               // filter input, a row, or the popup itself (Esc/Tab pass through).
               onKeyDown={onBranchKeyDown}
               // The closing context menu ignores pointer events for its ~100ms fade,
-              // so a click meant for an update item lands on popup content beneath it
-              // (any row, the bottom actions); 300ms of capture swallows it. DOM
-              // descendants only: the portaled menu is a React child here too.
+              // so a click meant for an item that leaves the list open (update,
+              // push, publish) lands on popup content beneath it; 300ms of capture
+              // swallows it. DOM descendants only: the portaled menu is a React
+              // child here too.
               onClickCapture={(e) => {
                 if (
                   Date.now() < fallThroughGuardUntil.current &&
@@ -3243,7 +3488,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               <div className="border-t py-1">
                 <MenuRow onClick={openCreate}>New branch…</MenuRow>
                 <MenuRow
-                  disabled={!currentName || isSessionBranchName(currentName)}
+                  disabled={
+                    currentRowPushing ||
+                    !currentName ||
+                    isSessionBranchName(currentName)
+                  }
                   reason={renameCurrentBlockedReason}
                   onClick={() => {
                     if (!currentName || isSessionBranchName(currentName))
@@ -3255,7 +3504,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 </MenuRow>
                 <MenuRow
                   disabled={
-                    !currentName || isDeletionBlocked(rulesConfig, currentName)
+                    !currentName ||
+                    isDeletionBlocked(rulesConfig, currentName) ||
+                    currentRowPushing
                   }
                   reason={deleteCurrentBlockedReason}
                   onClick={() => {
@@ -3363,6 +3614,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     !defaultName ||
                     !currentName ||
                     defaultName === currentName ||
+                    pushActive ||
                     busy ||
                     currentPromotion
                   }
@@ -3375,7 +3627,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   {currentPromotion ? " (promotion branch)" : ""}
                 </MenuRow>
                 <MenuRow
-                  disabled={otherBranches.length === 0 || !canMergeIntoCurrent}
+                  disabled={
+                    otherBranches.length === 0 ||
+                    pushActive ||
+                    !canMergeIntoCurrent
+                  }
                   reason={mergeIntoCurrentBlockedReason}
                   onClick={() => openPicker("merge")}
                 >
@@ -3384,7 +3640,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     : "Merge into current branch…"}
                 </MenuRow>
                 <MenuRow
-                  disabled={otherBranches.length === 0 || !canSquashIntoCurrent}
+                  disabled={
+                    otherBranches.length === 0 ||
+                    pushActive ||
+                    !canSquashIntoCurrent
+                  }
                   reason={squashIntoCurrentBlockedReason}
                   onClick={() => openPicker("squash")}
                 >

@@ -1,4 +1,5 @@
 import { WarningIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useId, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -14,7 +15,11 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { forgeEnsureForkRemote } from "@/lib/git/api";
-import { usePush } from "@/lib/git/queries";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  isBranchPushActive,
+  usePush,
+} from "@/lib/git/queries";
 import type { ForkPrMatch } from "@/lib/git/types";
 import {
   ACT_PENDING_REASON,
@@ -53,6 +58,7 @@ export function ForkPrPublishGuard({
   onPublishAnyway: () => void;
 }) {
   const push = usePush(repoPath);
+  const queryClient = useQueryClient();
   const [ensuring, setEnsuring] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
   const noteId = useId();
@@ -90,6 +96,11 @@ export function ForkPrPublishGuard({
   // which is where the PR list and details live.
   async function pushToFork() {
     if (!match || refuseWhileOffline() || switchedAway()) return;
+    // One push at a time: another row's push may have started under the dialog.
+    if (isBranchPushActive(queryClient, repoPath)) {
+      toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+      return;
+    }
     setEnsuring(true);
     let remote: string;
     try {

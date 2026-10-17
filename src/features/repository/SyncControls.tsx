@@ -5,6 +5,7 @@ import {
   CaretDownIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -42,10 +43,13 @@ import {
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
 import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  isBranchPushActive,
   repoStatusOptions,
   useBranchRewriteStatus,
   useFetchRemote,
   useHardResetToCommit,
+  usePendingBranchPushes,
   usePull,
   usePush,
   useRemoteBranches,
@@ -62,6 +66,8 @@ import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACT_PENDING_REASON,
   OFFLINE_ITEM_REASON,
+  pendingItemReason,
+  pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -87,6 +93,7 @@ import {
   headFacts,
   type MismatchMenu,
   type MismatchMenuItem,
+  SYNC_BUSY_REASON,
 } from "./sync-controls-state";
 import { usePullDropGuard } from "./usePullDropGuard";
 import { useStashReapplyRecovery } from "./useStashReapplyRecovery";
@@ -113,6 +120,22 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const fetchRemote = useFetchRemote(repoPath);
   const pull = usePull(repoPath);
   const push = usePush(repoPath);
+  const queryClient = useQueryClient();
+  // This repo's pushes in flight, read from the cache: the observer goes idle at
+  // a repo switch and never re-attaches, so a switch back mid-push would read
+  // idle. The bar's own pushes are tagged `source: "header"`.
+  const pendingPushes = usePendingBranchPushes(repoPath);
+  const headerPushPending = pendingPushes.some((p) => p.fromHeader);
+  // A push started elsewhere (the branch dropdown, a fork guard) holds the same
+  // network lock, so the bar's network controls wait on it too; only the bar's
+  // own pushes turn its Push spinner.
+  const otherPushes = pendingPushes.filter((p) => !p.fromHeader);
+  const otherPushRunning = otherPushes.length > 0;
+  const otherPushPaused = otherPushes.some((p) => p.paused);
+  const otherPushReason = pendingWriteReason(
+    otherPushPaused,
+    "A push is running.",
+  );
   const updateUpstream = useUpdateFromUpstream(repoPath);
   const recovery = useStashReapplyRecovery(repoPath);
   // Shares that recovery: a decided re-run can still hit a dirty tree, and one
@@ -241,15 +264,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // True only where the status actually measured commits on the other side.
   const remoteAhead = rewriteData?.remoteOnly ?? 0;
   const hardReset = useHardResetToCommit(repoPath);
-  const busy =
+  const ownBusy =
     fetchRemote.isPending ||
     pull.isPending ||
-    push.isPending ||
+    headerPushPending ||
     updateUpstream.isPending ||
     hardReset.isPending ||
     detecting ||
     recovery.pending ||
     pullDropGuard.pending;
+  const busy = ownBusy || otherPushRunning;
   const onError = (e: unknown) => toastError(e);
   // Every network arm here (fetch, pull, push, update from upstream) holds
   // offline rather than park: a parked push or force push would land whenever
@@ -270,18 +294,24 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     ) ?? false;
   // Sticky failure predicates, never `isError`: a never-loaded query that errored
   // goes back to pending on every refetch, which would flip the reason per poll.
-  const sync = deriveSyncControls({
+  const syncInput = {
     head,
     statusError: status.data === undefined && status.errorUpdateCount > 0,
     remotes: remotes.data,
     remotesError: remotes.data === undefined && remotes.errorUpdateCount > 0,
     busy,
+    // Held only by another surface's push, the bar names that push.
+    busyReason: ownBusy ? SYNC_BUSY_REASON : otherPushReason,
     offlineHold,
     remoteRebased,
     mixedRewrite,
     localAtRisk,
     remoteNewExists,
-  });
+  };
+  const sync = deriveSyncControls(syncInput);
+  // The hotkeys follow the bar's OWN holds, so a press during another surface's
+  // push reaches its fire-time refusal instead of doing nothing.
+  const hotkeys = deriveSyncControls({ ...syncInput, busy: ownBusy }).hotkeys;
   // The menu's trigger unmounts when the mismatch clears, closing the menu with
   // it; a menu left "open" would reappear by itself the next time it mounts.
   if (pushMenuOpen && !sync.mismatchMenu) setPushMenuOpen(false);
@@ -553,6 +583,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         setUpstream: branch === undefined && !hasUpstream,
         force,
         branch,
+        source: "header",
       });
       // Only a force push has a guarantee to report, and only the two
       // degraded values say more than the plain confirmation does.
@@ -629,7 +660,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // and never in the exit frames, which may already belong to another repo.
   const forceEvidence =
     forceConfirm?.open === true && head?.name === forceConfirm.branch;
-  const forceActPending = push.isPending || forceReading;
+  const forceActPending = headerPushPending || forceReading;
 
   // Publishing an untracked branch that is really a local copy of a fork PR's
   // head pushes a separate copy to origin and leaves the PR untouched — check
@@ -699,6 +730,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       )
     )
       return;
+    if (refuseWhilePushRuns()) return;
     const { branch, remote, remoteBranch } = capture.menu;
     if (headNameRef.current !== branch) {
       toast.info("HEAD moved — nothing was pushed.");
@@ -711,10 +743,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           branch,
           remote,
           remoteBranch,
+          source: "header",
         });
         toast.success(`Pushed ${branch} to ${remote}/${remoteBranch}`);
       } else {
-        await push.mutateAsync({ setUpstream: true, branch, remote });
+        await push.mutateAsync({
+          setUpstream: true,
+          branch,
+          remote,
+          source: "header",
+        });
         toast.success(
           `Published ${branch} to ${remote} — Push now sends to ${remote}/${branch}`,
         );
@@ -750,6 +788,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   ): MismatchMenuItem => {
     if (!sameTarget || !live) return { label: pinned.label, disabled: true };
     if (live.disabled) return live;
+    // The menu can be open when another surface's push starts.
+    if (otherPushRunning)
+      return {
+        label: `${live.label} (${pendingItemReason(otherPushPaused, "a push is running")})`,
+        disabled: true,
+      };
     return {
       label: `${live.label}${offlineSuffix}`,
       disabled: !!offlineHold,
@@ -761,17 +805,45 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const publishRow =
     pinnedMenu && menuRow(pinnedMenu.publish, liveMenu?.publish);
 
-  // Hotkeys mirror the buttons' holds exactly (sync-controls-state.ts).
-  useHotkeyAction("fetch", () => void doFetch(false), sync.hotkeys.fetch);
-  useHotkeyAction("pull", () => void doPull("ffOnly"), sync.hotkeys.pull);
-  useHotkeyAction("push", pressPush, sync.hotkeys.push);
+  // A network op started now would queue behind a push another surface runs on
+  // the repo's network lock, so a press says why it waits instead.
+  function refuseWhilePushRuns(): boolean {
+    if (!isBranchPushActive(queryClient, repoPath)) return false;
+    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+    return true;
+  }
+
+  // Hotkeys mirror the buttons' own holds (sync-controls-state.ts).
+  useHotkeyAction(
+    "fetch",
+    () => {
+      if (!refuseWhilePushRuns()) void doFetch(false);
+    },
+    hotkeys.fetch,
+  );
+  useHotkeyAction(
+    "pull",
+    () => {
+      if (!refuseWhilePushRuns()) void doPull("ffOnly");
+    },
+    hotkeys.pull,
+  );
+  useHotkeyAction(
+    "push",
+    () => {
+      if (!refuseWhilePushRuns()) pressPush();
+    },
+    hotkeys.push,
+  );
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
   // remote existing (and not detached), so it hides itself when there's nothing
   // to sync from or nowhere to merge into.
   useHotkeyAction(
     "update-from-upstream",
-    () => void doUpdateFromUpstream(),
-    sync.hotkeys.updateFromUpstream,
+    () => {
+      if (!refuseWhilePushRuns()) void doUpdateFromUpstream();
+    },
+    hotkeys.updateFromUpstream,
   );
 
   if (noOrigin) {
@@ -963,7 +1035,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                   aria-keyshortcuts={pushKeyshortcuts}
                   className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
                 >
-                  {push.isPending || detecting ? (
+                  {headerPushPending || detecting ? (
                     <Spinner data-icon="inline-start" className="size-3.5" />
                   ) : (
                     <ArrowUpIcon data-icon="inline-start" />
@@ -1022,7 +1094,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             className="border-l-0 focus-visible:relative focus-visible:z-10 max-md:pr-1.5"
             onClick={pressPush}
           >
-            {push.isPending || detecting ? (
+            {headerPushPending || detecting ? (
               <Spinner data-icon="inline-start" className="size-3.5" />
             ) : diverged ? (
               <WarningIcon data-icon="inline-start" />
@@ -1095,8 +1167,17 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             </Button>
             <DisabledReasonButton
               variant="destructive"
-              disabled={forceActPending || !!offlineHold}
-              reason={forceActPending ? ACT_PENDING_REASON : offlineHold}
+              disabled={forceActPending || otherPushRunning || !!offlineHold}
+              reason={(() => {
+                switch (true) {
+                  case forceActPending:
+                    return ACT_PENDING_REASON;
+                  case otherPushRunning:
+                    return otherPushReason;
+                  default:
+                    return offlineHold;
+                }
+              })()}
               onClick={() => void confirmForcePush()}
             >
               {forceActPending && <Spinner data-icon="inline-start" />}

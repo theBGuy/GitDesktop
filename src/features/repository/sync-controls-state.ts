@@ -73,6 +73,9 @@ export interface SyncControlsInput {
    *  refetches, as `statusError`); only consulted while `remotes` is undefined. */
   remotesError: boolean;
   busy: boolean;
+  /** What a `busy` hold says; {@link SYNC_BUSY_REASON} when absent. A caller
+   *  held by another surface's write names that write instead. */
+  busyReason?: string;
   /** The offline hold's reason, undefined while online. */
   offlineHold: string | undefined;
   /** The rewrite probe's measured verdicts (all false/0 until it resolves). */
@@ -135,6 +138,7 @@ function plural(n: number): string {
 
 export function deriveSyncControls(input: SyncControlsInput) {
   const { head, remotes, busy, offlineHold } = input;
+  const busyReason = input.busyReason ?? SYNC_BUSY_REASON;
   const statusKnown = head !== undefined;
   const remotesKnown = remotes !== undefined;
   const statusFailed = !statusKnown && input.statusError;
@@ -299,7 +303,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
     description: string | undefined,
   ): Hold => ({
     disabled: busy || !!offlineHold || pending !== undefined || blocked,
-    reason: busy ? SYNC_BUSY_REASON : (offlineHold ?? pending ?? description),
+    reason: busy ? busyReason : (offlineHold ?? pending ?? description),
   });
   const fetchHold = hold(unknownRead(false), false, undefined);
   const pull = hold(
@@ -319,7 +323,7 @@ export function deriveSyncControls(input: SyncControlsInput) {
     const pending = unknownRead(true);
     const empty = !hasUpstream && !canUpdateUpstream;
     const disabled = busy || pending !== undefined || empty;
-    if (busy) return { disabled, reason: SYNC_BUSY_REASON };
+    if (busy) return { disabled, reason: busyReason };
     if (pending !== undefined) return { disabled, reason: pending };
     // An unborn branch has no commits to reconcile, upstream or not, and the
     // empty menu's reason would point at Publish, which Push holds until the
