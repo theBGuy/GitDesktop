@@ -5,8 +5,16 @@ import {
   MagnifyingGlassIcon,
   TagIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { type MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type MouseEvent,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { ListRowSkeletons } from "@/components/list-row-skeleton";
@@ -39,6 +47,7 @@ import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
 import { gitCommitDetails, gitRecentCommits } from "@/lib/git/api";
 import {
+  repoKeys,
   useBranches,
   useCheckoutCommit,
   useCherryPick,
@@ -91,6 +100,14 @@ import {
 } from "./commit-confirms";
 import { EditHistoryDialog } from "./EditHistoryDialog";
 import {
+  advanceSnapshot,
+  deriveEditRange,
+  resolveUnpushedView,
+  statusLogAction,
+  type UnpushedSnapshot,
+  viewAgrees,
+} from "./editable-set";
+import {
   CherryPickOntoDialog,
   CreateRefFromCommitDialog,
   createRefFromCommitFormOpts,
@@ -105,6 +122,83 @@ import { useAmendWithConfirm } from "./useAmendCommit";
 const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
+  return (
+    <>
+      <StatusLogSync key={repoPath} repoPath={repoPath} />
+      <HistoryPanelBody repoPath={repoPath} />
+    </>
+  );
+}
+
+// Refreshes the log and its side reads when status reports a HEAD the log
+// hasn't caught up to (a commit made outside the app). Its own observers keep
+// the 5 s status poll from re-rendering the panel; it sits beside the body so
+// it mounts in every render arm, and the repo key resets its last-seen oid.
+function StatusLogSync({ repoPath }: { repoPath: string }) {
+  const queryClient = useQueryClient();
+  const log = useLog(repoPath);
+  const status = useRepoStatus(repoPath);
+  const head = status.data?.branch;
+  const noUpstream =
+    head != null && (head.upstream === null || head.upstreamGone);
+  const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
+  // The side keys refresh once per observed HEAD move, not per render.
+  const lastOid = useRef<string | null>(null);
+  const headOid = head?.oid;
+  const onSync = useEffectEvent(
+    (oid: string | null | undefined, logAt: number, statusAt: number) => {
+      const prevOid = lastOid.current;
+      if (oid != null) lastOid.current = oid;
+      const actions = statusLogAction({
+        oid,
+        // The first observed oid seeds the ref without firing.
+        oidChanged: prevOid !== null && oid != null && oid !== prevOid,
+        logHead: log.data?.pages[0]?.[0]?.hash,
+        logHasData: log.data !== undefined,
+        logIsFetching: log.isFetching,
+        logAt,
+        statusAt,
+        noUpstream,
+        countIsError: unpushedVsRemotes.isError,
+        countIsFetching: unpushedVsRemotes.isFetching,
+        countAt: unpushedVsRemotes.dataUpdatedAt,
+      });
+      if (!actions) return;
+      if (actions.has("refetch-log")) {
+        void queryClient.invalidateQueries(
+          { queryKey: repoKeys.log(repoPath) },
+          // Join a user's in-flight Load more instead of cancelling it; a
+          // skipped refetch is re-checked at the next status poll.
+          { cancelRefetch: false },
+        );
+      }
+      if (actions.has("refresh-side-keys")) {
+        // These families don't heal through the log refetch: the dialog's
+        // full-message read keys on a base that holds through the reseed,
+        // opState gates Edit history against outside operations, and the
+        // no-upstream count carries no HEAD of its own.
+        for (const key of [
+          ["repo", repoPath, "unpushed-count"],
+          ["repo", repoPath, "unpushed-messages"],
+          repoKeys.opState(repoPath),
+        ] as const) {
+          void queryClient.invalidateQueries({ queryKey: key });
+        }
+      }
+      if (actions.has("refresh-count")) {
+        void queryClient.invalidateQueries({
+          queryKey: ["repo", repoPath, "unpushed-count"],
+        });
+      }
+    },
+  );
+  useEffect(() => {
+    onSync(headOid, log.dataUpdatedAt, status.dataUpdatedAt);
+  }, [headOid, log.dataUpdatedAt, status.dataUpdatedAt]);
+  return null;
+}
+
+function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   const log = useLog(repoPath);
   // Batch-resolve commit-author avatars for the log's authors (GitHub-only,
   // deduped by react-query across the History surfaces).
@@ -155,7 +249,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // Multi-/range-selection for "cherry-pick to branch". Kept separate from the
   // ui store's focused commit (which drives the diff panel).
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
+  // A hash, not a row index: the log can gain a top commit mid-interaction.
+  const [anchorHash, setAnchorHash] = useState<string | null>(null);
   // Hashes to copy, oldest-first, and the chosen destination branch.
   const [pickOnto, setPickOnto] = useState<{
     hashes: string[];
@@ -194,10 +289,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     defaultMessage: string;
   } | null>(null);
   const [editHistoryOpen, setEditHistoryOpen] = useState(false);
-  // The commit (+ its row index) the one shared context menu acts on.
+  // The commit the one shared context menu acts on; its position is derived at
+  // render, since the log can gain a top commit while the menu is open.
   const [menuTarget, setMenuTarget] = useState<{
     commit: CommitSummary;
-    index: number;
   } | null>(null);
 
   const searchActive = searchMode && filterText.trim().length > 0;
@@ -424,7 +519,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     toast.success(`Pushed tag ${tag} to origin`);
   }
 
-  useHotkeyAction("undo-commit", undoLast, canUndo && !undoCommit.isPending);
+  // The log can trail an outside commit (and push): undo only the HEAD status
+  // reports.
+  useHotkeyAction(
+    "undo-commit",
+    undoLast,
+    canUndo && !undoCommit.isPending && lastCommit?.hash === head?.oid,
+  );
   useHotkeyAction("focus-filter", () => filterRef.current?.focus());
 
   // Derived commit lists — memoized so the per-render .flat()/.filter()/.map()
@@ -479,12 +580,55 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       ? (unpushedVsRemotes.data ?? 0)
       : head.ahead
     : 0;
-  // The unpushed set (top `unpushedCount` of the HEAD-order log), for marking
-  // rows. Memoized — the React Compiler won't hoist the .slice/.map/new Set.
-  // Auto-clears after a push: useRepoStatus refetches, head.ahead → 0.
+  // The count comes from status and the commits from the log, which refetch
+  // apart: every unpushed consumer reads them only as a pair both vouched for
+  // (the log's head is status's HEAD).
+  const agreed = viewAgrees({
+    logHead: commits[0]?.hash,
+    statusOid: head?.oid,
+    noUpstream,
+    countIsError: unpushedVsRemotes.isError,
+    countAt: unpushedVsRemotes.dataUpdatedAt,
+    logAt: log.dataUpdatedAt,
+  });
+  // The last agreeing unpushed view, advanced only on agreement so a
+  // mismatch window keeps serving the set both reads vouched for; null until
+  // the first agreement so a mismatched first render marks nothing. The
+  // render-time setState settles only because advanceSnapshot returns `prev`
+  // for an unchanged input.
+  const [snapshot, setSnapshot] =
+    useState<UnpushedSnapshot<CommitSummary> | null>(null);
+  const nextSnap = advanceSnapshot(
+    snapshot,
+    {
+      repo: repoPath,
+      branch: head?.name ?? null,
+      commits,
+      count: unpushedCount,
+      hasNextPage: log.hasNextPage,
+    },
+    agreed,
+  );
+  if (nextSnap !== snapshot) setSnapshot(nextSnap);
+  const view = resolveUnpushedView({
+    agreed,
+    repo: repoPath,
+    branch: head?.name ?? null,
+    statusOid: head?.oid,
+    liveAhead: head?.ahead ?? 0,
+    noUpstream,
+    commits,
+    count: unpushedCount,
+    hasNextPage: log.hasNextPage,
+    snapshot,
+  });
+  // The unpushed set (the top `view.count` of the gated view's HEAD-order
+  // commits), for marking rows. Memoized — the React Compiler won't hoist the
+  // .slice/.map/new Set. A push leaves HEAD in place, so it clears once status
+  // reports ahead 0.
   const unpushedHashes = useMemo(
-    () => new Set(commits.slice(0, unpushedCount).map((c) => c.hash)),
-    [commits, unpushedCount],
+    () => new Set(view.commits.slice(0, view.count).map((c) => c.hash)),
+    [view.commits, view.count],
   );
 
   if (log.isPending) {
@@ -549,11 +693,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     // Search results aren't contiguous history — single-select only there.
     if (searchActive) {
       setSelected(new Set([hash]));
-      setAnchorIndex(null);
+      setAnchorHash(null);
       return;
     }
-    if (e.shiftKey && anchorIndex !== null) {
-      selectRange(anchorIndex, index);
+    const from = visibleCommits.findIndex((c) => c.hash === anchorHash);
+    if (e.shiftKey && from !== -1) {
+      selectRange(from, index);
     } else if (e.ctrlKey || e.metaKey) {
       const next = new Set(selected);
       if (next.has(hash)) {
@@ -562,20 +707,20 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         next.add(hash);
       }
       setSelected(next);
-      setAnchorIndex(index);
+      setAnchorHash(hash);
     } else {
       setSelected(new Set([hash]));
-      setAnchorIndex(index);
+      setAnchorHash(hash);
     }
   }
 
   // Right-clicking a commit outside the selection collapses the selection
   // to it (standard desktop behavior) — the context menu then always
   // describes exactly what it acts on.
-  function onRowContextMenu(index: number, hash: string) {
+  function onRowContextMenu(hash: string) {
     if (!selected.has(hash)) {
       setSelected(new Set([hash]));
-      setAnchorIndex(index);
+      setAnchorHash(hash);
       selectCommit(hash);
     }
   }
@@ -588,11 +733,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     rowAttr: "data-hash",
     onActivate: (commit, to, shift) => {
       selectCommit(commit.hash);
-      if (shift && anchorIndex !== null) {
-        selectRange(anchorIndex, to);
+      const from = visibleCommits.findIndex((c) => c.hash === anchorHash);
+      if (shift && from !== -1) {
+        selectRange(from, to);
       } else {
         setSelected(new Set([commit.hash]));
-        setAnchorIndex(to);
+        setAnchorHash(commit.hash);
       }
     },
   });
@@ -615,19 +761,25 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const contiguousInHistory =
     selectedIndices.length > 1 &&
     squashMax - (selectedIndices[0] ?? 0) + 1 === selectedIndices.length;
-  const canSquash =
+  const squashAllowed =
     contiguousInHistory &&
-    squashMax < unpushedCount &&
+    selectedIndices.every((i) => unpushedHashes.has(commits[i].hash)) &&
     squashMax + 1 < commits.length &&
     // The replayed range (everything above the base) must be merge-free.
     commits.slice(0, squashMax + 1).every((c) => !c.isMerge);
+  // Opening also waits for agreement: during a mismatch the view may still
+  // serve the last agreeing set while HEAD has moved past it.
+  const canSquash = squashAllowed && agreed;
   // Why squash is unavailable — in particular the easy-to-miss case where a client
   // filter hides commits between the selected ones, so a range that looks adjacent
-  // in the filtered view isn't adjacent in real history.
-  const squashDisabledHint =
-    query && !contiguousInHistory
-      ? " (clear the filter — a squash range must be adjacent in history)"
-      : " (must be adjacent and unpushed)";
+  // in the filtered view isn't adjacent in real history. Nothing when agreement
+  // alone holds it: the range is adjacent and unpushed.
+  const squashDisabledHint = (() => {
+    if (squashAllowed) return "";
+    if (query && !contiguousInHistory)
+      return " (clear the filter — a squash range must be adjacent in history)";
+    return " (must be adjacent and unpushed)";
+  })();
 
   function openSquash() {
     if (!canSquash) return;
@@ -655,15 +807,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // Edit history: the top unpushed commits (capped), needing a base below them.
   // Merge commits can't be replayed, so the range stops at the first one. One
   // editable commit is enough (you can reword or drop a single commit).
-  const EDIT_MAX = 15;
-  const firstMerge = commits.findIndex((c) => c.isMerge);
-  let editLen = Math.min(
-    unpushedCount,
-    EDIT_MAX,
-    commits.length,
-    firstMerge === -1 ? Number.POSITIVE_INFINITY : firstMerge,
+  const { editLen, editCommits, editBase } = deriveEditRange(
+    view.commits,
+    view.count,
+    view.hasNextPage,
   );
-  if (editLen === commits.length && !log.hasNextPage) editLen -= 1;
   // Block editing history while a merge/rebase/cherry-pick/revert is mid-flight —
   // a new edit-rebase would clobber the in-flight one's state (the banner drives
   // it). The backend refuses too; this just keeps the action from looking live.
@@ -673,7 +821,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       opState.data?.cherryPicking ||
       opState.data?.reverting,
   );
-  const canEditHistory = editLen >= 1 && !opInProgress;
+  // Waits for agreement like squash: a mismatch may serve a set HEAD has
+  // already moved past.
+  const canEditHistory = editLen >= 1 && !opInProgress && agreed;
   const editHistoryHint = opInProgress
     ? " (finish the operation in Changes first)"
     : "";
@@ -688,8 +838,6 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     return " (no other branches)";
   })();
   const canPickOnto = pickOntoDisabledHint === "";
-  const editCommits = commits.slice(0, Math.max(editLen, 0));
-  const editBase = commits[Math.max(editLen, 0)]?.hash ?? "";
 
   function openCherryPickOnto(commit: CommitSummary) {
     const hashes = effectiveSelection(commit.hash);
@@ -719,15 +867,19 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       suppressContextMenu(e);
       return;
     }
-    onRowContextMenu(index, visibleCommits[index].hash);
-    setMenuTarget({ commit: visibleCommits[index], index });
+    onRowContextMenu(visibleCommits[index].hash);
+    setMenuTarget({ commit: visibleCommits[index] });
   }
 
   // The items for whichever commit was right-clicked — three exclusive variants:
   // search results (position-independent), a multi-selection, or a single commit.
   function renderCommitMenu() {
     if (!menuTarget) return null;
-    const { commit, index } = menuTarget;
+    const { commit } = menuTarget;
+    // Position in REAL history (-1 once it leaves the loaded log), and HEAD as
+    // status reports it: the log can trail a commit made outside the app.
+    const menuIndex = commits.findIndex((c) => c.hash === commit.hash);
+    const isHead = menuIndex === 0 && commit.hash === head?.oid;
     if (searchActive) {
       // Search results aren't contiguous recent history, so only the shared set.
       return (
@@ -762,6 +914,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       return (
         <>
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             disabled={!canPickOnto || selectionHasMerge}
             onClick={() => openCherryPickOnto(commit)}
           >
@@ -770,11 +923,16 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               ? ` (${RANGE_MERGE_ITEM_REASON})`
               : pickOntoDisabledHint}
           </ContextMenuItem>
-          <ContextMenuItem disabled={!canSquash} onClick={openSquash}>
+          <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
+            disabled={!canSquash}
+            onClick={openSquash}
+          >
             Squash {selected.size} commits…
             {!canSquash && squashDisabledHint}
           </ContextMenuItem>
           <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
             disabled={!canEditHistory}
             onClick={() => setEditHistoryOpen(true)}
           >
@@ -798,19 +956,22 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     return (
       <>
         <ContextMenuItem
-          disabled={index !== 0}
+          className={MENU_HELD_ROW_CLASS}
+          disabled={!isHead}
           onClick={() => requestAmend(commit.hash)}
         >
           Amend commit…
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={index !== 0 || !canUndo || undoCommit.isPending}
+          className={MENU_HELD_ROW_CLASS}
+          disabled={!isHead || !canUndo || undoCommit.isPending}
           onClick={undoLast}
         >
           Undo commit (keep changes)
         </ContextMenuItem>
         <ContextMenuItem
-          disabled={index === 0}
+          className={MENU_HELD_ROW_CLASS}
+          disabled={menuIndex <= 0}
           onClick={() => setReset({ hash: commit.hash, repo: repoPath })}
         >
           Reset to commit…
@@ -854,6 +1015,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           Cherry-pick commit
         </ContextMenuItem>
         <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
           disabled={!canPickOnto}
           onClick={() => openCherryPickOnto(commit)}
         >
@@ -861,6 +1023,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           {pickOntoDisabledHint}
         </ContextMenuItem>
         <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
           disabled={!canEditHistory}
           onClick={() => setEditHistoryOpen(true)}
         >
