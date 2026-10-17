@@ -5183,14 +5183,10 @@ export const CHECKS = [
       // already pins focus to a board card or a grid cell — none of which hold
       // editable or typeahead targets for the guards to protect.
       "src/features/projects/ProjectsBoardPanel.tsx",
-      // Same shape as the ProjectsBoardPanel entry above: its `eventToBinding`
-      // call tests a hardcoded set: the four Alt move chords (a commit row up,
-      // down, to the top, to the bottom) plus unmodified Enter/Space and
-      // Home/End, never a user binding, and the handler acts
-      // only when the event target is a [data-row] commit row, never an
-      // editable or typeahead surface the guards protect. The entry exempts the
-      // WHOLE file: a future dispatch of a USER binding here must apply the
-      // three-predicate clause, or this entry must be dropped.
+      // Same shape as the board entry above: its `eventToBinding` call tests a
+      // hardcoded set (the four Alt move chords plus unmodified Enter/Space and
+      // Home/End), never a user binding, and acts only when the event target is
+      // a [data-row] commit row, never an editable or typeahead surface.
       "src/features/history/EditHistoryDialog.tsx",
     ],
     message:

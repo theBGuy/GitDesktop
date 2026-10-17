@@ -122,6 +122,13 @@ const ALT_SWALLOWED_KEYS: ReadonlySet<string> = new Set([
  *  source. Toggled into the live region so a repeated message re-announces. */
 const ZWSP = String.fromCharCode(0x200b);
 
+/** The commit row for `hash` inside `list`, or null. */
+function findRow(list: HTMLElement | null, hash: string): HTMLElement | null {
+  return (
+    list?.querySelector<HTMLElement>(`[data-row="${CSS.escape(hash)}"]`) ?? null
+  );
+}
+
 /** A menu item's second line: what a squash or fixup combines into (or why it
  *  can't), else the action's static hint. */
 function ActionHint({
@@ -160,9 +167,10 @@ function ActionHint({
 /**
  * The unified interactive-rebase editor over the unpushed tip (`base..HEAD`).
  * Each row picks an action (pick / reword / squash / fixup / edit / drop),
- * reorders with ↑/↓, and edits its message inline; the plan compiles to the
- * replay engine, which applies it all at once (a conflict rolls it back), or to
- * a resumable rebase when a row is set to edit.
+ * reorders with its ↑/↓ buttons or Alt+↑/↓, and edits its message inline when
+ * the action bakes one (reword, squash, and a pick or edit a squash folds into).
+ * The plan compiles to the replay engine, which applies it all at once (a
+ * conflict rolls it back), or to a resumable rebase when a row is set to edit.
  */
 export function EditHistoryDialog({
   repoPath,
@@ -269,18 +277,11 @@ export function EditHistoryDialog({
   const announce = (text: string) =>
     setAnnouncement((prev) => ({ text, seq: prev.seq + 1 }));
 
-  const rowElement = (hash: string) =>
-    listRef.current?.querySelector<HTMLElement>(
-      `[data-row="${CSS.escape(hash)}"]`,
-    ) ?? null;
-
   // A move re-orders keyed nodes, which can drop focus off the moved row (and a
   // button click parks it on a button), so every move lands focus back on it.
   useLayoutEffect(() => {
     if (moveFocus === null) return;
-    const el = listRef.current?.querySelector<HTMLElement>(
-      `[data-row="${CSS.escape(moveFocus.hash)}"]`,
-    );
+    const el = findRow(listRef.current, moveFocus.hash);
     el?.focus();
     el?.scrollIntoView({ block: "nearest" });
   }, [moveFocus]);
@@ -299,11 +300,8 @@ export function EditHistoryDialog({
     if (!onRow && active !== null && active !== document.body) return;
     const remembered = lastFocusedRow.current;
     const el =
-      (remembered === null
-        ? null
-        : list.querySelector<HTMLElement>(
-            `[data-row="${CSS.escape(remembered)}"]`,
-          )) ?? list.querySelector<HTMLElement>("[data-row]");
+      (remembered === null ? null : findRow(list, remembered)) ??
+      list.querySelector<HTMLElement>("[data-row]");
     el?.focus();
     el?.scrollIntoView({ block: "nearest" });
   }, [reseedNonce]);
@@ -356,13 +354,13 @@ export function EditHistoryDialog({
     const swallowed = e.altKey && ALT_SWALLOWED_KEYS.has(e.key);
     // Plain Home/End only; a modified one keeps its native behavior.
     const jump = chord === "home" || chord === "end";
-    // Unmodified only (the canonical binding carries every modifier): a held
-    // Enter would flicker the menu, and Alt+Space is the system menu.
-    const opensMenu = (chord === "enter" || chord === "space") && !e.repeat;
+    // Unmodified only: the canonical binding carries every modifier, so a
+    // modified Enter or Space (Shift+Space scrolls) keeps its native behavior.
+    const menuKey = chord === "enter" || chord === "space";
 
     // While busy, walking the rows stays live (it changes nothing); moves, the
     // Alt swallow and the menu open refuse with the reason.
-    if (busy && (direction !== undefined || swallowed || opensMenu)) {
+    if (busy && (direction !== undefined || swallowed || menuKey)) {
       e.preventDefault();
       if (!e.repeat) announce(BUSY_REASON);
       return;
@@ -401,8 +399,12 @@ export function EditHistoryDialog({
       edge.scrollIntoView({ block: "nearest" });
       return;
     }
-    if (opensMenu) {
+    if (menuKey) {
+      // Every press is handled, so a held Space can't scroll the list; only the
+      // first opens, as a held Enter would flicker the menu and Alt+Space is the
+      // system menu.
       e.preventDefault();
+      if (e.repeat) return;
       // A controlled open gets no keyboard highlight, so open through Base UI's
       // own keyboard-activation click (detail 0, no pointer type) on the trigger.
       const trigger = row.querySelector<HTMLElement>("[data-action-trigger]");
@@ -595,7 +597,9 @@ export function EditHistoryDialog({
                       className="w-64"
                       // Back to the row, so the next arrow walks the list
                       // instead of reopening the menu from its trigger.
-                      finalFocus={() => rowElement(row.hash) ?? true}
+                      finalFocus={() =>
+                        findRow(listRef.current, row.hash) ?? true
+                      }
                     >
                       {ACTIONS.map((a) => {
                         const heldItem = isFold(a.value) && target === null;

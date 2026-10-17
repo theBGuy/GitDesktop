@@ -4579,6 +4579,10 @@ pub(crate) async fn rewrite_commits(
     .await
 }
 
+/// Both rewrite entry points' refusal when the branch moved past the plan they were
+/// handed: the coverage check, the replay's rewind and the rebase start all use it.
+const UNCOVERED_RANGE_REFUSAL: &str = "the branch gained commits after this plan was made, so nothing was rewritten — start over to include them";
+
 /// Refuses a rewrite plan that doesn't list every commit of `in_range` (the
 /// `base..HEAD` set) exactly once across `steps` and `dropped`. Shared by both
 /// rewrite entry points so the replay and the interactive rebase refuse alike.
@@ -4601,9 +4605,7 @@ fn check_plan_covers_range(
         }
     }
     if in_range.iter().any(|h| !listed.contains(h.as_str())) {
-        return Err(AppError::InvalidArgument(
-            "the branch gained commits after this plan was made, so nothing was rewritten — start over to include them".into(),
-        ));
+        return Err(AppError::InvalidArgument(UNCOVERED_RANGE_REFUSAL.into()));
     }
     Ok(())
 }
@@ -4662,7 +4664,18 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         ));
     }
 
-    let range = format!("{base}..HEAD");
+    // HEAD is read once: the range, the coverage check and the rewind's old-value
+    // check all name this oid, so nothing landing after it can be replayed away.
+    let orig = run_git(
+        Some(repo_path),
+        &["rev-parse", "--verify", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string();
+    let range = format!("{base}..{orig}");
     let merges = run_git(
         Some(repo_path),
         &["rev-list", "--merges", &range],
@@ -4681,19 +4694,12 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             .lines()
             .map(str::to_string)
             .collect();
-    // Under the working-tree hold, so no op that takes it can land a commit before
-    // the replay; git_rebase_edit doesn't, the MCP server builds its own AppState,
-    // and neither excludes an outside git.
+    // The plan must cover `orig`'s range. A commit that lands after the read, from
+    // any process, fails the rewind's compare-and-swap below and refuses the same way.
     check_plan_covers_range(&in_range, steps, dropped)?;
 
-    let orig = run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
-        .await?
-        .stdout_lossy()
-        .trim()
-        .to_string();
-
     // Journal a pending entry AFTER the guards + `orig` capture, BEFORE the first
-    // mutation (`reset --hard`). Best-effort: a journal failure returns None and
+    // mutation (the rewind). Best-effort: a journal failure returns None and
     // the op proceeds unchanged. Runs under the lock (app-data I/O, not git) because
     // the `orig` anchor it records is only valid while this hold is unbroken.
     let original_ref = journal_original_ref(repo_path).await;
@@ -4712,10 +4718,22 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         // Every failure class — the initial rewind, a conflict, a timeout — leaves
         // through the one rollback funnel below, so none of them strands the branch
         // rewound at `base` unless the rollback itself fails, which the error says.
-        let mut failure: Option<AppError> =
-            run_git(Some(repo_path), &["reset", "--hard", base], DEFAULT_TIMEOUT)
-                .await
-                .err();
+        let mut failure: Option<AppError> = match rewind_onto_base(repo_path, base, &orig).await {
+            Rewind::Rewound => None,
+            // HEAD moved past `orig`: nothing was mutated, and the funnel's
+            // `reset --hard orig` would discard whatever moved it.
+            Rewind::Moved => {
+                return Err(AppError::InvalidArgument(UNCOVERED_RANGE_REFUSAL.into()))
+            }
+            // Where HEAD is can't be read, so neither a rollback nor a claim that
+            // nothing changed is safe.
+            Rewind::Unverified(e) => {
+                return Err(AppError::Command(format!(
+                    "The rewrite stopped at its first step, and the branch's position couldn't be confirmed, so nothing was rolled back. Its tip before this run was {orig}; check the branch before retrying.\n{e}"
+                )))
+            }
+            Rewind::Failed(e) => Some(e),
+        };
         // A rewind that failed never reached the replay, so the detail lines
         // below have to describe THAT state: no pick ran (the user copy hedges
         // the branch position — a killed reset can still have moved it).
@@ -4899,10 +4917,19 @@ pub async fn git_rebase_edit(
             "the working tree has uncommitted changes — commit or stash them first".into(),
         ));
     }
-    // No working-tree lock spans this check and the rebase, so a millisecond race
-    // remains; what it closes is the minutes-long window between the dialog
-    // seeding its plan and the apply.
-    let range = format!("{base}..HEAD");
+    // The tip is read once and the coverage check runs on its range. A commit
+    // landing after this read is caught at rebase start, where git's forced
+    // missingCommitsCheck compares our todo with its own (`start_rebase_edit`).
+    let original_sha = run_git(
+        Some(&repo_path),
+        &["rev-parse", "--verify", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string();
+    let range = format!("{base}..{original_sha}");
     let in_range: std::collections::HashSet<String> =
         run_git(Some(&repo_path), &["rev-list", &range], DEFAULT_TIMEOUT)
             .await?
@@ -4917,17 +4944,7 @@ pub async fn git_rebase_edit(
     // returns None and the op proceeds unchanged. A paused rebase returns Ok, so
     // `finish` marks it "done" (git tracks the paused state); only a real Err is
     // "failed". `git_oplog_check` sees `rebasing` true only if the PROCESS died.
-    let original_sha = run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
-        .await
-        .ok()
-        .map(|o| o.stdout_lossy().trim().to_string())
-        .unwrap_or_default();
-    // An empty sha means an unborn HEAD (or a failed read), which journals no branch.
-    let original_ref = if original_sha.is_empty() {
-        None
-    } else {
-        journal_original_ref(&repo_path).await
-    };
+    let original_ref = journal_original_ref(&repo_path).await;
     let label = format!("Interactive rebase onto {base}");
     let op_id = crate::oplog::begin(
         &repo_path,
@@ -4986,24 +5003,11 @@ pub async fn git_rebase_edit(
         std::fs::write(&todo_path, &todo)
             .map_err(|e| AppError::InvalidArgument(format!("couldn't write todo: {e}")))?;
         let todo_fwd = todo_path.to_string_lossy().replace('\\', "/");
-        // `sequence.editor` swaps git's generated todo for ours (a plain copy);
-        // `core.editor=true` guarantees nothing ever blocks waiting for an editor.
-        let seq_editor = format!("sequence.editor=cp \"{todo_fwd}\"");
-
-        let out = run_git_raw(
-            Some(&repo_path),
-            &[
-                "-c",
-                "core.editor=true",
-                "-c",
-                &seq_editor,
-                "rebase",
-                "-i",
-                &base,
-            ],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        let Some(out) = start_rebase_edit(&repo_path, &base, &todo_fwd, &original_sha).await?
+        else {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(AppError::InvalidArgument(UNCOVERED_RANGE_REFUSAL.into()));
+        };
 
         // A paused rebase leaves rebase-merge in place — that's the hand-off to the
         // banner, not a failure. Only error when nothing's in progress.
@@ -5026,6 +5030,167 @@ pub async fn git_rebase_edit(
     )
     .await;
     op_result
+}
+
+/// How the replay's rewind ended. `Failed` goes through the rollback funnel;
+/// `Moved` and `Unverified` must not, since `reset --hard orig` could discard a
+/// commit someone else landed.
+#[derive(Debug)]
+enum Rewind {
+    Rewound,
+    /// HEAD had moved off the expected tip: nothing was mutated.
+    Moved,
+    Failed(AppError),
+    /// The CAS failed and HEAD couldn't be re-read.
+    Unverified(AppError),
+}
+
+/// Where a failed rewind CAS left things, from HEAD re-read after it (`None` when
+/// that read failed).
+#[derive(Debug, PartialEq)]
+enum CasMiss {
+    Moved,
+    Failed,
+    Unverified,
+}
+
+fn classify_failed_rewind(now: Option<&str>, expected: &str, base: &str) -> CasMiss {
+    match now {
+        None => CasMiss::Unverified,
+        // At `base`, our own update landed although update-ref reported failure
+        // (a timeout killed it after its rename): the funnel restores the branch.
+        Some(h) if h == expected || h == base => CasMiss::Failed,
+        Some(_) => CasMiss::Moved,
+    }
+}
+
+/// The replay's first mutation: moves HEAD (through a symbolic HEAD, its branch)
+/// from `expected` to `base` with an old-value check, then syncs the index and
+/// worktree. A failed sync moves the ref back the same way before it reports.
+async fn rewind_onto_base(repo_path: &str, base: &str, expected: &str) -> Rewind {
+    let cas = run_git(
+        Some(repo_path),
+        &[
+            "update-ref",
+            "-m",
+            "rewrite: rewind onto base",
+            "HEAD",
+            base,
+            expected,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    if let Err(e) = cas {
+        let now = run_git(
+            Some(repo_path),
+            &["rev-parse", "--verify", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .map(|o| o.stdout_lossy().trim().to_string())
+        .ok();
+        return match classify_failed_rewind(now.as_deref(), expected, base) {
+            CasMiss::Moved => Rewind::Moved,
+            CasMiss::Failed => Rewind::Failed(e),
+            CasMiss::Unverified => Rewind::Unverified(e),
+        };
+    }
+    // No target: syncs the index and worktree to the new HEAD and moves no ref.
+    if let Err(e) = run_git(Some(repo_path), &["reset", "--hard"], DEFAULT_TIMEOUT).await {
+        let _ = run_git(
+            Some(repo_path),
+            &[
+                "update-ref",
+                "-m",
+                "rewrite: undo rewind",
+                "HEAD",
+                expected,
+                base,
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        return Rewind::Failed(e);
+    }
+    Rewind::Rewound
+}
+
+/// git's own report when a rebase todo omits a commit under
+/// `missingCommitsCheck=error` (stderr, in the C locale the runner forces; git 2.51.1).
+const MISSING_COMMITS_STOP: &str = "some commits may have been dropped accidentally";
+
+/// Runs `rebase -i <base>` with the todo at `todo_fwd` in place of git's own. The
+/// forced `missingCommitsCheck=error` makes git compare it with the todo it builds
+/// from HEAD at start, so a commit that landed after the plan was checked stops the
+/// rebase; that stop is aborted here and returned as `None` once the branch is
+/// confirmed at or past `original_tip`.
+async fn start_rebase_edit(
+    repo_path: &str,
+    base: &str,
+    todo_fwd: &str,
+    original_tip: &str,
+) -> AppResult<Option<crate::git::runner::GitOutput>> {
+    // `sequence.editor` swaps git's generated todo for ours (a plain copy);
+    // `core.editor=true` guarantees nothing ever blocks waiting for an editor.
+    let seq_editor = format!("sequence.editor=cp \"{todo_fwd}\"");
+    let out = run_git_raw(
+        Some(repo_path),
+        &[
+            "-c",
+            "core.editor=true",
+            "-c",
+            "rebase.missingCommitsCheck=error",
+            "-c",
+            &seq_editor,
+            "rebase",
+            "-i",
+            base,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code == 0 || !out.stderr.contains(MISSING_COMMITS_STOP) {
+        return Ok(Some(out));
+    }
+    if let Err(e) = run_git_raw(Some(repo_path), &["rebase", "--abort"], DEFAULT_TIMEOUT)
+        .await
+        .and_then(check_code)
+    {
+        return Err(AppError::Command(format!(
+            "A commit missing from the plan stopped the rebase, and aborting it failed — run git rebase --abort before continuing.\n{e}"
+        )));
+    }
+    // The abort restores the branch to its tip at rebase start: the plan's tip, or
+    // a descendant when the commit that stopped it landed after the plan was read.
+    let rebasing = git_path_exists(repo_path, "rebase-merge").await
+        || git_path_exists(repo_path, "rebase-apply").await;
+    let at_or_past = run_git_raw(
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", original_tip, "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .is_ok_and(|o| o.code == 0);
+    if rebasing || !at_or_past {
+        let head = run_git(
+            Some(repo_path),
+            &["rev-parse", "--verify", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .map(|o| o.stdout_lossy().trim().to_string())
+        .unwrap_or_else(|_| "an unreadable commit".into());
+        let why = if rebasing {
+            "a rebase is still in progress"
+        } else {
+            "HEAD doesn't contain the original tip"
+        };
+        return Err(AppError::Command(format!(
+            "A commit missing from the plan stopped the rebase; it was aborted, but {why} (HEAD is at {head}, the original tip was {original_tip})."
+        )));
+    }
+    Ok(None)
 }
 
 #[derive(serde::Serialize)]
@@ -6468,6 +6633,122 @@ mod tests {
         );
         assert!(!git_path_exists(&repo, "rebase-merge").await);
         assert_eq!(subjects(&repo).await, vec!["two", "base"]);
+    }
+
+    /// The replay's rewind is a compare-and-swap: a commit that landed after the
+    /// rewrite read HEAD refuses it, with the branch and worktree untouched.
+    #[tokio::test]
+    async fn rewind_onto_base_refuses_a_moved_head() {
+        let (dir, repo) = setup_repo("rewind-moved-head").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let expected = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "outside").await;
+        let outside = rev(&repo, "HEAD").await;
+
+        let rewound = rewind_onto_base(&repo, &base, &expected).await;
+        assert!(matches!(rewound, Rewind::Moved), "{rewound:?}");
+        assert_eq!(rev(&repo, "HEAD").await, outside, "HEAD must not move");
+        assert!(
+            dir.path().join("c.txt").exists(),
+            "the worktree is untouched"
+        );
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    /// A commit that lands after the coverage check but before the rebase starts
+    /// is caught by git's own missing-commits check, and the rebase is aborted.
+    #[tokio::test]
+    async fn rebase_edit_start_refuses_a_commit_missing_from_its_todo() {
+        let (dir, repo) = setup_repo("rebase-start-stale").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let tip = rev(&repo, "HEAD").await;
+        // Inside .git, so the worktree stays clean for the rebase.
+        let todo = std::path::Path::new(&repo).join(".git/stale-todo");
+        std::fs::write(&todo, format!("pick {c1}\n")).unwrap();
+        let todo_fwd = todo.to_string_lossy().replace('\\', "/");
+
+        match start_rebase_edit(&repo, &base, &todo_fwd, &tip).await {
+            Ok(None) => {}
+            Ok(Some(out)) => panic!(
+                "the stale todo must stop and be aborted, got exit {}: {}",
+                out.code, out.stderr
+            ),
+            Err(e) => panic!("expected the stale stop, got {e:?}"),
+        }
+        assert!(!git_path_exists(&repo, "rebase-merge").await);
+        assert!(!git_path_exists(&repo, "rebase-apply").await);
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            tip,
+            "HEAD back at the original tip"
+        );
+        assert_eq!(subjects(&repo).await, vec!["two", "one", "base"]);
+    }
+
+    /// The real race: the plan was read at `tip`, then an outside commit landed
+    /// before the rebase started. git stops on it, and the abort leaves the branch
+    /// at the NEW tip, which is a descendant of the plan's, so it counts as clean.
+    #[tokio::test]
+    async fn rebase_edit_start_aborts_cleanly_past_an_outside_commit() {
+        let (dir, repo) = setup_repo("rebase-start-outside").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let tip = rev(&repo, "HEAD").await;
+        let todo = std::path::Path::new(&repo).join(".git/covering-todo");
+        std::fs::write(&todo, format!("pick {c1}\npick {tip}\n")).unwrap();
+        let todo_fwd = todo.to_string_lossy().replace('\\', "/");
+        commit_file(&repo, dir.path(), "d.txt", "d\n", "outside").await;
+        let outside = rev(&repo, "HEAD").await;
+
+        match start_rebase_edit(&repo, &base, &todo_fwd, &tip).await {
+            Ok(None) => {}
+            Ok(Some(out)) => panic!(
+                "the outside commit must stop the rebase, got exit {}: {}",
+                out.code, out.stderr
+            ),
+            Err(e) => panic!("a clean abort past the plan's tip must pass, got {e:?}"),
+        }
+        assert!(!git_path_exists(&repo, "rebase-merge").await);
+        assert!(!git_path_exists(&repo, "rebase-apply").await);
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            outside,
+            "the branch keeps the new commit"
+        );
+        assert!(dir.path().join("d.txt").exists(), "its file is intact");
+        assert_eq!(subjects(&repo).await, vec!["outside", "two", "one", "base"]);
+    }
+
+    #[test]
+    fn classify_failed_rewind_covers_every_head_position() {
+        let (expected, base) = ("aaaa", "bbbb");
+        // HEAD still at the expected tip: nothing moved, the funnel is harmless.
+        assert_eq!(
+            classify_failed_rewind(Some(expected), expected, base),
+            CasMiss::Failed
+        );
+        // At `base`: our own update landed, and the funnel must restore the branch.
+        assert_eq!(
+            classify_failed_rewind(Some(base), expected, base),
+            CasMiss::Failed
+        );
+        // Anywhere else: someone else moved it, so refuse without a rollback.
+        assert_eq!(
+            classify_failed_rewind(Some("cccc"), expected, base),
+            CasMiss::Moved
+        );
+        // Unreadable: neither roll back nor claim nothing changed.
+        assert_eq!(
+            classify_failed_rewind(None, expected, base),
+            CasMiss::Unverified
+        );
     }
 
     #[tokio::test]

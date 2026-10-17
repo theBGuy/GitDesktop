@@ -24,6 +24,9 @@ const row = (hash, action, message = hash) => ({
   message,
 });
 
+/** A row titled "wip": two of them are leaders that share a subject. */
+const wip = (hash, action) => ({ hash, subject: "wip", action, message: "" });
+
 /** Compiles newest-first rows against their own order as the original. */
 const compile = (rows) =>
   compilePlan(
@@ -87,7 +90,7 @@ test("folds stacked on one leader share its target, chronologically", () => {
   assert.equal(plan.error, null);
   assert.equal(plan.views[0].foldTarget, "l");
   assert.equal(plan.views[1].foldTarget, "l");
-  assert.deepEqual(plan.steps.length, 1);
+  assert.equal(plan.steps.length, 1);
   assert.deepEqual(plan.steps[0].hashes, ["l", "f", "s"]);
 });
 
@@ -192,7 +195,6 @@ test("errorHash names the row the error is about", () => {
 });
 
 test("the fold target carries its leader's hash beside the subject", () => {
-  const wip = (hash, action) => ({ hash, subject: "wip", action, message: "" });
   const before = compile([
     row("s", "squash"),
     wip("w1", "pick"),
@@ -311,5 +313,17 @@ test("an unchanged error is not repeated", () => {
       1,
     ),
     "Moved to 2 of 3",
+  );
+});
+
+test("a fold that retargets to a same-subject leader still names it", () => {
+  // By hash: under a subject comparison the move reads as no retarget at all.
+  assert.equal(
+    announceMove(
+      [row("s", "squash"), wip("w1", "pick"), wip("w2", "pick")],
+      0,
+      1,
+    ),
+    'Moved to 2 of 3, into "wip"',
   );
 });

@@ -117,10 +117,12 @@ export function compilePlan(
       steps.push(step);
       stepByLeader.set(i, step);
     } else if (currentLeader === -1) {
-      if (error === null) errorHash = rows[i].hash;
-      error ??= `"${rows[i].subject}" can't be ${
-        action === "squash" ? "squashed" : "fixed up"
-      } — no older commit in this list is kept to combine it into.`;
+      if (error === null) {
+        errorHash = rows[i].hash;
+        error = `"${rows[i].subject}" can't be ${
+          action === "squash" ? "squashed" : "fixed up"
+        } — no older commit in this list is kept to combine it into.`;
+      }
     } else {
       stepByLeader.get(currentLeader)?.hashes.push(rows[i].hash);
       if (action === "squash") leaderHasSquash[currentLeader] = true;
