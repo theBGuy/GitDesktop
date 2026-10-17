@@ -355,7 +355,8 @@ export function EditHistoryDialog({
     // Plain Home/End only; a modified one keeps its native behavior.
     const jump = chord === "home" || chord === "end";
     // Unmodified only: the canonical binding carries every modifier, so a
-    // modified Enter or Space (Shift+Space scrolls) keeps its native behavior.
+    // modified Enter or Space keeps its native behavior (Shift+Space scrolls,
+    // Alt+Space is the system menu).
     const menuKey = chord === "enter" || chord === "space";
 
     // While busy, walking the rows stays live (it changes nothing); moves, the
@@ -401,8 +402,7 @@ export function EditHistoryDialog({
     }
     if (menuKey) {
       // Every press is handled, so a held Space can't scroll the list; only the
-      // first opens, as a held Enter would flicker the menu and Alt+Space is the
-      // system menu.
+      // first opens, as a held Enter would flicker the menu.
       e.preventDefault();
       if (e.repeat) return;
       // A controlled open gets no keyboard highlight, so open through Base UI's

@@ -5186,7 +5186,9 @@ export const CHECKS = [
       // Same shape as the board entry above: its `eventToBinding` call tests a
       // hardcoded set (the four Alt move chords plus unmodified Enter/Space and
       // Home/End), never a user binding, and acts only when the event target is
-      // a [data-row] commit row, never an editable or typeahead surface.
+      // a [data-row] commit row, never an editable or typeahead surface. A
+      // rebindable binding dispatched here would need the three predicates, or this
+      // entry must go.
       "src/features/history/EditHistoryDialog.tsx",
     ],
     message:

@@ -4664,8 +4664,8 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         ));
     }
 
-    // HEAD is read once: the range, the coverage check and the rewind's old-value
-    // check all name this oid, so nothing landing after it can be replayed away.
+    // HEAD is read once, and the range and coverage check run on it; the rewind's
+    // ORIG_HEAD then shows whether its reset moved exactly this tip.
     let orig = run_git(
         Some(repo_path),
         &["rev-parse", "--verify", "HEAD"],
@@ -4694,8 +4694,9 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             .lines()
             .map(str::to_string)
             .collect();
-    // The plan must cover `orig`'s range. A commit that lands after the read, from
-    // any process, fails the rewind's compare-and-swap below and refuses the same way.
+    // The plan must cover `orig`'s range. A commit landing before the rewind's reset
+    // refuses (`check_rewind`); one landing after it is kept, the picks replay on
+    // top of it.
     check_plan_covers_range(&in_range, steps, dropped)?;
 
     // Journal a pending entry AFTER the guards + `orig` capture, BEFORE the first
@@ -4716,24 +4717,30 @@ pub(crate) async fn rewrite_commits_with_timeouts(
 
     let op_result: AppResult<()> = async {
         // Every failure class — the initial rewind, a conflict, a timeout — leaves
-        // through the one rollback funnel below, so none of them strands the branch
-        // rewound at `base` unless the rollback itself fails, which the error says.
-        let mut failure: Option<AppError> = match rewind_onto_base(repo_path, base, &orig).await {
-            Rewind::Rewound => None,
-            // HEAD moved past `orig`: nothing was mutated, and the funnel's
-            // `reset --hard orig` would discard whatever moved it.
-            Rewind::Moved => {
-                return Err(AppError::InvalidArgument(UNCOVERED_RANGE_REFUSAL.into()))
-            }
-            // Where HEAD is can't be read, so neither a rollback nor a claim that
-            // nothing changed is safe.
-            Rewind::Unverified(e) => {
-                return Err(AppError::Command(format!(
-                    "The rewrite stopped at its first step, and the branch's position couldn't be confirmed, so nothing was rolled back. Its tip before this run was {orig}; check the branch before retrying.\n{e}"
-                )))
-            }
-            Rewind::Failed(e) => Some(e),
-        };
+        // through the one rollback funnel below (a HEAD another writer moved skips
+        // it), so none strands the branch at `base` unless the rollback itself fails.
+        // Whether the rewind's reset ran, apart from whether the replay can: an
+        // unreadable ORIG_HEAD fails the rewind after HEAD has already moved.
+        let mut reset_ran = false;
+        let mut failure: Option<AppError> =
+            match run_git(Some(repo_path), &["reset", "--hard", base], DEFAULT_TIMEOUT).await {
+                Err(e) => Some(e),
+                Ok(_) => {
+                    reset_ran = true;
+                    match check_rewind(repo_path, &orig).await {
+                        RewindCheck::Rewound => None,
+                        // The funnel's `reset --hard orig` would discard the commit
+                        // that moved HEAD, which the check already put the branch on.
+                        RewindCheck::Moved => {
+                            return Err(AppError::InvalidArgument(
+                                UNCOVERED_RANGE_REFUSAL.into(),
+                            ))
+                        }
+                        RewindCheck::Unrestored(e) => return Err(e),
+                        RewindCheck::Unknown(e) => Some(e),
+                    }
+                }
+            };
         // A rewind that failed never reached the replay, so the detail lines
         // below have to describe THAT state: no pick ran (the user copy hedges
         // the branch position — a killed reset can still have moved it).
@@ -4813,16 +4820,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             // and remedies below it, git's own output last: the frontend collapses
             // a message whose first line is git conflict output into "operation
             // paused", which is the one thing these arms are not.
-            let cause = if rewound {
-                "Usually a conflict, or a squash/fixup that left nothing to commit."
-            } else {
-                "The rewind onto the base commit failed, so nothing was replayed."
-            };
-            let damage = if rewound {
-                format!("Your branch may be left partly rewritten; its tip before this run was {orig}.")
-            } else {
-                format!("Your branch should still be at its original tip {orig}.")
-            };
+            let (cause, damage) = funnel_detail(reset_ran, rewound, &orig);
             let recovery = format!(
                 "The rewrite failed and its automatic rollback also failed.\n{damage}\nRun git cherry-pick --abort if a pick is still in progress, or git reset --hard {orig} to restore it."
             );
@@ -5032,93 +5030,87 @@ pub async fn git_rebase_edit(
     op_result
 }
 
-/// How the replay's rewind ended. `Failed` goes through the rollback funnel;
-/// `Moved` and `Unverified` must not, since `reset --hard orig` could discard a
-/// commit someone else landed.
-#[derive(Debug)]
-enum Rewind {
-    Rewound,
-    /// HEAD had moved off the expected tip: nothing was mutated.
-    Moved,
-    Failed(AppError),
-    /// The CAS failed and HEAD couldn't be re-read.
-    Unverified(AppError),
-}
-
-/// Where a failed rewind CAS left things, from HEAD re-read after it (`None` when
-/// that read failed).
-#[derive(Debug, PartialEq)]
-enum CasMiss {
-    Moved,
-    Failed,
-    Unverified,
-}
-
-fn classify_failed_rewind(now: Option<&str>, expected: &str, base: &str) -> CasMiss {
-    match now {
-        None => CasMiss::Unverified,
-        // At `base`, our own update landed although update-ref reported failure
-        // (a timeout killed it after its rename): the funnel restores the branch.
-        Some(h) if h == expected || h == base => CasMiss::Failed,
-        Some(_) => CasMiss::Moved,
+/// The rollback funnel's cause line and its failed-rollback damage line, by how far
+/// the rewrite got: whether the rewind's reset ran, and whether the replay began.
+fn funnel_detail(reset_ran: bool, replayed: bool, orig: &str) -> (&'static str, String) {
+    if replayed {
+        return (
+            "Usually a conflict, or a squash/fixup that left nothing to commit.",
+            format!(
+                "Your branch may be left partly rewritten; its tip before this run was {orig}."
+            ),
+        );
     }
+    if reset_ran {
+        return (
+            "The rewind onto the base commit ran, but its check couldn't read ORIG_HEAD, so nothing was replayed.",
+            format!("Your branch may be left rewound onto the base commit; its tip before this run was {orig}."),
+        );
+    }
+    (
+        "The rewind onto the base commit failed, so nothing was replayed.",
+        format!("Your branch should still be at its original tip {orig}."),
+    )
 }
 
-/// The replay's first mutation: moves HEAD (through a symbolic HEAD, its branch)
-/// from `expected` to `base` with an old-value check, then syncs the index and
-/// worktree. A failed sync moves the ref back the same way before it reports.
-async fn rewind_onto_base(repo_path: &str, base: &str, expected: &str) -> Rewind {
-    let cas = run_git(
+/// What the replay's rewind reset found when it checked ORIG_HEAD.
+#[derive(Debug)]
+enum RewindCheck {
+    /// The reset moved exactly the checked tip: the replay continues.
+    Rewound,
+    /// Another writer had moved HEAD past the checked tip; the branch is back on
+    /// that commit and nothing was rewritten.
+    Moved,
+    /// ORIG_HEAD was unreadable: the rollback funnel decides.
+    Unknown(AppError),
+    /// HEAD had moved, and putting the branch back on that commit failed.
+    Unrestored(AppError),
+}
+
+/// Runs right after the replay's `reset --hard <base>`, which records the HEAD it
+/// moved from as ORIG_HEAD under its own index lock (git 2.51.1, probed). Any
+/// ORIG_HEAD but `orig` means another writer moved HEAD after the rewrite read it.
+async fn check_rewind(repo_path: &str, orig: &str) -> RewindCheck {
+    let moved_from = run_git(
         Some(repo_path),
-        &[
-            "update-ref",
-            "-m",
-            "rewrite: rewind onto base",
-            "HEAD",
-            base,
-            expected,
-        ],
+        &["rev-parse", "--verify", "ORIG_HEAD"],
         DEFAULT_TIMEOUT,
     )
-    .await;
-    if let Err(e) = cas {
-        let now = run_git(
-            Some(repo_path),
-            &["rev-parse", "--verify", "HEAD"],
-            DEFAULT_TIMEOUT,
-        )
-        .await
-        .map(|o| o.stdout_lossy().trim().to_string())
-        .ok();
-        return match classify_failed_rewind(now.as_deref(), expected, base) {
-            CasMiss::Moved => Rewind::Moved,
-            CasMiss::Failed => Rewind::Failed(e),
-            CasMiss::Unverified => Rewind::Unverified(e),
-        };
+    .await
+    .map(|o| o.stdout_lossy().trim().to_string());
+    let moved_from = match moved_from {
+        Ok(oid) => oid,
+        // A race can't be told from none here; rolling back to `orig` covers the
+        // common case, where nothing else moved HEAD.
+        Err(e) => return RewindCheck::Unknown(e),
+    };
+    if moved_from == orig {
+        return RewindCheck::Rewound;
     }
-    // No target: syncs the index and worktree to the new HEAD and moves no ref.
-    if let Err(e) = run_git(Some(repo_path), &["reset", "--hard"], DEFAULT_TIMEOUT).await {
-        let _ = run_git(
-            Some(repo_path),
-            &[
-                "update-ref",
-                "-m",
-                "rewrite: undo rewind",
-                "HEAD",
-                expected,
-                base,
-            ],
-            DEFAULT_TIMEOUT,
-        )
-        .await;
-        return Rewind::Failed(e);
+    match run_git(
+        Some(repo_path),
+        &["reset", "--hard", &moved_from],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(_) => RewindCheck::Moved,
+        Err(e) => RewindCheck::Unrestored(AppError::Command(format!(
+            "Another commit ({moved_from}) landed on the branch as the rewrite started, and putting the branch back on it failed. Run git reset --hard {moved_from} to restore it.\n{e}"
+        ))),
     }
-    Rewind::Rewound
 }
 
 /// git's own report when a rebase todo omits a commit under
 /// `missingCommitsCheck=error` (stderr, in the C locale the runner forces; git 2.51.1).
-const MISSING_COMMITS_STOP: &str = "some commits may have been dropped accidentally";
+/// Two lines, so a conflicting pick's one-line "could not apply <sha>... <subject>"
+/// can never match it.
+const MISSING_COMMITS_STOP: &str =
+    "some commits may have been dropped accidentally.\nDropped commits (newer to older):";
+
+fn is_missing_commits_stop(stderr: &str) -> bool {
+    stderr.replace("\r\n", "\n").contains(MISSING_COMMITS_STOP)
+}
 
 /// Runs `rebase -i <base>` with the todo at `todo_fwd` in place of git's own. The
 /// forced `missingCommitsCheck=error` makes git compare it with the todo it builds
@@ -5150,7 +5142,7 @@ async fn start_rebase_edit(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if out.code == 0 || !out.stderr.contains(MISSING_COMMITS_STOP) {
+    if out.code == 0 || !is_missing_commits_stop(&out.stderr) {
         return Ok(Some(out));
     }
     if let Err(e) = run_git_raw(Some(repo_path), &["rebase", "--abort"], DEFAULT_TIMEOUT)
@@ -6635,26 +6627,85 @@ mod tests {
         assert_eq!(subjects(&repo).await, vec!["two", "base"]);
     }
 
-    /// The replay's rewind is a compare-and-swap: a commit that landed after the
-    /// rewrite read HEAD refuses it, with the branch and worktree untouched.
+    /// A commit another writer landed between the rewrite's HEAD read and its reset
+    /// is seen through ORIG_HEAD: the branch goes back on it, and nothing is lost.
     #[tokio::test]
-    async fn rewind_onto_base_refuses_a_moved_head() {
+    async fn check_rewind_restores_a_moved_head() {
         let (dir, repo) = setup_repo("rewind-moved-head").await;
         let base = rev(&repo, "HEAD").await;
         commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
-        let expected = rev(&repo, "HEAD").await;
+        let orig = rev(&repo, "HEAD").await;
         commit_file(&repo, dir.path(), "c.txt", "c\n", "outside").await;
         let outside = rev(&repo, "HEAD").await;
 
-        let rewound = rewind_onto_base(&repo, &base, &expected).await;
-        assert!(matches!(rewound, Rewind::Moved), "{rewound:?}");
-        assert_eq!(rev(&repo, "HEAD").await, outside, "HEAD must not move");
-        assert!(
-            dir.path().join("c.txt").exists(),
-            "the worktree is untouched"
+        // The rewrite's own reset, run after the outside commit moved HEAD.
+        git(&repo, &["reset", "--hard", &base]).await;
+        let checked = check_rewind(&repo, &orig).await;
+        assert!(matches!(checked, RewindCheck::Moved), "{checked:?}");
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            outside,
+            "the branch is back on it"
         );
+        assert!(dir.path().join("c.txt").exists(), "its file is restored");
         let status = git(&repo, &["status", "--porcelain"]).await;
         assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    /// git's undo idiom after a rewrite, `git reset --hard ORIG_HEAD`, must land on
+    /// the tip the rewrite started from, as it does after `git rebase`.
+    #[tokio::test]
+    async fn rewrite_leaves_orig_head_at_the_original_tip() {
+        let (dir, repo) = setup_repo("rewrite-orig-head").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let orig = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        rewrite_commits(&state, &repo, &base, &[pick(&orig), pick(&c1)], &[])
+            .await
+            .unwrap();
+        assert_eq!(subjects(&repo).await, vec!["one", "two", "base"]);
+        assert_eq!(rev(&repo, "ORIG_HEAD").await, orig);
+    }
+
+    #[test]
+    fn funnel_detail_names_how_far_the_rewrite_got() {
+        let orig = "abc1234";
+        assert_eq!(
+            funnel_detail(false, false, orig),
+            (
+                "The rewind onto the base commit failed, so nothing was replayed.",
+                "Your branch should still be at its original tip abc1234.".to_string()
+            )
+        );
+        assert_eq!(
+            funnel_detail(true, false, orig),
+            (
+                "The rewind onto the base commit ran, but its check couldn't read ORIG_HEAD, so nothing was replayed.",
+                "Your branch may be left rewound onto the base commit; its tip before this run was abc1234.".to_string()
+            )
+        );
+        assert_eq!(
+            funnel_detail(true, true, orig),
+            (
+                "Usually a conflict, or a squash/fixup that left nothing to commit.",
+                "Your branch may be left partly rewritten; its tip before this run was abc1234."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn missing_commits_stop_needs_gits_two_line_report() {
+        let stop = "Warning: some commits may have been dropped accidentally.\nDropped commits (newer to older):\n - 5abc123 # two\n";
+        assert!(is_missing_commits_stop(stop));
+        assert!(is_missing_commits_stop(&stop.replace('\n', "\r\n")));
+        // A conflicting pick names its commit's subject on one line, whatever it says.
+        let conflict = "error: could not apply 5abc123... some commits may have been dropped accidentally.\nhint: Resolve all conflicts manually, mark them as resolved with\n";
+        assert!(!is_missing_commits_stop(conflict));
     }
 
     /// A commit that lands after the coverage check but before the rebase starts
@@ -6724,31 +6775,6 @@ mod tests {
         );
         assert!(dir.path().join("d.txt").exists(), "its file is intact");
         assert_eq!(subjects(&repo).await, vec!["outside", "two", "one", "base"]);
-    }
-
-    #[test]
-    fn classify_failed_rewind_covers_every_head_position() {
-        let (expected, base) = ("aaaa", "bbbb");
-        // HEAD still at the expected tip: nothing moved, the funnel is harmless.
-        assert_eq!(
-            classify_failed_rewind(Some(expected), expected, base),
-            CasMiss::Failed
-        );
-        // At `base`: our own update landed, and the funnel must restore the branch.
-        assert_eq!(
-            classify_failed_rewind(Some(base), expected, base),
-            CasMiss::Failed
-        );
-        // Anywhere else: someone else moved it, so refuse without a rollback.
-        assert_eq!(
-            classify_failed_rewind(Some("cccc"), expected, base),
-            CasMiss::Moved
-        );
-        // Unreadable: neither roll back nor claim nothing changed.
-        assert_eq!(
-            classify_failed_rewind(None, expected, base),
-            CasMiss::Unverified
-        );
     }
 
     #[tokio::test]
