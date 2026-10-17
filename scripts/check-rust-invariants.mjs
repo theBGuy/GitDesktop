@@ -299,12 +299,6 @@ const STDERR_ONLY_ALLOWLIST = [
       "`report` is a parameter, so no binding is in range — its doc contract requires full_failure_text() and every caller passes it",
   },
   {
-    file: "git/ops.rs",
-    fn: "git_rebase_edit",
-    rationale:
-      "interactive-rebase START failure, reached only when nothing is in progress — a paused rebase returns Ok, so there is no stdout report to lose",
-  },
-  {
     file: "git/runner.rs",
     fn: "exit_verdict",
     rationale:
@@ -398,7 +392,7 @@ const BARE_REV_ALLOWLIST = [
   },
   {
     file: "git/ops.rs",
-    fn: "git_rebase_edit",
+    fn: "git_rebase_edit_with_timeout",
     rationale:
       "`base` is a commit sha, validated with validate_hash at fn entry",
   },

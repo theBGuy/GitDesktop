@@ -240,7 +240,7 @@ impl GitOutput {
 /// after launch is still picked up on the next call without a restart.
 static GIT_BIN: OnceCell<PathBuf> = OnceCell::const_new();
 
-async fn git_bin() -> AppResult<PathBuf> {
+pub(crate) async fn git_bin() -> AppResult<PathBuf> {
     GIT_BIN
         .get_or_try_init(|| async {
             crate::agent::resolve_named(&["git"], None)
@@ -378,6 +378,31 @@ pub async fn run_git_raw_input_bytes(
     input: Option<&[u8]>,
     timeout: Duration,
 ) -> AppResult<GitOutput> {
+    run_git_spawn(repo_path, args, input, &[], timeout).await
+}
+
+/// [`run_git_raw`] with extra environment pairs set on the git process, after the
+/// runner's own. Only the history rewrite's rebase start and continue use it, to pin
+/// GIT_SEQUENCE_EDITOR and GIT_EDITOR: env vars outrank any `-c` editor config. git
+/// exports them to every exec line and hook the rebase runs, which is harmless for
+/// non-interactive commands and makes any accidental editor launch a no-op.
+pub(crate) async fn run_git_raw_env(
+    repo_path: Option<&str>,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    run_git_spawn(repo_path, args, None, envs, timeout).await
+}
+
+/// The one spawn path under every raw runner.
+async fn run_git_spawn(
+    repo_path: Option<&str>,
+    args: &[&str],
+    input: Option<&[u8]>,
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
     // A zero budget refuses before spawning — no production caller passes one (they
     // all use a *_TIMEOUT constant), and it makes the tests' `Duration::ZERO` seam
     // deterministic: a nonzero expired budget loses the race to a fast child (Linux).
@@ -420,6 +445,7 @@ pub async fn run_git_raw_input_bytes(
         cmd.env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_ATTR_NOSYSTEM", "1");
     }
+    cmd.envs(envs.iter().copied());
     cmd.stdin(if input.is_some() {
         Stdio::piped()
     } else {

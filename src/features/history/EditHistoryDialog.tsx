@@ -167,8 +167,9 @@ function ActionHint({
 /**
  * The unified interactive-rebase editor over the unpushed tip (`base..HEAD`).
  * Each row picks an action (pick / reword / squash / fixup / edit / drop),
- * reorders with its ↑/↓ buttons or Alt+↑/↓, and edits its message inline when
- * the action bakes one (reword, squash, and a pick or edit a squash folds into).
+ * reorders with its ↑/↓ buttons, Alt+↑/↓ or Alt+Home/End, and edits its
+ * message inline when the action bakes one (reword, squash, and a pick or edit
+ * a squash folds into).
  * The plan compiles to the replay engine, which applies it all at once (a
  * conflict rolls it back), or to a resumable rebase when a row is set to edit.
  */
