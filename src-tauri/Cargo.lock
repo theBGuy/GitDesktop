@@ -1510,6 +1510,7 @@ dependencies = [
  "dirs",
  "dunce",
  "keyring",
+ "libc",
  "os_info",
  "portable-pty",
  "rmcp",

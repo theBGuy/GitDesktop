@@ -2257,8 +2257,9 @@ fn has_blank_line(text: &str) -> bool {
 /// `child.start_kill()` reaches only the direct child, but the agent CLI is a
 /// shim that spawns node workers, MCP servers and tool subprocesses — killing
 /// the shim orphans them (they keep burning tokens and holding worktree file
-/// handles). `taskkill /T` on Windows; a process-group kill on Unix (the child
-/// leads its own group — see `process_group(0)` at the spawn site).
+/// handles). `taskkill /T` on Windows; `killpg` on Unix through
+/// `git::runner::kill_process_group` (the child leads its own group — see
+/// `process_group(0)` at the spawn site).
 fn kill_process_tree(child: &mut tokio::process::Child) {
     let Some(pid) = child.id() else {
         // Already reaped — nothing to signal.
@@ -2277,14 +2278,9 @@ fn kill_process_tree(child: &mut tokio::process::Child) {
             .spawn();
     }
 
+    // The child leads its own group (pgid == pid), so this reaches every descendant.
     #[cfg(unix)]
-    {
-        // Negative PID targets the process group (pgid == pid for a group
-        // leader), so `kill -KILL` reaches every descendant.
-        let mut cmd = std::process::Command::new("kill");
-        sanitize_child_env(&mut cmd);
-        let _ = cmd.args(["-KILL", &format!("-{pid}")]).spawn();
-    }
+    crate::git::runner::kill_process_group(pid);
 
     // Belt-and-braces: the tree-kill can race the child exiting, and this is
     // the last-resort direct kill on any platform.

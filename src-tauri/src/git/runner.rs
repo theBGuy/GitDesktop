@@ -224,7 +224,7 @@ impl GitOutput {
 
 /// The resolved `git` binary, memoized for the process lifetime.
 ///
-/// `run_git_raw_input_bytes` is the base of the whole git call stack (status, diffs,
+/// `run_git_spawn` is the base of the whole git call stack (status, diffs,
 /// history, staging — all firing continuously as the user works), and a packaged
 /// GUI app on macOS doesn't inherit the user's shell PATH. So we resolve `git`
 /// the way the About screen does (`crate::agent::resolve_named`: PATH + known
@@ -258,7 +258,8 @@ pub(crate) async fn git_bin() -> AppResult<PathBuf> {
 /// usually `cmd\git.exe` — the Git-for-Windows SHIM, which runs the real
 /// `mingw64\bin\git.exe` as a child. Killing the shim on timeout therefore leaves
 /// the real git running as an orphan, still deleting/mutating the repo long after
-/// the app reported failure and released the per-repo lock.
+/// the app reported failure and released the per-repo lock. `GitGroup` is the
+/// unix counterpart, so both platforms kill the whole tree.
 #[cfg(windows)]
 struct GitJob(windows_sys::Win32::Foundation::HANDLE);
 
@@ -348,6 +349,55 @@ impl Drop for GitJob {
     }
 }
 
+/// SIGKILLs the process group `pgid` (a child spawned with `process_group(0)` leads
+/// one whose id is its pid) through `killpg` itself: no spawn, so no PATH lookup and
+/// no procps-ng `kill` argv parsing, which misreads `-KILL -<pgid>` (wrong group,
+/// `kill(-1)`, or the caller's own group). Ids that can't name a child's group are
+/// refused, since `killpg(0)` signals the caller's own group.
+#[cfg(unix)]
+pub(crate) fn kill_process_group(pgid: u32) {
+    let Ok(pgid) = libc::pid_t::try_from(pgid) else {
+        return;
+    };
+    if pgid <= 1 {
+        return;
+    }
+    // SAFETY: `killpg` takes plain integers and touches no memory of ours. The result
+    // is ignored: ESRCH means the group is already gone.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+/// The process group of a spawned git on unix (git leads it via `process_group(0)`),
+/// armed so that dropping the guard kills the whole group: `kill_on_drop` reaches
+/// only git itself, not the hooks and helpers it spawned. Same contract as
+/// `GitJob`: only a REAPED command disarms. Leading its own group, git has no
+/// foreground terminal: in an app launched from a shell (`tauri dev`, an AppImage
+/// run from a terminal), a child that reads /dev/tty, such as an ssh passphrase or
+/// host-key prompt, is stopped (SIGTTIN) until the call's timeout. A GUI launch has
+/// no controlling tty.
+#[cfg(unix)]
+struct GitGroup(u32);
+
+#[cfg(unix)]
+impl GitGroup {
+    /// Consumes the guard without the kill, so a successful git's detached
+    /// descendants (a background `gc --auto`) survive.
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GitGroup {
+    fn drop(&mut self) {
+        // Synchronous, so the group is signalled before the caller's next git step
+        // (a rollback's abort).
+        kill_process_group(self.0);
+    }
+}
+
 /// Runs git and returns the raw output regardless of exit code.
 /// Only spawn failures and timeouts are errors.
 pub async fn run_git_raw(
@@ -384,8 +434,8 @@ pub async fn run_git_raw_input_bytes(
 /// [`run_git_raw`] with extra environment pairs set on the git process, after the
 /// runner's own. Only the history rewrite's rebase start and continue use it, to pin
 /// GIT_SEQUENCE_EDITOR and GIT_EDITOR: env vars outrank any `-c` editor config. git
-/// exports them to every exec line and hook the rebase runs, which is harmless for
-/// non-interactive commands and makes any accidental editor launch a no-op.
+/// exports both to every exec line and hook the rebase runs; only GIT_EDITOR=true
+/// makes an editor launch there a no-op.
 pub(crate) async fn run_git_raw_env(
     repo_path: Option<&str>,
     args: &[&str],
@@ -395,7 +445,8 @@ pub(crate) async fn run_git_raw_env(
     run_git_spawn(repo_path, args, None, envs, timeout).await
 }
 
-/// The one spawn path under every raw runner.
+/// The one spawn path under every raw runner. An abandoned run (a timeout, a failed
+/// wait) kills git's whole process tree on both platforms (`GitJob`, `GitGroup`).
 async fn run_git_spawn(
     repo_path: Option<&str>,
     args: &[&str],
@@ -455,6 +506,8 @@ async fn run_git_spawn(
     .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    #[cfg(unix)]
+    cmd.process_group(0);
     cmd.kill_on_drop(true);
 
     // `git_bin()` already confirmed the binary exists, so a spawn-time NotFound
@@ -473,6 +526,10 @@ async fn run_git_spawn(
         let mut child = cmd.spawn().map_err(spawn_err)?;
         #[cfg(windows)]
         let job = child.raw_handle().and_then(GitJob::arm);
+        // Declared after `child`, so on an abandoned run it drops (and kills) while
+        // the unreaped leader still holds the group id.
+        #[cfg(unix)]
+        let group = child.id().map(GitGroup);
 
         // git interleaves reading stdin with writing stdout, so the write and both
         // drains have to run CONCURRENTLY: writing all of stdin first wedges as soon
@@ -514,12 +571,16 @@ async fn run_git_spawn(
         };
         let (stdout, stderr, status) = match reaped {
             Ok(reaped) => reaped,
-            // Abandoned without a reaped child, so the job stays ARMED (see `disarm`).
+            // Abandoned without a reaped child, so the guard stays ARMED (see `disarm`).
             Err(e) => return Err(AppError::Io(written.err().unwrap_or(e))),
         };
         #[cfg(windows)]
         if let Some(job) = job {
             job.disarm();
+        }
+        #[cfg(unix)]
+        if let Some(group) = group {
+            group.disarm();
         }
         Ok(GitOutput {
             stdout,
@@ -1527,6 +1588,189 @@ mod config_write_lock_tests {
         assert_eq!(config_value(&repo, "gd.mutating").await, "1");
         assert_eq!(config_value(&repo, "gd.plain").await, "1");
         assert_eq!(domain.holder_label(), None, "and the domain is released");
+    }
+}
+
+#[cfg(test)]
+mod tree_kill_tests {
+    use super::*;
+
+    /// The call's budget, and the hook's run time well past it.
+    const BUDGET: Duration = Duration::from_secs(3);
+    const HOOK_SECS: u64 = 6;
+
+    /// A timed-out git takes its whole process tree down on every platform, so a
+    /// hook it spawned never finishes. Without the tree kill the hook outlives the
+    /// timeout and writes its marker.
+    #[tokio::test]
+    async fn a_timed_out_git_takes_its_hook_down_with_it() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-runner-tree-kill-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "t@t.local"],
+            &["config", "user.name", "T"],
+        ] {
+            run_git(Some(&repo), args, DEFAULT_TIMEOUT).await.unwrap();
+        }
+        let git_dir = dir.path().join(".git");
+        let hook = git_dir.join("hooks").join("pre-commit");
+        std::fs::create_dir_all(git_dir.join("hooks")).unwrap();
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\ntouch .git/hook-started\nsleep {HOOK_SECS}\ntouch .git/hook-finished\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let result = run_git(Some(&repo), &["commit", "--allow-empty", "-m", "x"], BUDGET).await;
+        match result {
+            Err(AppError::Timeout(_)) => {}
+            Ok(out) => panic!("the commit finished inside the budget: {}", out.stderr),
+            Err(e) => panic!("expected a timeout, got {e:?}"),
+        }
+        assert!(
+            git_dir.join("hook-started").exists(),
+            "the hook was running when the budget ran out"
+        );
+        // Past the latest moment the hook could finish, plus a margin.
+        tokio::time::sleep(Duration::from_secs(HOOK_SECS + 3)).await;
+        assert!(
+            !git_dir.join("hook-finished").exists(),
+            "the hook died with git"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod group_tests {
+    use super::{kill_process_group, GitGroup};
+    use std::os::unix::process::CommandExt;
+    use std::path::{Path, PathBuf};
+
+    /// How long the grandchild waits before writing its marker. Bounds the whole
+    /// fixture: nothing it spawns outlives this by more than the margins below.
+    const DELAY_SECS: u64 = 3;
+
+    /// A `sh` group leader whose backgrounded subshell (a GRANDCHILD tree) marks
+    /// that it started, sleeps, then writes `survived`. The marker files are an
+    /// observable scoped to this test, unlike a process search.
+    fn spawn_marker_tree(dir: &Path) -> (std::process::Child, PathBuf, PathBuf) {
+        let started = dir.join("started");
+        let survived = dir.join("survived");
+        let child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "(touch \"$1\"; sleep {DELAY_SECS}; touch \"$2\") & wait"
+            ))
+            .arg("sh")
+            .arg(&started)
+            .arg(&survived)
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the marker tree");
+        (child, started, survived)
+    }
+
+    fn wait_until(mut cond: impl FnMut() -> bool, secs: u64) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while std::time::Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        cond()
+    }
+
+    /// The kill reaches only the named group: a process outside it survives (and so
+    /// does this test's own group, or the test runner would die with it).
+    #[test]
+    fn a_group_kill_spares_a_process_outside_the_group() {
+        let sleeper = || {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .process_group(0)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn a sleeper")
+        };
+        let mut target = sleeper();
+        let mut bystander = sleeper();
+
+        kill_process_group(target.id());
+        let status = target.wait().expect("reap the target");
+        assert!(
+            !status.success(),
+            "the target's group was killed: {status:?}"
+        );
+        // Time for a mistargeted signal to land.
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(
+            bystander.try_wait().expect("poll the bystander").is_none(),
+            "the bystander survives"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+    }
+
+    /// Dropping an ARMED group guard kills the grandchild along with its parent.
+    #[test]
+    fn armed_group_drop_kills_the_grandchild() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-group-armed-")
+            .tempdir()
+            .expect("create temp dir");
+        let (mut child, started, survived) = spawn_marker_tree(dir.path());
+        let group = GitGroup(child.id());
+        assert!(
+            wait_until(|| started.exists(), 30),
+            "the grandchild started"
+        );
+
+        drop(group);
+        let _ = child.wait();
+        std::thread::sleep(std::time::Duration::from_secs(DELAY_SECS + 5));
+        assert!(!survived.exists(), "the grandchild died with the group");
+    }
+
+    /// The control that proves the observable can fail: a DISARMED guard kills
+    /// nothing, and a direct kill of the parent leaves the grandchild running (git's
+    /// detached `gc --auto` relies on exactly this).
+    #[test]
+    fn disarmed_group_drop_leaves_the_grandchild_running() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-group-disarmed-")
+            .tempdir()
+            .expect("create temp dir");
+        let (mut child, started, survived) = spawn_marker_tree(dir.path());
+        let group = GitGroup(child.id());
+        assert!(
+            wait_until(|| started.exists(), 30),
+            "the grandchild started"
+        );
+
+        group.disarm();
+        child.kill().expect("kill the direct child");
+        let _ = child.wait();
+        assert!(
+            wait_until(|| survived.exists(), DELAY_SECS + 15),
+            "the grandchild survives a disarmed guard plus a direct parent kill"
+        );
     }
 }
 

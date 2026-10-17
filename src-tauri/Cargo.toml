@@ -85,6 +85,12 @@ windows-sys = { version = "0.61", features = [
   "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Unix-only: `killpg`, so a timed-out git or a cancelled agent takes its whole process
+# group with it (runner.rs `kill_process_group`). A spawned `kill -KILL -<pgid>` is
+# misparsed by procps-ng's kill (probed on Ubuntu 22.04 and 24.04).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Vendored portable-pty carrying a 1-line Windows ConPTY fix: pass NULL (not
 # INVALID_HANDLE_VALUE) std handles when spawning the pty child, so it attaches to
 # the pseudoconsole instead of allocating its own console window (which left the

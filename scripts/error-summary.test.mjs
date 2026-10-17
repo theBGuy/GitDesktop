@@ -1255,8 +1255,8 @@ test("an interpolated name leading the detail keeps its case (must-not-match)", 
       "main's upstream moved since this was measured",
     ],
     [
-      "invalid argument: deadbee is not an unpushed commit on this branch",
-      "deadbee is not an unpushed commit on this branch",
+      "invalid argument: deadbee is listed more than once in the rewrite plan",
+      "deadbee is listed more than once in the rewrite plan",
     ],
     [
       "invalid argument: file_path does not exist: x",

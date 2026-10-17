@@ -1,2 +1,3 @@
-- **Reword** in Edit history now keeps each commit's original author and
-  date, and **squash** keeps those of the first commit it combines.
+- Reworded and squashed commits now keep their original author in
+  **Edit history** and **Squash N commits**; a squash keeps its first
+  commit's author.
