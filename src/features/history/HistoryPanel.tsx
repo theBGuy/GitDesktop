@@ -102,6 +102,8 @@ import { EditHistoryDialog } from "./EditHistoryDialog";
 import {
   advanceSnapshot,
   deriveEditRange,
+  isNoUpstream,
+  observeHeadOid,
   resolveUnpushedView,
   statusLogAction,
   type UnpushedSnapshot,
@@ -130,29 +132,30 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   );
 }
 
-// Refreshes the log and its side reads when status reports a HEAD the log
-// hasn't caught up to (a commit made outside the app). Its own observers keep
-// the 5 s status poll from re-rendering the panel; it sits beside the body so
-// it mounts in every render arm, and the repo key resets its last-seen oid.
+// Keeps the log and its side reads in step with status's HEAD: refetches the
+// log when status saw a new HEAD first, refreshes the side reads once per
+// observed HEAD move (outside commits, resets, checkouts and rebases, and
+// in-app moves alike), and retries a no-upstream count older than the log. Its
+// own observers keep the 5 s status poll from re-rendering the panel; it sits
+// beside the body so it mounts in every render arm, and the repo key resets
+// its last-seen oid.
 function StatusLogSync({ repoPath }: { repoPath: string }) {
   const queryClient = useQueryClient();
   const log = useLog(repoPath);
   const status = useRepoStatus(repoPath);
   const head = status.data?.branch;
-  const noUpstream =
-    head != null && (head.upstream === null || head.upstreamGone);
+  const noUpstream = isNoUpstream(head);
   const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
   // The side keys refresh once per observed HEAD move, not per render.
   const lastOid = useRef<string | null>(null);
   const headOid = head?.oid;
   const onSync = useEffectEvent(
     (oid: string | null | undefined, logAt: number, statusAt: number) => {
-      const prevOid = lastOid.current;
-      if (oid != null) lastOid.current = oid;
+      const seen = observeHeadOid(lastOid.current, oid);
+      lastOid.current = seen.next;
       const actions = statusLogAction({
         oid,
-        // The first observed oid seeds the ref without firing.
-        oidChanged: prevOid !== null && oid != null && oid !== prevOid,
+        oidChanged: seen.changed,
         logHead: log.data?.pages[0]?.[0]?.hash,
         logHasData: log.data !== undefined,
         logIsFetching: log.isFetching,
@@ -572,17 +575,17 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   // Drives both the rewrite gating below and the per-row "not pushed" marker.
   // A gone upstream counts as no upstream so the `unpushedVsRemotes` fallback
   // engages and the per-row "not pushed" markers reflect what's truly published.
-  const noUpstream =
-    head != null && (head.upstream === null || head.upstreamGone);
+  const noUpstream = isNoUpstream(head);
   const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
   const unpushedCount = head
     ? noUpstream
       ? (unpushedVsRemotes.data ?? 0)
       : head.ahead
     : 0;
-  // The count comes from status and the commits from the log, which refetch
-  // apart: every unpushed consumer reads them only as a pair both vouched for
-  // (the log's head is status's HEAD).
+  // The count (status's ahead, or the no-upstream count read) and the log's
+  // commits refetch apart: the unpushed consumers below read them only as a
+  // pair both vouched for — the log's head is status's HEAD, and a no-upstream
+  // count read is unerrored and at least as fresh as the log.
   const agreed = viewAgrees({
     logHead: commits[0]?.hash,
     statusOid: head?.oid,
@@ -624,8 +627,8 @@ function HistoryPanelBody({ repoPath }: { repoPath: string }) {
   });
   // The unpushed set (the top `view.count` of the gated view's HEAD-order
   // commits), for marking rows. Memoized — the React Compiler won't hoist the
-  // .slice/.map/new Set. A push leaves HEAD in place, so it clears once status
-  // reports ahead 0.
+  // .slice/.map/new Set. The markers clear once the unpushed count (status's
+  // ahead, or the no-upstream count read) reports 0.
   const unpushedHashes = useMemo(
     () => new Set(view.commits.slice(0, view.count).map((c) => c.hash)),
     [view.commits, view.count],

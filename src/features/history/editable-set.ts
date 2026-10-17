@@ -17,6 +17,26 @@ export function headAgrees(
   return logHead !== undefined && statusOid != null && logHead === statusOid;
 }
 
+/** Whether the unpushed count comes from the separate count read rather than
+ *  status's `ahead`: a branch with no upstream, or one whose upstream is
+ *  gone. False while status is pending. */
+export function isNoUpstream(
+  head: { upstream: string | null; upstreamGone: boolean } | null | undefined,
+): boolean {
+  return head != null && (head.upstream === null || head.upstreamGone);
+}
+
+/** One observation of status's HEAD oid against the last one seen. Only
+ *  non-null oids are stored (an unborn or pending read keeps the previous
+ *  one), and the first observed oid seeds without counting as a change. */
+export function observeHeadOid(
+  prev: string | null,
+  oid: string | null | undefined,
+): { next: string | null; changed: boolean } {
+  if (oid == null) return { next: prev, changed: false };
+  return { next: oid, changed: prev !== null && oid !== prev };
+}
+
 export type UnpushedSnapshot<C> = {
   repo: string;
   /** Status branch name at agreement time (null when detached) — a branch
@@ -125,9 +145,11 @@ export function advanceSnapshot<C>(
 
 /** The commits+count+hasNextPage every unpushed-derived consumer reads: live
  *  when the view agrees; during a mismatch, the last agreeing snapshot only
- *  while its lineage holds (same repo, same status branch, its head commit
- *  still in the live log), else the live commits with count 0 — nothing
- *  marked or editable, never another repo's, branch's or line's set.
+ *  while the live log's head is still the snapshot's head (status moved
+ *  first) in the same repo and status branch. Once the log has moved
+ *  (commits added on top, a reset, rebase, checkout or rewrite), the live
+ *  commits with count 0: nothing marked or editable, so an open Edit history
+ *  can't replay a set that would drop the log's newer commits.
  *  Upstream mode caps a served snapshot whose head isn't status's oid at
  *  `max(0, liveAhead - 1)`: a `commit && push` inside one poll reports the
  *  new oid with ahead 0 over the old log, where the uncapped snapshot would
@@ -158,7 +180,7 @@ export function resolveUnpushedView<C extends { hash: string }>(args: {
     snapHead !== undefined &&
     snap.repo === args.repo &&
     snap.branch === args.branch &&
-    args.commits.some((c) => c.hash === snapHead)
+    args.commits[0]?.hash === snapHead
   ) {
     const count =
       !args.noUpstream && args.statusOid !== snapHead

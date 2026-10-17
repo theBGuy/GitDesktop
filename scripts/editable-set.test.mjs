@@ -1,14 +1,14 @@
 // Pins the History panel's unpushed/editable view
 // (src/features/history/editable-set.ts): the log and status refetch apart, so
-// every unpushed consumer reads them only as a pair that agrees on HEAD, keeps
-// the last agreeing set through a mismatch while its lineage holds, and falls
-// to nothing editable otherwise; plus the sync gates that refetch the trailing
-// side without looping.
+// the unpushed consumers read them only as a pair that agrees on HEAD, keep
+// the last agreeing set through a mismatch only while the log still shows its
+// head (status moved first), and fall to nothing editable otherwise; plus the
+// sync gates that refetch the trailing side without looping.
 //
-// Not testable here: the component's last-seen-oid ref (which computes
-// `oidChanged`), the render-time setState loop, effect timing under
-// <Activity>, and the react-query invalidations themselves. Those need the
-// live app.
+// Not testable here: the component's ref holding the last-seen oid (its update
+// rule is `observeHeadOid`, pinned below), the render-time setState loop,
+// effect timing under <Activity>, and the react-query invalidations
+// themselves. Those need the live app.
 //
 // The import reaches straight into `src/` under Node's type stripping, so the
 // module must stay free of runtime imports.
@@ -19,6 +19,8 @@ import {
   deriveEditRange,
   EDIT_MAX,
   headAgrees,
+  isNoUpstream,
+  observeHeadOid,
   resolveUnpushedView,
   statusLogAction,
   viewAgrees,
@@ -143,8 +145,9 @@ test("status-first mismatch serves the lineage-valid snapshot", () => {
   );
 });
 
-test("log-first mismatch never slices the new log with the old count", () => {
-  // The log refetched first: it has N, status still reports U2 / ahead 2.
+test("log-first: commits added on top fall to the zero arm", () => {
+  // The log refetched first: it has N above the snapshot head U2, status still
+  // reports U2 / ahead 2. Serving [U2, U1] on base C1 would drop N on apply.
   const view = resolve({
     statusOid: "U2",
     liveAhead: 2,
@@ -152,7 +155,14 @@ test("log-first mismatch never slices the new log with the old count", () => {
     count: 2,
     snapshot: snap(OLD_LOG, 2),
   });
-  assert.deepEqual(unpushed(view), ["U2", "U1"]);
+  assert.strictEqual(view.count, 0);
+  assert.deepEqual(unpushed(view), []);
+  assert.equal(deriveEditRange(view.commits, view.count, false).editLen, 0);
+  assert.notDeepStrictEqual(
+    unpushed(view),
+    ["U2", "U1"],
+    "the snapshot whose head is merely present below the log's head",
+  );
   assert.notDeepStrictEqual(unpushed(view), preFix(NEW_LOG, 2));
 });
 
@@ -494,7 +504,7 @@ test("an outside commit changes the editable set exactly once (upstream)", () =>
   );
 });
 
-test("an outside commit changes the editable set exactly once (no upstream)", () => {
+test("no upstream: a count older than the moved log never pairs with it", () => {
   const state = { snapshot: null };
   const input = { noUpstream: true };
   const steps = [
@@ -514,7 +524,9 @@ test("an outside commit changes the editable set exactly once (no upstream)", ()
       logAt: 100,
       countAt: 100,
     }),
-    // The log lands, but the count read is still older than it.
+    // The log lands, but the count read is still older than it: the log has
+    // moved past the snapshot head, so nothing is editable until the count
+    // catches up.
     step(state, {
       ...input,
       commits: NEW_LOG,
@@ -534,9 +546,9 @@ test("an outside commit changes the editable set exactly once (no upstream)", ()
   ];
   assert.deepEqual(
     steps.map((s) => s.key),
-    ["U2,U1", "U2,U1", "U2,U1", "N,U2,U1"],
+    ["U2,U1", "U2,U1", "", "N,U2,U1"],
   );
-  assert.equal(changes(steps.map((s) => s.key)), 1);
+  assert.notEqual(steps[2].key, "U2,U1", "the snapshot would drop N");
   assert.notEqual(
     steps[2].key,
     steps[2].preFix,
@@ -576,4 +588,51 @@ test("deriveEditRange: the edit range and its base", () => {
   const empty = deriveEditRange([], 0, false);
   assert.equal(empty.editLen, 0);
   assert.equal(empty.editBase, "");
+});
+
+test("isNoUpstream: no upstream or a gone one, never a pending status", () => {
+  assert.equal(isNoUpstream({ upstream: null, upstreamGone: false }), true);
+  assert.equal(
+    isNoUpstream({ upstream: "origin/main", upstreamGone: true }),
+    true,
+  );
+  assert.equal(
+    isNoUpstream({ upstream: "origin/main", upstreamGone: false }),
+    false,
+  );
+  assert.equal(isNoUpstream(undefined), false, "status pending");
+  assert.equal(isNoUpstream(null), false);
+});
+
+test("observeHeadOid: seeds once, keeps through null, fires once per move", () => {
+  const first = observeHeadOid(null, "A");
+  assert.deepEqual(
+    first,
+    { next: "A", changed: false },
+    "first observation seeds",
+  );
+  assert.deepEqual(observeHeadOid(null, null), { next: null, changed: false });
+  assert.deepEqual(observeHeadOid(null, undefined), {
+    next: null,
+    changed: false,
+  });
+  assert.deepEqual(
+    observeHeadOid("A", null),
+    { next: "A", changed: false },
+    "an unborn or pending read keeps the last oid",
+  );
+  assert.deepEqual(observeHeadOid("A", undefined), {
+    next: "A",
+    changed: false,
+  });
+  const moved = observeHeadOid("A", "B");
+  assert.deepEqual(moved, { next: "B", changed: true });
+  assert.deepEqual(
+    observeHeadOid(moved.next, "B"),
+    { next: "B", changed: false },
+    "the same oid again doesn't fire",
+  );
+  // A null between two equal oids is no move.
+  const held = observeHeadOid(observeHeadOid("A", null).next, "A");
+  assert.equal(held.changed, false);
 });
