@@ -62,6 +62,7 @@ import { copyText } from "@/lib/clipboard";
 import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
   forgeFeatureReady,
+  pendingWriteMatching,
   pendingWriteOfKind,
   useBranchDiffFiles,
   useCompareBranches,
@@ -70,6 +71,7 @@ import {
   useForgeStatus,
   useMergeLocalPr,
   usePendingLocalPrWrites,
+  usePendingRepoWrites,
   useRepoStatus,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
@@ -142,6 +144,9 @@ export function LocalPrView({
   const localWrites = usePendingLocalPrWrites(repoPath);
   const runningMerge = pendingWriteOfKind(localWrites, "merge");
   const runningUpdate = pendingWriteOfKind(localWrites, "update-from");
+  // The record-store writes, read per PR below: this view outlives a PR switch,
+  // and its observers would hold whichever PR is shown next.
+  const storeWrites = usePendingRepoWrites("local-pr", repoPath);
   const recovery = useStashReapplyRecovery(repoPath);
   const status = useRepoStatus(repoPath);
   const selectedPr = useUiStore((s) => s.selectedPr);
@@ -212,11 +217,18 @@ export function LocalPrView({
     if (pr) await update.mutateAsync({ id: pr.id, mutate });
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
-  // Close/Reopen's and the review post's single-flight holds: the pinned update
-  // mutation detaches on a repo switch, so `update.isPending` alone can go idle
-  // while the write runs on. The panel's `post` gates re-entry on `posting`.
-  const [settingStatus, setSettingStatus] = useState(false);
-  const [postingReview, setPostingReview] = useState(false);
+  // Close/Reopen's and the review post's single-flight holds, scoped to the PR
+  // they save: object tokens so one settle never releases another PR's hold, kept
+  // across a PR switch so a return mid-save still holds. The panel's `post` gates
+  // re-entry on `posting`.
+  const [statusSavingFor, setStatusSavingFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
+  const [postingReviewFor, setPostingReviewFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
   const ghStatus = useForgeStatus(repoPath);
   const provider = ghStatus.data?.provider;
   // A local PR's body and comments autolink the forge's references like any other
@@ -339,6 +351,16 @@ export function LocalPrView({
     );
   }
 
+  const updateHold = pendingWriteMatching(
+    storeWrites,
+    "update",
+    (v: { id: string }) => v.id === pr.id,
+  );
+  const ownsSlot = (slot: { repo: string; id: string } | null) =>
+    slot?.repo === repoPath && slot.id === pr.id;
+  const statusHeld = updateHold !== undefined || ownsSlot(statusSavingFor);
+  const reviewPosting = updateHold !== undefined || ownsSlot(postingReviewFor);
+
   const ahead = comparison.data?.ahead ?? [];
   // Commits on `base` that `head` lacks — i.e. how far the PR's head branch has
   // fallen behind base. Non-empty ⇒ offer GitHub's "Update branch".
@@ -422,9 +444,10 @@ export function LocalPrView({
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
-    if (!pr || update.isPending || settingStatus) return;
+    if (!pr || statusHeld) return;
     const note = comment.trim();
-    setSettingStatus(true);
+    const mine = { repo: repoPath, id: pr.id };
+    setStatusSavingFor(mine);
     try {
       await update.mutateAsync({
         id: pr.id,
@@ -450,7 +473,7 @@ export function LocalPrView({
       // silent no-op behind a button that promised to post it.
       toastError(e);
     } finally {
-      setSettingStatus(false);
+      setStatusSavingFor((cur) => (cur === mine ? null : cur));
     }
   }
 
@@ -870,12 +893,13 @@ export function LocalPrView({
                 files: d.files,
               })),
           }}
-          posting={update.isPending || postingReview}
+          posting={reviewPosting}
           // The body arrives pre-branded from the panel; stamp the synthetic
           // author so it renders as a GitDesktop-posted review, not authorless.
           // `opts` (asBot) is a remote-forge concern — ignored for local PRs.
           onPost={async (body) => {
-            setPostingReview(true);
+            const mine = { repo: repoPath, id: pr.id };
+            setPostingReviewFor(mine);
             try {
               await update.mutateAsync({
                 id: pr.id,
@@ -896,7 +920,7 @@ export function LocalPrView({
               toastError(e);
               throw e; // let the panel skip its success toast / text clear
             } finally {
-              setPostingReview(false);
+              setPostingReviewFor((cur) => (cur === mine ? null : cur));
             }
           }}
         />
@@ -1154,7 +1178,7 @@ export function LocalPrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={update.isPending || settingStatus}
+              disabled={statusHeld}
               reason="Saving…"
               onClick={() => void setStatus("closed")}
               title={
@@ -1264,7 +1288,7 @@ export function LocalPrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={update.isPending || settingStatus}
+              disabled={statusHeld}
               reason="Saving…"
               onClick={() => void setStatus("open")}
               title={

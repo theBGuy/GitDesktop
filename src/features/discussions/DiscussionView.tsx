@@ -60,6 +60,7 @@ import type {
 import {
   DISCUSSION_WRITES_FAMILY,
   type DiscussionWriteVars,
+  pendingDiscussionWrite,
   pendingWriteMatching,
   repoKeys,
   useAddDiscussionComment,
@@ -249,7 +250,7 @@ export function DiscussionView({
   const toggleReactionMutation = useToggleReaction(repoPath, "discussion");
   const lockDiscussion = useLockDiscussion(repoPath);
   const unlockDiscussion = useUnlockDiscussion(repoPath);
-  // Lock/unlock pending state per discussion, from the cache: this view outlives
+  // Every write's pending state per discussion, from the cache: this view outlives
   // a discussion switch, and an observer tracks only its latest call.
   const discussionWrites = usePendingRepoWrites(
     DISCUSSION_WRITES_FAMILY,
@@ -334,31 +335,62 @@ export function DiscussionView({
   const staleReason = detailsStale ? "Loading this discussion…" : undefined;
   // A disabled menu item drops pointer events, so its reason rides the label.
   const staleSuffix = staleReason ? ` — ${staleReason}` : "";
+  // The rendered discussion's own writes: another discussion's never hold this one.
+  const commenting = pendingDiscussionWrite(
+    discussionWrites,
+    "add-comment",
+    (v) => v.discussionId === d.id,
+  );
+  const answering = pendingDiscussionWrite(
+    discussionWrites,
+    "mark-answer",
+    (v) => v.discussionId === d.id,
+  );
+  const deletingComment = pendingDiscussionWrite(
+    discussionWrites,
+    "delete-comment",
+    (v) => v.discussionId === d.id,
+  );
+  const closing = pendingDiscussionWrite(
+    discussionWrites,
+    "close",
+    (v) => v.discussionId === d.id,
+  );
+  const reopening = pendingDiscussionWrite(
+    discussionWrites,
+    "reopen",
+    (v) => v === d.id,
+  );
+  const deleting = pendingDiscussionWrite(
+    discussionWrites,
+    "delete",
+    (v) => v === d.id,
+  );
   const busy =
-    addComment.isPending ||
-    markAnswer.isPending ||
-    deleteComment.isPending ||
+    commenting !== undefined ||
+    answering !== undefined ||
+    deletingComment !== undefined ||
     detailsStale;
   // Which term of `busy` a control disabled on it names, ranked: the switch window
   // outranks a write the viewer started, being the hold they can't have caused.
   // A write pressed offline is parked, not running, until the connection returns.
   // The delete's arm is also the Delete comment dialog's own reason.
   const deleteCommentReason = pendingWriteReason(
-    deleteComment.isPaused,
+    deletingComment?.paused ?? false,
     COMMENT_DELETE_PENDING_REASON,
   );
   const busyReason = (() => {
     switch (true) {
       case detailsStale:
         return staleReason;
-      case addComment.isPending:
+      case commenting !== undefined:
         return pendingWriteReason(
-          addComment.isPaused,
+          commenting.paused,
           COMMENT_POST_PENDING_REASON,
         );
-      case markAnswer.isPending:
-        return pendingWriteReason(markAnswer.isPaused, "Updating the answer…");
-      case deleteComment.isPending:
+      case answering !== undefined:
+        return pendingWriteReason(answering.paused, "Updating the answer…");
+      case deletingComment !== undefined:
         return deleteCommentReason;
       default:
         return undefined;
@@ -387,9 +419,19 @@ export function DiscussionView({
   // above — but a hold outranks it: a held item posts nothing.
   const draftSuffix =
     staleSuffix || (draftRidesStateChange ? " — posts your draft" : "");
+  // A state change still in flight names itself next, below the switch window.
+  const reopenSuffix =
+    staleSuffix ||
+    (reopening
+      ? ` — ${pendingItemReason(reopening.paused, ACT_PENDING_REASON)}`
+      : "") ||
+    draftSuffix;
   // Close also holds offline, which outranks the draft promise the same way.
   const closeSuffix =
     staleSuffix ||
+    (closing
+      ? ` — ${pendingItemReason(closing.paused, ACT_PENDING_REASON)}`
+      : "") ||
     (offlineHold ? ` — ${OFFLINE_ITEM_REASON}` : "") ||
     draftSuffix;
   // Lock and unlock hold rather than park, like close: a parked one would change
@@ -503,9 +545,13 @@ export function DiscussionView({
   }
 
   async function toggleAnswer(commentId: string, isAnswer: boolean) {
-    if (detailsStale) return;
+    if (!d || detailsStale) return;
     try {
-      await markAnswer.mutateAsync({ commentId, answer: !isAnswer });
+      await markAnswer.mutateAsync({
+        discussionId: d.id,
+        commentId,
+        answer: !isAnswer,
+      });
     } catch (e) {
       onError(e);
       return;
@@ -597,7 +643,7 @@ export function DiscussionView({
     // Unlike the button surfaces, a menu item can be reached again during the
     // comment round trip (the menu closes on click, but reopens) — so the
     // in-flight post is the re-entry guard the item's own `disabled` can't be.
-    if (!d || detailsStale || addComment.isPending) return;
+    if (!d || detailsStale || commenting) return;
     // Captured before the await: posting clears the draft, and the error arm
     // below has to know a comment already went out.
     const withComment = draftRidesStateChange;
@@ -652,7 +698,7 @@ export function DiscussionView({
   }
 
   async function doReopen() {
-    if (!d || detailsStale || addComment.isPending) return;
+    if (!d || detailsStale || commenting) return;
     const withComment = draftRidesStateChange;
     // The reopen starts after the riding post's await, so it re-checks that this
     // repo is still the open one.
@@ -711,10 +757,11 @@ export function DiscussionView({
   /** Close-on-error is the dialog's documented contract, so both arms close it —
    *  functionally, since by the settle it may hold another comment. */
   async function doDeleteComment(commentId: string) {
+    if (!d) return;
     const closeIfStillOpen = () =>
       setDeletingCommentId((cur) => (cur === commentId ? null : cur));
     try {
-      await deleteComment.mutateAsync(commentId);
+      await deleteComment.mutateAsync({ discussionId: d.id, commentId });
     } catch (e) {
       onError(e);
       closeIfStillOpen();
@@ -775,10 +822,10 @@ export function DiscussionView({
               {d.closed ? (
                 <DropdownMenuItem
                   className={MENU_HELD_ROW_CLASS}
-                  disabled={reopenDiscussion.isPending || detailsStale}
+                  disabled={reopening !== undefined || detailsStale}
                   onClick={() => void doReopen()}
                 >
-                  Reopen discussion{draftSuffix}
+                  Reopen discussion{reopenSuffix}
                 </DropdownMenuItem>
               ) : (
                 <DropdownMenuSub>
@@ -786,9 +833,12 @@ export function DiscussionView({
                       own (unlike menu items), so the dim rides a call-site class. */}
                   <DropdownMenuSubTrigger
                     disabled={
-                      closeDiscussion.isPending || detailsStale || !!offlineHold
+                      closing !== undefined || detailsStale || !!offlineHold
                     }
-                    className="data-disabled:opacity-50"
+                    className={cn(
+                      MENU_HELD_ROW_CLASS,
+                      "data-disabled:opacity-50",
+                    )}
                   >
                     Close discussion…{closeSuffix}
                   </DropdownMenuSubTrigger>
@@ -798,9 +848,7 @@ export function DiscussionView({
                         key={reason}
                         className={MENU_HELD_ROW_CLASS}
                         disabled={
-                          closeDiscussion.isPending ||
-                          detailsStale ||
-                          !!offlineHold
+                          closing !== undefined || detailsStale || !!offlineHold
                         }
                         onClick={() => void doClose(reason)}
                       >
@@ -1182,7 +1230,7 @@ export function DiscussionView({
       <DeleteCommentDialog
         commentId={deletingCommentId}
         onClose={() => setDeletingCommentId(null)}
-        pending={deleteComment.isPending}
+        pending={deletingComment !== undefined}
         reason={deleteCommentReason}
         onConfirm={(commentId) => void doDeleteComment(commentId)}
       />
@@ -1205,12 +1253,10 @@ export function DiscussionView({
             </Button>
             <DisabledReasonButton
               variant="destructive"
-              disabled={
-                deleteDiscussion.isPending || detailsStale || !!offlineHold
-              }
+              disabled={deleting !== undefined || detailsStale || !!offlineHold}
               reason={(() => {
                 switch (true) {
-                  case deleteDiscussion.isPending:
+                  case deleting !== undefined:
                     return ACT_PENDING_REASON;
                   case staleReason !== undefined:
                     return staleReason;
@@ -1220,9 +1266,7 @@ export function DiscussionView({
               })()}
               onClick={() => void doDelete()}
             >
-              {deleteDiscussion.isPending && (
-                <Spinner data-icon="inline-start" />
-              )}
+              {deleting !== undefined && <Spinner data-icon="inline-start" />}
               Delete
             </DisabledReasonButton>
           </DialogFooter>

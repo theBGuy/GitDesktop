@@ -12,6 +12,8 @@ import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import {
   pendingMutationEntries,
   pendingTagPushesFor,
+  type ReleaseWriteVars,
+  releaseWriteKey,
   type TagPushState,
   tagPushKey,
 } from "./pr-writes";
@@ -47,18 +49,23 @@ export function usePendingTagPushes(repo: string): TagPushState[] {
 export function useDeleteLocalTag(repo: string) {
   return useRepoMutation(
     repo,
-    (name: string) => api.gitDeleteLocalTag(repo, name),
+    (name: ReleaseWriteVars["delete-local-tag"]) =>
+      api.gitDeleteLocalTag(repo, name),
     {
       // Local tag write — never park it offline.
       networkMode: "always",
+      identity: releaseWriteKey("delete-local-tag", repo),
     },
   );
 }
 
 /** Pushes the deletion to origin, so it keeps the default and pauses offline. */
 export function useDeleteTagOnOrigin(repo: string) {
-  return useRepoMutation(repo, (name: string) =>
-    api.gitDeleteTagOnOrigin(repo, name),
+  return useRepoMutation(
+    repo,
+    (name: ReleaseWriteVars["delete-origin-tag"]) =>
+      api.gitDeleteTagOnOrigin(repo, name),
+    { identity: releaseWriteKey("delete-origin-tag", repo) },
   );
 }
 
@@ -161,14 +168,7 @@ export function useCreateRelease(repo: string) {
 export function useEditRelease(repo: string) {
   return useRepoMutation(
     repo,
-    (args: {
-      tag: string;
-      title: string;
-      notes: string;
-      prerelease: boolean;
-      draft: boolean;
-      latest: boolean | undefined;
-    }) =>
+    (args: ReleaseWriteVars["edit-release"]) =>
       api.forgeReleaseEdit(
         repo,
         args.tag,
@@ -178,14 +178,18 @@ export function useEditRelease(repo: string) {
         args.draft,
         args.latest,
       ),
+    { identity: releaseWriteKey("edit-release", repo) },
   );
 }
 
 /** Syncs the release's `latest.json` updater manifest to the edited notes. Repo
  *  mutation like the asset upload — replacing the asset changes its size/stats. */
 export function useSyncUpdaterNotes(repo: string) {
-  return useRepoMutation(repo, (args: { tag: string; notes: string }) =>
-    api.forgeReleaseSyncUpdaterNotes(repo, args.tag, args.notes),
+  return useRepoMutation(
+    repo,
+    (args: ReleaseWriteVars["sync-updater"]) =>
+      api.forgeReleaseSyncUpdaterNotes(repo, args.tag, args.notes),
+    { identity: releaseWriteKey("sync-updater", repo) },
   );
 }
 
@@ -198,20 +202,29 @@ export function useGithubReleaseNotes(repo: string) {
 }
 
 export function useDeleteRelease(repo: string) {
-  return useRepoMutation(repo, (args: { tag: string; cleanupTag: boolean }) =>
-    api.forgeReleaseDelete(repo, args.tag, args.cleanupTag),
+  return useRepoMutation(
+    repo,
+    (args: ReleaseWriteVars["delete-release"]) =>
+      api.forgeReleaseDelete(repo, args.tag, args.cleanupTag),
+    { identity: releaseWriteKey("delete-release", repo) },
   );
 }
 
 export function useUploadReleaseAsset(repo: string) {
-  return useRepoMutation(repo, (args: { tag: string; filePath: string }) =>
-    api.forgeReleaseUploadAsset(repo, args.tag, args.filePath),
+  return useRepoMutation(
+    repo,
+    (args: ReleaseWriteVars["upload-asset"]) =>
+      api.forgeReleaseUploadAsset(repo, args.tag, args.filePath),
+    { identity: releaseWriteKey("upload-asset", repo) },
   );
 }
 
 export function useDeleteReleaseAsset(repo: string) {
-  return useRepoMutation(repo, (args: { tag: string; assetName: string }) =>
-    api.forgeReleaseDeleteAsset(repo, args.tag, args.assetName),
+  return useRepoMutation(
+    repo,
+    (args: ReleaseWriteVars["delete-asset"]) =>
+      api.forgeReleaseDeleteAsset(repo, args.tag, args.assetName),
+    { identity: releaseWriteKey("delete-asset", repo) },
   );
 }
 

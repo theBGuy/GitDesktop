@@ -42,6 +42,10 @@ import {
   forgeFeatureReady,
   forgeProbeReason,
   forgeProbeState,
+  pendingWriteMatching,
+  RELEASE_WRITES_FAMILY,
+  type ReleaseWriteKind,
+  releaseWriteTag,
   useCheckoutCommit,
   useDeleteLocalTag,
   useDeleteRelease,
@@ -50,6 +54,7 @@ import {
   useDownloadReleaseAsset,
   useEditRelease,
   useForgeStatus,
+  usePendingRepoWrites,
   usePendingTagPushes,
   usePushTag,
   useReleaseDetails,
@@ -131,8 +136,23 @@ export function TagDetailView({
   const tagPush = usePendingTagPushes(repoPath).find((p) => p.tag === tag);
   const deleteLocalTag = useDeleteLocalTag(repoPath);
   const deleteTagOnOrigin = useDeleteTagOnOrigin(repoPath);
+  // The tag and release writes, per tag from the cache for the same reason as
+  // the push: another tag's write never holds this one.
+  const releaseWrites = usePendingRepoWrites(RELEASE_WRITES_FAMILY, repoPath);
+  const writeOnTag = (kind: ReleaseWriteKind) =>
+    pendingWriteMatching(
+      releaseWrites,
+      kind,
+      (v: unknown) => releaseWriteTag(v) === tag,
+    ) !== undefined;
   const deleteTagPending =
-    deleteLocalTag.isPending || deleteTagOnOrigin.isPending;
+    writeOnTag("delete-local-tag") || writeOnTag("delete-origin-tag");
+  const editPending = writeOnTag("edit-release");
+  const deleteReleasePending = writeOnTag("delete-release");
+  const uploadPending = writeOnTag("upload-asset");
+  const deleteAssetPending = writeOnTag("delete-asset");
+  // Repo-wide by design: a checkout writes the one working tree, whichever tag
+  // it started from.
   const checkout = useCheckoutCommit(repoPath);
   const selectTag = useUiStore((s) => s.selectTag);
 
@@ -407,7 +427,7 @@ export function TagDetailView({
     // An armed sync makes Save two-phase; dismissing between the phases would fire the
     // manifest upload at a closed dialog, so the whole operation latches. A plain edit
     // (nothing armed) stays dismissible exactly as it always was.
-    const savePending = editRelease.isPending || syncUpdaterNotes.isPending;
+    const savePending = editPending || writeOnTag("sync-updater");
     const saveLatched = syncArmed && savePending;
 
     // Arrow consts, not declarations: only an expression created after the
@@ -555,12 +575,9 @@ export function TagDetailView({
                     variant="outline"
                     size="xs"
                     disabled={
-                      editRelease.isPending ||
-                      writeBlocked ||
-                      relStale ||
-                      !!offlineHold
+                      editPending || writeBlocked || relStale || !!offlineHold
                     }
-                    reason={triggerReason(editRelease.isPending)}
+                    reason={triggerReason(editPending)}
                     onClick={() => void onPublish()}
                   >
                     Publish
@@ -656,15 +673,12 @@ export function TagDetailView({
                     variant="ghost"
                     size="xs"
                     disabled={
-                      uploadAsset.isPending ||
-                      writeBlocked ||
-                      relStale ||
-                      !!offlineHold
+                      uploadPending || writeBlocked || relStale || !!offlineHold
                     }
-                    reason={triggerReason(uploadAsset.isPending)}
+                    reason={triggerReason(uploadPending)}
                     onClick={onUpload}
                   >
-                    {uploadAsset.isPending ? (
+                    {uploadPending ? (
                       <Spinner data-icon="inline-start" />
                     ) : (
                       <UploadSimpleIcon data-icon="inline-start" />
@@ -706,13 +720,13 @@ export function TagDetailView({
                           size="icon-xs"
                           aria-label={`Delete ${a.name}`}
                           disabled={
-                            deleteAsset.isPending ||
+                            deleteAssetPending ||
                             writeBlocked ||
                             relStale ||
                             !!offlineHold
                           }
                           reason={triggerReason(
-                            deleteAsset.isPending,
+                            deleteAssetPending,
                             ASSET_DELETE_PENDING_REASON,
                           )}
                           className="text-muted-foreground"
@@ -743,13 +757,13 @@ export function TagDetailView({
                             size="icon-xs"
                             aria-label={`Delete ${a.name}`}
                             disabled={
-                              deleteAsset.isPending ||
+                              deleteAssetPending ||
                               writeBlocked ||
                               relStale ||
                               !!offlineHold
                             }
                             reason={triggerReason(
-                              deleteAsset.isPending,
+                              deleteAssetPending,
                               ASSET_DELETE_PENDING_REASON,
                             )}
                             className="text-muted-foreground"
@@ -929,13 +943,11 @@ export function TagDetailView({
               </Button>
               <DisabledReasonButton
                 variant="destructive"
-                disabled={deleteRelease.isPending || relStale || !!offlineHold}
-                reason={triggerReason(deleteRelease.isPending)}
+                disabled={deleteReleasePending || relStale || !!offlineHold}
+                reason={triggerReason(deleteReleasePending)}
                 onClick={() => void onDeleteRelease()}
               >
-                {deleteRelease.isPending && (
-                  <Spinner data-icon="inline-start" />
-                )}
+                {deleteReleasePending && <Spinner data-icon="inline-start" />}
                 Delete
               </DisabledReasonButton>
             </DialogFooter>

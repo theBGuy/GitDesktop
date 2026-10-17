@@ -4,9 +4,15 @@ import { Markdown } from "@/components/markdown/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
-import { useForgeStatus } from "@/lib/git/queries";
+import {
+  pendingWriteMatching,
+  useForgeStatus,
+  usePendingRepoWrites,
+} from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import {
+  type ClearReviewDraftsVars,
+  LOCAL_REVIEW_WRITES_FAMILY,
   type ReviewDraft,
   useClearReviewDrafts,
   useRemoveReviewDraft,
@@ -162,7 +168,15 @@ export function PendingReviewBar({
   onSubmit: () => void;
 }) {
   const drafts = useReviewDrafts(repoPath, lens, number);
-  const clearDrafts = useClearReviewDrafts(repoPath, lens, number);
+  const clearDrafts = useClearReviewDrafts(repoPath, lens);
+  // This PR's own clear, from the cache: the bar outlives a PR switch, and a
+  // post-submit clear or the palette's discard on this PR holds it too.
+  const clearing =
+    pendingWriteMatching(
+      usePendingRepoWrites(LOCAL_REVIEW_WRITES_FAMILY, repoPath),
+      "clear-drafts",
+      (v: ClearReviewDraftsVars) => v.number === number,
+    ) !== undefined;
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const count = drafts.data?.length ?? 0;
   // The PR view swaps pull requests without remounting this bar, so its confirm
@@ -179,7 +193,7 @@ export function PendingReviewBar({
   async function discard() {
     const startedFor = prKey;
     try {
-      await clearDrafts.mutateAsync(undefined);
+      await clearDrafts.mutateAsync({ number });
       if (startedFor === prKeyRef.current) setConfirmDiscard(false);
     } catch {
       // Awaited with a do-nothing catch: see DraftCommentCard.
@@ -212,7 +226,7 @@ export function PendingReviewBar({
         body={`This deletes all ${count} pending comment${count === 1 ? "" : "s"}. They haven't been posted yet and can't be recovered.`}
         confirmLabel="Discard review"
         confirmVariant="destructive"
-        pending={clearDrafts.isPending}
+        pending={clearing}
         onConfirm={() => void discard()}
       />
     </div>

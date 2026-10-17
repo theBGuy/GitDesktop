@@ -105,14 +105,15 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Ten dependency-free Node scripts guard convention classes a past audit already
-paid to close once. Run them before pushing:
+Eleven dependency-free Node scripts guard convention classes a past audit
+already paid to close once. Run them before pushing:
 
 ```sh
 # banned patterns · Rust invariants · OG card references ·
 # IPC surface drift · rule-mirror drift · skill-mirror drift ·
 # Tauri npm/crate parity · lockfile singleton dedupe · AppImage env twins ·
-# installed-only suites enforced · guard self-tests
+# installed-only suites enforced · record-scoped pending reads ·
+# guard self-tests
 pnpm run checks
 ```
 
@@ -133,11 +134,14 @@ needing a crate half to compare against), a single resolved version in
 the AppImage guard's allowed exports and the Rust child-environment tables,
 and that every node suite which reads `GD_EXPECT_DEPS` (the ones that skip
 without `node_modules`) is listed in `frontend.yml`'s installed, enforced step
-(otherwise its skipped tests run in no CI job).
+(otherwise its skipped tests run in no CI job), and that the detail views one
+mounted instance reuses across records read a write's pending state from the
+mutation cache, matched on the record, rather than from a mutation observer
+(which would show one record's in-flight write on the next).
 
-The pattern, Rust-invariant, and surface checks carry allowlists; the AppImage
-environment-twins check carries an exemption map. They ratchet one way
-(rule-mirror drift, Tauri parity and lockfile dedupe carry none — there is
+The pattern, Rust-invariant, surface, and pending-read checks carry allowlists;
+the AppImage environment-twins check carries an exemption map. They ratchet one
+way (rule-mirror drift, Tauri parity and lockfile dedupe carry none — there is
 nothing to exempt). Adding an entry is a reviewed change like any other: it
 needs an inline rationale naming what makes that site safe, and it isn't the
 way to quiet a fresh violation. The ratchet is enforced, not just documented —

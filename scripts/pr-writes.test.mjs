@@ -21,8 +21,11 @@ import {
   pendingWriteOfKind,
   pendingWritesFor,
   prWriteKey,
+  RELEASE_WRITES_FAMILY,
   readPendingLocalPrWrite,
   readPendingPrWrite,
+  releaseWriteKey,
+  releaseWriteTag,
 } from "../src/lib/git/queries/pr-writes.ts";
 
 const write = (kind, vars) => ({ kind, ...pendingPrWriteTarget(vars) });
@@ -360,4 +363,72 @@ test("a foreign repo's local merge never holds this repo's view", () => {
   assert.equal(pendingWriteOfKind(writes, "merge"), undefined);
   const own = pendingWritesFor(entries, "C:/b", readPendingLocalPrWrite);
   assert.equal(pendingWriteOfKind(own, "merge")?.head, "feat");
+});
+
+test("a local merge's finish names its base only; an abort names no branch", () => {
+  assert.deepEqual(
+    pendingLocalPrWrite("finish-merge", {
+      base: "main",
+      strategy: "squash",
+      message: "m",
+      worktreePath: "C:/wt",
+      worktreeId: "w1",
+      opId: null,
+    }),
+    { kind: "finish-merge", base: "main", head: null },
+  );
+  assert.deepEqual(
+    pendingLocalPrWrite("abort-merge", { worktreePath: "C:/wt", opId: null }),
+    { kind: "abort-merge", base: null, head: null },
+  );
+});
+
+test("a finish or abort never reads as a merge or an update-from", () => {
+  const entries = [
+    { key: localPrWriteKey("finish-merge", "C:/a"), vars: { base: "main" } },
+    {
+      key: localPrWriteKey("abort-merge", "C:/a"),
+      vars: { worktreePath: "x" },
+    },
+  ];
+  const writes = pendingWritesFor(entries, "C:/a", readPendingLocalPrWrite);
+  assert.equal(pendingWriteOfKind(writes, "merge"), undefined);
+  assert.equal(pendingWriteOfKind(writes, "update-from"), undefined);
+  assert.equal(pendingWriteOfKind(writes, "finish-merge")?.base, "main");
+});
+
+test("a release write's tag is its bare-string vars or their `tag` field", () => {
+  assert.equal(releaseWriteTag("v1.0.0"), "v1.0.0");
+  assert.equal(releaseWriteTag({ tag: "v2", cleanupTag: true }), "v2");
+  assert.equal(releaseWriteTag({ tag: "v3", assetName: "a.zip" }), "v3");
+  for (const junk of [undefined, null, 7, ["v1"], { tag: 7 }, { name: "v1" }])
+    assert.equal(releaseWriteTag(junk), null, JSON.stringify(junk));
+});
+
+test("a release write's key files it by kind and repo under one prefix", () => {
+  assert.deepEqual(releaseWriteKey("delete-release", "C:/a"), [
+    RELEASE_WRITES_FAMILY,
+    "delete-release",
+    "C:/a",
+  ]);
+  const entries = [
+    { key: releaseWriteKey("delete-local-tag", "C:/a"), vars: "v1" },
+    { key: releaseWriteKey("delete-local-tag", "C:/b"), vars: "v1" },
+  ];
+  const writes = pendingWritesFor(entries, "C:/a", (kind, vars) => ({
+    kind,
+    tag: releaseWriteTag(vars),
+  }));
+  assert.deepEqual(writes, [{ kind: "delete-local-tag", tag: "v1" }]);
+});
+
+test("the new PR write kinds hold only their own PR", () => {
+  for (const kind of ["delete-comment", "delete-review-comment"]) {
+    const w = [write(kind, { number: 7, commentId: "c" })];
+    assert.equal(isPendingFor(w, kind, 7, "origin"), true, kind);
+    assert.equal(isPendingFor(w, kind, 8, "origin"), false, kind);
+  }
+  const discard = [write("discard-review", { number: 7, reviewId: "r" })];
+  assert.equal(isPendingFor(discard, "discard-review", 7, "upstream"), true);
+  assert.equal(isPendingFor(discard, "discard-review", 8, "origin"), false);
 });

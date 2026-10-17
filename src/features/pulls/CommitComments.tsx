@@ -16,12 +16,16 @@ import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
+  COMMIT_COMMENT_WRITES_FAMILY,
+  type CommitCommentWriteVars,
   forgeReady,
+  pendingWriteMatching,
   useCommitComments,
   useCreateCommitComment,
   useDeleteCommitComment,
   useEditCommitComment,
   useForgeStatus,
+  usePendingRepoWrites,
 } from "@/lib/git/queries";
 import type {
   CommitCommentOut,
@@ -305,6 +309,28 @@ export function CommitComments({
   const createComment = useCreateCommitComment(repoPath, lens);
   const editComment = useEditCommitComment(repoPath, lens);
   const deleteComment = useDeleteCommitComment(repoPath, lens);
+  // This commit's own writes, from the cache: neither host keys this pane on the
+  // commit, so another commit's write never holds it. Only a whole-commit create
+  // holds the composer; a line comment's create always carries its `path`.
+  const commentWrites = usePendingRepoWrites(
+    COMMIT_COMMENT_WRITES_FAMILY,
+    repoPath,
+  );
+  const creating = pendingWriteMatching(
+    commentWrites,
+    "create",
+    (v: CommitCommentWriteVars["create"]) => v.sha === sha && v.path == null,
+  );
+  const editing = pendingWriteMatching(
+    commentWrites,
+    "edit",
+    (v: CommitCommentWriteVars["edit"]) => v.sha === sha,
+  );
+  const deleting = pendingWriteMatching(
+    commentWrites,
+    "delete",
+    (v: CommitCommentWriteVars["delete"]) => v.sha === sha,
+  );
   // The pane takes `remoteLabel`, not the provider, and which triggers autolink
   // is a per-forge fact — read it from the shared forge status.
   const forge = useForgeStatus(repoPath);
@@ -390,16 +416,16 @@ export function CommitComments({
   // commit is the addressed one.
   const writesHeld = stale || held;
   const busy =
-    createComment.isPending ||
-    editComment.isPending ||
-    deleteComment.isPending ||
+    creating !== undefined ||
+    editing !== undefined ||
+    deleting !== undefined ||
     writesHeld;
   // Which term of `busy` the composer names, ranked: the switch window outranks a
   // write the viewer started, being the hold they can't have caused themselves.
   // A write pressed offline is parked, not running, until the connection returns.
   // The delete's arm is also the Delete comment dialog's own reason.
   const deleteCommentReason = pendingWriteReason(
-    deleteComment.isPaused,
+    deleting?.paused ?? false,
     COMMENT_DELETE_PENDING_REASON,
   );
   const composerReason = (() => {
@@ -408,17 +434,11 @@ export function CommitComments({
         return "Loading this commit…";
       case held:
         return "Checking whether this commit is pushed…";
-      case createComment.isPending:
-        return pendingWriteReason(
-          createComment.isPaused,
-          COMMENT_POST_PENDING_REASON,
-        );
-      case editComment.isPending:
-        return pendingWriteReason(
-          editComment.isPaused,
-          "Saving a comment edit…",
-        );
-      case deleteComment.isPending:
+      case creating !== undefined:
+        return pendingWriteReason(creating.paused, COMMENT_POST_PENDING_REASON);
+      case editing !== undefined:
+        return pendingWriteReason(editing.paused, "Saving a comment edit…");
+      case deleting !== undefined:
         return deleteCommentReason;
       default:
         return undefined;
@@ -634,7 +654,7 @@ export function CommitComments({
       <DeleteCommentDialog
         commentId={deletingId}
         onClose={() => setDeletingId(null)}
-        pending={deleteComment.isPending}
+        pending={deleting !== undefined}
         reason={deleteCommentReason}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
         onConfirm={(commentId) => void confirmDelete(commentId)}
@@ -691,7 +711,7 @@ export function CommitLineComposer({
   /** Which repo the commit lives on (origin vs upstream lens). */
   lens: RemoteLens;
 }) {
-  const createComment = useCreateCommitComment(repoPath, lens);
+  const createLineComment = useCreateCommitComment(repoPath, lens);
   const mentions = useMentionCandidates({ repoPath, lens, provider });
   const [body, setBody] = useState("");
 
@@ -721,7 +741,7 @@ export function CommitLineComposer({
     // The outcome rides the promise (detached, so the close still happens on this
     // tick): closing unmounts this composer, and react-query drops per-call mutate
     // callbacks with the observer.
-    void createComment
+    void createLineComment
       .mutateAsync({
         sha,
         body: text,
@@ -760,7 +780,7 @@ export function CommitLineComposer({
             // fires inside editable targets, so a chord this handler declines to
             // submit would otherwise reach the global action.
             e.preventDefault();
-            if (canPost && !createComment.isPending) submit();
+            if (canPost && !createLineComment.isPending) submit();
           } else if (e.key === "Escape") {
             // Close only this widget — don't leak Escape to global handlers.
             e.preventDefault();
@@ -777,7 +797,7 @@ export function CommitLineComposer({
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={!body.trim() || !canPost || createComment.isPending}
+          disabled={!body.trim() || !canPost || createLineComment.isPending}
           reason={
             disabledReason ?? (!body.trim() ? "Write a comment first" : null)
           }
@@ -789,7 +809,7 @@ export function CommitLineComposer({
         <Button
           variant="ghost"
           size="sm"
-          disabled={createComment.isPending}
+          disabled={createLineComment.isPending}
           onClick={onClose}
         >
           Cancel

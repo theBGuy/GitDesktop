@@ -37,6 +37,7 @@ import {
   useRepoMutation,
   workingTreeKeys,
 } from "./internal";
+import { issueWriteKey } from "./issues";
 import {
   pendingMutationEntries,
   pendingThreadWritesFor,
@@ -685,6 +686,33 @@ export function useRemoteCommitDiff(repo: string, sha: string | null) {
 const commitCommentsKey = (repo: string, sha: string, lens: RemoteLens) =>
   ["repo", repo, "commit", sha, "comments", lens] as const;
 
+/** Filter prefix for every commit-comment write ({@link commitCommentWriteKey}). */
+export const COMMIT_COMMENT_WRITES_FAMILY = "commit-comment-write";
+
+/** A commit-comment write's mutation key: static per repo and lens, so a commit
+ *  switch never detaches a pending write; the commit rides the variables (`sha`). */
+export const commitCommentWriteKey = (
+  kind: "create" | "edit" | "delete",
+  repo: string,
+  lens: RemoteLens,
+) => [COMMIT_COMMENT_WRITES_FAMILY, kind, repo, lens] as const;
+
+/** Each commit-comment write's variables, shared by the mutations' generics and
+ *  the pending reads' casts. A line comment's create carries `path`; a
+ *  whole-commit one never does. */
+export type CommitCommentWriteVars = {
+  create: {
+    sha: string;
+    body: string;
+    path?: string;
+    line?: number;
+    startLine?: number;
+    position?: number;
+  };
+  edit: { sha: string; commentId: string; body?: string };
+  delete: { sha: string; commentId: string };
+};
+
 /**
  * Optimistically appends a synthetic commit comment with exact-key rollback. The
  * synthetic row carries a collision-proof `optimistic:<n>` id and
@@ -699,23 +727,10 @@ export function useCreateCommitComment(repo: string, lens: RemoteLens) {
     // all close over `repo`/`lens`, and the comment hosts survive a repo switch —
     // without the key the newly-live repo's controls would read the pending
     // create as busy.
-    mutationKey: ["create-commit-comment", repo, lens],
-    mutationFn: (args: {
-      sha: string;
-      body: string;
-      path?: string;
-      line?: number;
-      startLine?: number;
-      position?: number;
-    }) => api.forgeCommitCommentCreate(repo, args, lens),
-    onMutate: async (args: {
-      sha: string;
-      body: string;
-      path?: string;
-      line?: number;
-      startLine?: number;
-      position?: number;
-    }) => {
+    mutationKey: commitCommentWriteKey("create", repo, lens),
+    mutationFn: (args: CommitCommentWriteVars["create"]) =>
+      api.forgeCommitCommentCreate(repo, args, lens),
+    onMutate: async (args: CommitCommentWriteVars["create"]) => {
       const key = commitCommentsKey(repo, args.sha, lens);
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<CommitCommentOut[]>(key);
@@ -763,6 +778,7 @@ function useOptimisticCommitCommentMutation<TData>(
     comment: CommitCommentOut,
     args: { sha: string; commentId: string; body?: string },
   ) => CommitCommentOut | null,
+  mutationKey?: QueryKey,
 ) {
   return useOptimisticCacheMutation<
     { sha: string; commentId: string; body?: string },
@@ -778,6 +794,7 @@ function useOptimisticCommitCommentMutation<TData>(
         return patched ? [patched] : [];
       }),
     (queryClient) => void invalidateRepoAfterWrite(queryClient, repo),
+    mutationKey,
   );
 }
 
@@ -796,6 +813,7 @@ export function useEditCommitComment(repo: string, lens: RemoteLens) {
         lens,
       ),
     (comment, args) => ({ ...comment, body: args.body ?? comment.body }),
+    commitCommentWriteKey("edit", repo, lens),
   );
 }
 
@@ -813,6 +831,7 @@ export function useDeleteCommitComment(repo: string, lens: RemoteLens) {
         lens,
       ),
     () => null,
+    commitCommentWriteKey("delete", repo, lens),
   );
 }
 
@@ -1049,8 +1068,12 @@ export function usePrTimeline(
 }
 
 export function useCommentIssue(repo: string, lens: RemoteLens) {
-  return useOptimisticCreateCommentMutation(repo, "issue", lens, (args) =>
-    api.forgeIssueComment(repo, args.number, args.body, lens),
+  return useOptimisticCreateCommentMutation(
+    repo,
+    "issue",
+    lens,
+    (args) => api.forgeIssueComment(repo, args.number, args.body, lens),
+    issueWriteKey("comment", repo),
   );
 }
 

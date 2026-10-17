@@ -59,10 +59,13 @@ import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotk
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import { ISSUE_SWITCH_LOADING_REASON } from "@/features/issues/RemoteIssueViewParts";
+import { type PendingRepoWrite, pendingWriteMatching } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { formatHmDelta, isValidJiraDuration } from "@/lib/jira/duration";
 import {
+  type JiraWriteKind,
+  type JiraWriteVars,
   useJiraAssign,
   useJiraComment,
   useJiraCommentDelete,
@@ -83,6 +86,7 @@ import {
   useJiraTransitionTo,
   useJiraUpdateWorklog,
   useJiraUserSearch,
+  usePendingJiraWrites,
 } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import {
@@ -94,6 +98,7 @@ import {
   type JiraWorklog,
 } from "@/lib/jira/types";
 import {
+  ACT_PENDING_REASON,
   COMMENT_POST_PENDING_REASON,
   pendingWriteReason,
   refuseWhileOffline,
@@ -105,6 +110,22 @@ import { toastError } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
+
+/** The `kind` write pending on `issueKey` (narrowed by `match`), read from the
+ *  cache: the view and its keyed rows outlive or remount across an issue switch,
+ *  so an observer would hold the wrong issue or release a write still running. */
+function jiraHold<K extends JiraWriteKind>(
+  writes: readonly PendingRepoWrite[],
+  kind: K,
+  issueKey: string,
+  match: (vars: JiraWriteVars[K]) => boolean = () => true,
+) {
+  return pendingWriteMatching(
+    writes,
+    kind,
+    (v: JiraWriteVars[K]) => v.issueKey === issueKey && match(v),
+  );
+}
 
 /** The category icon + tone shared by the chip and every menu row (so meaning is
  *  never color-only). `done` → the closed/merged treatment; else open/success. */
@@ -423,10 +444,15 @@ export function JiraPriorityMenu({
   const [open, setOpen] = useState(false);
   const priorities = useJiraPriorities(link, open);
   const setPriority = useJiraSetPriority(repoPath, link);
+  const settingPriority = jiraHold(
+    usePendingJiraWrites(repoPath),
+    "set-priority",
+    issueKey,
+  );
 
   async function apply(p: { id: string; name: string }) {
     // Skip a no-op re-pick of the current priority.
-    if (p.name === priorityName) return;
+    if (p.name === priorityName || settingPriority) return;
     try {
       await setPriority.mutateAsync({
         issueKey,
@@ -443,13 +469,25 @@ export function JiraPriorityMenu({
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger
-        disabled={setPriority.isPending}
         aria-label={
           priorityName
             ? `Priority: ${priorityName}. Change priority`
             : "Set priority"
         }
-        className="inline-flex cursor-pointer items-center gap-1 disabled:cursor-default disabled:opacity-60"
+        render={
+          <DisabledReasonButton
+            variant="ghost"
+            disabled={settingPriority !== undefined}
+            reason={
+              settingPriority
+                ? pendingWriteReason(settingPriority.paused, ACT_PENDING_REASON)
+                : undefined
+            }
+            // Strips the button chrome to a bare inline label: no border box,
+            // and the meta row's own text weight, wrapping and color.
+            className="h-auto cursor-pointer gap-1 border-0 p-0 font-normal whitespace-normal hover:bg-transparent hover:text-inherit aria-expanded:bg-transparent aria-expanded:text-inherit dark:hover:bg-transparent"
+          />
+        }
       >
         <FlagIcon className="size-3 shrink-0 opacity-60" />
         {priorityName || "Priority…"}
@@ -818,6 +856,23 @@ function JiraCommentItem({
 }) {
   const edit = useJiraCommentEdit(repoPath, link);
   const del = useJiraCommentDelete(repoPath, link);
+  // Keyed per comment, this row remounts idle on a return to its issue, so its
+  // holds read the cache by the comment's own id.
+  const jiraWrites = usePendingJiraWrites(repoPath);
+  const onThisComment = (v: { commentId: string }) =>
+    v.commentId === comment.id;
+  const editHold = jiraHold(
+    jiraWrites,
+    "comment-edit",
+    issueKey,
+    onThisComment,
+  );
+  const deleteHold = jiraHold(
+    jiraWrites,
+    "comment-delete",
+    issueKey,
+    onThisComment,
+  );
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -842,7 +897,7 @@ function JiraCommentItem({
     const body = draft.trim();
     // An editor opened before the switch would pair this comment's id with the
     // newly selected `issueKey`, which Jira routes as a 404.
-    if (stale) return;
+    if (stale || editHold) return;
     try {
       await edit.mutateAsync({ issueKey, commentId: comment.id, bodyMd: body });
     } catch (e) {
@@ -853,7 +908,7 @@ function JiraCommentItem({
   }
 
   async function doDelete() {
-    if (stale) return;
+    if (stale || deleteHold) return;
     // The confirm dialog closes on the same tick as the request rather than on
     // its outcome — the hook removes the comment optimistically.
     const deleted = del.mutateAsync({ issueKey, commentId: comment.id });
@@ -927,7 +982,7 @@ function JiraCommentItem({
             draft.trim() !== comment.bodyMd.trim() &&
             !stale
           }
-          pending={edit.isPending}
+          pending={editHold !== undefined}
           textareaClassName="max-h-48 min-h-16 resize-y"
         />
       ) : comment.bodyMd.trim() ? (
@@ -946,8 +1001,8 @@ function JiraCommentItem({
         }
         confirmLabel="Delete comment"
         confirmVariant="destructive"
-        pending={del.isPending}
-        paused={del.isPaused}
+        pending={deleteHold !== undefined}
+        paused={deleteHold?.paused ?? false}
         onConfirm={() => void doDelete()}
       />
     </div>
@@ -995,6 +1050,27 @@ function JiraWorklogItem({
 }) {
   const update = useJiraUpdateWorklog(repoPath, link);
   const del = useJiraDeleteWorklog(repoPath, link);
+  // Keyed per worklog, this row remounts idle on a return to its issue, so its
+  // holds read the cache by the entry's own id.
+  const jiraWrites = usePendingJiraWrites(repoPath);
+  const onThisWorklog = (v: { worklogId: string }) =>
+    v.worklogId === worklog.id;
+  const saveHold = jiraHold(
+    jiraWrites,
+    "update-worklog",
+    issueKey,
+    onThisWorklog,
+  );
+  const saving = saveHold !== undefined;
+  const savingReason = saveHold
+    ? pendingWriteReason(saveHold.paused, ACT_PENDING_REASON)
+    : undefined;
+  const deleteHold = jiraHold(
+    jiraWrites,
+    "delete-worklog",
+    issueKey,
+    onThisWorklog,
+  );
   const [editing, setEditing] = useState(false);
   const [durationDraft, setDurationDraft] = useState("");
   const [noteDraft, setNoteDraft] = useState("");
@@ -1018,8 +1094,7 @@ function JiraWorklogItem({
   const noteRemoved = hadNote && noteChanged && noteDraft.trim().length === 0;
   // An editor opened before the switch would pair this entry's id with the newly
   // selected `issueKey`, which Jira routes as a 404.
-  const canSaveEdit =
-    durationValid && !noteRemoved && !update.isPending && !stale;
+  const canSaveEdit = durationValid && !noteRemoved && !saving && !stale;
 
   function beginEdit() {
     setDurationDraft(worklog.timeSpent);
@@ -1049,7 +1124,7 @@ function JiraWorklogItem({
   }
 
   async function doDelete() {
-    if (stale) return;
+    if (stale || deleteHold) return;
     // Unlike the optimistic comment delete, which closes its confirm at once,
     // this hook is non-optimistic: the row stays until the refetch, so the open
     // confirm is the only sign the delete is running or queued offline.
@@ -1127,7 +1202,7 @@ function JiraWorklogItem({
             placeholder="Time spent (e.g. 3h 30m)"
             aria-label="Edit time spent"
             aria-invalid={durationTrimmed.length > 0 && !durationValid}
-            disabled={update.isPending}
+            disabled={saving}
           />
           <Input
             className="h-7"
@@ -1146,7 +1221,7 @@ function JiraWorklogItem({
             }}
             placeholder="Note (optional)"
             aria-label="Edit worklog note"
-            disabled={update.isPending}
+            disabled={saving}
           />
           {durationTrimmed.length > 0 && !durationValid && (
             <p className="text-[11px] text-destructive">
@@ -1160,22 +1235,24 @@ function JiraWorklogItem({
             </p>
           )}
           <div className="flex items-center gap-2">
-            <Button
+            <DisabledReasonButton
               size="xs"
               variant="outline"
               disabled={!canSaveEdit}
+              reason={savingReason}
               onClick={() => void saveEdit()}
             >
               Save
-            </Button>
-            <Button
+            </DisabledReasonButton>
+            <DisabledReasonButton
               size="xs"
               variant="ghost"
-              disabled={update.isPending}
+              disabled={saving}
+              reason={savingReason}
               onClick={() => setEditing(false)}
             >
               Cancel
-            </Button>
+            </DisabledReasonButton>
           </div>
         </div>
       ) : (
@@ -1192,8 +1269,8 @@ function JiraWorklogItem({
         }
         confirmLabel="Delete worklog"
         confirmVariant="destructive"
-        pending={del.isPending}
-        paused={del.isPaused}
+        pending={deleteHold !== undefined}
+        paused={deleteHold?.paused ?? false}
         onConfirm={() => void doDelete()}
       />
     </div>
@@ -1248,6 +1325,20 @@ export function JiraTimeTrackingSection({
   const logWork = useJiraLogWork(repoPath, link);
   const setOriginal = useJiraSetOriginalEstimate(repoPath, link);
   const setRemaining = useJiraSetRemainingEstimate(repoPath, link);
+  // This issue's own writes, from the cache: the rail is keyed per issue, so a
+  // return mid-write remounts it idle while the write runs on.
+  const jiraWrites = usePendingJiraWrites(repoPath);
+  const logHold = jiraHold(jiraWrites, "log-work", issueKey);
+  const logging = logHold !== undefined;
+  const loggingReason = logHold
+    ? pendingWriteReason(logHold.paused, ACT_PENDING_REASON)
+    : undefined;
+  const originalHold = jiraHold(jiraWrites, "set-original-estimate", issueKey);
+  const remainingHold = jiraHold(
+    jiraWrites,
+    "set-remaining-estimate",
+    issueKey,
+  );
 
   const [logDuration, setLogDuration] = useState("");
   const [logNote, setLogNote] = useState("");
@@ -1275,7 +1366,7 @@ export function JiraTimeTrackingSection({
   const logValid = isValidJiraDuration(logTrimmed);
 
   async function submitLog() {
-    if (!logValid || logWork.isPending) return;
+    if (!logValid || logging) return;
     const note = logNote.trim();
     try {
       await logWork.mutateAsync({
@@ -1355,7 +1446,7 @@ export function JiraTimeTrackingSection({
             placeholder="Log work (e.g. 3h 30m)"
             aria-label="Log work"
             aria-invalid={logTrimmed.length > 0 && !logValid}
-            disabled={logWork.isPending}
+            disabled={logging}
           />
           <Input
             className="h-7"
@@ -1369,21 +1460,22 @@ export function JiraTimeTrackingSection({
             }}
             placeholder="Note (optional)"
             aria-label="Worklog note"
-            disabled={logWork.isPending}
+            disabled={logging}
           />
           {logTrimmed.length > 0 && !logValid && (
             <p className="text-[11px] text-destructive">
               Enter a Jira duration like 3h 30m or 1d.
             </p>
           )}
-          <Button
+          <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={!logValid || logWork.isPending}
+            disabled={!logValid || logging}
+            reason={loggingReason}
             onClick={() => void submitLog()}
           >
             Log
-          </Button>
+          </DisabledReasonButton>
         </div>
       )}
 
@@ -1396,7 +1488,8 @@ export function JiraTimeTrackingSection({
             placeholder="Original estimate (e.g. 2d)"
             currentDisplay={tracking.originalEstimate ?? ""}
             hasValue={originalSeconds > 0}
-            pending={setOriginal.isPending}
+            pending={originalHold !== undefined}
+            paused={originalHold?.paused ?? false}
             onSet={(estimate) =>
               void setOriginal
                 .mutateAsync({ issueKey, estimate })
@@ -1408,7 +1501,8 @@ export function JiraTimeTrackingSection({
             placeholder="Remaining estimate (e.g. 1d)"
             currentDisplay={tracking.remainingEstimate ?? ""}
             hasValue={(tracking.remainingEstimateSeconds ?? 0) > 0}
-            pending={setRemaining.isPending}
+            pending={remainingHold !== undefined}
+            paused={remainingHold?.paused ?? false}
             onSet={(estimate) =>
               void setRemaining
                 .mutateAsync({ issueKey, estimate })
@@ -1468,6 +1562,7 @@ function JiraEstimateInput({
   currentDisplay,
   hasValue,
   pending,
+  paused,
   onSet,
 }: {
   label: string;
@@ -1475,6 +1570,8 @@ function JiraEstimateInput({
   currentDisplay: string;
   hasValue: boolean;
   pending: boolean;
+  /** The pending write is parked offline, from the same cache entry as `pending`. */
+  paused: boolean;
   onSet: (estimate: string | null) => void;
 }) {
   // Local invalid flag so the warning renders while the field is focused (the
@@ -1523,19 +1620,20 @@ function JiraEstimateInput({
           }}
         />
         {hasValue && (
-          <Button
+          <DisabledReasonButton
             type="button"
             variant="ghost"
             size="xs"
-            className="shrink-0 text-muted-foreground"
+            className="text-muted-foreground"
             disabled={pending}
+            reason={pendingWriteReason(paused, ACT_PENDING_REASON)}
             onClick={() => {
               setInvalid(false);
               onSet(null);
             }}
           >
             Clear
-          </Button>
+          </DisabledReasonButton>
         )}
       </div>
       {invalid && (
@@ -1588,6 +1686,12 @@ export function JiraIssueView({
   const comment = useJiraComment(repoPath, link.data);
   const transition = useJiraTransition(repoPath, link.data);
   const transitionTo = useJiraTransitionTo(repoPath, link.data);
+  // This issue's comment and status writes, from the cache: the view swaps issues
+  // without remounting, so another issue's write never holds this one.
+  const jiraWrites = usePendingJiraWrites(repoPath);
+  const commenting = jiraHold(jiraWrites, "comment", issueKey);
+  const transitioning = jiraHold(jiraWrites, "transition", issueKey);
+  const transitioningTo = jiraHold(jiraWrites, "transition-to", issueKey);
   // Set while offline: the status transitions hold on it at the press, while
   // the composer's comment is left to park and `composerReason` says so.
   const offlineHold = useOfflineHold();
@@ -1683,9 +1787,9 @@ export function JiraIssueView({
     switch (true) {
       case detailsStale:
         return ISSUE_SWITCH_LOADING_REASON;
-      case comment.isPending:
+      case commenting !== undefined:
         return pendingWriteReason(
-          comment.isPaused,
+          commenting.paused,
           COMMENT_POST_PENDING_REASON,
         );
       default:
@@ -1698,16 +1802,16 @@ export function JiraIssueView({
     switch (true) {
       case detailsStale:
         return ISSUE_SWITCH_LOADING_REASON;
-      case transition.isPending:
-        return pendingWriteReason(transition.isPaused, "Changing the status…");
-      case transitionTo.isPending:
+      case transitioning !== undefined:
+        return pendingWriteReason(transitioning.paused, "Changing the status…");
+      case transitioningTo !== undefined:
         return pendingWriteReason(
-          transitionTo.isPaused,
+          transitioningTo.paused,
           "Changing the status…",
         );
-      case comment.isPending:
+      case commenting !== undefined:
         return pendingWriteReason(
-          comment.isPaused,
+          commenting.paused,
           COMMENT_POST_PENDING_REASON,
         );
       default:
@@ -1940,9 +2044,9 @@ export function JiraIssueView({
           submitLabel="Comment"
           // A placeholder issue is the previously selected one, so submitting
           // would comment on it; typing stays live through the window.
-          busy={comment.isPending || detailsStale}
+          busy={commenting !== undefined || detailsStale}
           reason={composerReason}
-          disabled={comment.isPending}
+          disabled={commenting !== undefined}
         />
       )}
     </div>

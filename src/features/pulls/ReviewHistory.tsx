@@ -6,6 +6,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +16,7 @@ import { copyText } from "@/lib/clipboard";
 import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import {
   useClearReviews,
   useDeleteReview,
@@ -83,6 +85,15 @@ export function ReviewHistory({
     setLastScopeKey(scopeKey);
     setConfirmingClear(false);
   }
+  // The clear and trim holds, per review scope: object tokens so one scope's
+  // settle never releases another's, and kept through a scope switch (unlike the
+  // confirm) so a return mid-write still holds.
+  const [clearingFor, setClearingFor] = useState<{ scope: string } | null>(
+    null,
+  );
+  const [savingFor, setSavingFor] = useState<{ scope: string } | null>(null);
+  const clearing = clearingFor?.scope === scopeKey;
+  const saving = savingFor?.scope === scopeKey;
 
   // ONE list: completed reviews and kept partial runs interleave by time, so the
   // disclosure, its count, and the arrow-key walk all cover every stored record — a PR
@@ -117,21 +128,28 @@ export function ReviewHistory({
   // the shared review-history mutation has a failure surface.
   async function saveEdit(id: string) {
     const session = editSessionRef.current;
+    const mine = { scope: scopeKey };
+    setSavingFor(mine);
     try {
       await update.mutateAsync({ id, text: draft });
       if (editSessionRef.current === session) closeEdit();
     } catch {
       // No failure surface (see above).
+    } finally {
+      setSavingFor((cur) => (cur === mine ? null : cur));
     }
   }
 
   async function clearHistory() {
     const startedFor = scopeKey;
+    const mine = { scope: scopeKey };
+    setClearingFor(mine);
     try {
       await clear.mutateAsync(undefined);
     } catch {
       // No failure surface (see above).
     } finally {
+      setClearingFor((cur) => (cur === mine ? null : cur));
       if (startedFor === scopeKeyRef.current) setConfirmingClear(false);
     }
   }
@@ -170,15 +188,16 @@ export function ReviewHistory({
                   ? "Clear this PR's history, including the kept partial output?"
                   : "Clear this PR's history?"}
               </span>
-              <Button
+              <DisabledReasonButton
                 variant="ghost"
                 size="xs"
                 className="text-destructive"
-                disabled={clear.isPending}
+                disabled={clearing}
+                reason={ACT_PENDING_REASON}
                 onClick={() => void clearHistory()}
               >
                 Yes
-              </Button>
+              </DisabledReasonButton>
               <Button
                 variant="ghost"
                 size="xs"
@@ -296,13 +315,14 @@ export function ReviewHistory({
                           aria-label="Edit the previous review's findings"
                         />
                         <div className="flex items-center gap-2">
-                          <Button
+                          <DisabledReasonButton
                             size="xs"
-                            disabled={update.isPending}
+                            disabled={saving}
+                            reason={ACT_PENDING_REASON}
                             onClick={() => void saveEdit(r.id)}
                           >
                             Save
-                          </Button>
+                          </DisabledReasonButton>
                           <Button variant="ghost" size="xs" onClick={closeEdit}>
                             Cancel
                           </Button>

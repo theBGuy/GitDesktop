@@ -30,11 +30,16 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { required, withForm } from "@/lib/form";
 import type { CherryPickRangeResult } from "@/lib/git/api";
 import {
+  pendingWriteMatching,
+  RELEASE_WRITES_FAMILY,
+  type ReleaseWriteKind,
+  releaseWriteTag,
   useCherryPick,
   useCherryPickOnto,
   useCommitParents,
   useDeleteLocalTag,
   useDeleteTagOnOrigin,
+  usePendingRepoWrites,
   useResetToCommit,
   useRevertCommit,
 } from "@/lib/git/queries";
@@ -88,10 +93,22 @@ export function DeleteTagDialog({
 }) {
   const deleteLocalTag = useDeleteLocalTag(repoPath);
   const deleteTagOnOrigin = useDeleteTagOnOrigin(repoPath);
-  const pending = deleteLocalTag.isPending || deleteTagOnOrigin.isPending;
   // Offline holds only the origin arm; the local-only delete runs offline.
   const offlineHold = useOfflineHold();
   const shownName = useRetained(name);
+  // The shown tag's own delete, from the cache: this dialog is reused across
+  // tags, so another tag's delete never holds it. The retained name keeps the
+  // hold through the close fade.
+  const releaseWrites = usePendingRepoWrites(RELEASE_WRITES_FAMILY, repoPath);
+  const deletingThis = (kind: ReleaseWriteKind) =>
+    pendingWriteMatching(
+      releaseWrites,
+      kind,
+      (v: unknown) => releaseWriteTag(v) === shownName,
+    ) !== undefined;
+  const pending =
+    shownName !== null &&
+    (deletingThis("delete-local-tag") || deletingThis("delete-origin-tag"));
   const liveName = useLatestRef(name);
   const liveRepo = useLatestRef(repoPath);
   async function run() {

@@ -30,7 +30,8 @@ export function useMergeLocalPr(repo: string) {
   );
 }
 
-/** Commits a paused local-PR merge once its conflicts are resolved in the worktree. */
+/** Commits a paused local-PR merge once its conflicts are resolved in the worktree.
+ *  Keyed so the resolve view holds by the write's own `worktreePath`. */
 export function useFinishLocalPrMerge(repo: string) {
   return useRepoMutation(
     repo,
@@ -54,11 +55,13 @@ export function useFinishLocalPrMerge(repo: string) {
     {
       // Local merge write — never park it offline.
       networkMode: "always",
+      identity: localPrWriteKey("finish-merge", repo),
     },
   );
 }
 
-/** Rolls a paused local-PR merge back by deleting its isolated worktree. */
+/** Rolls a paused local-PR merge back by deleting its isolated worktree. Keyed like
+ *  {@link useFinishLocalPrMerge}. */
 export function useAbortLocalPrMerge(repo: string) {
   return useRepoMutation(
     repo,
@@ -67,6 +70,7 @@ export function useAbortLocalPrMerge(repo: string) {
     {
       // Local merge write — never park it offline.
       networkMode: "always",
+      identity: localPrWriteKey("abort-merge", repo),
     },
   );
 }

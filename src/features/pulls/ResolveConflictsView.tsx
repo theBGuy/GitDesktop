@@ -12,12 +12,16 @@ import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import {
+  LOCAL_PR_WRITES_KEY,
+  pendingWriteMatching,
   useAbortLocalPrMerge,
   useFinishLocalPrMerge,
+  usePendingRepoWrites,
   useRepoStatus,
 } from "@/lib/git/queries";
 import type { FileEntry } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import type { LocalPr } from "@/lib/pulls/local";
 import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
@@ -62,6 +66,18 @@ export function ResolveConflictsView({
   const update = useUpdateLocalPr(repoPath);
   const finish = useFinishLocalPrMerge(repoPath);
   const abort = useAbortLocalPrMerge(repoPath);
+  // This merge's own finish/abort, matched on its worktree from the cache: the
+  // host view swaps local PRs without remounting this surface, and two local PRs
+  // can each hold a paused merge.
+  const localPrWrites = usePendingRepoWrites(LOCAL_PR_WRITES_KEY[0], repoPath);
+  const onThisWorktree = (v: { worktreePath?: unknown }) =>
+    v.worktreePath === worktreePath;
+  const finishing =
+    pendingWriteMatching(localPrWrites, "finish-merge", onThisWorktree) !==
+    undefined;
+  const aborting =
+    pendingWriteMatching(localPrWrites, "abort-merge", onThisWorktree) !==
+    undefined;
   const aiEnabled = useAiEnabled();
   const reviewConfigured = useReviewConfigured();
   // Same AI-resolution store the Changes tab drives: `activePath` decides whether
@@ -121,7 +137,7 @@ export function ResolveConflictsView({
   // underneath us) leaves no entries, which would otherwise read as "all resolved".
   const done = status.isSuccess && remaining === 0;
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
-  const busy = finish.isPending || abort.isPending;
+  const busy = finishing || aborting;
 
   // Awaited, not per-call callbacks: this surface unmounts the moment
   // `pendingMerge` clears or the repo tab changes, and react-query drops
@@ -218,21 +234,31 @@ export function ResolveConflictsView({
               {remaining === 1 ? "Resolve with AI" : "Resolve all with AI"}
             </Button>
           )}
-          <Button
+          <DisabledReasonButton
             variant="outline"
             size="xs"
             disabled={busy}
+            reason={busy ? ACT_PENDING_REASON : undefined}
             onClick={() => void onAbort()}
           >
             Abort
-          </Button>
+          </DisabledReasonButton>
           <DisabledReasonButton
             size="xs"
             disabled={busy || remaining > 0}
-            reason={remaining > 0 ? "Resolve every conflict first" : undefined}
+            reason={(() => {
+              switch (true) {
+                case busy:
+                  return ACT_PENDING_REASON;
+                case remaining > 0:
+                  return "Resolve every conflict first";
+                default:
+                  return undefined;
+              }
+            })()}
             onClick={() => void onFinish()}
           >
-            {finish.isPending && <Spinner data-icon="inline-start" />}
+            {finishing && <Spinner data-icon="inline-start" />}
             Finish merge
           </DisabledReasonButton>
         </div>

@@ -299,20 +299,27 @@ export function useRemoveReviewDraft(
   });
 }
 
-/** Discards every pending draft for a PR/MR. `silent` suppresses the hook-level
- *  failure toast — for a caller that reports the failure in its own words (react-query
- *  fires this callback for `mutateAsync` too, so without the opt-out that caller
- *  double-toasts). */
+/** Filter prefix for the local review-draft writes a view reads back from the cache. */
+export const LOCAL_REVIEW_WRITES_FAMILY = "local-review-write";
+
+/** A draft clear's variables, shared by the mutation's generic and the readers' casts. */
+export type ClearReviewDraftsVars = { number: number };
+
+/** Discards every pending draft for a PR/MR. The PR rides the variables, so a view
+ *  holds only its own PR's clear. `silent` suppresses the hook-level failure toast —
+ *  for a caller that reports the failure in its own words (react-query fires this
+ *  callback for `mutateAsync` too, so without the opt-out that caller double-toasts). */
 export function useClearReviewDrafts(
   repo: string,
   lens: RemoteLens,
-  number: number,
   opts?: { silent?: boolean },
 ) {
   const queryClient = useQueryClient();
   const silent = opts?.silent ?? false;
   return useMutation({
-    mutationFn: () => clearDrafts(repo, lens, number),
+    mutationKey: [LOCAL_REVIEW_WRITES_FAMILY, "clear-drafts", repo],
+    mutationFn: (args: ClearReviewDraftsVars) =>
+      clearDrafts(repo, lens, args.number),
     // Local draft write — never park it offline.
     networkMode: "always",
     // Mutation-level: see useUpdateReviewDraft. The pending-review bar unmounts on a
@@ -320,9 +327,9 @@ export function useClearReviewDrafts(
     onError: (e) => {
       if (!silent) toastError(e);
     },
-    onSettled: () =>
+    onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({
-        queryKey: reviewDraftsKey(repo, lens, number),
+        queryKey: reviewDraftsKey(repo, lens, args.number),
       }),
   });
 }

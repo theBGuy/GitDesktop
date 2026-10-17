@@ -2,8 +2,11 @@ import { ArrowSquareOutIcon, NotePencilIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Button } from "@/components/ui/button";
-import { useDiscardPendingReview } from "@/lib/git/queries";
+import {
+  isPendingFor,
+  useDiscardPendingReview,
+  usePendingPrWrites,
+} from "@/lib/git/queries";
 import type { PrThreadOut, RemoteLens } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
@@ -51,11 +54,19 @@ export function PendingReviewStrip({
   selected: boolean;
 }) {
   const discard = useDiscardPendingReview(repoPath, lens);
+  // This pull request's own discard, from the cache: the strip outlives a PR
+  // switch, so another PR's discard must not hold this one.
+  const discarding = isPendingFor(
+    usePendingPrWrites(repoPath),
+    "discard-review",
+    number,
+    lens,
+  );
   const reviewId = review?.id;
   // Held by both the buttons and the palette entries, so a keyboard route can never
   // do what the disabled control refuses. An absent id is spelled "" here, the way
   // the backend spells a review whose source supplied none.
-  const ready = !!reviewId && !stale && !discard.isPending;
+  const ready = !!reviewId && !stale && !discarding;
   // Discard deletes the review on the forge, so it holds offline rather than
   // park; Finish only opens the browser and stays live.
   const offlineHold = useOfflineHold();
@@ -122,22 +133,23 @@ export function PendingReviewStrip({
           size="xs"
           // Live arm only: a held button regains full opacity under focus.
           className={offlineHold ? undefined : "text-destructive"}
-          disabled={discard.isPending || !!offlineHold}
-          reason={discard.isPending ? ACT_PENDING_REASON : offlineHold}
+          disabled={discarding || !!offlineHold}
+          reason={discarding ? ACT_PENDING_REASON : offlineHold}
           onClick={() => void discardReview()}
         >
           {`Discard on ${remoteLabel}…`}
         </DisabledReasonButton>
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="xs"
-          disabled={discard.isPending}
+          disabled={discarding}
+          reason={discarding ? ACT_PENDING_REASON : undefined}
           onClick={finishReview}
           title={`Open this pull request on ${remoteLabel} to submit or edit your review`}
         >
           <ArrowSquareOutIcon data-icon="inline-start" />
           {`Finish on ${remoteLabel}`}
-        </Button>
+        </DisabledReasonButton>
       </div>
     </div>
   );

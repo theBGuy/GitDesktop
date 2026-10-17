@@ -128,6 +128,7 @@ import {
   itemProjectsOptions,
   PIPELINE_IN_FLIGHT,
   type PrWriteKind,
+  pendingWriteMatching,
   pendingWriteOfKind,
   prApprovalsOptions,
   prDiffOptions,
@@ -158,6 +159,7 @@ import {
   useMergeRemotePr,
   useMinimizeComment,
   usePendingPrWrites,
+  usePendingRepoWrites,
   usePendingThreadWrites,
   usePrApprovals,
   usePrBaseDivergence,
@@ -220,6 +222,8 @@ import {
 import type { PrSection } from "@/lib/pulls/pr-section";
 import { PR_NOUN } from "@/lib/pulls/pr-state";
 import {
+  type ClearReviewDraftsVars,
+  LOCAL_REVIEW_WRITES_FAMILY,
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
@@ -1013,7 +1017,19 @@ export function RemotePrView({
   // Pending-review drafts (local-only until submitted); shared by the Files-tab
   // anchors, the PendingReviewBar count, and the ReviewComposer's draft count.
   const drafts = useReviewDrafts(repoPath, lens, shownNumber);
-  const clearDrafts = useClearReviewDrafts(repoPath, lens, number);
+  const clearDrafts = useClearReviewDrafts(repoPath, lens);
+  // The shown PR's own draft clear, from the cache: a clear fired on another PR
+  // (or from its bar or submit dialog) never holds this one's confirm.
+  const localReviewWrites = usePendingRepoWrites(
+    LOCAL_REVIEW_WRITES_FAMILY,
+    repoPath,
+  );
+  const clearingDrafts =
+    pendingWriteMatching(
+      localReviewWrites,
+      "clear-drafts",
+      (v: ClearReviewDraftsVars) => v.number === shownNumber,
+    ) !== undefined;
   // The composer/thread-create side of the forge detection: a strict provider key
   // (default "github" — gh is the authoritative default for an unrecognized host).
   const providerKey: ForgeProvider = provider ?? "github";
@@ -3194,8 +3210,11 @@ export function RemotePrView({
     // Closes only while its PR is on screen: another PR's discard confirm may be
     // open by the settle.
     const startedFor = entityKey;
+    // The PR the confirm counts drafts for and holds on; it only opens outside a
+    // hold, where that is also the selection.
+    if (hold.holding) return;
     try {
-      await clearDrafts.mutateAsync(undefined);
+      await clearDrafts.mutateAsync({ number: shownNumber });
       if (startedFor === entityKeyRef.current) setDiscardConfirmOpen(false);
     } catch {
       // `useClearReviewDrafts` toasts its own failure here (no `silent` opt-out),
@@ -4723,9 +4742,9 @@ export function RemotePrView({
       <DeleteCommentDialog
         commentId={hold.interactive ? deletingCommentId : null}
         onClose={() => setDeletingCommentId(null)}
-        pending={deleteComment.isPending}
+        pending={writePending("delete-comment")}
         reason={pendingWriteReason(
-          deleteComment.isPaused,
+          writePaused("delete-comment"),
           COMMENT_DELETE_PENDING_REASON,
         )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
@@ -4735,9 +4754,9 @@ export function RemotePrView({
       <DeleteCommentDialog
         commentId={hold.interactive ? deletingThreadCommentId : null}
         onClose={() => setDeletingThreadCommentId(null)}
-        pending={deleteReviewComment.isPending}
+        pending={writePending("delete-review-comment")}
         reason={pendingWriteReason(
-          deleteReviewComment.isPaused,
+          writePaused("delete-review-comment"),
           COMMENT_DELETE_PENDING_REASON,
         )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
@@ -4772,7 +4791,7 @@ export function RemotePrView({
         body={`This deletes all ${draftCount} pending comment${draftCount === 1 ? "" : "s"}. They haven't been posted yet and can't be recovered.`}
         confirmLabel="Discard review"
         confirmVariant="destructive"
-        pending={clearDrafts.isPending}
+        pending={clearingDrafts}
         onConfirm={() => void discardPendingReview()}
       />
     </>,

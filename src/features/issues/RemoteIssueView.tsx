@@ -742,10 +742,44 @@ export function RemoteIssueView({
     isError: detailFailed,
     stale: detailsPlaceholder,
   });
+  // The shown issue's own writes, from the cache: this view outlives an issue
+  // switch, so another issue's comment or close must not hold this one. Their
+  // variables carry no lens, so a lens flip at the same number holds the other
+  // lens's issue until the write settles — accepted, it only holds.
+  const commenting = pendingIssueWrite(
+    pendingWrites,
+    "comment",
+    (v) => v.number === shownNumber,
+  );
+  const closing = pendingIssueWrite(
+    pendingWrites,
+    "close",
+    (v) => v.number === shownNumber,
+  );
+  const reopening = pendingIssueWrite(
+    pendingWrites,
+    "reopen",
+    (v) => v === shownNumber,
+  );
+  const deletingComment = pendingIssueWrite(
+    pendingWrites,
+    "delete-comment",
+    (v) => v.number === shownNumber,
+  );
+  const transferring = pendingIssueWrite(
+    pendingWrites,
+    "transfer",
+    (v) => v.number === shownNumber,
+  );
+  const deleting = pendingIssueWrite(
+    pendingWrites,
+    "delete",
+    (v) => v === shownNumber,
+  );
   const busy =
-    comment.isPending ||
-    closeIssue.isPending ||
-    reopenIssue.isPending ||
+    commenting !== undefined ||
+    closing !== undefined ||
+    reopening !== undefined ||
     detailsPlaceholder;
   // Which term of `busy` to name, ranked: the switch window outranks a write the
   // viewer started, being the hold they can't have caused themselves. Shared by
@@ -755,18 +789,15 @@ export function RemoteIssueView({
     switch (true) {
       case detailsPlaceholder:
         return staleReason;
-      case comment.isPending:
+      case commenting !== undefined:
         return pendingWriteReason(
-          comment.isPaused,
+          commenting.paused,
           COMMENT_POST_PENDING_REASON,
         );
-      case closeIssue.isPending:
-        return pendingWriteReason(closeIssue.isPaused, "Closing this issue…");
-      case reopenIssue.isPending:
-        return pendingWriteReason(
-          reopenIssue.isPaused,
-          "Reopening this issue…",
-        );
+      case closing !== undefined:
+        return pendingWriteReason(closing.paused, "Closing this issue…");
+      case reopening !== undefined:
+        return pendingWriteReason(reopening.paused, "Reopening this issue…");
       default:
         return undefined;
     }
@@ -1059,7 +1090,9 @@ export function RemoteIssueView({
   }
 
   async function confirmDelete() {
-    if (refuseWhileOffline()) return;
+    // As in submitTransfer: `number` is the selection, while the dialog's hold
+    // reads the issue on screen, so the two must agree before it fires.
+    if (detailsStale || refuseWhileOffline()) return;
     const firedUnder = queryClient.getQueryData<RemoteLens>(lensKey(repoPath));
     const startedFor = issueIdentity;
     const closeIfStillHere = () => {
@@ -1753,9 +1786,9 @@ export function RemoteIssueView({
       <DeleteCommentDialog
         commentId={hold.interactive ? deletingCommentId : null}
         onClose={() => setDeletingCommentId(null)}
-        pending={deleteComment.isPending}
+        pending={deletingComment !== undefined}
         reason={pendingWriteReason(
-          deleteComment.isPaused,
+          deletingComment?.paused ?? false,
           COMMENT_DELETE_PENDING_REASON,
         )}
         description={`This permanently deletes the comment on ${remoteLabel}. This cannot be undone.`}
@@ -1769,7 +1802,7 @@ export function RemoteIssueView({
         dest={transferDest}
         onDestChange={setTransferDest}
         suggestions={repoSuggestions}
-        pending={transferIssue.isPending}
+        pending={transferring !== undefined}
         heldReason={offlineHold}
         onSubmit={() => void submitTransfer()}
         move={isGitLab}
@@ -1780,7 +1813,7 @@ export function RemoteIssueView({
         onClose={() => setDeleteOpen(false)}
         number={number}
         title={issue.title}
-        pending={deleteIssue.isPending}
+        pending={deleting !== undefined}
         heldReason={offlineHold}
         onConfirm={() => void confirmDelete()}
         remoteLabel={remoteLabel}
