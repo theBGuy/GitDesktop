@@ -1,6 +1,7 @@
 import { KanbanIcon } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,7 @@ import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastComposedError, toastError } from "@/lib/toast";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 
 type Destination = "forge" | "jira";
@@ -127,8 +129,12 @@ export function PromoteLocalIssueDialog({
 
   // The destination of the promote in flight, so its hold reason can't follow a
   // force-switched toggle.
-  const [pendingTo, setPendingTo] = useState<Destination | null>(null);
-  const pending = pendingTo !== null;
+  const [pendingPub, setPendingPub] = useState<{
+    to: Destination;
+    issueId: string;
+  } | null>(null);
+  const pendingTo = pendingPub?.to ?? null;
+  const pending = pendingPub !== null;
   // Both destinations hold offline rather than park: the local issue closes
   // before the create, so a parked create lost to an app quit would strand it
   // closed with no successor. A create that parks anyway (the connection dropped
@@ -151,6 +157,15 @@ export function PromoteLocalIssueDialog({
         );
 
   const carried = issue.comments.filter((c) => c.body.trim());
+  // Retained through the close fade, so the look holds while the live state
+  // clears; the count also freezes while this issue's publish runs.
+  const shownPendingTo = useRetained(pendingTo, open);
+  const shownPending = shownPendingTo !== null;
+  const shownPendingReason = useRetained(pendingReason, open);
+  const shownCarriedCount = useRetained(
+    carried.length,
+    open && !(pending && pendingPub?.issueId === issue.id),
+  );
 
   /** Whether a settle may still close and navigate: its repo is the live one AND
    *  this local issue is still selected. The host keeps one `promoteOpen` state
@@ -227,7 +242,9 @@ export function PromoteLocalIssueDialog({
       // the Issues tab shows it (and any stale remote selection is cleared) before
       // navigating to it.
       if (stillOnThisIssue(live)) {
-        onOpenChange(false);
+        // Every close commits before the finally's `setPendingPub(null)`
+        // renders while open, or the twins retain the cleared state.
+        flushSync(() => onOpenChange(false));
         setLens("origin");
         selectIssue({ kind: "remote", id: String(number) });
       }
@@ -245,7 +262,7 @@ export function PromoteLocalIssueDialog({
       // user can't see for themselves.
       const { number, url } = created;
       const { live, away } = landedIn(repoPath);
-      if (stillOnThisIssue(live)) onOpenChange(false);
+      if (stillOnThisIssue(live)) flushSync(() => onOpenChange(false));
       toastComposedError({
         title: `Created issue #${number}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
@@ -291,7 +308,7 @@ export function PromoteLocalIssueDialog({
         action: { label: JIRA_VIEW_LABEL, onClick: () => openUrl(url) },
       });
       if (stillOnThisIssue(live)) {
-        onOpenChange(false);
+        flushSync(() => onOpenChange(false));
         selectIssue({ kind: "jira", id: key });
       }
     } catch (e) {
@@ -302,7 +319,7 @@ export function PromoteLocalIssueDialog({
       // Same subject-and-repo close as the forge path.
       const { key, url } = created;
       const { live, away } = landedIn(repoPath);
-      if (stillOnThisIssue(live)) onOpenChange(false);
+      if (stillOnThisIssue(live)) flushSync(() => onOpenChange(false));
       toastComposedError({
         title: `Created ${key}${away}, but ${failedStep} failed: ${presentError(e).summary}`,
         errors: [e],
@@ -375,13 +392,14 @@ export function PromoteLocalIssueDialog({
   }
 
   async function promote() {
-    if (refuseWhileOffline()) return;
-    setPendingTo(destination);
+    // The look is retained through the close fade; this live gate adds `open`.
+    if (!open || refuseWhileOffline()) return;
+    setPendingPub({ to: destination, issueId: issue.id });
     try {
       if (destination === "jira") await promoteJira();
       else await promoteForge();
     } finally {
-      setPendingTo(null);
+      setPendingPub(null);
     }
   }
 
@@ -392,9 +410,9 @@ export function PromoteLocalIssueDialog({
           <DialogTitle>Publish this issue to {targetLabel}?</DialogTitle>
           <DialogDescription>
             Opens a new issue on {targetLabel} with this title and description
-            {carried.length > 0
-              ? ` and re-posts its ${carried.length} comment${
-                  carried.length === 1 ? "" : "s"
+            {shownCarriedCount > 0
+              ? ` and re-posts its ${shownCarriedCount} comment${
+                  shownCarriedCount === 1 ? "" : "s"
                 }`
               : ""}
             . The local issue is closed first, then linked to its replacement
@@ -423,8 +441,8 @@ export function PromoteLocalIssueDialog({
                   userPicked.current = true;
                   setDestination("forge");
                 }}
-                disabled={pending}
-                reason={pendingReason}
+                disabled={shownPending}
+                reason={shownPendingReason}
               >
                 {remoteLabel}
               </DisabledReasonButton>
@@ -440,8 +458,8 @@ export function PromoteLocalIssueDialog({
                   userPicked.current = true;
                   setDestination("jira");
                 }}
-                disabled={pending}
-                reason={pendingReason}
+                disabled={shownPending}
+                reason={shownPendingReason}
               >
                 <KanbanIcon data-icon="inline-start" />
                 Jira
@@ -480,17 +498,17 @@ export function PromoteLocalIssueDialog({
           <DisabledReasonButton
             variant="outline"
             onClick={() => onOpenChange(false)}
-            disabled={pending}
-            reason={pendingReason}
+            disabled={shownPending}
+            reason={shownPendingReason}
           >
             Cancel
           </DisabledReasonButton>
           <DisabledReasonButton
             onClick={promote}
-            disabled={pending || !jiraReady || !!offlineHold}
-            reason={pending ? pendingReason : offlineHold}
+            disabled={shownPending || !jiraReady || !!offlineHold}
+            reason={shownPending ? shownPendingReason : offlineHold}
           >
-            {pending && <Spinner data-icon="inline-start" />}
+            {shownPending && <Spinner data-icon="inline-start" />}
             Publish to {targetLabel}
           </DisabledReasonButton>
         </DialogFooter>
