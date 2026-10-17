@@ -53,7 +53,13 @@ import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
-import { compilePlan, type EditRow, type RowAction } from "./edit-history-plan";
+import {
+  compilePlan,
+  type EditRow,
+  FOLD_HELD_LABEL,
+  moveAnnouncement,
+  type RowAction,
+} from "./edit-history-plan";
 import { useGenerateSquashMessage } from "./RewriteDialogs";
 
 /** Action labels + one-line descriptions for the per-row picker. Squash and
@@ -85,7 +91,6 @@ const FOLD_HINT_TAIL: Record<FoldAction, string> = {
   fixup: "keeping that commit's message",
 };
 const FOLD_HELD_HINT = "No older kept commit in this list to combine into";
-const FOLD_HELD_LABEL = "no older kept commit to combine into";
 const BUSY_REASON = "The rewrite is still running.";
 const AT_NEWEST = "Already the newest commit";
 const AT_OLDEST = "Already the oldest commit";
@@ -137,7 +142,7 @@ function ActionHint({
     );
   // The subject truncates to what the first line leaves after its quotes, so
   // it always starts right after the opening one. The text still reads as one
-  // sentence (typeahead labels and the accessible name come from it).
+  // sentence, since typeahead reads the item's whole text.
   return (
     <span className="flex max-w-full flex-col text-[11px] text-muted-foreground">
       <span className="flex min-w-0 max-w-full">
@@ -188,9 +193,9 @@ export function EditHistoryDialog({
   const [overrides, setOverrides] = useState<Record<string, string>>({});
   // Bumps on every reseed, so focus the reorder dropped can be put back.
   const [reseedNonce, setReseedNonce] = useState(0);
+  const [menuHash, setMenuHash] = useState<string | null>(null);
 
-  // Reseed when a different set of commits arrives (render-time adjustment, the
-  // same pattern as ReorderDialog).
+  // Reseed when a different set of commits arrives (render-time adjustment).
   const key = commits.map((c) => c.hash).join();
   const [lastKey, setLastKey] = useState(key);
   if (key !== lastKey) {
@@ -199,6 +204,11 @@ export function EditHistoryDialog({
     setActions({});
     setOverrides({});
     setReseedNonce((n) => n + 1);
+    // A menu whose row left would otherwise reopen by itself if the row came
+    // back; one whose row survived stays open.
+    if (menuHash !== null && !commits.some((c) => c.hash === menuHash)) {
+      setMenuHash(null);
+    }
   }
 
   const subjectOf = useMemo(
@@ -243,12 +253,14 @@ export function EditHistoryDialog({
     (r) => r.action === "reword" || r.action === "squash",
   );
 
-  // The list is one Tab stop; its trigger and arrow buttons are tabIndex -1, as
-  // Enter opens the menu from the row.
+  // The rows are one Tab stop (message fields and Generate keep their own); the
+  // trigger and arrow buttons are tabIndex -1, as Enter or Space opens the menu
+  // from the row.
   const nav = useRovingRows({ items: rows, rowKey: (r) => r.hash });
   const listRef = useRef<HTMLDivElement>(null);
   const lastFocusedRow = useRef<string | null>(null);
-  const [menuHash, setMenuHash] = useState<string | null>(null);
+  // The row whose menu `onOpenChange(true)` opened during a key-driven click.
+  const keyOpenedRow = useRef<string | null>(null);
   const [moveFocus, setMoveFocus] = useState<{
     hash: string;
     nonce: number;
@@ -300,8 +312,8 @@ export function EditHistoryDialog({
     setActions((a) => ({ ...a, [hash]: action }));
   }
 
-  // Moves the row at `index` to `to`, announcing the landing and any fold or
-  // plan error it changed. The next plan is compiled here: the memoized one is a
+  // Moves the row at `index` to `to` and announces it (`moveAnnouncement` says
+  // what that covers). The next plan is compiled here: the memoized one is a
   // render behind inside the handler.
   function moveTo(index: number, to: number) {
     if (to === index || to < 0 || to >= order.length) return;
@@ -315,24 +327,17 @@ export function EditHistoryDialog({
     setOrder(nextOrder);
     setMoveFocus((prev) => ({ hash, nonce: (prev?.nonce ?? 0) + 1 }));
 
-    let text = `Moved to ${to + 1} of ${order.length}`;
-    const target = nextPlan.views[to].foldTarget;
-    // By hash: two leaders can share a subject.
-    const retargeted =
-      nextPlan.views[to].foldTargetHash !== plan.views[index].foldTargetHash;
-    if (isFold(moved.action) && retargeted) {
-      text += target === null ? `, ${FOLD_HELD_LABEL}` : `, into "${target}"`;
-    }
-    // Only an error about ANOTHER row: the moved row's own held state is
-    // already said by the fold suffix above.
-    if (
-      nextPlan.error !== null &&
-      nextPlan.error !== plan.error &&
-      nextPlan.errorHash !== hash
-    ) {
-      text += `. ${nextPlan.error}`;
-    }
-    announce(text);
+    announce(
+      moveAnnouncement({
+        prev: plan,
+        next: nextPlan,
+        action: moved.action,
+        hash,
+        from: index,
+        to,
+        total: order.length,
+      }),
+    );
   }
 
   function move(index: number, delta: -1 | 1) {
@@ -354,13 +359,12 @@ export function EditHistoryDialog({
     // Unmodified only (the canonical binding carries every modifier): a held
     // Enter would flicker the menu, and Alt+Space is the system menu.
     const opensMenu = (chord === "enter" || chord === "space") && !e.repeat;
-    const walks = e.key === "ArrowUp" || e.key === "ArrowDown";
 
-    if (busy) {
-      if (direction !== undefined || swallowed || jump || opensMenu || walks) {
-        e.preventDefault();
-        if (!e.repeat) announce(BUSY_REASON);
-      }
+    // While busy, walking the rows stays live (it changes nothing); moves, the
+    // Alt swallow and the menu open refuse with the reason.
+    if (busy && (direction !== undefined || swallowed || opensMenu)) {
+      e.preventDefault();
+      if (!e.repeat) announce(BUSY_REASON);
       return;
     }
     // No repeat gate: holding the chord repeats the move.
@@ -401,14 +405,20 @@ export function EditHistoryDialog({
       e.preventDefault();
       // A controlled open gets no keyboard highlight, so open through Base UI's
       // own keyboard-activation click (detail 0, no pointer type) on the trigger.
-      row.querySelector<HTMLElement>("[data-action-trigger]")?.dispatchEvent(
-        new PointerEvent("click", {
-          bubbles: true,
-          cancelable: true,
-          composed: true,
-          detail: 0,
-        }),
-      );
+      const trigger = row.querySelector<HTMLElement>("[data-action-trigger]");
+      const click = () =>
+        trigger?.dispatchEvent(
+          new PointerEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            detail: 0,
+          }),
+        );
+      keyOpenedRow.current = null;
+      click();
+      // A press that ended off the trigger makes Base UI swallow one click.
+      if (keyOpenedRow.current !== hash) click();
       return;
     }
     nav.onRowKeyDown(e);
@@ -553,14 +563,15 @@ export function EditHistoryDialog({
                 <div className="flex items-center gap-2 px-2 py-1.5">
                   <DropdownMenu
                     open={menuHash === row.hash}
-                    onOpenChange={(o) =>
+                    onOpenChange={(o) => {
+                      if (o) keyOpenedRow.current = row.hash;
                       // Clears only its own row, so a close racing another
                       // row's open can't wipe that open.
                       setMenuHash((cur) => {
                         if (o) return row.hash;
                         return cur === row.hash ? null : cur;
-                      })
-                    }
+                      });
+                    }}
                   >
                     <DropdownMenuTrigger
                       render={

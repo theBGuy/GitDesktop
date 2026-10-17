@@ -57,6 +57,9 @@ export interface CompiledPlan {
   hasEdit: boolean;
 }
 
+/** A held fold's row label, and the move announcement's suffix for it. */
+export const FOLD_HELD_LABEL = "no older kept commit to combine into";
+
 // A leader produces its own commit; folds attach to the nearest older one.
 const leads = (a: RowAction) => a === "pick" || a === "reword" || a === "edit";
 
@@ -183,4 +186,47 @@ export function compilePlan(
     changed,
     hasEdit,
   };
+}
+
+/**
+ * The live-region text for a move of the row at `from` (action `action`, hash
+ * `hash`) to `to` of `total`, given the plans before and after it. It names the
+ * landing; for a moved squash or fixup whose target commit changed, the new
+ * target or that it has none; and a new footer error, unless that suffix already
+ * said it. Another row's silent retarget is not announced.
+ */
+export function moveAnnouncement({
+  prev,
+  next,
+  action,
+  hash,
+  from,
+  to,
+  total,
+}: {
+  prev: CompiledPlan;
+  next: CompiledPlan;
+  action: RowAction;
+  hash: string;
+  from: number;
+  to: number;
+  total: number;
+}): string {
+  let text = `Moved to ${to + 1} of ${total}`;
+  // By hash: two leaders can share a subject.
+  const retargeted =
+    next.views[to].foldTargetHash !== prev.views[from].foldTargetHash;
+  const spoke = (action === "squash" || action === "fixup") && retargeted;
+  if (spoke) {
+    const target = next.views[to].foldTarget;
+    text += target === null ? `, ${FOLD_HELD_LABEL}` : `, into "${target}"`;
+  }
+  if (
+    next.error !== null &&
+    next.error !== prev.error &&
+    !(spoke && next.errorHash === hash)
+  ) {
+    text += `. ${next.error}`;
+  }
+  return text;
 }

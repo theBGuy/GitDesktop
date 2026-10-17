@@ -4681,9 +4681,9 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             .lines()
             .map(str::to_string)
             .collect();
-    // Under the working-tree hold, so no op in THIS process can land a commit
-    // between this check and the replay. The hold is in-process: the MCP server
-    // builds its own AppState, and neither excludes an outside git.
+    // Under the working-tree hold, so no op that takes it can land a commit before
+    // the replay; git_rebase_edit doesn't, the MCP server builds its own AppState,
+    // and neither excludes an outside git.
     check_plan_covers_range(&in_range, steps, dropped)?;
 
     let orig = run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
@@ -4951,8 +4951,8 @@ pub async fn git_rebase_edit(
             .map_err(|e| AppError::InvalidArgument(format!("couldn't create scratch dir: {e}")))?;
 
         // Drops are spelled out: under `rebase.missingCommitsCheck=error` git
-        // refuses a todo that merely omits a commit, stopping with the branch
-        // rewound onto `base`.
+        // refuses a todo that merely omits a commit, stopping the rebase with HEAD
+        // at `base`.
         let mut todo = String::new();
         for h in &dropped {
             todo.push_str("drop ");
@@ -6252,7 +6252,18 @@ mod tests {
         // the time it rolls back. "two" is declared dropped, as the coverage check
         // refuses an undeclared omission.
         let result = rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c3)], &[c2]).await;
-        assert!(result.is_err(), "the second pick must conflict");
+        // The rollback verdict, not just any error: a refusal before the first
+        // mutation would let the concurrent commit land without testing anything.
+        match result {
+            Err(AppError::Git { ref stderr, .. }) => {
+                assert_verdict_shape(stderr, "was rolled back");
+                assert!(
+                    stderr.contains("your branch is unchanged"),
+                    "a completed rollback must say so: {stderr}"
+                );
+            }
+            other => panic!("the second pick must conflict and roll back, got {other:?}"),
+        }
         concurrent.await.expect("concurrent task panicked");
 
         let log = subjects(&repo).await;
@@ -6420,8 +6431,8 @@ mod tests {
         assert_eq!(subjects(&repo).await, vec!["two", "base"]);
     }
 
-    /// Under `rebase.missingCommitsCheck=error` git stops a todo that only OMITS a
-    /// commit, leaving the branch rewound onto `base` — the drop must be written.
+    /// Under `rebase.missingCommitsCheck=error` git refuses a todo that only OMITS
+    /// a commit and stops the rebase with HEAD at `base` — the drop must be written.
     #[tokio::test]
     async fn rebase_edit_drops_explicitly_under_missing_commits_check() {
         let (dir, repo) = setup_repo("rebase-missing-check").await;

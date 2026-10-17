@@ -11,7 +11,10 @@
 // module must stay free of runtime imports.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compilePlan } from "../src/features/history/edit-history-plan.ts";
+import {
+  compilePlan,
+  moveAnnouncement,
+} from "../src/features/history/edit-history-plan.ts";
 
 /** A row whose hash doubles as its subject; message defaults to the subject. */
 const row = (hash, action, message = hash) => ({
@@ -206,4 +209,107 @@ test("the fold target carries its leader's hash beside the subject", () => {
   assert.equal(before.views[0].foldTargetHash, "w1");
   assert.equal(after.views[1].foldTargetHash, "w2");
   assert.equal(after.views[2].foldTargetHash, null);
+});
+
+test("dropped lists exactly the drop rows, oldest first", () => {
+  const plan = compile([
+    row("d1", "drop"),
+    row("p", "pick"),
+    row("d2", "drop"),
+    row("q", "pick"),
+  ]);
+  assert.deepEqual(plan.dropped, ["d2", "d1"]);
+});
+
+test("a mixed plan lists every original commit exactly once", () => {
+  const rows = [
+    row("e", "edit"),
+    row("s", "squash", "squash part"),
+    row("d1", "drop"),
+    row("r", "reword", "reworded"),
+    row("f", "fixup"),
+    row("d2", "drop"),
+    row("p", "pick"),
+  ];
+  const plan = compile(rows);
+  assert.equal(plan.error, null);
+  const listed = [...plan.steps.flatMap((s) => s.hashes), ...plan.dropped];
+  // The backend's coverage contract, seen from the UI: steps plus dropped are
+  // the whole range, each hash once, so a valid plan is never refused.
+  assert.equal(listed.length, rows.length);
+  assert.deepEqual([...listed].sort(), rows.map((r) => r.hash).sort());
+});
+
+/** Announces moving the row at `from` to `to` in newest-first `rows`. */
+const announceMove = (rows, from, to) => {
+  const next = [...rows];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  const original = rows.map((r) => r.hash);
+  return moveAnnouncement({
+    prev: compilePlan(rows, original),
+    next: compilePlan(next, original),
+    action: moved.action,
+    hash: moved.hash,
+    from,
+    to,
+    total: rows.length,
+  });
+};
+
+test("a plain move names only its landing", () => {
+  assert.equal(
+    announceMove([row("a", "pick"), row("b", "pick")], 0, 1),
+    "Moved to 2 of 2",
+  );
+});
+
+test("a fold that retargets names its new target", () => {
+  assert.equal(
+    announceMove(
+      [row("s", "squash"), row("x", "pick"), row("y", "pick")],
+      0,
+      1,
+    ),
+    'Moved to 2 of 3, into "y"',
+  );
+});
+
+test("a fold that loses its target says so once, without its own error", () => {
+  assert.equal(
+    announceMove([row("s", "squash"), row("y", "pick")], 0, 1),
+    "Moved to 2 of 2, no older kept commit to combine into",
+  );
+});
+
+test("a move that holds ANOTHER row's fold appends that error", () => {
+  assert.equal(
+    announceMove([row("s", "squash"), row("l", "pick")], 1, 0),
+    'Moved to 1 of 2. "s" can\'t be squashed — no older commit in this list is kept to combine it into.',
+  );
+});
+
+test("a moved reword whose blank message becomes the error appends it", () => {
+  assert.equal(
+    announceMove([row("r", "reword", ""), row("s", "squash")], 0, 1),
+    'Moved to 2 of 2. Rewording "r" needs a commit message.',
+  );
+});
+
+test("a held fold that stays held but becomes the error appends it", () => {
+  assert.equal(
+    announceMove([row("f", "fixup"), row("s", "squash")], 0, 1),
+    'Moved to 2 of 2. "f" can\'t be fixed up — no older commit in this list is kept to combine it into.',
+  );
+});
+
+test("an unchanged error is not repeated", () => {
+  assert.equal(
+    announceMove(
+      [row("a", "pick"), row("b", "pick"), row("s", "squash")],
+      0,
+      1,
+    ),
+    "Moved to 2 of 3",
+  );
 });

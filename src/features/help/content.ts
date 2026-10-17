@@ -626,16 +626,16 @@ selection to compare a range.
   **fixup** (combine it in, keeping that older commit's message), **edit** (pause to amend
   its changes), or **drop** (remove it). The action menu names the commit a squash or fixup
   combines into, and a folding row shows **into** and that commit's subject; when no older
-  commit in the list is kept, the menu holds **Squash** and **Fixup** and says why.
+  commit in the list is kept, **Squash** and **Fixup** are held, and the menu says why.
   {{key:up}} and {{key:down}} move between commits, {{key:home}} and {{key:end}} jump to the
-  first and last, and {{key:enter}} opens the commit's action menu. {{key:alt+up}} and
-  {{key:alt+down}} move the commit one place, as its arrow buttons do; {{key:alt+home}} and
-  {{key:alt+end}} send it to the top or bottom.{{ai}} Reword can regenerate a message with
-  AI.{{/ai}} A "Result" count shows what you'll end up with. With no **edit**, it applies all
-  at once — a conflict rolls it back. If you choose **edit**, it starts a rebase that
-  **pauses** at that commit — amend it in the **Changes** tab (stage and commit/amend as
-  usual), then **Continue** from the banner there. A quick **Squash N commits…** is also on
-  the context menu when you select adjacent commits.
+  first and last, and {{key:enter}} or {{key:space}} opens the commit's action menu.
+  {{key:alt+up}} and {{key:alt+down}} move the commit one place, as its arrow buttons do;
+  {{key:alt+home}} and {{key:alt+end}} send it to the top or bottom.{{ai}} Reword can
+  regenerate a message with AI.{{/ai}} A "Result" count shows what you'll end up with. With
+  no **edit**, it applies all at once — a conflict rolls it back. If you choose **edit**, it
+  starts a rebase that **pauses** at that commit — amend it in the **Changes** tab (stage and
+  commit/amend as usual), then **Continue** from the banner there. A quick
+  **Squash N commits…** is also on the context menu when you select adjacent commits.
 - **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
   first and explains the detached HEAD you land in), or copy
   its SHA.
