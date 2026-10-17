@@ -1,0 +1,209 @@
+// Pins Edit history's plan compiler (src/features/history/edit-history-plan.ts):
+// every row records the commit a squash or fixup there would combine into, drop
+// rows are listed for the backend's coverage check, folds attach to the nearest
+// older kept leader in chronological order, and a fold with nothing to combine
+// into blocks the plan with its footer sentence verbatim.
+//
+// Not testable here: the dialog's rendering of these values (menu hints, row
+// labels, the live region). Those need the live app.
+//
+// The import reaches straight into `src/` under Node's type stripping, so the
+// module must stay free of runtime imports.
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { compilePlan } from "../src/features/history/edit-history-plan.ts";
+
+/** A row whose hash doubles as its subject; message defaults to the subject. */
+const row = (hash, action, message = hash) => ({
+  hash,
+  subject: hash,
+  action,
+  message,
+});
+
+/** Compiles newest-first rows against their own order as the original. */
+const compile = (rows) =>
+  compilePlan(
+    rows,
+    rows.map((r) => r.hash),
+  );
+
+test("a squash on the oldest row is held with the squash sentence", () => {
+  const plan = compile([row("a", "pick"), row("b", "squash")]);
+  assert.equal(
+    plan.error,
+    '"b" can\'t be squashed — no older commit in this list is kept to combine it into.',
+  );
+  assert.equal(plan.views[1].foldTarget, null);
+  assert.deepEqual(plan.steps, [{ hashes: ["a"] }]);
+});
+
+test("a fixup on the oldest row is held with the fixup sentence", () => {
+  const plan = compile([row("a", "pick"), row("b", "fixup")]);
+  assert.equal(
+    plan.error,
+    '"b" can\'t be fixed up — no older commit in this list is kept to combine it into.',
+  );
+  assert.equal(plan.views[1].foldTarget, null);
+});
+
+test("a dropped row is skipped when finding the fold target", () => {
+  const nothingKept = compile([
+    row("p", "pick"),
+    row("s", "squash"),
+    row("d", "drop"),
+  ]);
+  assert.equal(nothingKept.views[1].foldTarget, null);
+  assert.equal(
+    nothingKept.error,
+    '"s" can\'t be squashed — no older commit in this list is kept to combine it into.',
+  );
+  assert.deepEqual(nothingKept.dropped, ["d"]);
+
+  const keptBelow = compile([
+    row("p", "pick"),
+    row("s", "squash"),
+    row("d", "drop"),
+    row("q", "pick"),
+  ]);
+  assert.equal(keptBelow.error, null);
+  assert.equal(keptBelow.views[1].foldTarget, "q");
+  assert.deepEqual(keptBelow.dropped, ["d"]);
+  assert.deepEqual(
+    keptBelow.steps.map((s) => s.hashes),
+    [["q", "s"], ["p"]],
+  );
+});
+
+test("folds stacked on one leader share its target, chronologically", () => {
+  const plan = compile([
+    row("s", "squash"),
+    row("f", "fixup"),
+    row("l", "pick"),
+  ]);
+  assert.equal(plan.error, null);
+  assert.equal(plan.views[0].foldTarget, "l");
+  assert.equal(plan.views[1].foldTarget, "l");
+  assert.deepEqual(plan.steps.length, 1);
+  assert.deepEqual(plan.steps[0].hashes, ["l", "f", "s"]);
+});
+
+test("a reword leader is the target and bakes its own message", () => {
+  const plan = compile([row("f", "fixup"), row("r", "reword", "new message")]);
+  assert.equal(plan.error, null);
+  assert.equal(plan.views[0].foldTarget, "r");
+  assert.deepEqual(plan.steps, [
+    { hashes: ["r", "f"], message: "new message" },
+  ]);
+});
+
+test("several folds join the leader and squash parts, never fixup parts", () => {
+  const plan = compile([
+    row("s2", "squash", "second squash"),
+    row("f", "fixup", "fixup body"),
+    row("s1", "squash", "  first squash  "),
+    row("l", "pick", "leader"),
+  ]);
+  assert.equal(plan.error, null);
+  assert.deepEqual(plan.steps, [
+    {
+      hashes: ["l", "s1", "f", "s2"],
+      message: "leader\n\nfirst squash\n\nsecond squash",
+    },
+  ]);
+  // The pick leader receiving a squash exposes its message for editing.
+  assert.equal(plan.views[3].showMessage, true);
+});
+
+test("every row records a fold target, drops and leaders included", () => {
+  const rows = [
+    row("e", "edit"),
+    row("s", "squash"),
+    row("d", "drop"),
+    row("p", "pick"),
+    row("r", "reword", "reworded"),
+  ];
+  const plan = compile(rows);
+  assert.equal(plan.views.length, rows.length);
+  for (const view of plan.views) {
+    assert.ok(Object.hasOwn(view, "foldTarget"));
+    assert.notEqual(view.foldTarget, undefined);
+  }
+  // A leader's own target is the next kept leader older than it.
+  assert.deepEqual(
+    plan.views.map((v) => v.foldTarget),
+    ["p", "p", "p", "r", null],
+  );
+});
+
+test("result count, changed and hasEdit survive the walk", () => {
+  const mixed = compile([
+    row("e", "edit"),
+    row("s", "squash"),
+    row("d", "drop"),
+    row("p", "pick"),
+    row("r", "reword", "reworded"),
+  ]);
+  assert.equal(mixed.error, null);
+  assert.equal(mixed.resultCount, 3);
+  assert.equal(mixed.changed, true);
+  assert.equal(mixed.hasEdit, true);
+  assert.deepEqual(mixed.dropped, ["d"]);
+
+  const untouched = compile([row("a", "pick"), row("b", "pick")]);
+  assert.equal(untouched.resultCount, 2);
+  assert.equal(untouched.changed, false);
+  assert.equal(untouched.hasEdit, false);
+  assert.deepEqual(untouched.dropped, []);
+
+  const reordered = compilePlan(
+    [row("b", "pick"), row("a", "pick")],
+    ["a", "b"],
+  );
+  assert.equal(reordered.changed, true);
+  assert.equal(reordered.resultCount, 2);
+});
+
+test("errorHash names the row the error is about", () => {
+  // Two held folds: the walk meets the oldest first, and that one is reported.
+  const held = compile([
+    row("a", "pick"),
+    row("s", "squash"),
+    row("f", "fixup"),
+  ]);
+  assert.equal(
+    held.error,
+    '"f" can\'t be fixed up — no older commit in this list is kept to combine it into.',
+  );
+  assert.equal(held.errorHash, "f");
+
+  const blank = compile([row("r", "reword", "  "), row("p", "pick")]);
+  assert.equal(blank.error, 'Rewording "r" needs a commit message.');
+  assert.equal(blank.errorHash, "r");
+
+  const allDropped = compile([row("a", "drop")]);
+  assert.notEqual(allDropped.error, null);
+  assert.equal(allDropped.errorHash, null);
+
+  assert.equal(compile([row("a", "pick")]).errorHash, null);
+});
+
+test("the fold target carries its leader's hash beside the subject", () => {
+  const wip = (hash, action) => ({ hash, subject: "wip", action, message: "" });
+  const before = compile([
+    row("s", "squash"),
+    wip("w1", "pick"),
+    wip("w2", "pick"),
+  ]);
+  const after = compile([
+    wip("w1", "pick"),
+    row("s", "squash"),
+    wip("w2", "pick"),
+  ]);
+  // Same subject either side of the move, different commit to combine into.
+  assert.equal(before.views[0].foldTarget, "wip");
+  assert.equal(after.views[1].foldTarget, "wip");
+  assert.equal(before.views[0].foldTargetHash, "w1");
+  assert.equal(after.views[1].foldTargetHash, "w2");
+  assert.equal(after.views[2].foldTargetHash, null);
+});

@@ -4534,7 +4534,10 @@ pub async fn git_conflict_preview(
 /// step, in step order. The interactive-rebase vocabulary maps onto step shape: one
 /// hash + no message = **pick**; one hash + message = **reword**; many hashes +
 /// message = **squash**; many hashes + no message = **fixup** (reuses the leader
-/// commit's message and authorship via `commit -C`). Omitting a commit **drops** it.
+/// commit's message and authorship via `commit -C`). A commit is dropped only when
+/// listed in `dropped`; any other omission refuses. Steps plus `dropped` must cover
+/// `base..HEAD` exactly once, so a commit that landed after the plan was made is
+/// refused rather than lost.
 /// Refuses on a dirty tree or merge commits in range. If any step fails — a conflict,
 /// a squash that leaves nothing to commit, a timeout — the branch is rolled back to
 /// its pre-run tip. The rollback is best-effort; when it fails the returned
@@ -4545,8 +4548,16 @@ pub async fn git_rewrite_commits(
     repo_path: String,
     base: String,
     steps: Vec<RewriteStep>,
+    dropped: Option<Vec<String>>,
 ) -> AppResult<()> {
-    rewrite_commits(&state, &repo_path, &base, &steps).await
+    rewrite_commits(
+        &state,
+        &repo_path,
+        &base,
+        &steps,
+        dropped.as_deref().unwrap_or(&[]),
+    )
+    .await
 }
 
 pub(crate) async fn rewrite_commits(
@@ -4554,16 +4565,47 @@ pub(crate) async fn rewrite_commits(
     repo_path: &str,
     base: &str,
     steps: &[RewriteStep],
+    dropped: &[String],
 ) -> AppResult<()> {
     rewrite_commits_with_timeouts(
         state,
         repo_path,
         base,
         steps,
+        dropped,
         DEFAULT_TIMEOUT,
         DEFAULT_TIMEOUT,
     )
     .await
+}
+
+/// Refuses a rewrite plan that doesn't list every commit of `in_range` (the
+/// `base..HEAD` set) exactly once across `steps` and `dropped`. Shared by both
+/// rewrite entry points so the replay and the interactive rebase refuse alike.
+fn check_plan_covers_range(
+    in_range: &std::collections::HashSet<String>,
+    steps: &[RewriteStep],
+    dropped: &[String],
+) -> AppResult<()> {
+    let mut listed = std::collections::HashSet::new();
+    for h in steps.iter().flat_map(|s| &s.hashes).chain(dropped) {
+        if !in_range.contains(h) {
+            return Err(AppError::InvalidArgument(format!(
+                "{h} is not an unpushed commit on this branch"
+            )));
+        }
+        if !listed.insert(h.as_str()) {
+            return Err(AppError::InvalidArgument(format!(
+                "{h} is listed more than once in the rewrite plan"
+            )));
+        }
+    }
+    if in_range.iter().any(|h| !listed.contains(h.as_str())) {
+        return Err(AppError::InvalidArgument(
+            "the branch gained commits after this plan was made, so nothing was rewritten — start over to include them".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// [`rewrite_commits`] with the git timeouts injectable. `pick_timeout` bounds ONLY
@@ -4576,6 +4618,7 @@ pub(crate) async fn rewrite_commits_with_timeouts(
     repo_path: &str,
     base: &str,
     steps: &[RewriteStep],
+    dropped: &[String],
     pick_timeout: std::time::Duration,
     rollback_timeout: std::time::Duration,
 ) -> AppResult<()> {
@@ -4593,6 +4636,9 @@ pub(crate) async fn rewrite_commits_with_timeouts(
         // A multi-hash step with no message is a valid fixup (reuse the leader's
         // message), so no message requirement here — pick/reword/squash/fixup
         // are all expressible.
+    }
+    for h in dropped {
+        validate_hash(h)?;
     }
 
     // One hold across gate → capture → replay → rollback: the rollback hard-resets to
@@ -4635,15 +4681,10 @@ pub(crate) async fn rewrite_commits_with_timeouts(
             .lines()
             .map(str::to_string)
             .collect();
-    for step in steps {
-        for h in &step.hashes {
-            if !in_range.contains(h) {
-                return Err(AppError::InvalidArgument(format!(
-                    "{h} is not an unpushed commit on this branch"
-                )));
-            }
-        }
-    }
+    // Under the working-tree hold, so no op in THIS process can land a commit
+    // between this check and the replay. The hold is in-process: the MCP server
+    // builds its own AppState, and neither excludes an outside git.
+    check_plan_covers_range(&in_range, steps, dropped)?;
 
     let orig = run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
         .await?
@@ -4809,12 +4850,14 @@ pub(crate) async fn rewrite_commits_with_timeouts(
 /// non-interactive `exec … commit --amend -F`) and injects it with
 /// `sequence.editor`, so no editor ever opens. Stopping at an `edit` (or at a
 /// conflict before one) leaves the rebase in progress for the banner to take over —
-/// a normal outcome, not an error.
+/// a normal outcome, not an error. Steps plus `dropped` must cover `base..HEAD`
+/// exactly once; anything else refuses, since the generated todo replaces git's.
 #[tauri::command]
 pub async fn git_rebase_edit(
     repo_path: String,
     base: String,
     steps: Vec<RewriteStep>,
+    dropped: Option<Vec<String>>,
 ) -> AppResult<()> {
     validate_hash(&base)?;
     if steps.is_empty() {
@@ -4827,6 +4870,10 @@ pub async fn git_rebase_edit(
         for h in &step.hashes {
             validate_hash(h)?;
         }
+    }
+    let dropped = dropped.unwrap_or_default();
+    for h in &dropped {
+        validate_hash(h)?;
     }
     // CRITICAL: refuse if a sequencer op is already mid-flight, BEFORE the
     // scratch-dir clear below — otherwise it would delete the in-flight rebase's
@@ -4852,6 +4899,18 @@ pub async fn git_rebase_edit(
             "the working tree has uncommitted changes — commit or stash them first".into(),
         ));
     }
+    // No working-tree lock spans this check and the rebase, so a millisecond race
+    // remains; what it closes is the minutes-long window between the dialog
+    // seeding its plan and the apply.
+    let range = format!("{base}..HEAD");
+    let in_range: std::collections::HashSet<String> =
+        run_git(Some(&repo_path), &["rev-list", &range], DEFAULT_TIMEOUT)
+            .await?
+            .stdout_lossy()
+            .lines()
+            .map(str::to_string)
+            .collect();
+    check_plan_covers_range(&in_range, &steps, &dropped)?;
 
     // Journal a pending entry AFTER the guards, BEFORE the first side effect
     // (scratch-dir setup / the rebase itself). Best-effort: a journal failure
@@ -4891,7 +4950,15 @@ pub async fn git_rebase_edit(
         std::fs::create_dir_all(&dir)
             .map_err(|e| AppError::InvalidArgument(format!("couldn't create scratch dir: {e}")))?;
 
+        // Drops are spelled out: under `rebase.missingCommitsCheck=error` git
+        // refuses a todo that merely omits a commit, stopping with the branch
+        // rewound onto `base`.
         let mut todo = String::new();
+        for h in &dropped {
+            todo.push_str("drop ");
+            todo.push_str(h);
+            todo.push('\n');
+        }
         for (i, step) in steps.iter().enumerate() {
             todo.push_str(if step.edit { "edit " } else { "pick " });
             todo.push_str(&step.hashes[0]);
@@ -5751,7 +5818,7 @@ mod tests {
 
         let state = AppState::default();
         // Oldest-first steps: "two" lands at the bottom, "one" on top.
-        rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)])
+        rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)], &[])
             .await
             .unwrap();
         assert_eq!(subjects(&repo).await, vec!["one", "two", "base"]);
@@ -5777,6 +5844,7 @@ mod tests {
                 message: Some("combined".into()),
                 edit: false,
             }],
+            &[],
         )
         .await
         .unwrap();
@@ -5807,6 +5875,7 @@ mod tests {
                 message: None,
                 edit: false,
             }],
+            &[],
         )
         .await
         .unwrap();
@@ -5828,7 +5897,7 @@ mod tests {
 
         let state = AppState::default();
         // "two"'s patch (v1→v2) can't apply onto v0 — conflict, then rollback.
-        let result = rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)]).await;
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)], &[]).await;
         match result {
             Err(AppError::Git { ref stderr, .. }) => {
                 // The negative control rides in `assert_verdict_shape`'s
@@ -5880,6 +5949,7 @@ mod tests {
                 message: Some("combined".into()),
                 edit: false,
             }],
+            &[],
         )
         .await;
         match result {
@@ -5923,6 +5993,7 @@ mod tests {
                 message: Some("combined".into()),
                 edit: false,
             }],
+            &[],
         )
         .await;
         match result {
@@ -5963,6 +6034,7 @@ mod tests {
             &repo,
             &base,
             &[pick(&c1)],
+            &[],
             NO_BUDGET,
             DEFAULT_TIMEOUT,
         )
@@ -6003,6 +6075,7 @@ mod tests {
             &repo,
             &base,
             &[pick(&c2), pick(&c1)],
+            &[],
             DEFAULT_TIMEOUT,
             NO_BUDGET,
         )
@@ -6048,7 +6121,7 @@ mod tests {
         let lock = std::path::Path::new(&repo).join(".git/index.lock");
         std::fs::write(&lock, "").unwrap();
         let state = AppState::default();
-        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1)]).await;
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1)], &[]).await;
         // Released before the assertions so a failure can't leave the fixture
         // locked for teardown.
         std::fs::remove_file(&lock).unwrap();
@@ -6099,6 +6172,7 @@ mod tests {
             &repo,
             &base,
             &[pick(&c1)],
+            &[],
             NO_BUDGET,
             NO_BUDGET,
         )
@@ -6139,6 +6213,7 @@ mod tests {
         commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
         let c1 = rev(&repo, "HEAD").await;
         commit_file(&repo, dir.path(), "a.txt", "v1\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
         commit_file(&repo, dir.path(), "a.txt", "v2\n", "three").await;
         let c3 = rev(&repo, "HEAD").await;
         let orig = rev(&repo, "HEAD").await;
@@ -6174,8 +6249,9 @@ mod tests {
 
         // "three"'s patch (v1→v2) can't apply after only "one" replayed, so the
         // SECOND pick conflicts — the compound has already mutated the branch by
-        // the time it rolls back.
-        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c3)]).await;
+        // the time it rolls back. "two" is declared dropped, as the coverage check
+        // refuses an undeclared omission.
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c3)], &[c2]).await;
         assert!(result.is_err(), "the second pick must conflict");
         concurrent.await.expect("concurrent task panicked");
 
@@ -6189,6 +6265,231 @@ mod tests {
             rev(&repo, "HEAD~1").await,
             orig,
             "and it must sit directly on the tip the rewrite rolled back to"
+        );
+    }
+
+    const UNCOVERED_REFUSAL: &str = "the branch gained commits after this plan was made, so nothing was rewritten — start over to include them";
+
+    /// Two unpushed commits the plan knows about, then a third landed from outside
+    /// the app after the plan was made. Returns (dir, repo, base, c1, c2, c3).
+    async fn plan_with_an_outside_commit(
+        marker: &str,
+    ) -> (tempfile::TempDir, String, String, String, String, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        std::fs::write(dir.path().join("d.txt"), "d\n").unwrap();
+        git(&repo, &["add", "."]).await;
+        git(&repo, &["commit", "-m", "outside"]).await;
+        let c3 = rev(&repo, "HEAD").await;
+        (dir, repo, base, c1, c2, c3)
+    }
+
+    #[tokio::test]
+    async fn rewrite_refuses_uncovered_commits() {
+        let (_dir, repo, base, c1, c2, c3) = plan_with_an_outside_commit("uncovered").await;
+        let state = AppState::default();
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c2)], &[]).await;
+        let Err(AppError::InvalidArgument(msg)) = &result else {
+            panic!("an uncovered commit must refuse, got {result:?}");
+        };
+        assert_eq!(msg, UNCOVERED_REFUSAL);
+        assert_eq!(rev(&repo, "HEAD").await, c3, "the branch must be untouched");
+        assert_eq!(subjects(&repo).await, vec!["outside", "two", "one", "base"]);
+        let status = git(&repo, &["status", "--porcelain"]).await;
+        assert!(status.trim().is_empty(), "tree should be clean: {status}");
+    }
+
+    #[tokio::test]
+    async fn rewrite_allows_explicit_drops() {
+        let (dir, repo) = setup_repo("explicit-drop").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        rewrite_commits(&state, &repo, &base, &[pick(&c2)], &[c1])
+            .await
+            .unwrap();
+        assert_eq!(subjects(&repo).await, vec!["two", "base"]);
+        assert!(
+            !dir.path().join("b.txt").exists(),
+            "the dropped commit's file is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrite_refuses_an_out_of_range_dropped_hash() {
+        let (dir, repo) = setup_repo("drop-out-of-range").await;
+        let below = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "mid").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+
+        let state = AppState::default();
+        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1)], &[below.clone()]).await;
+        let Err(AppError::InvalidArgument(msg)) = &result else {
+            panic!("an out-of-range drop must refuse, got {result:?}");
+        };
+        assert_eq!(
+            msg,
+            &format!("{below} is not an unpushed commit on this branch")
+        );
+        assert_eq!(rev(&repo, "HEAD").await, c1);
+    }
+
+    #[tokio::test]
+    async fn rewrite_refuses_a_hash_listed_twice() {
+        let (dir, repo) = setup_repo("listed-twice").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        let twice = |h: &str| format!("{h} is listed more than once in the rewrite plan");
+
+        let state = AppState::default();
+        // Across the two lists: a step hash also declared dropped.
+        let across =
+            rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c2)], &[c1.clone()]).await;
+        assert!(
+            matches!(&across, Err(AppError::InvalidArgument(m)) if *m == twice(&c1)),
+            "{across:?}"
+        );
+        // Within the steps: one commit replayed twice.
+        let in_steps = rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c1), pick(&c2), pick(&c1)],
+            &[],
+        )
+        .await;
+        assert!(
+            matches!(&in_steps, Err(AppError::InvalidArgument(m)) if *m == twice(&c1)),
+            "{in_steps:?}"
+        );
+        // Within the drops.
+        let in_dropped = rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c2)],
+            &[c1.clone(), c1.clone()],
+        )
+        .await;
+        assert!(
+            matches!(&in_dropped, Err(AppError::InvalidArgument(m)) if *m == twice(&c1)),
+            "{in_dropped:?}"
+        );
+        assert_eq!(rev(&repo, "HEAD").await, c2, "the branch must be untouched");
+        assert_eq!(subjects(&repo).await, vec!["two", "one", "base"]);
+    }
+
+    #[tokio::test]
+    async fn rebase_edit_refuses_uncovered_commits() {
+        let (_dir, repo, base, c1, c2, c3) = plan_with_an_outside_commit("rebase-uncovered").await;
+        let result = git_rebase_edit(repo.clone(), base, vec![pick(&c1), pick(&c2)], None).await;
+        let Err(AppError::InvalidArgument(msg)) = &result else {
+            panic!("an uncovered commit must refuse, got {result:?}");
+        };
+        assert_eq!(msg, UNCOVERED_REFUSAL);
+        assert_rebase_edit_untouched(&repo, &c3).await;
+    }
+
+    #[tokio::test]
+    async fn rebase_edit_allows_explicit_drops() {
+        let (dir, repo) = setup_repo("rebase-explicit-drop").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+
+        git_rebase_edit(repo.clone(), base, vec![pick(&c2)], Some(vec![c1]))
+            .await
+            .unwrap();
+        assert!(!git_path_exists(&repo, "rebase-merge").await);
+        assert!(!git_path_exists(&repo, "rebase-apply").await);
+        assert_eq!(subjects(&repo).await, vec!["two", "base"]);
+    }
+
+    /// Under `rebase.missingCommitsCheck=error` git stops a todo that only OMITS a
+    /// commit, leaving the branch rewound onto `base` — the drop must be written.
+    #[tokio::test]
+    async fn rebase_edit_drops_explicitly_under_missing_commits_check() {
+        let (dir, repo) = setup_repo("rebase-missing-check").await;
+        git(&repo, &["config", "rebase.missingCommitsCheck", "error"]).await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+
+        let step = RewriteStep {
+            hashes: vec![c2],
+            message: None,
+            edit: true,
+        };
+        git_rebase_edit(repo.clone(), base, vec![step], Some(vec![c1]))
+            .await
+            .unwrap();
+        // Paused at the edit with the drop applied, not stopped on the todo.
+        assert!(git_path_exists(&repo, "rebase-merge").await);
+        assert_eq!(subjects(&repo).await, vec!["two", "base"]);
+        let resumed = run_git_raw(
+            Some(&repo),
+            &["-c", "core.editor=true", "rebase", "--continue"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resumed.code, 0,
+            "the rebase must finish: {}",
+            resumed.stderr
+        );
+        assert!(!git_path_exists(&repo, "rebase-merge").await);
+        assert_eq!(subjects(&repo).await, vec!["two", "base"]);
+    }
+
+    #[tokio::test]
+    async fn rebase_edit_refuses_an_out_of_range_step_hash() {
+        let (dir, repo) = setup_repo("rebase-step-out-of-range").await;
+        let below = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "mid").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "c.txt", "c\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+
+        let result = git_rebase_edit(repo.clone(), base, vec![pick(&below), pick(&c1)], None).await;
+        let Err(AppError::InvalidArgument(msg)) = &result else {
+            panic!("an out-of-range step must refuse, got {result:?}");
+        };
+        assert_eq!(
+            msg,
+            &format!("{below} is not an unpushed commit on this branch")
+        );
+        assert_rebase_edit_untouched(&repo, &c1).await;
+    }
+
+    /// A refused edit-rebase started nothing: no rebase, HEAD where it was, and no
+    /// scratch dir.
+    async fn assert_rebase_edit_untouched(repo: &str, head: &str) {
+        assert!(!git_path_exists(repo, "rebase-merge").await);
+        assert!(!git_path_exists(repo, "rebase-apply").await);
+        assert_eq!(rev(repo, "HEAD").await, head, "HEAD must not move");
+        assert!(
+            !std::path::Path::new(repo)
+                .join(".git/gd-rebase-edit")
+                .exists(),
+            "scratch dir must not be touched when refused"
         );
     }
 
@@ -6788,7 +7089,7 @@ mod tests {
             message: None,
             edit: true,
         };
-        let result = git_rebase_edit(repo.clone(), base, vec![step]).await;
+        let result = git_rebase_edit(repo.clone(), base, vec![step], None).await;
         assert!(
             result.is_err(),
             "must refuse a new edit-rebase while one is in progress"
@@ -6842,7 +7143,7 @@ mod tests {
         // Reachable through the guard that clears another op's pending files. The
         // message is load-bearing: the dirty-tree guard below it also refuses this
         // tree, so only the wording proves WHICH guard caught it.
-        let refused = git_rebase_edit(repo.clone(), tip, vec![pick(&f1)]).await;
+        let refused = git_rebase_edit(repo.clone(), tip, vec![pick(&f1)], None).await;
         let Err(AppError::InvalidArgument(msg)) = &refused else {
             panic!("edit-rebase must refuse over sequencer state, got {refused:?}");
         };
@@ -9533,7 +9834,7 @@ detached
         git(&repo, &["tag", "feature", &base]).await;
 
         let state = AppState::default();
-        rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)])
+        rewrite_commits(&state, &repo, &base, &[pick(&c2), pick(&c1)], &[])
             .await
             .unwrap();
         let journaled = |op: &'static str| {
@@ -9556,7 +9857,7 @@ detached
         let tip = rev(&repo, "HEAD").await;
         commit_file(&repo, dir.path(), "d.txt", "d\n", "three").await;
         let c3 = rev(&repo, "HEAD").await;
-        git_rebase_edit(repo.clone(), tip, vec![pick(&c3)])
+        git_rebase_edit(repo.clone(), tip, vec![pick(&c3)], None)
             .await
             .unwrap();
         assert_eq!(journaled("rebase_edit").await.as_deref(), Some("feature"));

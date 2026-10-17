@@ -398,6 +398,12 @@ const BARE_REV_ALLOWLIST = [
   },
   {
     file: "git/ops.rs",
+    fn: "git_rebase_edit",
+    rationale:
+      "`base` is a commit sha, validated with validate_hash at fn entry",
+  },
+  {
+    file: "git/ops.rs",
     fn: "git_unpushed_messages",
     rationale:
       "`base` is a commit sha, validated with validate_hash at fn entry",

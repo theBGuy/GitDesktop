@@ -5183,6 +5183,15 @@ export const CHECKS = [
       // already pins focus to a board card or a grid cell — none of which hold
       // editable or typeahead targets for the guards to protect.
       "src/features/projects/ProjectsBoardPanel.tsx",
+      // Same shape as the ProjectsBoardPanel entry above: its `eventToBinding`
+      // call tests a hardcoded set: the four Alt move chords (a commit row up,
+      // down, to the top, to the bottom) plus unmodified Enter/Space and
+      // Home/End, never a user binding, and the handler acts
+      // only when the event target is a [data-row] commit row, never an
+      // editable or typeahead surface the guards protect. The entry exempts the
+      // WHOLE file: a future dispatch of a USER binding here must apply the
+      // three-predicate clause, or this entry must be dropped.
+      "src/features/history/EditHistoryDialog.tsx",
     ],
     message:
       "a path that matches eventToBinding(e) against a user binding and preventDefaults it must apply the same clause the global listener does — isEditableTarget, isTypeaheadTarget, and isTypeaheadKey (src/lib/hotkeys/binding.ts) — or a single-key binding steals keystrokes from text fields or typeahead lists, and named keys stop reaching the surfaces that should still get them; any subset leaves the case the missing predicate covers, and a file that dispatches no rebindable binding needs an allowlist entry with rationale",

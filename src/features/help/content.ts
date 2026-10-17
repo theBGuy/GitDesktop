@@ -620,16 +620,22 @@ selection to compare a range.
   choose its mainline.
 - **Reset** the current branch to a commit — a **mixed reset**, so the changes from later
   commits return to your working tree as uncommitted changes.
-- **Edit history** — open the interactive-rebase editor over your unpushed commits, where
-  each commit gets an action: **pick** (keep), **reword** (edit its message), **squash**
-  (merge into the commit below, combining messages), **fixup** (merge in, keeping the
-  message), **edit** (pause to amend its changes), or **drop** (remove it) — plus **↑/↓** to
-  reorder.{{ai}} Reword can regenerate a message with AI.{{/ai}} A "Result" count shows what
-  you'll end up with. With no **edit**, it applies all at once — a conflict rolls it back.
-  If you choose **edit**, it starts a rebase that **pauses** at that commit —
-  amend it in the **Changes** tab (stage and commit/amend as usual), then **Continue** from the
-  banner there. A quick **Squash N commits…** is also on the context menu when you select
-  adjacent commits.
+- **Edit history** — open the interactive-rebase editor over your unpushed commits, newest
+  on top, where each commit gets an action: **pick** (keep), **reword** (edit its message),
+  **squash** (combine it into the next older commit you keep, joining the messages),
+  **fixup** (combine it in, keeping that older commit's message), **edit** (pause to amend
+  its changes), or **drop** (remove it). The action menu names the commit a squash or fixup
+  combines into, and a folding row shows **into** and that commit's subject; when no older
+  commit in the list is kept, the menu holds **Squash** and **Fixup** and says why.
+  {{key:up}} and {{key:down}} move between commits, {{key:home}} and {{key:end}} jump to the
+  first and last, and {{key:enter}} opens the commit's action menu. {{key:alt+up}} and
+  {{key:alt+down}} move the commit one place, as its arrow buttons do; {{key:alt+home}} and
+  {{key:alt+end}} send it to the top or bottom.{{ai}} Reword can regenerate a message with
+  AI.{{/ai}} A "Result" count shows what you'll end up with. With no **edit**, it applies all
+  at once — a conflict rolls it back. If you choose **edit**, it starts a rebase that
+  **pauses** at that commit — amend it in the **Changes** tab (stage and commit/amend as
+  usual), then **Continue** from the banner there. A quick **Squash N commits…** is also on
+  the context menu when you select adjacent commits.
 - **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
   first and explains the detached HEAD you land in), or copy
   its SHA.

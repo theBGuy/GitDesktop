@@ -119,8 +119,8 @@ export function useCreateTag(repo: string) {
 export function useRewriteCommits(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { base: string; steps: RewriteStep[] }) =>
-      api.gitRewriteCommits(repo, args.base, args.steps),
+    (args: { base: string; steps: RewriteStep[]; dropped?: string[] }) =>
+      api.gitRewriteCommits(repo, args.base, args.steps, args.dropped),
     {
       // Local history write — never park it offline.
       networkMode: "always",
@@ -133,8 +133,8 @@ export function useRewriteCommits(repo: string) {
 export function useRebaseEdit(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { base: string; steps: RewriteStep[] }) =>
-      api.gitRebaseEdit(repo, args.base, args.steps),
+    (args: { base: string; steps: RewriteStep[]; dropped?: string[] }) =>
+      api.gitRebaseEdit(repo, args.base, args.steps, args.dropped),
     {
       // Local history write — never park it offline.
       networkMode: "always",

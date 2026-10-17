@@ -71,7 +71,14 @@ export const gitRewriteCommits = (
   repoPath: string,
   base: string,
   steps: RewriteStep[],
-) => invoke<void>("git_rewrite_commits", { repoPath, base, steps });
+  dropped?: string[],
+) =>
+  invoke<void>("git_rewrite_commits", {
+    repoPath,
+    base,
+    steps,
+    dropped: dropped ?? null,
+  });
 
 /** Like gitRewriteCommits but via a real, resumable `git rebase -i` — used when
  *  a step is marked `edit` (pause to amend its contents). Leaves the rebase in
@@ -80,7 +87,14 @@ export const gitRebaseEdit = (
   repoPath: string,
   base: string,
   steps: RewriteStep[],
-) => invoke<void>("git_rebase_edit", { repoPath, base, steps });
+  dropped?: string[],
+) =>
+  invoke<void>("git_rebase_edit", {
+    repoPath,
+    base,
+    steps,
+    dropped: dropped ?? null,
+  });
 
 /** Full messages (subject + body) for the unpushed commits `base..HEAD`, to
  *  pre-fill the Edit-history editor without truncating multi-line bodies. */

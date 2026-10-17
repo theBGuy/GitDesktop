@@ -3,7 +3,7 @@ import type { RewriteStep } from "@/lib/git/types";
 /**
  * The interactive-rebase vocabulary for one unpushed commit. Mirrors
  * `git rebase -i`: **pick** keeps it, **reword** changes its message, **squash**
- * folds it into the commit below (older) combining messages, **fixup** folds it
+ * folds it into the next older kept commit combining messages, **fixup** folds it
  * in keeping the leader's message, **edit** pauses there so you can amend its
  * contents, **drop** removes it.
  */
@@ -29,19 +29,27 @@ export interface EditRow {
 export interface RowView {
   /** Whether this row should render an editable message field. */
   showMessage: boolean;
-  /** `into "<leader subject>"` for a squash/fixup row with a leader; else null. */
-  foldInto: string | null;
+  /** The subject of the nearest kept leader older than this row, or null when
+   *  none is. Recorded for every row, so whatever a squash or fixup here would
+   *  combine into reads from this one value. */
+  foldTarget: string | null;
+  /** That leader's hash: its identity, since two commits can share a subject. */
+  foldTargetHash: string | null;
 }
 
 export interface CompiledPlan {
   /** Oldest-first steps for `git_rewrite_commits`. */
   steps: RewriteStep[];
+  /** Hashes of the drop rows: the backend refuses any omission not listed. */
+  dropped: string[];
   /** How many commits the rewrite produces. */
   resultCount: number;
   /** Per-row display metadata, parallel to the input rows. */
   views: RowView[];
   /** The first blocking problem, or null when the plan is valid to apply. */
   error: string | null;
+  /** The hash of the row `error` is about, or null when it names no row. */
+  errorHash: string | null;
   /** Whether the plan differs from the no-op (original order, all picked). */
   changed: boolean;
   /** Whether any commit is set to `edit` — routes the apply to the resumable
@@ -49,7 +57,7 @@ export interface CompiledPlan {
   hasEdit: boolean;
 }
 
-// A leader produces its own commit; folds attach to the nearest one below.
+// A leader produces its own commit; folds attach to the nearest older one.
 const leads = (a: RowAction) => a === "pick" || a === "reword" || a === "edit";
 
 /**
@@ -57,15 +65,15 @@ const leads = (a: RowAction) => a === "pick" || a === "reword" || a === "edit";
  * `RewriteStep[]` the replay engine runs, plus per-row view metadata and
  * validation.
  *
- * A squash/fixup row folds into its **leader** — the nearest kept pick/reword
- * row *below* it (older). Steps are built oldest-first; a fold appends its hash
- * to the leader's step in chronological order, so `cherry-pick` replays
- * leader-then-folds. A leader step's message encodes the vocabulary: omitted →
- * pick (cherry-pick keeps the message) or fixup (engine reuses the leader's via
- * `commit -C`); present → reword/squash (`commit -m`). Each row's `message`
- * supplies its own part of a combined squash message — including a *pick* leader
- * that receives a squash, which therefore shows an editable message too (so its
- * contribution isn't silently baked in invisibly).
+ * A squash/fixup row folds into its **leader** — the nearest kept
+ * pick/reword/edit row older than it. Steps are built oldest-first; a fold
+ * appends its hash to the leader's step in chronological order, so
+ * `cherry-pick` replays leader-then-folds. A leader step's message encodes the
+ * vocabulary: omitted → pick (cherry-pick keeps the message) or fixup (engine
+ * reuses the leader's via `commit -C`); present → reword/squash (`commit -m`).
+ * Each row's `message` supplies its own part of a combined squash message —
+ * including a *pick* leader that receives a squash, which therefore shows an
+ * editable message too (so its contribution isn't silently baked in invisibly).
  */
 export function compilePlan(
   rows: EditRow[],
@@ -74,20 +82,31 @@ export function compilePlan(
   const n = rows.length;
   const views: RowView[] = rows.map((r) => ({
     showMessage: r.action === "reword" || r.action === "squash",
-    foldInto: null,
+    foldTarget: null,
+    foldTargetHash: null,
   }));
 
   const steps: RewriteStep[] = [];
+  const dropped: string[] = [];
   const stepByLeader = new Map<number, RewriteStep>();
   const leaderHasSquash: boolean[] = rows.map(() => false);
   let currentLeader = -1;
   let error: string | null = null;
+  let errorHash: string | null = null;
 
   // Walk oldest→newest (display bottom-up). Leaders create a step; folds attach
-  // to the nearest leader below them and append their hash (chronological).
+  // to the nearest older leader and append their hash (chronological).
   for (let i = n - 1; i >= 0; i--) {
     const { action } = rows[i];
-    if (action === "drop") continue;
+    // Before the drop skip and before this row can become the leader, so every
+    // row records the nearest kept leader strictly older than itself.
+    const leader = currentLeader === -1 ? null : rows[currentLeader];
+    views[i].foldTarget = leader?.subject ?? null;
+    views[i].foldTargetHash = leader?.hash ?? null;
+    if (action === "drop") {
+      dropped.push(rows[i].hash);
+      continue;
+    }
     if (leads(action)) {
       currentLeader = i;
       const step: RewriteStep = { hashes: [rows[i].hash] };
@@ -95,11 +114,11 @@ export function compilePlan(
       steps.push(step);
       stepByLeader.set(i, step);
     } else if (currentLeader === -1) {
+      if (error === null) errorHash = rows[i].hash;
       error ??= `"${rows[i].subject}" can't be ${
         action === "squash" ? "squashed" : "fixed up"
-      } — there's no commit below it to merge into.`;
+      } — no older commit in this list is kept to combine it into.`;
     } else {
-      views[i].foldInto = `into "${rows[currentLeader].subject}"`;
       stepByLeader.get(currentLeader)?.hashes.push(rows[i].hash);
       if (action === "squash") leaderHasSquash[currentLeader] = true;
     }
@@ -142,7 +161,10 @@ export function compilePlan(
     const blank = rows.find(
       (r) => r.action === "reword" && r.message.trim() === "",
     );
-    if (blank) error = `Rewording "${blank.subject}" needs a commit message.`;
+    if (blank) {
+      error = `Rewording "${blank.subject}" needs a commit message.`;
+      errorHash = blank.hash;
+    }
   }
 
   const reordered =
@@ -151,5 +173,14 @@ export function compilePlan(
   const changed = reordered || rows.some((r) => r.action !== "pick");
   const hasEdit = rows.some((r) => r.action === "edit");
 
-  return { steps, resultCount: steps.length, views, error, changed, hasEdit };
+  return {
+    steps,
+    dropped,
+    resultCount: steps.length,
+    views,
+    error,
+    errorHash,
+    changed,
+    hasEdit,
+  };
 }
