@@ -4994,8 +4994,9 @@ const REBASE_DIR_EXISTS: &str = "It seems that there is already a rebase-merge d
 /// and `--no-reschedule-failed-exec` set); knobs newer than that ride `-c`, which an
 /// older git ignores instead of refusing. `--no-autosquash` and `--no-rebase-merges`
 /// keep git's own fallback todo a plain pick list, which the missing-commits check
-/// compares ours against; `--no-verify` skips the pre-rebase hook. post-checkout still
-/// fires at the start and post-rewrite after amends and at the finish, as in any rebase.
+/// compares ours against; `--no-verify` skips the pre-rebase hook. post-checkout fires
+/// at the start; post-rewrite fires after each reword's amend and at the finish, where
+/// the group scripts' mappings include the squash groups.
 const REBASE_START_ARGS: [&str; 22] = [
     "-c",
     "core.editor=true",
@@ -5165,31 +5166,49 @@ fn rebase_todo(
     (todo, files)
 }
 
-/// What a replay fold group's script reports when its commits cancel each other out.
+/// What a replay fold group's script reports when its commits add up to nothing.
 const EMPTY_GROUP_ERROR: &str =
-    "error: the squashed commits cancel each other out, so the group would be empty";
+    "error: the squashed commits add up to no change, so the group would be empty";
 
 /// The sh script a replay fold group runs (LF only): it stages the leader and every
 /// fold (`cherry-pick -n`), refuses an empty net, and commits once with the leader's
 /// author and author date, its message (`-C`) or the group's own (`-F`). The commit
-/// runs the commit hooks once, with the whole group staged. The author captures pass
-/// `--no-show-signature`, so `log.showSignature` can't splice gpg output into them.
+/// runs the commit hooks once, with the whole group staged.
+///
+/// - The empty-net check passes `--ignore-submodules=none`: `.gitmodules` `ignore=all`
+///   would otherwise hide a gitlink-only group, and a `-c` override doesn't outrank it.
+/// - The author captures pass `--no-show-signature` (`log.showSignature` would splice
+///   gpg output into them) and take the date as `%aI`: git refuses a raw date before
+///   1973 as GIT_AUTHOR_DATE.
+/// - Each member's old → new line goes to the sequencer's rewritten-list, which git
+///   reads at the finish for notes rewriting and post-rewrite; dropped members are
+///   otherwise missing from it.
 fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<&str>) -> String {
+    let members = || std::iter::once(leader).chain(folds.iter().map(String::as_str));
     let mut script = String::from("set -e\n");
-    for h in std::iter::once(leader).chain(folds.iter().map(String::as_str)) {
+    for h in members() {
         script.push_str(&format!("{git} cherry-pick -n {h}\n"));
     }
     script.push_str(&format!(
-        "if {git} diff --cached --quiet; then echo '{EMPTY_GROUP_ERROR}' >&2; exit 1; fi\n"
+        "if {git} diff --cached --quiet --ignore-submodules=none; then echo '{EMPTY_GROUP_ERROR}' >&2; exit 1; fi\n"
     ));
     match message_file {
         None => script.push_str(&format!("{git} commit -C {leader}\n")),
         Some(file) => script.push_str(&format!(
             "GIT_AUTHOR_NAME=\"$({git} log -1 --no-show-signature --format=%an {leader})\" \
              GIT_AUTHOR_EMAIL=\"$({git} log -1 --no-show-signature --format=%ae {leader})\" \
-             GIT_AUTHOR_DATE=\"$({git} log -1 --no-show-signature --format=%ad --date=raw {leader})\" \
+             GIT_AUTHOR_DATE=\"$({git} log -1 --no-show-signature --format=%aI {leader})\" \
              {git} commit -F {file}\n"
         )),
+    }
+    script.push_str(&format!("new=$({git} rev-parse HEAD)\n"));
+    script.push_str(&format!(
+        "list=$({git} rev-parse --git-path rebase-merge/rewritten-list)\n"
+    ));
+    for h in members() {
+        script.push_str(&format!(
+            "printf '%s %s\\n' \"$({git} rev-parse {h})\" \"$new\" >> \"$list\"\n"
+        ));
     }
     script
 }
@@ -5372,12 +5391,19 @@ fn shaped_failure_error(
 /// `report` without git's `Rebasing (n/m)` progress segments, which git joins to the
 /// next line with `\r`. Everything else stays, blank lines included.
 fn strip_rebase_progress(report: &str) -> String {
-    report
-        .split('\n')
-        .flat_map(|line| line.split('\r'))
+    report_segments(report)
         .filter(|segment| !is_rebase_progress(segment))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `report`'s lines and `\r`-joined segments, each without the erase-line escape
+/// (`ESC[K`) git puts in front of a segment when TERM is set.
+fn report_segments(report: &str) -> impl Iterator<Item = &str> {
+    report
+        .split('\n')
+        .flat_map(|line| line.split('\r'))
+        .map(|segment| segment.strip_prefix("\x1b[K").unwrap_or(segment))
 }
 
 /// A rolled-back `report` without what the rollback made untrue: git's progress
@@ -5390,9 +5416,7 @@ fn strip_rebase_progress(report: &str) -> String {
 /// so the English text is stable.
 fn strip_rebase_noise(report: &str) -> String {
     let mut in_status = false;
-    report
-        .split('\n')
-        .flat_map(|line| line.split('\r'))
+    report_segments(report)
         .filter(|segment| {
             if segment
                 .trim()
@@ -5409,10 +5433,26 @@ fn strip_rebase_noise(report: &str) -> String {
         .join("\n")
 }
 
-/// A line of git's status block (wt-status): indented or blank, or one of its
-/// headings and summaries.
+/// A line of git's status block (wt-status): blank, one of its headings and
+/// summaries, or one of its own indented lines (a tab-indented path, a parenthesized
+/// hint, a todo line). Any other indented line, such as a hook's own reason, ends the
+/// block.
 fn is_status_line(segment: &str) -> bool {
-    const STATUS: [&str; 14] = [
+    const TODO_VERBS: [&str; 12] = [
+        "pick",
+        "drop",
+        "exec",
+        "fixup",
+        "squash",
+        "edit",
+        "reword",
+        "break",
+        "label",
+        "reset",
+        "merge",
+        "update-ref",
+    ];
+    const STATUS: [&str; 15] = [
         "Last command done",
         "Last commands done",
         "Next command to do",
@@ -5426,10 +5466,20 @@ fn is_status_line(segment: &str) -> bool {
         "No changes",
         "nothing to commit",
         "nothing added to commit",
+        "no changes added to commit",
         "interactive rebase in progress;",
     ];
-    segment.trim().is_empty()
-        || segment.starts_with([' ', '\t'])
+    let trimmed = segment.trim();
+    let spaces = segment.len() - segment.trim_start_matches(' ').len();
+    let todo_line = spaces >= 3
+        && trimmed
+            .split_whitespace()
+            .next()
+            .is_some_and(|verb| TODO_VERBS.contains(&verb));
+    trimmed.is_empty()
+        || segment.starts_with('\t')
+        || (segment.starts_with(' ') && trimmed.starts_with('('))
+        || todo_line
         || STATUS.iter().any(|s| segment.starts_with(s))
 }
 
@@ -5440,8 +5490,9 @@ fn is_reason_line(trimmed: &str) -> bool {
 }
 
 /// A line of git's own report that a rollback makes untrue even though it reads like a
-/// reason: the exec's echo, its dirty-tree errors and their continuations, and a
-/// commit's success summary (an exec can commit before a later step fails).
+/// reason: the exec's echo, its dirty-tree errors and their continuations (a
+/// `<path>: needs merge` included), and a commit's success summary (an exec can
+/// commit before a later step fails).
 fn is_stale_after_rollback(segment: &str) -> bool {
     const DIRTY_TREE: [&str; 4] = [
         "error: cannot rebase:",
@@ -5462,6 +5513,7 @@ fn is_stale_after_rollback(segment: &str) -> bool {
     if segment.starts_with("Executing: ")
         || segment.starts_with("[detached HEAD ")
         || DIRTY_TREE.iter().any(|d| trimmed.starts_with(d))
+        || (!segment.starts_with([' ', '\t']) && trimmed.ends_with(": needs merge"))
     {
         return true;
     }
@@ -6776,11 +6828,59 @@ mod tests {
         (dir, repo, base, [leader, revert, other])
     }
 
+    /// Re-creates `chain` (oldest first, ending at HEAD) with a bogus `gpgsig` header
+    /// on its first commit and the same trees, moves the branch to the new tip, and
+    /// returns the new chain. Under `log.showSignature` git then prints gpg's failed
+    /// verification for that commit.
+    async fn with_bogus_signature_on_first(repo: &str, chain: &[String]) -> Vec<String> {
+        const SIGNATURE: &str = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEEAAAAAAAAAAAAAAAAAAAAAAAAAAAFAmAAAAAACgkQAAAAAAAA\n AAA=\n =AAAA\n -----END PGP SIGNATURE-----\n";
+        let mut parent: Option<String> = None;
+        let mut rebuilt = Vec::new();
+        for (i, commit) in chain.iter().enumerate() {
+            let raw = git(repo, &["cat-file", "commit", commit]).await;
+            let (headers, message) = raw.split_once("\n\n").expect("a commit object");
+            let mut object = String::new();
+            for line in headers.lines() {
+                match (&parent, line.starts_with("parent ")) {
+                    (Some(p), true) => object.push_str(&format!("parent {p}\n")),
+                    _ => object.push_str(&format!("{line}\n")),
+                }
+            }
+            if i == 0 {
+                object.push_str(SIGNATURE);
+            }
+            object.push_str(&format!("\n{message}"));
+            let out = run_git_raw_input(
+                Some(repo),
+                &["hash-object", "-t", "commit", "-w", "--stdin"],
+                Some(&object),
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.code, 0, "hash-object: {}", out.full_failure_text());
+            let sha = out.stdout_lossy().trim().to_string();
+            parent = Some(sha.clone());
+            rebuilt.push(sha);
+        }
+        git(repo, &["reset", "-q", "--hard", rebuilt.last().unwrap()]).await;
+        rebuilt
+    }
+
     #[tokio::test]
     async fn a_fold_group_whose_middle_nets_empty_still_applies() {
         for message in [None, Some("Squashed \"it\" (with quotes)\n\nbody line")] {
             let marker = format!("revert-pair-{}", message.is_some());
             let (dir, repo, base, group) = revert_pair_group(&marker).await;
+            // The message group's script reads the leader's identity through `git
+            // log`; a signed leader under `log.showSignature` would splice gpg's
+            // verification output into it. Vacuous where gpg is absent (Git for
+            // Windows bundles it).
+            let group = if message.is_some() {
+                with_bogus_signature_on_first(&repo, &group).await
+            } else {
+                group.to_vec()
+            };
             let identity = "%an <%ae> %ad";
             let leader = git(
                 &repo,
@@ -6794,8 +6894,6 @@ mod tests {
             )
             .await;
             if message.is_some() {
-                // The message group's script reads the leader's identity through
-                // `git log`, which must not pick up signature output.
                 git(&repo, &["config", "log.showSignature", "true"]).await;
             }
             let state = AppState::default();
@@ -6804,7 +6902,7 @@ mod tests {
                 &repo,
                 &base,
                 &[RewriteStep {
-                    hashes: group.to_vec(),
+                    hashes: group.clone(),
                     message: message.map(str::to_string),
                     edit: false,
                 }],
@@ -7039,6 +7137,226 @@ mod tests {
         assert_eq!(log("pre-commit-log"), "1.txt 2.txt 3.txt\n");
         assert_eq!(log("commit-msg-log"), "ran\n");
         assert_eq!(subjects(&repo).await, vec!["one", "base"]);
+    }
+
+    /// Installs a post-rewrite hook that logs its argument and stdin to
+    /// `.git/post-rewrite-log`.
+    fn log_post_rewrite(repo: &str) {
+        write_hook(
+            repo,
+            "post-rewrite",
+            "log=\"$(git rev-parse --git-dir)/post-rewrite-log\"\necho \"post-rewrite $1\" >> \"$log\"\ncat >> \"$log\"",
+        );
+    }
+
+    /// A group's members reach git's rewrite mappings: their notes are copied to the
+    /// squashed commit, and post-rewrite sees every member beside the plain picks.
+    #[tokio::test]
+    async fn a_fold_group_maps_its_members_for_notes_and_post_rewrite() {
+        let (dir, repo) = setup_repo("group-mappings").await;
+        git(&repo, &["config", "notes.rewriteRef", "refs/notes/commits"]).await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "2.txt", "2\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "3.txt", "3\n", "three").await;
+        let c3 = rev(&repo, "HEAD").await;
+        git(&repo, &["notes", "add", "-m", "note-two", &c2]).await;
+        git(&repo, &["notes", "add", "-m", "note-three", &c3]).await;
+        log_post_rewrite(&repo);
+
+        // Reordered so the pick is rewritten too.
+        let state = AppState::default();
+        rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[
+                RewriteStep {
+                    hashes: vec![c2.clone(), c3.clone()],
+                    message: None,
+                    edit: false,
+                },
+                pick(&c1),
+            ],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(subjects(&repo).await, vec!["one", "two", "base"]);
+        let squashed = rev(&repo, "HEAD~1").await;
+        let notes = git(&repo, &["notes", "show", &squashed]).await;
+        assert!(
+            notes.contains("note-two") && notes.contains("note-three"),
+            "both members' notes reach the squashed commit: {notes}"
+        );
+        let log = std::fs::read_to_string(git_dir_of(&repo).await.join("post-rewrite-log"))
+            .expect("post-rewrite ran");
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.first(), Some(&"post-rewrite rebase"), "{log}");
+        for member in [&c2, &c3] {
+            assert!(
+                lines.contains(&format!("{member} {squashed}").as_str()),
+                "post-rewrite maps {member}: {log}"
+            );
+        }
+        let picked = rev(&repo, "HEAD").await;
+        assert!(lines.contains(&format!("{c1} {picked}").as_str()), "{log}");
+    }
+
+    /// A plan of only fold groups (no pick for git to map) still fires post-rewrite.
+    #[tokio::test]
+    async fn an_all_group_plan_fires_post_rewrite() {
+        let (dir, repo) = setup_repo("all-group-post-rewrite").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "2.txt", "2\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        log_post_rewrite(&repo);
+
+        let state = AppState::default();
+        rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[RewriteStep {
+                hashes: vec![c1.clone(), c2.clone()],
+                message: Some("combined".into()),
+                edit: false,
+            }],
+            &[],
+        )
+        .await
+        .unwrap();
+        let squashed = rev(&repo, "HEAD").await;
+        let log = std::fs::read_to_string(git_dir_of(&repo).await.join("post-rewrite-log"))
+            .expect("post-rewrite ran");
+        assert_eq!(
+            log,
+            format!("post-rewrite rebase\n{c1} {squashed}\n{c2} {squashed}\n")
+        );
+    }
+
+    /// A group holding only gitlink bumps commits under `.gitmodules` `ignore = all`,
+    /// which hides them from a plain `diff --cached --quiet`.
+    #[tokio::test]
+    async fn a_gitlink_only_group_applies_under_submodule_ignore_all() {
+        let (dir, repo) = setup_repo("gitlink-group").await;
+        std::fs::write(
+            dir.path().join(".gitmodules"),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = ./nowhere\n\tignore = all\n",
+        )
+        .unwrap();
+        git(&repo, &["add", ".gitmodules"]).await;
+        let gitlink = |sha: &str| format!("160000,{},sub", sha.repeat(40));
+        git(
+            &repo,
+            &["update-index", "--add", "--cacheinfo", &gitlink("1")],
+        )
+        .await;
+        git(&repo, &["commit", "-m", "add sub"]).await;
+        let base = rev(&repo, "HEAD").await;
+        let mut bumps = Vec::new();
+        for (sha, msg) in [("2", "bump one"), ("3", "bump two")] {
+            git(&repo, &["update-index", "--cacheinfo", &gitlink(sha)]).await;
+            git(&repo, &["commit", "-m", msg]).await;
+            bumps.push(rev(&repo, "HEAD").await);
+        }
+
+        let state = AppState::default();
+        rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[RewriteStep {
+                hashes: bumps,
+                message: None,
+                edit: false,
+            }],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(subjects(&repo).await, vec!["bump one", "add sub", "base"]);
+        let tree = git(&repo, &["ls-tree", "HEAD", "sub"]).await;
+        assert!(
+            tree.contains(&"3".repeat(40)),
+            "the group's last bump: {tree}"
+        );
+    }
+
+    /// A message group keeps a leader's author date from before 1973, which git
+    /// refuses in its raw `<seconds> <tz>` form.
+    #[tokio::test]
+    async fn a_message_group_keeps_a_pre_1973_author_date() {
+        let (dir, repo) = setup_repo("old-date").await;
+        let base = rev(&repo, "HEAD").await;
+        std::fs::write(dir.path().join("1.txt"), "1\n").unwrap();
+        git(&repo, &["add", "."]).await;
+        git(
+            &repo,
+            &["commit", "--date", "1971-06-15T12:00:00+05:30", "-m", "old"],
+        )
+        .await;
+        let leader = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "2.txt", "2\n", "new").await;
+        let fold = rev(&repo, "HEAD").await;
+        let date = |r: &str| {
+            let repo = repo.clone();
+            let r = r.to_string();
+            async move { git(&repo, &["log", "-1", "--format=%aI", &r]).await }
+        };
+        let before = date(&leader).await;
+        assert_eq!(before.trim(), "1971-06-15T12:00:00+05:30");
+
+        let state = AppState::default();
+        rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[RewriteStep {
+                hashes: vec![leader, fold],
+                message: Some("combined".into()),
+                edit: false,
+            }],
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(subjects(&repo).await, vec!["combined", "base"]);
+        assert_eq!(date("HEAD").await, before);
+    }
+
+    /// A conflict ON the `edit` line hands off to the banner like any conflict, and
+    /// never reads as a paused edit: git writes no `amend` there, before or after the
+    /// conflict is resolved.
+    #[tokio::test]
+    async fn a_conflict_on_the_edit_line_is_not_a_paused_edit() {
+        let (dir, repo) = setup_repo("edit-line-conflict").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v2\n", "two").await;
+        let c2 = rev(&repo, "HEAD").await;
+        let step = RewriteStep {
+            hashes: vec![c2],
+            message: None,
+            edit: true,
+        };
+        // "two"'s patch (v1→v2) can't apply onto v0 once "one" is dropped.
+        git_rebase_edit(repo.clone(), base, vec![step], Some(vec![c1]))
+            .await
+            .unwrap();
+        assert!(rebasing(&repo).await, "left for the banner");
+        assert!(!git(&repo, &["ls-files", "-u"]).await.trim().is_empty());
+        assert!(!op_state(&repo).await.unwrap().edit_paused, "conflicted");
+
+        std::fs::write(dir.path().join("a.txt"), "resolved\n").unwrap();
+        git(&repo, &["add", "a.txt"]).await;
+        assert!(git(&repo, &["ls-files", "-u"]).await.trim().is_empty());
+        assert!(!op_state(&repo).await.unwrap().edit_paused, "resolved");
     }
 
     /// Reword keeps each commit's author and author date, and a squash its leader's;
@@ -7588,7 +7906,7 @@ mod tests {
         assert_eq!(subjects(&repo).await, vec!["one", "two", "base"]);
         assert_eq!(rev(&repo, "ORIG_HEAD").await, orig);
 
-        // The amends a reword and a squash run don't move ORIG_HEAD either.
+        // Group commits and reword amends leave ORIG_HEAD alone too.
         commit_file(&repo, dir.path(), "d.txt", "d\n", "three").await;
         let tip = rev(&repo, "HEAD").await;
         let below = rev(&repo, "HEAD~1").await;
@@ -7609,6 +7927,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(subjects(&repo).await, vec!["reworded", "squashed", "base"]);
+        assert_eq!(rev(&repo, "ORIG_HEAD").await, tip);
+
+        // A message-less group commits with `-C`, which leaves it alone as well.
+        let tip = rev(&repo, "HEAD").await;
+        let below = rev(&repo, "HEAD~1").await;
+        let plan = [RewriteStep {
+            hashes: vec![below, tip.clone()],
+            message: None,
+            edit: false,
+        }];
+        rewrite_commits(&state, &repo, &base, &plan, &[])
+            .await
+            .unwrap();
+        assert_eq!(subjects(&repo).await, vec!["squashed", "base"]);
         assert_eq!(rev(&repo, "ORIG_HEAD").await, tip);
     }
 
@@ -7991,12 +8323,14 @@ mod tests {
 
     /// Real 2.51.1 rollback reports from the replay's pinned continue, joined as
     /// `full_failure_text` joins them (paths and shas shortened): what the rollback
-    /// made untrue goes, and every reason line stays.
+    /// made untrue goes, and every reason line stays. The first cases are captures of
+    /// an earlier engine's inline exec chain (`cherry-pick -n … && commit --amend`),
+    /// kept as regression pins; the group-script cases capture the current shape.
     #[test]
     fn rollback_reports_drop_gits_continue_advice() {
         let joined = |lines: &[&str]| lines.join("\n");
         let cases = [
-            // An empty amend at the end of an exec chain.
+            // Earlier engine: an empty amend at the end of an exec chain.
             (
                 joined(&[
                     "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: git cherry-pick -n 72bbd32 && git commit --amend -F '/r/msg-0'",
@@ -8036,16 +8370,16 @@ mod tests {
                     "  (use \"git rebase --edit-todo\" to view and edit)",
                     "You are currently editing a commit while rebasing branch 'main' on '33b1f4a'.",
                     "nothing to commit, working tree clean",
+                    "no changes added to commit (use \"git add\" and/or \"git commit -a\")",
                     "CONFLICT (content): Merge conflict in f",
                     "f: needs merge",
                 ]),
                 joined(&[
                     "error: could not apply 65d8b67... c1 add X",
                     "CONFLICT (content): Merge conflict in f",
-                    "f: needs merge",
                 ]),
             ),
-            // A fold conflicting inside its group's exec.
+            // Earlier engine: a fold conflicting inside its exec chain.
             (
                 joined(&[
                     "Rebasing (2/5)\rRebasing (3/5)\rRebasing (4/5)\rExecuting: git cherry-pick -n 65d8b67 && git commit --amend --no-edit",
@@ -8069,7 +8403,6 @@ mod tests {
                     "warning: execution failed: git cherry-pick -n 65d8b67 && git commit --amend --no-edit",
                     "Auto-merging f",
                     "CONFLICT (content): Merge conflict in f",
-                    "f: needs merge",
                 ]),
             ),
             // A commit-msg hook refusing a reword's amend.
@@ -8087,7 +8420,7 @@ mod tests {
                     "warning: execution failed: git commit --amend -F '/r/msg-1'",
                 ]),
             ),
-            // A fold group's script refusing its empty net.
+            // A group script refusing its empty net.
             (
                 joined(&[
                     "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: sh '/r/group-0.sh'",
@@ -8102,7 +8435,23 @@ mod tests {
                     "warning: execution failed: sh '/r/group-0.sh'",
                 ]),
             ),
-            // A commit-msg hook refusing a fold group's commit.
+            // The same under TERM (git 2.43, Ubuntu 24.04): the `Executing:` echo
+            // carries a leading erase-line escape.
+            (
+                joined(&[
+                    "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\r\r\x1b[KExecuting: sh '/p/.git/gd-rebase-edit/group-0.sh'",
+                    EMPTY_GROUP_ERROR,
+                    "warning: execution failed: sh '/p/.git/gd-rebase-edit/group-0.sh'",
+                    "You can fix the problem, and then run",
+                    "",
+                    "  git rebase --continue",
+                ]),
+                joined(&[
+                    EMPTY_GROUP_ERROR,
+                    "warning: execution failed: sh '/p/.git/gd-rebase-edit/group-0.sh'",
+                ]),
+            ),
+            // A commit-msg hook refusing a group's commit.
             (
                 joined(&[
                     "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: sh '/r/group-0.sh'",
@@ -8119,8 +8468,67 @@ mod tests {
                     "warning: execution failed: sh '/r/group-0.sh'",
                 ]),
             ),
-            // An exec that committed, then left the tree dirty (a pre-commit hook that
-            // edits a file): the commit's summary and git's dirty-tree advice go.
+            // A conflict inside a group script.
+            (
+                joined(&[
+                    "Rebasing (2/5)\rRebasing (3/5)\rRebasing (4/5)\rRebasing (5/5)\rExecuting: sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                    "error: could not apply cd4b95f... two",
+                    "hint: after resolving the conflicts, mark the corrected paths",
+                    "hint: with 'git add <paths>' or 'git rm <paths>'",
+                    "hint: Disable this message with \"git config set advice.mergeConflict false\"",
+                    "error: cannot rebase: You have unstaged changes.",
+                    "error: additionally, your index contains uncommitted changes.",
+                    "warning: execution failed: sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                    "and made changes to the index and/or the working tree.",
+                    "You can fix the problem, and then run",
+                    "",
+                    "  git rebase --continue",
+                    "Auto-merging a.txt",
+                    "CONFLICT (content): Merge conflict in a.txt",
+                    "a.txt: needs merge",
+                ]),
+                joined(&[
+                    "error: could not apply cd4b95f... two",
+                    "warning: execution failed: sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                    "Auto-merging a.txt",
+                    "CONFLICT (content): Merge conflict in a.txt",
+                ]),
+            ),
+            // A group's pre-commit hook printing `git status`, then an INDENTED reason
+            // of its own: only git's indented shapes continue the block.
+            (
+                joined(&[
+                    "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                    "interactive rebase in progress; onto ce97f06",
+                    "Last commands done (4 commands done):",
+                    "   drop 9fa6fba ",
+                    "   exec sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                    "  (see more in file .git/rebase-merge/done)",
+                    "No commands remaining.",
+                    "You are currently rebasing branch 'main' on 'ce97f06'.",
+                    "  (all conflicts fixed: run \"git rebase --continue\")",
+                    "",
+                    "Changes to be committed:",
+                    "  (use \"git restore --staged <file>...\" to unstage)",
+                    "\tnew file:   x.txt",
+                    "\tnew file:   y.txt",
+                    "",
+                    "  \u{2716} eslint found 3 problems",
+                    "error: cannot rebase: Your index contains uncommitted changes.",
+                    "warning: execution failed: sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                    "and made changes to the index and/or the working tree.",
+                    "You can fix the problem, and then run",
+                    "",
+                    "  git rebase --continue",
+                ]),
+                joined(&[
+                    "  \u{2716} eslint found 3 problems",
+                    "warning: execution failed: sh '/r/.git/gd-rebase-edit/group-0.sh'",
+                ]),
+            ),
+            // Earlier engine: an exec that committed, then left the tree dirty (a
+            // pre-commit hook that edits a file): the commit's summary and git's
+            // dirty-tree advice go.
             (
                 joined(&[
                     "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: git cherry-pick -n ffa6155 && git commit --amend --no-edit",
@@ -8140,8 +8548,24 @@ mod tests {
                     "warning: execution succeeded: git cherry-pick -n ffa6155 && git commit --amend --no-edit",
                 ]),
             ),
-            // A hook that prints `git status` before its own reason: the status block
-            // ends at the first line that isn't git's, so the hook's reason stays.
+            // Every line shape of a commit's summary (git 2.51.1 `commit` output).
+            (
+                joined(&[
+                    "[detached HEAD 425de84] c1 add X",
+                    " Author: Author A <A@x>",
+                    " Date: Fri Jan 1 10:00:00 2021 +0200",
+                    " 1 file changed, 1 insertion(+)",
+                    " create mode 100644 x.txt",
+                    " delete mode 100644 y.txt",
+                    " rename a.txt => b.txt (100%)",
+                    " copy c.txt => d.txt (100%)",
+                    " mode change 100644 => 100755 run.sh",
+                    "warning: execution succeeded: sh '/r/group-0.sh'",
+                ]),
+                joined(&["warning: execution succeeded: sh '/r/group-0.sh'"]),
+            ),
+            // Earlier engine: a hook that prints `git status` before its own
+            // unindented reason.
             (
                 joined(&[
                     "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: git cherry-pick -n 8794a9d && git commit --amend --no-edit",
@@ -8178,13 +8602,13 @@ mod tests {
     }
 
     /// A rebase left in progress keeps git's hints and advice, which stay true; only
-    /// the progress counters go.
+    /// the progress counters (and a leading erase-line escape) go.
     #[test]
     fn live_rebase_reports_drop_only_progress() {
-        let report = "Rebasing (2/3)\rerror: could not apply 328946b... two\nhint: Resolve all conflicts manually, mark them as resolved with\nYou can fix the problem, and then run\n\n  git rebase --continue";
+        let report = "Rebasing (2/3)\r\r\x1b[KExecuting: sh '/r/group-0.sh'\nerror: could not apply 328946b... two\nhint: Resolve all conflicts manually, mark them as resolved with\nYou can fix the problem, and then run\n\n  git rebase --continue";
         assert_eq!(
             strip_rebase_progress(report),
-            "error: could not apply 328946b... two\nhint: Resolve all conflicts manually, mark them as resolved with\nYou can fix the problem, and then run\n\n  git rebase --continue"
+            "\nExecuting: sh '/r/group-0.sh'\nerror: could not apply 328946b... two\nhint: Resolve all conflicts manually, mark them as resolved with\nYou can fix the problem, and then run\n\n  git rebase --continue"
         );
     }
 
@@ -8499,7 +8923,7 @@ mod tests {
     /// message-less fixup's `-C` commit) and keep the leader's author; the edit path's
     /// amend and fixups run none.
     #[tokio::test]
-    async fn replay_amends_run_commit_hooks_and_the_edit_path_skips_them() {
+    async fn replay_commits_run_commit_hooks_and_the_edit_path_skips_them() {
         let hook = "echo 'Hooked: yes' >> \"$1\"";
         let marker = "touch \"$(git rev-parse --git-dir)/pre-commit-ran\"";
         let plan = |c: &[String]| {
@@ -8757,8 +9181,21 @@ mod tests {
         };
         assert_eq!(files.len(), 3, "{files:?}");
         let empty_net = format!(
-            "if 'git' diff --cached --quiet; then echo '{EMPTY_GROUP_ERROR}' >&2; exit 1; fi\n"
+            "if 'git' diff --cached --quiet --ignore-submodules=none; \
+             then echo '{EMPTY_GROUP_ERROR}' >&2; exit 1; fi\n"
         );
+        let mappings = |members: &[&str]| {
+            let mut lines = String::from(
+                "new=$('git' rev-parse HEAD)\n\
+                 list=$('git' rev-parse --git-path rebase-merge/rewritten-list)\n",
+            );
+            for m in members {
+                lines.push_str(&format!(
+                    "printf '%s %s\\n' \"$('git' rev-parse {m})\" \"$new\" >> \"$list\"\n"
+                ));
+            }
+            lines
+        };
         assert_eq!(
             file("d/group-0.sh"),
             format!(
@@ -8767,7 +9204,9 @@ mod tests {
                  'git' cherry-pick -n a2\n\
                  'git' cherry-pick -n a3\n\
                  {empty_net}\
-                 'git' commit -C a1\n"
+                 'git' commit -C a1\n\
+                 {}",
+                mappings(&["a1", "a2", "a3"])
             )
         );
         assert_eq!(
@@ -8779,8 +9218,10 @@ mod tests {
                  {empty_net}\
                  GIT_AUTHOR_NAME=\"$('git' log -1 --no-show-signature --format=%an b1)\" \
                  GIT_AUTHOR_EMAIL=\"$('git' log -1 --no-show-signature --format=%ae b1)\" \
-                 GIT_AUTHOR_DATE=\"$('git' log -1 --no-show-signature --format=%ad --date=raw b1)\" \
-                 'git' commit -F 'd/msg-1'\n"
+                 GIT_AUTHOR_DATE=\"$('git' log -1 --no-show-signature --format=%aI b1)\" \
+                 'git' commit -F 'd/msg-1'\n\
+                 {}",
+                mappings(&["b1", "b2"])
             )
         );
         assert_eq!(file("d/msg-1"), "squashed");
