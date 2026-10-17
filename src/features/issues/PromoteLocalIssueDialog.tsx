@@ -127,8 +127,9 @@ export function PromoteLocalIssueDialog({
     });
   }, [canPublishForge, canPublishJira]);
 
-  // The destination of the promote in flight, so its hold reason can't follow a
-  // force-switched toggle.
+  // The promote in flight: its destination, so the hold reason can't follow a
+  // force-switched toggle, and its issue, since the host reuses this dialog
+  // across local issues and another issue's publish must not freeze this count.
   const [pendingPub, setPendingPub] = useState<{
     to: Destination;
     issueId: string;
@@ -242,7 +243,7 @@ export function PromoteLocalIssueDialog({
       // the Issues tab shows it (and any stale remote selection is cleared) before
       // navigating to it.
       if (stillOnThisIssue(live)) {
-        // Every close commits before the finally's `setPendingPub(null)`
+        // A settle's close must commit before the finally's `setPendingPub(null)`
         // renders while open, or the twins retain the cleared state.
         flushSync(() => onOpenChange(false));
         setLens("origin");
