@@ -127,9 +127,9 @@ export function PromoteLocalIssueDialog({
     });
   }, [canPublishForge, canPublishJira]);
 
-  // The promote in flight: its destination and the comments it carries, so its
-  // dialog keeps showing that run whatever the toggles do meanwhile, and its
-  // issue, since the host reuses this dialog across local issues.
+  // The promote in flight: its destination and carried comment count, which its
+  // dialog keeps showing while the shared toggles change or its back-link lands,
+  // and its issue, since the host reuses this dialog across local issues.
   const [pendingPub, setPendingPub] = useState<{
     to: Destination;
     issueId: string;
