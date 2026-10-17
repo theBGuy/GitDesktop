@@ -5096,7 +5096,7 @@ async fn read_head_name(repo: &str) -> AppResult<String> {
 }
 
 /// The rebase todo for `steps` and `dropped`, and the files its `exec` lines read
-/// (path, content) under `dir`: message files and fold-group scripts. It opens with
+/// (path, content) under `dir`: message files and the replay's scripts. It opens with
 /// `break`, so the rebase pauses on `base` before any pick and the start-tip gate can
 /// run; drops are explicit lines, since `missingCommitsCheck=error` refuses a bare
 /// omission.
@@ -5104,7 +5104,8 @@ async fn read_head_name(repo: &str) -> AppResult<String> {
 /// On the replay route a fold group drops every one of its commits and runs ONE
 /// generated script ([`group_script`]) instead of picking its leader: a picked leader
 /// whose change is already present stops as an empty pick, and an inline exec chain
-/// is cut by git's `sh -c` at ~8 KiB (87+ folds, measured on Windows).
+/// is cut by git's `sh -c` at ~8 KiB (87+ folds, measured on Windows). A replay
+/// reword amends through its own script too ([`reword_script`]).
 fn rebase_todo(
     route: TodoRoute,
     steps: &[RewriteStep],
@@ -5144,7 +5145,9 @@ fn rebase_todo(
             TodoRoute::Replay => {
                 todo.push_str(&format!("pick {leader}\n"));
                 if let Some(file) = message_file {
-                    todo.push_str(&format!("exec {git} commit --amend -F {file}\n"));
+                    let script = dir.join(format!("reword-{i}.sh"));
+                    todo.push_str(&format!("exec sh {}\n", sh_quote(&shell_path(&script))));
+                    files.push((script, reword_script(&git, &file)));
                 }
             }
             TodoRoute::Edit => {
@@ -5178,8 +5181,10 @@ const EMPTY_GROUP_ERROR: &str =
 /// - The empty-net check passes `--ignore-submodules=none`: `.gitmodules` `ignore=all`
 ///   would otherwise hide a gitlink-only group, and a `-c` override doesn't outrank it.
 /// - The author captures pass `--no-show-signature` (`log.showSignature` would splice
-///   gpg output into them) and take the date as `%aI`: git refuses a raw date before
-///   1973 as GIT_AUTHOR_DATE.
+///   gpg output into them) and take the date in git's own `@<seconds> <tz>` form,
+///   which round-trips every date (ISO 8601 breaks from 2100 on, and a plain raw
+///   date before 1973). Each is its own assignment: `set -e` can't see a failure
+///   inside a command's prefix assignment.
 /// - Each member's old → new line goes to the sequencer's rewritten-list, which git
 ///   reads at the finish for notes rewriting and post-rewrite; dropped members are
 ///   otherwise missing from it.
@@ -5195,9 +5200,10 @@ fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<
     match message_file {
         None => script.push_str(&format!("{git} commit -C {leader}\n")),
         Some(file) => script.push_str(&format!(
-            "GIT_AUTHOR_NAME=\"$({git} log -1 --no-show-signature --format=%an {leader})\" \
-             GIT_AUTHOR_EMAIL=\"$({git} log -1 --no-show-signature --format=%ae {leader})\" \
-             GIT_AUTHOR_DATE=\"$({git} log -1 --no-show-signature --format=%aI {leader})\" \
+            "n=$({git} log -1 --no-show-signature --format=%an {leader})\n\
+             e=$({git} log -1 --no-show-signature --format=%ae {leader})\n\
+             d=$({git} log -1 --no-show-signature --date=raw --format=@%ad {leader})\n\
+             GIT_AUTHOR_NAME=\"$n\" GIT_AUTHOR_EMAIL=\"$e\" GIT_AUTHOR_DATE=\"$d\" \
              {git} commit -F {file}\n"
         )),
     }
@@ -5211,6 +5217,24 @@ fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<
         ));
     }
     script
+}
+
+/// The sh script a replay reword runs (LF only) after its pick: it amends with the new
+/// message, then points the pick's rewritten-list line at the amended commit. git
+/// records that line before the exec, so it would otherwise send the pick's notes and
+/// post-rewrite to the orphaned pre-amend commit; `--no-post-rewrite` leaves the
+/// finish's mapping as the only one. The commit hooks still run. A temp file and `mv`
+/// stand in for `sed -i`, whose syntax differs between GNU and BSD sed.
+fn reword_script(git: &str, message_file: &str) -> String {
+    format!(
+        "set -e\n\
+         pre=$({git} rev-parse HEAD)\n\
+         {git} commit --amend --no-post-rewrite -F {message_file}\n\
+         new=$({git} rev-parse HEAD)\n\
+         list=$({git} rev-parse --git-path rebase-merge/rewritten-list)\n\
+         if [ -f \"$list\" ]; then sed \"s/ $pre\\$/ $new/\" \"$list\" > \"$list.gd-tmp\" \
+         && mv \"$list.gd-tmp\" \"$list\"; fi\n"
+    )
 }
 
 /// The replay's `rebase --continue` budget: one bound for the whole plan, which that
@@ -5452,7 +5476,7 @@ fn is_status_line(segment: &str) -> bool {
         "merge",
         "update-ref",
     ];
-    const STATUS: [&str; 15] = [
+    const STATUS: [&str; 17] = [
         "Last command done",
         "Last commands done",
         "Next command to do",
@@ -5467,6 +5491,8 @@ fn is_status_line(segment: &str) -> bool {
         "nothing to commit",
         "nothing added to commit",
         "no changes added to commit",
+        "Untracked files not listed",
+        "Ignored files:",
         "interactive rebase in progress;",
     ];
     let trimmed = segment.trim();
@@ -5497,8 +5523,8 @@ fn is_stale_after_rollback(segment: &str) -> bool {
     const DIRTY_TREE: [&str; 4] = [
         "error: cannot rebase:",
         "error: additionally, your index contains uncommitted changes.",
-        "and made changes to the index and/or the working tree.",
-        "but left changes to the index and/or the working tree.",
+        "and made changes to the index and/or the working tree",
+        "but left changes to the index and/or the working tree",
     ];
     const SUMMARY: [&str; 7] = [
         "Author: ",
@@ -7287,46 +7313,123 @@ mod tests {
         );
     }
 
-    /// A message group keeps a leader's author date from before 1973, which git
-    /// refuses in its raw `<seconds> <tz>` form.
+    /// A message group keeps its leader's exact author date at the edges git's other
+    /// date forms break on: before 1973 (raw seconds), from 2100 on (ISO 8601), and
+    /// the first hours of 1970 at a negative offset.
     #[tokio::test]
-    async fn a_message_group_keeps_a_pre_1973_author_date() {
-        let (dir, repo) = setup_repo("old-date").await;
-        let base = rev(&repo, "HEAD").await;
-        std::fs::write(dir.path().join("1.txt"), "1\n").unwrap();
-        git(&repo, &["add", "."]).await;
-        git(
-            &repo,
-            &["commit", "--date", "1971-06-15T12:00:00+05:30", "-m", "old"],
-        )
-        .await;
-        let leader = rev(&repo, "HEAD").await;
-        commit_file(&repo, dir.path(), "2.txt", "2\n", "new").await;
-        let fold = rev(&repo, "HEAD").await;
-        let date = |r: &str| {
-            let repo = repo.clone();
-            let r = r.to_string();
-            async move { git(&repo, &["log", "-1", "--format=%aI", &r]).await }
-        };
-        let before = date(&leader).await;
-        assert_eq!(before.trim(), "1971-06-15T12:00:00+05:30");
+    async fn a_message_group_keeps_its_leaders_author_date_at_the_edges() {
+        for (i, when) in [
+            "@45815400 +0530",   // 1971-06-15T12:00:00+05:30
+            "@4102444800 +0000", // 2100-01-01T00:00:00Z
+            "@0 -0500",          // 1969-12-31T19:00:00-05:00
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (dir, repo) = setup_repo(&format!("edge-date-{i}")).await;
+            let base = rev(&repo, "HEAD").await;
+            std::fs::write(dir.path().join("1.txt"), "1\n").unwrap();
+            git(&repo, &["add", "."]).await;
+            // Through the env in git's raw form, the only one that sets all three:
+            // `--date` refuses the pre-epoch one and ISO 8601 refuses 2100.
+            let out = run_git_raw_env(
+                Some(&repo),
+                &["commit", "-m", "old"],
+                &[("GIT_AUTHOR_DATE", when)],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_eq!(out.code, 0, "{when}: {}", out.full_failure_text());
+            let leader = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "2.txt", "2\n", "new").await;
+            let fold = rev(&repo, "HEAD").await;
+            let date = |r: &str| {
+                let repo = repo.clone();
+                let r = r.to_string();
+                async move { git(&repo, &["log", "-1", "--date=raw", "--format=%ad", &r]).await }
+            };
+            let before = date(&leader).await;
 
-        let state = AppState::default();
-        rewrite_commits(
-            &state,
-            &repo,
-            &base,
-            &[RewriteStep {
-                hashes: vec![leader, fold],
-                message: Some("combined".into()),
+            let state = AppState::default();
+            rewrite_commits(
+                &state,
+                &repo,
+                &base,
+                &[RewriteStep {
+                    hashes: vec![leader, fold],
+                    message: Some("combined".into()),
+                    edit: false,
+                }],
+                &[],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{when}: {e}"));
+            assert_eq!(subjects(&repo).await, vec!["combined", "base"], "{when}");
+            assert_eq!(date("HEAD").await, before, "{when}");
+        }
+    }
+
+    /// Installs a post-rewrite hook that logs its argument and stdin, and turns on
+    /// notes rewriting; returns the log's path.
+    async fn track_rewrites(repo: &str) -> std::path::PathBuf {
+        git(repo, &["config", "notes.rewriteRef", "refs/notes/commits"]).await;
+        log_post_rewrite(repo);
+        git_dir_of(repo).await.join("post-rewrite-log")
+    }
+
+    /// A replay reword sends its commit's note and post-rewrite mapping to the FINAL
+    /// reworded commit, whether its pick fast-forwards or not.
+    #[tokio::test]
+    async fn a_replay_reword_maps_its_commit_to_the_final_one() {
+        for fast_forward in [true, false] {
+            let (dir, repo) = setup_repo(&format!("reword-mapping-{fast_forward}")).await;
+            let base = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+            let c1 = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "2.txt", "2\n", "two").await;
+            let x = rev(&repo, "HEAD").await;
+            git(&repo, &["notes", "add", "-m", "note-x", &x]).await;
+            let log = track_rewrites(&repo).await;
+            let reword = RewriteStep {
+                hashes: vec![x.clone()],
+                message: Some("reworded".into()),
                 edit: false,
-            }],
-            &[],
-        )
-        .await
-        .unwrap();
-        assert_eq!(subjects(&repo).await, vec!["combined", "base"]);
-        assert_eq!(date("HEAD").await, before);
+            };
+            // Fast-forward: every pick replays onto its own parent. Otherwise "one" is
+            // dropped, so "two" is picked onto a new parent.
+            let (steps, dropped) = if fast_forward {
+                (vec![pick(&c1), reword], vec![])
+            } else {
+                (vec![reword], vec![c1.clone()])
+            };
+            let state = AppState::default();
+            rewrite_commits(&state, &repo, &base, &steps, &dropped)
+                .await
+                .unwrap();
+            let head = rev(&repo, "HEAD").await;
+            assert_eq!(
+                subjects(&repo).await.first().map(String::as_str),
+                Some("reworded")
+            );
+            assert_eq!(
+                git(&repo, &["notes", "show", "HEAD"]).await.trim(),
+                "note-x",
+                "ff={fast_forward}: the note follows to the final commit"
+            );
+            let log = std::fs::read_to_string(&log).expect("post-rewrite ran");
+            assert!(log.starts_with("post-rewrite rebase\n"), "{log}");
+            let mapped: Vec<&str> = log
+                .lines()
+                .filter_map(|l| l.strip_prefix(&format!("{x} ")))
+                .collect();
+            assert_eq!(mapped, vec![head.as_str()], "ff={fast_forward}: {log}");
+            let amend_events = log
+                .lines()
+                .filter(|l| l.starts_with("post-rewrite amend"))
+                .count();
+            assert_eq!(amend_events, 0, "{log}");
+        }
     }
 
     /// A conflict ON the `edit` line hands off to the banner like any conflict, and
@@ -8595,6 +8698,67 @@ mod tests {
                     "warning: execution failed: git cherry-pick -n 8794a9d && git commit --amend --no-edit",
                 ]),
             ),
+            // git 2.34.1 (Ubuntu 22.04): an exec that failed, then one that succeeded,
+            // each leaving the tree dirty; this git prints the continuations without
+            // their period.
+            (
+                joined(&[
+                    "Rebasing (2/3)\rRebasing (3/3)\r\r\x1b[KExecuting: sh -c 'echo x >> b.txt; exit 1'",
+                    "error: cannot rebase: You have unstaged changes.",
+                    "warning: execution failed: sh -c 'echo x >> b.txt; exit 1'",
+                    "and made changes to the index and/or the working tree",
+                    "You can fix the problem, and then run",
+                    "",
+                    "  git rebase --continue",
+                ]),
+                joined(&["warning: execution failed: sh -c 'echo x >> b.txt; exit 1'"]),
+            ),
+            (
+                joined(&[
+                    "Rebasing (2/3)\rRebasing (3/3)\r\r\x1b[KExecuting: sh -c 'echo x >> b.txt'",
+                    "error: cannot rebase: You have unstaged changes.",
+                    "warning: execution succeeded: sh -c 'echo x >> b.txt'",
+                    "but left changes to the index and/or the working tree",
+                    "Commit or stash your changes, and then run",
+                    "",
+                    "  git rebase --continue",
+                ]),
+                joined(&["warning: execution succeeded: sh -c 'echo x >> b.txt'"]),
+            ),
+            // A group's hook printing `git status` under status.showUntrackedFiles=no,
+            // then its own reason.
+            (
+                joined(&[
+                    "Rebasing (2/4)\rRebasing (3/4)\rRebasing (4/4)\rExecuting: sh '/r/group-0.sh'",
+                    "interactive rebase in progress; onto cda714e",
+                    "Last commands done (4 commands done):",
+                    "   drop 0ab37aa ",
+                    "   exec sh '/r/group-0.sh'",
+                    "  (see more in file .git/rebase-merge/done)",
+                    "No commands remaining.",
+                    "You are currently rebasing branch 'main' on 'cda714e'.",
+                    "  (all conflicts fixed: run \"git rebase --continue\")",
+                    "",
+                    "Changes to be committed:",
+                    "  (use \"git restore --staged <file>...\" to unstage)",
+                    "\tnew file:   1.txt",
+                    "\tnew file:   2.txt",
+                    "",
+                    "Untracked files not listed (use -u option to show untracked files)",
+                    "Ignored files:",
+                    "lint: 2 files need formatting",
+                    "error: cannot rebase: Your index contains uncommitted changes.",
+                    "warning: execution failed: sh '/r/group-0.sh'",
+                    "and made changes to the index and/or the working tree.",
+                    "You can fix the problem, and then run",
+                    "",
+                    "  git rebase --continue",
+                ]),
+                joined(&[
+                    "lint: 2 files need formatting",
+                    "warning: execution failed: sh '/r/group-0.sh'",
+                ]),
+            ),
         ];
         for (report, kept) in cases {
             assert_eq!(strip_rebase_noise(&report), kept);
@@ -9068,7 +9232,7 @@ mod tests {
             edit: false,
         };
         let dir = std::path::Path::new("C:/it's dir");
-        let (todo, messages) = rebase_todo(
+        let (todo, files) = rebase_todo(
             TodoRoute::Replay,
             &[step],
             &[],
@@ -9077,10 +9241,21 @@ mod tests {
         );
         assert_eq!(
             todo,
-            "break\npick aaaa\nexec 'C:/Program Files/Git/cmd/git.exe' commit --amend -F 'C:/it'\\''s dir/msg-0'\n"
+            "break\npick aaaa\nexec sh 'C:/it'\\''s dir/reword-0.sh'\n"
         );
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].1, "reworded");
+        assert_eq!(files.len(), 2);
+        let script = files
+            .iter()
+            .find(|(path, _)| shell_path(path).ends_with("reword-0.sh"))
+            .map(|(_, content)| content.as_str())
+            .unwrap();
+        assert!(
+            script.contains(
+                "'C:/Program Files/Git/cmd/git.exe' commit --amend --no-post-rewrite -F 'C:/it'\\''s dir/msg-0'\n"
+            ),
+            "{script}"
+        );
+        assert!(files.iter().any(|(_, content)| content == "reworded"));
         let env = rebase_editor_env("C:/it's dir/todo");
         assert_eq!(env[0].1, r"cp 'C:/it'\''s dir/todo'");
     }
@@ -9160,6 +9335,11 @@ mod tests {
                 message: None,
                 edit: false,
             },
+            RewriteStep {
+                hashes: vec!["d1".into()],
+                message: Some("reworded".into()),
+                edit: false,
+            },
         ];
         let dir = std::path::Path::new("d");
         let (replay, files) = rebase_todo(TodoRoute::Replay, &steps, &[], dir, "git");
@@ -9170,7 +9350,9 @@ mod tests {
              exec sh 'd/group-0.sh'\n\
              drop b1\ndrop b2\n\
              exec sh 'd/group-1.sh'\n\
-             pick c1\n"
+             pick c1\n\
+             pick d1\n\
+             exec sh 'd/reword-3.sh'\n"
         );
         let file = |name: &str| {
             files
@@ -9179,7 +9361,7 @@ mod tests {
                 .map(|(_, content)| content.as_str())
                 .unwrap_or_else(|| panic!("no {name} in {files:?}"))
         };
-        assert_eq!(files.len(), 3, "{files:?}");
+        assert_eq!(files.len(), 5, "{files:?}");
         let empty_net = format!(
             "if 'git' diff --cached --quiet --ignore-submodules=none; \
              then echo '{EMPTY_GROUP_ERROR}' >&2; exit 1; fi\n"
@@ -9216,15 +9398,27 @@ mod tests {
                  'git' cherry-pick -n b1\n\
                  'git' cherry-pick -n b2\n\
                  {empty_net}\
-                 GIT_AUTHOR_NAME=\"$('git' log -1 --no-show-signature --format=%an b1)\" \
-                 GIT_AUTHOR_EMAIL=\"$('git' log -1 --no-show-signature --format=%ae b1)\" \
-                 GIT_AUTHOR_DATE=\"$('git' log -1 --no-show-signature --format=%aI b1)\" \
+                 n=$('git' log -1 --no-show-signature --format=%an b1)\n\
+                 e=$('git' log -1 --no-show-signature --format=%ae b1)\n\
+                 d=$('git' log -1 --no-show-signature --date=raw --format=@%ad b1)\n\
+                 GIT_AUTHOR_NAME=\"$n\" GIT_AUTHOR_EMAIL=\"$e\" GIT_AUTHOR_DATE=\"$d\" \
                  'git' commit -F 'd/msg-1'\n\
                  {}",
                 mappings(&["b1", "b2"])
             )
         );
         assert_eq!(file("d/msg-1"), "squashed");
+        assert_eq!(file("d/msg-3"), "reworded");
+        assert_eq!(
+            file("d/reword-3.sh"),
+            "set -e\n\
+             pre=$('git' rev-parse HEAD)\n\
+             'git' commit --amend --no-post-rewrite -F 'd/msg-3'\n\
+             new=$('git' rev-parse HEAD)\n\
+             list=$('git' rev-parse --git-path rebase-merge/rewritten-list)\n\
+             if [ -f \"$list\" ]; then sed \"s/ $pre\\$/ $new/\" \"$list\" > \"$list.gd-tmp\" \
+             && mv \"$list.gd-tmp\" \"$list\"; fi\n"
+        );
         assert!(!files.iter().any(|(_, c)| c.contains('\r')), "LF only");
         let (edit, _) = rebase_todo(TodoRoute::Edit, &steps, &[], dir, "git");
         assert_eq!(
@@ -9233,7 +9427,9 @@ mod tests {
              pick a1\nfixup a2\nfixup a3\n\
              pick b1\nfixup b2\n\
              exec 'git' commit --amend --no-verify -F 'd/msg-1'\n\
-             pick c1\n"
+             pick c1\n\
+             pick d1\n\
+             exec 'git' commit --amend --no-verify -F 'd/msg-3'\n"
         );
     }
 
