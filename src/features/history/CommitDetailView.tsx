@@ -69,6 +69,7 @@ import {
   type MergeParentOp,
   revertCommitConfirm,
 } from "./commit-confirms";
+import { headAgrees } from "./editable-set";
 import { FileRowActions } from "./FileRowActions";
 import { MergeParentDialog, type MergePickTarget } from "./HistoryDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
@@ -253,10 +254,11 @@ export function CommitDetailView({
   >(null);
   const prefetchFileDiff = usePrefetchCommitFileDiff(repoPath);
   const hoverPrefetch = useHoverPrefetch();
-  const isLatest = log.data?.pages[0]?.[0]?.hash === hash;
+  const logTop = log.data?.pages[0]?.[0]?.hash;
+  const isLatest = logTop === hash;
   // Amend needs the log top AND status HEAD: an outside commit reaches status
   // first, and amending in that window would rewrite it.
-  const isHead = isLatest && hash === status.data?.branch?.oid;
+  const isHead = isLatest && headAgrees(logTop, status.data?.branch?.oid);
   const onError = (e: unknown) => toastError(e);
 
   if (details.isPending || files.isPending) {

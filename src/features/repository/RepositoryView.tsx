@@ -58,7 +58,7 @@ import { DiscussionView } from "@/features/discussions/DiscussionView";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { BlameFilePickerDialog } from "@/features/history/BlameFilePickerDialog";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
-import { HistoryPanel } from "@/features/history/HistoryPanel";
+import { HistoryPanel, StatusLogSync } from "@/features/history/HistoryPanel";
 import { IssuesPanel } from "@/features/issues/IssuesPanel";
 import { JiraIssueView } from "@/features/issues/JiraIssueView";
 import { LocalIssueView } from "@/features/issues/LocalIssueView";
@@ -797,6 +797,9 @@ export function RepositoryView() {
       <OpRecoveryBanner repoPath={repoPath} />
       <WorktreeRemovalBanner repoPath={repoPath} />
       <PrCreateBanner repoPath={repoPath} />
+      {/* Outside every TabPanel: a hidden tab's <Activity> pauses effects, and
+          the log must follow HEAD for readers on whichever tab is shown. */}
+      <StatusLogSync key={repoPath} repoPath={repoPath} />
       <div className="flex min-h-0 flex-1">
         {/* The sidebar shares the window's shrink with the content pane: it
             gives up width down to a 288px floor (the narrowest that still fits

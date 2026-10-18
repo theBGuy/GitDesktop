@@ -155,8 +155,9 @@ export function useCommitSubmit(
   // observer has no listeners.
   async function doCommit() {
     // Belt for a gate that flipped under an open surface: `canCommit` disables
-    // the button and hotkey, but the rules can settle to "locked" between the
-    // render that enabled them and the click.
+    // the button and hotkey, but between the render that enabled them and the
+    // press the rules can settle to "locked", or a status read can move HEAD
+    // off the amend target.
     if (rulesSettling || locked || headMoved) return;
     const commitTitle = title.trim();
     // Trailers must be the final paragraph of the message.
