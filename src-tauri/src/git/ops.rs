@@ -652,7 +652,7 @@ pub(crate) async fn git_reset_core_expecting(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
     // Identity before tree state: a dirty-tree refusal would mislead when the real
     // problem is a tip the user never saw. A non-zero exit is an unborn HEAD.
-    if let Some(expected) = expected_head.filter(|_| hard) {
+    if let Some(expected) = expected_head {
         let current =
             run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
         if current.code != 0 || current.stdout_lossy().trim() != expected {

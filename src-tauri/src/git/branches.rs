@@ -1685,15 +1685,16 @@ fn parse_cherry_counts(text: &str) -> Option<(u32, u32, u32)> {
 /// nothing local is unique. Never touches a working tree, so it is the NON-current-branch
 /// half of the reset story; the current branch goes through `git_reset` in `--hard` mode.
 ///
-/// Refused with the holding worktree named when the branch is checked out, rebased or
-/// bisected ANYWHERE, a linked worktree or this checkout itself. The ref moves by
-/// `update-ref`, which refuses none of these, so those probes fail closed.
+/// Refused with the holding worktree named when the branch is checked out, rebased,
+/// bisected, or listed for a stacked `rebase --update-refs` ANYWHERE, a linked worktree
+/// or this checkout itself. The ref moves by `update-ref`, which refuses none of these,
+/// so those probes fail closed.
 ///
 /// Two measured shas pin the move: `expected_tip`, the upstream tip the user was shown
 /// (a background fetch that moved it refuses), and `expected_local_tip`, the branch's own
 /// tip then (an outside commit refuses rather than being dropped). The guards and the
-/// compare-and-swap share one working-tree hold, so only another process checking the
-/// branch out between the probe and the swap can slip past the probes.
+/// compare-and-swap share one working-tree hold, so only another process checking out,
+/// rebasing or bisecting the branch between the probe and the swap can slip past them.
 #[tauri::command]
 pub async fn git_branch_reset_to_upstream(
     state: State<'_, AppState>,

@@ -184,6 +184,23 @@ struct UndoLastCommitArgs {
     expected_head: Option<String>,
 }
 
+/// An `expectedHead` in the form the core compares: a full commit id, lowercased. An
+/// abbreviated or malformed pin could only ever miss that compare, and the miss would
+/// report a moved HEAD that never moved.
+fn full_commit_id(expected_head: Option<String>) -> Result<Option<String>, McpError> {
+    let Some(id) = expected_head else {
+        return Ok(None);
+    };
+    if !matches!(id.len(), 40 | 64) || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(McpError::invalid_params(
+            "expectedHead must be a full commit id (40 or 64 hex characters), as log and \
+             repo_status report it",
+            None,
+        ));
+    }
+    Ok(Some(id.to_ascii_lowercase()))
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct CreateBranchArgs {
     /// The new branch name.
@@ -599,8 +616,9 @@ impl GitDesktopMcp {
     #[tool(
         description = "Create a commit from the staged changes in the bound repository. With \
                        `amend`, rewrites the previous commit instead. With `amend`, an optional \
-                       `expectedHead` makes the amend run only while HEAD is still that commit. \
-                       Returns the new commit hash as JSON. Requires --allow-git-write.",
+                       `expectedHead` (a full commit id) makes the amend run only while HEAD is \
+                       still that commit. Returns the new commit hash as JSON. Requires \
+                       --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn commit(
@@ -608,6 +626,12 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        // The core consults the pin only for an amend, so only an amend validates it.
+        let expected_head = if args.amend {
+            full_commit_id(args.expected_head)?
+        } else {
+            None
+        };
         // A session that predates canonicalization journaled its paused picks under the
         // RAW `--repo` spelling, which `git_commit_core_expecting`'s close — keyed on the canonical
         // path — cannot reach. Mirror that close's gate here for the second spelling,
@@ -626,7 +650,7 @@ impl GitDesktopMcp {
             args.message,
             args.body,
             args.amend,
-            args.expected_head,
+            expected_head,
         )
         .await
         .map_err(app_err)?;
@@ -641,8 +665,10 @@ impl GitDesktopMcp {
     #[tool(
         description = "Undo the most recent commit, keeping its changes staged (a SOFT reset — no \
                        work is lost, the changes return to the index). A root commit has no parent, \
-                       so its branch ref is removed instead. An optional `expectedHead` makes the \
-                       undo run only while the latest commit is still that id. Requires \
+                       so its branch ref is removed instead; with HEAD detached there, or at a \
+                       shallow clone's boundary commit, it refuses: there is nothing to undo \
+                       onto. An optional `expectedHead` (a full commit id) makes the undo run \
+                       only while the latest commit is still that id. Requires \
                        --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -651,14 +677,11 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<UndoLastCommitArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
+        let expected_head = full_commit_id(args.expected_head)?;
         let _promote = self.promote_gate().await?;
-        crate::git::commit::git_undo_commit_core(
-            &self.state,
-            self.repo.clone(),
-            args.expected_head,
-        )
-        .await
-        .map_err(app_err)?;
+        crate::git::commit::git_undo_commit_core(&self.state, self.repo.clone(), expected_head)
+            .await
+            .map_err(app_err)?;
         ok_text("last commit undone (changes kept staged)")
     }
 
@@ -1966,6 +1989,62 @@ mod tests {
         h.undo_last_commit(Parameters(args(serde_json::json!({ "expectedHead": b }))))
             .await
             .expect("the current HEAD undoes");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), a);
+    }
+
+    /// An abbreviated pin is a malformed argument, never "the latest commit changed";
+    /// an uppercase full id is the same commit and amends.
+    #[tokio::test]
+    async fn mcp_amend_requires_a_full_expected_head() {
+        let (_dir, repo, _a, b) = two_commit_repo("gd-mcp-amend-full-").await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, false);
+        let args = |expected: &str| {
+            serde_json::from_value::<CommitArgs>(serde_json::json!({
+                "message": "B reworded",
+                "amend": true,
+                "expectedHead": expected,
+            }))
+            .unwrap()
+        };
+
+        let err = h
+            .commit(Parameters(args(&b[..12])))
+            .await
+            .expect_err("an abbreviated pin is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("must be a full commit id"), "{msg}");
+        assert!(!msg.contains("nothing was amended"), "{msg}");
+        assert_eq!(subjects(&repo).await, ["B", "A"]);
+
+        h.commit(Parameters(args(&b.to_uppercase())))
+            .await
+            .expect("an uppercase full id is the same commit");
+        assert_eq!(subjects(&repo).await, ["B reworded", "A"]);
+    }
+
+    #[tokio::test]
+    async fn mcp_undo_requires_a_full_expected_head() {
+        let (_dir, repo, a, b) = two_commit_repo("gd-mcp-undo-full-").await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, false);
+        let args = |expected: &str| {
+            serde_json::from_value::<UndoLastCommitArgs>(serde_json::json!({
+                "expectedHead": expected,
+            }))
+            .unwrap()
+        };
+
+        let err = h
+            .undo_last_commit(Parameters(args(&b[..12])))
+            .await
+            .expect_err("an abbreviated pin is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("must be a full commit id"), "{msg}");
+        assert!(!msg.contains("nothing was undone"), "{msg}");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), b);
+
+        h.undo_last_commit(Parameters(args(&b.to_uppercase())))
+            .await
+            .expect("an uppercase full id is the same commit");
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), a);
     }
 

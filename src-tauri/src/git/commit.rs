@@ -329,8 +329,8 @@ const UNDO_HEAD_MOVED: &str = "The latest commit changed — nothing was undone.
 /// The refusal for a detached HEAD at a parentless commit: `update-ref -d HEAD`
 /// there deletes `.git/HEAD` itself and git stops recognizing the repository
 /// (measured, git 2.51.1).
-/// KEEP IN STEP: HistoryPanel.tsx's `UNDO_DETACHED_ROOT` explains the disabled menu
-/// item with this exact sentence.
+/// KEEP IN STEP: HistoryPanel.tsx's `UNDO_DETACHED_ROOT` toasts this exact sentence on
+/// the hotkey and palette routes; its menu item shows a short form.
 const UNDO_DETACHED_ROOT: &str =
     "HEAD is detached at the repository's first commit — nothing to undo onto.";
 
