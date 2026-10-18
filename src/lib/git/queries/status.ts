@@ -16,11 +16,16 @@ export function repoStatusOptions(repo: string) {
   };
 }
 
+/** The status poll, for observers that narrow the read with `select`. */
+export const repoStatusPoll = {
+  refetchInterval: 5000,
+  refetchIntervalInBackground: false,
+} as const;
+
 export function useRepoStatus(repo: string) {
   return useQuery({
     ...repoStatusOptions(repo),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
+    ...repoStatusPoll,
   });
 }
 

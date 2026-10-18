@@ -7,7 +7,7 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { gitCommitDetails } from "@/lib/git/api";
-import { repoStatusOptions } from "@/lib/git/queries";
+import { repoStatusOptions, repoStatusPoll } from "@/lib/git/queries";
 import type { RepoStatus } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -70,11 +70,9 @@ const selectAmendBranch = (s: RepoStatus) => ({
  * that dialog at the call site.
  */
 export function useAmendWithConfirm(repoPath: string) {
-  // The same poll `useRepoStatus` runs, narrowed by `select`.
   const branch = useQuery({
     ...repoStatusOptions(repoPath),
-    refetchInterval: 5000,
-    refetchIntervalInBackground: false,
+    ...repoStatusPoll,
     select: selectAmendBranch,
   }).data;
   const settings = useSettings();

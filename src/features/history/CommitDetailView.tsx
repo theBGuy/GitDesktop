@@ -52,7 +52,7 @@ import {
   useRemoteCommitDiff,
   useRevertCommit,
 } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import { providerLabel, type RepoStatus } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
@@ -77,6 +77,14 @@ import { useAmendWithConfirm } from "./useAmendCommit";
 /** Where a revert or cherry-pick from the detail view goes once the commit's
  *  parents are read. */
 type MergeRoute = "dialog" | "plain" | "stale";
+
+/** Module-level so the selector's identity is stable; structural sharing keeps
+ *  an equal result stable too, so working-tree edits in the polled status don't
+ *  re-render the view. */
+const selectHead = (s: RepoStatus) => ({
+  oid: s.branch?.oid ?? null,
+  name: s.branch?.name ?? null,
+});
 
 export function CommitDetailView({
   repoPath,
@@ -239,11 +247,11 @@ export function CommitDetailView({
   // Same actions as the history list's right-click menu (minus the
   // dialog-driven ones), surfaced behind a visible ⋯ for discoverability.
   const log = useLog(repoPath);
-  // HEAD's oid alone, on the shared status entry (other observers poll it): the
-  // rest of status changes with every working-tree edit.
-  const headOid = useQuery({
+  // HEAD's oid (the Amend gate) and branch name (the cherry-pick prompt) alone,
+  // on the shared status entry other observers poll.
+  const head = useQuery({
     ...repoStatusOptions(repoPath),
-    select: (s) => s.branch?.oid ?? null,
+    select: selectHead,
   }).data;
   const { requestAmend, forcePushDialog } = useAmendWithConfirm(repoPath);
   const checkoutCommit = useCheckoutCommit(repoPath);
@@ -263,7 +271,7 @@ export function CommitDetailView({
   const isLatest = logTop === hash;
   // Amend needs the log top AND status HEAD: an outside commit reaches status
   // first, and an amend chosen in that window would land already held.
-  const isHead = isLatest && headAgrees(logTop, headOid);
+  const isHead = isLatest && headAgrees(logTop, head?.oid);
   const onError = (e: unknown) => toastError(e);
 
   if (details.isPending || files.isPending) {
@@ -358,15 +366,12 @@ export function CommitDetailView({
     void revertCommit.mutateAsync({ hash }).catch(onError);
   }
 
-  // No branch name: this view reads repo status only through narrow selects
-  // (HEAD's oid, the amend gate's branch fields), so working-tree status
-  // changes don't re-render the diff pane.
   async function doCherryPick() {
     if ((await routeMergeCommit("cherry-pick")) !== "plain") return;
     const pickIn = repoPath;
     const ok = await useConfirm
       .getState()
-      .ask(cherryPickCommitConfirm(hash, null));
+      .ask(cherryPickCommitConfirm(hash, head?.name ?? null));
     if (!ok || refuseIfSwitched(pickIn, "nothing was cherry-picked")) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
