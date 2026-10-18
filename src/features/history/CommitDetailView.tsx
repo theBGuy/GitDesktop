@@ -1,5 +1,5 @@
 import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDeferredValue, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
@@ -36,6 +36,7 @@ import type { CommitParent } from "@/lib/git/api";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
   commitParentsOptions,
+  repoStatusOptions,
   useCheckoutCommit,
   useCherryPick,
   useCommitAuthorAvatarIndex,
@@ -49,7 +50,6 @@ import {
   useLog,
   usePrefetchCommitFileDiff,
   useRemoteCommitDiff,
-  useRepoStatus,
   useRevertCommit,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
@@ -239,7 +239,12 @@ export function CommitDetailView({
   // Same actions as the history list's right-click menu (minus the
   // dialog-driven ones), surfaced behind a visible ⋯ for discoverability.
   const log = useLog(repoPath);
-  const status = useRepoStatus(repoPath);
+  // HEAD's oid alone, on the shared status entry (other observers poll it): the
+  // rest of status changes with every working-tree edit.
+  const headOid = useQuery({
+    ...repoStatusOptions(repoPath),
+    select: (s) => s.branch?.oid ?? null,
+  }).data;
   const { requestAmend, forcePushDialog } = useAmendWithConfirm(repoPath);
   const checkoutCommit = useCheckoutCommit(repoPath);
   const revertCommit = useRevertCommit(repoPath);
@@ -257,8 +262,8 @@ export function CommitDetailView({
   const logTop = log.data?.pages[0]?.[0]?.hash;
   const isLatest = logTop === hash;
   // Amend needs the log top AND status HEAD: an outside commit reaches status
-  // first, and amending in that window would rewrite it.
-  const isHead = isLatest && headAgrees(logTop, status.data?.branch?.oid);
+  // first, and an amend chosen in that window would land already held.
+  const isHead = isLatest && headAgrees(logTop, headOid);
   const onError = (e: unknown) => toastError(e);
 
   if (details.isPending || files.isPending) {
@@ -353,8 +358,9 @@ export function CommitDetailView({
     void revertCommit.mutateAsync({ hash }).catch(onError);
   }
 
-  // No branch name: this view doesn't subscribe to repo status, and doing so for
-  // one prompt's wording would re-render the diff pane on every status poll.
+  // No branch name: this view reads repo status only through narrow selects
+  // (HEAD's oid, the amend gate's branch fields), so working-tree status
+  // changes don't re-render the diff pane.
   async function doCherryPick() {
     if ((await routeMergeCommit("cherry-pick")) !== "plain") return;
     const pickIn = repoPath;

@@ -3,9 +3,9 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_config_write_held, run_git_mutating, run_git_mutating_raw,
-    run_git_raw, run_git_raw_index_retry, with_config_write_lock, DEFAULT_TIMEOUT,
-    LOCK_WAIT_TIMEOUT,
+    acquire_repo_lock, holder_label, run_git, run_git_config_write_held, run_git_mutating,
+    run_git_mutating_raw, run_git_raw, run_git_raw_index_retry, with_config_write_lock,
+    DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
 };
 use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
 use crate::state::AppState;
@@ -278,11 +278,12 @@ pub(crate) async fn git_commit_core_expecting(
     // stderr EMPTY (measured, git 2.51.1) — this is the commit box's own error
     // path, so "git exited with code 1" would be the user's only explanation.
     let commit = match expected_head.filter(|_| amend) {
-        // The guard drops at the block's end, before the pick-close and the result
-        // read below take their own locks.
+        // The guard drops at the block's end, so the pick-close below takes its
+        // store locks outside the working-tree hold.
         Some(expected) => {
             let domain = state.working_tree_lock(&repo_path).await;
-            let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a commit").await?;
+            let _guard =
+                acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, holder_label("commit")).await?;
             let current =
                 run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
             // A non-zero exit is an unborn HEAD: nothing the user chose is there.

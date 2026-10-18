@@ -34,8 +34,7 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
     setCommitTitle,
     setCommitBody,
     setCoAuthors,
-    clearCommitDraft,
-    setAmending,
+    stopAmending,
     amending,
     amendingHash,
     headMoved,
@@ -94,13 +93,10 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
                   ).{" "}
                 </>
               )}
-              {/* Held, HEAD moved without the user choosing to stop, so only
-                  amend mode ends and the box keeps whatever it holds; unheld,
-                  stopping is the user's choice and clears the draft. */}
               <button
                 type="button"
                 className="font-medium underline underline-offset-2 hover:no-underline"
-                onClick={headMoved ? () => setAmending(null) : clearCommitDraft}
+                onClick={stopAmending}
               >
                 Stop amending
               </button>{" "}

@@ -149,6 +149,14 @@ export function useCommitSubmit(
     active && canGenerate && !generating,
   );
 
+  // Held, HEAD moved without the user choosing to stop, so only amend mode ends
+  // and the box keeps whatever it holds; unheld, stopping is the user's choice
+  // and clears the draft.
+  function stopAmending() {
+    if (headMoved) setAmending(null);
+    else clearCommitDraft();
+  }
+
   // Awaited rather than per-call callbacks: both hosts can go while the commit
   // is in flight (the dialog closes itself, the inline box rides an
   // <Activity>-hidden tab), and react-query drops per-call callbacks once the
@@ -232,8 +240,7 @@ export function useCommitSubmit(
     setCommitTitle,
     setCommitBody,
     setCoAuthors,
-    clearCommitDraft,
-    setAmending,
+    stopAmending,
     amending,
     amendingHash,
     /** Amending, but HEAD is no longer `amendingHash` — the commit holds. */

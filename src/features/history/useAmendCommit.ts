@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { isForcePushBlocked } from "@/lib/branch-rules/match";
@@ -6,7 +7,8 @@ import {
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
 import { gitCommitDetails } from "@/lib/git/api";
-import { useRepoStatus } from "@/lib/git/queries";
+import { repoStatusOptions } from "@/lib/git/queries";
+import type { RepoStatus } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
@@ -51,6 +53,16 @@ const STATUS_SETTLING_MESSAGE =
 const protectedBranchMessage = (name: string) =>
   `${name} is protected: force-pushing (amending a pushed commit) is blocked by a branch rule`;
 
+/** The only status fields the force-push gate reads. Structural sharing keeps an
+ *  equal result referentially stable, so working-tree changes in the polled
+ *  status don't re-render the hosts (the commit detail view's diff pane). */
+const selectAmendBranch = (s: RepoStatus) => ({
+  name: s.branch?.name ?? null,
+  upstream: s.branch?.upstream ?? null,
+  upstreamGone: s.branch?.upstreamGone ?? false,
+  ahead: s.branch?.ahead ?? 0,
+});
+
 /**
  * Amend, gated by a force-push confirmation when the commit is already on the
  * remote (an upstream exists and HEAD isn't ahead of it). Returns the request
@@ -58,7 +70,13 @@ const protectedBranchMessage = (name: string) =>
  * that dialog at the call site.
  */
 export function useAmendWithConfirm(repoPath: string) {
-  const status = useRepoStatus(repoPath);
+  // The same poll `useRepoStatus` runs, narrowed by `select`.
+  const branch = useQuery({
+    ...repoStatusOptions(repoPath),
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
+    select: selectAmendBranch,
+  }).data;
   const settings = useSettings();
   const rulesConfig = useEffectiveBranchRules(repoPath);
   // While either rules scope is on its FIRST read the effective config stands in
@@ -69,7 +87,6 @@ export function useAmendWithConfirm(repoPath: string) {
   const amend = useAmendCommit(repoPath);
   const [pendingHash, setPendingHash] = useState<string | null>(null);
 
-  const branch = status.data?.branch;
   const upstream = branch?.upstream ?? null;
   // A gone upstream (remote branch deleted) reads as no upstream: the commit
   // isn't on any live remote, so amending it is a plain re-commit, not a
@@ -81,7 +98,7 @@ export function useAmendWithConfirm(repoPath: string) {
   // arm is skipped. An ERRORED read is the same blind state and holds too — the
   // query's 5s interval keeps asking, so the hold lifts itself as soon as any
   // read lands, and from then on the gate reads measured values.
-  const statusSettling = status.data === undefined;
+  const statusSettling = branch === undefined;
 
   // Amending an already-pushed commit means force-pushing it. Shared by request
   // and confirm so the two refusal paths can't drift.
