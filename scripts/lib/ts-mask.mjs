@@ -55,8 +55,6 @@ export function maskNonCode(src, jsx) {
   const fail = (what, at) => {
     throw new ScanError(`${what} at line ${lineOf(src, at)}`);
   };
-  // Reads the already-masked text backwards, so comments and string bodies
-  // before `i` can't pose as the previous token.
   // `of` is a keyword only after a for-of binding (`for (const x of …)`, a `]`
   // or `}` pattern); anywhere else it is an ordinary name (`of / 2`).
   const ofIsKeyword = (s) => {
@@ -67,8 +65,13 @@ export function maskNonCode(src, jsx) {
     if (!/[\w$]/.test(out[k])) return false;
     let w = k;
     while (w > 0 && /[\w$]/.test(out[w - 1])) w--;
-    return !EXPR_KEYWORDS.has(out.slice(w, k + 1).join(""));
+    // Only a reserved word before it rules the binding out: a binding may itself
+    // be named `of` (`for (const of of …)`).
+    const prev = out.slice(w, k + 1).join("");
+    return prev === "of" || !EXPR_KEYWORDS.has(prev);
   };
+  // Reads the already-masked text backwards, so comments and string bodies
+  // before `i` can't pose as the previous token.
   const exprStartAt = (i) => {
     let k = i - 1;
     while (k >= 0 && /\s/.test(out[k])) k--;

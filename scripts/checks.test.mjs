@@ -9727,4 +9727,13 @@ test("reused-view-pending: the masker reads `of` as a name outside a for-of head
     "  for (const [a, b] of /a.isPending/.exec(s) ?? []) use(b, deleteRelease.isPaused);",
   ])
     assert.deepEqual(rvReads(rvView(line)), ["deleteRelease.isPaused"], line);
+  // A binding may itself be named `of`.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  for (const of of /deleteRelease.isPending/.exec(s) ?? []) use(of);",
+      ),
+    ),
+    [],
+  );
 });

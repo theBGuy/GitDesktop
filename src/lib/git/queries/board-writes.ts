@@ -268,7 +268,7 @@ export function repoFocusInvalidations(
 }
 
 /** The kind a project status write files itself under, its mutation key being
- *  `[family, kind]` (projects.ts `STATUS_WRITE_KEY` + kind). A key naming any
+ *  `[family, kind]` (projects.ts `statusWriteKey`). A key naming any
  *  other kind, or none, reads as null and so holds nothing: the filter sees
  *  `Mutation<any>`, so the key is checked, never asserted. */
 export function statusWriteKind(

@@ -3687,12 +3687,14 @@ interface StatusWriteScope {
   projectId: string;
 }
 
-/** The family prefix every status write's key starts with (each hook appends its
- *  kind: see {@link statusWriteKind}). Its own prefix, never under `board-write`:
+/** The family prefix every status write's key starts with; {@link statusWriteKey}
+ *  appends each write's kind. Its own prefix, never under `board-write`:
  *  {@link usePendingBoardWrites} enumerates that prefix, and would start counting
  *  these. Which repo and project a write addresses rides its VARIABLES, for the
  *  reason {@link boardWriteKey} gives. */
 const STATUS_WRITE_KEY = ["project-status-write"] as const;
+const statusWriteKey = (kind: "create" | "update" | "delete") =>
+  [...STATUS_WRITE_KEY, kind] as const;
 
 /** Whether a mutation's variables address `scope`. The filter sees
  *  `Mutation<any>`, so the fields are `typeof`-guarded rather than asserted. */
@@ -3784,7 +3786,7 @@ export function usePendingStatusUpdateWrites(
 export function useCreateProjectStatusUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: [...STATUS_WRITE_KEY, "create"],
+    mutationKey: statusWriteKey("create"),
     mutationFn: (
       args: StatusWriteScope & {
         status: ProjectStatusValue;
@@ -3849,7 +3851,7 @@ export function useCreateProjectStatusUpdate() {
 export function useUpdateProjectStatusUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: [...STATUS_WRITE_KEY, "update"],
+    mutationKey: statusWriteKey("update"),
     mutationFn: (
       args: StatusWriteScope & {
         statusUpdateId: string;
@@ -3906,7 +3908,7 @@ export function useUpdateProjectStatusUpdate() {
 export function useDeleteProjectStatusUpdate() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: [...STATUS_WRITE_KEY, "delete"],
+    mutationKey: statusWriteKey("delete"),
     mutationFn: (args: StatusWriteScope & { statusUpdateId: string }) =>
       api.ghDeleteProjectStatusUpdate(args.repo, args.statusUpdateId),
     onMutate: async (args) => {
