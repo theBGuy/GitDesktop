@@ -186,7 +186,8 @@ struct UndoLastCommitArgs {
 
 /// An `expectedHead` in the form the core compares: a full commit id, lowercased. An
 /// abbreviated or malformed pin could only ever miss that compare, and the miss would
-/// report a moved HEAD that never moved.
+/// report a moved HEAD that never moved. The length check doesn't know the repo's
+/// object format: an id of the other format's length still passes and reads as moved.
 fn full_commit_id(expected_head: Option<String>) -> Result<Option<String>, McpError> {
     let Some(id) = expected_head else {
         return Ok(None);
