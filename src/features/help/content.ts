@@ -770,13 +770,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   context menu. If a branch or what it tracks just changed outside the app, the shortcut
   may ask you to press it again while the branch list catches up.
 - **While a push runs, its branch is held.** The pushing branch can't be renamed, deleted,
-  archived, reset or updated until the push finishes, and while it's the current branch it
-  can't be rebased or given a new base either. One push runs at a time, and anything that
-  would wait behind it holds with the reason: another push or publish, merging into the
-  current branch, updating the current branch, deleting a branch on a remote,
-  **Clean up branches…**, and the sync bar's **Fetch**, **Pull** and **Push**. The branch
-  menu's shortcuts say why instead of starting, and so does a press in a menu that was
-  already open when the push started.
+  archived, reset or updated until the push finishes, and **Clean up branches…**, which
+  could remove it, waits too; while it's the current branch it can't be rebased or given a
+  new base either. One push runs at a time, and anything that would wait behind it holds
+  with the reason: another push or publish, merging into the current branch, updating the
+  current branch, deleting a branch on a remote, and the sync bar's **Fetch**, **Pull**
+  and **Push**. The branch menu's shortcuts say why instead of starting, and so does a
+  press in a menu that was already open when the push started.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
