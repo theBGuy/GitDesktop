@@ -427,7 +427,7 @@ pub async fn git_undo_commit(
 /// Every read and the mutation share one working-tree hold. With `expected_head`
 /// the undo runs only while HEAD is still that full oid, and with `expected_ref` only
 /// while HEAD names that branch (or none); `None` and `Any` (the MCP default)
-/// undoes whatever HEAD is, though the root deletion still compares-and-swaps on
+/// undo whatever HEAD is, though the root deletion still compares-and-swaps on
 /// the oid read under the hold. A separate process can still move HEAD in the
 /// milliseconds before the soft reset spawns, the window the amend pin accepts.
 pub(crate) async fn git_undo_commit_core(
@@ -1185,6 +1185,7 @@ mod tests {
             assert_eq!(head(&repo).await, a, "HEAD still names the commit");
         }
     }
+
     /// A switch to another branch at the SAME commit passes the oid pin; the branch
     /// pin refuses it, and the branch the user saw proceeds.
     #[tokio::test]

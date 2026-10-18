@@ -609,10 +609,12 @@ selection to compare a range.
 
 {{Secondaryclick}} a commit (or use the commit detail view) for:
 
-- **Amend** the most recent commit (reword, or fold in staged changes). If a new commit
-  lands, HEAD detaches, or HEAD reattaches to the branch you started amending from
-  before you commit, the commit box holds the amend and says why, and **Stop amending**
-  then ends amend mode with your message kept.
+- **Amend** the most recent commit (reword, or fold in staged changes). The amend stays
+  tied to where you started it: that commit, on that branch or on a detached HEAD. If a
+  new commit lands, or HEAD detaches from that branch or reattaches from a detached
+  start, the commit box holds the amend and says why until HEAD is back where you
+  started; switching to another branch shows that branch's own draft instead. While it
+  holds, **Stop amending** ends amend mode with your message kept.
 - **Revert** — create a new commit that undoes a commit's changes. It asks first, and
   says that history keeps both commits. Reverting or cherry-picking a merge commit asks
   which of its parents counts as the mainline instead, with Parent 1 (the usual choice)
