@@ -1316,8 +1316,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       setRemoteDeleteTarget(null);
       return;
     }
-    // The confirm can sit open across a disconnect; refusing keeps it open.
-    if (refuseWhileOffline()) return;
+    // The confirm can sit open across a disconnect, or from before a push started
+    // (a remote delete is a push, so it would queue behind it); refusing keeps it
+    // open.
+    if (refuseWhileOffline() || pushAlreadyActive()) return;
     try {
       await deleteRemoteBranch.mutateAsync({
         remote: target.remote,
@@ -1597,6 +1599,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // stay put. A conflicting merge aborts and reports rather than switching.
   async function doUpdateFromDefault(target: string) {
     if (!defaultName || target === defaultName) return;
+    if (refuseUpdateWhilePushing(target)) return;
     const base = defaultName;
     // Only an in-place update can open the recovery dialog over the list; every
     // other row updates with the popover open and refreshes in place.
@@ -1638,10 +1641,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
   }
 
+  // An update moves `target`'s ref, which that branch's own push may be sending,
+  // and one of the CURRENT branch merges in place, on the network lock a push
+  // holds. Any other branch updates in a throwaway worktree, off that lock. Read at
+  // fire time, for a menu or shortcut pressed from before the push started.
+  function refuseUpdateWhilePushing(target: string): boolean {
+    if (branchPushing(target)) {
+      toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+      return true;
+    }
+    return target === currentName && pushAlreadyActive();
+  }
+
   // Pull `target`'s own upstream (e.g. `origin/master`) into it without checking
   // it out — the "just merged a PR, bring master current before I switch back"
   // flow. Merges in place when `target` is current, fast-forwards otherwise.
   async function doUpdateFromUpstream(target: string, base: string) {
+    if (refuseUpdateWhilePushing(target)) return;
     if (target === currentName) setOpen(false);
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -1890,7 +1906,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // The current branch's own push holds the rebases that would rewrite it, with
   // the pushing row's reset wording on the label.
   const currentPushSuffix = currentRowPushing
-    ? ` (${pendingItemReason(currentPushPaused, "pushing…")})`
+    ? ` (${currentPushPaused ? branchPushHoldItemReason(true) : "pushing…"})`
     : "";
 
   // Every "there is none" reason below derives from a query whose empty answer
@@ -2019,7 +2035,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     if (lockCurrent)
       return `A branch rule requires a pull request to change ${currentName}.`;
-    if (currentRowPushing) return branchPushHoldReason(currentPushPaused);
     return null;
   })();
   const changeBaseBlockedReason = (() => {
@@ -2035,7 +2050,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (lockCurrent)
       return `A branch rule requires a pull request to change ${currentName}.`;
     if (busy) return "Another git operation is running.";
-    if (currentRowPushing) return branchPushHoldReason(currentPushPaused);
     return null;
   })();
   const noChangesBlockedReason =
@@ -2275,8 +2289,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "update-from-default",
     () => {
-      // In place, so it would queue on a push's network lock.
-      if (pushAlreadyActive()) return;
       if (currentName) void doUpdateFromDefault(currentName);
     },
     Boolean(
@@ -2335,13 +2347,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "update-default-from-upstream",
     () => {
-      // The default's own push moves its ref; only an update of the CURRENT
-      // branch runs in place, on the network lock.
-      if (defaultBranchRow && branchPushing(defaultBranchRow.name)) {
-        toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+      // An update would move the ref the default's own push is sending; only an
+      // update of the CURRENT branch runs in place, on the network lock. Refused
+      // before the rewrite probe runs.
+      if (defaultBranchRow && refuseUpdateWhilePushing(defaultBranchRow.name))
         return;
-      }
-      if (defaultName === currentName && pushAlreadyActive()) return;
       void updateDefaultFromUpstream();
     },
     Boolean(defaultBranchRow?.upstream) &&
@@ -2472,10 +2482,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const rowDetecting = detectingBranch === branch.name;
     const rowPush = pushOnBranch(branch.name);
     const rowPushing = rowDetecting || rowPush !== undefined;
+    // The push item's own hold: its parked copy says the push waits offline.
     const rowPushReason = pendingItemReason(
       rowPush?.paused ?? false,
       "pushing…",
     );
+    // Every other item it holds: a parked push is what waits, never that item.
+    const rowPushHeldReason = rowPush?.paused
+      ? branchPushHoldItemReason(true)
+      : "pushing…";
     const pushRunningReason = branchPushHoldItemReason(pushPaused);
     const rowSpinnerLabel = (() => {
       switch (true) {
@@ -2533,7 +2548,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       rowUpdating || rowPushing || (branch.isCurrent && (busy || pushActive));
     const updateHeldReason = (() => {
       if (rowUpdating) return "updating…";
-      if (rowPushing) return rowPushReason;
+      if (rowPushing) return rowPushHeldReason;
       if (branch.isCurrent && busy) return "operation in progress";
       if (branch.isCurrent && pushActive) return pushRunningReason;
       return undefined;
@@ -2579,7 +2594,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (branch.isCurrent) return "current branch";
       if (branch.name === defaultName) return "default branch";
       // Ahead of the removal arm, whose null would leave the item enabled.
-      if (rowPushing) return rowPushReason;
+      if (rowPushing) return rowPushHeldReason;
       if (removals.some((r) => r.branch === branch.name && !r.promotePhase))
         return null;
       if (userWorktrees.data === undefined && !userWorktrees.isError)
@@ -2937,7 +2952,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                         case inWorktree:
                           return ` (checked out in ${holder})`;
                         case rowPushing:
-                          return ` (${rowPushReason})`;
+                          return ` (${rowPushHeldReason})`;
                         default:
                           return busySuffix;
                       }
@@ -3041,7 +3056,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 case rowUpdating:
                   return " (updating…)";
                 case rowPushing:
-                  return ` (${rowPushReason})`;
+                  return ` (${rowPushHeldReason})`;
                 default:
                   return "";
               }
@@ -3174,7 +3189,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 case inWorktree:
                   return `Delete branch… (${rowCopy.held})`;
                 case rowPushing:
-                  return `Delete branch… (${rowPushReason})`;
+                  return `Delete branch… (${rowPushHeldReason})`;
                 default:
                   return "Delete branch…";
               }
@@ -3814,7 +3829,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         confirmLabel="Delete"
         confirmVariant="destructive"
         pending={deleteRemoteBranch.isPending}
-        heldReason={offlineHold}
+        // A remote delete is a push: it waits out a running one, as an offline
+        // hold would (the handler re-checks at the press).
+        heldReason={pushActive ? branchPushHoldReason(pushPaused) : offlineHold}
         onConfirm={doDeleteRemoteBranch}
       />
 

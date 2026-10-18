@@ -1,7 +1,8 @@
 /**
  * The pure pieces of the branch-push bookkeeping: the key every push is filed
  * under, the variables it carries, how a pending push reads back out of the
- * mutation cache, and the label a branch row's spinner shows for it.
+ * mutation cache, the label a branch row's spinner shows for it, the reasons a
+ * push puts on the other controls it holds, and the HEAD-push latch.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
  * file, and `scripts/push-writes.test.mjs` loads it straight from `src/` under
@@ -43,9 +44,11 @@ export interface BranchPushState {
   fromHeader: boolean;
 }
 
-/** The refusal for any network-lock operation (a push, fetch, pull, merge, remote
- *  delete) started while a push is in flight: the backend would queue it behind
- *  the push on the repo's network lock, for up to a minute. */
+/** The refusal for two kinds of route started while a push is in flight: one
+ *  that would queue behind it on the repo's network lock for up to a minute
+ *  (another push, a fetch, pull, merge, in-place update or remote delete), and a
+ *  rename, delete, rebase or update of the branch being pushed, which would move
+ *  or remove the ref it is sending. */
 export const BRANCH_PUSH_ACTIVE_MESSAGE =
   "A push is already running — wait for it to finish.";
 

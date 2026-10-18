@@ -775,7 +775,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   would wait behind it holds with the reason: another push or publish, merging into the
   current branch, updating the current branch, deleting a branch on a remote,
   **Clean up branches…**, and the sync bar's **Fetch**, **Pull** and **Push**. The branch
-  menu's shortcuts say why instead of starting.
+  menu's shortcuts say why instead of starting, and so does a press in a menu that was
+  already open when the push started.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for

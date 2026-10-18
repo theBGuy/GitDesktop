@@ -341,8 +341,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // so a successful fetch always records its freshness. Auto-fetches stay quiet
   // (a failed background fetch just retries next tick).
   async function doFetch(silent: boolean) {
-    // Auto-fetch carries its own connectivity gate (auto-fetch.ts).
-    if (!silent && refuseWhileOffline()) return;
+    // Auto-fetch carries its own connectivity gate (auto-fetch.ts), and waits out
+    // a push through `busy` without a word.
+    if (!silent && (refuseWhileOffline() || refuseWhilePushing())) return;
     try {
       await fetchRemote.mutateAsync(undefined);
       markFetched(repoPath);
@@ -430,7 +431,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // error keeps its normal toast. Both are triggered by the refusal, never
   // pre-flighted.
   async function doPull(mode: PullMode) {
-    if (refuseWhileOffline()) return;
+    // The Pull menu can be open from before a push started.
+    if (refuseWhileOffline() || refuseWhilePushing()) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -475,7 +477,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // outcome; a conflicting merge rejects and the conflict banner takes over
   // (its error still toasts). No auto-push — Push lights up on its own.
   async function doUpdateFromUpstream() {
-    if (refuseWhileOffline()) return;
+    if (refuseWhileOffline() || refuseWhilePushing()) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -808,21 +810,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     return refuseWhilePushRuns(queryClient, repoPath);
   }
 
-  // Hotkeys mirror the buttons' own holds (sync-controls-state.ts).
-  useHotkeyAction(
-    "fetch",
-    () => {
-      if (!refuseWhilePushing()) void doFetch(false);
-    },
-    hotkeys.fetch,
-  );
-  useHotkeyAction(
-    "pull",
-    () => {
-      if (!refuseWhilePushing()) void doPull("ffOnly");
-    },
-    hotkeys.pull,
-  );
+  // Hotkeys mirror the buttons' own holds (sync-controls-state.ts); the routes
+  // they start refuse while another surface's push runs.
+  useHotkeyAction("fetch", () => void doFetch(false), hotkeys.fetch);
+  useHotkeyAction("pull", () => void doPull("ffOnly"), hotkeys.pull);
   useHotkeyAction(
     "push",
     () => {
@@ -835,9 +826,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // to sync from or nowhere to merge into.
   useHotkeyAction(
     "update-from-upstream",
-    () => {
-      if (!refuseWhilePushing()) void doUpdateFromUpstream();
-    },
+    () => void doUpdateFromUpstream(),
     hotkeys.updateFromUpstream,
   );
 
