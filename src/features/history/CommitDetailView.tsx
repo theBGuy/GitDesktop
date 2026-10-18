@@ -6,6 +6,7 @@ import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import type { MarkdownRefs } from "@/components/markdown/markdown-refs";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,7 @@ import {
   useLog,
   usePrefetchCommitFileDiff,
   useRemoteCommitDiff,
+  useRepoStatus,
   useRevertCommit,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
@@ -63,9 +65,11 @@ import {
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
+  HISTORY_REFRESHING_HINT,
   type MergeParentOp,
   revertCommitConfirm,
 } from "./commit-confirms";
+import { headAgrees } from "./editable-set";
 import { FileRowActions } from "./FileRowActions";
 import { MergeParentDialog, type MergePickTarget } from "./HistoryDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
@@ -235,6 +239,7 @@ export function CommitDetailView({
   // Same actions as the history list's right-click menu (minus the
   // dialog-driven ones), surfaced behind a visible ⋯ for discoverability.
   const log = useLog(repoPath);
+  const status = useRepoStatus(repoPath);
   const { requestAmend, forcePushDialog } = useAmendWithConfirm(repoPath);
   const checkoutCommit = useCheckoutCommit(repoPath);
   const revertCommit = useRevertCommit(repoPath);
@@ -249,7 +254,11 @@ export function CommitDetailView({
   >(null);
   const prefetchFileDiff = usePrefetchCommitFileDiff(repoPath);
   const hoverPrefetch = useHoverPrefetch();
-  const isLatest = log.data?.pages[0]?.[0]?.hash === hash;
+  const logTop = log.data?.pages[0]?.[0]?.hash;
+  const isLatest = logTop === hash;
+  // Amend needs the log top AND status HEAD: an outside commit reaches status
+  // first, and amending in that window would rewrite it.
+  const isHead = isLatest && headAgrees(logTop, status.data?.branch?.oid);
   const onError = (e: unknown) => toastError(e);
 
   if (details.isPending || files.isPending) {
@@ -462,10 +471,12 @@ export function CommitDetailView({
             </DropdownMenuTrigger>
             <DropdownMenuContent className="min-w-56" align="end">
               <DropdownMenuItem
-                disabled={!isLatest}
+                className={MENU_HELD_ROW_CLASS}
+                disabled={!isHead}
                 onClick={() => requestAmend(hash)}
               >
                 Amend commit…
+                {isLatest && !isHead && HISTORY_REFRESHING_HINT}
               </DropdownMenuItem>
               <DropdownMenuItem onClick={doCheckoutCommit}>
                 Checkout commit

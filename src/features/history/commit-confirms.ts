@@ -120,6 +120,10 @@ export const mergeParentPrompt = (op: MergeParentOp, hash: string) => ({
  *  sentence reaches users through the Rust error itself — no TS copy exists. */
 export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own";
 
+/** The disabled-reason suffix while the log and status reads disagree: what's
+ *  unpushed, and which commit is HEAD, are unknown until they agree again. */
+export const HISTORY_REFRESHING_HINT = " (refreshing history…)";
+
 /** A parentless commit has nothing to soft-reset to, so undo deletes the branch
  *  ref instead — the one undo that doesn't just re-stage in place. Scoped to the
  *  branch, never the repository: an orphan branch's first commit takes this path

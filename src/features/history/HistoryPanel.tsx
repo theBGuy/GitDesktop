@@ -94,6 +94,7 @@ import {
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
+  HISTORY_REFRESHING_HINT,
   RANGE_MERGE_ITEM_REASON,
   revertCommitConfirm,
   UNDO_ROOT_COMMIT_CONFIRM,
@@ -122,27 +123,16 @@ import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
 const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
-// The disabled-reason suffix while the log and status reads disagree: what's
-// unpushed, and which commit is HEAD, are unknown until they agree again.
-const HISTORY_REFRESHING_HINT = " (refreshing history…)";
-
-export function HistoryPanel({ repoPath }: { repoPath: string }) {
-  return (
-    <>
-      <StatusLogSync key={repoPath} repoPath={repoPath} />
-      <HistoryPanelBody repoPath={repoPath} />
-    </>
-  );
-}
 
 // Keeps the log and its side reads in step with status's HEAD: refetches the
 // log when status saw a new HEAD first, refreshes the side reads once per
 // observed HEAD move (outside commits, resets, checkouts and rebases, and
 // in-app moves alike), and retries a no-upstream count older than the log. Its
-// own observers keep the 5 s status poll from re-rendering the panel; it sits
-// beside the body so it mounts in every render arm, and the repo key resets
-// its last-seen oid.
-function StatusLogSync({ repoPath }: { repoPath: string }) {
+// own observers keep the 5 s status poll from re-rendering any panel.
+// RepositoryView mounts it outside every tab's <Activity>, keyed on the repo
+// to reset its last-seen oid: log readers on every tab rely on it, the commit
+// detail view's Amend gate and its "refreshing history" hint included.
+export function StatusLogSync({ repoPath }: { repoPath: string }) {
   const queryClient = useQueryClient();
   const log = useLog(repoPath);
   const status = useRepoStatus(repoPath);
@@ -204,7 +194,7 @@ function StatusLogSync({ repoPath }: { repoPath: string }) {
   return null;
 }
 
-function HistoryPanelBody({ repoPath }: { repoPath: string }) {
+export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const log = useLog(repoPath);
   // Batch-resolve commit-author avatars for the log's authors (GitHub-only,
   // deduped by react-query across the History surfaces).

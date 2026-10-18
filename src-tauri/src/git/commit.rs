@@ -3,8 +3,9 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
-    run_git, run_git_config_write_held, run_git_mutating, run_git_mutating_raw, run_git_raw,
-    with_config_write_lock, DEFAULT_TIMEOUT,
+    acquire_repo_lock, run_git, run_git_config_write_held, run_git_mutating, run_git_mutating_raw,
+    run_git_raw, run_git_raw_index_retry, with_config_write_lock, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT,
 };
 use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
 use crate::state::AppState;
@@ -228,9 +229,13 @@ pub async fn git_commit(
     title: String,
     body: Option<String>,
     amend: bool,
+    expected_head: Option<String>,
 ) -> AppResult<CommitResult> {
-    git_commit_core(&state, repo_path, title, body, amend).await
+    git_commit_core_expecting(&state, repo_path, title, body, amend, expected_head).await
 }
+
+/// The refusal an amend gets when HEAD is no longer the commit the user chose.
+const AMEND_HEAD_MOVED: &str = "The latest commit changed — nothing was amended.";
 
 pub(crate) async fn git_commit_core(
     state: &AppState,
@@ -238,6 +243,21 @@ pub(crate) async fn git_commit_core(
     title: String,
     body: Option<String>,
     amend: bool,
+) -> AppResult<CommitResult> {
+    git_commit_core_expecting(state, repo_path, title, body, amend, None).await
+}
+
+/// `expected_head` is consulted only when `amend` is set: the amend then runs only
+/// if HEAD is still that full oid, checked under the same working-tree hold as the
+/// commit. The hold serializes this process only, so a separate process can still
+/// move HEAD in the milliseconds between the check and the commit spawn.
+pub(crate) async fn git_commit_core_expecting(
+    state: &AppState,
+    repo_path: String,
+    title: String,
+    body: Option<String>,
+    amend: bool,
+    expected_head: Option<String>,
 ) -> AppResult<CommitResult> {
     // git's own conflict advice offers `git commit` as the way to conclude a
     // cherry-pick, and the commit box has no mid-op gate, so this route ends picks
@@ -257,7 +277,25 @@ pub(crate) async fn git_commit_core(
     // Raw: a refusing `commit` writes its whole report to stdout and leaves
     // stderr EMPTY (measured, git 2.51.1) — this is the commit box's own error
     // path, so "git exited with code 1" would be the user's only explanation.
-    let commit = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let commit = match expected_head.filter(|_| amend) {
+        // The guard drops at the block's end, before the pick-close and the result
+        // read below take their own locks.
+        Some(expected) => {
+            let domain = state.working_tree_lock(&repo_path).await;
+            let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a commit").await?;
+            let current =
+                run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+            // A non-zero exit is an unborn HEAD: nothing the user chose is there.
+            if current.code != 0 || current.stdout_lossy().trim() != expected {
+                return Err(AppError::Git {
+                    code: 1,
+                    stderr: AMEND_HEAD_MOVED.to_string(),
+                });
+            }
+            run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?
+        }
+        None => run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?,
+    };
     if commit.code != 0 {
         return Err(AppError::Git {
             code: commit.code,
@@ -513,5 +551,161 @@ mod tests {
             .expect("the tagged commit is in range");
         assert_eq!(tagged.tags, vec!["v1.0".to_string()]);
         assert!(!tagged.is_merge, "an ordinary commit has one parent");
+    }
+
+    /// A temp repo with a local identity, so commits work on any host config.
+    async fn amend_fixture(prefix: &str, init_args: &[&str]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        let mut init = vec!["init", "-q"];
+        init.extend_from_slice(init_args);
+        run(&repo, &init).await;
+        run(&repo, &["config", "user.email", "t@t.local"]).await;
+        run(&repo, &["config", "user.name", "T"]).await;
+        (dir, repo)
+    }
+
+    /// Commits `file` with `subject` through raw git and returns the new HEAD.
+    async fn raw_commit(dir: &tempfile::TempDir, repo: &str, file: &str, subject: &str) -> String {
+        std::fs::write(dir.path().join(file), format!("{subject}\n")).unwrap();
+        run(repo, &["add", "-A"]).await;
+        run(repo, &["commit", "-qm", subject]).await;
+        head(repo).await
+    }
+
+    async fn head(repo: &str) -> String {
+        run(repo, &["rev-parse", "HEAD"]).await.trim().to_string()
+    }
+
+    async fn head_subject(repo: &str) -> String {
+        run(repo, &["log", "-1", "--format=%s"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    async fn amend_expecting(
+        repo: &str,
+        title: &str,
+        expected: Option<String>,
+    ) -> AppResult<CommitResult> {
+        let state = AppState::default();
+        git_commit_core_expecting(
+            &state,
+            repo.to_string(),
+            title.to_string(),
+            None,
+            true,
+            expected,
+        )
+        .await
+    }
+
+    fn assert_refused(result: AppResult<CommitResult>) {
+        match result {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, AMEND_HEAD_MOVED),
+            other => panic!("expected the head-moved refusal, got {other:?}"),
+        }
+    }
+
+    /// The amend the user chose for A must not rewrite an outside commit B that
+    /// became HEAD meanwhile. B carries a file: git itself refuses to amend past an
+    /// empty commit, which would hide the defect.
+    #[tokio::test]
+    async fn amend_refuses_when_head_moved_and_leaves_head_alone() {
+        let (dir, repo) = amend_fixture("gd-amend-moved-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+
+        let result = amend_expecting(&repo, "A reworded", Some(a)).await;
+
+        assert_eq!(head(&repo).await, b, "HEAD is still the outside commit");
+        assert_eq!(head_subject(&repo).await, "B", "B's message is untouched");
+        assert_refused(result);
+    }
+
+    #[tokio::test]
+    async fn amend_with_current_head_rewrites_it() {
+        let (dir, repo) = amend_fixture("gd-amend-current-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+
+        let result = amend_expecting(&repo, "B reworded", Some(b.clone()))
+            .await
+            .expect("amending the current HEAD succeeds");
+
+        assert_ne!(result.hash, b, "the amend minted a new commit");
+        assert_eq!(head(&repo).await, result.hash);
+        assert_eq!(head_subject(&repo).await, "B reworded");
+        let parent = run(&repo, &["rev-parse", "HEAD~1"]).await;
+        assert_eq!(parent.trim(), a, "the parent is preserved");
+    }
+
+    #[tokio::test]
+    async fn amend_with_expected_head_works_detached() {
+        let (dir, repo) = amend_fixture("gd-amend-detached-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        run(&repo, &["checkout", "-q", "--detach"]).await;
+
+        amend_expecting(&repo, "B detached", Some(b))
+            .await
+            .expect("a detached HEAD amends when it matches");
+
+        assert_eq!(head_subject(&repo).await, "B detached");
+    }
+
+    /// git's own unborn-amend error words it differently, so the exact refusal text
+    /// proves the CAS answered before any commit spawned.
+    #[tokio::test]
+    async fn amend_expected_head_refuses_on_unborn() {
+        let (_dir, repo) = amend_fixture("gd-amend-unborn-", &[]).await;
+
+        let result = amend_expecting(&repo, "first", Some("0".repeat(40))).await;
+
+        assert_refused(result);
+        let probe = run_git_raw(
+            Some(&repo),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(probe.code, 0, "the repo still has no HEAD");
+    }
+
+    /// The MCP commit tool passes no expected head and keeps amending whatever HEAD is.
+    #[tokio::test]
+    async fn amend_without_expected_keeps_rewriting_current_head() {
+        let (dir, repo) = amend_fixture("gd-amend-none-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        raw_commit(&dir, &repo, "b.txt", "B").await;
+
+        amend_expecting(&repo, "B via mcp", None)
+            .await
+            .expect("an amend with no expectation runs");
+
+        assert_eq!(head_subject(&repo).await, "B via mcp");
+    }
+
+    #[tokio::test]
+    async fn expected_head_compare_is_full_hash_in_sha256_repos() {
+        let (dir, repo) = amend_fixture("gd-amend-sha256-", &["--object-format=sha256"]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        assert_eq!(a.len(), 64, "a sha256 oid");
+
+        // Same 63-char prefix, different last digit: only a full compare tells them apart.
+        let last = if a.ends_with('0') { '1' } else { '0' };
+        let near_miss = format!("{}{last}", &a[..63]);
+        assert_refused(amend_expecting(&repo, "A near miss", Some(near_miss)).await);
+        assert_eq!(head(&repo).await, a);
+
+        amend_expecting(&repo, "A sha256", Some(a))
+            .await
+            .expect("the full oid matches");
+        assert_eq!(head_subject(&repo).await, "A sha256");
     }
 }
