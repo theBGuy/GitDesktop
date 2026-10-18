@@ -260,13 +260,14 @@ of its remote, it restores the name and leaves out the commits you
 never pushed, so remake that kind from the hash.
 
 Git keeps a deleted branch's commits for a while, but its grace periods
-count from when you last committed on or switched to the branch, and
-from when its objects were last written, not from when you deleted it.
-By default garbage collection drops HEAD reflog lines pointing at
-unreachable commits once they are a month old, and it prunes
-unreachable objects by how long ago they were last written. A branch you last
-touched in the spring can be past both limits already, so the next
-`git gc`, including one Git starts on its own, may take it.
+count from the last time HEAD moved onto or off the branch's tip,
+usually the switch away from it, and from when its objects were last
+written, not from when you deleted it. By default garbage collection
+drops HEAD reflog lines pointing at unreachable commits once they are a
+month old, and it prunes unreachable objects by how long ago they were
+last written. A branch you last touched in the spring can be past both
+limits already, so the next `git gc`, including one Git starts on its
+own, may take it.
 
 ## Or don't do any of this
 
@@ -281,9 +282,9 @@ it never pre-checks a row on its own — it badges one for you to confirm."
 
 Archive is the dialog's default, with Delete beside it. Archiving folds
 branches into a collapsed "Archived" section of the switcher and leaves
-every commit where it is. It is one setting in your repository's local
-config, and Unarchive deletes it. Most cleanups only need a shorter
-list, and an archived branch still points at its commits, so garbage
-collection leaves them alone.
+every commit where it is. It is one setting per branch in your
+repository's local config, and Unarchive deletes it. Most cleanups only
+need a shorter list, and an archived branch still points at its
+commits, so garbage collection leaves them alone.
 
 A squash merge lands your changes and strands your commits.
