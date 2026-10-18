@@ -222,6 +222,47 @@ pub async fn git_commit_authors(repo_path: String) -> AppResult<Vec<CommitAuthor
     Ok(authors)
 }
 
+/// What HEAD must name, beside its oid, for a pinned rewrite to run: an oid alone can't
+/// see a switch to another branch at the same commit, which would rewrite THAT branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExpectedRef {
+    /// Unpinned: the MCP tools pin the commit id only.
+    Any,
+    /// HEAD detached, on no branch.
+    Detached,
+    /// HEAD on this branch (the short name).
+    Branch(String),
+}
+
+impl ExpectedRef {
+    /// The IPC form: the branch's short name, or `HEAD` for a detached HEAD (git refuses
+    /// a branch named `HEAD`, so the two never collide). Absent means unpinned.
+    pub(crate) fn from_wire(wire: Option<String>) -> AppResult<Self> {
+        match wire {
+            None => Ok(Self::Any),
+            Some(head) if head == "HEAD" => Ok(Self::Detached),
+            Some(name) => {
+                crate::git::branches::validate_branch_name(&name)?;
+                Ok(Self::Branch(name))
+            }
+        }
+    }
+
+    /// Whether HEAD names something else now; run under the caller's hold. A
+    /// `symbolic-ref` that fails for any reason but a detached HEAD is an `Err`.
+    pub(crate) async fn moved(&self, repo_path: &str) -> AppResult<bool> {
+        let wanted = match self {
+            Self::Any => return Ok(false),
+            Self::Detached => None,
+            Self::Branch(name) => Some(name.as_str()),
+        };
+        Ok(crate::git::branches::current_branch_name(repo_path)
+            .await?
+            .as_deref()
+            != wanted)
+    }
+}
+
 #[tauri::command]
 pub async fn git_commit(
     state: State<'_, AppState>,
@@ -230,12 +271,29 @@ pub async fn git_commit(
     body: Option<String>,
     amend: bool,
     expected_head: Option<String>,
+    expected_branch: Option<String>,
 ) -> AppResult<CommitResult> {
-    git_commit_core_expecting(&state, repo_path, title, body, amend, expected_head).await
+    let expected_ref = ExpectedRef::from_wire(expected_branch)?;
+    git_commit_core_expecting(
+        &state,
+        repo_path,
+        title,
+        body,
+        amend,
+        expected_head,
+        expected_ref,
+    )
+    .await
 }
 
 /// The refusal an amend gets when HEAD is no longer the commit the user chose.
+/// KEEP IN STEP: one wording family with `AMEND_BRANCH_SWITCHED`, the undo pair below
+/// and ops.rs's reset pair ("… — nothing was <verb>.").
 const AMEND_HEAD_MOVED: &str = "The latest commit changed — nothing was amended.";
+
+/// The refusal an amend gets when HEAD sits on another branch (or none) than the one
+/// the user chose, even at the same commit.
+const AMEND_BRANCH_SWITCHED: &str = "The checked-out branch changed — nothing was amended.";
 
 /// The unpinned form, kept for test fixtures: every production route passes its pin
 /// (or its absence) to [`git_commit_core_expecting`] explicitly.
@@ -247,13 +305,14 @@ pub(crate) async fn git_commit_core(
     body: Option<String>,
     amend: bool,
 ) -> AppResult<CommitResult> {
-    git_commit_core_expecting(state, repo_path, title, body, amend, None).await
+    git_commit_core_expecting(state, repo_path, title, body, amend, None, ExpectedRef::Any).await
 }
 
 /// `expected_head` is consulted only when `amend` is set: the amend then runs only
-/// if HEAD is still that full oid, checked under the same working-tree hold as the
-/// commit. The hold serializes this process only, so a separate process can still
-/// move HEAD in the milliseconds between the check and the commit spawn.
+/// if HEAD is still that full oid, and on `expected_ref`'s branch (or detached, as it
+/// says), both checked under the same working-tree hold as the commit. The hold
+/// serializes this process only, so a separate process can still move HEAD in the
+/// milliseconds between the check and the commit spawn.
 pub(crate) async fn git_commit_core_expecting(
     state: &AppState,
     repo_path: String,
@@ -261,6 +320,7 @@ pub(crate) async fn git_commit_core_expecting(
     body: Option<String>,
     amend: bool,
     expected_head: Option<String>,
+    expected_ref: ExpectedRef,
 ) -> AppResult<CommitResult> {
     // git's own conflict advice offers `git commit` as the way to conclude a
     // cherry-pick, and the commit box has no mid-op gate, so this route ends picks
@@ -287,6 +347,12 @@ pub(crate) async fn git_commit_core_expecting(
             let domain = state.working_tree_lock(&repo_path).await;
             let _guard =
                 acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, holder_label("commit")).await?;
+            if expected_ref.moved(&repo_path).await? {
+                return Err(AppError::Git {
+                    code: 1,
+                    stderr: AMEND_BRANCH_SWITCHED.to_string(),
+                });
+            }
             let current =
                 run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
             // A non-zero exit is an unborn HEAD: nothing the user chose is there.
@@ -326,6 +392,10 @@ pub(crate) async fn git_commit_core_expecting(
 /// reset twins of its "… — nothing was <verb>." shape.
 const UNDO_HEAD_MOVED: &str = "The latest commit changed — nothing was undone.";
 
+/// The refusal an undo gets when HEAD sits on another branch (or none) than the one
+/// the user saw, even at the same commit. KEEP IN STEP with the family above.
+const UNDO_BRANCH_SWITCHED: &str = "The checked-out branch changed — nothing was undone.";
+
 /// The refusal for a detached HEAD at a parentless commit: `update-ref -d HEAD`
 /// there deletes `.git/HEAD` itself and git stops recognizing the repository
 /// (measured, git 2.51.1).
@@ -344,8 +414,10 @@ pub async fn git_undo_commit(
     state: State<'_, AppState>,
     repo_path: String,
     expected_head: String,
+    expected_branch: String,
 ) -> AppResult<()> {
-    git_undo_commit_core(&state, repo_path, Some(expected_head)).await
+    let expected_ref = ExpectedRef::from_wire(Some(expected_branch))?;
+    git_undo_commit_core(&state, repo_path, Some(expected_head), expected_ref).await
 }
 
 /// Undoes the latest commit, keeping its changes staged (soft reset). A root commit
@@ -353,7 +425,8 @@ pub async fn git_undo_commit(
 /// in the pre-first-commit state.
 ///
 /// Every read and the mutation share one working-tree hold. With `expected_head`
-/// the undo runs only while HEAD is still that full oid; `None` (the MCP default)
+/// the undo runs only while HEAD is still that full oid, and with `expected_ref` only
+/// while HEAD names that branch (or none); `None` and `Any` (the MCP default)
 /// undoes whatever HEAD is, though the root deletion still compares-and-swaps on
 /// the oid read under the hold. A separate process can still move HEAD in the
 /// milliseconds before the soft reset spawns, the window the amend pin accepts.
@@ -361,6 +434,7 @@ pub(crate) async fn git_undo_commit_core(
     state: &AppState,
     repo_path: String,
     expected_head: Option<String>,
+    expected_ref: ExpectedRef,
 ) -> AppResult<()> {
     let moved = || AppError::Git {
         code: 1,
@@ -368,6 +442,12 @@ pub(crate) async fn git_undo_commit_core(
     };
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "an undo").await?;
+    if expected_ref.moved(&repo_path).await? {
+        return Err(AppError::Git {
+            code: 1,
+            stderr: UNDO_BRANCH_SWITCHED.to_string(),
+        });
+    }
     let read_head = || async {
         run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
             .await
@@ -717,6 +797,15 @@ mod tests {
         title: &str,
         expected: Option<String>,
     ) -> AppResult<CommitResult> {
+        amend_on(repo, title, expected, ExpectedRef::Any).await
+    }
+
+    async fn amend_on(
+        repo: &str,
+        title: &str,
+        expected: Option<String>,
+        expected_ref: ExpectedRef,
+    ) -> AppResult<CommitResult> {
         let state = AppState::default();
         git_commit_core_expecting(
             &state,
@@ -725,6 +814,7 @@ mod tests {
             None,
             true,
             expected,
+            expected_ref,
         )
         .await
     }
@@ -835,8 +925,22 @@ mod tests {
     }
 
     async fn undo(repo: &str, expected: Option<String>) -> AppResult<()> {
+        undo_on(repo, expected, ExpectedRef::Any).await
+    }
+
+    async fn undo_on(repo: &str, expected: Option<String>, on: ExpectedRef) -> AppResult<()> {
         let state = AppState::default();
-        git_undo_commit_core(&state, repo.to_string(), expected).await
+        git_undo_commit_core(&state, repo.to_string(), expected, on).await
+    }
+
+    /// HEAD's branch name, as the GUI's status read reports it.
+    async fn branch_here(repo: &str) -> ExpectedRef {
+        ExpectedRef::Branch(
+            run(repo, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .trim()
+                .to_string(),
+        )
     }
 
     fn assert_undo_refused(result: AppResult<()>, copy: &str) {
@@ -1080,5 +1184,112 @@ mod tests {
             assert!(dir.path().join(".git").join("HEAD").is_file());
             assert_eq!(head(&repo).await, a, "HEAD still names the commit");
         }
+    }
+    /// A switch to another branch at the SAME commit passes the oid pin; the branch
+    /// pin refuses it, and the branch the user saw proceeds.
+    #[tokio::test]
+    async fn undo_commit_refuses_a_same_oid_switch_to_another_branch() {
+        let (dir, repo) = amend_fixture("gd-undo-switched-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let seen = branch_here(&repo).await;
+        run(&repo, &["switch", "-qc", "other"]).await;
+
+        let result = undo_on(&repo, Some(b.clone()), seen).await;
+
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(head(&repo).await, b, "HEAD is untouched");
+        assert_eq!(porcelain(&repo).await, "");
+        undo_on(&repo, Some(b), ExpectedRef::Branch("other".into()))
+            .await
+            .expect("the branch HEAD is on undoes");
+        assert_eq!(head(&repo).await, a);
+    }
+
+    /// Detached and attached are different answers at the same commit, both ways.
+    #[tokio::test]
+    async fn undo_commit_refuses_a_detached_flip_either_way() {
+        let (dir, repo) = amend_fixture("gd-undo-flip-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let attached = branch_here(&repo).await;
+
+        assert_undo_refused(
+            undo_on(&repo, Some(b.clone()), ExpectedRef::Detached).await,
+            UNDO_BRANCH_SWITCHED,
+        );
+        run(&repo, &["checkout", "-q", "--detach"]).await;
+        assert_undo_refused(
+            undo_on(&repo, Some(b.clone()), attached).await,
+            UNDO_BRANCH_SWITCHED,
+        );
+        assert_eq!(head(&repo).await, b);
+
+        undo_on(&repo, Some(b), ExpectedRef::Detached)
+            .await
+            .expect("a detached HEAD undoes when the pin says detached");
+        assert_eq!(head(&repo).await, a);
+    }
+
+    #[tokio::test]
+    async fn amend_refuses_a_same_oid_switch_to_another_branch() {
+        let (dir, repo) = amend_fixture("gd-amend-switched-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let seen = branch_here(&repo).await;
+        run(&repo, &["switch", "-qc", "other"]).await;
+
+        match amend_on(&repo, "B reworded", Some(b.clone()), seen).await {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, AMEND_BRANCH_SWITCHED),
+            other => panic!("expected the branch-switched refusal, got {other:?}"),
+        }
+        assert_eq!(head(&repo).await, b, "HEAD is untouched");
+        assert_eq!(head_subject(&repo).await, "B");
+
+        amend_on(
+            &repo,
+            "B reworded",
+            Some(b),
+            ExpectedRef::Branch("other".into()),
+        )
+        .await
+        .expect("the branch HEAD is on amends");
+        assert_eq!(head_subject(&repo).await, "B reworded");
+    }
+
+    #[tokio::test]
+    async fn amend_refuses_a_detached_flip_either_way() {
+        let (dir, repo) = amend_fixture("gd-amend-flip-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let attached = branch_here(&repo).await;
+        let refused = |result: AppResult<CommitResult>| match result {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, AMEND_BRANCH_SWITCHED),
+            other => panic!("expected the branch-switched refusal, got {other:?}"),
+        };
+
+        refused(amend_on(&repo, "x", Some(b.clone()), ExpectedRef::Detached).await);
+        run(&repo, &["checkout", "-q", "--detach"]).await;
+        refused(amend_on(&repo, "x", Some(b.clone()), attached).await);
+        assert_eq!(head_subject(&repo).await, "B");
+
+        amend_on(&repo, "B detached", Some(b), ExpectedRef::Detached)
+            .await
+            .expect("a detached HEAD amends when the pin says detached");
+        assert_eq!(head_subject(&repo).await, "B detached");
+    }
+
+    #[test]
+    fn expected_ref_reads_the_wire_form() {
+        assert_eq!(ExpectedRef::from_wire(None).unwrap(), ExpectedRef::Any);
+        assert_eq!(
+            ExpectedRef::from_wire(Some("HEAD".into())).unwrap(),
+            ExpectedRef::Detached
+        );
+        assert_eq!(
+            ExpectedRef::from_wire(Some("feature/x".into())).unwrap(),
+            ExpectedRef::Branch("feature/x".into())
+        );
+        assert!(ExpectedRef::from_wire(Some("-x".into())).is_err());
     }
 }

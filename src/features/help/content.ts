@@ -580,10 +580,11 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 {{ai}}- **Generate with AI** ({{kbd:generate-commit-message}}) — write the summary and
   description from your staged diff (see *AI & automations*).
 {{/ai}}- After committing, **Undo** ({{kbd:undo-commit}}) reverses the last commit and
-  returns your message to the box. Undoing a branch's *first* commit asks first —
-  it has no parent to fall back to, so the branch ref goes with it. A commit that
-  lands from elsewhere before the undo runs is left in place, and Undo says so; on a
-  detached first commit there is nothing to undo onto, and Undo says that instead.
+  returns your message to the box. Undoing a branch's *first* commit asks first — it
+  has no parent to fall back to, so the branch ref goes with it. If a commit lands,
+  or the branch is switched, from elsewhere before the undo runs, nothing is undone
+  and Undo says so; on a detached first commit there is nothing to undo onto, and
+  Undo says that instead.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright. The exception is a name Windows reserves for a device
@@ -608,7 +609,10 @@ selection to compare a range.
 
 {{Secondaryclick}} a commit (or use the commit detail view) for:
 
-- **Amend** the most recent commit (reword, or fold in staged changes).
+- **Amend** the most recent commit (reword, or fold in staged changes). If a new commit
+  lands, HEAD detaches, or HEAD reattaches to the branch you started amending from
+  before you commit, the commit box holds the amend and says why, and **Stop amending**
+  then ends amend mode with your message kept.
 - **Revert** — create a new commit that undoes a commit's changes. It asks first, and
   says that history keeps both commits. Reverting or cherry-picking a merge commit asks
   which of its parents counts as the mainline instead, with Parent 1 (the usual choice)
@@ -746,13 +750,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   disabled with the reason, since a merge would duplicate the rewritten history. On the
   branch you're on, that reset rewrites your files too, so it stops and names any
   untracked files or folders (ignored ones aside) sitting where the upstream version has
-  files; move them aside and run it again. If the branch moved since you confirmed, or
-  is checked out in another worktree or being rebased or bisected anywhere, the reset
-  leaves it alone and says why. This is the "just merged a PR — bring the default branch
-  current before I switch back" flow; every branch's row shows its own push/pull state
-  (↑/↓ vs. its upstream) after a fetch, so the branches with commits to pull are visible
-  at a glance, and *Update default branch from its remote* is available from the command
-  palette too.
+  files; move them aside and run it again. If the branch moved, or you switched onto or
+  off it, since you confirmed, or it is checked out in another worktree or being rebased
+  or bisected anywhere, the reset leaves it alone and says why. This is the "just merged
+  a PR — bring the default branch current before I switch back" flow; every branch's row
+  shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so the branches
+  with commits to pull are visible at a glance, and *Update default branch from its
+  remote* is available from the command palette too.
 - **While an update runs, its branch is held.** Switching to that branch, renaming or
   deleting it, or starting a second update is turned away with a short message until the
   update completes. Every worktree of the repository sees the same hold. An update a crash
@@ -1051,8 +1055,8 @@ ids, the force-push confirmation warns that pushing would put the old history ba
 and the Pull menu offers a confirmed **Reset to _origin/…_** that lines the two up
 instead. The reset won't overwrite untracked files or folders unless they're ignored: if
 any sit where the upstream version has files, it stops and names them so you can move
-them aside first. If the branch moves before the reset runs, nothing is reset and the
-view refreshes so you can decide again.
+them aside first. If the branch moves, or you switch branches, before the reset runs,
+nothing is reset and the view refreshes so you can decide again.
 
 ## Resolving conflicts
 

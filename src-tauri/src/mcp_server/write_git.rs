@@ -167,8 +167,8 @@ struct CommitArgs {
     #[serde(default)]
     amend: bool,
     /// Only used with `amend`: the amend runs only while HEAD is still this full
-    /// commit id (as `log`/`repo_status` report it). Omit to amend whatever the
-    /// latest commit is.
+    /// commit id (as `log`/`repo_status` report it), whichever branch HEAD is on.
+    /// Omit to amend whatever the latest commit is.
     // No `rename_all` on the struct, so the wire name is spelled explicitly (the
     // `noTrack` / `expectedDropShas` convention). The alias keeps a snake_case caller
     // pinned instead of silently unpinned.
@@ -179,7 +179,8 @@ struct CommitArgs {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct UndoLastCommitArgs {
     /// Optional: the undo runs only while the latest commit is still this full
-    /// commit id. Omit to undo whatever the latest commit is.
+    /// commit id, whichever branch HEAD is on. Omit to undo whatever the latest
+    /// commit is.
     #[serde(default, rename = "expectedHead", alias = "expected_head")]
     expected_head: Option<String>,
 }
@@ -616,10 +617,10 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Create a commit from the staged changes in the bound repository. With \
-                       `amend`, rewrites the previous commit instead. With `amend`, an optional \
-                       `expectedHead` (a full commit id) makes the amend run only while HEAD is \
-                       still that commit. Returns the new commit hash as JSON. Requires \
-                       --allow-git-write.",
+                       `amend`, rewrites the previous commit instead; an optional `expectedHead` \
+                       (a full commit id) then makes the amend run only while HEAD is still that \
+                       commit. It pins the commit id only, not which branch HEAD is on. Returns \
+                       the new commit hash as JSON. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn commit(
@@ -652,6 +653,7 @@ impl GitDesktopMcp {
             args.body,
             args.amend,
             expected_head,
+            crate::git::commit::ExpectedRef::Any,
         )
         .await
         .map_err(app_err)?;
@@ -669,8 +671,8 @@ impl GitDesktopMcp {
                        so its branch ref is removed instead; with HEAD detached there, or at a \
                        shallow clone's boundary commit, it refuses: there is nothing to undo \
                        onto. An optional `expectedHead` (a full commit id) makes the undo run \
-                       only while the latest commit is still that id. Requires \
-                       --allow-git-write.",
+                       only while the latest commit is still that id; it pins the commit id \
+                       only, not which branch HEAD is on. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn undo_last_commit(
@@ -680,9 +682,14 @@ impl GitDesktopMcp {
         self.ensure_git_write()?;
         let expected_head = full_commit_id(args.expected_head)?;
         let _promote = self.promote_gate().await?;
-        crate::git::commit::git_undo_commit_core(&self.state, self.repo.clone(), expected_head)
-            .await
-            .map_err(app_err)?;
+        crate::git::commit::git_undo_commit_core(
+            &self.state,
+            self.repo.clone(),
+            expected_head,
+            crate::git::commit::ExpectedRef::Any,
+        )
+        .await
+        .map_err(app_err)?;
         ok_text("last commit undone (changes kept staged)")
     }
 

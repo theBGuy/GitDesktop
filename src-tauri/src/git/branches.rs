@@ -735,11 +735,35 @@ async fn clear_update_holder(
             if marker::claim_dead_update_worktree(state, repo_path, holder).await {
                 return Ok(true);
             }
-            // Provably dead but unclaimable (the admin domain was busy) — the hidden
-            // path is nothing the user can act on, so name the state instead.
+            // Provably dead but unclaimed (the admin domain was busy, or the lock no
+            // longer read released) — the hidden path is nothing the user can act on,
+            // so name the state instead.
             Err(marker::interrupted_update_refusal(branch))
         }
         LockProbe::Missing | LockProbe::Unknown => Ok(false),
+    }
+}
+
+/// [`clear_update_holder`]'s no-claim verdict for a re-probed holder, used under a
+/// working-tree hold or after that function's sweep already ran: a claim's removal
+/// runs in the admin domain and can take minutes. `None` leaves the caller's own
+/// message to speak, as that function's `Ok(false)` does; a dead update's checkout
+/// reads as interrupted, left for a retry to sweep.
+async fn update_holder_refusal(
+    state: &AppState,
+    repo_path: &str,
+    branch: &str,
+    holder: &str,
+) -> Option<AppError> {
+    use crate::git::update_marker::{self as marker, LockProbe};
+    let roots = marker::roots_for_cached(state, repo_path).await.ok()?;
+    if !marker::is_managed_update_worktree_in(&roots, holder) {
+        return None;
+    }
+    match marker::update_worktree_probe(holder) {
+        LockProbe::Live => Some(marker::branch_update_refusal(branch)),
+        LockProbe::Released => Some(marker::interrupted_update_refusal(branch)),
+        LockProbe::Missing | LockProbe::Unknown => None,
     }
 }
 
@@ -769,17 +793,21 @@ pub(crate) async fn git_delete_branch_core(
     if let Some(path) = worktree_holding_branch(&repo_path, &name).await {
         // An update's hidden checkout is nothing the user can act on by that path, so
         // it takes its own arm: refused while live, swept and re-probed once dead.
-        let swept = clear_update_holder(state, &repo_path, &name, &path).await?;
-        let held = if swept {
-            worktree_holding_branch(&repo_path, &name).await
-        } else {
-            Some(path)
-        };
-        if let Some(path) = held {
-            return Err(AppError::Command(format!(
+        let checked_out = |path: String| {
+            AppError::Command(format!(
                 "{name} is checked out in the worktree at {path} — remove that worktree \
                  (or switch it to another branch) before deleting {name}."
-            )));
+            ))
+        };
+        if !clear_update_holder(state, &repo_path, &name, &path).await? {
+            return Err(checked_out(path));
+        }
+        // A holder found there after the sweep gets the update refusal when its marker
+        // proves it live or dead; otherwise the caller's own message.
+        if let Some(path) = worktree_holding_branch(&repo_path, &name).await {
+            return Err(update_holder_refusal(state, &repo_path, &name, &path)
+                .await
+                .unwrap_or_else(|| checked_out(path)));
         }
     }
     let repo = repo_path.as_str();
@@ -1693,8 +1721,10 @@ fn parse_cherry_counts(text: &str) -> Option<(u32, u32, u32)> {
 /// Two measured shas pin the move: `expected_tip`, the upstream tip the user was shown
 /// (a background fetch that moved it refuses), and `expected_local_tip`, the branch's own
 /// tip then (an outside commit refuses rather than being dropped). The guards and the
-/// compare-and-swap share one working-tree hold, so only another process checking out,
-/// rebasing or bisecting the branch between the probe and the swap can slip past them.
+/// compare-and-swap share one working-tree hold, so only an operation this checkout's
+/// hold doesn't serialize (another process, or this app in a linked worktree, whose
+/// working-tree domain is its own) can slip past them. A dead update's hidden checkout
+/// is swept BEFORE the hold: its removal takes the admin domain and can run for minutes.
 #[tauri::command]
 pub async fn git_branch_reset_to_upstream(
     state: State<'_, AppState>,
@@ -1719,6 +1749,28 @@ pub(crate) async fn branch_reset_to_upstream(
     branch: &str,
     expected_tip: &str,
     expected_local_tip: &str,
+) -> AppResult<()> {
+    branch_reset_to_upstream_within(
+        state,
+        repo_path,
+        branch,
+        expected_tip,
+        expected_local_tip,
+        LOCK_WAIT_TIMEOUT,
+    )
+    .await
+}
+
+/// [`branch_reset_to_upstream`] with the working-tree lock's wait bound as a seam: a
+/// test holding the lock passes `Duration::ZERO` to get `Busy` at once, while a free
+/// lock is still taken (runner.rs's `acquire_repo_lock` contract).
+async fn branch_reset_to_upstream_within(
+    state: &AppState,
+    repo_path: &str,
+    branch: &str,
+    expected_tip: &str,
+    expected_local_tip: &str,
+    lock_wait: std::time::Duration,
 ) -> AppResult<()> {
     validate_branch_name(branch)?;
     crate::git::history::validate_hash(expected_tip)?;
@@ -1755,33 +1807,44 @@ pub(crate) async fn branch_reset_to_upstream(
         stderr: format!("{branch} changed since you confirmed — nothing was reset."),
     };
 
-    // One hold across the guards, the local-tip compare and the swap. Every spawn under
-    // it is lock-free: `run_git_mutating` re-acquires this non-reentrant domain.
+    let checked_out = |path: String| {
+        AppError::Command(format!(
+            "{branch} is checked out in the worktree at {path} — switch that worktree \
+             to another branch (or remove it) before resetting {branch}."
+        ))
+    };
+    // Pre-mutation guards. `update-ref` refuses none of these itself, so a probe that
+    // errors refuses too. The linked-worktree probe excludes THIS checkout, so the
+    // current branch takes its own arm. An update's hidden checkout names no remedy
+    // the user can follow: refused while live, and swept once dead OUTSIDE the hold,
+    // since its removal runs in the admin domain (see `clear_update_holder`).
+    if let Some(path) = worktree_holding_branch_checked(repo_path, branch).await? {
+        if !clear_update_holder(state, repo_path, branch, &path).await? {
+            return Err(checked_out(path));
+        }
+        // A holder found there after the sweep gets the update refusal when its marker
+        // proves it live or dead; otherwise the caller's own message.
+        if let Some(path) = worktree_holding_branch_checked(repo_path, branch).await? {
+            return Err(update_holder_refusal(state, repo_path, branch, &path)
+                .await
+                .unwrap_or_else(|| checked_out(path)));
+        }
+    }
+
+    // One hold across the re-probes, the local-tip compare and the swap. Every spawn
+    // under it is lock-free: `run_git_mutating` re-acquires this non-reentrant domain.
     let domain = state.working_tree_lock(repo_path).await;
-    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
+    let _guard = acquire_repo_lock(&domain, lock_wait, "a reset").await?;
     // Two halves of one window, as in `git_delete_branch_core`: the marker covers an
     // update that has minted but not yet registered its checkout, the porcelain arm
     // below covers it once registered. Heal-free — healing lives in the claim arm.
     crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, branch).await?;
-    // Pre-mutation guards. `update-ref` refuses neither case itself, so a probe that
-    // errors refuses too. The linked-worktree probe excludes THIS checkout, so the
-    // current branch takes its own arm.
+    // Re-probed under the hold and never swept here: a holder that registered or died
+    // since the probe above refuses, and a retry sweeps a dead one.
     if let Some(path) = worktree_holding_branch_checked(repo_path, branch).await? {
-        // An update's hidden checkout names no remedy the user can follow; it is
-        // refused while live and swept once dead (see `clear_update_holder`). The sweep
-        // takes ADMIN under this hold: the bounded, try-only nesting exception.
-        let swept = clear_update_holder(state, repo_path, branch, &path).await?;
-        let held = if swept {
-            worktree_holding_branch_checked(repo_path, branch).await?
-        } else {
-            Some(path)
-        };
-        if let Some(path) = held {
-            return Err(AppError::Command(format!(
-                "{branch} is checked out in the worktree at {path} — switch that worktree \
-                 to another branch (or remove it) before resetting {branch}."
-            )));
-        }
+        return Err(update_holder_refusal(state, repo_path, branch, &path)
+            .await
+            .unwrap_or_else(|| checked_out(path)));
     }
     if current_branch_name(repo_path).await?.as_deref() == Some(branch) {
         return Err(AppError::Command(format!(
@@ -2089,7 +2152,8 @@ pub(crate) async fn update_branch_from(
 
     // Diverged → merge in a throwaway worktree so the user's checkout is untouched. The
     // worktree steps below run in the worktree-admin domain, which no blocking hold nests
-    // with (a dead holder's claim takes it try-only under the working-tree hold).
+    // with (a dead holder's claim in the holder probe above takes it try-only under the
+    // working-tree hold).
     drop(guard);
 
     // Minted under the app-data worktrees root, never the OS temp dir: that
@@ -2475,8 +2539,9 @@ pub(crate) async fn branch_tip_sha(repo_path: &str, branch: &str) -> AppResult<O
 
 /// The diverged arm, run with the working-tree lock RELEASED: `worktree
 /// add/remove/prune` belong to the worktree-admin domain, which no blocking hold nests
-/// with (a dead holder's claim takes it try-only under the working-tree hold), and
-/// materializing a whole checkout takes minutes that staging must not queue behind.
+/// with (`update_branch_from`'s dead-holder claim takes it try-only under its
+/// working-tree hold), and materializing a whole checkout takes minutes that staging
+/// must not queue behind.
 ///
 /// The add is bounded, so a concurrent removal's prune yields an explained `Busy`
 /// instead of an interleaved write to `.git/worktrees/`. Every path out of the merge
@@ -2733,7 +2798,9 @@ fn unique_suffix() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::branch_reset_to_upstream_within;
     use super::git_delete_remote_branch_core;
+    use super::update_holder_refusal;
     use super::{archive_config_busy, set_branch_archived_core};
     use super::{
         branch_reset_to_upstream, branch_rewrite_status, build_create_branch_args,
@@ -2751,6 +2818,7 @@ mod tests {
     };
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
     use crate::error::AppError;
+    use crate::git::runner::LOCK_WAIT_TIMEOUT;
     use crate::git::runner::{
         acquire_repo_lock, hold_config_lock, release_config_lock_before_attempt, run_git,
         run_git_raw, CONFIG_WRITE_ATTEMPT_HOOK, DEFAULT_TIMEOUT,
@@ -7109,6 +7177,130 @@ mod tests {
                 .trim()
                 .is_empty(),
             "and the branch is still there"
+        );
+    }
+
+    /// A reset to upstream sweeps a dead update's registered checkout BEFORE taking the
+    /// working-tree hold: with that hold held elsewhere, the reset times out Busy and
+    /// the checkout is already gone. Released, the reset then proceeds.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_released_update_holder_is_swept_before_a_reset_to_upstream() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo_s, _seed) = repo_with_local_upstream("reset-swept-holder").await;
+        let root = std::path::Path::new(&repo_s)
+            .parent()
+            .unwrap()
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        // A branch name no other test uses: the override root is process-wide.
+        let branch = "feature-reset-swept-holder";
+        run(&repo_s, &["branch", "-m", "feature", branch]).await;
+        let dead = root.join("gd-update-reset-crashed");
+        let dead_s = dead.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "--quiet", &dead_s, branch]).await;
+        marker::write_released_marker(&root, "gd-update-reset-crashed", branch);
+        // The upstream moves past the branch, so the reset below really moves the ref.
+        std::fs::write(
+            std::path::Path::new(&repo_s).join("a.txt"),
+            "upstream moved\n",
+        )
+        .unwrap();
+        run(&repo_s, &["commit", "-qam", "upstream moves"]).await;
+        let tip = run(
+            &repo_s,
+            &["rev-parse", &format!("{branch}@{{upstream}}^{{commit}}")],
+        )
+        .await
+        .trim()
+        .to_string();
+        let local = local_tip(&repo_s, branch).await;
+        assert_ne!(local, tip, "fixture sanity: the reset has somewhere to go");
+
+        let state = AppState::default();
+        let domain = state.working_tree_lock(&repo_s).await;
+        let held = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a test hold")
+            .await
+            .expect("the test takes the hold");
+        let err =
+            branch_reset_to_upstream_within(&state, &repo_s, branch, &tip, &local, Duration::ZERO)
+                .await
+                .expect_err("the reset meets the held working tree");
+        assert!(matches!(err, AppError::Busy { .. }), "got {err:?}");
+        assert!(
+            !dead.exists(),
+            "the orphaned checkout was removed before the hold was needed"
+        );
+        drop(held);
+
+        branch_reset_to_upstream(&state, &repo_s, branch, &tip, &local)
+            .await
+            .expect("with the hold free, the reset proceeds");
+        assert_eq!(local_tip(&repo_s, branch).await, tip);
+    }
+
+    /// The in-hold classification names an update's hidden checkout without claiming
+    /// it: live reads as updating, dead as interrupted (its checkout left in place for
+    /// a retry to sweep outside the hold), and anything else leaves the caller's
+    /// generic message.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the whole body.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_holder_refusal_classifies_without_claiming() {
+        use crate::git::update_marker as marker;
+        let (_guard, repo_s, _tip) = repo_with_local_upstream("holder-classify").await;
+        let root = std::path::Path::new(&repo_s)
+            .parent()
+            .unwrap()
+            .join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let _serialized = marker::test_root_lock();
+        let _override = marker::TestRootOverride::set(&root);
+        let branch = "feature-holder-classify";
+        run(&repo_s, &["branch", "-m", "feature", branch]).await;
+        let state = AppState::default();
+
+        let dead = root.join("gd-update-classify-dead");
+        let dead_s = dead.to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "--quiet", &dead_s, branch]).await;
+        marker::write_released_marker(&root, "gd-update-classify-dead", branch);
+        let verdict = update_holder_refusal(&state, &repo_s, branch, &dead_s).await;
+        assert_eq!(
+            verdict.map(|e| e.to_string()),
+            Some(marker::interrupted_update_refusal(branch).to_string())
+        );
+        assert!(dead.exists(), "nothing is claimed under the hold");
+        run(&repo_s, &["worktree", "remove", "--force", &dead_s]).await;
+
+        let live = root.join("gd-update-classify-live");
+        let _live = marker::UpdateMarker::create_for(&live, branch).expect("the marker mints");
+        let verdict = update_holder_refusal(&state, &repo_s, branch, &live.to_string_lossy()).await;
+        assert_eq!(
+            verdict.map(|e| e.to_string()),
+            Some(marker::branch_update_refusal(branch).to_string())
+        );
+
+        // Named and marked like an update's checkout, with a released lock beside it,
+        // but outside the update roots: only the root check can turn it away.
+        let users_own_parent = std::path::Path::new(&repo_s)
+            .parent()
+            .unwrap()
+            .join("users-own");
+        std::fs::create_dir_all(&users_own_parent).unwrap();
+        marker::write_released_marker(&users_own_parent, "gd-update-users-own", branch);
+        let users_own = users_own_parent.join("gd-update-users-own");
+        assert!(
+            update_holder_refusal(&state, &repo_s, branch, &users_own.to_string_lossy())
+                .await
+                .is_none(),
+            "a checkout outside the update roots keeps the generic message"
         );
     }
 

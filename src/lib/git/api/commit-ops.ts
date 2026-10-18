@@ -1,21 +1,31 @@
 import { invoke } from "@/lib/tauri/invoke";
-import type { RewriteStep } from "../types";
+import type { BranchHead, RewriteStep } from "../types";
+
+/** The `expectedBranch` IPC form of the HEAD a surface displayed: its branch name, or
+ *  `HEAD` when detached (git refuses a branch named `HEAD`, so the two never
+ *  collide). A pinned rewrite refuses when HEAD now names something else, which an
+ *  oid pin alone can't see when another branch sits at the same commit. */
+export const headBranchPin = (head: BranchHead): string =>
+  head.detached || head.name === null ? "HEAD" : head.name;
 
 /** Moves the branch pointer to `hash`. `"mixed"` (the default) keeps every
  *  working-tree change; `"hard"` rewrites the working tree too and is refused
- *  outright while tracked changes are outstanding. `expectedHead` applies to
- *  hard mode only: the backend refuses when HEAD is no longer that commit. */
+ *  outright while tracked changes are outstanding. `expectedHead` and
+ *  `expectedBranch` ({@link headBranchPin}) apply to hard mode only: the backend
+ *  refuses when HEAD is no longer that commit on that branch. */
 export const gitReset = (
   repoPath: string,
   hash: string,
   mode?: "mixed" | "hard",
   expectedHead?: string,
+  expectedBranch?: string,
 ) =>
   invoke<void>("git_reset", {
     repoPath,
     hash,
     mode: mode ?? null,
     expectedHead: expectedHead ?? null,
+    expectedBranch: expectedBranch ?? null,
   });
 
 export const gitCheckoutCommit = (repoPath: string, hash: string) =>
@@ -112,6 +122,11 @@ export const gitUnpushedMessages = (repoPath: string, base: string) =>
     base,
   });
 
-/** The backend refuses when the latest commit is no longer `expectedHead`. */
-export const gitUndoCommit = (repoPath: string, expectedHead: string) =>
-  invoke<void>("git_undo_commit", { repoPath, expectedHead });
+/** The backend refuses when the latest commit is no longer `expectedHead`, or HEAD no
+ *  longer names `expectedBranch` ({@link headBranchPin}). */
+export const gitUndoCommit = (
+  repoPath: string,
+  expectedHead: string,
+  expectedBranch: string,
+) =>
+  invoke<void>("git_undo_commit", { repoPath, expectedHead, expectedBranch });

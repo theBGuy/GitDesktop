@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
+use crate::git::commit::ExpectedRef;
 use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::ignored_guard::{self, ignored_files_in_the_way};
@@ -598,8 +599,10 @@ pub async fn git_reset(
     hash: String,
     mode: Option<String>,
     expected_head: Option<String>,
+    expected_branch: Option<String>,
 ) -> AppResult<()> {
-    git_reset_core_expecting(&state, repo_path, hash, mode, expected_head).await
+    let expected_ref = ExpectedRef::from_wire(expected_branch)?;
+    git_reset_core_expecting(&state, repo_path, hash, mode, expected_head, expected_ref).await
 }
 
 /// The refusal a hard reset gets when HEAD is no longer the tip the user confirmed.
@@ -607,24 +610,33 @@ pub async fn git_reset(
 /// commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
 const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothing was reset.";
 
+/// The refusal a hard reset gets when HEAD sits on another branch (or none) than the one
+/// the user confirmed, even at the same commit. KEEP IN STEP with the family above, and
+/// with the "HEAD moved while the dialog was open — nothing was reset." toasts in
+/// SyncControls.tsx and BranchSwitcher.tsx that answer a switch the frontend sees first.
+const RESET_BRANCH_SWITCHED: &str =
+    "The checked-out branch changed since you confirmed — nothing was reset.";
+
 pub(crate) async fn git_reset_core(
     state: &AppState,
     repo_path: String,
     hash: String,
     mode: Option<String>,
 ) -> AppResult<()> {
-    git_reset_core_expecting(state, repo_path, hash, mode, None).await
+    git_reset_core_expecting(state, repo_path, hash, mode, None, ExpectedRef::Any).await
 }
 
-/// `expected_head` is consulted in the hard arm only: the reset then runs only while
-/// HEAD is still that full oid, checked first under the guards' hold. The mixed arm
-/// ignores it, since its callers name an explicit user-chosen commit.
+/// `expected_head` and `expected_ref` are consulted in the hard arm only: the reset then
+/// runs only while HEAD is still that full oid on that branch (or detached, as it says),
+/// checked first under the guards' hold. The mixed arm ignores both, since its callers
+/// name an explicit user-chosen commit.
 pub(crate) async fn git_reset_core_expecting(
     state: &AppState,
     repo_path: String,
     hash: String,
     mode: Option<String>,
     expected_head: Option<String>,
+    expected_ref: ExpectedRef,
 ) -> AppResult<()> {
     validate_hash(&hash)?;
     let hard = match mode.as_deref() {
@@ -651,10 +663,17 @@ pub(crate) async fn git_reset_core_expecting(
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
     // Identity before tree state: a dirty-tree refusal would mislead when the real
-    // problem is a tip the user never saw. A non-zero exit is an unborn HEAD.
+    // problem is a tip the user never saw.
+    if expected_ref.moved(&repo_path).await? {
+        return Err(AppError::Git {
+            code: 1,
+            stderr: RESET_BRANCH_SWITCHED.to_string(),
+        });
+    }
     if let Some(expected) = expected_head {
         let current =
             run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+        // A non-zero exit is an unborn HEAD.
         if current.code != 0 || current.stdout_lossy().trim() != expected {
             return Err(AppError::Git {
                 code: 1,
@@ -6662,9 +6681,15 @@ mod tests {
         let outside = rev(&repo, "HEAD").await;
         let state = AppState::default();
 
-        let result =
-            git_reset_core_expecting(&state, repo.clone(), base, Some("hard".into()), Some(seen))
-                .await;
+        let result = git_reset_core_expecting(
+            &state,
+            repo.clone(),
+            base,
+            Some("hard".into()),
+            Some(seen),
+            ExpectedRef::Any,
+        )
+        .await;
 
         assert_reset_head_moved(result);
         assert_eq!(
@@ -6696,6 +6721,7 @@ mod tests {
             base.clone(),
             Some("hard".into()),
             Some(seen),
+            ExpectedRef::Any,
         )
         .await
         .expect("a reset pinned to the current HEAD runs");
@@ -6731,6 +6757,7 @@ mod tests {
                 base.clone(),
                 Some("hard".into()),
                 Some(stale),
+                ExpectedRef::Any,
             )
             .await;
             assert_reset_head_moved(result);
@@ -6743,9 +6770,80 @@ mod tests {
             base.clone(),
             Some("hard".into()),
             Some(tip),
+            ExpectedRef::Any,
         )
         .await
         .expect("the full oid matches");
+        assert_eq!(rev(&repo, "HEAD").await, base);
+    }
+
+    /// A switch to another branch at the SAME commit passes the oid pin; the branch pin
+    /// refuses it before the tree is touched, and the branch HEAD is on proceeds.
+    #[tokio::test]
+    async fn reset_hard_refuses_a_same_oid_switch_to_another_branch() {
+        let (dir, repo) = setup_repo("reset-hard-switched").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let seen = ExpectedRef::Branch(head_branch(&repo).await);
+        git(&repo, &["switch", "-qc", "other"]).await;
+        let state = AppState::default();
+        let reset = |on: ExpectedRef| {
+            git_reset_core_expecting(
+                &state,
+                repo.clone(),
+                base.clone(),
+                Some("hard".into()),
+                Some(tip.clone()),
+                on,
+            )
+        };
+
+        match reset(seen).await {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, RESET_BRANCH_SWITCHED),
+            other => panic!("expected the branch-switched refusal, got {other:?}"),
+        }
+        assert_eq!(rev(&repo, "HEAD").await, tip, "HEAD is untouched");
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+
+        reset(ExpectedRef::Branch("other".into()))
+            .await
+            .expect("the branch HEAD is on resets");
+        assert_eq!(rev(&repo, "HEAD").await, base);
+    }
+
+    /// Detached and attached are different answers at the same commit, both ways.
+    #[tokio::test]
+    async fn reset_hard_refuses_a_detached_flip_either_way() {
+        let (dir, repo) = setup_repo("reset-hard-flip").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let attached = ExpectedRef::Branch(head_branch(&repo).await);
+        let state = AppState::default();
+        let reset = |on: ExpectedRef| {
+            git_reset_core_expecting(
+                &state,
+                repo.clone(),
+                base.clone(),
+                Some("hard".into()),
+                Some(tip.clone()),
+                on,
+            )
+        };
+        let refused = |result: AppResult<()>| match result {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, RESET_BRANCH_SWITCHED),
+            other => panic!("expected the branch-switched refusal, got {other:?}"),
+        };
+
+        refused(reset(ExpectedRef::Detached).await);
+        git(&repo, &["checkout", "-q", "--detach"]).await;
+        refused(reset(attached).await);
+        assert_eq!(rev(&repo, "HEAD").await, tip);
+
+        reset(ExpectedRef::Detached)
+            .await
+            .expect("a detached HEAD resets when the pin says detached");
         assert_eq!(rev(&repo, "HEAD").await, base);
     }
 
@@ -6764,6 +6862,7 @@ mod tests {
             base.clone(),
             Some("mixed".into()),
             Some("0".repeat(40)),
+            ExpectedRef::Branch("not-this-branch".into()),
         )
         .await
         .expect("a mixed reset runs whatever the pin says");

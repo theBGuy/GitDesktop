@@ -98,7 +98,7 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
-    fn: "branch_reset_to_upstream",
+    fn: "branch_reset_to_upstream_within",
     rationale:
       "validates with validate_branch_name at fn entry; the full ref is update-ref's compare-and-swap target, never a refspec",
   },

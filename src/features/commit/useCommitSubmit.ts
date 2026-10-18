@@ -8,6 +8,7 @@ import {
   useEffectiveBranchRules,
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
+import { headBranchPin } from "@/lib/git/api";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { repoKeys, useCommit, useRepoStatus } from "@/lib/git/queries";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
@@ -16,6 +17,10 @@ import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useGenerateCommitMessage } from "./useGenerateCommitMessage";
+
+/** Why an amend holds, for the surfaces' banner: the commit moved, then the branch;
+ *  `"none"` while it can run, or when not amending. */
+export type AmendHold = "none" | "commit" | "branch";
 
 /**
  * The commit machinery behind both composing surfaces — the inline CommitBox and
@@ -52,12 +57,13 @@ export function useCommitSubmit(
   const title = useUiStore((s) => s.commitTitle);
   const body = useUiStore((s) => s.commitBody);
   const amendingHash = useUiStore((s) => s.amendingHash);
+  const amendingBranch = useUiStore((s) => s.amendingBranch);
   const coAuthors = useUiStore((s) => s.commitCoAuthors);
   const setCommitTitle = useUiStore((s) => s.setCommitTitle);
   const setCommitBody = useUiStore((s) => s.setCommitBody);
   const setCoAuthors = useUiStore((s) => s.setCommitCoAuthors);
   const clearCommitDraft = useUiStore((s) => s.clearCommitDraft);
-  const setAmending = useUiStore((s) => s.setAmending);
+  const clearAmending = useUiStore((s) => s.clearAmending);
   const restoreCommitDraft = useUiStore((s) => s.restoreCommitDraft);
   const activeDraftKey = useUiStore((s) => s.activeDraftKey);
   const loadCommitDraft = useUiStore((s) => s.loadCommitDraft);
@@ -75,12 +81,31 @@ export function useCommitSubmit(
   // The amend target is no longer HEAD; a null oid (unborn) holds too. Off while
   // status is unread, where the backend's expected-HEAD check is the backstop.
   // Cached status right after a repo switch can read "not moved" until the mount
-  // refetch lands; that same check covers the window. Detached HEAD keeps the
-  // draft under the previous branch's key, but the hold still reads the live oid.
+  // refetch lands; that same check covers the window.
   const headMoved =
     amending &&
     status.data !== undefined &&
     status.data.branch?.oid !== amendingHash;
+  // A switch between named branches loads the other branch's draft, but detaching
+  // or reattaching HEAD keeps this one (no branch name to key by), so the branch
+  // pin holds that flip here. A null pin (status unread at amend start) never does.
+  const shownHead = status.data?.branch;
+  const branchMoved =
+    amending &&
+    amendingBranch !== null &&
+    shownHead != null &&
+    headBranchPin(shownHead) !== amendingBranch;
+  const amendHeld = headMoved || branchMoved;
+  const amendHold = ((): AmendHold => {
+    switch (true) {
+      case headMoved:
+        return "commit";
+      case branchMoved:
+        return "branch";
+      default:
+        return "none";
+    }
+  })();
 
   // Point the commit surfaces at this repo+branch's saved draft. Drafts are kept
   // per repo+branch, so switching repos/branches preserves each in-progress
@@ -107,7 +132,7 @@ export function useCommitSubmit(
     (stagedCount > 0 || amending) &&
     !commit.isPending &&
     !locked &&
-    !headMoved &&
+    !amendHeld &&
     !rulesSettling;
   const canGenerate = aiEnabled && aiConfigured && stagedCount > 0;
   // Why Commit is refused, most-blocking first: the still-unread rules, then a
@@ -121,6 +146,8 @@ export function useCommitSubmit(
         return "This branch requires changes via a pull request";
       case headMoved:
         return "The latest commit changed since you started amending";
+      case branchMoved:
+        return "The checked-out branch changed since you started amending";
       case title.trim().length === 0:
         return "Enter a commit title first";
       case stagedCount === 0 && !amending:
@@ -149,11 +176,11 @@ export function useCommitSubmit(
     active && canGenerate && !generating,
   );
 
-  // Held, HEAD moved without the user choosing to stop, so only amend mode ends
-  // and the box keeps whatever it holds; unheld, stopping is the user's choice
-  // and clears the draft.
+  // Held, HEAD moved or switched without the user choosing to stop, so only amend
+  // mode ends and the box keeps whatever it holds; unheld, stopping is the user's
+  // choice and clears the draft.
   function stopAmending() {
-    if (headMoved) setAmending(null);
+    if (amendHeld) clearAmending();
     else clearCommitDraft();
   }
 
@@ -166,7 +193,7 @@ export function useCommitSubmit(
     // the button and hotkey, but between the render that enabled them and the
     // press the rules can settle to "locked", or a status read can move HEAD
     // off the amend target.
-    if (rulesSettling || locked || headMoved) return;
+    if (rulesSettling || locked || amendHeld) return;
     const commitTitle = title.trim();
     // Trailers must be the final paragraph of the message.
     const fullBody = [body.trim(), coAuthorTrailers(coAuthors)]
@@ -180,6 +207,7 @@ export function useCommitSubmit(
     const draftKey = activeDraftKey;
     const wasAmending = amendingHash !== null;
     const expectedHead = amendingHash;
+    const expectedBranch = amendingBranch;
     const fileCount = stagedCount;
     // Clear optimistically so the fields empty the instant you commit (GitHub
     // Desktop feel) instead of snapping empty once the commit resolves. Also
@@ -190,8 +218,10 @@ export function useCommitSubmit(
         title: commitTitle,
         body: fullBody || undefined,
         amend: wasAmending,
-        // The backend refuses the amend unless HEAD is still this commit.
+        // The backend refuses the amend unless HEAD is still this commit, on the
+        // branch HEAD was on when the amend started.
         expectedHead: wasAmending ? expectedHead : undefined,
+        expectedBranch: wasAmending ? expectedBranch : undefined,
       });
       // First, so the pop-out closes the instant the commit lands rather
       // than behind the reporting work below.
@@ -223,7 +253,10 @@ export function useCommitSubmit(
     } catch (e) {
       // The commit failed — put the message back so it isn't lost (restores
       // amending mode too).
-      restoreCommitDraft({ ...snapshot, amendingHash }, draftKey);
+      restoreCommitDraft(
+        { ...snapshot, amendingHash, amendingBranch },
+        draftKey,
+      );
       toastError(e);
       // A failed commit doesn't refresh status, so a moved HEAD would otherwise
       // stay unheld until the next poll.
@@ -243,8 +276,10 @@ export function useCommitSubmit(
     stopAmending,
     amending,
     amendingHash,
-    /** Amending, but HEAD is no longer `amendingHash` — the commit holds. */
-    headMoved,
+    /** Amending, but HEAD is no longer `amendingHash` (`"commit"`) or no longer on
+     *  the branch the amend started on (`"branch"`): the commit holds. `"none"`
+     *  otherwise. */
+    amendHold,
     branchName,
     locked,
     stagedEntries,

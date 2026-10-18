@@ -343,6 +343,7 @@ export function useCommit(repo: string) {
       body?: string;
       amend?: boolean;
       expectedHead?: string | null;
+      expectedBranch?: string | null;
     }) =>
       api.gitCommit(
         repo,
@@ -350,6 +351,7 @@ export function useCommit(repo: string) {
         args.body,
         args.amend ?? false,
         args.expectedHead,
+        args.expectedBranch,
       ),
     {
       invalidate: workingTreeKeys(repo),

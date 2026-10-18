@@ -24,6 +24,7 @@ import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
+import { AmendHoldSentence } from "./AmendHoldSentence";
 import { CoAuthorPicker } from "./CoAuthorPicker";
 import { useCommitSubmit } from "./useCommitSubmit";
 
@@ -57,7 +58,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
     stopAmending,
     amending,
     amendingHash,
-    headMoved,
+    amendHold,
     branchName,
     locked,
     stagedEntries,
@@ -132,23 +133,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
             <p className="flex items-start gap-2">
               <InfoIcon className="mt-0.5 size-3.5 shrink-0" />
               <span className="flex-1">
-                {headMoved ? (
-                  <>
-                    The latest commit is no longer{" "}
-                    <span className="font-mono">
-                      {amendingHash?.slice(0, 7)}
-                    </span>
-                    , so your changes can't amend it.{" "}
-                  </>
-                ) : (
-                  <>
-                    Your changes will amend the most recent commit (
-                    <span className="font-mono">
-                      {amendingHash?.slice(0, 7)}
-                    </span>
-                    ).{" "}
-                  </>
-                )}
+                <AmendHoldSentence hold={amendHold} hash={amendingHash} />
                 <button
                   type="button"
                   className="font-medium underline underline-offset-2 hover:no-underline"

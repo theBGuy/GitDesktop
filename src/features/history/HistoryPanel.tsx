@@ -45,7 +45,7 @@ import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
-import { gitCommitDetails } from "@/lib/git/api";
+import { gitCommitDetails, headBranchPin } from "@/lib/git/api";
 import {
   repoKeys,
   useBranches,
@@ -393,7 +393,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const detachedRoot = headIsRoot && Boolean(head?.detached);
 
   async function undoLast() {
-    if (!lastCommit) return;
+    if (!lastCommit || !head) return;
     if (detachedRoot) {
       toast.info(UNDO_DETACHED_ROOT);
       return;
@@ -413,9 +413,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     }
     let details: CommitDetails;
     try {
-      // The backend pins `lastCommit.hash` under the repo lock and refuses if HEAD
-      // moved, so a commit landing out of band (another window, a terminal) is
-      // never the one undone; the refusal settles as an error, refreshing the log.
+      // The backend pins `lastCommit.hash` and the branch shown under the repo lock
+      // and refuses if HEAD moved or switched, so a commit or checkout landing out of
+      // band (another window, a terminal) never redirects the undo; the refusal
+      // settles as an error, refreshing the log.
       // Read the message BEFORE the undo removes the commit it belongs to.
       details = await gitCommitDetails(repoPath, lastCommit.hash);
       // The undo builds from the observer's options when it is called, which
@@ -428,7 +429,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         )
       )
         return;
-      await undoCommit.mutateAsync(lastCommit.hash);
+      await undoCommit.mutateAsync({
+        expectedHead: lastCommit.hash,
+        expectedBranch: headBranchPin(head),
+      });
     } catch (e) {
       onError(e);
       return;

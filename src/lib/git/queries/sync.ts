@@ -324,7 +324,8 @@ export function refuseWhilePushRuns(
 export function useUndoCommit(repo: string) {
   return useRepoMutation(
     repo,
-    (expectedHead: string) => api.gitUndoCommit(repo, expectedHead),
+    (args: { expectedHead: string; expectedBranch: string }) =>
+      api.gitUndoCommit(repo, args.expectedHead, args.expectedBranch),
     {
       // Local history write — never park it offline.
       networkMode: "always",

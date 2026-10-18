@@ -261,9 +261,9 @@ fn any_update_refusal() -> AppError {
 }
 
 /// The refusal when a PROVABLY dead update's leftover still holds `branch` and this
-/// attempt could not clear it, which now means only one thing: the worktree-admin
-/// domain was busy. Raised solely off a `Released` probe, so it never says an update is
-/// running — that would be a claim the probe just disproved.
+/// attempt left it in place: its claim found the worktree-admin domain busy or the lock
+/// no longer released, or the holder was found where no claim runs; a retry re-probes.
+/// Raised solely off a `Released` probe, so it never says an update is running.
 pub(crate) fn interrupted_update_refusal(branch: &str) -> AppError {
     AppError::Command(format!(
         "An interrupted branch update is still holding {branch} — try again in a moment."

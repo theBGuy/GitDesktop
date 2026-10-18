@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { isForcePushBlocked } from "@/lib/branch-rules/match";
@@ -6,7 +6,7 @@ import {
   useEffectiveBranchRules,
   useEffectiveBranchRulesSettling,
 } from "@/lib/branch-rules/queries";
-import { gitCommitDetails } from "@/lib/git/api";
+import { gitCommitDetails, headBranchPin } from "@/lib/git/api";
 import { repoStatusOptions, repoStatusPoll } from "@/lib/git/queries";
 import type { RepoStatus } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
@@ -21,6 +21,7 @@ import { toastError } from "@/lib/toast";
  * navigation or repo) while the commit loaded, which is silent.
  */
 export function useAmendCommit(repoPath: string) {
+  const queryClient = useQueryClient();
   const noteUserInteraction = useUiStore((s) => s.noteUserInteraction);
   const landAmend = useUiStore((s) => s.landAmend);
 
@@ -32,15 +33,22 @@ export function useAmendCommit(repoPath: string) {
       noteUserInteraction();
       const { interactionEpoch: epoch, repoPath: firedOn } =
         useUiStore.getState();
+      // The branch pin is the HEAD shown when this runs (on the force-push route, at
+      // confirm), stored beside the oid pin; an unread status leaves the oid pin to
+      // stand alone.
+      const shownHead = queryClient.getQueryData<RepoStatus>(
+        repoStatusOptions(repoPath).queryKey,
+      )?.branch;
+      const branch = shownHead ? headBranchPin(shownHead) : null;
       const details = await gitCommitDetails(repoPath, hash);
       const live = useUiStore.getState();
       if (live.interactionEpoch !== epoch || live.repoPath !== firedOn) {
         return false;
       }
-      landAmend(hash, details.subject, details.body);
+      landAmend(hash, branch, details.subject, details.body);
       return true;
     },
-    [repoPath, noteUserInteraction, landAmend],
+    [repoPath, queryClient, noteUserInteraction, landAmend],
   );
 }
 

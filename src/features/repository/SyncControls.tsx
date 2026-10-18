@@ -562,7 +562,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     try {
-      await hardReset.mutateAsync({ hash: tip, expectedHead: localTip });
+      await hardReset.mutateAsync({
+        hash: tip,
+        expectedHead: localTip,
+        expectedBranch: branch,
+      });
       toast.success(`Reset ${branch} to ${upstream}`);
     } catch (e) {
       onError(e);

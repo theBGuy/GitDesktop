@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { normPath } from "@/lib/git/path";
 import type { CommitAuthor, RemoteLens, RepoInfo } from "@/lib/git/types";
 import type { PrSection } from "@/lib/pulls/pr-section";
+import { retargetAmendPin } from "@/lib/stores/draft-pin";
 import { startViewTransition } from "@/lib/view-transition";
 
 export type AppView =
@@ -182,6 +183,11 @@ export interface CommitDraft {
   coAuthors: CommitAuthor[];
   aiGenerated: boolean;
   amendingHash: string | null;
+  /** The HEAD shown when useAmendCommit ran (`headBranchPin`'s form; on the
+   *  force-push route, at confirm), the amend's branch pin beside `amendingHash`.
+   *  Null when not amending, or when status was unread then and the oid pin
+   *  stands alone. */
+  amendingBranch: string | null;
 }
 
 const EMPTY_COMMIT_DRAFT: CommitDraft = {
@@ -190,6 +196,7 @@ const EMPTY_COMMIT_DRAFT: CommitDraft = {
   coAuthors: [],
   aiGenerated: false,
   amendingHash: null,
+  amendingBranch: null,
 };
 
 /** Selections cleared when a navigation switches to a *different* repo — the
@@ -224,6 +231,7 @@ const CROSS_REPO_RESET: Partial<UiState> = {
   commitCoAuthors: [],
   commitAiGenerated: false,
   amendingHash: null,
+  amendingBranch: null,
   activeDraftKey: null,
   draftKeyRemaps: {},
 };
@@ -395,6 +403,8 @@ interface UiState {
   commitAiGenerated: boolean;
   /** Hash of the commit being amended, or null for a normal commit. */
   amendingHash: string | null;
+  /** The live mirror of {@link CommitDraft.amendingBranch}. */
+  amendingBranch: string | null;
   /** Saved commit drafts keyed by repo+branch; survives repo/branch switches.
    *  The live commit fields above mirror the entry for `activeDraftKey`. */
   commitDrafts: Record<string, CommitDraft>;
@@ -591,11 +601,18 @@ interface UiState {
   restoreCommitDraft: (draft: CommitDraft, key: string | null) => void;
   setGenerating: (generating: boolean) => void;
   setCommitAiGenerated: (generated: boolean) => void;
-  setAmending: (hash: string | null) => void;
+  /** Ends amend mode, oid and branch pins together; amend mode starts only through
+   *  {@link UiState.landAmend}, which takes both pins. */
+  clearAmending: () => void;
   /** Lands an amend on the Changes tab: the commit's message and amend mode in ONE
    *  set. It never bumps {@link UiState.interactionEpoch}: it runs after the commit
    *  lookup's await, so the amend's request bumped instead (see useAmendCommit). */
-  landAmend: (hash: string, title: string, body: string) => void;
+  landAmend: (
+    hash: string,
+    branch: string | null,
+    title: string,
+    body: string,
+  ) => void;
   /** Point the live commit fields at `key`'s saved draft (load on repo/branch
    *  switch). The previous draft is already mirrored in `commitDrafts`. */
   loadCommitDraft: (key: string) => void;
@@ -619,6 +636,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     commitCoAuthors: CommitAuthor[];
     commitAiGenerated: boolean;
     amendingHash: string | null;
+    amendingBranch: string | null;
   }>;
   // Mirror the live commit-draft fields into commitDrafts[activeDraftKey] on
   // every edit so a draft survives repo/branch switches; empty drafts are
@@ -633,6 +651,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       commitCoAuthors: s.commitCoAuthors,
       commitAiGenerated: s.commitAiGenerated,
       amendingHash: s.amendingHash,
+      amendingBranch: s.amendingBranch,
       ...patch,
     };
     const result: Partial<UiState> = { ...patch };
@@ -643,6 +662,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         coAuthors: next.commitCoAuthors,
         aiGenerated: next.commitAiGenerated,
         amendingHash: next.amendingHash,
+        amendingBranch: next.amendingBranch,
       };
       const drafts = { ...s.commitDrafts };
       if (isEmptyDraft(draft)) delete drafts[s.activeDraftKey];
@@ -732,6 +752,7 @@ export const useUiStore = create<UiState>()((set, get) => {
     generating: false,
     commitAiGenerated: false,
     amendingHash: null,
+    amendingBranch: null,
     commitDrafts: {},
     activeDraftKey: null,
     draftKeyRemaps: {},
@@ -1087,6 +1108,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           commitCoAuthors: [],
           commitAiGenerated: false,
           amendingHash: null,
+          amendingBranch: null,
           commitDrafts: drafts,
         };
       }),
@@ -1097,35 +1119,52 @@ export const useUiStore = create<UiState>()((set, get) => {
         // seam the generation guard resolves through.
         const target = resolveDraftKey(s.draftKeyRemaps, key);
         const result: Partial<UiState> = {};
+        // The amend's branch pin follows that rename too, as migrateCommitDraft's
+        // does: the emptied draft gave the rename nothing to carry.
+        const restored =
+          key !== null && target !== null
+            ? {
+                ...draft,
+                amendingBranch: retargetAmendPin(
+                  draft.amendingBranch,
+                  s.repoPath,
+                  key,
+                  target,
+                ),
+              }
+            : draft;
         // Put the message back into the draft it belonged to.
         if (target) {
           const drafts = { ...s.commitDrafts };
-          if (isEmptyDraft(draft)) delete drafts[target];
-          else drafts[target] = draft;
+          if (isEmptyDraft(restored)) delete drafts[target];
+          else drafts[target] = restored;
           result.commitDrafts = drafts;
         }
         // Only touch the live fields if that draft is still the active one —
         // if the user switched branches mid-commit, leave their current draft
         // alone (the restored message reappears when they switch back).
         if (s.activeDraftKey === target) {
-          result.commitTitle = draft.title;
-          result.commitBody = draft.body;
-          result.commitCoAuthors = draft.coAuthors;
-          result.commitAiGenerated = draft.aiGenerated;
-          result.amendingHash = draft.amendingHash;
+          result.commitTitle = restored.title;
+          result.commitBody = restored.body;
+          result.commitCoAuthors = restored.coAuthors;
+          result.commitAiGenerated = restored.aiGenerated;
+          result.amendingHash = restored.amendingHash;
+          result.amendingBranch = restored.amendingBranch;
         }
         return result;
       }),
     setGenerating: (generating) => set({ generating }),
     setCommitAiGenerated: (generated) =>
       setDraftFields({ commitAiGenerated: generated }),
-    setAmending: (hash) => setDraftFields({ amendingHash: hash }),
-    landAmend: (hash, title, body) =>
+    clearAmending: () =>
+      setDraftFields({ amendingHash: null, amendingBranch: null }),
+    landAmend: (hash, branch, title, body) =>
       set((s) => ({
         ...draftFieldsPatch(s, {
           commitTitle: title,
           commitBody: body,
           amendingHash: hash,
+          amendingBranch: branch,
         }),
         repoTab: "changes",
       })),
@@ -1145,6 +1184,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           commitCoAuthors: d.coAuthors,
           commitAiGenerated: d.aiGenerated,
           amendingHash: d.amendingHash,
+          amendingBranch: d.amendingBranch,
         };
       }),
     migrateCommitDraft: (repoPath, fromBranch, toBranch) =>
@@ -1153,7 +1193,12 @@ export const useUiStore = create<UiState>()((set, get) => {
         const newKey = commitDraftKey(repoPath, toBranch);
         if (oldKey === newKey) return {};
         const result: Partial<UiState> = {};
-        const moved = s.commitDrafts[oldKey];
+        const carried = s.commitDrafts[oldKey];
+        // An amend's branch pin names the branch, so it follows the rename too.
+        const moved =
+          carried?.amendingBranch === fromBranch
+            ? { ...carried, amendingBranch: toBranch }
+            : carried;
         const retargeting = s.activeDraftKey === oldKey;
         // A draft already sitting under the new name belongs to a branch that no
         // longer answers to it, so the state carried across the rename wins —
@@ -1182,6 +1227,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         result.draftKeyRemaps = remaps;
         if (retargeting) {
           result.activeDraftKey = newKey;
+          if (s.amendingBranch === fromBranch) result.amendingBranch = toBranch;
         } else if (s.activeDraftKey === newKey && moved) {
           // The status poll can flip the key to the new name before this runs,
           // which blanks the live fields; put the carried-over draft back into
@@ -1191,6 +1237,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           result.commitCoAuthors = moved.coAuthors;
           result.commitAiGenerated = moved.aiGenerated;
           result.amendingHash = moved.amendingHash;
+          result.amendingBranch = moved.amendingBranch;
         }
         return result;
       }),

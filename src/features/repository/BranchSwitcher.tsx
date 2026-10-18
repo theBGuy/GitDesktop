@@ -1739,7 +1739,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           );
           return;
         }
-        await hardReset.mutateAsync({ hash: tip, expectedHead: localTip });
+        await hardReset.mutateAsync({
+          hash: tip,
+          expectedHead: localTip,
+          expectedBranch: branch.name,
+        });
       } else {
         await resetToUpstream.mutateAsync({
           branch: branch.name,
