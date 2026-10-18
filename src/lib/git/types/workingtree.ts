@@ -21,7 +21,9 @@ export interface FileDiff {
   isTruncated: boolean;
   text: string;
   /** The raw diff bytes weren't valid UTF-8, so `text` is a lossy decode and the
-   *  hunk/line write paths must refuse. Absent on hand-built diffs (PR surfaces). */
+   *  hunk/line write paths must refuse. Only the working-tree read measures it:
+   *  other backend diffs send false and hand-built ones omit it, so neither means
+   *  the bytes were checked. */
   undecodable?: boolean;
 }
 

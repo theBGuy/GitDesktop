@@ -254,7 +254,8 @@ export function ConflictResolveView({
     setPhase("idle");
   }
 
-  // Ends the session; the bump retires an Accept still re-reading the file.
+  // Ends the session; the bump retires a start() still loading the sides (Close
+  // or Escape during the loading phase), so it never goes on to stream.
   function stopSession() {
     genRef.current++;
     stop();
@@ -282,7 +283,7 @@ export function ConflictResolveView({
         fresh = await conflictSides(acceptIn, path, []);
       } catch {
         toast.info(
-          `${baseName(path)} changed since the proposal was made and couldn't be re-read — nothing was written.`,
+          `${baseName(path)} couldn't be re-read — nothing was written.`,
         );
         return;
       }

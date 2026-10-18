@@ -366,7 +366,9 @@ export function ConflictFileView({
   // can't be text-merged; offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
   // Gated on the working file alone: per-region accepts rebuild from it, so a
-  // clean working file over a non-UTF-8 stage blob stays lossless here.
+  // clean working file over a non-UTF-8 stage blob stays lossless for them.
+  // canAi deliberately leaves that blob-only case to ConflictResolveView's
+  // `undecodable` block, which is what keeps the AI flow safe there.
   const workingUndecodable = file.data?.workingUndecodable === true;
   const canAi =
     aiEnabled && reviewConfigured && textResolvable && !workingUndecodable;
