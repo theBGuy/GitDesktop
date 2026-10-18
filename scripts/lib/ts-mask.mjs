@@ -1,8 +1,11 @@
 // Shared TypeScript/TSX masking and source traversal for the networkmode guards.
 // Runs in CI's installless guards job, so node built-ins ONLY.
-// Known loud false ambiguities: postfix `x++ / y` division lexes as a regex
-// opener; a `<const T,>` generic arrow lexes as JSX; a function-typed JSX
-// prop's type argument is unreadable. These fail closed.
+// Known false ambiguities: a `<const T,>` generic arrow lexes as JSX and a
+// function-typed JSX prop's type argument is unreadable; both fail closed.
+// Postfix `x++ / y` / `x-- / y` division lexes as a regex opener: it fails
+// closed only when nothing later on the line closes it, else the code between is
+// blanked silently. A regex right after a brace-less `if (…)`/`while (…)`/
+// `for (…)` lexes as a division.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -38,6 +41,9 @@ export const EXPR_KEYWORDS = new Set([
  *  text refuses rather than guesses. */
 export function maskNonCode(src, jsx) {
   const out = src.split("");
+  // A leading byte-order mark is blanked in place, so offsets stay put.
+  const BOM = String.fromCharCode(0xfeff);
+  if (out[0] === BOM) out[0] = " ";
   const blank = (from, to) => {
     for (let k = from; k < to; k++)
       if (out[k] !== "\n" && out[k] !== "\r") out[k] = " ";
@@ -54,7 +60,18 @@ export function maskNonCode(src, jsx) {
     if (/[\w$]/.test(out[k])) {
       let s = k;
       while (s > 0 && /[\w$]/.test(out[s - 1])) s--;
+      // A keyword-named property (`size.in / 2`) is an operand, not a keyword;
+      // a spread's `...` before a keyword is not a property access.
+      if (out[s - 1] === "." && out[s - 2] !== ".") return false;
       return EXPR_KEYWORDS.has(out.slice(s, k + 1).join(""));
+    }
+    // A run of `!` hard after an operand (a name, a closing bracket, a
+    // template's backtick) is TS's postfix non-null assertion (`total! / 2`,
+    // `x!! / 2`, `count! < 3`), so what follows is an operator.
+    if (out[k] === "!") {
+      let s = k;
+      while (s > 0 && out[s - 1] === "!") s--;
+      if (s > 0 && /[\w$)\]`]/.test(out[s - 1])) return false;
     }
     return EXPR_OPENERS.has(out[k]);
   };
@@ -64,6 +81,8 @@ export function maskNonCode(src, jsx) {
     for (let j = start + 1; j < src.length; j++) {
       if (src[j] === "\\" && !multiline) {
         j++;
+        // A line continuation over CRLF escapes the whole break.
+        if (src[j] === "\r" && src[j + 1] === "\n") j++;
         continue;
       }
       if (src[j] === q) {

@@ -432,3 +432,55 @@ test("the new PR write kinds hold only their own PR", () => {
   assert.equal(isPendingFor(discard, "discard-review", 7, "upstream"), true);
   assert.equal(isPendingFor(discard, "discard-review", 8, "origin"), false);
 });
+
+const scoped = (entries, scope) =>
+  pendingWritesFor(entries, "C:/a", (kind) => kind, scope);
+
+test("a scope matches a key's trailing lens; the other lens never holds", () => {
+  const entries = [
+    { key: ["commit-comment-write", "create", "C:/a", "origin"], vars: {} },
+  ];
+  assert.deepEqual(scoped(entries, ["origin"]), ["create"]);
+  assert.deepEqual(scoped(entries, ["upstream"]), []);
+  // A reader passing no scope keeps holding on every trailing value.
+  assert.deepEqual(scoped(entries, []), ["create"]);
+});
+
+test("a scope matches a key's trailing site; another site never holds", () => {
+  const entries = [
+    { key: ["jira-write", "comment", "C:/a", "acme.atlassian.net"], vars: {} },
+  ];
+  assert.deepEqual(scoped(entries, ["acme.atlassian.net"]), ["comment"]);
+  assert.deepEqual(scoped(entries, ["other.atlassian.net"]), []);
+});
+
+test("a key without the trailing element, or holding null, still matches", () => {
+  const entries = [
+    { key: ["jira-write", "due-date", "C:/a"], vars: {} },
+    { key: ["jira-write", "comment", "C:/a", null], vars: {} },
+  ];
+  assert.deepEqual(scoped(entries, ["acme.atlassian.net"]), [
+    "due-date",
+    "comment",
+  ]);
+  // A reader that can't name its site (null) holds on every write.
+  assert.deepEqual(
+    scoped(
+      [{ key: ["jira-write", "comment", "C:/a", "x.net"], vars: {} }],
+      [null],
+    ),
+    ["comment"],
+  );
+});
+
+test("a multi-element scope must match each trailing element in order", () => {
+  const entries = [
+    {
+      key: ["review-history-write", "clear", "C:/a", "origin", "remote", "7"],
+      vars: undefined,
+    },
+  ];
+  assert.deepEqual(scoped(entries, ["origin", "remote", "7"]), ["clear"]);
+  assert.deepEqual(scoped(entries, ["origin", "remote", "8"]), []);
+  assert.deepEqual(scoped(entries, ["origin", "local", "7"]), []);
+});

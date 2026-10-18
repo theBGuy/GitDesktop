@@ -13,11 +13,12 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { copyText } from "@/lib/clipboard";
-import { useForgeStatus } from "@/lib/git/queries";
+import { useForgeStatus, usePendingRepoWrites } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import {
+  REVIEW_HISTORY_WRITES_FAMILY,
   useClearReviews,
   useDeleteReview,
   useReviewHistory,
@@ -85,15 +86,19 @@ export function ReviewHistory({
     setLastScopeKey(scopeKey);
     setConfirmingClear(false);
   }
-  // The clear and trim holds, per review scope: object tokens so one scope's
-  // settle never releases another's, and kept through a scope switch (unlike the
-  // confirm) so a return mid-write still holds.
-  const [clearingFor, setClearingFor] = useState<{ scope: string } | null>(
-    null,
+  // The clear and trim holds, read from the cache by review scope: this disclosure
+  // outlives a PR switch, and the cache keeps a write another scope started (or a
+  // return to this one mid-write) apart. No click-time slot: a second press before
+  // the cache notification lands repeats the same idempotent write.
+  const historyWrites = usePendingRepoWrites(
+    REVIEW_HISTORY_WRITES_FAMILY,
+    repoPath,
+    [lens, prKind, prRef],
   );
-  const [savingFor, setSavingFor] = useState<{ scope: string } | null>(null);
-  const clearing = clearingFor?.scope === scopeKey;
-  const saving = savingFor?.scope === scopeKey;
+  // Whole-scope writes: the key already names the PR, and a clear sends no
+  // variables to match on.
+  const clearing = historyWrites.some((w) => w.kind === "clear");
+  const saving = historyWrites.some((w) => w.kind === "update");
 
   // ONE list: completed reviews and kept partial runs interleave by time, so the
   // disclosure, its count, and the arrow-key walk all cover every stored record — a PR
@@ -128,28 +133,21 @@ export function ReviewHistory({
   // the shared review-history mutation has a failure surface.
   async function saveEdit(id: string) {
     const session = editSessionRef.current;
-    const mine = { scope: scopeKey };
-    setSavingFor(mine);
     try {
       await update.mutateAsync({ id, text: draft });
       if (editSessionRef.current === session) closeEdit();
     } catch {
       // No failure surface (see above).
-    } finally {
-      setSavingFor((cur) => (cur === mine ? null : cur));
     }
   }
 
   async function clearHistory() {
     const startedFor = scopeKey;
-    const mine = { scope: scopeKey };
-    setClearingFor(mine);
     try {
       await clear.mutateAsync(undefined);
     } catch {
       // No failure surface (see above).
     } finally {
-      setClearingFor((cur) => (cur === mine ? null : cur));
       if (startedFor === scopeKeyRef.current) setConfirmingClear(false);
     }
   }

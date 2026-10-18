@@ -116,9 +116,14 @@ const JIRA_WRITES_FAMILY = "jira-write";
 export const jiraWriteKey = (kind: JiraWriteKind, repo: string) =>
   [JIRA_WRITES_FAMILY, kind, repo] as const;
 
-/** The pending Jira writes in `repo`, every issue's. */
-export function usePendingJiraWrites(repo: string): PendingRepoWrite[] {
-  return usePendingRepoWrites(JIRA_WRITES_FAMILY, repo);
+/** The pending Jira writes in `repo`, every issue's. `siteHost` is the linked
+ *  site: the comment writes key it after the repo, so a relink to another site
+ *  stops holding on the old one's; writes keyed without it match any site. */
+export function usePendingJiraWrites(
+  repo: string,
+  siteHost: string | null = null,
+): PendingRepoWrite[] {
+  return usePendingRepoWrites(JIRA_WRITES_FAMILY, repo, [siteHost]);
 }
 
 /** The family PREFIX for a repo's Jira issue lists: the list query and the prefix
@@ -905,7 +910,8 @@ export function useJiraCommentDelete(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    // The trailing site scopes the hold across a relink, like the comment writes.
+    // The trailing site scopes the hold across a relink (usePendingJiraWrites
+    // matches it), like the comment writes.
     mutationKey: [
       ...jiraWriteKey("comment-delete", repo),
       link?.siteHost ?? null,

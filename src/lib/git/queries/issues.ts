@@ -127,11 +127,15 @@ const NO_REPO_WRITES: PendingRepoWrite[] = [];
 /** The pending writes of `family` filed against `repo`, read from the mutation
  *  cache so a host's remount (an entity switch) can't lose them. Exported for the
  *  families outside this package (the Jira writes), which can't reach the
- *  snapshot primitive themselves. */
+ *  snapshot primitive themselves. `scope` names the key's trailing elements a
+ *  family carries (see {@link pendingWritesFor}): a lens, a Jira site. */
 export function usePendingRepoWrites(
   family: string,
   repo: string,
+  scope: readonly (string | null)[] = [],
 ): PendingRepoWrite[] {
+  // A primitive signature, so the caller's fresh array never re-memoizes `select`.
+  const scopeSig = JSON.stringify(scope);
   const select = useCallback(
     (cache: MutationCache) =>
       pendingWritesFor(
@@ -140,8 +144,9 @@ export function usePendingRepoWrites(
         ),
         repo,
         readRepoWrite,
+        JSON.parse(scopeSig),
       ),
-    [family, repo],
+    [family, repo, scopeSig],
   );
   return useMutationCacheSnapshot(select, NO_REPO_WRITES);
 }

@@ -310,11 +310,13 @@ export function CommitComments({
   const editComment = useEditCommitComment(repoPath, lens);
   const deleteComment = useDeleteCommitComment(repoPath, lens);
   // This commit's own writes, from the cache: neither host keys this pane on the
-  // commit, so another commit's write never holds it. Only a whole-commit create
-  // holds the composer; a line comment's create always carries its `path`.
+  // commit, so another commit's write never holds it, nor one under the other
+  // lens (the key carries it). Only a whole-commit create holds the composer; a
+  // line comment's create always carries its `path`.
   const commentWrites = usePendingRepoWrites(
     COMMIT_COMMENT_WRITES_FAMILY,
     repoPath,
+    [lens],
   );
   const creating = pendingWriteMatching(
     commentWrites,

@@ -123,7 +123,21 @@ export function useReviewPartials(
   });
 }
 
+/** Filter prefix for the review-history writes a view reads back from the cache. */
+export const REVIEW_HISTORY_WRITES_FAMILY = "review-history-write";
+
+/** A review-history write's key: the review scope (lens, PR kind, PR ref) trails
+ *  the repo, so a reader passing its scope holds only its own PR's writes. */
+const reviewHistoryWriteKey = (
+  op: "update" | "delete" | "clear",
+  repo: string,
+  lens: RemoteLens,
+  kind: PrKind,
+  ref: string,
+) => [REVIEW_HISTORY_WRITES_FAMILY, op, repo, lens, kind, ref] as const;
+
 function useReviewHistoryMutation<TArgs>(
+  op: "update" | "delete" | "clear",
   repo: string,
   lens: RemoteLens,
   kind: PrKind,
@@ -132,6 +146,7 @@ function useReviewHistoryMutation<TArgs>(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: reviewHistoryWriteKey(op, repo, lens, kind, ref),
     mutationFn: fn,
     // Local review-history write — never park it offline.
     networkMode: "always",
@@ -160,6 +175,7 @@ export function useUpdateReviewText(
   ref: string,
 ) {
   return useReviewHistoryMutation(
+    "update",
     repo,
     lens,
     kind,
@@ -175,8 +191,13 @@ export function useDeleteReview(
   kind: PrKind,
   ref: string,
 ) {
-  return useReviewHistoryMutation(repo, lens, kind, ref, (id: string) =>
-    deleteReview(repo, id),
+  return useReviewHistoryMutation(
+    "delete",
+    repo,
+    lens,
+    kind,
+    ref,
+    (id: string) => deleteReview(repo, id),
   );
 }
 
@@ -186,7 +207,7 @@ export function useClearReviews(
   kind: PrKind,
   ref: string,
 ) {
-  return useReviewHistoryMutation(repo, lens, kind, ref, () =>
+  return useReviewHistoryMutation("clear", repo, lens, kind, ref, () =>
     clearReviewsFor(repo, lens, kind, ref),
   );
 }

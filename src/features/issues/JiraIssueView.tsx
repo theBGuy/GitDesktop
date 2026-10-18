@@ -445,7 +445,7 @@ export function JiraPriorityMenu({
   const priorities = useJiraPriorities(link, open);
   const setPriority = useJiraSetPriority(repoPath, link);
   const settingPriority = jiraHold(
-    usePendingJiraWrites(repoPath),
+    usePendingJiraWrites(repoPath, link.siteHost),
     "set-priority",
     issueKey,
   );
@@ -858,7 +858,7 @@ function JiraCommentItem({
   const del = useJiraCommentDelete(repoPath, link);
   // Keyed per comment, this row remounts idle on a return to its issue, so its
   // holds read the cache by the comment's own id.
-  const jiraWrites = usePendingJiraWrites(repoPath);
+  const jiraWrites = usePendingJiraWrites(repoPath, link?.siteHost);
   const onThisComment = (v: { commentId: string }) =>
     v.commentId === comment.id;
   const editHold = jiraHold(
@@ -1052,7 +1052,7 @@ function JiraWorklogItem({
   const del = useJiraDeleteWorklog(repoPath, link);
   // Keyed per worklog, this row remounts idle on a return to its issue, so its
   // holds read the cache by the entry's own id.
-  const jiraWrites = usePendingJiraWrites(repoPath);
+  const jiraWrites = usePendingJiraWrites(repoPath, link?.siteHost);
   const onThisWorklog = (v: { worklogId: string }) =>
     v.worklogId === worklog.id;
   const saveHold = jiraHold(
@@ -1327,7 +1327,7 @@ export function JiraTimeTrackingSection({
   const setRemaining = useJiraSetRemainingEstimate(repoPath, link);
   // This issue's own writes, from the cache: the rail is keyed per issue, so a
   // return mid-write remounts it idle while the write runs on.
-  const jiraWrites = usePendingJiraWrites(repoPath);
+  const jiraWrites = usePendingJiraWrites(repoPath, link?.siteHost);
   const logHold = jiraHold(jiraWrites, "log-work", issueKey);
   const logging = logHold !== undefined;
   const loggingReason = logHold
@@ -1688,7 +1688,7 @@ export function JiraIssueView({
   const transitionTo = useJiraTransitionTo(repoPath, link.data);
   // This issue's comment and status writes, from the cache: the view swaps issues
   // without remounting, so another issue's write never holds this one.
-  const jiraWrites = usePendingJiraWrites(repoPath);
+  const jiraWrites = usePendingJiraWrites(repoPath, link.data?.siteHost);
   const commenting = jiraHold(jiraWrites, "comment", issueKey);
   const transitioning = jiraHold(jiraWrites, "transition", issueKey);
   const transitioningTo = jiraHold(jiraWrites, "transition-to", issueKey);

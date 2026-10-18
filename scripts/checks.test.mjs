@@ -79,6 +79,7 @@ import {
 } from "./check-og-cards.mjs";
 import {
   bindsReceiver,
+  fileKey,
   pendingReads,
   ALLOWLIST as REUSED_VIEW_ALLOWLIST,
   LIMITATIONS as REUSED_VIEW_LIMITATIONS,
@@ -8942,7 +8943,7 @@ test("reused-view-pending keeps its member list, reasons and limitations", () =>
     assert.ok(e.reason.trim().length > 5, `${e.file} ${e.receiver} says why`);
     assert.ok(e.props.length > 0);
   }
-  assert.equal(REUSED_VIEW_LIMITATIONS.length, 5);
+  assert.equal(REUSED_VIEW_LIMITATIONS.length, 12);
 });
 
 test("reused-view-pending CLI fails a missing file and prints its limitations", () => {
@@ -8986,6 +8987,8 @@ test("reused-view-pending CLI fails a missing file and prints its limitations", 
     writeFileSync(join(root, file), rvView("  const ok = 1;"));
     const clean = run(["--root", root, file]);
     assert.equal(clean.status, 0, clean.out);
+    // Only the checked files' entries are counted.
+    assert.match(clean.out, /OK 1 files, 0 reviewed exceptions/);
 
     const missing = run(["--root", root, "src/features/fixture/Gone.tsx"]);
     assert.equal(missing.status, 1, missing.out);
@@ -9015,13 +9018,6 @@ test("reused-view-pending flags non-null, typed and nested-pattern reads", () =>
     assert.equal(violations.length, 1, line);
     assert.match(violations[0].form, /^destructure/, line);
   }
-  // A key inside the nested pattern is the variables' field, never the observer's.
-  assert.deepEqual(
-    rvReads(
-      rvView("  const { variables: { isPending } = {} } = deleteRelease;"),
-    ),
-    [],
-  );
 });
 
 test("reused-view-pending reads template interpolation as code, its text as text", () => {
@@ -9048,4 +9044,665 @@ test("reused-view-pending masks regex literals and JSX text", () => {
     rvReads(rvView("  const j = <p>{deleteRelease.isPending}</p>;")),
     ["deleteRelease.isPending"],
   );
+});
+
+test("reused-view-pending reads a chained receiver as its whole chain", () => {
+  const entry = rvEntry({ props: ["isPending"] });
+  for (const line of [
+    "  const a = ops.deleteRelease.isPending;",
+    "  const b = props?.deleteRelease!.isPending;",
+  ]) {
+    const { violations } = rvRun(
+      rvView(`${line}\n  const own = deleteRelease.isPending;`),
+      [entry],
+    );
+    assert.equal(violations.length, 1, line);
+    assert.match(violations[0].receiver, /\.deleteRelease$/, line);
+  }
+});
+
+test("reused-view-pending reads a non-null status and a typed hook binding", () => {
+  assert.deepEqual(
+    rvReads(rvView('  const a = deleteRelease!.status === "pending";')),
+    ["deleteRelease.status"],
+  );
+  assert.deepEqual(
+    rvReads(
+      'export function V() {\n  const t: UseMutationResult<A, B> = useCreatePr();\n  const p = t.status === "pending";\n}\n',
+    ),
+    ["t.status"],
+  );
+});
+
+test("reused-view-pending reads a key inside a one-level nested pattern", () => {
+  assert.deepEqual(
+    rvReads(rvView("  const { createPr: { isPending } } = ops;")),
+    ["ops.isPending"],
+  );
+  assert.deepEqual(
+    rvReads(rvView("  const { variables: { tag } = {} } = deleteRelease;")),
+    [],
+  );
+});
+
+test("reused-view-pending bans aliased, namespaced and imperative mutation counts", () => {
+  for (const [label, src] of [
+    [
+      "alias",
+      'import { useMutationState as useMS } from "@tanstack/react-query";\n' +
+        rvView("  const s = useMS({});"),
+    ],
+    ["namespace", rvView("  const n = RQ.useIsMutating();")],
+    [
+      "imperative",
+      rvView("  const n = queryClient.isMutating({ mutationKey });"),
+    ],
+    ["hook twin", rvView("  const n = useQueryClient().isMutating();")],
+  ]) {
+    const { violations } = rvRun(src);
+    assert.deepEqual(
+      violations.map((r) => r.form),
+      ["banned-call"],
+      label,
+    );
+  }
+});
+
+test("reused-view-pending fails a member with no named top-level declaration", () => {
+  for (const src of [
+    "",
+    "   \n\n",
+    'export { TagDetailView } from "./x";\n',
+    'export * from "./Moved";\n',
+  ]) {
+    assert.match(
+      rvRun(src).errors.join("\n"),
+      /no top-level declaration to scan \(empty, or a re-export stub\)/,
+      JSON.stringify(src),
+    );
+  }
+});
+
+test("reused-view-pending scans arrow-const and memo components", () => {
+  for (const src of [
+    "export const View = () => {\n  return null;\n};\n",
+    "export const View = memo(function View() {\n  return null;\n});\n",
+  ])
+    assert.deepEqual(rvRun(src).errors, [], src);
+});
+
+test("reused-view-pending flags a spread of a whole hook result only", () => {
+  assert.deepEqual(
+    rvReads(rvView("  const el = <Child {...deleteRelease} />;")),
+    ["deleteRelease...."],
+  );
+  for (const line of [
+    "  const o = { ...deleteRelease, extra: 1 };",
+    "  report(...deleteRelease);",
+  ])
+    assert.deepEqual(rvReads(rvView(line)), ["deleteRelease...."], line);
+  // A field destructured from a hook is not the hook's result.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  const { nativeProps } = useDisabledReason(x);\n  const el = <b {...nativeProps} />;",
+      ),
+    ),
+    [],
+  );
+});
+
+test("reused-view-pending resolves a banned alias past a comment in the import", () => {
+  for (const imp of [
+    'import {\n  // count writes\n  useIsMutating as uim,\n} from "@tanstack/react-query";\n',
+    'import { /* c */ useIsMutating as uim } from "@tanstack/react-query";\n',
+  ]) {
+    const { violations } = rvRun(imp + rvView("  const n = uim();"));
+    assert.deepEqual(
+      violations.map((r) => r.form),
+      ["banned-call"],
+      imp,
+    );
+  }
+  // An alias imported from another module is not the banned hook.
+  assert.deepEqual(
+    rvRun(
+      'import { useIsMutating as uim } from "./local";\n' +
+        rvView("  const n = uim();"),
+    ).violations,
+    [],
+  );
+});
+
+test("reused-view-pending treats a hook destructure's rest element as the result", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  const { data, ...rest } = useUpdateIssue();\n  const el = <C {...rest} />;",
+      ),
+    ),
+    ["rest...."],
+  );
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const { data, ...rest } = useUpdateIssue();\n  const p = rest.status === "pending";',
+      ),
+    ),
+    ["rest.status"],
+  );
+});
+
+test("reused-view-pending reads a parenthesised or cast spread operand", () => {
+  for (const line of [
+    "  const el = <C {...(deleteRelease as Props)} />;",
+    "  const o = { ...(deleteRelease) };",
+    "  const o = { ...(deleteRelease as unknown as Props) };",
+  ])
+    assert.deepEqual(rvReads(rvView(line)), ["deleteRelease...."], line);
+  // A field of the result is spread, not the result.
+  assert.deepEqual(
+    rvReads(rvView("  const a = [...(deleteRelease.data ?? [])];")),
+    [],
+  );
+});
+
+test("reused-view-pending pins only a const binding", () => {
+  const src =
+    "export function TagDetailView() {\n  let deleteRelease = useDeleteRelease(repoPath);\n  deleteRelease = useOther();\n  const p = deleteRelease.isPaused;\n}\n";
+  assert.match(
+    rvRun(src, [rvEntry()]).stale.join("\n"),
+    /no longer bound from useDeleteRelease/,
+  );
+});
+
+test("reused-view-pending reads a namespaced hook call as a hook result", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView("  const m = api.useUpdateIssue();\n  const el = <C {...m} />;"),
+    ),
+    ["m...."],
+  );
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const m = api.useUpdateIssue();\n  const p = m.status === "pending";',
+      ),
+    ),
+    ["m.status"],
+  );
+});
+
+// Round-3 shapes, shared by the fixtures below and the old-vs-new probe.
+const R3 = {
+  nonNullDivision: rvView(
+    "  return total! / 2 + Number(deleteRelease.isPending) / 3;",
+  ),
+  nonNullCompare: rvView(
+    "  const few = count! < 3;\n  return few && deleteRelease.isPending;",
+  ),
+  keywordProperty: rvView(
+    "  return size.in / 2 + Number(deleteRelease.isPending) / 3;",
+  ),
+  crlfContinuation: `export function TagDetailView() {\r\n  const deleteRelease = useDeleteRelease(repoPath);\r\n  const s = "a${String.fromCharCode(92)}\r\nb";\r\n  return deleteRelease.isPaused;\r\n}\r\n`,
+  bom: `\uFEFF${rvView("  return deleteRelease.isPaused;")}`,
+  templateColumnZero: rvView(
+    "  const s = `head\n${deleteRelease.title}\ntail`;\n  return deleteRelease.isPaused;",
+  ),
+};
+
+test("reused-view-pending: the masker reads a postfix `!` and a keyword property as operands", () => {
+  for (const src of [R3.nonNullDivision, R3.nonNullCompare, R3.keywordProperty])
+    assert.deepEqual(rvReads(src), ["deleteRelease.isPending"], src);
+});
+
+test("reused-view-pending: a CRLF line continuation, a BOM and a column-0 `${` scan clean", () => {
+  for (const src of [R3.crlfContinuation, R3.bom, R3.templateColumnZero])
+    assert.deepEqual(
+      rvRun(src, [rvEntry()]),
+      { violations: [], stale: [], errors: [] },
+      JSON.stringify(src.slice(0, 40)),
+    );
+});
+
+test("reused-view-pending reads nested and arrow-typed generic arguments", () => {
+  for (const call of [
+    "useMutation<Foo<Bar>, Error, Vars>({})",
+    "useMutation<A<B<C>>>({})",
+    "useMutation<(a: A) => B>({})",
+  ]) {
+    assert.deepEqual(
+      rvReads(rvView(`  const m = ${call};\n  return <C {...m} />;`)),
+      ["m...."],
+      call,
+    );
+    assert.deepEqual(
+      rvReads(rvView(`  const m = ${call};\n  return m.status === "pending";`)),
+      ["m.status"],
+      call,
+    );
+  }
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  const { mutate, ...rest } = useMutation<Foo<Bar>>({});\n  return <C {...rest} />;",
+      ),
+    ),
+    ["rest...."],
+  );
+  for (const src of [
+    rvView(
+      "  const s = useMutationState<MutationState<unknown, Error, V>>({});",
+    ),
+    'import { useMutationState as ms } from "@tanstack/react-query";\n' +
+      rvView("  const s = ms<Array<string>>({});"),
+    rvView("  return qc.isMutating<MutationFilters>({});"),
+  ])
+    assert.deepEqual(
+      rvRun(src).violations.map((r) => r.form),
+      ["banned-call"],
+      src,
+    );
+  // A pinned binding called with a nested generic still satisfies its pin.
+  assert.deepEqual(
+    rvRun(
+      "export function TagDetailView() {\n  const deleteRelease = useDeleteRelease<Foo<Bar>>(repoPath);\n  return deleteRelease.isPaused;\n}\n",
+      [rvEntry()],
+    ),
+    { violations: [], stale: [], errors: [] },
+  );
+});
+
+test("reused-view-pending tracks a rest element beside a nested or defaulted key", () => {
+  for (const pattern of ["{ data: { x }, ...rest }", "{ data = {}, ...rest }"])
+    assert.deepEqual(
+      rvReads(
+        rvView(`  const ${pattern} = useX();\n  return <C {...rest} />;`),
+      ),
+      ["rest...."],
+      pattern,
+    );
+  // A nested pattern's own rest is a field of that field, not the result.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  const { data: { ...inner } } = useX();\n  return <C {...inner} />;",
+      ),
+    ),
+    [],
+  );
+});
+
+test("reused-view-pending binds a hook result after a comma in a declaration", () => {
+  assert.deepEqual(
+    rvReads(rvView("  const a = 1,\n    m = useX();\n  return <C {...m} />;")),
+    ["m...."],
+  );
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const n = useY(),\n    m = useX();\n  return m.status === "pending";',
+      ),
+    ),
+    ["m.status"],
+  );
+  // An object key after a comma is not a declarator.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  const o = useZ({ a, provider: forge.data });\n  const s = useS();\n  return { ...(provider === 1 ? {} : {}) };",
+      ),
+    ),
+    [],
+  );
+});
+
+test("reused-view-pending reads a chained status receiver by its root", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const ops = useOps();\n  return ops.save.status === "pending";',
+      ),
+    ),
+    ["ops.save.status"],
+  );
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const { a, ...rest } = useX();\n  return rest.inner.status === "pending";',
+      ),
+    ),
+    ["rest.inner.status"],
+  );
+});
+
+test("reused-view-pending reads optional-chained and multi-level namespaced hooks", () => {
+  for (const call of ["api?.useX()", "a.b.useX()"])
+    assert.deepEqual(
+      rvReads(rvView(`  const m = ${call};\n  return <C {...m} />;`)),
+      ["m...."],
+      call,
+    );
+});
+
+test("reused-view-pending bans a banned name as a bracket key", () => {
+  for (const line of [
+    '  return qc["isMutating"]();',
+    "  return RQ['useIsMutating']();",
+    "  return RQ[`useMutationState`]({});",
+  ])
+    assert.deepEqual(
+      rvRun(rvView(line)).violations.map((r) => r.form),
+      ["banned-call"],
+      line,
+    );
+});
+
+test("reused-view-pending admits an alias call only as a call", () => {
+  const head =
+    'import { useIsMutating as busy } from "@tanstack/react-query";\n';
+  for (const line of [
+    "  return editor.busy();",
+    "  const o = { busy() { return 1; } };",
+  ])
+    assert.deepEqual(rvRun(head + rvView(line)).violations, [], line);
+  assert.deepEqual(
+    rvRun(head + rvView("  return busy();")).violations.map((r) => r.form),
+    ["banned-call"],
+  );
+});
+
+test("reused-view-pending: a field of a cast hook result is not a whole spread", () => {
+  assert.deepEqual(
+    rvReads(rvView("  return <C {...(deleteRelease as X).data} />;")),
+    [],
+  );
+});
+
+test("reused-view-pending fails an admitted prop no read uses", () => {
+  const { stale } = rvRun(rvView("  const p = deleteRelease.isPaused;"), [
+    rvEntry({ props: ["isPaused", "isPending"] }),
+  ]);
+  assert.deepEqual(stale, [
+    `${RV_FILE} TagDetailView: deleteRelease.isPending admits no read (unused allowlist entry)`,
+  ]);
+});
+
+test("reused-view-pending pins a destructure to its binding itself, at the top level", () => {
+  const pin = rvEntry({ receiver: "parents", binding: "choice" });
+  const run = (line) =>
+    rvRun(
+      `export function TagDetailView() {\n${line}\n  return parents.isPaused;\n}\n`,
+      [pin],
+    );
+  assert.match(
+    run("  const { parents } = choice.revertTarget;").stale.join("\n"),
+    /no longer bound from choice/,
+  );
+  assert.match(
+    run("  const { meta: { parents } } = choice;").stale.join("\n"),
+    /no longer bound from choice/,
+  );
+  for (const line of [
+    "  const { parents }: MainlineChoice = choice;",
+    "  const { meta: { label }, parents } = choice;",
+  ])
+    assert.deepEqual(run(line).stale, [], line);
+  // A namespaced hook satisfies a direct pin.
+  assert.deepEqual(
+    rvRun(
+      "export function TagDetailView() {\n  const deleteRelease = queries.useDeleteRelease(repoPath);\n  return deleteRelease.isPaused;\n}\n",
+      [rvEntry()],
+    ).stale,
+    [],
+  );
+});
+
+test("reused-view-pending reports an unused entry beside a stale sibling", () => {
+  const { stale } = rvRun(rvView("  return null;"), [
+    rvEntry({ binding: "useOther", props: ["isPending"] }),
+    rvEntry(),
+  ]);
+  assert.equal(stale.length, 2);
+  assert.match(stale[0], /no longer bound from useOther/);
+  assert.match(stale[1], /deleteRelease\.isPaused admits no read/);
+});
+
+test("reused-view-pending fails non-ASCII code, never JSX text", () => {
+  assert.match(
+    rvRun(
+      rvView("  const ä = deleteRelease;\n  return ä.isPending;"),
+    ).errors.join("\n"),
+    /non-ASCII character in code at line 3/,
+  );
+  assert.deepEqual(
+    rvRun(rvView("  return <p>Applying this change…</p>;")).errors,
+    [],
+  );
+});
+
+test("reused-view-pending keys a CLI file argument as the allowlist does", () => {
+  const root = resolve("C:/repo");
+  const member = "src/features/pulls/RemotePrView.tsx";
+  for (const arg of [`./${member}`, member.toLowerCase(), join(root, member)])
+    assert.equal(fileKey(root, arg, "win32"), member, arg);
+  assert.equal(
+    fileKey(root, member.toLowerCase(), "linux"),
+    member.toLowerCase(),
+  );
+});
+
+test("reused-view-pending: a status through a query's `data` is the entity's own", () => {
+  for (const read of [
+    "deleteRelease.data.status",
+    "deleteRelease.data?.status",
+    "deleteRelease?.data?.status",
+  ])
+    assert.deepEqual(
+      rvReads(rvView(`  return ${read} === "pending";`)),
+      [],
+      read,
+    );
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const ops = useOps();\n  return ops.save.status === "pending";',
+      ),
+    ),
+    ["ops.save.status"],
+  );
+});
+
+test("reused-view-pending reads a reversed compare on a chained status", () => {
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const ops = useOps();\n  if ("pending" === ops.save.status) return null;',
+      ),
+    ),
+    ["ops.save.status"],
+  );
+});
+
+test("reused-view-pending keeps hook-bound names to their own component", () => {
+  const src =
+    'export function A() {\n  const run = useLatestRun(repo);\n  return run.data;\n}\n\nfunction B({ run }: { run: Run }) {\n  return run.status === "pending" ? <Spin /> : <C {...run} />;\n}\n';
+  assert.deepEqual(rvReads(src), []);
+  // The same shape bound by a hook in its own component still flags.
+  assert.deepEqual(
+    rvReads(
+      'export function A() {\n  return null;\n}\n\nfunction B() {\n  const run = useLatestRun(repo);\n  return run.status === "pending" ? <Spin /> : <C {...run} />;\n}\n',
+    ),
+    ["run....", "run.status"],
+  );
+});
+
+test("reused-view-pending pins a destructure only to the hook call itself", () => {
+  const pin = rvEntry({ receiver: "details", binding: "usePrDetails" });
+  const run = (line) =>
+    rvRun(
+      `export function TagDetailView() {\n${line}\n  return details.isPaused;\n}\n`,
+      [pin],
+    );
+  assert.match(
+    run("  const { details } = usePrDetails(id).x;").stale.join("\n"),
+    /no longer bound from usePrDetails/,
+  );
+  assert.deepEqual(run("  const { details } = usePrDetails(id);").stale, []);
+});
+
+test("reused-view-pending: the masker reads a repeated or template postfix `!`", () => {
+  for (const line of [
+    "  return total!! / 2 + (deleteRelease.isPending ? 1 : 0) / 3;",
+    "  return tag`x`! / 2 + deleteRelease.isPending / 3;",
+  ])
+    assert.deepEqual(rvReads(rvView(line)), ["deleteRelease.isPending"], line);
+  // A prefix double-not still opens a regex.
+  assert.deepEqual(
+    rvReads(
+      rvView("  return (!!/x.isPending/.test(s)) && deleteRelease.isPaused;"),
+    ),
+    ["deleteRelease.isPaused"],
+  );
+});
+
+test("reused-view-pending scripts hold no invisible or bidi characters", () => {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const invisible = new RegExp(
+    `[${[0xfeff, 0x200b, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069].map((c) => String.fromCharCode(c)).join("")}]`,
+  );
+  for (const file of ["check-reused-view-pending.mjs", "lib/ts-mask.mjs"])
+    assert.ok(
+      !invisible.test(readFileSync(join(dir, file), "utf8")),
+      `${file} holds an invisible or bidi character`,
+    );
+});
+
+test("reused-view-pending keys a mis-cased CLI argument on macOS too", () => {
+  const member = "src/features/pulls/RemotePrView.tsx";
+  assert.equal(fileKey(resolve("/r"), member.toLowerCase(), "darwin"), member);
+});
+
+test("reused-view-pending: a status read through a `data` binding is the entity's own", () => {
+  for (const [bind, read] of [
+    ["const { data: run } = useLatestRun(repo);", "run?.status"],
+    ["const { data } = useLatestRun(repo);", "data?.status"],
+    ["const run = useLatestRun(repo).data;", "run?.status"],
+    ["const run = useLatestRun(repo)?.data;", "run.status"],
+  ])
+    assert.deepEqual(
+      rvReads(rvView(`  ${bind}\n  return ${read} === "pending";`)),
+      [],
+      bind,
+    );
+  // The rest of the observer beside its data, and the observer itself, still read.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const { data, ...rest } = useLatestRun(repo);\n  return rest.status === "pending";',
+      ),
+    ),
+    ["rest.status"],
+  );
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const run = useLatestRun(repo);\n  return run.status === "pending";',
+      ),
+    ),
+    ["run.status"],
+  );
+});
+
+test("reused-view-pending pins a binding only when it is the whole value", () => {
+  const pin = rvEntry({ receiver: "parents", binding: "useChoice" });
+  const run = (line) =>
+    rvRun(
+      `export function TagDetailView() {\n${line}\n  return parents.isPaused;\n}\n`,
+      [pin],
+    ).stale;
+  for (const line of [
+    "  const parents = useChoice(a).parents;",
+    "  const parents = useChoice(a)?.parents;",
+    "  const parents = useChoice(a) ?? other;",
+    "  const parents = useChoice(a) || other;",
+    "  const { parents } = useChoice(a) ?? fallback;",
+  ])
+    assert.match(run(line).join("\n"), /no longer bound from useChoice/, line);
+  for (const line of [
+    "  const parents = useChoice(a);",
+    "  const { parents } = useChoice(a);",
+    "  const { parents } = api.useChoice(a);",
+  ])
+    assert.deepEqual(run(line), [], line);
+  const choicePin = rvEntry({ receiver: "parents", binding: "choice" });
+  for (const line of [
+    "  const { parents } = choice ?? other;",
+    "  const { parents } = choice || other;",
+  ])
+    assert.match(
+      rvRun(
+        `export function TagDetailView() {\n${line}\n  return parents.isPaused;\n}\n`,
+        [choicePin],
+      ).stale.join("\n"),
+      /no longer bound from choice/,
+      line,
+    );
+});
+
+test("reused-view-pending: a destructure of a hook's `data` binds the data", () => {
+  for (const src of [
+    rvView(
+      '  const { run, jobs } = useRunDetail(repo, id).data ?? {};\n  return run?.status === "pending";',
+    ),
+    rvView(
+      "  const { title, ...rest } = useIssueDetails(repo, n).data ?? {};\n  return <Meta {...rest} />;",
+    ),
+    rvView(
+      '  const { save, data } = useBundle(repo).data;\n  return save.status === "pending";',
+    ),
+    rvView(
+      '  const run = useRun(repo)!.data;\n  return run.status === "pending";',
+    ),
+    rvView(
+      '  const { run } = useRun(repo)!.data;\n  return run.status === "pending";',
+    ),
+    rvView(
+      '  const run = useRun(repo).data!;\n  return run.status === "pending";',
+    ),
+  ])
+    assert.deepEqual(rvReads(src), [], src);
+  // Without the `.data` read, the destructure still binds the observer's keys.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        '  const { save, data } = useBundle(repo);\n  return save.status === "pending";',
+      ),
+    ),
+    ["save.status"],
+  );
+});
+
+test("reused-view-pending pins a destructure to a key, never a rename target", () => {
+  const pin = (receiver, binding) => rvEntry({ receiver, binding });
+  const stale = (line, entry) =>
+    rvRun(
+      `export function TagDetailView() {\n${line}\n  return ${entry.receiver}.isPaused;\n}\n`,
+      [entry],
+    ).stale;
+  for (const [line, entry] of [
+    ["  const { revert: parents } = choice;", pin("parents", "choice")],
+    ["  const { data: parents } = choice;", pin("parents", "choice")],
+    [
+      "  const { mutation: details } = useBundle(repo);",
+      pin("details", "useBundle"),
+    ],
+  ])
+    assert.match(stale(line, entry).join("\n"), /no longer bound from/, line);
+  for (const line of [
+    "  const { parents } = choice;",
+    "  const { parents = d } = choice;",
+    "  const { a, parents } = choice;",
+  ])
+    assert.deepEqual(stale(line, pin("parents", "choice")), [], line);
 });

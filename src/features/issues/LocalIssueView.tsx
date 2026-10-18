@@ -118,9 +118,11 @@ export function LocalIssueView({
   });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [promoteOpen, setPromoteOpen] = useState(false);
-  // Close/Reopen's single-flight hold, scoped to the issue it saves: an object
-  // token so one settle never releases another issue's hold, and kept across an
-  // issue switch so a return mid-save still holds.
+  // Close/Reopen's click-time hold, before the cache notification that feeds
+  // `updateHold` lands: the write appends the typed note, so a second press in
+  // that window would post it twice. `updateHold` carries the hold across an
+  // issue switch; the object token compare-and-clears, so a settle never
+  // releases another press's slot.
   const [statusSavingFor, setStatusSavingFor] = useState<{
     repo: string;
     id: string;

@@ -217,10 +217,12 @@ export function LocalPrView({
     if (pr) await update.mutateAsync({ id: pr.id, mutate });
   });
   const [promoteOpen, setPromoteOpen] = useState(false);
-  // Close/Reopen's and the review post's single-flight holds, scoped to the PR
-  // they save: object tokens so one settle never releases another PR's hold, kept
-  // across a PR switch so a return mid-save still holds. The panel's `post` gates
-  // re-entry on `posting`.
+  // Close/Reopen's and the review post's click-time holds, before the cache
+  // notification that feeds `updateHold` lands: both writes append a comment, so
+  // a second press in that window would post it twice. `updateHold` carries the
+  // hold across a PR switch; the object tokens compare-and-clear, so a settle
+  // never releases another press's slot. The panel's `post` gates re-entry on
+  // `posting`.
   const [statusSavingFor, setStatusSavingFor] = useState<{
     repo: string;
     id: string;

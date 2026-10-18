@@ -148,15 +148,22 @@ export function pendingMutationEntries(
 
 /** The writes among `entries` filed against `repo` (keyed `[prefix, kind, repo]`),
  *  each read through `read`. One keyed to another repo, or with no kind, is dropped:
- *  a hold never crosses repos. */
+ *  a hold never crosses repos. `scope` matches the key's trailing elements in order
+ *  (a lens, a Jira site): a key element that differs drops the write, while one the
+ *  key lacks, or either side holds as null, matches, so a write keyed without it
+ *  over-holds rather than releasing early. */
 export function pendingWritesFor<W>(
   entries: readonly PendingMutationEntry[],
   repo: string,
   read: (kind: string, vars: unknown, paused: boolean) => W,
+  scope: readonly unknown[] = [],
 ): W[] {
   return entries.flatMap((e) => {
-    const [, kind, keyRepo] = e.key ?? [];
-    return keyRepo === repo && typeof kind === "string"
+    const [, kind, keyRepo, ...trailing] = e.key ?? [];
+    const inScope = scope.every(
+      (want, i) => want == null || trailing[i] == null || trailing[i] === want,
+    );
+    return keyRepo === repo && typeof kind === "string" && inScope
       ? [read(kind, e.vars, e.paused ?? false)]
       : [];
   });
