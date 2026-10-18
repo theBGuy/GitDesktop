@@ -5267,6 +5267,7 @@ mod tests {
         // Windows backslash is an escape character.
         let sentinel = base_dir.join("hook-fired");
         let hook = repo.join(".git").join("hooks").join("pre-merge-commit");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::write(
             &hook,
             format!(
@@ -7080,7 +7081,8 @@ mod tests {
         let state = AppState::default();
         // (mode, start, new branch, checkout, repaired). `simple` tracks only a
         // same-named remote branch, so its row creates `same-name` itself.
-        let cases: [(Option<&str>, Option<&str>, &str, bool, bool); 7] = [
+        type Case<'a> = (Option<&'a str>, Option<&'a str>, &'a str, bool, bool);
+        let cases: [Case<'_>; 7] = [
             (None, Some("origin/same-name"), "mode-default", false, true),
             (
                 Some("always"),

@@ -1176,7 +1176,12 @@ mod tests {
                 &add_item_mutation(),
                 json!({"projectId":hostile,"contentId":hostile}),
             ),
-            update_draft_input(&hostile, &hostile, &hostile, Some(&[hostile.clone()])),
+            update_draft_input(
+                &hostile,
+                &hostile,
+                &hostile,
+                Some(std::slice::from_ref(&hostile)),
+            ),
             position_input(&hostile, &hostile, Some(&hostile)),
         ] {
             let payload: Value = serde_json::from_str(&input).unwrap();

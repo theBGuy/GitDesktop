@@ -8,7 +8,7 @@ paths:
 > Excerpted from `.claude/skills/gd-conventions/SKILL.md` §Rust/Tauri — read that section
 > in full before substantive Rust work; this file is the tripwire, not the playbook.
 
-- Never repo-wide `cargo fmt`; new files only via `rustfmt <file>`.
+- Never repo-wide `cargo fmt`; new files only via `rustfmt --edition 2021 <file>`.
 - Large ints over IPC serialize as strings (u64 loses precision as a JS number).
 - GraphQL fields without `!` deserialize into `Option<T>`; never `unwrap_or_default()` a
   `from_value`.

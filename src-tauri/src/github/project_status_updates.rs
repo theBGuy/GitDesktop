@@ -721,7 +721,8 @@ mod tests {
 
     #[test]
     fn scope_errors_map_to_each_hint_and_other_errors_survive() {
-        let mappers: [(fn(AppError) -> AppError, &str); 2] = [
+        type Mapper = (fn(AppError) -> AppError, &'static str);
+        let mappers: [Mapper; 2] = [
             (read_scope_error, READ_SCOPE_HINT),
             (write_scope_error, WRITE_SCOPE_HINT),
         ];

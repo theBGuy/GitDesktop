@@ -93,17 +93,13 @@ fn oplog_lock() -> &'static Mutex<()> {
     OPLOG_LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Pure resolution of the store's base directory, in precedence order:
-/// 1. a non-empty `GD_OPLOG_DIR` override — the escape hatch for headless/test callers;
-/// 2. under `cfg!(test)`, a temp subdir, so no in-crate test can write the user's real
-///    store (the instrumented ops run for real under `cargo test`);
-/// 3. otherwise the real app-data dir (`dirs::data_dir()/<identifier>`).
-///
-/// No filesystem side effects — `atomic_write` creates the parent at write time.
-fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool) -> AppResult<PathBuf> {
+/// A non-empty override wins; otherwise tests use a Git admin directory under
+/// temp or a normalized-repo hash under temp; the app uses its app-data directory.
+/// Only the test arm probes paths and gitdir pointers; parents are created on write.
+fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool, repo: &str) -> AppResult<PathBuf> {
     match gd_oplog_dir {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
-        _ if is_test => Ok(std::env::temp_dir().join("gd-oplog-test")),
+        _ if is_test => Ok(resolve_test_store(repo).0),
         _ => {
             let data = dirs::data_dir().ok_or_else(|| {
                 AppError::Command("could not resolve the app-data directory".to_string())
@@ -113,11 +109,56 @@ fn resolve_store_base(gd_oplog_dir: Option<&str>, is_test: bool) -> AppResult<Pa
     }
 }
 
-/// Absolute path of `opslog.json` — `<store base>/opslog.json`; see
-/// [`resolve_store_base`] for how the base is chosen.
-pub fn store_path() -> AppResult<PathBuf> {
-    let base = resolve_store_base(std::env::var("GD_OPLOG_DIR").ok().as_deref(), cfg!(test))?;
-    Ok(base.join(STORE_FILE))
+fn resolve_test_store(repo: &str) -> (PathBuf, &'static str) {
+    let admin = (|| {
+        let repo = Path::new(repo);
+        if !repo.is_absolute() {
+            return None;
+        }
+        let temp = std::fs::canonicalize(std::env::temp_dir()).ok()?;
+        if !std::fs::canonicalize(repo).ok()?.starts_with(&temp) {
+            return None;
+        }
+        let dot_git = repo.join(".git");
+        let admin = if dot_git.is_dir() {
+            dot_git
+        } else {
+            let contents = std::fs::read_to_string(dot_git).ok()?;
+            let target = contents.trim().strip_prefix("gitdir:")?.trim();
+            if target.is_empty() {
+                return None;
+            }
+            repo.join(target)
+        };
+        let canonical_admin = std::fs::canonicalize(&admin).ok()?;
+        if !canonical_admin.is_dir() || !canonical_admin.starts_with(&temp) {
+            return None;
+        }
+        Some(admin)
+    })();
+    if let Some(admin) = admin {
+        return (admin, "gd-oplog-test.json");
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    norm_repo_key(repo).hash(&mut hash);
+    (
+        std::env::temp_dir()
+            .join("gd-oplog-test")
+            .join(format!("{:016x}", hash.finish())),
+        STORE_FILE,
+    )
+}
+
+/// Store path: tests with a Git admin directory under temp use `gd-oplog-test.json`;
+/// overrides, hashed test bases and the app-data base use `opslog.json`.
+pub fn store_path(repo: &str) -> AppResult<PathBuf> {
+    let override_dir = std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty());
+    if cfg!(test) && override_dir.is_none() {
+        let (base, name) = resolve_test_store(repo);
+        return Ok(base.join(name));
+    }
+    Ok(resolve_store_base(override_dir.as_deref(), false, repo)?.join(STORE_FILE))
 }
 
 /// Read the whole store file as a JSON object. A missing file is an empty object;
@@ -153,25 +194,26 @@ fn write_store(path: &Path, store: &Map<String, Value>) -> AppResult<()> {
     crate::fsops::atomic_write(path, body.as_bytes())
 }
 
+fn norm_repo_key(s: &str) -> String {
+    let slashed: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
+    let bytes = slashed.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        let mut out = String::with_capacity(slashed.len());
+        out.push(bytes[0].to_ascii_lowercase() as char);
+        out.push_str(&slashed[1..]);
+        out
+    } else {
+        slashed
+    }
+}
+
 /// Compare two repo-path keys for "same repo" tolerantly: normalize separators to
 /// `/` and treat a leading Windows drive letter case-insensitively (`C:` == `c:`).
 /// Mirrors `local_prs.rs`. `pub(crate)` so a caller holding two spellings of one repo can
 /// tell whether they already resolve to one journal key — junctions, symlinks, 8.3 names
 /// and path-body case are outside this tolerance and need a second probe.
 pub(crate) fn same_repo(a: &str, b: &str) -> bool {
-    fn norm(s: &str) -> String {
-        let slashed: String = s.chars().map(|c| if c == '\\' { '/' } else { c }).collect();
-        let bytes = slashed.as_bytes();
-        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-            let mut out = String::with_capacity(slashed.len());
-            out.push(bytes[0].to_ascii_lowercase() as char);
-            out.push_str(&slashed[1..]);
-            out
-        } else {
-            slashed
-        }
-    }
-    norm(a) == norm(b)
+    norm_repo_key(a) == norm_repo_key(b)
 }
 
 /// Find the EXISTING store key for `repo` (exact first, then tolerant match), so we
@@ -219,7 +261,7 @@ fn sort_newest_first(entries: &mut [Value]) {
 fn insert_pending(repo: &str, entry: &OpLogEntry) -> AppResult<()> {
     let record = serde_json::to_value(entry)
         .map_err(|e| AppError::Command(format!("serialize opslog entry: {e}")))?;
-    let path = store_path()?;
+    let path = store_path(repo)?;
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
     let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
@@ -264,7 +306,7 @@ fn mutate_entry<F>(repo: &str, id: &str, mutate: F) -> AppResult<()>
 where
     F: FnOnce(&mut Map<String, Value>),
 {
-    let path = store_path()?;
+    let path = store_path(repo)?;
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
     let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
@@ -462,12 +504,18 @@ fn reconcile(
     current_branch: &str,
     live: &LiveOps<'_>,
 ) -> AppResult<Vec<OpLogEntry>> {
-    reconcile_at(&store_path()?, repo, mid_op, tree_dirty, current_branch, live)
+    reconcile_at(
+        &store_path(repo)?,
+        repo,
+        mid_op,
+        tree_dirty,
+        current_branch,
+        live,
+    )
 }
 
-/// The store logic behind [`reconcile`], taking an explicit path so a test can drive it
-/// against a temp file of its own (mirroring [`crate::review_notes`]'s `set_at`). The
-/// shared `cfg(test)` store can't answer whether a check WROTE, only what it left.
+/// The explicit-path seam lets no-write pins inspect exact file bytes independently
+/// of the per-repo resolver (mirroring [`crate::review_notes`]'s `set_at`).
 fn reconcile_at(
     path: &Path,
     repo: &str,
@@ -671,7 +719,7 @@ fn close_newest_paused_op(
     outcome: &PausedOutcome,
     now: String,
 ) -> AppResult<()> {
-    let path = store_path()?;
+    let path = store_path(repo)?;
     let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
     let _store_lock = crate::store_lock::lock_store(&path);
     let mut store = read_store(&path)?;
@@ -720,7 +768,7 @@ pub(crate) async fn pre_op_tip(repo: &str, id: &Option<String>) -> Option<String
 /// a reader on a tokio worker could park behind one for the whole budget.
 async fn read_repo_entries(repo: String) -> AppResult<Vec<Value>> {
     crate::store_lock::locked_store_task(move || {
-        let path = store_path()?;
+        let path = store_path(&repo)?;
         let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
         let store = read_store(&path)?;
         Ok(repo_entries(&store, &repo))
@@ -865,7 +913,7 @@ mod tests {
         // This runs in a cfg(test) build, so `store_path` takes arm 2 (temp subdir)
         // UNLESS a GD_OPLOG_DIR override is present in the environment. Branch on the
         // var rather than mutating process env (which would race parallel tests).
-        let path = store_path().unwrap();
+        let path = store_path(r"C:\oplog\resolver-pin").unwrap();
         match std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty()) {
             Some(dir) => {
                 // Override wins even under test: path is under the override dir.
@@ -893,26 +941,128 @@ mod tests {
         // Drive the pure resolver directly — deterministic + parallel-safe (no
         // process-env mutation).
         // 1. An explicit override wins regardless of the test flag.
-        let over = resolve_store_base(Some("C:/tmp/x"), true).unwrap();
+        let over = resolve_store_base(Some("C:/tmp/x"), true, r"C:\oplog\resolver-pin").unwrap();
         assert_eq!(over, PathBuf::from("C:/tmp/x"));
-        let over_nontest = resolve_store_base(Some("C:/tmp/x"), false).unwrap();
+        let over_nontest =
+            resolve_store_base(Some("C:/tmp/x"), false, r"C:\oplog\resolver-pin").unwrap();
         assert_eq!(over_nontest, PathBuf::from("C:/tmp/x"));
         // An empty override is ignored (falls through to the next arm).
         assert_eq!(
-            resolve_store_base(Some(""), true).unwrap(),
-            std::env::temp_dir().join("gd-oplog-test")
+            resolve_store_base(Some(""), true, r"C:\oplog\resolver-pin").unwrap(),
+            resolve_store_base(None, true, r"C:\oplog\resolver-pin").unwrap()
         );
         // 2. No override + test → the temp subdir.
         assert_eq!(
-            resolve_store_base(None, true).unwrap(),
+            resolve_store_base(None, true, r"C:\oplog\resolver-pin")
+                .unwrap()
+                .parent()
+                .unwrap(),
             std::env::temp_dir().join("gd-oplog-test")
         );
         // 3. No override + non-test → the real app-data dir (ends with the identifier).
-        let real = resolve_store_base(None, false).unwrap();
+        let real = resolve_store_base(None, false, r"C:\oplog\resolver-pin").unwrap();
         assert!(
             real.components().any(|c| c.as_os_str() == APP_IDENTIFIER),
             "real base {real:?} should contain {APP_IDENTIFIER}"
         );
+    }
+
+    #[test]
+    fn store_paths_are_keyed_by_repo_under_test() {
+        let first = resolve_store_base(None, true, r"C:\x").unwrap();
+        let second = resolve_store_base(None, true, r"C:\y").unwrap();
+        assert_ne!(
+            first, second,
+            "different repositories need different test stores"
+        );
+        assert_eq!(first, resolve_store_base(None, true, "c:/x").unwrap());
+        let fallback = std::env::temp_dir().join("gd-oplog-test");
+        assert_eq!(first.parent(), Some(fallback.as_path()));
+        let hash = first.file_name().unwrap().to_str().unwrap();
+        assert_eq!(hash.len(), 16);
+        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(first.join(STORE_FILE), fallback.join(STORE_FILE));
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_str().unwrap();
+        let dot_git = dir.path().join(".git");
+        std::fs::create_dir_all(&dot_git).unwrap();
+        assert_eq!(resolve_store_base(None, true, repo).unwrap(), dot_git);
+        assert_eq!(
+            resolve_store_base(Some("C:/tmp/x"), true, repo).unwrap(),
+            PathBuf::from("C:/tmp/x")
+        );
+        let override_dir = std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty());
+        let expected = override_dir.as_ref().map_or_else(
+            || dot_git.join("gd-oplog-test.json"),
+            |dir| PathBuf::from(dir).join(STORE_FILE),
+        );
+        assert_eq!(store_path(repo).unwrap(), expected);
+        let expected_fake = override_dir.as_ref().map_or_else(
+            || first.join(STORE_FILE),
+            |dir| PathBuf::from(dir).join(STORE_FILE),
+        );
+        assert_eq!(store_path(r"C:\x").unwrap(), expected_fake);
+        assert_eq!(
+            resolve_store_base(None, false, repo).unwrap(),
+            resolve_store_base(None, false, r"C:\y").unwrap()
+        );
+
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::write(worktree.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        let base = resolve_store_base(None, true, worktree.path().to_str().unwrap()).unwrap();
+        assert_eq!(base.parent(), Some(fallback.as_path()));
+        assert_ne!(base.join(STORE_FILE), fallback.join(STORE_FILE));
+    }
+
+    #[test]
+    fn store_paths_keep_non_temp_and_relative_repos_in_temp() {
+        let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let outside = temp.ancestors().last().unwrap();
+        assert!(!outside.starts_with(&temp));
+        let fallback = std::env::temp_dir().join("gd-oplog-test");
+        for repo in [outside.to_str().unwrap(), "."] {
+            let base = resolve_store_base(None, true, repo).unwrap();
+            assert_eq!(base.parent(), Some(fallback.as_path()));
+        }
+
+        let worktree = tempfile::tempdir().unwrap();
+        std::fs::write(
+            worktree.path().join(".git"),
+            format!("gitdir: {}\n", outside.display()),
+        )
+        .unwrap();
+        let base = resolve_store_base(None, true, worktree.path().to_str().unwrap()).unwrap();
+        assert_eq!(base.parent(), Some(fallback.as_path()));
+    }
+
+    #[test]
+    fn store_paths_resolve_temp_worktree_admin_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("linked");
+        let admin = dir.path().join("main/.git/worktrees/linked");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&admin).unwrap();
+        for pointer in [
+            "../main/.git/worktrees/linked".to_string(),
+            admin.to_str().unwrap().to_string(),
+        ] {
+            std::fs::write(worktree.join(".git"), format!("gitdir: {pointer}\n")).unwrap();
+            let repo = worktree.to_str().unwrap();
+            let base = resolve_store_base(None, true, repo).unwrap();
+            assert_eq!(
+                std::fs::canonicalize(&base).unwrap(),
+                std::fs::canonicalize(&admin).unwrap()
+            );
+            let expected = std::env::var("GD_OPLOG_DIR")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .map_or_else(
+                    || base.join("gd-oplog-test.json"),
+                    |dir| PathBuf::from(dir).join(STORE_FILE),
+                );
+            assert_eq!(store_path(repo).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -1367,15 +1517,12 @@ mod tests {
 
     // ── Stale-pause reconcile ────────────────────────────────────────────────
     //
-    // These drive `reconcile`/`git_oplog_check` for real, so they go through
-    // `store_path()` — the cfg(test) arm, a temp file no in-crate test may leave the
-    // developer's real store for. The file is shared with every other test in the
-    // binary, so each seeds a repo key of its own and mutates under the same locks
-    // production takes.
+    // Real reconcile calls use each repo's test store, isolated from app data.
+    // Seeds replace only their own key under the same locks production takes.
 
     /// Replace `repo`'s entries in the seam-resolved store, as one locked RMW.
     fn seed_entries(repo: &str, entries: Vec<Value>) {
-        let path = store_path().unwrap();
+        let path = store_path(repo).unwrap();
         let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
         let _store_lock = crate::store_lock::lock_store(&path);
         let mut store = read_store(&path).unwrap();
@@ -1386,7 +1533,7 @@ mod tests {
     /// `repo`'s record `id`, straight off disk — under both locks, so the read can't
     /// land inside another test's (or process's) atomic rename over the file.
     fn stored_entry(repo: &str, id: &str) -> Value {
-        let path = store_path().unwrap();
+        let path = store_path(repo).unwrap();
         let _guard = oplog_lock().lock().unwrap_or_else(|p| p.into_inner());
         let _store_lock = crate::store_lock::lock_store(&path);
         let store = read_store(&path).unwrap();
@@ -1597,7 +1744,7 @@ mod tests {
 
     #[test]
     fn every_stale_paused_pick_is_concluded_in_one_pass() {
-        let repo = r"C:\oplog\two-stale-pauses";
+        let repo = &format!(r"C:\oplog\two-stale-pauses-{}", uuid::Uuid::new_v4());
         seed_entries(
             repo,
             vec![
@@ -1625,7 +1772,10 @@ mod tests {
 
     #[test]
     fn the_pending_arm_is_untouched_by_the_paused_one() {
-        let repo = r"C:\oplog\pending-beside-a-stale-pause";
+        let repo = &format!(
+            r"C:\oplog\pending-beside-a-stale-pause-{}",
+            uuid::Uuid::new_v4()
+        );
         seed_entries(
             repo,
             vec![
@@ -1649,7 +1799,7 @@ mod tests {
     /// otherwise the row is cap-immortal and a permanent lie in Operation history.
     #[test]
     fn a_stale_paused_pull_drop_is_concluded_by_the_next_check() {
-        let repo = r"C:\oplog\stale-pull-drop";
+        let repo = &format!(r"C:\oplog\stale-pull-drop-{}", uuid::Uuid::new_v4());
         seed_entries(
             repo,
             vec![drop_record("stale-drop", "2026-01-01T00:00:00.000Z", "paused")],
@@ -1666,7 +1816,10 @@ mod tests {
     #[test]
     fn a_live_paused_pull_drop_is_never_concluded() {
         for (flag, probe_live) in [(true, false), (false, true)] {
-            let repo = format!(r"C:\oplog\live-pull-drop-{flag}-{probe_live}");
+            let repo = format!(
+                r"C:\oplog\live-pull-drop-{flag}-{probe_live}-{}",
+                uuid::Uuid::new_v4()
+            );
             seed_entries(
                 &repo,
                 vec![drop_record("live-drop", "2026-01-01T00:00:00.000Z", "paused")],
@@ -1699,7 +1852,7 @@ mod tests {
     /// concluding the record the very check after its rebase paused.
     #[test]
     fn a_paused_record_is_judged_against_its_own_ops_signals() {
-        let repo = r"C:\oplog\per-op-pause-verdict";
+        let repo = &format!(r"C:\oplog\per-op-pause-verdict-{}", uuid::Uuid::new_v4());
         let seeded = || {
             vec![
                 pick_record("the-pick", "2026-01-01T00:00:00.000Z", "paused"),

@@ -2662,6 +2662,7 @@ mod tests {
             .join(".git")
             .join("hooks")
             .join("reference-transaction");
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
         std::fs::write(
             &hook,
             "#!/bin/sh\nif [ \"$1\" = \"committed\" ]; then\n  \

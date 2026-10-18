@@ -2439,7 +2439,7 @@ mod tests {
     async fn a_refused_switch_never_stashes() {
         use crate::git::update_marker as marker;
         let (dir, repo) = setup_repo("update-guard-order").await;
-        git(&repo, &["branch", "feature"]).await;
+        git(&repo, &["branch", "switch-refusal-holder"]).await;
         // Uncommitted work: without the guard this is exactly what would be stashed.
         write(dir.path(), "a.txt", "dirty\n");
 
@@ -2447,16 +2447,23 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let _serialized = marker::test_root_lock();
         let _override = marker::TestRootOverride::set(&root);
-        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), "feature")
-            .expect("the marker mints");
+        let _live =
+            marker::UpdateMarker::create_for(&root.join("gd-update-live"), "switch-refusal-holder")
+                .expect("the marker mints");
 
         let state = AppState::default();
-        let err = git_switch_autostash_core(&state, repo.clone(), "feature".into(), None, true)
-            .await
-            .expect_err("switching to a branch an update holds is refused");
+        let err = git_switch_autostash_core(
+            &state,
+            repo.clone(),
+            "switch-refusal-holder".into(),
+            None,
+            true,
+        )
+        .await
+        .expect_err("switching to a branch an update holds is refused");
         assert_eq!(
             err.to_string(),
-            marker::branch_update_refusal("feature").to_string()
+            marker::branch_update_refusal("switch-refusal-holder").to_string()
         );
         assert!(
             git(&repo, &["stash", "list"]).await.trim().is_empty(),

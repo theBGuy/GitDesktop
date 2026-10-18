@@ -4437,7 +4437,7 @@ check your internet connection or https://githubstatus.com";
 
     fn assert_detail_register(detail: &str) {
         assert!(
-            detail.matches('"').count() % 2 == 0,
+            detail.matches('"').count().is_multiple_of(2),
             "unbalanced quote: {detail}"
         );
         assert!(!detail.contains('\n'), "{detail}");
@@ -4522,7 +4522,7 @@ check your internet connection or https://githubstatus.com";
         let detail = normalize_detail(&raw, 60);
         assert!(detail.chars().count() <= 60, "{detail}");
         assert!(detail.ends_with('…'), "{detail}");
-        assert!(detail.matches('"').count() % 2 == 0, "{detail}");
+        assert!(detail.matches('"').count().is_multiple_of(2), "{detail}");
         // A word boundary, not a mid-word cut.
         let body = detail.trim_end_matches('…');
         assert!(

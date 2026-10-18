@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for eight Rust invariants that have each cost this repo a fix
+// Static gate for nine Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -33,6 +33,8 @@
 //      (`git::branches::branch_tip_sha`) is the replacement.
 //   H. merge into a checkout without the ignored-file guard — merge-ort ignores
 //      --no-overwrite-ignore on 3-way merges, so checkout merges check first.
+//   I. test-held update-marker branch names — process-wide root overrides
+//      require holder names no other test uses.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -2218,6 +2220,205 @@ export function checkMergeIgnoredGuard(
   }
 }
 
+// ------------------------------------------------------------------- check I
+
+// Production-path mints, dynamically built victim names and aliased UpdateMarker
+// imports remain review concerns. Other types named TestRootOverride can match;
+// a reviewed allowlist rationale must establish why such a holder is private.
+
+// testModuleSpans misses #[cfg(all(unix, test))] and out-of-line `mod tests;` files.
+// Delegation covers one same-file level only. Exact quoted literals miss victims
+// using "refs/heads/<name>" or larger literals containing the marker branch name.
+
+// Binding resolution uses the last same-named let before the call, even when
+// that binding belongs to an already-closed inner block.
+export const TEST_MARKER_ALLOWLIST = [];
+
+let testMarkerCorpus;
+
+function markerCorpus(file, src) {
+  if (!testMarkerCorpus) {
+    testMarkerCorpus = new Map(
+      rustFiles(SRC).map((path) => {
+        const rel = relative(SRC, path).replace(/\\/g, "/");
+        return [
+          rel,
+          rel === file
+            ? src
+            : readFileSync(path, "utf8").replace(/\r\n/g, "\n"),
+        ];
+      }),
+    );
+  }
+  return Array.from(testMarkerCorpus, ([key, value]) => ({
+    file: key,
+    src: key === file ? src : value,
+  }));
+}
+
+export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
+  src = src.replace(/\r\n/g, "\n");
+  const push = (at, fn, fix) =>
+    hits.push({
+      file,
+      line: src.slice(0, at).split("\n").length,
+      fn,
+      allowlisted: allowed(TEST_MARKER_ALLOWLIST, file, fn),
+      fix,
+    });
+  let sources;
+  try {
+    sources = corpus === undefined ? markerCorpus(file, src) : corpus;
+    if (
+      !Array.isArray(sources) ||
+      sources.length === 0 ||
+      sources.some(
+        (row) =>
+          !row || typeof row.file !== "string" || typeof row.src !== "string",
+      ) ||
+      new Set(sources.map((row) => row.file)).size !== sources.length ||
+      !sources.some((row) => row.file === file)
+    ) {
+      throw new Error("empty, absent, duplicate or unreadable Rust corpus");
+    }
+    sources = sources.map((row) => ({
+      file: row.file,
+      src: (row.file === file ? src : row.src).replace(/\r\n/g, "\n"),
+    }));
+  } catch (error) {
+    push(
+      0,
+      "<unreadable>",
+      `check I cannot read the Rust corpus: ${error.message}`,
+    );
+    return;
+  }
+  const { code, masked, unterminated } = lexRust(src);
+  if (unterminated >= 0) {
+    push(
+      unterminated,
+      "<unreadable>",
+      "check I requires closed literals and comments",
+    );
+    return;
+  }
+  const tests = testModuleSpans(masked);
+  const functions = rustFunctions(masked);
+  const body = (fn) => masked.slice(fn.open + 1, fn.close);
+  const override = /\bTestRootOverride\s*::\s*set\s*\(/;
+  const helpers = functions.filter((fn) => override.test(body(fn)));
+  const installsOverride = (fn) =>
+    override.test(body(fn)) ||
+    helpers.some((helper) =>
+      new RegExp(String.raw`\b${helper.name}\s*\(`).test(body(fn)),
+    );
+  const literal = /^"(?:\\.|[^"\\])*"$/;
+  for (const site of masked.matchAll(
+    /\bUpdateMarker\s*::\s*create_for\s*\(/g,
+  )) {
+    if (!tests.some(([start, end]) => site.index > start && site.index < end))
+      continue;
+    const fn = functions
+      .filter(
+        (candidate) =>
+          site.index > candidate.open && site.index < candidate.close,
+      )
+      .at(-1);
+    if (!fn) {
+      push(
+        site.index,
+        "<unreadable>",
+        "check I cannot find the marker's enclosing function",
+      );
+      continue;
+    }
+    if (!installsOverride(fn)) continue;
+    const args = [];
+    let start = site.index + site[0].length;
+    let depth = 0;
+    let closed = false;
+    for (let i = start; i < fn.close; i++) {
+      const char = masked[i];
+      if (char === ")" && depth === 0) {
+        args.push(code.slice(start, i).trim());
+        closed = true;
+        break;
+      }
+      if ("([{".includes(char)) depth++;
+      else if (")]}".includes(char)) depth--;
+      else if (char === "," && depth === 0) {
+        args.push(code.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+    let branch = closed ? args[1] : undefined;
+    if (branch && /^[A-Za-z_]\w*$/.test(branch)) {
+      const prefix = masked.slice(fn.open + 1, site.index);
+      const binding = [
+        ...prefix.matchAll(
+          new RegExp(
+            String.raw`\blet\s+(?:mut\s+)?${branch}\s*(?::[^=;]*)?=`,
+            "g",
+          ),
+        ),
+      ]
+        .filter(
+          (match) =>
+            !functions.some(
+              (nested) =>
+                nested !== fn &&
+                fn.open + 1 + match.index > nested.open &&
+                fn.open + 1 + match.index < nested.close,
+            ),
+        )
+        .at(-1);
+      const init = binding ? fn.open + 1 + binding.index : -1;
+      const end = init < 0 ? -1 : masked.indexOf(";", init);
+      const declaration =
+        end >= 0 && end < site.index
+          ? code.slice(init, end + 1).split("\n")
+          : [];
+      branch = bindingInitializer(declaration, 0, branch)
+        ?.replace(/;\s*$/, "")
+        .trim();
+    }
+    const raw = /^r(#*)"/.exec(branch ?? "");
+    if (
+      !branch ||
+      !(
+        literal.test(branch) ||
+        (raw && literalEnd(branch, 0) === branch.length - 1)
+      )
+    ) {
+      push(
+        site.index,
+        fn.name,
+        "cannot resolve the marker branch name — use a same-function string literal or add an allowlist row (check I)",
+      );
+      continue;
+    }
+    if (raw)
+      branch = branch.slice(raw[0].length - 1, branch.length - raw[1].length);
+    const shared = sources.some((row) => {
+      for (
+        let at = row.src.indexOf(branch);
+        at >= 0;
+        at = row.src.indexOf(branch, at + 1)
+      ) {
+        if (row.file !== file || at < fn.start || at > fn.close) return true;
+      }
+      return false;
+    });
+    if (shared) {
+      push(
+        site.index,
+        fn.name,
+        `check I: test-held update markers must use a branch name unique to their function; rename ${branch} and its same-function uses`,
+      );
+    }
+  }
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -2271,15 +2472,23 @@ function main() {
       note: MERGE_GUARD_NOTE,
       hits: [],
     },
+    {
+      name: "I. test-held update-marker branch names",
+      run: checkTestMarkerBranches,
+      allowlist: TEST_MARKER_ALLOWLIST,
+      hits: [],
+    },
   ];
 
   const files = rustFiles(SRC);
   for (const path of files) {
     // Normalise CRLF: on Windows a git checkout materialises these files with
     // CRLF, and a trailing `\r` would leak into every reported line.
-    const src = readFileSync(path, "utf8").replace(/\r\n/g, "\n");
-    const lines = src.split("\n");
     const rel = relative(SRC, path).replace(/\\/g, "/");
+    const src =
+      testMarkerCorpus?.get(rel) ??
+      readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+    const lines = src.split("\n");
     for (const check of CHECKS) check.run(rel, src, lines, check.hits);
   }
 

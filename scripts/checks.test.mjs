@@ -100,12 +100,14 @@ import {
   checkShortRefNames,
   checkStderrOnlyGitError,
   checkSyncCommands,
+  checkTestMarkerBranches,
   enclosingFn,
   lexRust,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
   splitStaleEntries,
   staleAllowlistEntries,
+  TEST_MARKER_ALLOWLIST,
 } from "./check-rust-invariants.mjs";
 import {
   diffTrees,
@@ -4775,6 +4777,190 @@ test("stripComments blanks comments but not comment-shaped strings", () => {
 });
 
 // -------------------------------------------------------- check-rust-invariants
+
+function markerBranchHits(src, other = "", corpus = undefined) {
+  const hits = [];
+  checkTestMarkerBranches(
+    "holder.rs",
+    src,
+    src.split("\n"),
+    hits,
+    corpus === undefined
+      ? [
+          { file: "holder.rs", src },
+          { file: "victim.rs", src: other },
+        ]
+      : corpus,
+  );
+  return hits;
+}
+
+const markerHolder = (arg, setup = "TestRootOverride::set(&root);") =>
+  `#[cfg(test)] mod tests {
+    fn holder() {
+      ${setup}
+      UpdateMarker::create_for(&root.join("live"), ${arg});
+    }
+  }`;
+
+test("marker branches flag cross-file and same-file victims", () => {
+  const src = markerHolder('"feature"');
+  const victim = 'fn victim() { switch("feature"); }';
+  for (const hits of [
+    markerBranchHits(src, victim),
+    markerBranchHits(`${src}\n${victim}`),
+  ]) {
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].fn, "holder");
+    assert.equal(hits[0].allowlisted, false);
+    assert.match(hits[0].fix, /unique/);
+  }
+});
+
+test("marker branches follow one same-file override helper", () => {
+  const src = `${markerHolder('"feature"', "holder_marker_root();")}
+    fn holder_marker_root() { TestRootOverride::set(&root); }`;
+  assert.equal(
+    markerBranchHits(src, 'fn victim() { switch("feature"); }').length,
+    1,
+  );
+});
+
+test("marker branches fail closed on unresolved second arguments", () => {
+  for (const arg of [
+    'format!("branch-{}", id)',
+    "parameter",
+    "name()",
+    '"literal".to_string()',
+  ]) {
+    const hits = markerBranchHits(markerHolder(arg));
+    assert.equal(hits.length, 1, arg);
+    assert.match(hits[0].fix, /cannot resolve/);
+  }
+});
+
+test("marker branches count comment-only reuse in another file", () => {
+  assert.equal(markerBranchHits(markerHolder('"held"'), '// "held"').length, 1);
+});
+
+test("marker branches resolve raw literals and reject a nested function's binding", () => {
+  assert.deepEqual(markerBranchHits(markerHolder('r#"held"#')), []);
+  assert.equal(
+    markerBranchHits(markerHolder('r#"held"#'), '// "held"').length,
+    1,
+  );
+  const hits = markerBranchHits(
+    markerHolder(
+      "branch",
+      'TestRootOverride::set(&root); fn nested() { let branch = "private"; }',
+    ),
+  );
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].fix, /cannot resolve/);
+});
+
+test("marker branches accept unique direct and bound names with same-function reuse", () => {
+  for (const [arg, setup] of [
+    ['"held"', 'TestRootOverride::set(&root); switch("held");'],
+    [
+      "branch",
+      'TestRootOverride::set(&root);\n let branch = "held";\n switch(branch);',
+    ],
+  ]) {
+    assert.deepEqual(markerBranchHits(markerHolder(arg, setup)), []);
+  }
+  assert.deepEqual(TEST_MARKER_ALLOWLIST, []);
+});
+
+test("marker branches report an allowlist row stale when its holder is unique", () => {
+  const row = {
+    file: "holder.rs",
+    fn: "holder",
+    rationale: "Fixture for a holder whose branch became unique.",
+  };
+  TEST_MARKER_ALLOWLIST.push(row);
+  try {
+    const hits = markerBranchHits(markerHolder('"held"'));
+    assert.deepEqual(hits, []);
+    assert.deepEqual(splitStaleEntries(TEST_MARKER_ALLOWLIST, hits), {
+      failing: [row],
+      retired: [],
+    });
+  } finally {
+    TEST_MARKER_ALLOWLIST.pop();
+  }
+});
+
+test("marker branches balance wrapped calls and ignore comment delimiters", () => {
+  const src = `#[cfg(test)] mod tests {
+    fn holder() {
+      TestRootOverride::set(&root);
+      // } fn fake() { "held"
+      UpdateMarker::create_for(
+        &root.join(call("(,)", nested())),
+        /* ), } "decoy" */ "held",
+      );
+    }
+  }`;
+  assert.deepEqual(markerBranchHits(src), []);
+  assert.equal(markerBranchHits(src, '// "held"').length, 1);
+});
+
+test("marker branches skip private roots and production sites", () => {
+  assert.deepEqual(
+    markerBranchHits(markerHolder('"feature"', ""), '// "feature"'),
+    [],
+  );
+  assert.deepEqual(
+    markerBranchHits(
+      'fn prod() { TestRootOverride::set(&root); UpdateMarker::create_for(&root, "feature"); }',
+      '// "feature"',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    markerBranchHits(
+      markerHolder('"feature"', "// TestRootOverride::set(&root);\n"),
+      '// "feature"',
+    ),
+    [],
+  );
+});
+
+test("marker branches reject empty, absent and unreadable corpora", () => {
+  const src = markerHolder('"held"');
+  for (const corpus of [
+    [],
+    null,
+    [{ file: "elsewhere.rs", src: "" }],
+    [{ file: "holder.rs", src: null }],
+    [
+      { file: "holder.rs", src },
+      { file: "holder.rs", src },
+    ],
+  ]) {
+    const hits = markerBranchHits(src, "", corpus);
+    assert.equal(hits.length, 1);
+    assert.match(hits[0].fix, /cannot read the Rust corpus/);
+  }
+});
+
+test("marker branches use current source and normalize CRLF corpus offsets", () => {
+  const src = markerHolder('"held"').replace(/\n/g, "\r\n");
+  assert.deepEqual(
+    markerBranchHits(src, "", [
+      { file: "holder.rs", src: '// "held"' },
+      { file: "victim.rs", src: "// no marker\r\n" },
+    ]),
+    [],
+  );
+});
+
+test("marker branches report unterminated source", () => {
+  const hits = markerBranchHits(`${markerHolder('"held"')}\n/*`);
+  assert.equal(hits.length, 1);
+  assert.match(hits[0].fix, /closed literals and comments/);
+});
 
 function mergeGuardHits(src, file = "fixture.rs", allowlist = undefined) {
   const hits = [];

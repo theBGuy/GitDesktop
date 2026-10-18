@@ -2104,7 +2104,7 @@ mod tests {
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
         run_git(
-            Some(&nested.to_string_lossy().into_owned()),
+            Some(&nested.to_string_lossy()),
             &["init", "-q"],
             DEFAULT_TIMEOUT,
         )

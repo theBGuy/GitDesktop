@@ -28,10 +28,11 @@ Where this file and generic best practice disagree, this file wins.
    the sanctioned local modifications (a re-vendor silently reverts them);
    any future sanctioned edit updates it in the same change.
 4. **Never repo-wide `cargo fmt`** in `src-tauri` (~35 files of collateral).
-   New files only: `rustfmt <that file>` — and never on a `mod.rs`: rustfmt
-   follows its `mod` declarations into every child file (measured: 6-file
-   collateral). Verify an edit's formatting with `rustfmt --check
-   --config skip_children=true` and compare flagged hunks to your lines.
+   New files only: `rustfmt --edition 2021 <that file>` — and never on a
+   `mod.rs`: rustfmt follows its `mod` declarations into every child file
+   (measured: 6-file collateral). Verify an edit's formatting with
+   `rustfmt --edition 2021 --check --config skip_children=true` and compare
+   flagged hunks to your lines.
 5. **Report from evidence.** Verification claims come from command output in
    this session, never memory. Quote failures verbatim.
 
@@ -856,6 +857,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `--ff-only --no-overwrite-ignore` (git refuses natively) and fresh throwaway
   checkouts. A caller of an argv builder runs the guard itself (guard:
   check-rust-invariants check H, per function).
+- Test-side update-marker holders under the process-wide root override use
+  branch names no other test uses (guard: check-rust-invariants check I).
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
   app-data modules carry their own seams with the opposite arm order

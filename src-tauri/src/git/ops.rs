@@ -7868,7 +7868,14 @@ mod tests {
         let c1 = rev(&repo, "HEAD").await;
 
         let state = AppState::default();
-        let result = rewrite_commits(&state, &repo, &base, &[pick(&c1)], &[below.clone()]).await;
+        let result = rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c1)],
+            std::slice::from_ref(&below),
+        )
+        .await;
         let Err(AppError::InvalidArgument(msg)) = &result else {
             panic!("an out-of-range drop must refuse, got {result:?}");
         };
@@ -7888,8 +7895,14 @@ mod tests {
 
         let state = AppState::default();
         // Across the two lists: a step hash also declared dropped.
-        let across =
-            rewrite_commits(&state, &repo, &base, &[pick(&c1), pick(&c2)], &[c1.clone()]).await;
+        let across = rewrite_commits(
+            &state,
+            &repo,
+            &base,
+            &[pick(&c1), pick(&c2)],
+            std::slice::from_ref(&c1),
+        )
+        .await;
         assert!(
             matches!(&across, Err(AppError::InvalidArgument(m)) if *m == twice(&c1)),
             "{across:?}"
@@ -15285,30 +15298,38 @@ detached
     async fn finalize_base_refuses_while_an_update_holds_the_base_branch() {
         use crate::git::update_marker as marker;
         let (dir, repo) = setup_repo("finalize-update-guard").await;
-        git(&repo, &["branch", "feature"]).await;
-        let tip = rev(&repo, "refs/heads/feature").await;
+        git(&repo, &["branch", "finalize-base-holder"]).await;
+        let tip = rev(&repo, "refs/heads/finalize-base-holder").await;
         let root = dir.path().join("gd-worktrees");
         std::fs::create_dir_all(&root).unwrap();
 
         let _serialized = marker::test_root_lock();
         let _override = marker::TestRootOverride::set(&root);
-        let _live = marker::UpdateMarker::create_for(&root.join("gd-update-live"), "feature")
-            .expect("the marker mints");
+        let _live =
+            marker::UpdateMarker::create_for(&root.join("gd-update-live"), "finalize-base-holder")
+                .expect("the marker mints");
 
         let state = AppState::default();
         let current = git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"])
             .await
             .trim()
             .to_string();
-        let err = finalize_base(&state, &repo, "feature", &tip, &current, Some(&tip))
-            .await
-            .expect_err("advancing a branch an update is merging is refused");
+        let err = finalize_base(
+            &state,
+            &repo,
+            "finalize-base-holder",
+            &tip,
+            &current,
+            Some(&tip),
+        )
+        .await
+        .expect_err("advancing a branch an update is merging is refused");
         assert_eq!(
             err.to_string(),
-            marker::branch_update_refusal("feature").to_string()
+            marker::branch_update_refusal("finalize-base-holder").to_string()
         );
         assert_eq!(
-            rev(&repo, "refs/heads/feature").await,
+            rev(&repo, "refs/heads/finalize-base-holder").await,
             tip,
             "and the branch is exactly where it was"
         );

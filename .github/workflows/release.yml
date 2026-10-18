@@ -26,7 +26,7 @@ jobs:
   # which also becomes the auto-updater's "what's new" notes. Falls back to a
   # pointer if the section is missing (rename "Unreleased" → the version first).
   notes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       body: ${{ steps.extract.outputs.body }}
     steps:

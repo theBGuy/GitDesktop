@@ -5789,6 +5789,7 @@ and the repository exists.
             )
             .await;
             run(&clone, &["fetch", "origin"]).await;
+            std::fs::create_dir_all(std::path::Path::new(&clone).join(".git/info")).unwrap();
             std::fs::write(
                 std::path::Path::new(&clone).join(".git/info/exclude"),
                 "local.cfg\n",
