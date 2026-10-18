@@ -858,7 +858,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   checkouts. A caller of an argv builder runs the guard itself (guard:
   check-rust-invariants check H, per function).
 - Test-side update-marker holders under the process-wide root override use
-  branch names no other test uses (guard: check-rust-invariants check I).
+  branch names no other test uses (guard: check-rust-invariants check I for
+  `UpdateMarker::create_for` calls in test modules, following one level of
+  same-file helper delegation for the override). Production-path mints are
+  review-enforced.
 - **Rust tests never read the real settings store** — use the
   `TEST_STORE_DIR` seam in `app_store.rs` (arm 0 of `store_path`). The other
   app-data modules carry their own seams with the opposite arm order

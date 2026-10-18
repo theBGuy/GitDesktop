@@ -1543,7 +1543,9 @@ mod tests {
             );
         }
         let fields: Vec<_> = args[2..args.len() - 2]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0].as_str(), pair[1].as_str()))
             .collect();
         assert_eq!(
@@ -1585,7 +1587,7 @@ mod tests {
         }
         assert!(query.contains("$v2:Date!"));
         assert!(query.contains("$v4:[String!]!"));
-        let fields: Vec<_> = args[2..].chunks_exact(2).collect();
+        let fields: Vec<_> = args[2..].as_chunks::<2>().0.iter().collect();
         for pair in &fields {
             assert_eq!(pair[0], "-f");
         }
@@ -1630,7 +1632,9 @@ mod tests {
         }
         assert!(query.contains("s10: updateProjectV2ItemFieldValue(input:{projectId:$p,itemId:$i,fieldId:$f10,value:{text:$v10}})"));
         let pairs: Vec<_> = args[2..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0].as_str(), pair[1].as_str()))
             .collect();
         for pair in [
@@ -1654,7 +1658,11 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(args[2..].chunks_exact(2).any(|pair| pair == ["-f", "v0="]));
+        assert!(args[2..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| *pair == ["-f", "v0="]));
         assert!(!args.iter().any(|arg| arg == "v0" || arg == "v0[]"));
         assert!(args.last().unwrap().contains("value:{text:$v0}"));
     }

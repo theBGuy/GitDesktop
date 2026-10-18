@@ -295,9 +295,9 @@ pub fn ensure(version: &str) -> AppResult<PathBuf> {
 /// (lazy: users who never used MCP never get the copy). Best-effort — errors are
 /// swallowed, and the next launch retries.
 ///
-/// Only wired up on Windows (the `#[cfg(windows)]` setup hook in `lib.rs`), so
-/// compilation is gated to Windows + tests to keep other builds dead-code-free.
-#[cfg(any(windows, test))]
+/// Only compiled on Windows for the setup hook in `lib.rs`; tests on all platforms
+/// call `refresh_dest_if_stale` directly.
+#[cfg(windows)]
 pub fn refresh_if_present(version: &str) {
     let Ok(Resolution::Managed(dest)) = resolve() else {
         return;
@@ -311,7 +311,7 @@ pub fn refresh_if_present(version: &str) {
     refresh_dest_if_stale(&source, &dest, &want);
 }
 
-/// The env-free core of [`refresh_if_present`], parameterized on
+/// The env-free core of `refresh_if_present`, parameterized on
 /// `source`/`dest`/`want` so tests drive it against a temp dir without touching
 /// process-global env.
 #[cfg(any(windows, test))]

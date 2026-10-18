@@ -527,7 +527,7 @@ mod tests {
         assert_eq!(args.len(), 6);
         assert_eq!(args[3], format!("query={}", status_updates_query()));
         assert_eq!(args[5], format!("id={id}"));
-        for pair in args[2..].chunks_exact(2) {
+        for pair in args[2..].as_chunks::<2>().0 {
             assert_eq!(pair[0], "-f");
         }
     }

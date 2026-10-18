@@ -910,9 +910,9 @@ mod tests {
 
     #[test]
     fn store_path_avoids_the_real_store_under_test() {
-        // This runs in a cfg(test) build, so `store_path` takes arm 2 (temp subdir)
-        // UNLESS a GD_OPLOG_DIR override is present in the environment. Branch on the
-        // var rather than mutating process env (which would race parallel tests).
+        // This repo key is outside temp, so tests use its hashed temp-dir store
+        // unless GD_OPLOG_DIR overrides it. Branch on the var without mutating
+        // process env, which would race parallel tests.
         let path = store_path(r"C:\oplog\resolver-pin").unwrap();
         match std::env::var("GD_OPLOG_DIR").ok().filter(|d| !d.is_empty()) {
             Some(dir) => {

@@ -2230,6 +2230,9 @@ export function checkMergeIgnoredGuard(
 // Delegation covers one same-file level only. Exact quoted literals miss victims
 // using "refs/heads/<name>" or larger literals containing the marker branch name.
 
+// Reverse delegation is skipped: a test-module helper that mints a marker
+// is not checked when only its caller installs the override.
+
 // Binding resolution uses the last same-named let before the call, even when
 // that binding belongs to an already-closed inner block.
 export const TEST_MARKER_ALLOWLIST = [];
