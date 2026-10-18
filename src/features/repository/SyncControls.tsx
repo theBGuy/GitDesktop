@@ -576,8 +576,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // describes HEAD, which may no longer be that branch.
   async function doPush(force: boolean, branch?: string) {
     // The force confirm and the fork-PR guard can both sit open across a
-    // disconnect, and each lands here.
-    if (refuseWhileOffline()) return;
+    // disconnect, and each lands here. Every route also arrives after an await
+    // (a status read, a fork-PR detection) another surface's push can start in.
+    if (refuseWhileOffline() || refuseWhilePushRuns()) return;
     try {
       const guard = await push.mutateAsync({
         setUpstream: branch === undefined && !hasUpstream,
@@ -805,8 +806,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const publishRow =
     pinnedMenu && menuRow(pinnedMenu.publish, liveMenu?.publish);
 
-  // A network op started now would queue behind a push another surface runs on
-  // the repo's network lock, so a press says why it waits instead.
+  // A network op started now would queue behind a running push on the repo's
+  // network lock for up to a minute, so it refuses and says why instead.
   function refuseWhilePushRuns(): boolean {
     if (!isBranchPushActive(queryClient, repoPath)) return false;
     toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);

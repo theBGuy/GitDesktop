@@ -198,7 +198,14 @@ test("label: a cross-name entry without a remote falls through, never null/x", (
   );
   // A mistyped remote is read as absent before the label sees it.
   const [read] = pendingBranchPushesFor(
-    [entry({ setUpstream: false, remote: 5, remoteBranch: "pr-head" })],
+    [
+      entry({
+        setUpstream: false,
+        branch: "feature",
+        remote: 5,
+        remoteBranch: "pr-head",
+      }),
+    ],
     "/repo",
   );
   assert.equal(branchPushLabel(read, tracked), "Pushing to origin/feature");
@@ -247,5 +254,23 @@ test("label: a tracked row names its upstream", () => {
   assert.equal(
     branchPushLabel(push({ remote: "other" }), tracked),
     "Pushing to origin/feature",
+  );
+});
+
+test("label: a HEAD push of a tracked row names no destination", () => {
+  // A bare `git push` follows pushRemote / pushDefault / push.default, so the
+  // row's upstream may not be where it lands.
+  assert.equal(branchPushLabel(push({ branch: null }), tracked), "Pushing");
+  // Only the tracked arm changes: a HEAD push that publishes still says so.
+  assert.equal(
+    branchPushLabel(push({ branch: null, setUpstream: true }), tracked),
+    "Publishing branch",
+  );
+  assert.equal(
+    branchPushLabel(push({ branch: null }), {
+      upstream: null,
+      upstreamGone: false,
+    }),
+    "Publishing branch",
   );
 });

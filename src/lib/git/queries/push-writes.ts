@@ -44,7 +44,7 @@ export interface BranchPushState {
 }
 
 /** The refusal a second push gets while one is in flight: the backend would
- *  queue it behind the first on the repo's network lock, then run it. */
+ *  queue it behind the first on the repo's network lock, for up to a minute. */
 export const BRANCH_PUSH_ACTIVE_MESSAGE =
   "A push is already running — wait for it to finish.";
 
@@ -78,14 +78,16 @@ export function pendingBranchPushesFor(
   return out;
 }
 
-/** A publish's label: the remote only when the push names one, since a push
- *  without one goes wherever git's own routing sends it. */
+/** A label names a destination only when the push itself fixes one: a push that
+ *  names no remote or branch goes wherever git's push routing sends it, which a
+ *  row can't know. */
 export const branchPublishLabel = (remote: string | null): string =>
   remote === null ? "Publishing branch" : `Publishing to ${remote}`;
 
 /** The row spinner's label, arms in precedence order: a cross-name push names
- *  its exact destination, a push that sets or (re)creates tracking publishes,
- *  and a tracked push names the row's upstream. */
+ *  its exact destination, a push that sets or (re)creates tracking publishes, a
+ *  named push of a tracked branch targets its upstream, and a HEAD push (a bare
+ *  `git push`) names none. */
 export function branchPushLabel(
   push: BranchPushState,
   row: { upstream: string | null; upstreamGone: boolean },
@@ -94,5 +96,6 @@ export function branchPushLabel(
     return `Pushing to ${push.remote}/${push.remoteBranch}`;
   if (push.setUpstream || row.upstream === null || row.upstreamGone)
     return branchPublishLabel(push.remote);
+  if (push.branch === null) return "Pushing";
   return `Pushing to ${row.upstream}`;
 }

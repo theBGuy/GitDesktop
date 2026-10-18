@@ -89,18 +89,22 @@ export function ForkPrPublishGuard({
     return true;
   }
 
+  // One push at a time: another surface's push can start while the dialog is
+  // open, and a second one would queue behind it on the network lock.
+  function pushRunning(): boolean {
+    if (!isBranchPushActive(queryClient, repoPath)) return false;
+    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+    return true;
+  }
+
   // Add the fork remote (idempotent) and push the local branch onto the PR's
   // head ref — no fetch first: the match is ancestry-verified locally, so this
   // fast-forwards unless the contributor pushed meanwhile, which surfaces as a
   // normal push error. The push mutation invalidates the whole repo subtree,
   // which is where the PR list and details live.
   async function pushToFork() {
-    if (!match || refuseWhileOffline() || switchedAway()) return;
-    // One push at a time: another row's push may have started under the dialog.
-    if (isBranchPushActive(queryClient, repoPath)) {
-      toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+    if (!match || refuseWhileOffline() || switchedAway() || pushRunning())
       return;
-    }
     setEnsuring(true);
     let remote: string;
     try {
@@ -115,9 +119,9 @@ export function ForkPrPublishGuard({
       return;
     }
     setEnsuring(false);
-    // Again below the remote setup, an await the connection can drop and the
-    // user can switch repositories during.
-    if (refuseWhileOffline() || switchedAway()) return;
+    // Again below the remote setup, an await the connection can drop, the user
+    // can switch repositories, and another push can start during.
+    if (refuseWhileOffline() || switchedAway() || pushRunning()) return;
     try {
       await push.mutateAsync({
         setUpstream: false,

@@ -1738,7 +1738,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // One push at a time, re-checked where each push route fires: a menu can be
   // stale under the pointer, and the backend would queue a second push behind
-  // the first, then run it. Reads the cache and the detection ref live.
+  // the first on the network lock, for up to a minute. Reads the cache and the
+  // detection ref live.
   function pushAlreadyActive(): boolean {
     if (
       !isBranchPushActive(queryClient, repoPath) &&
@@ -2260,10 +2261,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     Boolean(currentName && !isDeletionBlocked(rulesConfig, currentName)) &&
       !currentRowPushing,
   );
-  useHotkeyAction("cleanup-branches", () => {
-    setOpen(false);
-    setCleanupOpen(true);
-  });
+  // Cleanup deletes and archives branches, the pushing one included.
+  useHotkeyAction(
+    "cleanup-branches",
+    () => {
+      setOpen(false);
+      setCleanupOpen(true);
+    },
+    !pushActive,
+  );
   useHotkeyAction(
     "update-from-default",
     () => {
@@ -3520,6 +3526,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     : "Delete current branch…"}
                 </MenuRow>
                 <MenuRow
+                  disabled={pushActive}
+                  reason={pendingWriteReason(pushPaused, "A push is running.")}
                   onClick={() => {
                     setOpen(false);
                     setCleanupOpen(true);
