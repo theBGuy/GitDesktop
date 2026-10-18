@@ -120,18 +120,22 @@ export const gitBranchRewriteStatus = (repoPath: string, branch: string) =>
  *  sync controls for the current branch — that arm takes `gitReset` (commit-ops.ts)
  *  in `"hard"` mode, which moves the working tree too).
  *
- *  `expectedTip` is the sha the caller measured and showed the user: the backend
- *  re-resolves the upstream and refuses if it has moved since, so a background
- *  fetch during the confirmation can't redirect the reset. */
+ *  Two measured shas pin it. `expectedTip` is the upstream tip the user was
+ *  shown: the backend re-resolves the upstream and refuses if it has moved, so a
+ *  background fetch during the confirmation can't redirect the reset.
+ *  `expectedLocalTip` is the branch's own tip then: the backend refuses if the
+ *  branch itself moved, so a commit landed meanwhile is never dropped. */
 export const gitBranchResetToUpstream = (
   repoPath: string,
   branch: string,
   expectedTip: string,
+  expectedLocalTip: string,
 ) =>
   invoke<void>("git_branch_reset_to_upstream", {
     repoPath,
     branch,
     expectedTip,
+    expectedLocalTip,
   });
 
 export interface MergePair {

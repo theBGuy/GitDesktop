@@ -3,9 +3,9 @@ use tauri::State;
 use crate::error::{AppError, AppResult};
 use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
-    acquire_repo_lock, holder_label, run_git, run_git_config_write_held, run_git_mutating,
-    run_git_mutating_raw, run_git_raw, run_git_raw_index_retry, with_config_write_lock,
-    DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT,
+    acquire_repo_lock, holder_label, run_git, run_git_config_write_held, run_git_mutating_raw,
+    run_git_raw, run_git_raw_index_retry, with_config_write_lock, DEFAULT_TIMEOUT,
+    LOCK_WAIT_TIMEOUT,
 };
 use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
 use crate::state::AppState;
@@ -237,6 +237,9 @@ pub async fn git_commit(
 /// The refusal an amend gets when HEAD is no longer the commit the user chose.
 const AMEND_HEAD_MOVED: &str = "The latest commit changed — nothing was amended.";
 
+/// The unpinned form, kept for test fixtures: every production route passes its pin
+/// (or its absence) to [`git_commit_core_expecting`] explicitly.
+#[cfg(test)]
 pub(crate) async fn git_commit_core(
     state: &AppState,
     repo_path: String,
@@ -317,15 +320,67 @@ pub(crate) async fn git_commit_core_expecting(
     })
 }
 
-/// Undoes the latest commit, keeping its changes staged (soft reset).
-/// A root commit has no parent to reset to, so the branch ref is deleted
-/// instead, which leaves the repo in the pre-first-commit state.
+/// The refusal an undo gets when HEAD is no longer the commit the user chose.
+/// KEEP IN STEP: this exact sentence is the one wording for a moved-HEAD undo on
+/// every route (GUI toast, MCP tool error); ops.rs and branches.rs carry the
+/// reset twins of its "… — nothing was <verb>." shape.
+const UNDO_HEAD_MOVED: &str = "The latest commit changed — nothing was undone.";
+
+/// The refusal for a detached HEAD at a parentless commit: `update-ref -d HEAD`
+/// there deletes `.git/HEAD` itself and git stops recognizing the repository
+/// (measured, git 2.51.1).
+/// KEEP IN STEP: HistoryPanel.tsx's `UNDO_DETACHED_ROOT` explains the disabled menu
+/// item with this exact sentence.
+const UNDO_DETACHED_ROOT: &str =
+    "HEAD is detached at the repository's first commit — nothing to undo onto.";
+
+/// The refusal for a shallow clone's boundary commit: its parent is recorded but was
+/// never fetched, so `HEAD~1` can't resolve, and the root arm would delete the branch.
+const UNDO_SHALLOW_BOUNDARY: &str =
+    "The latest commit's parent isn't in this shallow clone — nothing was undone.";
+
 #[tauri::command]
-pub async fn git_undo_commit(state: State<'_, AppState>, repo_path: String) -> AppResult<()> {
-    git_undo_commit_core(&state, repo_path).await
+pub async fn git_undo_commit(
+    state: State<'_, AppState>,
+    repo_path: String,
+    expected_head: String,
+) -> AppResult<()> {
+    git_undo_commit_core(&state, repo_path, Some(expected_head)).await
 }
 
-pub(crate) async fn git_undo_commit_core(state: &AppState, repo_path: String) -> AppResult<()> {
+/// Undoes the latest commit, keeping its changes staged (soft reset). A root commit
+/// has no parent to reset to, so the branch ref is deleted instead, leaving the repo
+/// in the pre-first-commit state.
+///
+/// Every read and the mutation share one working-tree hold. With `expected_head`
+/// the undo runs only while HEAD is still that full oid; `None` (the MCP default)
+/// undoes whatever HEAD is, though the root deletion still compares-and-swaps on
+/// the oid read under the hold. A separate process can still move HEAD in the
+/// milliseconds before the soft reset spawns, the window the amend pin accepts.
+pub(crate) async fn git_undo_commit_core(
+    state: &AppState,
+    repo_path: String,
+    expected_head: Option<String>,
+) -> AppResult<()> {
+    let moved = || AppError::Git {
+        code: 1,
+        stderr: UNDO_HEAD_MOVED.to_string(),
+    };
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "an undo").await?;
+    let read_head = || async {
+        run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .map(|out| (out.code == 0).then(|| out.stdout_lossy().trim().to_string()))
+    };
+    // `None` is an unborn HEAD: nothing a pin could name is there. Unpinned, it
+    // falls through to the root arm unchanged, where git's update-ref is a no-op.
+    let head = read_head().await?;
+    if let Some(expected) = &expected_head {
+        if head.as_deref() != Some(expected.as_str()) {
+            return Err(moved());
+        }
+    }
     let has_parent = run_git_raw(
         Some(&repo_path),
         &["rev-parse", "--verify", "--quiet", "HEAD~1"],
@@ -334,12 +389,81 @@ pub(crate) async fn git_undo_commit_core(state: &AppState, repo_path: String) ->
     .await?
     .code
         == 0;
-    let args: &[&str] = if has_parent {
-        &["reset", "--soft", "HEAD~1"]
-    } else {
-        &["update-ref", "-d", "HEAD"]
-    };
-    run_git_mutating(state, &repo_path, args, DEFAULT_TIMEOUT).await?;
+    if has_parent {
+        let out =
+            run_git_raw_index_retry(&repo_path, &["reset", "--soft", "HEAD~1"], DEFAULT_TIMEOUT)
+                .await?;
+        if out.code != 0 {
+            return Err(AppError::Git {
+                code: out.code,
+                stderr: out.full_failure_text(),
+            });
+        }
+        return Ok(());
+    }
+    let head_oid = head.unwrap_or_default();
+    if !head_oid.is_empty() {
+        // The raw object, not `rev-list --parents`: a shallow graft hides the parent
+        // line from traversal but not from the commit itself (measured, git 2.51.1).
+        let object = run_git_raw(
+            Some(&repo_path),
+            &["cat-file", "commit", &head_oid],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if object.code != 0 {
+            return Err(AppError::Git {
+                code: object.code,
+                stderr: object.full_failure_text(),
+            });
+        }
+        let text = object.stdout_lossy();
+        let mut header = text.lines().take_while(|line| !line.is_empty());
+        if header.any(|line| line.starts_with("parent ")) {
+            return Err(AppError::Git {
+                code: 1,
+                stderr: UNDO_SHALLOW_BOUNDARY.to_string(),
+            });
+        }
+        let attached = run_git_raw(
+            Some(&repo_path),
+            &["symbolic-ref", "-q", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        // Fails closed: `-q` exits 1 exactly when HEAD is detached, and any other
+        // failure refuses with git's own error rather than risk deleting HEAD itself.
+        if attached.code == 1 {
+            return Err(AppError::Git {
+                code: 1,
+                stderr: UNDO_DETACHED_ROOT.to_string(),
+            });
+        }
+        if attached.code != 0 {
+            return Err(AppError::Git {
+                code: attached.code,
+                stderr: attached.full_failure_text(),
+            });
+        }
+    }
+    // The old value is passed even unpinned, so a branch that just gained a commit
+    // from another process is never deleted.
+    let mut args = vec!["update-ref", "-d", "HEAD"];
+    if !head_oid.is_empty() {
+        args.push(&head_oid);
+    }
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
+    if out.code != 0 {
+        // A failed compare-and-swap reads as moved only when HEAD really moved; a
+        // stale ref `.lock` keeps git's own error.
+        if !head_oid.is_empty() && read_head().await?.as_deref() != Some(head_oid.as_str()) {
+            return Err(moved());
+        }
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -708,5 +832,253 @@ mod tests {
             .await
             .expect("the full oid matches");
         assert_eq!(head_subject(&repo).await, "A sha256");
+    }
+
+    async fn undo(repo: &str, expected: Option<String>) -> AppResult<()> {
+        let state = AppState::default();
+        git_undo_commit_core(&state, repo.to_string(), expected).await
+    }
+
+    fn assert_undo_refused(result: AppResult<()>, copy: &str) {
+        match result {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, copy),
+            other => panic!("expected the refusal {copy:?}, got {other:?}"),
+        }
+    }
+
+    async fn porcelain(repo: &str) -> String {
+        run(repo, &["status", "--porcelain"]).await
+    }
+
+    async fn has_head(repo: &str) -> bool {
+        run_git_raw(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .code
+            == 0
+    }
+
+    /// The undo the user chose for B must not unwind an outside commit C that became
+    /// HEAD meanwhile; HEAD, index and tree stay exactly as C left them.
+    #[tokio::test]
+    async fn undo_commit_refuses_when_head_moved() {
+        let (dir, repo) = amend_fixture("gd-undo-moved-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let c = raw_commit(&dir, &repo, "c.txt", "C").await;
+
+        let result = undo(&repo, Some(b)).await;
+
+        assert_undo_refused(result, UNDO_HEAD_MOVED);
+        assert_eq!(head(&repo).await, c, "the outside commit is kept");
+        assert_eq!(porcelain(&repo).await, "", "index and tree are untouched");
+    }
+
+    #[tokio::test]
+    async fn undo_commit_with_current_head_undoes() {
+        let (dir, repo) = amend_fixture("gd-undo-current-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+
+        undo(&repo, Some(b))
+            .await
+            .expect("undoing the current HEAD succeeds");
+
+        assert_eq!(head(&repo).await, a, "HEAD is back on the parent");
+        assert_eq!(
+            run(&repo, &["diff", "--cached", "--name-only"])
+                .await
+                .trim(),
+            "b.txt",
+            "the undone commit's changes stay staged"
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_commit_root_arm_deletes_ref_when_expected_matches() {
+        let (dir, repo) = amend_fixture("gd-undo-root-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+
+        undo(&repo, Some(a))
+            .await
+            .expect("undoing the only commit succeeds");
+
+        assert!(!has_head(&repo).await, "the branch is unborn again");
+        assert_eq!(
+            porcelain(&repo).await.trim(),
+            "A  a.txt",
+            "its file stays staged"
+        );
+    }
+
+    /// A root-only branch measured by the user gains an outside commit before the
+    /// undo runs: deleting the branch ref now would drop both commits.
+    #[tokio::test]
+    async fn undo_commit_refuses_root_arm_when_branch_gained_a_commit() {
+        let (dir, repo) = amend_fixture("gd-undo-root-moved-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+
+        let result = undo(&repo, Some(a.clone())).await;
+
+        assert_undo_refused(result, UNDO_HEAD_MOVED);
+        assert_eq!(head(&repo).await, b, "the branch ref survives");
+        assert_eq!(run(&repo, &["rev-parse", "HEAD~1"]).await.trim(), a);
+        assert_eq!(porcelain(&repo).await, "");
+    }
+
+    #[tokio::test]
+    async fn undo_commit_expected_head_compare_is_full_hash_in_sha256_repos() {
+        let (dir, repo) = amend_fixture("gd-undo-sha256-", &["--object-format=sha256"]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        assert_eq!(b.len(), 64, "a sha256 oid");
+
+        // Same 63-char prefix, different last digit: only a full compare tells them apart.
+        let last = if b.ends_with('0') { '1' } else { '0' };
+        for stale in [format!("{}{last}", &b[..63]), b[..40].to_string()] {
+            assert_undo_refused(undo(&repo, Some(stale)).await, UNDO_HEAD_MOVED);
+            assert_eq!(head(&repo).await, b);
+        }
+
+        undo(&repo, Some(b)).await.expect("the full oid matches");
+        assert_eq!(head(&repo).await, a);
+    }
+
+    #[tokio::test]
+    async fn undo_commit_refuses_on_unborn_head() {
+        let (_dir, repo) = amend_fixture("gd-undo-unborn-", &[]).await;
+
+        assert_undo_refused(undo(&repo, Some("0".repeat(40))).await, UNDO_HEAD_MOVED);
+
+        assert!(!has_head(&repo).await, "the repo still has no HEAD");
+    }
+
+    /// The MCP undo tool passes no expected head and keeps undoing whatever HEAD is.
+    #[tokio::test]
+    async fn undo_commit_without_expected_undoes_current_head() {
+        let (dir, repo) = amend_fixture("gd-undo-none-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        raw_commit(&dir, &repo, "c.txt", "C").await;
+
+        undo(&repo, None)
+            .await
+            .expect("an undo with no expectation runs");
+
+        assert_eq!(head(&repo).await, b);
+    }
+
+    /// A stale ref lock fails the root arm's compare-and-swap with HEAD unmoved: that
+    /// is git's own error, never the moved refusal. Clearing it is the success twin.
+    #[tokio::test]
+    async fn undo_commit_root_arm_keeps_gits_error_for_a_stale_ref_lock() {
+        let (dir, repo) = amend_fixture("gd-undo-root-lock-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let full_ref = run(&repo, &["symbolic-ref", "HEAD"]).await;
+        let lock = dir
+            .path()
+            .join(".git")
+            .join(format!("{}.lock", full_ref.trim()));
+        std::fs::write(&lock, "").unwrap();
+
+        match undo(&repo, Some(a.clone())).await {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_ne!(stderr, UNDO_HEAD_MOVED);
+                assert!(stderr.contains(".lock"), "git's own error: {stderr}");
+            }
+            other => panic!("expected git's lock error, got {other:?}"),
+        }
+        assert_eq!(head(&repo).await, a, "the branch survives");
+
+        std::fs::remove_file(&lock).unwrap();
+        undo(&repo, Some(a))
+            .await
+            .expect("with the lock gone, the undo runs");
+        assert!(!has_head(&repo).await);
+    }
+
+    /// Only the object's header counts toward the shallow check: a root commit whose
+    /// MESSAGE carries a line starting `parent ` still takes the root arm.
+    #[tokio::test]
+    async fn undo_commit_root_arm_ignores_a_parent_line_in_the_message() {
+        let (dir, repo) = amend_fixture("gd-undo-root-parent-msg-", &[]).await;
+        std::fs::write(dir.path().join("a.txt"), "A\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        let fake = format!("parent {}", "1".repeat(40));
+        run(&repo, &["commit", "-qm", "A", "-m", &fake]).await;
+        let a = head(&repo).await;
+
+        undo(&repo, Some(a))
+            .await
+            .expect("a message line is not a parent");
+
+        assert!(!has_head(&repo).await, "the branch is unborn again");
+    }
+
+    /// A depth-1 clone's only commit records a parent it never fetched: `HEAD~1` fails
+    /// to resolve there, and taking the root arm would delete the branch.
+    #[tokio::test]
+    async fn undo_commit_refuses_a_shallow_clones_boundary_commit() {
+        let (dir, source) = amend_fixture("gd-undo-shallow-", &[]).await;
+        raw_commit(&dir, &source, "a.txt", "A").await;
+        raw_commit(&dir, &source, "b.txt", "B").await;
+        // `--depth` is ignored for a plain local path, so the source goes by URL.
+        let path = source.replace('\\', "/");
+        let url = if path.starts_with('/') {
+            format!("file://{path}")
+        } else {
+            format!("file:///{path}")
+        };
+        let clone_dir = dir.path().join("clone");
+        let clone = clone_dir.to_string_lossy().into_owned();
+        run_git(
+            None,
+            &["clone", "-q", "--depth", "1", &url, &clone],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("the shallow clone succeeds");
+        let b = head(&clone).await;
+        assert!(
+            run_git_raw(
+                Some(&clone),
+                &["rev-parse", "--verify", "--quiet", "HEAD~1"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap()
+            .code
+                != 0,
+            "fixture sanity: the boundary's parent does not resolve"
+        );
+
+        for expected in [Some(b.clone()), None] {
+            assert_undo_refused(undo(&clone, expected).await, UNDO_SHALLOW_BOUNDARY);
+            assert_eq!(head(&clone).await, b, "the branch survives");
+        }
+        undo(&source, None)
+            .await
+            .expect("the same commit undoes where its parent exists");
+    }
+
+    /// `update-ref -d HEAD` on a detached HEAD deletes `.git/HEAD` itself, so the
+    /// detached-at-root case refuses on both routes. The attached root arm above is
+    /// the success twin.
+    #[tokio::test]
+    async fn undo_commit_refuses_a_detached_head_at_the_root_commit() {
+        let (dir, repo) = amend_fixture("gd-undo-detached-root-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        run(&repo, &["checkout", "-q", "--detach"]).await;
+
+        for expected in [Some(a.clone()), None] {
+            assert_undo_refused(undo(&repo, expected).await, UNDO_DETACHED_ROOT);
+            assert!(dir.path().join(".git").join("HEAD").is_file());
+            assert_eq!(head(&repo).await, a, "HEAD still names the commit");
+        }
     }
 }

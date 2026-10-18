@@ -3,12 +3,20 @@ import type { RewriteStep } from "../types";
 
 /** Moves the branch pointer to `hash`. `"mixed"` (the default) keeps every
  *  working-tree change; `"hard"` rewrites the working tree too and is refused
- *  outright while tracked changes are outstanding. */
+ *  outright while tracked changes are outstanding. `expectedHead` applies to
+ *  hard mode only: the backend refuses when HEAD is no longer that commit. */
 export const gitReset = (
   repoPath: string,
   hash: string,
   mode?: "mixed" | "hard",
-) => invoke<void>("git_reset", { repoPath, hash, mode: mode ?? null });
+  expectedHead?: string,
+) =>
+  invoke<void>("git_reset", {
+    repoPath,
+    hash,
+    mode: mode ?? null,
+    expectedHead: expectedHead ?? null,
+  });
 
 export const gitCheckoutCommit = (repoPath: string, hash: string) =>
   invoke<void>("git_checkout_commit", { repoPath, hash });
@@ -104,5 +112,6 @@ export const gitUnpushedMessages = (repoPath: string, base: string) =>
     base,
   });
 
-export const gitUndoCommit = (repoPath: string) =>
-  invoke<void>("git_undo_commit", { repoPath });
+/** The backend refuses when the latest commit is no longer `expectedHead`. */
+export const gitUndoCommit = (repoPath: string, expectedHead: string) =>
+  invoke<void>("git_undo_commit", { repoPath, expectedHead });

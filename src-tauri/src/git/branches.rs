@@ -573,6 +573,15 @@ async fn rename_phase(phase: RenamePhase) {
 /// spelling, so the normalize-only compare stays as a second chance; either
 /// match excludes, which can only ever remove a false positive.
 async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> {
+    worktree_holding_branch_checked(repo_path, name)
+        .await
+        .ok()
+        .flatten()
+}
+
+/// [`worktree_holding_branch`] with a failed `worktree list` reported as an `Err`, for
+/// a caller with no git refusal behind it to fall back on.
+async fn worktree_holding_branch_checked(repo_path: &str, name: &str) -> AppResult<Option<String>> {
     use crate::git::ops::{parse_worktree_branches, parse_worktree_paths};
     use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
     let listed = run_git(
@@ -580,8 +589,7 @@ async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> 
         &["worktree", "list", "--porcelain"],
         DEFAULT_TIMEOUT,
     )
-    .await
-    .ok()?;
+    .await?;
     let porcelain = listed.stdout_lossy();
     let self_norm = normalize_wt_path(repo_path);
     let self_canon = canonical_wt_path(repo_path);
@@ -589,11 +597,113 @@ async fn worktree_holding_branch(repo_path: &str, name: &str) -> Option<String> 
         |p: &str| normalize_wt_path(p) == self_norm || canonical_wt_path(p) == self_canon;
     // Both parsers emit one entry per `worktree …` stanza in the same list order,
     // so the zip is length-safe and pairs each worktree's path with its branch.
-    parse_worktree_paths(&porcelain)
+    Ok(parse_worktree_paths(&porcelain)
         .into_iter()
         .zip(parse_worktree_branches(&porcelain))
         .find(|(path, branch)| branch == name && !is_self(path))
-        .map(|(path, _)| path)
+        .map(|(path, _)| path))
+}
+
+/// The refusal for a checkout, this one included, whose rebase or bisect is working on
+/// `branch`, or whose `rebase --update-refs` will move it. Such a checkout reads as
+/// detached in `worktree list`, and `update-ref` moves the ref under it where
+/// `branch -f` refuses, so every admin dir under the common dir is read the way git's
+/// own checked-out test reads them. Fails closed: a marker that exists but can't be read
+/// is an `Err`.
+async fn branch_operation_refusal(repo_path: &str, branch: &str) -> AppResult<Option<String>> {
+    use crate::git::ops::parse_worktree_paths;
+    use crate::git::worktree::canonical_wt_path;
+    let git_dir = |which: &'static str| async move {
+        run_git(
+            Some(repo_path),
+            &["rev-parse", "--path-format=absolute", which],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .map(|out| {
+            out.stdout_lossy()
+                .trim_end_matches(['\r', '\n'])
+                .to_string()
+        })
+    };
+    let common = std::path::PathBuf::from(git_dir("--git-common-dir").await?);
+    let own_admin = canonical_wt_path(&git_dir("--absolute-git-dir").await?);
+    // Checkout paths are shown in git's own spelling: the porcelain lists the main
+    // checkout first, and a linked one is matched to its entry by canonical path.
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let listed = parse_worktree_paths(&listed.stdout_lossy());
+    let read = |path: std::path::PathBuf| -> AppResult<Option<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text.trim().to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    };
+    // The main checkout's admin dir is the common dir; each linked one's sits under
+    // `worktrees/`, its `gitdir` file naming the checkout's `.git` (maybe relative).
+    let mut admins = vec![(common.clone(), listed.first().cloned())];
+    match std::fs::read_dir(common.join("worktrees")) {
+        Ok(entries) => {
+            for entry in entries {
+                let admin = entry?.path();
+                // git's own listing skips anything that isn't a directory.
+                match std::fs::metadata(&admin) {
+                    Ok(meta) if meta.is_dir() => {}
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(e.into()),
+                }
+                let checkout = read(admin.join("gitdir"))?
+                    .and_then(|dot_git| admin.join(dot_git).parent().map(|p| p.to_path_buf()))
+                    .map(|path| {
+                        let path = path.to_string_lossy().into_owned();
+                        let key = canonical_wt_path(&path);
+                        listed
+                            .iter()
+                            .find(|listed| canonical_wt_path(listed) == key)
+                            .cloned()
+                            .unwrap_or(path)
+                    });
+                admins.push((admin, checkout));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    let on_branch = |line: &str| line.trim().strip_prefix("refs/heads/") == Some(branch);
+    for (admin, checkout) in admins {
+        let rebase_merge = admin.join("rebase-merge");
+        let rebasing = read(rebase_merge.join("head-name"))?.is_some_and(|h| on_branch(&h))
+            || read(admin.join("rebase-apply").join("head-name"))?.is_some_and(|h| on_branch(&h));
+        // Triplets of lines: the ref, then its before and after oids.
+        let updating = read(rebase_merge.join("update-refs"))?
+            .is_some_and(|text| text.lines().step_by(3).any(on_branch));
+        // `BISECT_START` holds the short name the bisect started on.
+        let bisecting = read(admin.join("BISECT_START"))?.as_deref() == Some(branch);
+        if !rebasing && !updating && !bisecting {
+            continue;
+        }
+        let place = if canonical_wt_path(&admin.to_string_lossy()) == own_admin {
+            "here".to_string()
+        } else {
+            let at = checkout.unwrap_or_else(|| admin.to_string_lossy().into_owned());
+            format!("in the worktree at {at}")
+        };
+        let (what, remedy) = match (rebasing, updating) {
+            (true, _) => ("is being rebased", "finish or abort that rebase"),
+            (false, true) => ("is part of a rebase", "finish or abort that rebase"),
+            (false, false) => ("is being bisected", "end that bisect (git bisect reset)"),
+        };
+        return Ok(Some(format!(
+            "{branch} {what} {place} — {remedy} before resetting {branch}."
+        )));
+    }
+    Ok(None)
 }
 
 /// Arbitrates a `worktree_holding_branch` hit that turns out to be an UPDATE's hidden
@@ -1334,6 +1444,9 @@ pub struct BranchRewriteStatus {
     /// re-resolving the ref, so it can only ever land on the state the user was
     /// shown — and it keeps `git_reset`'s hex-only validator intact.
     pub upstream_tip: Option<String>,
+    /// The branch's own tip when the status was measured. A confirmed reset pins
+    /// this sha and the backend refuses if the branch moved off it since.
+    pub local_tip: Option<String>,
 }
 
 impl BranchRewriteStatus {
@@ -1351,6 +1464,7 @@ impl BranchRewriteStatus {
             patch_equal: 0,
             upstream: None,
             upstream_tip: None,
+            local_tip: None,
         }
     }
 }
@@ -1520,6 +1634,7 @@ pub(crate) async fn branch_rewrite_status(
         patch_equal,
         upstream: Some(upstream),
         upstream_tip: Some(tip),
+        local_tip: Some(local_tip),
     })
 }
 
@@ -1566,27 +1681,35 @@ fn parse_cherry_counts(text: &str) -> Option<(u32, u32, u32)> {
     Some((next()?, next()?, next()?))
 }
 
-/// Points a branch at its upstream's tip (`git branch -f`), the remedy when the
-/// remote rewrote it and nothing local is unique. Never touches a working tree,
-/// so it is the NON-current-branch half of the reset story; the current branch
-/// goes through `git_reset` in `--hard` mode, which moves the tree too.
+/// Points a branch at its upstream's tip, the remedy when the remote rewrote it and
+/// nothing local is unique. Never touches a working tree, so it is the NON-current-branch
+/// half of the reset story; the current branch goes through `git_reset` in `--hard` mode.
 ///
-/// Refused with the holding worktree named when the branch is checked out
-/// ANYWHERE — a linked worktree or this checkout itself: git refuses both, but
-/// only after the caller has already framed the action as available.
+/// Refused with the holding worktree named when the branch is checked out, rebased or
+/// bisected ANYWHERE, a linked worktree or this checkout itself. The ref moves by
+/// `update-ref`, which refuses none of these, so those probes fail closed.
 ///
-/// `expected_tip` is the sha the caller measured and showed the user. The
-/// upstream is re-resolved here and must still be at it, so a background fetch
-/// that moved the ref while the confirmation sat open turns into a refusal
-/// rather than a silent reset onto a state nobody approved.
+/// Two measured shas pin the move: `expected_tip`, the upstream tip the user was shown
+/// (a background fetch that moved it refuses), and `expected_local_tip`, the branch's own
+/// tip then (an outside commit refuses rather than being dropped). The guards and the
+/// compare-and-swap share one working-tree hold, so only another process checking the
+/// branch out between the probe and the swap can slip past the probes.
 #[tauri::command]
 pub async fn git_branch_reset_to_upstream(
     state: State<'_, AppState>,
     repo_path: String,
     branch: String,
     expected_tip: String,
+    expected_local_tip: String,
 ) -> AppResult<()> {
-    branch_reset_to_upstream(&state, &repo_path, &branch, &expected_tip).await
+    branch_reset_to_upstream(
+        &state,
+        &repo_path,
+        &branch,
+        &expected_tip,
+        &expected_local_tip,
+    )
+    .await
 }
 
 pub(crate) async fn branch_reset_to_upstream(
@@ -1594,9 +1717,11 @@ pub(crate) async fn branch_reset_to_upstream(
     repo_path: &str,
     branch: &str,
     expected_tip: &str,
+    expected_local_tip: &str,
 ) -> AppResult<()> {
     validate_branch_name(branch)?;
     crate::git::history::validate_hash(expected_tip)?;
+    crate::git::history::validate_hash(expected_local_tip)?;
     let upstream_rev = format!("{branch}@{{upstream}}");
     let tip_out = run_git_raw(
         Some(repo_path),
@@ -1622,20 +1747,31 @@ pub(crate) async fn branch_reset_to_upstream(
         )));
     }
 
+    // KEEP IN STEP: one wording family with ops.rs's `RESET_HEAD_MOVED` and commit.rs's
+    // `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
+    let moved = || AppError::Git {
+        code: 1,
+        stderr: format!("{branch} changed since you confirmed — nothing was reset."),
+    };
+
+    // One hold across the guards, the local-tip compare and the swap. Every spawn under
+    // it is lock-free: `run_git_mutating` re-acquires this non-reentrant domain.
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
     // Two halves of one window, as in `git_delete_branch_core`: the marker covers an
     // update that has minted but not yet registered its checkout, the porcelain arm
     // below covers it once registered. Heal-free — healing lives in the claim arm.
     crate::git::update_marker::refuse_if_branch_updating_no_heal(state, repo_path, branch).await?;
-    // Pre-mutation guards: git refuses both of these itself, but only after the
-    // user has confirmed a destructive action, and its wording names neither
-    // remedy. The linked-worktree probe excludes THIS checkout, so the current
-    // branch takes its own arm.
-    if let Some(path) = worktree_holding_branch(repo_path, branch).await {
+    // Pre-mutation guards. `update-ref` refuses neither case itself, so a probe that
+    // errors refuses too. The linked-worktree probe excludes THIS checkout, so the
+    // current branch takes its own arm.
+    if let Some(path) = worktree_holding_branch_checked(repo_path, branch).await? {
         // An update's hidden checkout names no remedy the user can follow; it is
-        // refused while live and swept once dead (see `clear_update_holder`).
+        // refused while live and swept once dead (see `clear_update_holder`). The sweep
+        // takes ADMIN under this hold: the bounded, try-only nesting exception.
         let swept = clear_update_holder(state, repo_path, branch, &path).await?;
         let held = if swept {
-            worktree_holding_branch(repo_path, branch).await
+            worktree_holding_branch_checked(repo_path, branch).await?
         } else {
             Some(path)
         };
@@ -1646,26 +1782,45 @@ pub(crate) async fn branch_reset_to_upstream(
             )));
         }
     }
-    // A symbolic-ref that RAN but failed falls through to `branch -f`, which refuses
-    // a checked-out branch itself; only a spawn failure aborts here.
-    let current = match current_branch_name(repo_path).await {
-        Ok(name) => name,
-        Err(AppError::Git { .. }) => None,
-        Err(e) => return Err(e),
-    };
-    if current.as_deref() == Some(branch) {
+    if current_branch_name(repo_path).await?.as_deref() == Some(branch) {
         return Err(AppError::Command(format!(
             "{branch} is checked out here — use Reset to {branch}'s upstream from the \
              sync controls, which moves your working tree with it."
         )));
     }
-    run_git_mutating(
-        state,
-        repo_path,
-        &["branch", "-f", "--", branch, &tip],
+    if let Some(refusal) = branch_operation_refusal(repo_path, branch).await? {
+        return Err(AppError::Command(refusal));
+    }
+    if branch_tip_sha(repo_path, branch).await?.as_deref() != Some(expected_local_tip) {
+        return Err(moved());
+    }
+    // The reflog line is the one `branch -f` writes, so recovery reads the same.
+    let message = format!("branch: Reset to {tip}");
+    let full_ref = format!("refs/heads/{branch}");
+    let out = run_git_raw(
+        Some(repo_path),
+        &[
+            "update-ref",
+            "-m",
+            &message,
+            &full_ref,
+            &tip,
+            expected_local_tip,
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
+    if out.code != 0 {
+        // A failed swap reads as moved only when the branch really moved; a stale ref
+        // `.lock` keeps git's own error.
+        if branch_tip_sha(repo_path, branch).await?.as_deref() != Some(expected_local_tip) {
+            return Err(moved());
+        }
+        return Err(AppError::Git {
+            code: out.code,
+            stderr: out.full_failure_text(),
+        });
+    }
     Ok(())
 }
 
@@ -1932,7 +2087,8 @@ pub(crate) async fn update_branch_from(
     }
 
     // Diverged → merge in a throwaway worktree so the user's checkout is untouched. The
-    // worktree steps below run in the worktree-admin domain, which nests with no other.
+    // worktree steps below run in the worktree-admin domain, which no blocking hold nests
+    // with (a dead holder's claim takes it try-only under the working-tree hold).
     drop(guard);
 
     // Minted under the app-data worktrees root, never the OS temp dir: that
@@ -2317,9 +2473,9 @@ pub(crate) async fn branch_tip_sha(repo_path: &str, branch: &str) -> AppResult<O
 }
 
 /// The diverged arm, run with the working-tree lock RELEASED: `worktree
-/// add/remove/prune` belong to the worktree-admin domain, which nests with no other,
-/// and materializing a whole checkout takes minutes that staging must not queue
-/// behind.
+/// add/remove/prune` belong to the worktree-admin domain, which no blocking hold nests
+/// with (a dead holder's claim takes it try-only under the working-tree hold), and
+/// materializing a whole checkout takes minutes that staging must not queue behind.
 ///
 /// The add is bounded, so a concurrent removal's prune yields an explained `Busy`
 /// instead of an interleaved write to `.git/worktrees/`. Every path out of the merge
@@ -4229,16 +4385,56 @@ mod tests {
             patch_equal: 4,
             upstream: Some("origin/feature".into()),
             upstream_tip: Some("abc123".into()),
+            local_tip: Some("def456".into()),
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"remoteRewritten":true,"localOnly":0,"remoteOnly":1,"patchEqual":4,"upstream":"origin/feature","upstreamTip":"abc123"}"#
+            r#"{"remoteRewritten":true,"localOnly":0,"remoteOnly":1,"patchEqual":4,"upstream":"origin/feature","upstreamTip":"abc123","localTip":"def456"}"#
         );
         assert_eq!(
             serde_json::to_string(&BranchRewriteStatus::unknown()).unwrap(),
-            r#"{"remoteRewritten":null,"localOnly":0,"remoteOnly":0,"patchEqual":0,"upstream":null,"upstreamTip":null}"#
+            r#"{"remoteRewritten":null,"localOnly":0,"remoteOnly":0,"patchEqual":0,"upstream":null,"upstreamTip":null,"localTip":null}"#
         );
+    }
+
+    /// A measured status carries the branch's own tip, the sha a confirmed reset pins.
+    #[tokio::test]
+    async fn rewrite_status_carries_the_measured_local_tip() {
+        let (_base, base) = temp_base("rewrite-local-tip");
+        let local_s = server_rebase_fixture(&base).await;
+        run(&local_s, &["tag", "feature", "main"]).await;
+
+        let st = branch_rewrite_status(&local_s, "feature")
+            .await
+            .expect("status resolves");
+
+        assert_eq!(
+            st.local_tip,
+            Some(local_tip(&local_s, "feature").await),
+            "the branch's tip, never a same-named tag's"
+        );
+    }
+
+    /// The branch's own tip, read through the full ref so no same-named tag answers.
+    async fn local_tip(repo: &str, branch: &str) -> String {
+        branch_tip_sha(repo, branch)
+            .await
+            .expect("the tip reads")
+            .expect("the branch exists")
+    }
+
+    /// Lands one commit on `branch` without checking it out, as a terminal or
+    /// another process would, and returns the new tip.
+    async fn commit_onto_idle_branch(repo: &str, branch: &str, subject: &str) -> String {
+        let parent = local_tip(repo, branch).await;
+        let tree = format!("{parent}^{{tree}}");
+        let commit = run(repo, &["commit-tree", &tree, "-p", &parent, "-m", subject])
+            .await
+            .trim()
+            .to_string();
+        run(repo, &["branch", "-f", "--", branch, &commit]).await;
+        commit
     }
 
     /// The non-current-branch remedy moves the ref and leaves the working tree —
@@ -4255,8 +4451,9 @@ mod tests {
             .to_string();
         let head_before = run(&local_s, &["rev-parse", "HEAD"]).await.trim().to_string();
 
+        let local = local_tip(&local_s, "feature").await;
         let state = AppState::default();
-        branch_reset_to_upstream(&state, &local_s, "feature", &target)
+        branch_reset_to_upstream(&state, &local_s, "feature", &target, &local)
             .await
             .expect("reset succeeds");
 
@@ -4270,6 +4467,369 @@ mod tests {
             head_before,
             "the checked-out branch never moved"
         );
+        assert_eq!(
+            run(
+                &local_s,
+                &["reflog", "show", "-1", "--format=%gs", "refs/heads/feature"]
+            )
+            .await
+            .trim(),
+            format!("branch: Reset to {target}"),
+            "the reflog entry reads as `branch -f` wrote it, the recovery path"
+        );
+    }
+
+    /// The user confirmed against the branch's tip then; an outside commit landed on
+    /// the branch before the reset ran. The reset must keep it, and a re-measured tip
+    /// is the success twin.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_when_the_branch_itself_moved() {
+        let (_base, base) = temp_base("reset-upstream-local-moved");
+        let local_s = server_rebase_fixture(&base).await;
+        run(&local_s, &["switch", "-q", "main"]).await;
+        // A branch name no other test uses: a parallel test's live update marker on a
+        // shared name would refuse this one first.
+        let branch = "feature-local-moved";
+        run(&local_s, &["branch", "-m", "feature", branch]).await;
+        let target = run(&local_s, &["rev-parse", "origin/feature"])
+            .await
+            .trim()
+            .to_string();
+        let measured = local_tip(&local_s, branch).await;
+        let outside = commit_onto_idle_branch(&local_s, branch, "outside").await;
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &local_s, branch, &target, &measured)
+            .await
+            .expect_err("a branch that moved since the confirm must refuse");
+        assert!(
+            matches!(&err, AppError::Git { stderr, .. }
+                if *stderr == format!("{branch} changed since you confirmed — nothing was reset.")),
+            "got {err:?}"
+        );
+        assert_eq!(
+            local_tip(&local_s, branch).await,
+            outside,
+            "the outside commit is kept"
+        );
+
+        branch_reset_to_upstream(&state, &local_s, branch, &target, &outside)
+            .await
+            .expect("the re-measured tip resets");
+        assert_eq!(local_tip(&local_s, branch).await, target);
+    }
+
+    #[tokio::test]
+    async fn reset_to_upstream_local_tip_compare_is_full_hash_in_sha256_repos() {
+        let (_base, base) = temp_base("reset-upstream-sha256");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        run(&repo_s, &["init", "-q", "--object-format=sha256"]).await;
+        run(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        run(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "seed"]).await;
+        // Unique names, as above: an update marker is matched by branch name.
+        let (branch, up) = ("feature-sha256-pin", "up-sha256-pin");
+        run(&repo_s, &["branch", up]).await;
+        run(&repo_s, &["branch", branch]).await;
+        run(&repo_s, &["branch", "--set-upstream-to", up, branch]).await;
+        let target = commit_onto_idle_branch(&repo_s, up, "upstream moves").await;
+        let local = local_tip(&repo_s, branch).await;
+        assert_eq!(local.len(), 64, "a sha256 oid");
+
+        let state = AppState::default();
+        // Same 63-char prefix, different last digit: only a full compare tells them apart.
+        let last = if local.ends_with('0') { '1' } else { '0' };
+        for stale in [format!("{}{last}", &local[..63]), local[..40].to_string()] {
+            let err = branch_reset_to_upstream(&state, &repo_s, branch, &target, &stale)
+                .await
+                .expect_err("a near-miss pin refuses");
+            assert!(
+                matches!(&err, AppError::Git { stderr, .. }
+                    if stderr.contains("changed since you confirmed")),
+                "got {err:?}"
+            );
+            assert_eq!(local_tip(&repo_s, branch).await, local);
+        }
+
+        branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect("the full oid matches");
+        assert_eq!(local_tip(&repo_s, branch).await, target);
+    }
+
+    /// A repo whose `branch` is `ahead` commits past a base and tracks a local `up`
+    /// branch one conflicting commit past it; `branch` is NOT checked out. Returns
+    /// (repo, base, up's tip).
+    async fn diverged_local_upstream(
+        base: &std::path::Path,
+        branch: &str,
+        up: &str,
+        ahead: usize,
+    ) -> (String, String, String) {
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        let fork = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["branch", up]).await;
+        run(&repo_s, &["switch", "-qc", branch]).await;
+        for n in 0..ahead {
+            std::fs::write(repo.join("a.txt"), format!("mine {n}\n")).unwrap();
+            run(&repo_s, &["commit", "-qam", &format!("mine {n}")]).await;
+        }
+        run(&repo_s, &["switch", "-q", up]).await;
+        std::fs::write(repo.join("a.txt"), "theirs\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "theirs"]).await;
+        let up_tip = local_tip(&repo_s, up).await;
+        run(&repo_s, &["switch", "-q", "--detach"]).await;
+        run(&repo_s, &["branch", "--set-upstream-to", up, branch]).await;
+        (repo_s, fork, up_tip)
+    }
+
+    /// A linked worktree stopped mid-rebase of the branch reads as detached in
+    /// `worktree list`, and `update-ref` would move the ref under it. The refusal
+    /// names that worktree; once the worktree is gone, the reset runs.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_a_branch_being_rebased_in_a_worktree() {
+        let (_base, base) = temp_base("reset-upstream-rebasing");
+        let (branch, up) = ("feature-rebasing", "up-rebasing");
+        let (repo_s, _fork, target) = diverged_local_upstream(&base, branch, up, 1).await;
+        let wt_s = base.join("wt").to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-q", &wt_s, branch]).await;
+        let rebase = run_git_raw(Some(&wt_s), &["rebase", up], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(
+            rebase.code, 0,
+            "fixture sanity: the rebase stops on a conflict"
+        );
+        let local = local_tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect_err("a branch mid-rebase must refuse");
+        let AppError::Command(msg) = &err else {
+            panic!("expected the actionable refusal, got {err:?}");
+        };
+        let named = msg
+            .split_once(" at ")
+            .and_then(|(_, rest)| rest.split_once(" — "))
+            .map(|(path, _)| path)
+            .unwrap_or_default();
+        assert!(msg.contains("being rebased"), "{msg}");
+        assert_eq!(
+            crate::git::worktree::canonical_wt_path(named),
+            crate::git::worktree::canonical_wt_path(&wt_s),
+            "the refusal names the rebasing worktree: {msg}"
+        );
+        assert_eq!(
+            local_tip(&repo_s, branch).await,
+            local,
+            "the ref is unmoved"
+        );
+
+        run(&wt_s, &["rebase", "--abort"]).await;
+        run(&repo_s, &["worktree", "remove", "--force", &wt_s]).await;
+        branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect("with no rebase in the way, the reset runs");
+        assert_eq!(local_tip(&repo_s, branch).await, target);
+    }
+
+    /// The bisect twin: a worktree bisecting the branch has detached onto a midpoint.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_a_branch_being_bisected_in_a_worktree() {
+        let (_base, base) = temp_base("reset-upstream-bisecting");
+        let (branch, up) = ("feature-bisecting", "up-bisecting");
+        let (repo_s, fork, target) = diverged_local_upstream(&base, branch, up, 3).await;
+        let wt_s = base.join("wt").to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-q", &wt_s, branch]).await;
+        run(&wt_s, &["bisect", "start", branch, &fork]).await;
+        assert!(
+            worktree_holding_branch(&repo_s, branch).await.is_none(),
+            "fixture sanity: the bisect detached the worktree"
+        );
+        let local = local_tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect_err("a branch mid-bisect must refuse");
+        assert!(
+            matches!(&err, AppError::Command(m) if m.contains("being bisected")),
+            "got {err:?}"
+        );
+        assert_eq!(
+            local_tip(&repo_s, branch).await,
+            local,
+            "the ref is unmoved"
+        );
+
+        run(&wt_s, &["bisect", "reset"]).await;
+        run(&repo_s, &["worktree", "remove", "--force", &wt_s]).await;
+        branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect("with no bisect in the way, the reset runs");
+        assert_eq!(local_tip(&repo_s, branch).await, target);
+    }
+
+    /// A stacked `rebase --update-refs` of the TOP branch, stopped in a linked worktree,
+    /// will move the bottom branch too: git lists it in `rebase-merge/update-refs` and
+    /// `branch -f` refuses it, so the reset refuses it as well.
+    #[tokio::test]
+    async fn reset_to_upstream_refuses_a_branch_a_stacked_rebase_will_move() {
+        let (_base, base) = temp_base("reset-upstream-update-refs");
+        let (bottom, top, up) = ("stack-bottom-pin", "stack-top-pin", "up-update-refs");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "a.txt").await;
+        run(&repo_s, &["branch", up]).await;
+        run(&repo_s, &["switch", "-qc", bottom]).await;
+        std::fs::write(repo.join("b.txt"), "bottom\n").unwrap();
+        run(&repo_s, &["add", "-A"]).await;
+        run(&repo_s, &["commit", "-qm", "bottom"]).await;
+        run(&repo_s, &["switch", "-qc", top]).await;
+        std::fs::write(repo.join("a.txt"), "mine\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "top"]).await;
+        run(&repo_s, &["switch", "-q", up]).await;
+        std::fs::write(repo.join("a.txt"), "theirs\n").unwrap();
+        run(&repo_s, &["commit", "-qam", "theirs"]).await;
+        let target = local_tip(&repo_s, up).await;
+        run(&repo_s, &["switch", "-q", "--detach"]).await;
+        run(&repo_s, &["branch", "--set-upstream-to", up, bottom]).await;
+        let wt_s = base.join("wt").to_string_lossy().into_owned();
+        run(&repo_s, &["worktree", "add", "-q", &wt_s, top]).await;
+        let rebase = run_git_raw(
+            Some(&wt_s),
+            &["rebase", "--update-refs", up],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(rebase.code, 0, "fixture sanity: the top commit conflicts");
+        let local = local_tip(&repo_s, bottom).await;
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &repo_s, bottom, &target, &local)
+            .await
+            .expect_err("a branch a stacked rebase will move must refuse");
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.contains("is part of a rebase in the worktree at")),
+            "got {err:?}"
+        );
+        assert_eq!(
+            local_tip(&repo_s, bottom).await,
+            local,
+            "the ref is unmoved"
+        );
+
+        run(&wt_s, &["rebase", "--abort"]).await;
+        run(&repo_s, &["worktree", "remove", "--force", &wt_s]).await;
+        branch_reset_to_upstream(&state, &repo_s, bottom, &target, &local)
+            .await
+            .expect("with no rebase in the way, the reset runs");
+        assert_eq!(local_tip(&repo_s, bottom).await, target);
+    }
+
+    /// The rebase stopped in THIS checkout reads "here", as the checked-out refusal
+    /// does; once it is aborted and HEAD detached again, the reset runs.
+    #[tokio::test]
+    async fn reset_to_upstream_says_here_for_a_rebase_in_this_checkout() {
+        let (_base, base) = temp_base("reset-upstream-rebasing-here");
+        let (branch, up) = ("feature-rebasing-here", "up-rebasing-here");
+        let (repo_s, _fork, target) = diverged_local_upstream(&base, branch, up, 1).await;
+        run(&repo_s, &["switch", "-q", branch]).await;
+        let rebase = run_git_raw(Some(&repo_s), &["rebase", up], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(
+            rebase.code, 0,
+            "fixture sanity: the rebase stops on a conflict"
+        );
+        let local = local_tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect_err("a branch mid-rebase here must refuse");
+        assert!(
+            matches!(&err, AppError::Command(m)
+                if m.starts_with(&format!("{branch} is being rebased here — "))),
+            "got {err:?}"
+        );
+
+        run(&repo_s, &["rebase", "--abort"]).await;
+        run(&repo_s, &["switch", "-q", "--detach"]).await;
+        branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect("with no rebase in the way, the reset runs");
+        assert_eq!(local_tip(&repo_s, branch).await, target);
+    }
+
+    /// A stray FILE under `<common>/worktrees/` is skipped, as git's own listing skips
+    /// it, rather than failing every reset closed.
+    #[tokio::test]
+    async fn reset_to_upstream_skips_a_stray_file_among_the_worktree_admin_dirs() {
+        let (_base, base) = temp_base("reset-upstream-stray-admin");
+        let (branch, up) = ("feature-stray-admin", "up-stray-admin");
+        let (repo_s, _fork, target) = diverged_local_upstream(&base, branch, up, 1).await;
+        let admins = std::path::Path::new(&repo_s).join(".git").join("worktrees");
+        std::fs::create_dir_all(&admins).unwrap();
+        std::fs::write(admins.join("stray"), "not a worktree\n").unwrap();
+        let local = local_tip(&repo_s, branch).await;
+
+        let state = AppState::default();
+        branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect("a stray file is not a worktree");
+        assert_eq!(local_tip(&repo_s, branch).await, target);
+    }
+
+    /// A stale ref lock fails the compare-and-swap with the branch unmoved: that is
+    /// git's own error, never "changed since you confirmed". Clearing it is the twin.
+    #[tokio::test]
+    async fn reset_to_upstream_keeps_gits_error_for_a_stale_ref_lock() {
+        let (_base, base) = temp_base("reset-upstream-ref-lock");
+        let (branch, up) = ("feature-ref-lock", "up-ref-lock");
+        let (repo_s, _fork, target) = diverged_local_upstream(&base, branch, up, 1).await;
+        let local = local_tip(&repo_s, branch).await;
+        let lock = std::path::Path::new(&repo_s)
+            .join(".git")
+            .join("refs")
+            .join("heads")
+            .join(format!("{branch}.lock"));
+        std::fs::write(&lock, "").unwrap();
+
+        let state = AppState::default();
+        let err = branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect_err("a held ref lock fails the swap");
+        assert!(
+            matches!(&err, AppError::Git { stderr, .. }
+                if stderr.contains(".lock") && !stderr.contains("changed since you confirmed")),
+            "git's own error: {err:?}"
+        );
+        assert_eq!(
+            local_tip(&repo_s, branch).await,
+            local,
+            "the ref is unmoved"
+        );
+
+        std::fs::remove_file(&lock).unwrap();
+        branch_reset_to_upstream(&state, &repo_s, branch, &target, &local)
+            .await
+            .expect("with the lock gone, the reset runs");
+        assert_eq!(local_tip(&repo_s, branch).await, target);
     }
 
     /// The pre-mutation guard: a branch checked out in ANOTHER worktree can't be
@@ -4288,8 +4848,9 @@ mod tests {
             .trim()
             .to_string();
 
+        let local = local_tip(&local_s, "feature").await;
         let state = AppState::default();
-        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target)
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target, &local)
             .await
             .expect_err("a branch held by a worktree can't be reset");
         let AppError::Command(msg) = &err else {
@@ -4362,7 +4923,7 @@ mod tests {
         );
 
         let state = AppState::default();
-        let err = branch_reset_to_upstream(&state, &local_s, "feature", &measured)
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &measured, &before)
             .await
             .expect_err("a moved upstream must refuse");
         assert!(
@@ -4401,8 +4962,9 @@ mod tests {
         let resolved = std::fs::canonicalize(&local_s).expect("repo resolves");
         let resolved_s = resolved.to_string_lossy().into_owned();
 
+        let local = local_tip(&local_s, "feature").await;
         let state = AppState::default();
-        let err = branch_reset_to_upstream(&state, &resolved_s, "feature", &target)
+        let err = branch_reset_to_upstream(&state, &resolved_s, "feature", &target, &local)
             .await
             .expect_err("feature is checked out in this very repo");
         let AppError::Command(msg) = &err else {
@@ -4427,8 +4989,9 @@ mod tests {
             .to_string();
         let before = run(&local_s, &["rev-parse", "feature"]).await.trim().to_string();
 
+        let local = local_tip(&local_s, "feature").await;
         let state = AppState::default();
-        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target)
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target, &local)
             .await
             .expect_err("the current branch can't take a ref-only reset");
         let AppError::Command(msg) = &err else {
@@ -4457,8 +5020,9 @@ mod tests {
             .trim()
             .to_string();
 
+        let local = local_tip(&local_s, "feature").await;
         let state = AppState::default();
-        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target)
+        let err = branch_reset_to_upstream(&state, &local_s, "feature", &target, &local)
             .await
             .expect_err("the current branch can't take a ref-only reset");
         let AppError::Command(msg) = &err else {
@@ -6533,7 +7097,8 @@ mod tests {
             .await
             .expect_err("a delete during the pre-add window is refused");
         assert_eq!(deleted.to_string(), expected);
-        let reset = branch_reset_to_upstream(&state, &repo_s, branch, &tip)
+        let local = local_tip(&repo_s, branch).await;
+        let reset = branch_reset_to_upstream(&state, &repo_s, branch, &tip, &local)
             .await
             .expect_err("a reset during the pre-add window is refused");
         assert_eq!(reset.to_string(), expected);

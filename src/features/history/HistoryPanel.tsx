@@ -45,7 +45,7 @@ import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { useAppForm } from "@/lib/form";
-import { gitCommitDetails, gitRecentCommits } from "@/lib/git/api";
+import { gitCommitDetails } from "@/lib/git/api";
 import {
   repoKeys,
   useBranches,
@@ -123,6 +123,15 @@ import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
 
 const FILTER_PLACEHOLDER = "Filter loaded commits, or search all history";
+
+/** Why undo is withheld on a detached HEAD at the first commit: there is no
+ *  branch ref to delete, and the backend refuses. KEEP IN STEP: commit.rs's
+ *  `UNDO_DETACHED_ROOT` is the backend's copy of this exact sentence. */
+const UNDO_DETACHED_ROOT =
+  "HEAD is detached at the repository's first commit — nothing to undo onto.";
+/** The menu item's short form of {@link UNDO_DETACHED_ROOT}. */
+const UNDO_DETACHED_ROOT_HINT =
+  " (detached at the first commit — nothing to undo onto)";
 
 // Keeps the log and its side reads in step with status's HEAD: refetches the
 // log when status saw a new HEAD first, refreshes the side reads once per
@@ -379,9 +388,16 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // path. The log walks HEAD's ancestry and only stops paging once a page comes
   // up short, so a lone loaded commit with no next page means HEAD has no parent.
   const headIsRoot = log.data?.pages[0]?.length === 1 && !log.hasNextPage;
+  // The root confirm promises to delete the branch's ref, which a detached HEAD
+  // doesn't have: every route explains the backend's refusal instead.
+  const detachedRoot = headIsRoot && Boolean(head?.detached);
 
   async function undoLast() {
     if (!lastCommit) return;
+    if (detachedRoot) {
+      toast.info(UNDO_DETACHED_ROOT);
+      return;
+    }
     const undoIn = repoPath;
     // Only the root case is lossy enough to ask about: an ordinary undo is gated
     // to unpushed commits and leaves everything staged.
@@ -397,19 +413,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     }
     let details: CommitDetails;
     try {
-      // The undo names no commit — it always unwinds whatever HEAD is at the
-      // moment it runs — so re-read HEAD across the prompt's await. A commit
-      // landing out of band (another window, a terminal) would otherwise be the
-      // one undone, under a confirmation that described a different commit.
-      const [headNow] = await gitRecentCommits(repoPath, 1);
-      if (headNow?.hash !== lastCommit.hash) {
-        toast.info("The latest commit changed — nothing was undone.");
-        return;
-      }
+      // The backend pins `lastCommit.hash` under the repo lock and refuses if HEAD
+      // moved, so a commit landing out of band (another window, a terminal) is
+      // never the one undone; the refusal settles as an error, refreshing the log.
       // Read the message BEFORE the undo removes the commit it belongs to.
       details = await gitCommitDetails(repoPath, lastCommit.hash);
       // The undo builds from the observer's options when it is called, which
-      // follow the live repo: a switch during the reads above refuses instead.
+      // follow the live repo: a switch during the read above refuses instead.
       if (
         refuseIfSwitched(
           undoIn,
@@ -418,7 +428,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         )
       )
         return;
-      await undoCommit.mutateAsync(undefined);
+      await undoCommit.mutateAsync(lastCommit.hash);
     } catch (e) {
       onError(e);
       return;
@@ -516,7 +526,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   // The log can trail an outside commit (and push): undo only the HEAD status
-  // reports.
+  // reports. A detached first commit stays enabled ON PURPOSE, unlike the menu:
+  // the palette hides disabled actions with no reason, so firing explains by
+  // toast, as promotionBlocksCheckout does.
   useHotkeyAction(
     "undo-commit",
     undoLast,
@@ -970,11 +982,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         </ContextMenuItem>
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}
-          disabled={!isHead || !canUndo || undoCommit.isPending}
+          disabled={!isHead || !canUndo || undoCommit.isPending || detachedRoot}
           onClick={undoLast}
         >
           Undo commit (keep changes)
           {menuIndex === 0 && !isHead && HISTORY_REFRESHING_HINT}
+          {isHead && detachedRoot && UNDO_DETACHED_ROOT_HINT}
         </ContextMenuItem>
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}

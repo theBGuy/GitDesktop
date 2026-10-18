@@ -166,6 +166,22 @@ struct CommitArgs {
     /// Amend the previous commit instead of creating a new one. Defaults to false.
     #[serde(default)]
     amend: bool,
+    /// Only used with `amend`: the amend runs only while HEAD is still this full
+    /// commit id (as `log`/`repo_status` report it). Omit to amend whatever the
+    /// latest commit is.
+    // No `rename_all` on the struct, so the wire name is spelled explicitly (the
+    // `noTrack` / `expectedDropShas` convention). The alias keeps a snake_case caller
+    // pinned instead of silently unpinned.
+    #[serde(default, rename = "expectedHead", alias = "expected_head")]
+    expected_head: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct UndoLastCommitArgs {
+    /// Optional: the undo runs only while the latest commit is still this full
+    /// commit id. Omit to undo whatever the latest commit is.
+    #[serde(default, rename = "expectedHead", alias = "expected_head")]
+    expected_head: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -582,8 +598,9 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Create a commit from the staged changes in the bound repository. With \
-                       `amend`, rewrites the previous commit instead. Returns the new commit hash \
-                       as JSON. Requires --allow-git-write.",
+                       `amend`, rewrites the previous commit instead. With `amend`, an optional \
+                       `expectedHead` makes the amend run only while HEAD is still that commit. \
+                       Returns the new commit hash as JSON. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn commit(
@@ -592,7 +609,7 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         // A session that predates canonicalization journaled its paused picks under the
-        // RAW `--repo` spelling, which `git_commit_core`'s close — keyed on the canonical
+        // RAW `--repo` spelling, which `git_commit_core_expecting`'s close — keyed on the canonical
         // path — cannot reach. Mirror that close's gate here for the second spelling,
         // reading the marker BEFORE the commit clears it. Skipped when the two already
         // resolve to one journal key, which is what keeps this from closing a second
@@ -603,12 +620,13 @@ impl GitDesktopMcp {
             .filter(|raw| !crate::oplog::same_repo(raw, &self.repo));
         let was_picking =
             legacy_repo.is_some() && crate::git::ops::cherry_pick_marker_present(&self.repo);
-        let result = crate::git::commit::git_commit_core(
+        let result = crate::git::commit::git_commit_core_expecting(
             &self.state,
             self.repo.clone(),
             args.message,
             args.body,
             args.amend,
+            args.expected_head,
         )
         .await
         .map_err(app_err)?;
@@ -623,15 +641,24 @@ impl GitDesktopMcp {
     #[tool(
         description = "Undo the most recent commit, keeping its changes staged (a SOFT reset — no \
                        work is lost, the changes return to the index). A root commit has no parent, \
-                       so its branch ref is removed instead. Requires --allow-git-write.",
+                       so its branch ref is removed instead. An optional `expectedHead` makes the \
+                       undo run only while the latest commit is still that id. Requires \
+                       --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
-    async fn undo_last_commit(&self) -> Result<CallToolResult, McpError> {
+    async fn undo_last_commit(
+        &self,
+        Parameters(args): Parameters<UndoLastCommitArgs>,
+    ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         let _promote = self.promote_gate().await?;
-        crate::git::commit::git_undo_commit_core(&self.state, self.repo.clone())
-            .await
-            .map_err(app_err)?;
+        crate::git::commit::git_undo_commit_core(
+            &self.state,
+            self.repo.clone(),
+            args.expected_head,
+        )
+        .await
+        .map_err(app_err)?;
         ok_text("last commit undone (changes kept staged)")
     }
 
@@ -1376,11 +1403,17 @@ mod tests {
             h.commit(Parameters(CommitArgs {
                 message: "m".into(),
                 body: None,
-                amend: false
+                amend: false,
+                expected_head: None
             })),
             "--allow-git-write"
         );
-        assert_gated!(h.undo_last_commit(), "--allow-git-write");
+        assert_gated!(
+            h.undo_last_commit(Parameters(UndoLastCommitArgs {
+                expected_head: None
+            })),
+            "--allow-git-write"
+        );
         assert_gated!(
             h.create_branch(Parameters(CreateBranchArgs {
                 name: "b".into(),
@@ -1853,6 +1886,87 @@ mod tests {
             .expect("the tool returns one text block")
             .text
             .clone()
+    }
+
+    /// A repo holding commits A then B; returns their oids.
+    async fn two_commit_repo(prefix: &str) -> (tempfile::TempDir, String, String, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init", "-q"]).await;
+        configure(&repo).await;
+        let mut oids = Vec::new();
+        for name in ["A", "B"] {
+            std::fs::write(dir.path().join(format!("{name}.txt")), "x\n").unwrap();
+            git(&repo, &["add", "-A"]).await;
+            git(&repo, &["commit", "-qm", name]).await;
+            oids.push(git(&repo, &["rev-parse", "HEAD"]).await.trim().to_string());
+        }
+        let b = oids.pop().unwrap();
+        let a = oids.pop().unwrap();
+        (dir, repo, a, b)
+    }
+
+    /// The wire pin: a stale `expectedHead`, under either spelling, must reach the
+    /// amend's core and refuse with HEAD untouched; the current oid amends.
+    #[tokio::test]
+    async fn mcp_amend_refuses_on_stale_expected_head() {
+        let (_dir, repo, a, b) = two_commit_repo("gd-mcp-amend-pin-").await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, false);
+        let args = |key: &str, expected: &str| {
+            let mut wire = serde_json::json!({ "message": "B reworded", "amend": true });
+            wire[key] = serde_json::json!(expected);
+            serde_json::from_value::<CommitArgs>(wire).unwrap()
+        };
+
+        for key in ["expectedHead", "expected_head"] {
+            let err = h
+                .commit(Parameters(args(key, &a)))
+                .await
+                .expect_err("a stale pin refuses");
+            assert!(
+                err.to_string().contains("nothing was amended"),
+                "{key}: {err}"
+            );
+            assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), b);
+            assert_eq!(subjects(&repo).await, ["B", "A"]);
+        }
+
+        h.commit(Parameters(args("expectedHead", &b)))
+            .await
+            .expect("the current HEAD amends");
+        assert_eq!(subjects(&repo).await, ["B reworded", "A"]);
+    }
+
+    /// The same wire pin for the undo, plus the absent field's unpinned default.
+    #[tokio::test]
+    async fn mcp_undo_refuses_on_stale_expected_head() {
+        let (_dir, repo, a, b) = two_commit_repo("gd-mcp-undo-pin-").await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, false);
+        let args =
+            |wire: serde_json::Value| serde_json::from_value::<UndoLastCommitArgs>(wire).unwrap();
+        assert!(args(serde_json::json!({})).expected_head.is_none());
+
+        for key in ["expectedHead", "expected_head"] {
+            let mut wire = serde_json::json!({});
+            wire[key] = serde_json::json!(a);
+            let err = h
+                .undo_last_commit(Parameters(args(wire)))
+                .await
+                .expect_err("a stale pin refuses");
+            assert!(
+                err.to_string().contains("nothing was undone"),
+                "{key}: {err}"
+            );
+            assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), b);
+        }
+
+        h.undo_last_commit(Parameters(args(serde_json::json!({ "expectedHead": b }))))
+            .await
+            .expect("the current HEAD undoes");
+        assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await.trim(), a);
     }
 
     #[tokio::test]
@@ -2451,9 +2565,11 @@ mod tests {
             h.stash_pop()
                 .await
                 .expect_err("stash pop refuses mid-promote"),
-            h.undo_last_commit()
-                .await
-                .expect_err("undo refuses mid-promote"),
+            h.undo_last_commit(Parameters(UndoLastCommitArgs {
+                expected_head: None,
+            }))
+            .await
+            .expect_err("undo refuses mid-promote"),
             h.reset_to_commit(Parameters(ShaArgs {
                 sha: head.trim().to_string(),
             }))

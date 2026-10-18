@@ -1683,10 +1683,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // The remedy for a branch whose upstream already carries its changes under
   // other ids: point the branch back at that upstream instead of merging it in,
   // which would duplicate them. `tip` is the sha the status was measured against,
-  // so a confirmed reset can only land where the copy said it would. The current
-  // branch takes the hard reset (its working tree moves too); every other branch
-  // is a ref move, which is why it works even from another checkout.
-  async function doResetToUpstream(branch: Branch, tip: string) {
+  // so a confirmed reset can only land where the copy said it would, and
+  // `localTip` the branch's own tip then, so a commit landed meanwhile refuses the
+  // reset in the backend instead of being dropped. The current branch takes the
+  // hard reset (its working tree moves too); every other branch is a ref move,
+  // which is why it works even from another checkout.
+  async function doResetToUpstream(
+    branch: Branch,
+    tip: string,
+    localTip: string,
+  ) {
     const base = branch.upstream;
     if (!base) return;
     setOpen(false);
@@ -1733,11 +1739,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           );
           return;
         }
-        await hardReset.mutateAsync(tip);
+        await hardReset.mutateAsync({ hash: tip, expectedHead: localTip });
       } else {
         await resetToUpstream.mutateAsync({
           branch: branch.name,
           expectedTip: tip,
+          expectedLocalTip: localTip,
         });
       }
       toast.success(`Reset ${branch.name} to ${base}`);
@@ -2648,10 +2655,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       !rewrite.isError &&
       (rewrite.isFetching || rewrite.data === undefined);
     // The pair, never the reflog verdict alone: offering a reset while unique
-    // local work exists would destroy it.
+    // local work exists would destroy it. Both measured shas ride the item, the
+    // upstream tip it lands on and the local tip the backend pins.
     const resetTip =
-      rowRewrite?.remoteRewritten === true && rowRewrite.localOnly === 0
-        ? rowRewrite.upstreamTip
+      rowRewrite?.remoteRewritten === true &&
+      rowRewrite.localOnly === 0 &&
+      rowRewrite.upstreamTip &&
+      rowRewrite.localTip
+        ? { tip: rowRewrite.upstreamTip, localTip: rowRewrite.localTip }
         : null;
     // Patch twins upstream AND commits without one: a reset would destroy the
     // latter, and a merge would bring the twinned changes back in beside the
@@ -2961,7 +2972,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                       <ContextMenuItem
                         className={MENU_HELD_ROW_CLASS}
                         disabled={busy || inWorktree || rowPushing}
-                        onClick={() => void doResetToUpstream(branch, resetTip)}
+                        onClick={() =>
+                          void doResetToUpstream(
+                            branch,
+                            resetTip.tip,
+                            resetTip.localTip,
+                          )
+                        }
                       >
                         Reset to {base}…{resetSuffix}
                       </ContextMenuItem>

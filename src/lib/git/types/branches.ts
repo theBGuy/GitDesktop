@@ -95,6 +95,9 @@ export interface BranchRewriteStatus {
   /** The upstream tip's sha — a confirmed reset targets this commit, so it can
    *  only land on the state the user was shown. */
   upstreamTip: string | null;
+  /** The branch's own tip when the status was measured — a confirmed reset pins it
+   *  and the backend refuses if the branch has moved off it since. */
+  localTip: string | null;
 }
 
 /** A local branch's ahead/behind counts vs. the default branch. */

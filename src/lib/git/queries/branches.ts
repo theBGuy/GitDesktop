@@ -333,14 +333,19 @@ export function branchRewriteStatusOptions(repo: string, branch: string) {
 }
 
 /** Points a NON-current branch at its upstream's tip, refusing if that upstream
- *  moved away from `expectedTip` since the caller measured it. The current branch
- *  takes commit-ops.ts's `useHardResetToCommit` instead — only that moves the
- *  working tree with it. */
+ *  moved away from `expectedTip`, or the branch away from `expectedLocalTip`,
+ *  since the caller measured them. The current branch takes commit-ops.ts's
+ *  `useHardResetToCommit` instead — only that moves the working tree with it. */
 export function useBranchResetToUpstream(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { branch: string; expectedTip: string }) =>
-      api.gitBranchResetToUpstream(repo, args.branch, args.expectedTip),
+    (args: { branch: string; expectedTip: string; expectedLocalTip: string }) =>
+      api.gitBranchResetToUpstream(
+        repo,
+        args.branch,
+        args.expectedTip,
+        args.expectedLocalTip,
+      ),
     {
       // Local branch write — never park it offline.
       networkMode: "always",

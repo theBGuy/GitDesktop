@@ -597,15 +597,34 @@ pub async fn git_reset(
     repo_path: String,
     hash: String,
     mode: Option<String>,
+    expected_head: Option<String>,
 ) -> AppResult<()> {
-    git_reset_core(&state, repo_path, hash, mode).await
+    git_reset_core_expecting(&state, repo_path, hash, mode, expected_head).await
 }
+
+/// The refusal a hard reset gets when HEAD is no longer the tip the user confirmed.
+/// KEEP IN STEP: one wording family with branches.rs's ref-move refusal and
+/// commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
+const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothing was reset.";
 
 pub(crate) async fn git_reset_core(
     state: &AppState,
     repo_path: String,
     hash: String,
     mode: Option<String>,
+) -> AppResult<()> {
+    git_reset_core_expecting(state, repo_path, hash, mode, None).await
+}
+
+/// `expected_head` is consulted in the hard arm only: the reset then runs only while
+/// HEAD is still that full oid, checked first under the guards' hold. The mixed arm
+/// ignores it, since its callers name an explicit user-chosen commit.
+pub(crate) async fn git_reset_core_expecting(
+    state: &AppState,
+    repo_path: String,
+    hash: String,
+    mode: Option<String>,
+    expected_head: Option<String>,
 ) -> AppResult<()> {
     validate_hash(&hash)?;
     let hard = match mode.as_deref() {
@@ -631,6 +650,18 @@ pub(crate) async fn git_reset_core(
     // why the runner inside it must be the lock-free one.
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
+    // Identity before tree state: a dirty-tree refusal would mislead when the real
+    // problem is a tip the user never saw. A non-zero exit is an unborn HEAD.
+    if let Some(expected) = expected_head.filter(|_| hard) {
+        let current =
+            run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+        if current.code != 0 || current.stdout_lossy().trim() != expected {
+            return Err(AppError::Git {
+                code: 1,
+                stderr: RESET_HEAD_MOVED.to_string(),
+            });
+        }
+    }
     ensure_clean_tree(&repo_path).await?;
     if op_state(&repo_path).await?.mid_op() {
         return Err(AppError::InvalidArgument(
@@ -6610,6 +6641,135 @@ mod tests {
                 && msg.contains("move or remove them first"),
             "{msg}"
         );
+    }
+
+    fn assert_reset_head_moved(result: AppResult<()>) {
+        match result {
+            Err(AppError::Git { stderr, .. }) => assert_eq!(stderr, RESET_HEAD_MOVED),
+            other => panic!("expected the head-moved refusal, got {other:?}"),
+        }
+    }
+
+    /// The user confirmed against `seen`; an outside commit landed before the reset
+    /// ran. The reset must keep that commit, with HEAD, index and tree untouched.
+    #[tokio::test]
+    async fn reset_hard_refuses_when_head_moved_since_confirmed() {
+        let (dir, repo) = setup_repo("reset-hard-moved").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let seen = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "b.txt", "outside\n", "outside").await;
+        let outside = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+
+        let result =
+            git_reset_core_expecting(&state, repo.clone(), base, Some("hard".into()), Some(seen))
+                .await;
+
+        assert_reset_head_moved(result);
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            outside,
+            "the outside commit is kept"
+        );
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+        assert_eq!(tree_text(dir.path(), "b.txt"), "outside\n");
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).await,
+            "",
+            "index and tree are untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_hard_with_current_head_succeeds() {
+        let (dir, repo) = setup_repo("reset-hard-current").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        commit_file(&repo, dir.path(), "b.txt", "outside\n", "outside").await;
+        let seen = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+
+        git_reset_core_expecting(
+            &state,
+            repo.clone(),
+            base.clone(),
+            Some("hard".into()),
+            Some(seen),
+        )
+        .await
+        .expect("a reset pinned to the current HEAD runs");
+
+        assert_eq!(rev(&repo, "HEAD").await, base);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v0\n");
+        assert!(!dir.path().join("b.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn reset_hard_expected_head_compare_is_full_hash_in_sha256_repos() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-rewrite-reset-hard-sha256-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init", "--object-format=sha256"]).await;
+        git(&repo, &["config", "user.email", "t@t"]).await;
+        git(&repo, &["config", "user.name", "t"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "v0\n", "base").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        assert_eq!(tip.len(), 64, "a sha256 oid");
+        let state = AppState::default();
+
+        // Same 63-char prefix, different last digit: only a full compare tells them apart.
+        let last = if tip.ends_with('0') { '1' } else { '0' };
+        for stale in [format!("{}{last}", &tip[..63]), tip[..40].to_string()] {
+            let result = git_reset_core_expecting(
+                &state,
+                repo.clone(),
+                base.clone(),
+                Some("hard".into()),
+                Some(stale),
+            )
+            .await;
+            assert_reset_head_moved(result);
+            assert_eq!(rev(&repo, "HEAD").await, tip);
+        }
+
+        git_reset_core_expecting(
+            &state,
+            repo.clone(),
+            base.clone(),
+            Some("hard".into()),
+            Some(tip),
+        )
+        .await
+        .expect("the full oid matches");
+        assert_eq!(rev(&repo, "HEAD").await, base);
+    }
+
+    /// The mixed arm serves History's reset and the MCP `reset_to_commit`, which name
+    /// an explicit commit, so a pin never reaches it.
+    #[tokio::test]
+    async fn mixed_reset_ignores_expected_head() {
+        let (dir, repo) = setup_repo("reset-mixed-pin").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let state = AppState::default();
+
+        git_reset_core_expecting(
+            &state,
+            repo.clone(),
+            base.clone(),
+            Some("mixed".into()),
+            Some("0".repeat(40)),
+        )
+        .await
+        .expect("a mixed reset runs whatever the pin says");
+
+        assert_eq!(rev(&repo, "HEAD").await, base);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
     }
 
     #[tokio::test]

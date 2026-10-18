@@ -98,6 +98,12 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
+    fn: "branch_reset_to_upstream",
+    rationale:
+      "validates with validate_branch_name at fn entry; the full ref is update-ref's compare-and-swap target, never a refspec",
+  },
+  {
+    file: "git/branches.rs",
     fn: "update_branch_from",
     rationale:
       "the fast-forward's local `fetch .` destination; validates branch and base with validate_branch_name at fn entry",
@@ -364,7 +370,7 @@ const BARE_REV_ALLOWLIST = [
     file: "git/ops.rs",
     fn: "refuse_untracked_reset_collisions",
     rationale:
-      "its only production caller (git_reset_core) passes a hash validated with validate_hash",
+      "its only production caller (git_reset_core_expecting) passes a hash validated with validate_hash",
   },
   {
     file: "git/ops.rs",

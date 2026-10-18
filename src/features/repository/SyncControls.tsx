@@ -242,7 +242,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const remoteRebased =
     rewriteData?.remoteRewritten === true &&
     rewriteData.localOnly === 0 &&
-    Boolean(rewriteData.upstreamTip);
+    Boolean(rewriteData.upstreamTip) &&
+    Boolean(rewriteData.localTip);
   // Patch twins upstream AND commits without one: a reset would destroy the
   // latter, a merge would re-import the former beside the copies already there.
   // `patchEqual > 0` is strong evidence, not proof — two sides can apply the same
@@ -528,7 +529,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const branch = head?.name;
     const upstream = head?.upstream;
     const tip = rewriteData?.upstreamTip;
-    if (!branch || !upstream || !tip) return;
+    const localTip = rewriteData?.localTip;
+    if (!branch || !upstream || !tip || !localTip) return;
     // The count is `ahead` rather than the status's patchEqual, which tallies
     // both sides of every matched pair; localOnly === 0 is what shows all of them
     // landed upstream.
@@ -560,7 +562,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     try {
-      await hardReset.mutateAsync(tip);
+      await hardReset.mutateAsync({ hash: tip, expectedHead: localTip });
       toast.success(`Reset ${branch} to ${upstream}`);
     } catch (e) {
       onError(e);
