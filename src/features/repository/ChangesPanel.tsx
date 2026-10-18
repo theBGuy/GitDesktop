@@ -3,7 +3,6 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   FunnelIcon,
-  InfoIcon,
   StackIcon,
   TreeViewIcon,
 } from "@phosphor-icons/react";
@@ -22,6 +21,7 @@ import {
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { InfoNote } from "@/components/info-note";
 import { usePanelPortalContainer } from "@/components/panel-portal";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -1682,28 +1682,29 @@ export function ChangesPanel({
           {settings.data &&
             (settings.data.showSelectionHint ?? true) &&
             entries.length >= 2 && (
-              <div className="flex items-center gap-2 border-b bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
-                <InfoIcon className="size-3.5 shrink-0" />
-                <span className="flex-1 leading-snug">
-                  {formatBinding("mod")}-click to select files individually,
-                  Shift-click for a range.
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!settings.data) return;
-                    void saveSettings
-                      .mutateAsync({
-                        ...settings.data,
-                        showSelectionHint: false,
-                      })
-                      .catch(() => undefined);
-                  }}
-                  className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
-                >
-                  Don't show again
-                </button>
-              </div>
+              <InfoNote
+                className="px-2.5"
+                action={
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!settings.data) return;
+                      void saveSettings
+                        .mutateAsync({
+                          ...settings.data,
+                          showSelectionHint: false,
+                        })
+                        .catch(() => undefined);
+                    }}
+                    className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+                  >
+                    Don't show again
+                  </button>
+                }
+              >
+                {formatBinding("mod")}-click to select files individually,
+                Shift-click for a range.
+              </InfoNote>
             )}
 
           <ContextMenu>

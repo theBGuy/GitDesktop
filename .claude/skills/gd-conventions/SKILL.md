@@ -188,6 +188,15 @@ Inner-clause drift between two dispatchers is the regression this prevents; the
   `StatusDetailChip` (`src/components/status-detail-chip.tsx`) — a click popover
   keyboard, touch, and AT all reach, and a plain Badge when there's no detail. A
   `title` alone is mouse-only; the `titled-badge` guard bans it on Badge.
+- ICON-LED informational strips (InfoIcon + one line of muted text above a pane
+  body: a hint, a disclosure, a capability note) are `InfoNote`
+  (`src/components/info-note.tsx`) — never a hand-rolled InfoIcon +
+  `border-b bg-muted/40` row; a plain div, not a live region, with a trailing
+  `action` slot for a dismiss control. Icon-less `border-b bg-muted/40` rows
+  (action strips, section headers) are a different class and stay as they are.
+  One known icon-led exception: ProjectsBoardPanel's `SelectionHintStrip`, whose
+  `reserve` mode (an invisible, `aria-hidden` placeholder) and `mb-2` need an
+  InfoNote reserve arm before it can move.
 - A conversation surface's own actions sit before the submit button via
   `CommentComposer`'s `leadingActions` slot when submit is the row's last
   action (the issue views); a surface whose right-slot action is itself a
@@ -658,7 +667,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   predates an earlier await (a render-time closure, as in CommitDetailView's
   `doCherryPick`) keeps its own `refuseIfSwitched` after the ask. A view whose
   repo can be a worktree rather than the open one compares its own prop instead
-  (ConflictFileView's `refuseIfMoved`). A `useRepoMutation` whose mutationFn or
+  (`useRefuseIfMoved` in `src/features/repository/use-refuse-if-moved.ts`, shared
+  by the two conflict views). A `useRepoMutation` whose mutationFn or
   callbacks close over repo/lens AND whose host survives a repo switch passes
   `identity: ["<op>", repo, lens]`, which scopes the HOLD: a changed key hash
   detaches the pending mutation at the switch, so the new repo's controls don't

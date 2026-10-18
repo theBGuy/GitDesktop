@@ -46,6 +46,13 @@ pub struct ConflictSides {
     /// empty file and a deleted one alike; this is what separates them. A file
     /// that exists but can't be read fails the whole command instead.
     pub working_exists: bool,
+    /// The working file's bytes are not valid UTF-8, so `working` is a lossy
+    /// decode: per-region accepts (which rebuild the file from it) must refuse.
+    pub working_undecodable: bool,
+    /// `working_undecodable`, OR any present stage blob's raw bytes are invalid
+    /// UTF-8 — every string here that an AI resolution splices and writes back is
+    /// then lossy, so the AI flow must refuse even when the working file is clean.
+    pub undecodable: bool,
 }
 
 /// The AI-ignore gate's answer for one conflicted path. `unreadable` implies
@@ -79,12 +86,14 @@ fn validate_rel_path(path: &str) -> AppResult<()> {
 /// whose read fails is re-listed once: gone now means an outside resolve landed
 /// after the listing (`None`, agreeing with the index); still listed is an
 /// `AppError::Git`, never `None`, so a failed read can't pass for an absent side.
+/// The `bool` is whether the blob's raw bytes are invalid UTF-8 (the text is
+/// then a lossy decode), decided before decoding.
 async fn stage_blob(
     repo: &str,
     present: &[u8],
     stage: u8,
     path: &str,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<(String, bool)>> {
     if !present.contains(&stage) {
         return Ok(None);
     }
@@ -100,7 +109,9 @@ async fn stage_blob(
     {
         return Ok(None);
     }
-    Ok(Some(out.exit_verdict()?.stdout_lossy()))
+    let out = out.exit_verdict()?;
+    let undecodable = std::str::from_utf8(&out.stdout).is_err();
+    Ok(Some((out.stdout_lossy(), undecodable)))
 }
 
 /// The unmerged index stages present for `spec` (1 = base, 2 = ours, 3 = theirs).
@@ -198,15 +209,27 @@ pub async fn git_conflict_sides(
             "binary file — resolve this conflict by hand".into(),
         ));
     }
+    // Byte truth, never the decoded text: a genuine U+FFFD is valid UTF-8.
+    let working_undecodable = std::str::from_utf8(&working_bytes).is_err();
     let working = String::from_utf8_lossy(&working_bytes).into_owned();
+
+    let base = stage_blob(&repo_path, &present, 1, &path).await?;
+    let ours = stage_blob(&repo_path, &present, 2, &path).await?;
+    let theirs = stage_blob(&repo_path, &present, 3, &path).await?;
+    let undecodable = working_undecodable
+        || [&base, &ours, &theirs]
+            .iter()
+            .any(|blob| blob.as_ref().is_some_and(|(_, bad)| *bad));
 
     Ok(ConflictSides {
         working,
-        base: stage_blob(&repo_path, &present, 1, &path).await?,
-        ours: stage_blob(&repo_path, &present, 2, &path).await?,
-        theirs: stage_blob(&repo_path, &present, 3, &path).await?,
+        base: base.map(|(text, _)| text),
+        ours: ours.map(|(text, _)| text),
+        theirs: theirs.map(|(text, _)| text),
         ai_ignored,
         working_exists,
+        working_undecodable,
+        undecodable,
     })
 }
 
@@ -437,6 +460,39 @@ mod tests {
         std::fs::write(&file, "ours\n").unwrap();
         git(vec!["commit", "-am", "ours"]).await;
         // The merge is expected to conflict (non-zero exit), so run it raw.
+        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        (dir, repo)
+    }
+
+    /// `conflicted_repo`'s shape over chosen BYTES per side, so a test can mint a
+    /// conflict whose stage blobs (and merged working file) aren't valid UTF-8.
+    async fn conflicted_repo_with(
+        tag: &str,
+        path: &str,
+        base: &[u8],
+        ours: &[u8],
+        theirs: &[u8],
+    ) -> (tempfile::TempDir, String) {
+        let (dir, repo) = temp_repo(tag);
+        let git = |args: Vec<&'static str>| {
+            let repo = repo.clone();
+            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
+        };
+        git(vec!["init"]).await;
+        git(vec!["config", "user.email", "t@t"]).await;
+        git(vec!["config", "user.name", "t"]).await;
+        let file = Path::new(&repo).join(path);
+        std::fs::write(&file, base).unwrap();
+        git(vec!["add", "."]).await;
+        git(vec!["commit", "-m", "base"]).await;
+        git(vec!["checkout", "-b", "feature"]).await;
+        std::fs::write(&file, theirs).unwrap();
+        git(vec!["commit", "-am", "theirs"]).await;
+        git(vec!["checkout", "-"]).await;
+        std::fs::write(&file, ours).unwrap();
+        git(vec!["commit", "-am", "ours"]).await;
         run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -1058,5 +1114,89 @@ mod tests {
         assert!(text.contains("@@"));
         assert!(text.contains("-two"));
         assert!(text.contains("+TWO"));
+    }
+
+    /// A non-UTF-8 working file raises both flags (per-region accepts and the AI
+    /// flow both refuse), decided from its bytes; the clean fixture is the
+    /// negative control. The wire keys are pinned as the TS mirror reads them.
+    #[tokio::test]
+    async fn conflict_sides_flag_undecodable_bytes() {
+        let (_dir, repo) = conflicted_repo("undecodable-working", "file.txt", &[]).await;
+        let clean = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert!(!clean.working_undecodable);
+        assert!(!clean.undecodable);
+
+        std::fs::write(
+            Path::new(&repo).join("file.txt"),
+            b"<<<<<<< HEAD\nours \xFC\n=======\ntheirs\n>>>>>>> feature\n",
+        )
+        .unwrap();
+        let dirty = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert!(dirty.working_undecodable);
+        assert!(dirty.undecodable);
+        let json = serde_json::to_string(&dirty).unwrap();
+        assert!(
+            json.contains("\"workingUndecodable\":true"),
+            "wire key missing: {json}"
+        );
+        assert!(
+            json.contains("\"undecodable\":true"),
+            "wire key missing: {json}"
+        );
+        assert!(
+            !json.contains("working_undecodable"),
+            "snake_case leaked: {json}"
+        );
+    }
+
+    /// A clean working file over a non-UTF-8 stage blob sets only the OR flag:
+    /// per-region accepts rebuild from the working text alone (lossless), while
+    /// the AI flow splices every side.
+    #[tokio::test]
+    async fn conflict_sides_blob_only_undecodable_sets_only_the_or_flag() {
+        let (_dir, repo) = conflicted_repo_with(
+            "undecodable-blob",
+            "file.txt",
+            b"base\n",
+            b"ours\n",
+            b"th\xFCirs\n",
+        )
+        .await;
+        std::fs::write(
+            Path::new(&repo).join("file.txt"),
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> feature\n",
+        )
+        .unwrap();
+        let sides = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert!(sides.theirs.is_some(), "the dirty blob must be present");
+        assert!(!sides.working_undecodable);
+        assert!(sides.undecodable);
+    }
+
+    /// Valid UTF-8 carrying a literal U+FFFD (EF BF BD) is not a lossy decode, so
+    /// neither flag fires on any side.
+    #[tokio::test]
+    async fn conflict_sides_real_replacement_char_is_not_undecodable() {
+        let (_dir, repo) = conflicted_repo_with(
+            "undecodable-fffd",
+            "file.txt",
+            "base \u{FFFD}\n".as_bytes(),
+            "ours \u{FFFD}\n".as_bytes(),
+            "theirs \u{FFFD}\n".as_bytes(),
+        )
+        .await;
+        let sides = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .unwrap();
+        assert!(sides.working.contains('\u{FFFD}'));
+        assert!(sides.working.contains("<<<<<<<"), "fixture not conflicted");
+        assert!(!sides.working_undecodable);
+        assert!(!sides.undecodable);
     }
 }

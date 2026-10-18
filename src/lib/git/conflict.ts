@@ -25,6 +25,12 @@ export interface ConflictSides {
   /** Whether the working file exists on disk — false when the user deleted it
    *  (`working` collapses to "" either way). */
   workingExists: boolean;
+  /** The working file's bytes aren't valid UTF-8 — `working` is a lossy decode,
+   *  so the per-region accepts (rebuilt from it) are off. */
+  workingUndecodable: boolean;
+  /** `workingUndecodable`, or any stage blob isn't valid UTF-8 — an AI
+   *  resolution would splice and write back lossy text, so it is blocked. */
+  undecodable: boolean;
 }
 
 /** Reads a conflicted file's base/ours/theirs blobs + the marked working file,

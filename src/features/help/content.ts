@@ -496,7 +496,8 @@ The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
   replacing it; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's
   diff) without reaching for the button, and the command palette offers **Clear line
-  selection**.
+  selection**. A file whose change isn't UTF-8 text stages, unstages and discards only
+  as a whole, keeping every byte exact; its diff says so.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
   for **Stage / Unstage / Discard / Stash** of the whole selection — or use the command
   palette ({{kbd:command-palette}}) for Stage / Unstage selected files.
@@ -1059,10 +1060,12 @@ without **Abort** or a finish control, since nothing is left in progress: resolv
 and after a **Stash and reapply** the banner then offers to drop or keep the backup stash.
 Select a conflicted file (the \`!\` badge) to open the **conflict
 editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)** with
-**Accept current**, **Accept incoming**, or **Accept both**, and the header adds whole-file
+**Accept current**, **Accept incoming**, or **Both**, and the header adds whole-file
 **Accept all current** / **Accept all incoming** and **Open in editor**. Those whole-file
 accepts ask first, since taking a side replaces the file wholesale, conflict regions you
-already settled by hand included. Files mark
+already settled by hand included. A conflicted file that isn't UTF-8 text skips the
+per-region accepts and resolves through the whole-file accepts or your editor, keeping its
+bytes exact. Files mark
 themselves resolved as you go — the \`!\` badge clears — and the finish control stays
 disabled, saying so, until every conflict is resolved. When one side of a conflict removed
 a file, the editor names the removal instead of showing regions, and the same whole-file
@@ -1094,7 +1097,9 @@ into regions, **Mark resolved** is offered right away and asks before staging th
 banner's sparkle button (**Resolve all with AI** on hover) walks every conflict in turn —
 the walk keeps its place while you peek at another tab (switching repositories ends it).
 It runs on any provider, including local Ollama and keyless Claude Code / Codex agents, and
-skips files matched by your AI ignore patterns.{{/ai}}`,
+skips files matched by your AI ignore patterns. A conflict that includes text that isn't
+UTF-8 isn't sent to the model either; resolve it with the whole-file accepts or your
+editor.{{/ai}}`,
   },
   {
     id: "pull-requests",

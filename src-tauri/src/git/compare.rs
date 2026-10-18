@@ -257,6 +257,7 @@ pub async fn git_branch_file_diff(
         is_binary,
         is_truncated,
         text,
+        undecodable: false,
     })
 }
 

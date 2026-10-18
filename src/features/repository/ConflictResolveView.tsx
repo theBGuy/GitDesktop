@@ -5,7 +5,13 @@ import {
   WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -35,11 +41,45 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 type Phase = "loading" | "streaming" | "ready" | "blocked" | "idle";
 type ViewKey = "diff" | "proposed" | "ours" | "theirs" | "base";
 
 const baseName = (path: string) => path.split("/").pop() || path;
+
+/** Why a file never reaches the model. Byte safety outranks the ignore
+ *  patterns: a non-UTF-8 file names its own reason even when also ignored. */
+type BlockedReason =
+  | "undecodable"
+  | "blobUndecodable"
+  | "unreadableName"
+  | "ignored";
+
+function blockedReason(sides: ConflictSides | null): BlockedReason {
+  if (sides?.workingUndecodable) return "undecodable";
+  if (sides?.undecodable) return "blobUndecodable";
+  if (sides?.aiIgnored.unreadable) return "unreadableName";
+  return "ignored";
+}
+
+/** The non-UTF-8 arms name the byte-safe actions as the conflict editor words
+ *  them, in place of the generic by-hand sentence the other two end with. */
+const BLOCKED_COPY: Record<BlockedReason, (fileName: string) => ReactNode> = {
+  undecodable: () =>
+    "This file isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
+  blobUndecodable: () =>
+    "Part of this conflict isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
+  unreadableName: () =>
+    "This file's name can't be read as text, so it isn't sent to a model. Resolve it by hand in your editor, then stage it.",
+  ignored: (fileName) => (
+    <>
+      <span className="font-mono">{fileName}</span> matches your AI ignore
+      patterns, so it isn't sent to a model. Resolve it by hand in your editor,
+      then stage it.
+    </>
+  ),
+};
 
 /**
  * Inline resolution surface for one conflicted file: asks the configured review
@@ -79,6 +119,12 @@ export function ConflictResolveView({
   // "streaming" while the finished proposal is being diffed.
   const runningRef = useRef(false);
   const textRef = useLatestRef(text);
+  // Accept's live re-read runs before `resolve.isPending` turns on, so it holds
+  // the action bar itself: the ref refuses a second press inside the same
+  // frame, the state disables Skip/Discard/Regenerate and Escape for the read.
+  const acceptingRef = useRef(false);
+  const [accepting, setAccepting] = useState(false);
+  const refuseIfMoved = useRefuseIfMoved(repoPath);
   // The resolve view shares the diff pane's width budget, so the preview takes
   // the same legibility gate: below it, render unified.
   const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
@@ -116,7 +162,7 @@ export function ConflictResolveView({
     }
     if (gen !== genRef.current) return;
     setSides(resolved);
-    if (resolved.aiIgnored.ignored) {
+    if (resolved.undecodable || resolved.aiIgnored.ignored) {
       runningRef.current = false;
       setPhase("blocked");
       return;
@@ -208,16 +254,56 @@ export function ConflictResolveView({
     setPhase("idle");
   }
 
+  // Ends the session; the bump retires an Accept still re-reading the file.
+  function stopSession() {
+    genRef.current++;
+    stop();
+  }
+
   // Awaited, not per-call callbacks: `<Activity>` hide tears this observer's
   // subscription down, and react-query drops per-call callbacks once an observer
   // has no listeners — the walk would stall pinned to an already-resolved file.
   async function accept() {
+    if (acceptingRef.current) return;
+    acceptingRef.current = true;
+    setAccepting(true);
+    const gen = genRef.current;
+    const acceptIn = repoPath;
     // A staged file with markers left would ride Continue's commit, so a
     // marker-bearing proposal is written unstaged. It still leaves this view: the
     // file stays listed as conflicted, and the hand fix (open in editor, Mark
     // resolved) lives in the conflict editor, which this view has no counterpart to.
     const clean = !hasConflictMarkers(proposed);
     try {
+      // `sides` is the start-time read; the write refuses on the LIVE bytes, so a
+      // file that stopped being UTF-8 since then never takes a lossy proposal.
+      let fresh: ConflictSides;
+      try {
+        fresh = await conflictSides(acceptIn, path, []);
+      } catch {
+        toast.info(
+          `${baseName(path)} changed since the proposal was made and couldn't be re-read — nothing was written.`,
+        );
+        return;
+      }
+      // A belt: `accepting` holds every control that could retire this accept
+      // during the read, so only a restart moves the generation here (unmounts and
+      // hides are refuseIfMoved's arms).
+      if (gen !== genRef.current) return;
+      if (
+        refuseIfMoved(
+          acceptIn,
+          "nothing was written",
+          "before the check finished",
+        )
+      )
+        return;
+      if (fresh.undecodable) {
+        toast.info(
+          `${baseName(path)} changed to text that isn't UTF-8, so the proposal wasn't applied. Use Accept all current or Accept all incoming in the conflict editor to keep its bytes exact.`,
+        );
+        return;
+      }
       await resolve.mutateAsync({ path, content: proposed, stage: clean });
       // This continuation can outlive the walk that armed it (another surface armed
       // its own walk, or the repo-switch clear fired) during the mutation, so both
@@ -240,12 +326,16 @@ export function ConflictResolveView({
       if (owns) walk.advance();
     } catch (e) {
       toastError(e);
+    } finally {
+      acceptingRef.current = false;
+      setAccepting(false);
     }
   }
 
   // "Reject this proposal": in a resolve-all run, skip to the next file (leaving
   // this one conflicted); otherwise end the session.
   function reject() {
+    genRef.current++;
     if (queue.length > 0) advance();
     else stop();
   }
@@ -271,8 +361,8 @@ export function ConflictResolveView({
     <div
       className="ph-no-capture flex h-full flex-col"
       onKeyDown={(e) => {
-        if (e.key === "Escape" && !resolve.isPending) {
-          generating ? handleCancel() : stop();
+        if (e.key === "Escape" && !resolve.isPending && !accepting) {
+          generating ? handleCancel() : stopSession();
         }
       }}
     >
@@ -342,15 +432,7 @@ export function ConflictResolveView({
       <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
-            {sides?.aiIgnored.unreadable ? (
-              "This file's name can't be read as text, so it isn't sent to a model."
-            ) : (
-              <>
-                <span className="font-mono">{baseName(path)}</span> matches your
-                AI ignore patterns, so it isn't sent to a model.
-              </>
-            )}{" "}
-            Resolve it by hand in your editor, then stage it.
+            {BLOCKED_COPY[blockedReason(sides)](baseName(path))}
           </p>
         ) : phase === "loading" ? (
           <p className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
@@ -404,7 +486,7 @@ export function ConflictResolveView({
             <Button
               variant="ghost"
               size="sm"
-              disabled={resolve.isPending}
+              disabled={resolve.isPending || accepting}
               onClick={reject}
             >
               {queue.length > 0 ? "Skip" : "Discard"}
@@ -412,7 +494,7 @@ export function ConflictResolveView({
             <Button
               variant="outline"
               size="sm"
-              disabled={resolve.isPending}
+              disabled={resolve.isPending || accepting}
               onClick={start}
             >
               <ArrowClockwiseIcon data-icon="inline-start" />
@@ -421,10 +503,10 @@ export function ConflictResolveView({
             <Button
               size="sm"
               className="ml-auto"
-              disabled={resolve.isPending}
+              disabled={resolve.isPending || accepting}
               onClick={() => void accept()}
             >
-              {resolve.isPending ? (
+              {resolve.isPending || accepting ? (
                 <Spinner data-icon="inline-start" />
               ) : (
                 <CheckIcon data-icon="inline-start" />
@@ -434,7 +516,8 @@ export function ConflictResolveView({
           </>
         ) : (
           <>
-            {/* AI-ignored files have no bypass — honoring the ignore is the point.
+            {/* Blocked files (AI-ignored, or not UTF-8 text) have no bypass:
+                honoring the ignore, and keeping the bytes exact, is the point.
                 Other idle states (cancelled / empty response) can retry. */}
             {phase !== "blocked" && (
               <Button
@@ -458,7 +541,7 @@ export function ConflictResolveView({
               variant="ghost"
               size="sm"
               className="ml-auto"
-              onClick={stop}
+              onClick={stopSession}
             >
               {queue.length > 0 ? "Stop" : "Close"}
             </Button>

@@ -4,7 +4,6 @@ import {
   DiffModeEnum,
   DiffView,
 } from "@git-diff-view/react";
-import { InfoIcon } from "@phosphor-icons/react";
 import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
@@ -23,6 +22,7 @@ import {
 import { flushSync } from "react-dom";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { InfoNote } from "@/components/info-note";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
@@ -128,6 +128,11 @@ import {
   MarkdownViewToggle,
 } from "./MarkdownPreview";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
+import {
+  hunkWritesAllowed,
+  type StagingSide,
+  UNDECODABLE_NOTE_COPY,
+} from "./undecodable-note";
 import {
   useFocusOnControlsSwap,
   useHiddenTriggerFocus,
@@ -426,12 +431,20 @@ function landHunkFocus(
   return kept;
 }
 
+/** Which side of the working tree a diff shows, for the non-UTF-8 note's copy. */
+function stagingSideOf(untracked: boolean, staged: boolean): StagingSide {
+  if (untracked) return "untracked";
+  if (staged) return "staged";
+  return "unstaged";
+}
+
 /**
  * The working-tree variant of the diff pane: hunks render as cards with
  * whole-hunk stage/unstage/discard, plus drag-to-select for staging a subset of
- * lines. Binary, truncated, and generated/minified (one enormous line) diffs
- * fall back to the plain whole-file surface (which is what shows the
- * generated/minified placeholder); untracked text files stage here like any other.
+ * lines. Binary, truncated, undecodable (non-UTF-8), and generated/minified (one
+ * enormous line) diffs fall back to the plain whole-file surface (which is what
+ * shows the generated/minified placeholder and the non-UTF-8 note); untracked
+ * text files stage here like any other.
  */
 function WorkingTreeDiff({
   repoPath,
@@ -463,6 +476,7 @@ function WorkingTreeDiff({
       ? { oldRev: "HEAD", newRev: ":0" }
       : { oldRev: ":0", newRev: null };
   const diff = useFileDiff(repoPath, { ...file, untracked });
+  const stagingSide = stagingSideOf(untracked, file.staged);
   const applyPatch = useApplyPatch(repoPath);
   const applyPartial = useApplyPartial(repoPath);
   const discardUntracked = useDiscardUntrackedLines(repoPath);
@@ -594,8 +608,11 @@ function WorkingTreeDiff({
     // A generated/minified file (one enormous line) would freeze the
     // un-virtualized staging renderer — route it down the whole-file
     // DiffSurface fallback, which shows the generated/minified placeholder.
+    // An undecodable diff goes there too: a lossy decode must never be handed
+    // back to `git apply`.
     if (
       !data ||
+      !hunkWritesAllowed(data) ||
       data.isBinary ||
       data.isTruncated ||
       longestLineLength(data.text) > DIFF_MEGA_LINE_CHARS
@@ -603,6 +620,9 @@ function WorkingTreeDiff({
       return null;
     return parseHunks(data.text);
   }, [diff.data]);
+  // The fire-time belt reads this, never a handler's own `diff.data`: every
+  // handler below closes over a render where the flag may still have been false.
+  const liveDiffRef = useLatestRef(diff.data);
 
   // A truncated parse could cut a hunk in half — never offer to apply one.
   // Untracked text files line-stage too: `git apply --cached` of a subset of a
@@ -676,6 +696,10 @@ function WorkingTreeDiff({
   // The fallback view renders no confirm, so a close in progress ended with
   // its unmount: nothing is left to wait for.
   if (!hunkMode && confirmClosing) setConfirmClosing(false);
+  // A flag flip can leave the decoded text byte-identical, so the text-keyed
+  // guards above never fire for it; leaving hunk mode clears both here.
+  if (!hunkMode && selectionState !== null) setSelectionState(null);
+  if (!hunkMode && discard !== null) setDiscard(null);
 
   if (!hunkMode) {
     return (
@@ -688,6 +712,7 @@ function WorkingTreeDiff({
           file.staged ? { old: "HEAD", new: ":0" } : { old: "HEAD", new: null }
         }
         contentRevs={workingRevs}
+        stagingSide={stagingSide}
       />
     );
   }
@@ -720,6 +745,13 @@ function WorkingTreeDiff({
     focus: HunkFocus | null,
   ) {
     if (writingRef.current) return;
+    // A diff gone from the cache refuses too, silently: it has no flag to name.
+    const live = liveDiffRef.current;
+    if (!hunkWritesAllowed(live)) {
+      if (live?.undecodable === true)
+        toast.info(UNDECODABLE_NOTE_COPY[stagingSide]);
+      return;
+    }
     writingRef.current = true;
     hunkFocusRef.current = focus;
     const wasUntracked = untracked;
@@ -791,6 +823,15 @@ function WorkingTreeDiff({
     // A hunk from a stale display would patch lines the user never saw.
     if (forText !== (diff.data?.text ?? "")) {
       toast.info(STALE_HUNK_ACTION[kind]);
+      return;
+    }
+    const live = liveDiffRef.current;
+    if (!hunkWritesAllowed(live)) {
+      toast.info(
+        live?.undecodable === true
+          ? UNDECODABLE_NOTE_COPY[stagingSide]
+          : STALE_HUNK_ACTION[kind],
+      );
       return;
     }
     if (kind === "discard") {
@@ -985,39 +1026,39 @@ function WorkingTreeDiff({
             {/* The drag-the-line-numbers hint is about the staging gutter, so
                 it stays out of Preview, which has no line numbers at all. */}
             {(settings.data?.showLineStageHint ?? true) && (
-              <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
-                <InfoIcon className="size-3.5 shrink-0" />
-                <span className="flex-1 leading-snug">
-                  Drag across the line numbers to{" "}
-                  {file.staged ? "unstage" : "stage"} just those lines, added
-                  and removed alike. Hold Shift while dragging to take one side
-                  of a change, or {ADDITIVE_MODIFIER} to add to the selection.
-                  {selectionBinding !== null && (
-                    <>
-                      {" "}
-                      Press {formatBinding(selectionBinding)} to{" "}
-                      {file.staged ? "unstage" : "stage"} the selection.
-                    </>
-                  )}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!settings.data) return;
-                    // A dismissed hint is cosmetic: a failed write only means
-                    // it shows again next time, which needs no toast.
-                    void saveSettings
-                      .mutateAsync({
-                        ...settings.data,
-                        showLineStageHint: false,
-                      })
-                      .catch(() => undefined);
-                  }}
-                  className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
-                >
-                  Don't show again
-                </button>
-              </div>
+              <InfoNote
+                action={
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!settings.data) return;
+                      // A dismissed hint is cosmetic: a failed write only means
+                      // it shows again next time, which needs no toast.
+                      void saveSettings
+                        .mutateAsync({
+                          ...settings.data,
+                          showLineStageHint: false,
+                        })
+                        .catch(() => undefined);
+                    }}
+                    className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+                  >
+                    Don't show again
+                  </button>
+                }
+              >
+                Drag across the line numbers to{" "}
+                {file.staged ? "unstage" : "stage"} just those lines, added and
+                removed alike. Hold Shift while dragging to take one side of a
+                change, or {ADDITIVE_MODIFIER} to add to the selection.
+                {selectionBinding !== null && (
+                  <>
+                    {" "}
+                    Press {formatBinding(selectionBinding)} to{" "}
+                    {file.staged ? "unstage" : "stage"} the selection.
+                  </>
+                )}
+              </InfoNote>
             )}
             <StagingDiffView
               repoPath={repoPath}

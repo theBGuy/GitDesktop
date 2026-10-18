@@ -1,5 +1,5 @@
-import { InfoIcon } from "@phosphor-icons/react";
 import { type ReactNode, useMemo } from "react";
+import { InfoNote } from "@/components/info-note";
 import { Markdown } from "@/components/markdown/markdown";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -68,12 +68,7 @@ export function MarkdownViewToggle({
 /** One-line disclosure strip above the rendered body (same treatment as the
  *  working-tree line-stage hint). */
 function PreviewNote({ children }: { children: ReactNode }) {
-  return (
-    <div className="flex items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-[11px] text-muted-foreground">
-      <InfoIcon className="size-3.5 shrink-0" />
-      <span className="leading-snug">{children}</span>
-    </div>
-  );
+  return <InfoNote>{children}</InfoNote>;
 }
 
 /**

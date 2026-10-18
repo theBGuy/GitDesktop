@@ -2181,6 +2181,7 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
         is_binary,
         is_truncated,
         text,
+        undecodable: false,
     })
 }
 

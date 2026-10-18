@@ -20,6 +20,9 @@ export interface FileDiff {
   isBinary: boolean;
   isTruncated: boolean;
   text: string;
+  /** The raw diff bytes weren't valid UTF-8, so `text` is a lossy decode and the
+   *  hunk/line write paths must refuse. Absent on hand-built diffs (PR surfaces). */
+  undecodable?: boolean;
 }
 
 export interface DiffStatEntry {

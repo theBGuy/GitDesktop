@@ -22,6 +22,7 @@ import {
   useState,
 } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { InfoNote } from "@/components/info-note";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -85,6 +86,7 @@ import {
 } from "./shiki-highlighter";
 import { SPLIT_MIN_CONTAINER_PX } from "./split-threshold";
 import { ensureCustomLanguages } from "./syntax";
+import { type StagingSide, UNDECODABLE_NOTE_COPY } from "./undecodable-note";
 import {
   useFocusOnControlsSwap,
   useHiddenTriggerFocus,
@@ -1238,6 +1240,7 @@ export function DiffSurface({
   previewRev,
   lineAnchors,
   lineWidget,
+  stagingSide,
 }: {
   filePath: string;
   diff: UseQueryResult<FileDiff>;
@@ -1248,6 +1251,8 @@ export function DiffSurface({
   previewRev?: string;
   lineAnchors?: DiffLineAnchor[];
   lineWidget?: LineWidget;
+  /** See {@link DiffContent}'s prop of the same name. */
+  stagingSide?: StagingSide;
 }) {
   return (
     <DiffContent
@@ -1265,6 +1270,7 @@ export function DiffSurface({
       dataIsPlaceholder={diff.isPlaceholderData}
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}
+      stagingSide={stagingSide}
     />
   );
 }
@@ -1288,6 +1294,7 @@ export function DiffContent({
   dataIsPlaceholder,
   lineAnchors,
   lineWidget,
+  stagingSide,
 }: {
   filePath: string;
   /** Absent only when the source query has nothing to show; never an empty
@@ -1323,6 +1330,9 @@ export function DiffContent({
   lineAnchors?: DiffLineAnchor[];
   /** Inline composer opened from a diff line (PR review). Absent = read-only. */
   lineWidget?: LineWidget;
+  /** Set only by the working-tree staging host; enables the non-UTF-8 note.
+   *  Absent = read-only host, no note. */
+  stagingSide?: StagingSide;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
   // down to a rail-flanked column, and both the split gate and the toolbar's
@@ -1530,6 +1540,13 @@ export function DiffContent({
           )}
         </span>
       </div>
+      {/* Not gated on Preview, unlike the truncated label: the whole-file
+          staging rule holds whichever view is up. */}
+      {stagingSide !== undefined && data.undecodable && (
+        <InfoNote className="shrink-0">
+          {UNDECODABLE_NOTE_COPY[stagingSide]}
+        </InfoNote>
+      )}
       <div className="min-h-0 flex-1 overflow-auto">
         {previewOn && repoPath && previewRevs ? (
           // Passed the raw revs, not the truncation-stripped pair below:

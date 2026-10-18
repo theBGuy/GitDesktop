@@ -380,6 +380,9 @@ pub async fn git_diff_file(
         run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?
     };
 
+    // Decided from the raw bytes before the lossy decode and the truncation cut:
+    // a genuine U+FFFD is valid UTF-8, and a bad byte past the cut still counts.
+    let undecodable = std::str::from_utf8(&out.stdout).is_err();
     let text = out.stdout_lossy();
     let is_binary = text.lines().any(|l| {
         l.starts_with("Binary files ") && l.ends_with(" differ")
@@ -391,6 +394,7 @@ pub async fn git_diff_file(
         is_binary,
         is_truncated,
         text,
+        undecodable,
     })
 }
 
@@ -457,6 +461,7 @@ pub async fn git_session_file_diff(
         is_binary,
         is_truncated,
         text,
+        undecodable: false,
     })
 }
 
@@ -2880,5 +2885,136 @@ mod tests {
             .unwrap(),
             serde_json::json!({ "base64": null, "mime": null, "tooLarge": true })
         );
+    }
+
+    /// A committed ASCII `file.txt` in a pinned-config repo, for the
+    /// `undecodable` flag tests.
+    async fn init_undecodable_repo(
+        prefix: &str,
+    ) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let (tmp, dir, repo) = init_line_stats_repo(prefix).await;
+        std::fs::write(dir.join("file.txt"), "base line\n").unwrap();
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "base"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        (tmp, dir, repo)
+    }
+
+    /// The flag is per diff side: a non-UTF-8 change staged (HEAD↔index) flags the
+    /// staged read, while the unstaged read (index == worktree) stays clean.
+    #[tokio::test]
+    async fn file_diff_flags_an_undecodable_staged_change() {
+        let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-staged-").await;
+        std::fs::write(dir.join("file.txt"), b"base line\ncaf\xFC\n").unwrap();
+        run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let staged = git_diff_file(repo.clone(), "file.txt".into(), true, false)
+            .await
+            .unwrap();
+        assert!(staged.undecodable);
+        let unstaged = git_diff_file(repo, "file.txt".into(), false, false)
+            .await
+            .unwrap();
+        assert!(!unstaged.undecodable);
+    }
+
+    #[tokio::test]
+    async fn file_diff_flags_an_undecodable_unstaged_change() {
+        let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-unstaged-").await;
+        std::fs::write(dir.join("file.txt"), "base line\nascii edit\n").unwrap();
+        let ascii = git_diff_file(repo.clone(), "file.txt".into(), false, false)
+            .await
+            .unwrap();
+        assert!(ascii.text.contains("+ascii edit"), "{}", ascii.text);
+        assert!(!ascii.undecodable);
+
+        std::fs::write(dir.join("file.txt"), b"base line\ncaf\xFC\n").unwrap();
+        let unstaged = git_diff_file(repo.clone(), "file.txt".into(), false, false)
+            .await
+            .unwrap();
+        assert!(unstaged.undecodable);
+        let staged = git_diff_file(repo, "file.txt".into(), true, false)
+            .await
+            .unwrap();
+        assert!(!staged.undecodable);
+    }
+
+    /// The `--no-index` branch computes the flag too; an ASCII twin is the control.
+    #[tokio::test]
+    async fn file_diff_flags_an_undecodable_untracked_file() {
+        let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-untracked-").await;
+        std::fs::write(dir.join("new.txt"), b"caf\xFC\n").unwrap();
+        std::fs::write(dir.join("plain.txt"), "plain\n").unwrap();
+        let dirty = git_diff_file(repo.clone(), "new.txt".into(), false, true)
+            .await
+            .unwrap();
+        assert!(dirty.undecodable);
+        let plain = git_diff_file(repo, "plain.txt".into(), false, true)
+            .await
+            .unwrap();
+        assert!(plain.text.contains("+plain"), "{}", plain.text);
+        assert!(!plain.undecodable);
+    }
+
+    /// A literal U+FFFD (EF BF BD) is valid UTF-8: decided from bytes, it never
+    /// passes for a lossy decode.
+    #[tokio::test]
+    async fn file_diff_real_replacement_char_is_not_undecodable() {
+        let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-fffd-").await;
+        std::fs::write(dir.join("file.txt"), "base line\ncaf\u{FFFD}\n").unwrap();
+        let diff = git_diff_file(repo, "file.txt".into(), false, false)
+            .await
+            .unwrap();
+        assert!(diff.text.contains('\u{FFFD}'), "{}", diff.text);
+        assert!(!diff.undecodable);
+    }
+
+    /// A bad byte past the viewer cut still flags the diff: the flag reads the full
+    /// raw output, not the truncated text.
+    #[tokio::test]
+    async fn file_diff_undecodable_is_computed_before_truncation() {
+        let (_tmp, dir, repo) = init_undecodable_repo("gd-undecodable-cut-").await;
+        let mut bytes = "0123456789abcdef0123456789abcdef0123456789abcdef\n"
+            .repeat(VIEWER_MAX_BYTES / 40)
+            .into_bytes();
+        bytes.extend_from_slice(b"tail \xFC\n");
+        std::fs::write(dir.join("big.txt"), &bytes).unwrap();
+        let diff = git_diff_file(repo.clone(), "big.txt".into(), false, true)
+            .await
+            .unwrap();
+        assert!(diff.is_truncated);
+        assert!(diff.undecodable);
+
+        // Control: the same size, all ASCII.
+        let ascii_len = bytes.len() - 2;
+        bytes.truncate(ascii_len);
+        bytes.push(b'\n');
+        std::fs::write(dir.join("big.txt"), &bytes).unwrap();
+        let ascii = git_diff_file(repo, "big.txt".into(), false, true)
+            .await
+            .unwrap();
+        assert!(ascii.is_truncated);
+        assert!(!ascii.undecodable);
+    }
+
+    /// The frontend reads `undecodable` off this record, and `rename_all` must still
+    /// camelCase its siblings.
+    #[test]
+    fn file_diff_wire_shape_carries_undecodable() {
+        let json = serde_json::to_value(FileDiff {
+            file_path: "a.txt".into(),
+            is_binary: false,
+            is_truncated: false,
+            text: String::new(),
+            undecodable: true,
+        })
+        .unwrap();
+        assert_eq!(json["undecodable"], serde_json::json!(true));
+        assert!(json.get("filePath").is_some(), "{json}");
+        assert!(json.get("file_path").is_none(), "{json}");
     }
 }

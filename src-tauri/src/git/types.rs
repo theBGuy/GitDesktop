@@ -138,6 +138,10 @@ pub struct FileDiff {
     pub is_binary: bool,
     pub is_truncated: bool,
     pub text: String,
+    /// Any byte of the RAW diff output (headers included) is not valid UTF-8, so
+    /// `text` is a lossy decode and must never be handed back to `git apply`.
+    /// Computed only by `git_diff_file`; every other producer sets false.
+    pub undecodable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

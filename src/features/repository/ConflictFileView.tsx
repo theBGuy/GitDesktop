@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { InfoNote } from "@/components/info-note";
 import { usePanelActive } from "@/components/panel-portal";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -39,17 +40,23 @@ import {
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
-import { useUiStore } from "@/lib/stores/ui";
 import { type AppError, isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { markerStagePrompt } from "./conflict-confirms";
+import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 const baseName = (path: string) => path.split("/").pop() || path;
 
 /** The `notConflicted` line, and the reason the header's whole-file actions
  *  hold under it. */
 const NOT_CONFLICTED_COPY = "This file is no longer conflicted.";
+
+/** Why the per-region accepts are off for a non-UTF-8 working file: they
+ *  rebuild the file from its lossy decode. Names the byte-safe actions as the
+ *  header buttons word them. */
+const CONFLICT_UNDECODABLE_NOTE =
+  "This file isn't UTF-8 text, so it resolves as a whole to keep its bytes exact. Use Accept all current, Accept all incoming, or Open in editor.";
 
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
@@ -291,42 +298,10 @@ export function ConflictFileView({
   const resolve = useResolveConflict(repoPath);
   const checkoutSide = useCheckoutConflictSide(repoPath);
   const markResolve = useMarkConflictResolved(repoPath);
-  // This view's repo, read live after an await: its mutations follow the prop,
-  // and a PR's resolve worktree hosts it as well as the open repo, so the live
-  // repo is not the one to compare against.
-  const repoPathRef = useLatestRef(repoPath);
-  // Cleared on unmount (and an <Activity> hide), when the ref above keeps its
-  // last value: a prompt answered after that belongs to a view that is gone.
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
   // Whether the view moved to another repo, or went away, while a prompt was
-  // open or Mark resolved's re-read ran, saying so: a mutate called then builds
-  // from options this view no longer describes. Not the shared `refuseIfSwitched`,
-  // which compares against the live repo, never a worktree. A prompt never
-  // reaches the closed arm (the confirm store cancels a repo-scoped prompt on a
-  // close); the re-read can.
-  const refuseIfMoved = (
-    startedIn: string,
-    outcome: string,
-    during = "while the dialog was open",
-  ) => {
-    if (useUiStore.getState().repoPath === null) {
-      toast.info(`You closed the repository ${during} — ${outcome}.`);
-      return true;
-    }
-    if (!mountedRef.current) {
-      toast.info(`You left this file ${during} — ${outcome}.`);
-      return true;
-    }
-    if (repoPathRef.current === startedIn) return false;
-    toast.info(`You switched repositories ${during} — ${outcome}.`);
-    return true;
-  };
+  // open or Mark resolved's re-read ran. A prompt never reaches the closed arm
+  // (the confirm store cancels a repo-scoped prompt on a close); the re-read can.
+  const refuseIfMoved = useRefuseIfMoved(repoPath);
   const aiEnabled = useAiEnabled();
   const reviewConfigured = useReviewConfigured();
   const startResolveAi = useConflictResolve((s) => s.startOne);
@@ -390,7 +365,13 @@ export function ConflictFileView({
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged; offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
-  const canAi = aiEnabled && reviewConfigured && textResolvable;
+  // Gated on the working file alone: per-region accepts rebuild from it, so a
+  // clean working file over a non-UTF-8 stage blob stays lossless here.
+  const workingUndecodable = file.data?.workingUndecodable === true;
+  const canAi =
+    aiEnabled && reviewConfigured && textResolvable && !workingUndecodable;
+  // The fire-time belt reads this: a committed Accept's closure predates a flip.
+  const workingUndecodableRef = useLatestRef(workingUndecodable);
 
   const sep = isWindows ? "\\" : "/";
   const absPath = `${repoPath}${sep}${path.replaceAll("/", sep)}`;
@@ -418,6 +399,10 @@ export function ConflictFileView({
 
   async function acceptRegion(index: number, choice: ConflictChoice) {
     if (inFlightRef.current || !segments) return;
+    if (workingUndecodableRef.current) {
+      toast.info(CONFLICT_UNDECODABLE_NOTE);
+      return;
+    }
     const content = resolveBlock(segments, index, choice);
     // Stage once the last marker is gone — same end state as the AI flow.
     const stage = !hasConflictMarkers(content);
@@ -625,6 +610,11 @@ export function ConflictFileView({
         </span>
       </div>
 
+      {/* Only over the region view: the fallback arms already resolve whole. */}
+      {!file.isError && segments !== null && workingUndecodable && (
+        <InfoNote className="shrink-0">{CONFLICT_UNDECODABLE_NOTE}</InfoNote>
+      )}
+
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-auto">
         {file.isPending ? (
@@ -671,30 +661,34 @@ export function ConflictFileView({
                     Conflict
                   </span>
                   <span className="flex-1" />
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => acceptRegion(index, "current")}
-                  >
-                    Accept current
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => acceptRegion(index, "incoming")}
-                  >
-                    Accept incoming
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() => acceptRegion(index, "both")}
-                  >
-                    Both
-                  </Button>
+                  {!workingUndecodable && (
+                    <>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => acceptRegion(index, "current")}
+                      >
+                        Accept current
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => acceptRegion(index, "incoming")}
+                      >
+                        Accept incoming
+                      </Button>
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={busy}
+                        onClick={() => acceptRegion(index, "both")}
+                      >
+                        Both
+                      </Button>
+                    </>
+                  )}
                 </div>
                 <div className="bg-success/5">
                   <div className="px-3 py-0.5 text-[10px] font-medium text-success">
