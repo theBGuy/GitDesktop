@@ -9736,4 +9736,13 @@ test("reused-view-pending: the masker reads `of` as a name outside a for-of head
     ),
     [],
   );
+  // An `of` after the for-of keyword is a name, so a division follows it.
+  assert.deepEqual(
+    rvReads(
+      rvView(
+        "  for (const x of of / Number(deleteRelease.isPending) / 3 > 1 ? a : b) use(x);",
+      ),
+    ),
+    ["deleteRelease.isPending"],
+  );
 });

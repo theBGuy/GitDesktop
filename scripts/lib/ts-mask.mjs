@@ -65,10 +65,18 @@ export function maskNonCode(src, jsx) {
     if (!/[\w$]/.test(out[k])) return false;
     let w = k;
     while (w > 0 && /[\w$]/.test(out[w - 1])) w--;
-    // Only a reserved word before it rules the binding out: a binding may itself
-    // be named `of` (`for (const of of …)`).
+    // A reserved word before it rules the binding out. A preceding `of` counts as
+    // the binding only right after `const`/`let`/`var` or `(` (`for (const of of
+    // …)`); after anything else it is the keyword, and this `of` is a name.
     const prev = out.slice(w, k + 1).join("");
-    return prev === "of" || !EXPR_KEYWORDS.has(prev);
+    if (prev !== "of") return !EXPR_KEYWORDS.has(prev);
+    let b = w - 1;
+    while (b >= 0 && /\s/.test(out[b])) b--;
+    if (b < 0) return false;
+    if (out[b] === "(") return true;
+    let d = b;
+    while (d > 0 && /[\w$]/.test(out[d - 1])) d--;
+    return ["const", "let", "var"].includes(out.slice(d, b + 1).join(""));
   };
   // Reads the already-masked text backwards, so comments and string bodies
   // before `i` can't pose as the previous token.
