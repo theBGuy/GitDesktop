@@ -758,6 +758,9 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
   destination (one **Publish to _…_** item per remote). Neither checks the branch out or
   touches your working tree, so it works even for a branch checked out in another worktree.
+  The list stays open while the push runs, so you can keep switching and browsing, and the
+  branch's row shows a spinner naming where the push is going. A push from the sync bar
+  may not name one, since git's own push settings decide where it lands.
   {{kbd:push-to-origin}} is the keyboard shortcut for pushing to **origin** specifically:
   with the **branches** list open it targets the **highlighted** branch, otherwise the
   **current** one, and pushes or publishes it to origin. A branch that tracks a different
@@ -766,6 +769,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   push the current branch with **Push** in the sync bar, or a highlighted one from its
   context menu. If a branch or what it tracks just changed outside the app, the shortcut
   may ask you to press it again while the branch list catches up.
+- **While a push runs, its branch is held.** The pushing branch can't be renamed, deleted,
+  archived, reset or updated until the push finishes, and while it's the current branch it
+  can't be rebased or given a new base either. One push runs at a time, and anything that
+  would wait behind it holds with the reason: another push or publish, merging into the
+  current branch, updating the current branch, deleting a branch on a remote,
+  **Clean up branches…**, and the sync bar's **Fetch**, **Pull** and **Push**. The branch
+  menu's shortcuts say why instead of starting.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for

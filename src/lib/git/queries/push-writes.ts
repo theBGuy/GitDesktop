@@ -43,10 +43,22 @@ export interface BranchPushState {
   fromHeader: boolean;
 }
 
-/** The refusal a second push gets while one is in flight: the backend would
- *  queue it behind the first on the repo's network lock, for up to a minute. */
+/** The refusal for any network-lock operation (a push, fetch, pull, merge, remote
+ *  delete) started while a push is in flight: the backend would queue it behind
+ *  the push on the repo's network lock, for up to a minute. */
 export const BRANCH_PUSH_ACTIVE_MESSAGE =
   "A push is already running — wait for it to finish.";
+
+/** Why a control that isn't the push is held by one. A push parked offline is
+ *  waiting for the connection; the held control itself sends nothing, so the
+ *  generic parked-write copy ("this sends…") would misdescribe it. */
+export const branchPushHoldReason = (paused: boolean): string =>
+  paused ? "A push is waiting for the connection." : "A push is running.";
+
+/** The menu-label twin of {@link branchPushHoldReason}, for the parenthetical a
+ *  disabled item carries. */
+export const branchPushHoldItemReason = (paused: boolean): string =>
+  paused ? "a push is waiting for the connection" : "a push is running";
 
 /** The pushes among `entries` filed against `repo`, one per invocation in cache
  *  order. Every field is `typeof`-guarded: the cache holds `Mutation<any>`, so the
@@ -98,4 +110,35 @@ export function branchPushLabel(
     return branchPublishLabel(push.remote);
   if (push.branch === null) return "Pushing";
   return `Pushing to ${row.upstream}`;
+}
+
+/** The HEAD-push latch after a render's reads: `pending` is this repo's pushes,
+ *  `pendingIds` every repo's. A branch-less push still pending somewhere latches
+ *  to `currentName` once, and an id pending in no repo is pruned (a switch away
+ *  keeps it, so a switch back still finds it). Null when nothing changes, so a
+ *  render-time adjust settles. */
+export function nextPushLatch(
+  latch: Readonly<Record<number, string>>,
+  pending: readonly BranchPushState[],
+  pendingIds: readonly number[],
+  currentName: string | null,
+): Record<number, string> | null {
+  const added: [number, string][] = [];
+  if (currentName !== null) {
+    for (const p of pending) {
+      if (
+        p.branch === null &&
+        p.mutationId !== null &&
+        pendingIds.includes(p.mutationId) &&
+        !Object.hasOwn(latch, p.mutationId)
+      )
+        added.push([p.mutationId, currentName]);
+    }
+  }
+  const kept = Object.entries(latch).filter(([id]) =>
+    pendingIds.includes(Number(id)),
+  );
+  if (added.length === 0 && kept.length === Object.keys(latch).length)
+    return null;
+  return { ...Object.fromEntries(kept), ...Object.fromEntries(added) };
 }

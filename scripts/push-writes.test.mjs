@@ -1,7 +1,8 @@
 // Pins the pure branch-push bookkeeping: which cache entries count as a push of a
-// repo, how their variables read back, and the label a branch row's spinner
-// shows. A wrong answer here never errors — a variables-shape change reads as
-// "no push" and the row's holds silently drop — so each shape is a case.
+// repo, how their variables read back, the label a branch row's spinner shows,
+// the hold reasons, and the HEAD-push latch. A wrong answer here never errors —
+// a variables-shape change reads as "no push" and the row's holds silently drop
+// — so each shape is a case.
 //
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6), which resolves no bundler aliases: `push-writes.ts` may
@@ -12,8 +13,11 @@ import { test } from "node:test";
 import {
   BRANCH_PUSH_KEY,
   branchPublishLabel,
+  branchPushHoldItemReason,
+  branchPushHoldReason,
   branchPushKey,
   branchPushLabel,
+  nextPushLatch,
   pendingBranchPushesFor,
 } from "../src/lib/git/queries/push-writes.ts";
 
@@ -273,4 +277,65 @@ test("label: a HEAD push of a tracked row names no destination", () => {
     }),
     "Publishing branch",
   );
+});
+
+test("hold reasons: a parked push is waiting, never a write the control sends", () => {
+  assert.equal(branchPushHoldReason(false), "A push is running.");
+  assert.equal(
+    branchPushHoldReason(true),
+    "A push is waiting for the connection.",
+  );
+  assert.equal(branchPushHoldItemReason(false), "a push is running");
+  assert.equal(
+    branchPushHoldItemReason(true),
+    "a push is waiting for the connection",
+  );
+});
+
+// A HEAD push as the latch reads it: no branch, a cache id.
+const headPush = (mutationId) => push({ branch: null, mutationId });
+
+test("latch: a HEAD push latches to the current branch", () => {
+  assert.deepEqual(nextPushLatch({}, [headPush(4)], [4], "main"), {
+    4: "main",
+  });
+});
+
+test("latch: named pushes and id-less entries are ignored", () => {
+  assert.equal(
+    nextPushLatch({}, [push({ mutationId: 4 }), headPush(null)], [4], "main"),
+    null,
+  );
+});
+
+test("latch: a second call over the same reads changes nothing", () => {
+  const once = nextPushLatch({}, [headPush(4)], [4], "main");
+  assert.equal(nextPushLatch(once, [headPush(4)], [4], "main"), null);
+  // A later checkout never re-latches a push already latched.
+  assert.equal(nextPushLatch(once, [headPush(4)], [4], "feature"), null);
+});
+
+test("latch: an id still pending in another repo is kept", () => {
+  // This repo's snapshot no longer holds it (a switch away), every repo's does.
+  assert.equal(nextPushLatch({ 4: "main" }, [], [4], "other"), null);
+});
+
+test("latch: a settled id is pruned, and a new one latches beside the rest", () => {
+  assert.deepEqual(nextPushLatch({ 4: "main", 5: "dev" }, [], [5], "x"), {
+    5: "dev",
+  });
+  assert.deepEqual(
+    nextPushLatch({ 4: "main" }, [headPush(6)], [6], "feature"),
+    { 6: "feature" },
+  );
+});
+
+test("latch: a null current branch latches nothing, but still prunes", () => {
+  assert.equal(nextPushLatch({}, [headPush(4)], [4], null), null);
+  assert.deepEqual(nextPushLatch({ 4: "main" }, [headPush(6)], [6], null), {});
+});
+
+test("latch: an id not pending in any repo is never latched", () => {
+  // A snapshot that tore ahead of the id list must not latch what the prune drops.
+  assert.equal(nextPushLatch({}, [headPush(4)], [], "main"), null);
 });

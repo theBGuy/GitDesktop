@@ -4,11 +4,13 @@ import {
   useQuery,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { toast } from "sonner";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import * as api from "../api";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { pendingMutationEntries } from "./pr-writes";
 import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
   BRANCH_PUSH_KEY,
   type BranchPushState,
   branchPushKey,
@@ -20,7 +22,10 @@ export {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   type BranchPushState,
   branchPublishLabel,
+  branchPushHoldItemReason,
+  branchPushHoldReason,
   branchPushLabel,
+  nextPushLatch,
   type PushVars,
 } from "./push-writes";
 
@@ -303,6 +308,17 @@ export function isBranchPushActive(
       .findAll({ mutationKey: branchPushKey(repo), status: "pending" }).length >
     0
   );
+}
+
+/** The fire-time refusal every network-lock route shares: true (and says why)
+ *  while `repo` has a push in flight, which the route would queue behind. */
+export function refuseWhilePushRuns(
+  queryClient: QueryClient,
+  repo: string,
+): boolean {
+  if (!isBranchPushActive(queryClient, repo)) return false;
+  toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+  return true;
 }
 
 export function useUndoCommit(repo: string) {

@@ -195,7 +195,9 @@ default's name), and a PR badge.
   push a branch that's ahead of the remote it tracks (its own remote, not
   just `origin`) or publish an unpushed one, choosing the remote when
   there's more than one. Works even when the branch is checked out in
-  another worktree.
+  another worktree. The list stays open while it runs: the branch's row
+  shows the push's progress and destination, and you can keep switching
+  and browsing.
 - **Start a branch from any base**: the new-branch dialog's *Base it on*
   picker is a searchable list of local and remote branches. Basing on a
   remote branch (e.g. `origin/epic/big-feature`) starts from the remote tip

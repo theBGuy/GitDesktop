@@ -52,11 +52,14 @@ import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
   type BranchPushState,
   branchPublishLabel,
+  branchPushHoldItemReason,
+  branchPushHoldReason,
   branchPushLabel,
   branchRewriteStatusOptions,
   forgeFeatureReady,
-  isBranchPushActive,
+  nextPushLatch,
   REMOTE_BRANCHES_STALE_TIME,
+  refuseWhilePushRuns,
   remoteBranchesOptions,
   repoKeys,
   repoStatusOptions,
@@ -108,7 +111,6 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   OFFLINE_ITEM_REASON,
   pendingItemReason,
-  pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -1420,11 +1422,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     options: MergeRunOptions,
   ) {
     const pickedIn = picker?.repo;
-    // A merge would queue on the network lock a running push holds (the picker
-    // can predate the push). Refused before the picker closes, so the picked
-    // branch and options survive; a switched repo keeps its own refusal below.
-    if (mode !== "rebase" && pickedIn === repoPath && pushAlreadyActive())
-      return;
+    // A merge would queue on the network lock a running push holds, and a rebase
+    // would rewrite the current branch under its own push (the picker can predate
+    // the push). Refused before the picker closes, so the picked branch and
+    // options survive; a switched repo keeps its own refusal below.
+    if (pickedIn === repoPath) {
+      const refused =
+        mode === "rebase" ? refuseWhileCurrentPushes() : pushAlreadyActive();
+      if (refused) return;
+    }
     setPicker(null);
     const nothing =
       mode === "rebase" ? "nothing was rebased" : "nothing was merged";
@@ -1485,6 +1491,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // compound up front beats a round-trip that can only fail.
   async function runRebaseOnto(newBase: string, oldBase: string) {
     const pickedIn = rebaseOntoIn;
+    // Refused before the dialog closes, as the picker's run is.
+    if (pickedIn === repoPath && refuseWhileCurrentPushes()) return;
     setRebaseOntoIn(null);
     if (!pickedIn || refuseIfSwitched(pickedIn, "nothing was rebased")) return;
     if (promotionBlocksCheckout(repoPath)) {
@@ -1736,18 +1744,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     else void beginPublishBranch(branch, remote);
   }
 
-  // One push at a time, re-checked where each push route fires: a menu can be
-  // stale under the pointer, and the backend would queue a second push behind
-  // the first on the network lock, for up to a minute. Reads the cache and the
-  // detection ref live.
+  // One push at a time, re-checked where each network-lock route fires: a menu
+  // can be stale under the pointer, and the backend would queue the route behind
+  // the push for up to a minute. The shared cache check, plus this switcher's
+  // own fork-PR detection, read live from its ref.
   function pushAlreadyActive(): boolean {
-    if (
-      !isBranchPushActive(queryClient, repoPath) &&
-      publishDetectRef.current?.repo !== repoPath
-    )
-      return false;
-    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-    return true;
+    if (publishDetectRef.current?.repo === repoPath) {
+      toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+      return true;
+    }
+    return refuseWhilePushRuns(queryClient, repoPath);
   }
 
   // Publishing a branch that is really a local copy of a fork PR's head pushes a
@@ -1850,32 +1856,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const [pushLatch, setPushLatch] = useState<Readonly<Record<number, string>>>(
     {},
   );
-  // Only an id still pending somewhere may be latched: the prune drops any other.
-  const newPushLatches: [number, string][] = [];
-  if (currentName !== null) {
-    for (const p of pendingPushes) {
-      if (
-        p.branch === null &&
-        p.mutationId !== null &&
-        pendingPushIds.includes(p.mutationId) &&
-        !Object.hasOwn(pushLatch, p.mutationId)
-      )
-        newPushLatches.push([p.mutationId, currentName]);
-    }
-  }
-  const settledLatch = Object.keys(pushLatch).some(
-    (id) => !pendingPushIds.includes(Number(id)),
+  const nextLatch = nextPushLatch(
+    pushLatch,
+    pendingPushes,
+    pendingPushIds,
+    currentName,
   );
-  if (newPushLatches.length > 0 || settledLatch) {
-    setPushLatch({
-      ...Object.fromEntries(
-        Object.entries(pushLatch).filter(([id]) =>
-          pendingPushIds.includes(Number(id)),
-        ),
-      ),
-      ...Object.fromEntries(newPushLatches),
-    });
-  }
+  if (nextLatch) setPushLatch(nextLatch);
   /** The branch a pending push paints: its own, or the one its HEAD push
    *  latched. */
   const pushBranchOf = (p: BranchPushState): string | null =>
@@ -1898,6 +1885,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const branchPushing = (name: string) =>
     detectingBranch === name || pushOnBranch(name) !== undefined;
   const currentRowPushing = currentName !== null && branchPushing(currentName);
+  const currentPushPaused =
+    currentName !== null && (pushOnBranch(currentName)?.paused ?? false);
+  // The current branch's own push holds the rebases that would rewrite it, with
+  // the pushing row's reset wording on the label.
+  const currentPushSuffix = currentRowPushing
+    ? ` (${pendingItemReason(currentPushPaused, "pushing…")})`
+    : "";
 
   // Every "there is none" reason below derives from a query whose empty answer
   // and whose UNANSWERED state are the same value — `?? null` for the names,
@@ -1958,7 +1952,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     switch (true) {
       // A rename moves the ref the running push is sending.
       case currentRowPushing:
-        return pendingWriteReason(pushPaused, "A push is running.");
+        return branchPushHoldReason(pushPaused);
       case headUnread !== null:
         return headUnread;
       case currentName !== null && isSessionBranchName(currentName):
@@ -1975,8 +1969,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // Branch protection: the label already states it.
     if (isDeletionBlocked(rulesConfig, currentName)) return null;
     // A delete removes the ref the running push is sending.
-    if (currentRowPushing)
-      return pendingWriteReason(pushPaused, "A push is running.");
+    if (currentRowPushing) return branchPushHoldReason(pushPaused);
     return null;
   })();
   const updateFromDefaultBlockedReason = (() => {
@@ -1986,7 +1979,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return headUnread ?? "HEAD is detached — there's no branch to update.";
     if (defaultName === currentName) return `You're already on ${defaultName}.`;
     // An in-place update waits on the network lock a push holds.
-    if (pushActive) return pendingWriteReason(pushPaused, "A push is running.");
+    if (pushActive) return branchPushHoldReason(pushPaused);
     if (busy) return "Another git operation is running.";
     // The remaining arm is the promotion rule, which the label already states.
     return null;
@@ -2001,7 +1994,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (canMergeIntoCurrent) return branchesUnread;
     }
     // A merge waits on the network lock a push holds.
-    if (pushActive) return pendingWriteReason(pushPaused, "A push is running.");
+    if (pushActive) return branchPushHoldReason(pushPaused);
     if (lockCurrent) return null; // the label says "(requires PR)"
     if (!canMergeIntoCurrent)
       return `A branch rule doesn't allow merge commits on ${currentName}.`;
@@ -2012,7 +2005,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (!branchesUnread) return "There are no other branches to merge from.";
       if (canSquashIntoCurrent) return branchesUnread;
     }
-    if (pushActive) return pendingWriteReason(pushPaused, "A push is running.");
+    if (pushActive) return branchPushHoldReason(pushPaused);
     if (lockCurrent)
       return `A branch rule requires a pull request to change ${currentName}.`;
     if (!canSquashIntoCurrent)
@@ -2022,10 +2015,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const rebaseCurrentBlockedReason = (() => {
     if (otherBranches.length === 0) {
       if (!branchesUnread) return "There are no other branches to rebase onto.";
-      if (!lockCurrent) return branchesUnread;
+      if (!lockCurrent && !currentRowPushing) return branchesUnread;
     }
     if (lockCurrent)
       return `A branch rule requires a pull request to change ${currentName}.`;
+    if (currentRowPushing) return branchPushHoldReason(currentPushPaused);
     return null;
   })();
   const changeBaseBlockedReason = (() => {
@@ -2034,13 +2028,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (otherBranches.length < 2) {
       if (!branchesUnread)
         return "Changing the base needs at least two other branches.";
-      // `busy` joins the rule arms here: it too is true right now, whatever the
-      // branch count turns out to be.
-      if (!lockCurrent && !busy) return branchesUnread;
+      // `busy` and the push join the rule arms here: each is true right now,
+      // whatever the branch count turns out to be.
+      if (!lockCurrent && !busy && !currentRowPushing) return branchesUnread;
     }
     if (lockCurrent)
       return `A branch rule requires a pull request to change ${currentName}.`;
     if (busy) return "Another git operation is running.";
+    if (currentRowPushing) return branchPushHoldReason(currentPushPaused);
     return null;
   })();
   const noChangesBlockedReason =
@@ -2245,42 +2240,49 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   );
 
   useHotkeyAction("new-branch", openCreate);
+  // The hotkeys a push holds stay live and refuse with the toast, so a press
+  // never goes silent; their menu rows hold with a reason instead. The rename,
+  // delete and rebase twins wait on the CURRENT branch's push: each moves or
+  // removes the ref it is sending.
+  function refuseWhileCurrentPushes(): boolean {
+    if (!currentRowPushing) return false;
+    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+    return true;
+  }
   useHotkeyAction(
     "rename-branch",
-    () => currentName && openRename(currentName),
-    Boolean(currentName) &&
-      !isSessionBranchName(currentName ?? "") &&
-      !currentRowPushing,
+    () => {
+      if (refuseWhileCurrentPushes()) return;
+      if (currentName) openRename(currentName);
+    },
+    Boolean(currentName) && !isSessionBranchName(currentName ?? ""),
   );
   useHotkeyAction(
     "delete-branch",
     () => {
+      if (refuseWhileCurrentPushes()) return;
       setOpen(false);
       if (currentName) openDelete(currentName);
     },
-    Boolean(currentName && !isDeletionBlocked(rulesConfig, currentName)) &&
-      !currentRowPushing,
+    Boolean(currentName && !isDeletionBlocked(rulesConfig, currentName)),
   );
   // Cleanup deletes and archives branches, the pushing one included.
-  useHotkeyAction(
-    "cleanup-branches",
-    () => {
-      setOpen(false);
-      setCleanupOpen(true);
-    },
-    !pushActive,
-  );
+  useHotkeyAction("cleanup-branches", () => {
+    if (pushAlreadyActive()) return;
+    setOpen(false);
+    setCleanupOpen(true);
+  });
   useHotkeyAction(
     "update-from-default",
     () => {
+      // In place, so it would queue on a push's network lock.
+      if (pushAlreadyActive()) return;
       if (currentName) void doUpdateFromDefault(currentName);
     },
     Boolean(
       defaultName &&
         defaultName !== currentName &&
         !busy &&
-        // In place, so it would queue on a push's network lock.
-        !pushActive &&
         currentName &&
         !currentPromotion,
     ),
@@ -2332,35 +2334,49 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }
   useHotkeyAction(
     "update-default-from-upstream",
-    () => void updateDefaultFromUpstream(),
+    () => {
+      // The default's own push moves its ref; only an update of the CURRENT
+      // branch runs in place, on the network lock.
+      if (defaultBranchRow && branchPushing(defaultBranchRow.name)) {
+        toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+        return;
+      }
+      if (defaultName === currentName && pushAlreadyActive()) return;
+      void updateDefaultFromUpstream();
+    },
     Boolean(defaultBranchRow?.upstream) &&
       !defaultBranchRow?.upstreamGone &&
       !busy &&
       // `busy` holds only the current branch's update; this one holds on the
-      // same per-branch reads the row items use: its own update, its own push.
-      !(defaultBranchRow && updatingBase.has(defaultBranchRow.name)) &&
-      !(defaultBranchRow && branchPushing(defaultBranchRow.name)) &&
-      // Only an update of the CURRENT branch runs in place, on the network lock.
-      !(pushActive && defaultName === currentName),
+      // same per-branch read the row items use.
+      !(defaultBranchRow && updatingBase.has(defaultBranchRow.name)),
   );
   useHotkeyAction(
     "merge-into-current",
-    () => openPicker("merge"),
-    otherBranches.length > 0 && canMergeIntoCurrent && !pushActive,
+    () => {
+      if (!pushAlreadyActive()) openPicker("merge");
+    },
+    otherBranches.length > 0 && canMergeIntoCurrent,
   );
   useHotkeyAction(
     "squash-merge-into-current",
-    () => openPicker("squash"),
-    otherBranches.length > 0 && canSquashIntoCurrent && !pushActive,
+    () => {
+      if (!pushAlreadyActive()) openPicker("squash");
+    },
+    otherBranches.length > 0 && canSquashIntoCurrent,
   );
   useHotkeyAction(
     "rebase-current",
-    () => openPicker("rebase"),
+    () => {
+      if (!refuseWhileCurrentPushes()) openPicker("rebase");
+    },
     otherBranches.length > 0 && !lockCurrent,
   );
   useHotkeyAction(
     "rebase-onto-new-base",
-    openRebaseOnto,
+    () => {
+      if (!refuseWhileCurrentPushes()) openRebaseOnto();
+    },
     Boolean(currentName) && otherBranches.length >= 2 && !lockCurrent && !busy,
   );
   useHotkeyAction("stash-all", () => setStashAllIn(repoPath), hasChanges);
@@ -2460,10 +2476,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       rowPush?.paused ?? false,
       "pushing…",
     );
-    const pushRunningReason = pendingItemReason(
-      pushPaused,
-      "a push is running",
-    );
+    const pushRunningReason = branchPushHoldItemReason(pushPaused);
     const rowSpinnerLabel = (() => {
       switch (true) {
         case rowUpdating:
@@ -3240,7 +3253,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 case deletionBlocked:
                   return `Delete on ${branch.remote}… (protected)`;
                 case pushActive:
-                  return `Delete on ${branch.remote}… (${pendingItemReason(pushPaused, "a push is running")})`;
+                  return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`;
                 default:
                   return `Delete on ${branch.remote}…${offlineSuffix}`;
               }
@@ -3527,7 +3540,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 </MenuRow>
                 <MenuRow
                   disabled={pushActive}
-                  reason={pendingWriteReason(pushPaused, "A push is running.")}
+                  reason={branchPushHoldReason(pushPaused)}
                   onClick={() => {
                     setOpen(false);
                     setCleanupOpen(true);
@@ -3659,23 +3672,28 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   Squash and merge into current branch…
                 </MenuRow>
                 <MenuRow
-                  disabled={otherBranches.length === 0 || lockCurrent}
+                  disabled={
+                    otherBranches.length === 0 ||
+                    lockCurrent ||
+                    currentRowPushing
+                  }
                   reason={rebaseCurrentBlockedReason}
                   onClick={() => openPicker("rebase")}
                 >
-                  Rebase current branch…
+                  Rebase current branch…{currentPushSuffix}
                 </MenuRow>
                 <MenuRow
                   disabled={
                     !currentName ||
                     otherBranches.length < 2 ||
                     lockCurrent ||
-                    busy
+                    busy ||
+                    currentRowPushing
                   }
                   reason={changeBaseBlockedReason}
                   onClick={openRebaseOnto}
                 >
-                  Change base…
+                  Change base…{currentPushSuffix}
                 </MenuRow>
               </div>
             </Popover.Popup>
@@ -3881,6 +3899,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         destination={forkGuard?.remote ?? "origin"}
         onClose={() => setForkGuard(null)}
         onPublishAnyway={() => {
+          // Refused before the dialog closes, so it stays to retry from.
+          if (forkGuard?.repo === repoPath && pushAlreadyActive()) return;
           setForkGuard(null);
           if (
             forkGuard &&

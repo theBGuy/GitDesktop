@@ -97,7 +97,8 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Branches & history",
-    label: "Push or publish a branch to any remote — no checkout needed",
+    label:
+      "Push or publish a branch to any remote — no checkout needed, with its progress on the branch's row",
   },
   {
     group: "Branches & history",

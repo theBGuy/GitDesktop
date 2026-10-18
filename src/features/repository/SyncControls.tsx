@@ -43,8 +43,9 @@ import {
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
 import {
-  BRANCH_PUSH_ACTIVE_MESSAGE,
-  isBranchPushActive,
+  branchPushHoldItemReason,
+  branchPushHoldReason,
+  refuseWhilePushRuns,
   repoStatusOptions,
   useBranchRewriteStatus,
   useFetchRemote,
@@ -66,8 +67,6 @@ import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   ACT_PENDING_REASON,
   OFFLINE_ITEM_REASON,
-  pendingItemReason,
-  pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
@@ -132,10 +131,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const otherPushes = pendingPushes.filter((p) => !p.fromHeader);
   const otherPushRunning = otherPushes.length > 0;
   const otherPushPaused = otherPushes.some((p) => p.paused);
-  const otherPushReason = pendingWriteReason(
-    otherPushPaused,
-    "A push is running.",
-  );
+  const otherPushReason = branchPushHoldReason(otherPushPaused);
   const updateUpstream = useUpdateFromUpstream(repoPath);
   const recovery = useStashReapplyRecovery(repoPath);
   // Shares that recovery: a decided re-run can still hit a dirty tree, and one
@@ -576,9 +572,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // describes HEAD, which may no longer be that branch.
   async function doPush(force: boolean, branch?: string) {
     // The force confirm and the fork-PR guard can both sit open across a
-    // disconnect, and each lands here. Every route also arrives after an await
-    // (a status read, a fork-PR detection) another surface's push can start in.
-    if (refuseWhileOffline() || refuseWhilePushRuns()) return;
+    // disconnect, and each lands here. Some routes also arrive after an await (a
+    // status read, a fork-PR detection) another surface's push can start in.
+    if (refuseWhileOffline() || refuseWhilePushing()) return;
     try {
       const guard = await push.mutateAsync({
         setUpstream: branch === undefined && !hasUpstream,
@@ -731,7 +727,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       )
     )
       return;
-    if (refuseWhilePushRuns()) return;
+    if (refuseWhilePushing()) return;
     const { branch, remote, remoteBranch } = capture.menu;
     if (headNameRef.current !== branch) {
       toast.info("HEAD moved — nothing was pushed.");
@@ -792,7 +788,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // The menu can be open when another surface's push starts.
     if (otherPushRunning)
       return {
-        label: `${live.label} (${pendingItemReason(otherPushPaused, "a push is running")})`,
+        label: `${live.label} (${branchPushHoldItemReason(otherPushPaused)})`,
         disabled: true,
       };
     return {
@@ -808,31 +804,29 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
 
   // A network op started now would queue behind a running push on the repo's
   // network lock for up to a minute, so it refuses and says why instead.
-  function refuseWhilePushRuns(): boolean {
-    if (!isBranchPushActive(queryClient, repoPath)) return false;
-    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-    return true;
+  function refuseWhilePushing(): boolean {
+    return refuseWhilePushRuns(queryClient, repoPath);
   }
 
   // Hotkeys mirror the buttons' own holds (sync-controls-state.ts).
   useHotkeyAction(
     "fetch",
     () => {
-      if (!refuseWhilePushRuns()) void doFetch(false);
+      if (!refuseWhilePushing()) void doFetch(false);
     },
     hotkeys.fetch,
   );
   useHotkeyAction(
     "pull",
     () => {
-      if (!refuseWhilePushRuns()) void doPull("ffOnly");
+      if (!refuseWhilePushing()) void doPull("ffOnly");
     },
     hotkeys.pull,
   );
   useHotkeyAction(
     "push",
     () => {
-      if (!refuseWhilePushRuns()) pressPush();
+      if (!refuseWhilePushing()) pressPush();
     },
     hotkeys.push,
   );
@@ -842,7 +836,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "update-from-upstream",
     () => {
-      if (!refuseWhilePushRuns()) void doUpdateFromUpstream();
+      if (!refuseWhilePushing()) void doUpdateFromUpstream();
     },
     hotkeys.updateFromUpstream,
   );
@@ -1196,6 +1190,13 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           branch={forkGuard.branch}
           onClose={() => closeForkGuard(forkGuard.token)}
           onPublishAnyway={() => {
+            // Refused before the dialog closes, so it stays to retry from.
+            if (
+              forkGuard.open &&
+              forkGuard.repo === repoPath &&
+              refuseWhilePushing()
+            )
+              return;
             closeForkGuard(forkGuard.token);
             // Only this open, in its own still-live repo: `open` covers a
             // click during the dialog's close transition (silently), the

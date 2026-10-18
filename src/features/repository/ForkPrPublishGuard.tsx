@@ -16,8 +16,9 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { forgeEnsureForkRemote } from "@/lib/git/api";
 import {
-  BRANCH_PUSH_ACTIVE_MESSAGE,
-  isBranchPushActive,
+  branchPushHoldReason,
+  refuseWhilePushRuns,
+  usePendingBranchPushes,
   usePush,
 } from "@/lib/git/queries";
 import type { ForkPrMatch } from "@/lib/git/types";
@@ -65,6 +66,13 @@ export function ForkPrPublishGuard({
 
   const open = match !== null;
   const pending = ensuring || push.isPending;
+  // Another surface's push in this repo (its own push is `pending`): both routes
+  // would queue behind it on the network lock, so both hold until it settles.
+  const pendingPushes = usePendingBranchPushes(repoPath);
+  const otherPushHeld = !pending && pendingPushes.length > 0;
+  const otherPushReason = branchPushHoldReason(
+    pendingPushes.some((p) => p.paused),
+  );
   // Both routes push, so both hold while offline; the dialog can be open when
   // the connection drops.
   const offlineHold = useOfflineHold();
@@ -91,11 +99,7 @@ export function ForkPrPublishGuard({
 
   // One push at a time: another surface's push can start while the dialog is
   // open, and a second one would queue behind it on the network lock.
-  function pushRunning(): boolean {
-    if (!isBranchPushActive(queryClient, repoPath)) return false;
-    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
-    return true;
-  }
+  const pushRunning = () => refuseWhilePushRuns(queryClient, repoPath);
 
   // Add the fork remote (idempotent) and push the local branch onto the PR's
   // head ref — no fetch first: the match is ancestry-verified locally, so this
@@ -202,16 +206,28 @@ export function ForkPrPublishGuard({
           </Button>
           <DisabledReasonButton
             variant="outline"
-            disabled={pending || !!offlineHold}
-            // `pending` is the fork route's push, never this button's own.
-            reason={pending ? "Pushing to the fork…" : offlineHold}
+            disabled={pending || otherPushHeld || !!offlineHold}
+            // `pending` is this dialog's fork push, never this button's own
+            // publish; another surface's push holds it the same way.
+            reason={(() => {
+              switch (true) {
+                case pending:
+                  return "Pushing to the fork…";
+                case otherPushHeld:
+                  return otherPushReason;
+                default:
+                  return offlineHold;
+              }
+            })()}
             onClick={onPublishAnyway}
           >
             Publish to {destination} anyway
           </DisabledReasonButton>
           {showPushToFork ? (
             <DisabledReasonButton
-              disabled={!canPushToFork || pending || !!offlineHold}
+              disabled={
+                !canPushToFork || pending || otherPushHeld || !!offlineHold
+              }
               // The permission note already describes its own hold (a plain
               // disable that offline never flips); a running push outranks offline.
               reason={(() => {
@@ -220,6 +236,8 @@ export function ForkPrPublishGuard({
                     return undefined;
                   case pending:
                     return ACT_PENDING_REASON;
+                  case otherPushHeld:
+                    return otherPushReason;
                   default:
                     return offlineHold;
                 }
