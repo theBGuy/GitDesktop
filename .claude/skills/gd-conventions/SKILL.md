@@ -43,7 +43,7 @@ pnpm build                             # tsc + bundle — the frontend gate
 pnpm exec tsc -b --noEmit              # typecheck alone — plain `tsc --noEmit` is a NO-OP here (project refs); only -b checks
 pnpm exec biome check ./src/           # lint/format CHECK (no mutation)
 cargo test --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cd site && pnpm build                  # when the marketing site changed
 pnpm run checks                        # guard scripts + self-tests — CI quality.yml guards job
 ```

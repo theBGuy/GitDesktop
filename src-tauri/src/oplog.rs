@@ -1520,6 +1520,18 @@ mod tests {
     // Real reconcile calls use each repo's test store, isolated from app data.
     // Seeds replace only their own key under the same locks production takes.
 
+    /// A unique repo key whose test store lives in `<tmp>/.git/` and goes with the guard,
+    /// unless `GD_OPLOG_DIR` overrides it.
+    fn scratch_repo_key(label: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-oplog-{label}-"))
+            .tempdir()
+            .unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        let repo = dir.path().to_str().unwrap().to_owned();
+        (dir, repo)
+    }
+
     /// Replace `repo`'s entries in the seam-resolved store, as one locked RMW.
     fn seed_entries(repo: &str, entries: Vec<Value>) {
         let path = store_path(repo).unwrap();
@@ -1744,7 +1756,8 @@ mod tests {
 
     #[test]
     fn every_stale_paused_pick_is_concluded_in_one_pass() {
-        let repo = &format!(r"C:\oplog\two-stale-pauses-{}", uuid::Uuid::new_v4());
+        let (_repo_dir, repo) = scratch_repo_key("two-stale-pauses");
+        let repo = repo.as_str();
         seed_entries(
             repo,
             vec![
@@ -1772,10 +1785,8 @@ mod tests {
 
     #[test]
     fn the_pending_arm_is_untouched_by_the_paused_one() {
-        let repo = &format!(
-            r"C:\oplog\pending-beside-a-stale-pause-{}",
-            uuid::Uuid::new_v4()
-        );
+        let (_repo_dir, repo) = scratch_repo_key("pending-beside-a-stale-pause");
+        let repo = repo.as_str();
         seed_entries(
             repo,
             vec![
@@ -1799,7 +1810,8 @@ mod tests {
     /// otherwise the row is cap-immortal and a permanent lie in Operation history.
     #[test]
     fn a_stale_paused_pull_drop_is_concluded_by_the_next_check() {
-        let repo = &format!(r"C:\oplog\stale-pull-drop-{}", uuid::Uuid::new_v4());
+        let (_repo_dir, repo) = scratch_repo_key("stale-pull-drop");
+        let repo = repo.as_str();
         seed_entries(
             repo,
             vec![drop_record("stale-drop", "2026-01-01T00:00:00.000Z", "paused")],
@@ -1816,10 +1828,7 @@ mod tests {
     #[test]
     fn a_live_paused_pull_drop_is_never_concluded() {
         for (flag, probe_live) in [(true, false), (false, true)] {
-            let repo = format!(
-                r"C:\oplog\live-pull-drop-{flag}-{probe_live}-{}",
-                uuid::Uuid::new_v4()
-            );
+            let (_repo_dir, repo) = scratch_repo_key("live-pull-drop");
             seed_entries(
                 &repo,
                 vec![drop_record("live-drop", "2026-01-01T00:00:00.000Z", "paused")],
@@ -1852,7 +1861,8 @@ mod tests {
     /// concluding the record the very check after its rebase paused.
     #[test]
     fn a_paused_record_is_judged_against_its_own_ops_signals() {
-        let repo = &format!(r"C:\oplog\per-op-pause-verdict-{}", uuid::Uuid::new_v4());
+        let (_repo_dir, repo) = scratch_repo_key("per-op-pause-verdict");
+        let repo = repo.as_str();
         let seeded = || {
             vec![
                 pick_record("the-pick", "2026-01-01T00:00:00.000Z", "paused"),

@@ -4837,6 +4837,26 @@ test("marker branches fail closed on unresolved second arguments", () => {
     assert.equal(hits.length, 1, arg);
     assert.match(hits[0].fix, /cannot resolve/);
   }
+  // A call that never closes inside its function.
+  const unclosed = markerBranchHits(
+    '#[cfg(test)] mod tests { fn holder() { TestRootOverride::set(&root); UpdateMarker::create_for(&root, "held" } }',
+  );
+  assert.equal(unclosed.length, 1);
+  assert.match(unclosed[0].fix, /cannot resolve/);
+  const unclosedAfterComma = markerBranchHits(
+    '#[cfg(test)] mod tests { fn holder() { TestRootOverride::set(&root); UpdateMarker::create_for(&root, "held", } }',
+  );
+  assert.equal(unclosedAfterComma.length, 1);
+  assert.match(unclosedAfterComma[0].fix, /cannot resolve/);
+});
+
+test("marker branches fail closed on a test-module site outside any function", () => {
+  const hits = markerBranchHits(
+    '#[cfg(test)] mod tests { const X: () = UpdateMarker::create_for(&root, "held"); }',
+  );
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "<unreadable>");
+  assert.match(hits[0].fix, /enclosing function/);
 });
 
 test("marker branches count comment-only reuse in another file", () => {
@@ -4869,6 +4889,9 @@ test("marker branches accept unique direct and bound names with same-function re
   ]) {
     assert.deepEqual(markerBranchHits(markerHolder(arg, setup)), []);
   }
+});
+
+test("marker branch allowlist starts empty", () => {
   assert.deepEqual(TEST_MARKER_ALLOWLIST, []);
 });
 

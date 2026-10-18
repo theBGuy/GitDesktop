@@ -27,5 +27,6 @@ paths:
   non-re-acquiring runner inside, or you deadlock.
 - Advisory probes fail SAFE toward inaction: verdict "unknown" on any failed sub-probe;
   destructive actions target the measured sha, never a re-resolved ref.
-- Verification: `cargo test` + `cargo clippy -- -D warnings` (manifest-path src-tauri);
+- Verification: `cargo test` (manifest-path src-tauri) +
+  `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`;
   a `///` line starting with `+`/`-`/`*` mid-sentence lints as `doc_lazy_continuation`.

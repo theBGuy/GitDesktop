@@ -8,8 +8,8 @@ description: Review playbook for GitDesktop pull requests — evidence standards
 GitDesktop is a keyboard-first Git desktop client: Tauri 2 (Rust backend in
 `src-tauri/`) + React 19/TypeScript (`src/`), with an Astro marketing site in
 `site/`. Biome handles lint + format; CI runs the TypeScript build (`tsc -b`),
-`biome ci`, and `cargo test` + `cargo clippy -- -D warnings` on Linux, macOS,
-and Windows.
+`biome ci`, and `cargo test` + `cargo clippy --all-targets -- -D warnings` on
+Linux, macOS, and Windows.
 
 ## Evidence standard for findings
 
