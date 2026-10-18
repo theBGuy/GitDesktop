@@ -9745,4 +9745,13 @@ test("reused-view-pending: the masker reads `of` as a name outside a for-of head
     ),
     ["deleteRelease.isPending"],
   );
+  // A member target named `of` is the for-of target, so the keyword and a regex
+  // follow it.
+  for (const line of [
+    "  for (obj.of of /deleteRelease.isPending/.exec(s) ?? []) use(obj.of);",
+    "  for (a.b.of of /[\"']/.source) use(a.b.of);",
+  ]) {
+    assert.deepEqual(rvRun(rvView(line)).errors, [], line);
+    assert.deepEqual(rvReads(rvView(line)), [], line);
+  }
 });
