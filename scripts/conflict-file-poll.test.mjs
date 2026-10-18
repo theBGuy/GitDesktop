@@ -552,6 +552,13 @@ test("the header's whole-file actions hold, with a reason, on a path no longer c
       /(?<![\w$.])notConflicted(?![\w$])/,
       `"${label}" must be disabled while the arm is notConflicted`,
     );
+    if (label === "Resolve with AI") {
+      assert.match(
+        prop("disabled"),
+        /(?<![\w$.])workingUndecodable(?![\w$])/,
+        `"${label}" must be disabled while the working file isn't UTF-8 text`,
+      );
+    }
     // The AI button holds for a second cause too (a non-UTF-8 working file), so
     // its reason comes from `aiHeldReason`, pinned below.
     assert.match(

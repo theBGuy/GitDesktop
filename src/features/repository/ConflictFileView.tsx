@@ -487,6 +487,11 @@ export function ConflictFileView({
   // drops this pane. Restarts a status read already in flight, since one begun
   // before an outside `git add` still lists the path as unmerged.
   const notConflicted = arm === "notConflicted";
+  useEffect(() => {
+    if (!notConflicted) return;
+    void queryClient.invalidateQueries({ queryKey: repoKeys.status(repoPath) });
+  }, [notConflicted, queryClient, repoPath]);
+
   const aiHeldReason = (() => {
     switch (true) {
       case notConflicted:
@@ -497,10 +502,6 @@ export function ConflictFileView({
         return null;
     }
   })();
-  useEffect(() => {
-    if (!notConflicted) return;
-    void queryClient.invalidateQueries({ queryKey: repoKeys.status(repoPath) });
-  }, [notConflicted, queryClient, repoPath]);
 
   // The button and the palette action both land here, so this is the one gate:
   // staging is a plain `git add`, which would take any remaining markers along.
