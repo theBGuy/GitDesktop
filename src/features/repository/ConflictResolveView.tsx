@@ -341,7 +341,6 @@ export function ConflictResolveView({
   // "Reject this proposal": in a resolve-all run, skip to the next file (leaving
   // this one conflicted); otherwise end the session.
   function reject() {
-    genRef.current++;
     if (queue.length > 0) advance();
     else stop();
   }

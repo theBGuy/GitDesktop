@@ -552,12 +552,36 @@ test("the header's whole-file actions hold, with a reason, on a path no longer c
       /(?<![\w$.])notConflicted(?![\w$])/,
       `"${label}" must be disabled while the arm is notConflicted`,
     );
+    // The AI button holds for a second cause too (a non-UTF-8 working file), so
+    // its reason comes from `aiHeldReason`, pinned below.
     assert.match(
       prop("reason"),
-      /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*null\s*$/,
+      label === "Resolve with AI"
+        ? /^\s*aiHeldReason\s*$/
+        : /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*null\s*$/,
       `"${label}" must explain its notConflicted hold`,
     );
   }
+  // The AI reason's first case is the no-longer-conflicted one, so that reason
+  // wins and stays the shared copy; the non-UTF-8 hold has its own arm.
+  const held =
+    /\bconst\s+aiHeldReason\s*=\s*\(\s*\(\s*\)\s*=>\s*\{\s*switch\s*\(\s*true\s*\)\s*\{([^]*?)\}\s*\}\s*\)\s*\(\s*\)\s*;/.exec(
+      src.masked,
+    );
+  assert.ok(
+    held,
+    "ConflictFileView's `const aiHeldReason = (() => { switch (true) {` is gone",
+  );
+  assert.match(
+    held[1],
+    /^\s*case\s+notConflicted\s*:\s*return\s+NOT_CONFLICTED_COPY\s*;/,
+    "aiHeldReason's first case must be notConflicted -> NOT_CONFLICTED_COPY",
+  );
+  assert.match(
+    held[1],
+    /\bcase\s+workingUndecodable\s*:\s*return\s+AI_UNDECODABLE_REASON\s*;/,
+    "aiHeldReason must hold a non-UTF-8 working file with AI_UNDECODABLE_REASON",
+  );
   assert.match(
     src.source,
     /\bconst\s+NOT_CONFLICTED_COPY\s*=\s*"This file is no longer conflicted\."\s*;/,

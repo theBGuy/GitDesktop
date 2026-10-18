@@ -58,6 +58,11 @@ const NOT_CONFLICTED_COPY = "This file is no longer conflicted.";
 const CONFLICT_UNDECODABLE_NOTE =
   "This file isn't UTF-8 text, so it resolves as a whole to keep its bytes exact. Use Accept all current, Accept all incoming, or Open in editor.";
 
+/** Why Resolve with AI holds over a non-UTF-8 working file: the proposal would
+ *  be written back from its lossy decode. */
+const AI_UNDECODABLE_REASON =
+  "This file isn't UTF-8 text, so AI resolution would change its bytes.";
+
 /** The whole-file sides, worded as the header buttons word them. */
 const ACCEPT_ALL_COPY = {
   ours: { side: "current", other: "incoming" },
@@ -365,13 +370,14 @@ export function ConflictFileView({
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged; offer only whole-file resolution + the editor.
   const textResolvable = !file.isError;
-  // Gated on the working file alone: per-region accepts rebuild from it, so a
-  // clean working file over a non-UTF-8 stage blob stays lossless for them.
-  // canAi deliberately leaves that blob-only case to ConflictResolveView's
-  // `undecodable` block, which is what keeps the AI flow safe there.
+  // The working file alone: per-region accepts rebuild from it, so a clean
+  // working file over a non-UTF-8 stage blob stays lossless for them. The AI
+  // button holds on it too, but deliberately leaves that blob-only case to
+  // ConflictResolveView's `undecodable` block, which keeps the AI flow safe there.
   const workingUndecodable = file.data?.workingUndecodable === true;
-  const canAi =
-    aiEnabled && reviewConfigured && textResolvable && !workingUndecodable;
+  // Offered exactly as for a UTF-8 file; a non-UTF-8 one disables it with a
+  // reason instead of hiding it.
+  const offersAi = aiEnabled && reviewConfigured && textResolvable;
   // The fire-time belt reads this: a committed Accept's closure predates a flip.
   const workingUndecodableRef = useLatestRef(workingUndecodable);
 
@@ -481,6 +487,16 @@ export function ConflictFileView({
   // drops this pane. Restarts a status read already in flight, since one begun
   // before an outside `git add` still lists the path as unmerged.
   const notConflicted = arm === "notConflicted";
+  const aiHeldReason = (() => {
+    switch (true) {
+      case notConflicted:
+        return NOT_CONFLICTED_COPY;
+      case workingUndecodable:
+        return AI_UNDECODABLE_REASON;
+      default:
+        return null;
+    }
+  })();
   useEffect(() => {
     if (!notConflicted) return;
     void queryClient.invalidateQueries({ queryKey: repoKeys.status(repoPath) });
@@ -596,13 +612,13 @@ export function ConflictFileView({
           >
             Accept all incoming
           </DisabledReasonButton>
-          {canAi && (
+          {offersAi && (
             // This view's OWN repoPath scopes the walk — the main repo on the
             // Changes tab, the hidden worktree in a PR takeover.
             <DisabledReasonButton
               size="xs"
-              disabled={busy || notConflicted}
-              reason={notConflicted ? NOT_CONFLICTED_COPY : null}
+              disabled={busy || notConflicted || workingUndecodable}
+              reason={aiHeldReason}
               onClick={() => startResolveAi(path, repoPath)}
             >
               <SparkleIcon data-icon="inline-start" />

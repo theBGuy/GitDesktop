@@ -138,9 +138,10 @@ working-tree diff is one whole-file view with hunk- and line-level staging
 and discarding (drag across the line numbers, spanning hunks freely — a drag
 picks up added and removed lines together in either view, Shift keeps it to
 one side, and Ctrl, or Cmd on macOS, adds to a selection), including
-committing or discarding only part of a brand-new (untracked) file. Stage or
-unstage a drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`, without
-reaching for the button. Stage, unstage, or discard single files or a
+committing or discarding only part of a brand-new (untracked) file. Partial
+staging is for UTF-8 text; other encodings stage and discard as a whole file.
+Stage or unstage a drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`,
+without reaching for the button. Stage, unstage, or discard single files or a
 multi-selection from the context menu (staging and unstaging a selection sit
 in the command palette too); discarding a whole untracked file goes to the
 recycle bin. Commit with title + body, co-authors suggested from history,

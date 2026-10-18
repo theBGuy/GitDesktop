@@ -435,6 +435,21 @@ mod tests {
         path: &str,
         also_tracked: &[&str],
     ) -> (tempfile::TempDir, String) {
+        conflicted_repo_with(tag, path, also_tracked, b"base\n", b"ours\n", b"theirs\n").await
+    }
+
+    /// A real merge conflict on `path` whose base, ours and theirs sides hold the
+    /// given BYTES, left mid-merge, so a test can mint stage blobs (and a merged
+    /// working file) that aren't valid UTF-8. `also_tracked` as in
+    /// `conflicted_repo`.
+    async fn conflicted_repo_with(
+        tag: &str,
+        path: &str,
+        also_tracked: &[&str],
+        base: &[u8],
+        ours: &[u8],
+        theirs: &[u8],
+    ) -> (tempfile::TempDir, String) {
         let (dir, repo) = temp_repo(tag);
         let git = |args: Vec<&'static str>| {
             let repo = repo.clone();
@@ -450,40 +465,6 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, "sibling base\n").unwrap();
         }
-        std::fs::write(&file, "base\n").unwrap();
-        git(vec!["add", "."]).await;
-        git(vec!["commit", "-m", "base"]).await;
-        git(vec!["checkout", "-b", "feature"]).await;
-        std::fs::write(&file, "theirs\n").unwrap();
-        git(vec!["commit", "-am", "theirs"]).await;
-        git(vec!["checkout", "-"]).await;
-        std::fs::write(&file, "ours\n").unwrap();
-        git(vec!["commit", "-am", "ours"]).await;
-        // The merge is expected to conflict (non-zero exit), so run it raw.
-        run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
-            .await
-            .unwrap();
-        (dir, repo)
-    }
-
-    /// `conflicted_repo`'s shape over chosen BYTES per side, so a test can mint a
-    /// conflict whose stage blobs (and merged working file) aren't valid UTF-8.
-    async fn conflicted_repo_with(
-        tag: &str,
-        path: &str,
-        base: &[u8],
-        ours: &[u8],
-        theirs: &[u8],
-    ) -> (tempfile::TempDir, String) {
-        let (dir, repo) = temp_repo(tag);
-        let git = |args: Vec<&'static str>| {
-            let repo = repo.clone();
-            async move { run_git(Some(&repo), &args, DEFAULT_TIMEOUT).await.unwrap() }
-        };
-        git(vec!["init"]).await;
-        git(vec!["config", "user.email", "t@t"]).await;
-        git(vec!["config", "user.name", "t"]).await;
-        let file = Path::new(&repo).join(path);
         std::fs::write(&file, base).unwrap();
         git(vec!["add", "."]).await;
         git(vec!["commit", "-m", "base"]).await;
@@ -493,6 +474,7 @@ mod tests {
         git(vec!["checkout", "-"]).await;
         std::fs::write(&file, ours).unwrap();
         git(vec!["commit", "-am", "ours"]).await;
+        // The merge is expected to conflict (non-zero exit), so run it raw.
         run_git_raw(Some(&repo), &["merge", "feature"], DEFAULT_TIMEOUT)
             .await
             .unwrap();
@@ -1161,6 +1143,7 @@ mod tests {
         let (_dir, repo) = conflicted_repo_with(
             "undecodable-blob",
             "file.txt",
+            &[],
             b"base\n",
             b"ours\n",
             b"th\xFCirs\n",
@@ -1186,6 +1169,7 @@ mod tests {
         let (_dir, repo) = conflicted_repo_with(
             "undecodable-fffd",
             "file.txt",
+            &[],
             "base \u{FFFD}\n".as_bytes(),
             "ours \u{FFFD}\n".as_bytes(),
             "theirs \u{FFFD}\n".as_bytes(),

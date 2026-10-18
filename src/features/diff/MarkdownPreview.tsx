@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo } from "react";
+import { useMemo } from "react";
 import { InfoNote } from "@/components/info-note";
 import { Markdown } from "@/components/markdown/markdown";
 import { Button } from "@/components/ui/button";
@@ -63,12 +63,6 @@ export function MarkdownViewToggle({
       </Button>
     </ButtonGroup>
   );
-}
-
-/** One-line disclosure strip above the rendered body (same treatment as the
- *  working-tree line-stage hint). */
-function PreviewNote({ children }: { children: ReactNode }) {
-  return <InfoNote>{children}</InfoNote>;
 }
 
 /**
@@ -148,15 +142,13 @@ export function MarkdownDocPreview({
   return (
     <>
       {showOld && (
-        <PreviewNote>
-          File deleted — previewing the previous version.
-        </PreviewNote>
+        <InfoNote>File deleted — previewing the previous version.</InfoNote>
       )}
       {isMdxPath(filePath) && (
-        <PreviewNote>
+        <InfoNote>
           Approximate preview: MDX components and expressions render as plain
           text.
-        </PreviewNote>
+        </InfoNote>
       )}
       {/* Same reading measure as the in-app guide's rendered pages. */}
       <div className="mx-auto w-full max-w-2xl p-6">
