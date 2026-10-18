@@ -448,14 +448,9 @@ pub(crate) async fn git_undo_commit_core(
             stderr: UNDO_BRANCH_SWITCHED.to_string(),
         });
     }
-    let read_head = || async {
-        run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
-            .await
-            .map(|out| (out.code == 0).then(|| out.stdout_lossy().trim().to_string()))
-    };
     // `None` is an unborn HEAD: nothing a pin could name is there. Unpinned, it
     // falls through to the root arm unchanged, where git's update-ref is a no-op.
-    let head = read_head().await?;
+    let head = ref_oid(&repo_path, "HEAD").await?;
     if let Some(expected) = &expected_head {
         if head.as_deref() != Some(expected.as_str()) {
             return Err(moved());
@@ -482,9 +477,9 @@ pub(crate) async fn git_undo_commit_core(
         return Ok(());
     }
     let head_oid = head.unwrap_or_default();
-    // What the root arm deletes: the ref HEAD named under this hold, or `HEAD` itself
-    // when unborn, where git's delete is a no-op.
-    let mut target = "HEAD".to_string();
+    // What the root arm deletes: the ref HEAD named under this hold; `None` when
+    // unborn, where the arm deletes `HEAD` and git does nothing.
+    let mut target: Option<String> = None;
     if !head_oid.is_empty() {
         // The raw object, not `rev-list --parents`: a shallow graft hides the parent
         // line from traversal but not from the commit itself (measured, git 2.51.1).
@@ -528,22 +523,26 @@ pub(crate) async fn git_undo_commit_core(
                 stderr: attached.full_failure_text(),
             });
         }
-        target = attached.stdout_lossy().trim().to_string();
+        target = Some(attached.stdout_lossy().trim().to_string());
     }
+    #[cfg(test)]
+    undo_root_phase().await;
     // The old value (passed even unpinned) means a branch that just gained a commit is
     // never deleted; naming the ref means another process's switch can't redirect it.
-    let out = if head_oid.is_empty() {
-        run_git_raw_index_retry(&repo_path, &["update-ref", "-d", "HEAD"], DEFAULT_TIMEOUT).await?
-    } else {
-        delete_root_ref(&repo_path, &target, &head_oid).await?
+    let out = match &target {
+        None => {
+            run_git_raw_index_retry(&repo_path, &["update-ref", "-d", "HEAD"], DEFAULT_TIMEOUT)
+                .await?
+        }
+        Some(full_ref) => delete_root_ref(&repo_path, full_ref, &head_oid).await?,
     };
     if out.code != 0 {
         // A failed compare-and-swap reads as moved only when that ref really moved; a
         // stale ref `.lock` keeps git's own error.
-        if !head_oid.is_empty()
-            && ref_oid(&repo_path, &target).await?.as_deref() != Some(head_oid.as_str())
-        {
-            return Err(moved());
+        if let Some(full_ref) = &target {
+            if ref_oid(&repo_path, full_ref).await?.as_deref() != Some(head_oid.as_str()) {
+                return Err(moved());
+            }
         }
         return Err(AppError::Git {
             code: out.code,
@@ -551,6 +550,25 @@ pub(crate) async fn git_undo_commit_core(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+type UndoRootHook = std::sync::Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited by the root undo it is scoped to, after `symbolic-ref` named the branch
+    /// and before the delete, so a test can switch HEAD inside that window.
+    static UNDO_ROOT_HOOK: UndoRootHook;
+}
+
+#[cfg(test)]
+async fn undo_root_phase() {
+    if let Ok(wait) = UNDO_ROOT_HOOK.try_with(|hook| hook()) {
+        wait.await;
+    }
 }
 
 /// The root undo's mutation: deletes `full_ref` only while it still points at `oid`.
@@ -565,11 +583,11 @@ async fn delete_root_ref(repo_path: &str, full_ref: &str, oid: &str) -> AppResul
     .await
 }
 
-/// The oid `full_ref` points at, `None` when it no longer resolves.
-async fn ref_oid(repo_path: &str, full_ref: &str) -> AppResult<Option<String>> {
+/// The oid `name` resolves to, `None` when it doesn't resolve.
+async fn ref_oid(repo_path: &str, name: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
         Some(repo_path),
-        &["rev-parse", "--verify", "--quiet", full_ref],
+        &["rev-parse", "--verify", "--quiet", name],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -1323,26 +1341,32 @@ mod tests {
         assert!(ExpectedRef::from_wire(Some("-x".into())).is_err());
     }
 
-    /// The root delete names its ref: with HEAD symbolic to another branch at the same
-    /// root commit, only the named branch goes, and HEAD and its branch are untouched.
-    /// `HEAD` there would delete whatever branch HEAD names when update-ref runs.
+    /// A switch that lands after the root undo's `symbolic-ref` read and before its
+    /// delete must not redirect it: the branch read under the hold goes, and the branch
+    /// HEAD switched to (same root commit) survives with HEAD still on it.
     #[tokio::test]
-    async fn root_delete_removes_the_named_branch_not_the_one_head_names() {
-        let (dir, repo) = amend_fixture("gd-undo-root-named-", &[]).await;
+    async fn root_undo_deletes_the_branch_it_read_when_head_switches_before_the_delete() {
+        let (dir, repo) = amend_fixture("gd-undo-root-switched-", &[]).await;
         let root = raw_commit(&dir, &repo, "a.txt", "A").await;
-        run(&repo, &["branch", "checked"]).await;
-        run(&repo, &["switch", "-qc", "switched-to"]).await;
+        run(&repo, &["branch", "-m", "checked"]).await;
+        let hook_repo = repo.clone();
+        let switch: UndoRootHook = std::sync::Arc::new(move || {
+            let repo = hook_repo.clone();
+            Box::pin(async move {
+                run(&repo, &["switch", "-qc", "switched-to"]).await;
+            })
+        });
 
-        let out = delete_root_ref(&repo, "refs/heads/checked", &root)
+        UNDO_ROOT_HOOK
+            .scope(switch, undo(&repo, Some(root.clone())))
             .await
-            .unwrap();
+            .expect("the undo deletes the branch it read");
 
-        assert_eq!(out.code, 0, "{}", out.full_failure_text());
         assert_eq!(ref_oid(&repo, "refs/heads/checked").await.unwrap(), None);
         assert_eq!(
             ref_oid(&repo, "refs/heads/switched-to").await.unwrap(),
             Some(root),
-            "the branch HEAD names survives"
+            "the branch HEAD switched to survives"
         );
         assert_eq!(
             run(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
