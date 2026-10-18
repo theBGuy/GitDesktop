@@ -118,6 +118,11 @@ export function ConflictResolveView({
   // stays true across a cancel's kill round-trip, and the phase is still
   // "streaming" while the finished proposal is being diffed.
   const runningRef = useRef(false);
+  // Set by the teardown below when it cut a session short, so the next setup can
+  // tell a resumable interruption from a session that settled on its own. A
+  // start() still before its stream reads it after every await and stops: its
+  // view is gone (unmount) or hidden, and a show restarts it fresh.
+  const interruptedRef = useRef(false);
   const textRef = useLatestRef(text);
   // Accept's live re-read runs before `resolve.isPending` turns on, so it holds
   // the action bar itself: the ref refuses a second press inside the same
@@ -153,14 +158,14 @@ export function ConflictResolveView({
       );
       resolved = await conflictSides(repoPath, path, exclude);
     } catch (e) {
-      if (gen === genRef.current) {
+      if (gen === genRef.current && !interruptedRef.current) {
         runningRef.current = false;
         toastError(e);
         setPhase("idle");
       }
       return;
     }
-    if (gen !== genRef.current) return;
+    if (gen !== genRef.current || interruptedRef.current) return;
     setSides(resolved);
     if (resolved.undecodable || resolved.aiIgnored.ignored) {
       runningRef.current = false;
@@ -171,7 +176,7 @@ export function ConflictResolveView({
     const repoInstructions = await readRepoInstructions(repoPath).catch(
       () => null,
     );
-    if (gen !== genRef.current) return;
+    if (gen !== genRef.current || interruptedRef.current) return;
     const { system, prompt } = buildConflictPrompt({
       path,
       sides: resolved,
@@ -214,9 +219,6 @@ export function ConflictResolveView({
     setPhase("ready");
   }
 
-  // Set by the teardown below when it cut a session short, so the next setup can
-  // tell a resumable interruption from a session that settled on its own.
-  const interruptedRef = useRef(false);
   // Auto-start once per mounted file. Remounts (keyed on path in DiffViewer) as
   // the resolve-all walk advances, so each conflict kicks off on arrival.
   // `<Activity>` replays this effect on every show, so only a fresh session or one
@@ -238,7 +240,9 @@ export function ConflictResolveView({
   // selected, so without this a streaming resolution keeps billing into an
   // orphaned component; `<Activity>` hide runs it too. The flag marks a run this
   // teardown cut short — never a user cancel, never one that already settled.
-  // Before the stream starts there is nothing to cancel: `run` clears it on entry.
+  // Before the stream starts there is nothing to cancel (`run` clears the cancel
+  // on entry), so the flag is what stops a start() still loading. Teardown never
+  // bumps `genRef`: a hide would then strand a settling run on "streaming".
   useEffect(
     () => () => {
       if (runningRef.current) interruptedRef.current = true;
@@ -255,7 +259,8 @@ export function ConflictResolveView({
   }
 
   // Ends the session; the bump retires a start() still loading the sides (Close
-  // or Escape during the loading phase), so it never goes on to stream.
+  // or Escape during the loading phase) even before the view unmounts and the
+  // teardown's flag stops it too, so it never goes on to stream.
   function stopSession() {
     genRef.current++;
     stop();
