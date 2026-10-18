@@ -35,9 +35,9 @@ export function checkoutTagSuccessToast(tag: string) {
   return checkedOutDetached(tag);
 }
 
-/** What each op does, for its plain confirm. `branch` names the destination when
- *  the caller already holds repo status; without it the copy says "the current
- *  branch" rather than subscribing a view to status for one string. */
+/** What each op does, for its plain confirm. `branch` names the destination; a
+ *  null name (status not yet read, or a detached HEAD) falls back to "the
+ *  current branch". */
 const OP_EFFECT: Record<
   MergeParentOp,
   (hash: string, branch: string | null) => string
