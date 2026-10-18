@@ -53,7 +53,8 @@ context: the standing brief and the repo playbook of conventions and gotchas.
   the trustworthy gate is the per-file LF-copy `biome ci` form (gd-conventions),
   or whatever the spec's Verification field names. Never run repo-wide
   `cargo fmt` in `src-tauri`; `rustfmt --edition 2021 <file>` on individual
-  new files only.
+  new files only, never on a `mod.rs` (rustfmt follows its `mod` declarations
+  into every child file).
 - **No scratch or temp files inside the repo** — working files belong in the
   session scratchpad or `C:/temp`. The one sanctioned exception: a run that may
   create files judges formatting with the per-file LF-copy `biome ci` gate,
