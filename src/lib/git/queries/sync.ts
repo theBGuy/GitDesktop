@@ -1,7 +1,28 @@
-import { useQuery } from "@tanstack/react-query";
+import {
+  type MutationCache,
+  type QueryClient,
+  useQuery,
+} from "@tanstack/react-query";
+import { useCallback } from "react";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import * as api from "../api";
-import { useRepoMutation } from "./internal";
+import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
+import { pendingMutationEntries } from "./pr-writes";
+import {
+  BRANCH_PUSH_KEY,
+  type BranchPushState,
+  branchPushKey,
+  type PushVars,
+  pendingBranchPushesFor,
+} from "./push-writes";
+
+export {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  type BranchPushState,
+  branchPublishLabel,
+  branchPushLabel,
+  type PushVars,
+} from "./push-writes";
 
 export function useFetchRemote(repo: string) {
   return useRepoMutation(repo, () => api.gitFetch(repo));
@@ -217,18 +238,13 @@ export function useSetSubmoduleBranch(repo: string) {
   );
 }
 
+/** Keyed per repo with the branch in the variables: {@link usePendingBranchPushes}
+ *  reads every push in flight, whichever mount fired it. `source` stays on the
+ *  client; the backend gets exactly the push's own arguments. */
 export function usePush(repo: string) {
   return useRepoMutation(
     repo,
-    (args: {
-      setUpstream: boolean;
-      force?: boolean;
-      branch?: string;
-      remote?: string;
-      /** Destination branch name when it differs from the local one (pushing to a
-       *  fork PR's head); requires `branch` and `remote`, and never tracks. */
-      remoteBranch?: string;
-    }) =>
+    (args: PushVars) =>
       api.gitPush(
         repo,
         args.setUpstream,
@@ -237,6 +253,55 @@ export function usePush(repo: string) {
         args.remote,
         args.remoteBranch,
       ),
+    { identity: branchPushKey(repo) },
+  );
+}
+
+const NO_PENDING_BRANCH_PUSHES: BranchPushState[] = [];
+
+/** The pushes of `repo` in flight, read from the mutation cache, so a remount or
+ *  a switch back still sees a push an earlier mount started. */
+export function usePendingBranchPushes(repo: string): BranchPushState[] {
+  const select = useCallback(
+    (cache: MutationCache) =>
+      pendingBranchPushesFor(
+        pendingMutationEntries(
+          cache.findAll({
+            mutationKey: branchPushKey(repo),
+            status: "pending",
+          }),
+        ),
+        repo,
+      ),
+    [repo],
+  );
+  return useMutationCacheSnapshot(select, NO_PENDING_BRANCH_PUSHES);
+}
+
+const NO_PENDING_PUSH_IDS: number[] = [];
+
+const selectPendingPushIds = (cache: MutationCache) =>
+  cache
+    .findAll({ mutationKey: BRANCH_PUSH_KEY, status: "pending" })
+    .map((m) => m.mutationId);
+
+/** The mutation ids of every branch push in flight, in ANY repo: what a reader
+ *  that remembers pushes across a repo switch prunes against. */
+export function usePendingBranchPushIds(): number[] {
+  return useMutationCacheSnapshot(selectPendingPushIds, NO_PENDING_PUSH_IDS);
+}
+
+/** Fire-time twin of {@link usePendingBranchPushes}: whether `repo` has a push in
+ *  flight right now, for a handler a stale render could otherwise let through. */
+export function isBranchPushActive(
+  queryClient: QueryClient,
+  repo: string,
+): boolean {
+  return (
+    queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: branchPushKey(repo), status: "pending" }).length >
+    0
   );
 }
 
