@@ -21,6 +21,10 @@ export function useLocalIssues(repo: string) {
   });
 }
 
+/** Filter prefix for every local-issue record write (`[family, op, repo]`), the
+ *  family a view reads its pending writes back from. */
+export const LOCAL_ISSUE_WRITES_FAMILY = "local-issue";
+
 /** Pinned to `op` + repo, so a repo switch mid-flight detaches the write and the
  *  newly-live repo's controls don't read it as busy (gd-conventions). The detached
  *  observer goes idle, so callers never rely on `isPending` alone for re-entry
@@ -32,7 +36,7 @@ function useLocalIssueMutation<TArgs, TData>(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: ["local-issue", op, repo],
+    mutationKey: [LOCAL_ISSUE_WRITES_FAMILY, op, repo],
     mutationFn: fn,
     // Local issue write — never park it offline.
     networkMode: "always",

@@ -13,6 +13,7 @@ import {
   pendingBoardWritesFor,
   pendingItemWriteFor,
   pendingProjectWritesFor,
+  statusWriteKind,
 } from "../src/lib/git/queries/board-writes.ts";
 import {
   forkByNameKey,
@@ -742,4 +743,13 @@ test("discussion lock writes hold each discussion by its own pending write", () 
   assert.deepEqual(stateFor("D_B"), { locking: [], unlocking: [false] });
   // Another repo's lock never holds this one's discussions.
   assert.deepEqual(stateFor("D_C"), { locking: [], unlocking: [] });
+});
+
+test("a project status write's kind comes from its own key", () => {
+  const family = "project-status-write";
+  for (const kind of ["create", "update", "delete"])
+    assert.equal(statusWriteKind([family, kind]), kind);
+  // A key naming no known kind, or no key at all, holds nothing.
+  for (const key of [[family, "edit"], [family], [], undefined, [family, 1]])
+    assert.equal(statusWriteKind(key), null, JSON.stringify(key));
 });

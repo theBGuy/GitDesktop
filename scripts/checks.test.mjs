@@ -9233,8 +9233,8 @@ test("reused-view-pending reads a namespaced hook call as a hook result", () => 
   );
 });
 
-// Round-3 shapes, shared by the fixtures below and the old-vs-new probe.
-const R3 = {
+// Shapes the masker must read as code, shared by the two tests below.
+const MASKER_SHAPES = {
   nonNullDivision: rvView(
     "  return total! / 2 + Number(deleteRelease.isPending) / 3;",
   ),
@@ -9252,12 +9252,20 @@ const R3 = {
 };
 
 test("reused-view-pending: the masker reads a postfix `!` and a keyword property as operands", () => {
-  for (const src of [R3.nonNullDivision, R3.nonNullCompare, R3.keywordProperty])
+  for (const src of [
+    MASKER_SHAPES.nonNullDivision,
+    MASKER_SHAPES.nonNullCompare,
+    MASKER_SHAPES.keywordProperty,
+  ])
     assert.deepEqual(rvReads(src), ["deleteRelease.isPending"], src);
 });
 
 test("reused-view-pending: a CRLF line continuation, a BOM and a column-0 `${` scan clean", () => {
-  for (const src of [R3.crlfContinuation, R3.bom, R3.templateColumnZero])
+  for (const src of [
+    MASKER_SHAPES.crlfContinuation,
+    MASKER_SHAPES.bom,
+    MASKER_SHAPES.templateColumnZero,
+  ])
     assert.deepEqual(
       rvRun(src, [rvEntry()]),
       { violations: [], stale: [], errors: [] },
@@ -9705,4 +9713,18 @@ test("reused-view-pending pins a destructure to a key, never a rename target", (
     "  const { a, parents } = choice;",
   ])
     assert.deepEqual(stale(line, pin("parents", "choice")), [], line);
+});
+
+test("reused-view-pending: the masker reads `of` as a name outside a for-of head", () => {
+  for (const line of [
+    "  const half = of / 2 + Number(deleteRelease.isPending) / 3;",
+    "  return of / 2 + Number(deleteRelease.isPending) / 3;",
+  ])
+    assert.deepEqual(rvReads(rvView(line)), ["deleteRelease.isPending"], line);
+  // After a for-of binding it is the keyword, so a regex follows.
+  for (const line of [
+    "  for (const x of /a.isPending/.exec(s) ?? []) use(x, deleteRelease.isPaused);",
+    "  for (const [a, b] of /a.isPending/.exec(s) ?? []) use(b, deleteRelease.isPaused);",
+  ])
+    assert.deepEqual(rvReads(rvView(line)), ["deleteRelease.isPaused"], line);
 });

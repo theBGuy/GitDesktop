@@ -74,6 +74,7 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { type LocalPrStatus, reloadLocalPrs } from "@/lib/pulls/local";
 import {
+  LOCAL_PR_RECORD_WRITES_FAMILY,
   localPrKey,
   useDeleteLocalPr,
   useLocalPrs,
@@ -470,7 +471,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // change, so another PR's delete never holds this confirm.
   const deleting =
     pendingWriteMatching(
-      usePendingRepoWrites("local-pr", repoPath),
+      usePendingRepoWrites(LOCAL_PR_RECORD_WRITES_FAMILY, repoPath),
       "delete",
       (v: string) => v === confirmDeleteId,
     ) !== undefined;

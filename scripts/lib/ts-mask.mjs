@@ -16,7 +16,11 @@ export const lineOf = (src, index) => src.slice(0, index).split("\n").length;
 /** Punctuation after which an expression starts, so a `/` opens a regex literal
  *  and, in .tsx, a `<` opens a JSX element. */
 export const EXPR_OPENERS = new Set([..."(,=:[!&|?{};+-*%<>~^"]);
-/** Keywords after which an expression starts. */
+/** Keywords after which an expression starts. All but `of` are reserved words in
+ *  a module (`yield` and `await` too, modules being strict), so none can be a
+ *  name; `of` is contextual and `maskNonCode` checks its position. Contextual
+ *  words that never precede an expression here (`async`, `let`, `get`, …) are
+ *  left out on purpose. */
 export const EXPR_KEYWORDS = new Set([
   "return",
   "throw",
@@ -53,6 +57,18 @@ export function maskNonCode(src, jsx) {
   };
   // Reads the already-masked text backwards, so comments and string bodies
   // before `i` can't pose as the previous token.
+  // `of` is a keyword only after a for-of binding (`for (const x of …)`, a `]`
+  // or `}` pattern); anywhere else it is an ordinary name (`of / 2`).
+  const ofIsKeyword = (s) => {
+    let k = s - 1;
+    while (k >= 0 && /\s/.test(out[k])) k--;
+    if (k < 0) return false;
+    if (out[k] === "]" || out[k] === "}") return true;
+    if (!/[\w$]/.test(out[k])) return false;
+    let w = k;
+    while (w > 0 && /[\w$]/.test(out[w - 1])) w--;
+    return !EXPR_KEYWORDS.has(out.slice(w, k + 1).join(""));
+  };
   const exprStartAt = (i) => {
     let k = i - 1;
     while (k >= 0 && /\s/.test(out[k])) k--;
@@ -63,7 +79,9 @@ export function maskNonCode(src, jsx) {
       // A keyword-named property (`size.in / 2`) is an operand, not a keyword;
       // a spread's `...` before a keyword is not a property access.
       if (out[s - 1] === "." && out[s - 2] !== ".") return false;
-      return EXPR_KEYWORDS.has(out.slice(s, k + 1).join(""));
+      const word = out.slice(s, k + 1).join("");
+      if (word === "of") return ofIsKeyword(s);
+      return EXPR_KEYWORDS.has(word);
     }
     // A run of `!` hard after an operand (a name, a closing bracket, a
     // template's backtick) is TS's postfix non-null assertion (`total! / 2`,

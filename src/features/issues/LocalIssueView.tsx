@@ -56,6 +56,7 @@ import {
 } from "@/lib/git/queries";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
+  LOCAL_ISSUE_WRITES_FAMILY,
   useDeleteLocalIssue,
   useLocalIssues,
   useUpdateLocalIssue,
@@ -81,7 +82,7 @@ export function LocalIssueView({
   const del = useDeleteLocalIssue(repoPath);
   // Every local-issue write in flight, read per issue below: this view outlives an
   // issue switch, and its observers would hold whichever issue is shown next.
-  const localWrites = usePendingRepoWrites("local-issue", repoPath);
+  const localWrites = usePendingRepoWrites(LOCAL_ISSUE_WRITES_FAMILY, repoPath);
   const selectIssue = useUiStore((s) => s.selectIssue);
   const selectedIssue = useUiStore((s) => s.selectedIssue);
   const ghStatus = useForgeStatus(repoPath);

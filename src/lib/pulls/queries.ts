@@ -45,6 +45,11 @@ export function useLocalPrs(repo: string) {
   return useQuery(localPrsOptions(repo));
 }
 
+/** Filter prefix for every local-PR RECORD write (`[family, op, repo]`), the
+ *  family a view reads its pending writes back from. Distinct from the git-side
+ *  local-PR writes' `LOCAL_PR_WRITES_KEY` ("local-pr-write"). */
+export const LOCAL_PR_RECORD_WRITES_FAMILY = "local-pr";
+
 /** Pinned to `op` + repo, so a repo switch mid-flight detaches the write and the
  *  newly-live repo's controls don't read it as busy (gd-conventions). The detached
  *  observer goes idle, so callers never rely on `isPending` alone for re-entry
@@ -56,7 +61,7 @@ function useLocalPrMutation<TArgs, TData>(
 ) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationKey: ["local-pr", op, repo],
+    mutationKey: [LOCAL_PR_RECORD_WRITES_FAMILY, op, repo],
     mutationFn: fn,
     // Local PR write — never park it offline.
     networkMode: "always",

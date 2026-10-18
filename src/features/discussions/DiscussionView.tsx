@@ -423,15 +423,13 @@ export function DiscussionView({
   const reopenSuffix =
     staleSuffix ||
     (reopening
-      ? ` — ${pendingItemReason(reopening.paused, ACT_PENDING_REASON)}`
+      ? ` — ${pendingItemReason(reopening.paused, "reopening…")}`
       : "") ||
     draftSuffix;
   // Close also holds offline, which outranks the draft promise the same way.
   const closeSuffix =
     staleSuffix ||
-    (closing
-      ? ` — ${pendingItemReason(closing.paused, ACT_PENDING_REASON)}`
-      : "") ||
+    (closing ? ` — ${pendingItemReason(closing.paused, "closing…")}` : "") ||
     (offlineHold ? ` — ${OFFLINE_ITEM_REASON}` : "") ||
     draftSuffix;
   // Lock and unlock hold rather than park, like close: a parked one would change

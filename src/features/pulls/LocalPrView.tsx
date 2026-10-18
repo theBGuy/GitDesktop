@@ -79,7 +79,11 @@ import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
 import type { PrSection } from "@/lib/pulls/pr-section";
-import { useLocalPrs, useUpdateLocalPr } from "@/lib/pulls/queries";
+import {
+  LOCAL_PR_RECORD_WRITES_FAMILY,
+  useLocalPrs,
+  useUpdateLocalPr,
+} from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -146,7 +150,10 @@ export function LocalPrView({
   const runningUpdate = pendingWriteOfKind(localWrites, "update-from");
   // The record-store writes, read per PR below: this view outlives a PR switch,
   // and its observers would hold whichever PR is shown next.
-  const storeWrites = usePendingRepoWrites("local-pr", repoPath);
+  const storeWrites = usePendingRepoWrites(
+    LOCAL_PR_RECORD_WRITES_FAMILY,
+    repoPath,
+  );
   const recovery = useStashReapplyRecovery(repoPath);
   const status = useRepoStatus(repoPath);
   const selectedPr = useUiStore((s) => s.selectedPr);
