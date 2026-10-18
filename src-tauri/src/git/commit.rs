@@ -4,7 +4,7 @@ use crate::error::{AppError, AppResult};
 use crate::git::history::{parse_commit_log, LOG_FORMAT};
 use crate::git::runner::{
     acquire_repo_lock, holder_label, run_git, run_git_config_write_held, run_git_mutating_raw,
-    run_git_raw, run_git_raw_index_retry, with_config_write_lock, DEFAULT_TIMEOUT,
+    run_git_raw, run_git_raw_index_retry, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
     LOCK_WAIT_TIMEOUT,
 };
 use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
@@ -482,6 +482,9 @@ pub(crate) async fn git_undo_commit_core(
         return Ok(());
     }
     let head_oid = head.unwrap_or_default();
+    // What the root arm deletes: the ref HEAD named under this hold, or `HEAD` itself
+    // when unborn, where git's delete is a no-op.
+    let mut target = "HEAD".to_string();
     if !head_oid.is_empty() {
         // The raw object, not `rev-list --parents`: a shallow graft hides the parent
         // line from traversal but not from the commit itself (measured, git 2.51.1).
@@ -525,18 +528,21 @@ pub(crate) async fn git_undo_commit_core(
                 stderr: attached.full_failure_text(),
             });
         }
+        target = attached.stdout_lossy().trim().to_string();
     }
-    // The old value is passed even unpinned, so a branch that just gained a commit
-    // from another process is never deleted.
-    let mut args = vec!["update-ref", "-d", "HEAD"];
-    if !head_oid.is_empty() {
-        args.push(&head_oid);
-    }
-    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
+    // The old value (passed even unpinned) means a branch that just gained a commit is
+    // never deleted; naming the ref means another process's switch can't redirect it.
+    let out = if head_oid.is_empty() {
+        run_git_raw_index_retry(&repo_path, &["update-ref", "-d", "HEAD"], DEFAULT_TIMEOUT).await?
+    } else {
+        delete_root_ref(&repo_path, &target, &head_oid).await?
+    };
     if out.code != 0 {
-        // A failed compare-and-swap reads as moved only when HEAD really moved; a
+        // A failed compare-and-swap reads as moved only when that ref really moved; a
         // stale ref `.lock` keeps git's own error.
-        if !head_oid.is_empty() && read_head().await?.as_deref() != Some(head_oid.as_str()) {
+        if !head_oid.is_empty()
+            && ref_oid(&repo_path, &target).await?.as_deref() != Some(head_oid.as_str())
+        {
             return Err(moved());
         }
         return Err(AppError::Git {
@@ -545,6 +551,29 @@ pub(crate) async fn git_undo_commit_core(
         });
     }
     Ok(())
+}
+
+/// The root undo's mutation: deletes `full_ref` only while it still points at `oid`.
+/// Never `HEAD`: `update-ref` dereferences a symbolic HEAD when it runs, so a switch
+/// that lands after the caller's checks would redirect the delete to another branch.
+async fn delete_root_ref(repo_path: &str, full_ref: &str, oid: &str) -> AppResult<GitOutput> {
+    run_git_raw_index_retry(
+        repo_path,
+        &["update-ref", "-d", full_ref, oid],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+}
+
+/// The oid `full_ref` points at, `None` when it no longer resolves.
+async fn ref_oid(repo_path: &str, full_ref: &str) -> AppResult<Option<String>> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "--quiet", full_ref],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok((out.code == 0).then(|| out.stdout_lossy().trim().to_string()))
 }
 
 #[tauri::command]
@@ -1292,5 +1321,32 @@ mod tests {
             ExpectedRef::Branch("feature/x".into())
         );
         assert!(ExpectedRef::from_wire(Some("-x".into())).is_err());
+    }
+
+    /// The root delete names its ref: with HEAD symbolic to another branch at the same
+    /// root commit, only the named branch goes, and HEAD and its branch are untouched.
+    /// `HEAD` there would delete whatever branch HEAD names when update-ref runs.
+    #[tokio::test]
+    async fn root_delete_removes_the_named_branch_not_the_one_head_names() {
+        let (dir, repo) = amend_fixture("gd-undo-root-named-", &[]).await;
+        let root = raw_commit(&dir, &repo, "a.txt", "A").await;
+        run(&repo, &["branch", "checked"]).await;
+        run(&repo, &["switch", "-qc", "switched-to"]).await;
+
+        let out = delete_root_ref(&repo, "refs/heads/checked", &root)
+            .await
+            .unwrap();
+
+        assert_eq!(out.code, 0, "{}", out.full_failure_text());
+        assert_eq!(ref_oid(&repo, "refs/heads/checked").await.unwrap(), None);
+        assert_eq!(
+            ref_oid(&repo, "refs/heads/switched-to").await.unwrap(),
+            Some(root),
+            "the branch HEAD names survives"
+        );
+        assert_eq!(
+            run(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+            "refs/heads/switched-to"
+        );
     }
 }
