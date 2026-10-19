@@ -1,9 +1,9 @@
-// Pins the JSX-less typescript and TS/JS params-comment transforms
+// Pins the JSX-less typescript and TS/JS comment/regex transforms
 // (src/features/diff/hljs-ts-no-jsx.ts) on both highlight.js engines: lowlight's
 // singleton (@git-diff-view/core) and a `lib/core` instance standing in for
-// the markdown singleton. Each fix arm runs beside a negative control proving
-// the STOCK grammar still collapses on the same buffer, so an hljs bump that
-// moves either mode out from under its structural predicate fails loudly.
+// the markdown singleton. Comment fixes have stock-collapse negative controls;
+// regex and division controls pin closed spans. Mode counts make an hljs bump
+// that moves a mode out from under its structural predicate fail loudly.
 //
 // The imports reach straight into `src/` under Node's type stripping, so the
 // module must stay free of aliased and app imports. Static imports are stdlib
@@ -104,6 +104,36 @@ const JS_PARAMS_REPRO = `function f({ // a's
 const y = 1;
 `;
 const JS_PARAMS_CONTROL = JS_PARAMS_REPRO.replace("a's", "as");
+const TEMPLATE_COMMENT = "const s = `${ /* it's */ a }`;\nconst x = 1;\n";
+const TEMPLATE_COMMENT_CONTROL = TEMPLATE_COMMENT.replace("it's", "its");
+const PARAMS_REGEX_CLASS =
+  "function f(x = {pattern: /[/*]/}) {}\nconst y = 1;\n";
+const PARAMS_REGEX_URL =
+  String.raw`function f(x = {pattern: /https?:\/\//}) {}` + "\nconst y = 1;\n";
+const PARAMS_DIVISION = "function f(x = {value: a / b / c}) {}\nconst y = 1;\n";
+const TEMPLATE_REGEX_CLASS = "const s = `${ /[/*]/ }`;\nconst y = 1;\n";
+const TEMPLATE_REGEX_URL = "const s = `${ /https?:\\/\\// }`;\nconst y = 1;\n";
+const TEMPLATE_DIVISION = "const s = `${ a / b / c }`;\nconst y = 1;\n";
+const TEMPLATE_BRACE_DIVISION =
+  "const s = `${ {value: a / b / c} }`;\nconst y = 1;\n";
+
+const TS_COMMENT_CASES = [
+  [TS_PARAMS_REPRO, "JSDoc"],
+  [TS_PARAMS_LINE, "line comment"],
+  [TS_FN_DECL, "function declaration"],
+  [TS_BRACE_IN_COMMENT, "brace in comment"],
+];
+const REGEX_CASES = [
+  [PARAMS_REGEX_CLASS, "params regex character class"],
+  [PARAMS_REGEX_URL, "params URL regex"],
+  [TEMPLATE_REGEX_CLASS, "substitution regex character class"],
+  [TEMPLATE_REGEX_URL, "substitution URL regex"],
+];
+const DIVISION_CASES = [
+  [PARAMS_DIVISION, "params double division"],
+  [TEMPLATE_DIVISION, "substitution double division"],
+  [TEMPLATE_BRACE_DIVISION, "substitution brace double division"],
+];
 
 const TRIGGER_CONTROLS = [
   ["typescript", TS_PARAMS_CONTROL, "no apostrophe"],
@@ -194,8 +224,21 @@ function assertParamsFixed(highlight, buffer, control, label) {
 }
 
 function assertStockParams(run) {
-  assertParamsCollapsed(run("typescript"), TS_PARAMS_REPRO, "stock TS params");
+  for (const [buffer, label] of TS_COMMENT_CASES) {
+    assertParamsCollapsed(run("typescript"), buffer, `stock ${label}`);
+  }
+  assertParamsCollapsed(run("tsx"), TS_PARAMS_REPRO, "stock tsx params");
   assertParamsCollapsed(run("javascript"), JS_PARAMS_REPRO, "stock JS params");
+  for (const language of ["typescript", "javascript", "tsx"]) {
+    assertParamsCollapsed(
+      run(language),
+      TEMPLATE_COMMENT,
+      `stock ${language} substitution comment`,
+    );
+    for (const [buffer, label] of [...REGEX_CASES, ...DIVISION_CASES]) {
+      assertParamsClosed(run(language)(buffer), `stock ${language} ${label}`);
+    }
+  }
   for (const [language, buffer, label] of TRIGGER_CONTROLS) {
     assertParamsClosed(run(language)(buffer), `stock ${label}`);
   }
@@ -203,20 +246,36 @@ function assertStockParams(run) {
 }
 
 function assertFixedParams(run, unchanged) {
-  for (const [buffer, label] of [
-    [TS_PARAMS_REPRO, "JSDoc"],
-    [TS_PARAMS_LINE, "line comment"],
-    [TS_FN_DECL, "function declaration"],
-    [TS_BRACE_IN_COMMENT, "brace in comment"],
-  ]) {
+  for (const [buffer, label] of TS_COMMENT_CASES) {
     assertParamsFixed(run("typescript"), buffer, TS_PARAMS_CONTROL, label);
   }
+  assertParamsFixed(run("tsx"), TS_PARAMS_REPRO, TS_PARAMS_CONTROL, "tsx");
   assertParamsFixed(
     run("javascript"),
     JS_PARAMS_REPRO,
     JS_PARAMS_CONTROL,
     "JS destructuring",
   );
+  for (const language of ["typescript", "javascript", "tsx"]) {
+    assertParamsFixed(
+      run(language),
+      TEMPLATE_COMMENT,
+      TEMPLATE_COMMENT_CONTROL,
+      `${language} substitution comment`,
+    );
+    for (const [buffer, label] of REGEX_CASES) {
+      const html = run(language)(buffer);
+      assertParamsClosed(html, `${language} ${label}`);
+      assert.ok(
+        html.includes('class="hljs-regexp"'),
+        `${label}: regex colored`,
+      );
+      assert.ok(!html.includes('class="hljs-comment"'), `${label}: no comment`);
+    }
+    for (const [buffer, label] of DIVISION_CASES) {
+      assertParamsClosed(run(language)(buffer), `${language} ${label}`);
+    }
+  }
   for (const [language, buffer, label] of TRIGGER_CONTROLS) {
     const html = run(language)(buffer);
     assertParamsClosed(html, `spliced ${label}`);
@@ -229,13 +288,13 @@ function assertFixedParams(run, unchanged) {
   assert.equal(run("typescript")(CONTROL), unchanged[1]);
 }
 
-test("params brace shape: one splice per stock grammar, then idempotent", {
+test("brace/subst shape: four inserted modes per grammar, then idempotent", {
   skip,
 }, () => {
   const hljs = hljsCore.newInstance();
   for (const stock of [stockTypescript, stockJavascript]) {
     const lang = stock(hljs);
-    assert.equal(spliceParamsComment(lang), 1);
+    assert.equal(spliceParamsComment(lang), 4);
     assert.equal(spliceParamsComment(lang), 0);
     assert.ok(!isJsParamsComment(lang));
   }

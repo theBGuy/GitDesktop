@@ -8,15 +8,15 @@ import typescript from "highlight.js/lib/languages/typescript";
  * `</T` appears ANYWHERE later in the input (strings included), so one generic
  * plus a later `"</Title>"` turns the rest of a `.ts` file into unhighlighted
  * xml text. A `.ts` file can't contain JSX, so dropping the mode loses nothing.
- * TypeScript, tsx, and javascript also splice COMMENT into their shared params
- * brace mode so apostrophes in comments leave subsequent code tokenized.
+ * Each typescript, tsx, and javascript grammar also handles comments and regex
+ * literals in its params brace and template-substitution modes.
  *
  * Must stay free of aliased and app imports:
  * scripts/ts-no-jsx-highlight.test.mjs loads it directly under Node's type
  * stripping, where `@/` paths don't resolve.
  */
 
-// A registry symbol so the mark survives HMR re-evaluation of this module.
+// Registry symbols keep both grammar marks stable across HMR re-evaluation.
 const TS_NO_JSX = Symbol.for("gd.hljs.tsNoJsx");
 const JS_PARAMS_COMMENT = Symbol.for("gd.hljs.jsParamsComment");
 
@@ -57,16 +57,18 @@ export function stripJsxModes(root: Mode): number {
 }
 
 /**
- * Splice the grammar's COMMENT mode into each `{`/`}` pairing mode that lacks
- * one: params and template substitutions share that mode, and without COMMENT
- * a comment's apostrophe there opens a string that ignoreIllegals runs to EOF.
- * Returns the count spliced (0 when the shape moved; the pin test catches that).
- * Regex and JSX modes stay out, as in the grammar's own parens mode, so a regex
- * literal or JSX text holding `//` or `/*` in these braces reads as a comment.
+ * Splice COMMENT then regex into brace-pairing and template-substitution modes:
+ * quotes or backticks in unrecognized comments can leave enclosing spans open
+ * even after a later quote closes the string when ignoreIllegals is enabled.
+ * Returns inserted-mode count; 0 means already spliced, target shape moved,
+ * or no comment wrapper or matching regex mode found. Pins catch shape drift.
+ * Two divisions on one line may color as regex; JSX stays out, so JSX text
+ * holding `//` or `/*` in these contexts can still open a comment.
  */
 export function spliceParamsComment(root: Mode): number {
-  const braces: Mode[] = [];
+  const targets: Mode[] = [];
   let comment: Mode | undefined;
+  let regexp: Mode | undefined;
   const seen = new Set<object>();
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) {
@@ -76,15 +78,20 @@ export function spliceParamsComment(root: Mode): number {
     if (!node || typeof node !== "object" || seen.has(node)) return;
     seen.add(node);
     const mode = node as Mode;
-    if (
+    const isBrace =
       mode.begin instanceof RegExp &&
       mode.begin.source === "\\{" &&
       mode.end instanceof RegExp &&
       mode.end.source === "\\}" &&
       Array.isArray(mode.contains) &&
-      mode.contains[0] === "self"
-    ) {
-      braces.push(mode);
+      mode.contains[0] === "self";
+    const isSubst =
+      (mode.className === "subst" || mode.scope === "subst") &&
+      mode.begin === "\\$\\{" &&
+      mode.end === "\\}" &&
+      Array.isArray(mode.contains);
+    if (isBrace || isSubst) {
+      targets.push(mode);
     }
     if (
       !comment &&
@@ -93,27 +100,48 @@ export function spliceParamsComment(root: Mode): number {
     ) {
       comment = mode;
     }
+    if (
+      !regexp &&
+      (mode.className === "regexp" || mode.scope === "regexp") &&
+      mode.begin instanceof RegExp &&
+      mode.begin.source === /\/(?=[^/\n]*\/)/.source &&
+      mode.end instanceof RegExp &&
+      mode.end.source === /\/[gimuy]*/.source &&
+      Array.isArray(mode.contains)
+    ) {
+      regexp = mode;
+    }
     visit(mode.contains);
     visit(mode.variants);
     visit(mode.starts);
   };
   visit(root);
-  if (!comment) return 0;
+  if (!comment || !regexp) return 0;
   let spliced = 0;
-  for (const mode of braces) {
-    const contains = mode.contains;
+  for (const mode of targets) {
+    if (!mode.contains) continue;
+    const contains = [...mode.contains];
+    let commentIndex = contains.findIndex(
+      (child) =>
+        typeof child === "object" &&
+        (child.className === "comment" || child.scope === "comment"),
+    );
+    if (commentIndex === -1) {
+      commentIndex = contains[0] === "self" ? 1 : 0;
+      contains.splice(commentIndex, 0, comment);
+      spliced++;
+    }
     if (
-      !contains ||
-      contains.some(
+      !contains.some(
         (child) =>
           typeof child === "object" &&
-          (child.className === "comment" || child.scope === "comment"),
+          (child.className === "regexp" || child.scope === "regexp"),
       )
     ) {
-      continue;
+      contains.splice(commentIndex + 1, 0, regexp);
+      spliced++;
     }
-    mode.contains = [contains[0], comment, ...contains.slice(1)];
-    spliced++;
+    mode.contains = contains;
   }
   return spliced;
 }
@@ -136,8 +164,8 @@ export function isJsParamsComment(lang: Language | undefined): boolean {
   return !!lang && JS_PARAMS_COMMENT in lang;
 }
 
-/** The stock typescript minus JSX and its `tsx` alias, plus the params-comment
- *  splice; that id belongs to {@link typescriptWithJsx}. Failure keeps stock. */
+/** Stock typescript with the comment/regex splice, minus JSX and its `tsx`
+ *  alias; `tsx` belongs to {@link typescriptWithJsx}. Failure keeps stock. */
 export const typescriptNoJsx: LanguageFn = (hljs) => {
   try {
     const lang = typescript(hljs);
@@ -185,7 +213,7 @@ export function isTsNoJsx(lang: Language | undefined): boolean {
 /**
  * Install on an engine exposing only `register` (the diff's lowlight
  * singleton), once per engine: a later custom grammar the user registers under
- * any id must win, so this never re-runs over it.
+ * any of these ids must win, so this never re-runs over it.
  */
 export function installTsNoJsx(engine: { register: Register }): void {
   try {
