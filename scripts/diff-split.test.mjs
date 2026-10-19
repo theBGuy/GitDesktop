@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  binaryRowPaths,
   diffSectionStats,
   sectionFilePath,
+  sectionIsBinary,
   splitUnifiedDiff,
 } from "../src/lib/git/diff-split.ts";
 
@@ -495,4 +497,227 @@ test("a headerless patch with a usable new-side path is retained", () => {
   assert.deepEqual(diffSectionStats(diff), [
     { path: "loose.txt", added: 1, deleted: 1, isBinary: false },
   ]);
+});
+
+// -------------------------------------------------------------- binaryMarkers
+
+const binarySections = [
+  {
+    name: "a modified binary",
+    path: "img/logo.png",
+    section:
+      "diff --git a/img/logo.png b/img/logo.png\n" +
+      "index 1111111..2222222 100644\n" +
+      "Binary files a/img/logo.png and b/img/logo.png differ\n",
+  },
+  {
+    name: "an added binary",
+    path: "img/new.png",
+    section:
+      "diff --git a/img/new.png b/img/new.png\n" +
+      "new file mode 100644\n" +
+      "index 0000000..3333333\n" +
+      "Binary files /dev/null and b/img/new.png differ\n",
+  },
+  {
+    name: "a deleted binary, keyed by its header's b-side name",
+    path: "img/old.png",
+    section:
+      "diff --git a/img/old.png b/img/old.png\n" +
+      "deleted file mode 100644\n" +
+      "index 4444444..0000000\n" +
+      "Binary files a/img/old.png and /dev/null differ\n",
+  },
+  {
+    name: "a renamed binary without hunks, keyed by its new path",
+    path: "img/after.png",
+    section:
+      "diff --git a/img/before.png b/img/after.png\n" +
+      "similarity index 90%\n" +
+      "rename from img/before.png\n" +
+      "rename to img/after.png\n" +
+      "index 5555555..6666666 100644\n" +
+      "Binary files a/img/before.png and b/img/after.png differ\n",
+  },
+  {
+    name: "a C-quoted binary, keyed by its decoded path",
+    path: "img/café.png",
+    section:
+      'diff --git "a/img/caf\\303\\251.png" "b/img/caf\\303\\251.png"\n' +
+      "index 7777777..8888888 100644\n" +
+      'Binary files "a/img/caf\\303\\251.png" and "b/img/caf\\303\\251.png" differ\n',
+  },
+];
+
+// Text diffs whose hunk CONTENT mentions binary files: every hunk line carries
+// its +/-/space prefix, so none of them may read as git's marker.
+const contentMentions = [
+  {
+    name: "a context line",
+    path: "docs/context.md",
+    added: 1,
+    deleted: 1,
+    section:
+      "diff --git a/docs/context.md b/docs/context.md\n" +
+      "index 1111111..2222222 100644\n" +
+      "--- a/docs/context.md\n" +
+      "+++ b/docs/context.md\n" +
+      "@@ -1,2 +1,2 @@\n" +
+      " Binary files a and b differ\n" +
+      "-old\n+new\n",
+  },
+  {
+    name: "an added line",
+    path: "docs/added.md",
+    added: 1,
+    deleted: 0,
+    section:
+      "diff --git a/docs/added.md b/docs/added.md\n" +
+      "index 1111111..2222222 100644\n" +
+      "--- a/docs/added.md\n" +
+      "+++ b/docs/added.md\n" +
+      "@@ -1 +1,2 @@\n" +
+      " intro\n" +
+      "+Binary files a/x and b/x differ\n",
+  },
+  {
+    name: "a deleted line",
+    path: "docs/deleted.md",
+    added: 0,
+    deleted: 1,
+    section:
+      "diff --git a/docs/deleted.md b/docs/deleted.md\n" +
+      "index 1111111..2222222 100644\n" +
+      "--- a/docs/deleted.md\n" +
+      "+++ b/docs/deleted.md\n" +
+      "@@ -1,2 +1 @@\n" +
+      " intro\n" +
+      "-Binary files a/x and b/x differ\n",
+  },
+];
+
+test("git's binary marker reads as binary on every section shape", () => {
+  for (const { name, path, section } of binarySections) {
+    assert.equal(sectionIsBinary(section), true, name);
+    assert.deepEqual([...splitUnifiedDiff(section).keys()], [path], name);
+  }
+  // The suite's existing quoting fixtures with a marker read the same way.
+  for (const { name, section } of shapes.filter(({ section }) =>
+    /(?<![^\n])Binary files /.test(section),
+  ))
+    assert.equal(sectionIsBinary(section), true, name);
+});
+
+test("a text diff whose content mentions binary files is not binary", () => {
+  for (const { name, section } of contentMentions) {
+    // The trap: the loose substring check matches this content.
+    assert.equal(section.includes("Binary files "), true, name);
+    assert.equal(sectionIsBinary(section), false, name);
+  }
+});
+
+test("sections without the marker are not binary", () => {
+  for (const path of [
+    "src/plain.txt",
+    "src/renamed.txt",
+    "bin/a b/run.sh",
+    "a b/empty.txt",
+  ]) {
+    const { section } = shapes.find((shape) => shape.path === path);
+    assert.equal(sectionIsBinary(section), false, path);
+  }
+  assert.equal(sectionIsBinary(""), false);
+});
+
+test("per-file stats flag the marker section and only it", () => {
+  const diff =
+    binarySections[0].section +
+    contentMentions.map(({ section }) => section).join("");
+  assert.deepEqual(diffSectionStats(diff), [
+    { path: "img/logo.png", added: 0, deleted: 0, isBinary: true },
+    ...contentMentions.map(({ path, added, deleted }) => ({
+      path,
+      added,
+      deleted,
+      isBinary: false,
+    })),
+  ]);
+});
+
+// ---------------------------------------------------------------- binaryRows
+
+const rowDiff =
+  binarySections.map(({ section }) => section).join("") +
+  contentMentions.map(({ section }) => section).join("") +
+  ["src/renamed.txt", "bin/a b/run.sh", "a b/empty.txt", "img/a b/logo.png"]
+    .map((path) => shapes.find((shape) => shape.path === path).section)
+    .join("");
+
+test("rows flag binary only at 0/0 forge counts over a marker section", () => {
+  const sections = splitUnifiedDiff(rowDiff);
+  const files = [
+    ...binarySections.map(({ path }) => ({ path, additions: 0, deletions: 0 })),
+    // A spaced binary path from the quoting fixtures.
+    { path: "img/a b/logo.png", additions: 0, deletions: 0 },
+    // Text rows keep their counts.
+    ...contentMentions.map(({ path, added, deleted }) => ({
+      path,
+      additions: added,
+      deletions: deleted,
+    })),
+    // Pure rename, mode-only change and empty new file: 0/0, no marker.
+    { path: "src/renamed.txt", additions: 0, deletions: 0 },
+    { path: "bin/a b/run.sh", additions: 0, deletions: 0 },
+    { path: "a b/empty.txt", additions: 0, deletions: 0 },
+    // A row the (truncated) diff has no section for.
+    { path: "img/missing.png", additions: 0, deletions: 0 },
+  ];
+  assert.deepEqual(
+    [...binaryRowPaths(files, sections)].sort(),
+    [...binarySections.map(({ path }) => path), "img/a b/logo.png"].sort(),
+  );
+});
+
+test("a marker section under nonzero forge counts keeps the counts", () => {
+  // GitHub's too-large fallback writes the marker for huge text files too, and
+  // a moved head can pair new counts with an old diff.
+  const sections = splitUnifiedDiff(binarySections[0].section);
+  for (const counts of [
+    { additions: 1200, deletions: 0 },
+    { additions: 0, deletions: 3 },
+    { additions: 5, deletions: 5 },
+  ])
+    assert.deepEqual(
+      [...binaryRowPaths([{ path: "img/logo.png", ...counts }], sections)],
+      [],
+      JSON.stringify(counts),
+    );
+});
+
+test("a one-file binary PR flags its only row", () => {
+  const { path, section } = binarySections[0];
+  assert.deepEqual(
+    [
+      ...binaryRowPaths(
+        [{ path, additions: 0, deletions: 0 }],
+        splitUnifiedDiff(section),
+      ),
+    ],
+    [path],
+  );
+});
+
+test("empty files or an empty section map flag nothing", () => {
+  const sections = splitUnifiedDiff(rowDiff);
+  assert.deepEqual([...binaryRowPaths([], sections)], []);
+  assert.deepEqual([...binaryRowPaths([], new Map())], []);
+  assert.deepEqual(
+    [
+      ...binaryRowPaths(
+        [{ path: "img/logo.png", additions: 0, deletions: 0 }],
+        splitUnifiedDiff(""),
+      ),
+    ],
+    [],
+  );
 });

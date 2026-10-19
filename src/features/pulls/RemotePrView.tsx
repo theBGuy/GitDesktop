@@ -115,7 +115,11 @@ import {
   type RemotePrResolveHandle,
 } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
-import { splitUnifiedDiff } from "@/lib/git/diff-split";
+import {
+  binaryRowPaths,
+  sectionIsBinary,
+  splitUnifiedDiff,
+} from "@/lib/git/diff-split";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
   forgeFeatureReady,
@@ -2352,6 +2356,16 @@ export function RemotePrView({
     () => splitUnifiedDiff(prDiff.data ?? ""),
     [prDiff.data],
   );
+  // No flag from a previous PR's placeholder diff OR placeholder details: both
+  // reads key on shownNumber but settle independently, and showsLoadingFrame
+  // hides the details placeholder only in the hold's loading phase.
+  const binaryPaths = useMemo(
+    () =>
+      prDiff.isPlaceholderData || detailsPlaceholder
+        ? new Set<string>()
+        : binaryRowPaths(pr?.files ?? [], fileSections),
+    [prDiff.isPlaceholderData, detailsPlaceholder, pr?.files, fileSections],
+  );
 
   // Reset per-PR view state when a different PR is shown — a render-time state
   // adjustment, not an effect. Keyed on the lens-bearing identity, not the number:
@@ -2965,9 +2979,7 @@ export function RemotePrView({
       ? {
           filePath: effectivePath,
           text: fileSections.get(effectivePath) ?? "",
-          isBinary: (fileSections.get(effectivePath) ?? "").includes(
-            "Binary files ",
-          ),
+          isBinary: sectionIsBinary(fileSections.get(effectivePath) ?? ""),
           isTruncated: false,
         }
       : undefined;
@@ -4404,6 +4416,7 @@ export function RemotePrView({
           {!filesMissing && (
             <PrFilesPane
               files={pr.files}
+              binaryPaths={binaryPaths}
               effectivePath={effectivePath}
               onSelectPath={setSelectedPath}
               fileDiff={fileDiff}

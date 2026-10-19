@@ -426,6 +426,16 @@ const RAW_COPY_ICON_BUTTON_RE =
 // the two duplicates actually took, not the whole class.
 const KIND_BADGE_DEF_RE = /\bconst\s+KIND_BADGE\b/;
 
+// A git binary-marker check spelled out: a string literal that IS "Binary
+// files" (optional `\n` prefix or trailing space, any quote kind) or a regex
+// literal of just that; prose containing the words mid-string must not match.
+// Not read (review concerns): "\r\n" prefixes, regexes with more pattern around
+// the words (/^Binary files .* differ$/m), RegExp() strings, split literals, and
+// a second loose literal in an allowlisted file. A UI label that is exactly
+// "Binary files" trips it: reword or allowlist it.
+const BINARY_MARKER_RE =
+  /(["'`])(\\n)?Binary files ?\1|\/(\\n|\^)?Binary files ?\//;
+
 // `<Activity` as a JSX open tag. The lookahead is what separates it from the
 // app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
 // comment stripping is what keeps the many prose mentions of `<Activity>` clean.
@@ -5098,6 +5108,19 @@ export const CHECKS = [
     allowlist: [],
     message:
       "the change-kind letter, screen-reader label, and colour token come from KIND_BADGE in src/lib/git/change-kind-badge.ts — a second definition drifts one surface at a time, so the Changes list and the commit dialog's staged summary stop agreeing on the same file; import it rather than re-spelling the table",
+  },
+  {
+    name: "binary-marker-single-source",
+    // The helper module IS the idiom; everything else imports sectionIsBinary.
+    appliesTo: (file) => file !== "src/lib/git/diff-split.ts",
+    scan: perLine(BINARY_MARKER_RE),
+    allowlist: [
+      // Anchored already; adopting sectionIsBinary is a recorded follow-up
+      // (src/lib/ai was fenced for a sibling lane when the helper landed).
+      "src/lib/ai/prompt.ts",
+    ],
+    message:
+      'the git binary-marker check lives in sectionIsBinary (src/lib/git/diff-split.ts) — a re-spelled "Binary files" literal or regex re-mints the loose-match class (a text diff whose CONTENT mentions binary files read as binary, shipped in v0.13.5) or drifts from the line-anchored form one site at a time; import the helper',
   },
   {
     name: "lone-activity-boundary",

@@ -18,7 +18,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
-import { splitUnifiedDiff } from "@/lib/git/diff-split";
+import { sectionIsBinary, splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
   useCommitComments,
   useObjectsPresent,
@@ -98,7 +98,7 @@ export function PrCommitDetail({
         path,
         section,
         ...countChanges(section),
-        isBinary: section.includes("Binary files "),
+        isBinary: sectionIsBinary(section),
       })),
     [sections],
   );

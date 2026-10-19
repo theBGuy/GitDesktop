@@ -170,6 +170,36 @@ export function sectionFilePath(section: string): string | undefined {
   );
 }
 
+/** True when a diff section carries git's own binary marker at line start —
+ *  hunk body lines are prefixed (+/-/space), so content can't match. A
+ *  section never STARTS with the marker (every section opens with
+ *  `diff --git`, or `---`/`+++` for a synthesized one), so the \n-prefixed
+ *  literal needs no start-of-string arm — and it must stay this literal:
+ *  diffSectionStats' behavior is pinned on it. */
+export function sectionIsBinary(section: string): boolean {
+  return section.includes("\nBinary files ");
+}
+
+/** The paths of the rows the PR Files list may flag binary: forge counts 0/0
+ *  (forges report 0/0 for binaries; nonzero counts mean a huge-text fallback
+ *  marker or a count/diff skew) AND the row's section carries the marker.
+ *  Keyed exactly as the pane keys sections (the same map). */
+export function binaryRowPaths(
+  files: ReadonlyArray<{ path: string; additions: number; deletions: number }>,
+  sections: ReadonlyMap<string, string>,
+): ReadonlySet<string> {
+  const paths = new Set<string>();
+  for (const file of files) {
+    if (
+      file.additions === 0 &&
+      file.deletions === 0 &&
+      sectionIsBinary(sections.get(file.path) ?? "")
+    )
+      paths.add(file.path);
+  }
+  return paths;
+}
+
 /**
  * Per-file `+added -deleted` counts read off a unified diff that arrived without
  * a file list. Paths come from `sectionFilePath`, the decoder `splitUnifiedDiff`
@@ -198,7 +228,7 @@ export function diffSectionStats(diff: string): DiffStatEntry[] {
         path,
         added,
         deleted,
-        isBinary: part.includes("\nBinary files "),
+        isBinary: sectionIsBinary(part),
       });
     } catch {
       // One malformed section must never cost the rest of the list.
