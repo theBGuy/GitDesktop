@@ -126,6 +126,7 @@ const TS_COMMENT_CASES = [
   [TS_FN_DECL, "function declaration"],
   [TS_BRACE_IN_COMMENT, "brace in comment"],
 ];
+// Optional row fields list expected comments and whether stock collapses.
 const REGEX_CASES = [
   [PARAMS_REGEX_CLASS, "params regex character class"],
   [PARAMS_REGEX_URL, "params URL regex"],
@@ -193,6 +194,70 @@ const REGEX_CASES = [
       " }`;\nconst x = 1;\n",
     "substitution URL regex in arrow callback",
   ],
+  [
+    "function f(x = {pattern: /* note */ /[/*]/}) {}\nconst y = 1;\n",
+    "params block comment before regex",
+    ["/* note */"],
+  ],
+  [
+    "function f(x = {pattern: // note\n  /[/*]/}) {}\nconst y = 1;\n",
+    "params line comment before regex",
+    ["// note"],
+  ],
+  [
+    "function f(x = {pattern: /* a */ /* b */ /[/*]/}) {}\nconst y = 1;\n",
+    "params consecutive block comments before regex",
+    ["/* a */", "/* b */"],
+  ],
+  [
+    "function f(x = {pattern: /* it's */ /[/*]/}) {}\nconst y = 1;\n",
+    "params apostrophe comment before regex",
+    ["/* it's */"],
+    true,
+  ],
+  [
+    "const s = `${ /* c */ /[/*]/ }`;\nconst x = 1;\n",
+    "substitution block comment before regex",
+    ["/* c */"],
+  ],
+  [
+    "const s = `${ a ? /* c */ /[/*]/ : null }`;\nconst x = 1;\n",
+    "substitution conditional comment before regex",
+    ["/* c */"],
+  ],
+  [
+    "const s = `${ list.map((u) => /* c */ /[/*]/.test(u)) }`;\nconst x = 1;\n",
+    "substitution arrow comment before regex",
+    ["/* c */"],
+  ],
+  [
+    "const s = `${ !/* c */ /[/*]/.test(s) }`;\nconst x = 1;\n",
+    "substitution prefix-not comment before regex",
+    ["/* c */"],
+  ],
+  [
+    "function f(x = { m() { return /* c */ /[/*]/; } }) {}\nconst y = 1;\n",
+    "params return block comment before regex",
+    ["/* c */"],
+  ],
+  [
+    "function f(x = { m() { return // c\n /[/*]/; } }) {}\nconst y = 1;\n",
+    "params return line comment before regex",
+    ["// c"],
+  ],
+  [
+    String.raw`function f(x = {pattern: /* note */ /^https?:\/\//}) {}` +
+      "\nconst y = 1;\n",
+    "params block comment before URL regex",
+    ["/* note */"],
+  ],
+  [
+    "function f(x = {pattern: // note\n  " +
+      String.raw`/^https?:\/\//}) {}` +
+      "\nconst y = 1;\n",
+    "params line comment before URL regex",
+    ["// note"],
+  ],
 ];
 const DIVISION_CASES = [
   [PARAMS_DIVISION, "params double division"],
@@ -258,6 +323,34 @@ const DIVISION_CASES = [
   [
     "function f(x = {k: a! / b[c / 2]}) {}\nconst y = 1;\n",
     "params non-null division with indexed divisor",
+  ],
+  [
+    "function f(x = {k: a /* c */ / b / c}) {}\nconst y = 1;\n",
+    "params division after block comment",
+  ],
+  [
+    "function f(x = {k: a /* note: */ / b / c}) {}\nconst y = 1;\n",
+    "params division after a colon-ending block comment",
+  ],
+  [
+    "const s = `${ a /* c, */ / b / c }`;\nconst x = 1;\n",
+    "substitution division after a comma-ending block comment",
+  ],
+  [
+    "const s = `${ i++ /* c */ / n / 2 }`;\nconst x = 1;\n",
+    "substitution postfix division after block comment",
+  ],
+  [
+    "function f(x = {k: a! /* c */ / b / c}) {}\nconst y = 1;\n",
+    "params non-null division after block comment",
+  ],
+  [
+    "const s = `${ a /* c */ / b }/${ m }`;\nconst x = 1;\n",
+    "substitution division after comment before template separator",
+  ],
+  [
+    "function f(x = {k: a // note\n / b}) {}\nconst y = 1;\n",
+    "params division after line comment",
   ],
 ];
 const DIVISION_COMMENT_CASES = [
@@ -388,8 +481,19 @@ function assertStockParams(run) {
       TEMPLATE_COMMENT,
       `stock ${language} substitution comment`,
     );
-    for (const [buffer, label] of [...REGEX_CASES, ...DIVISION_CASES]) {
-      assertParamsClosed(run(language)(buffer), `stock ${language} ${label}`);
+    for (const [buffer, label, , stockCollapses] of [
+      ...REGEX_CASES,
+      ...DIVISION_CASES,
+    ]) {
+      if (stockCollapses) {
+        assertParamsCollapsed(
+          run(language),
+          buffer,
+          `stock ${language} ${label}`,
+        );
+      } else {
+        assertParamsClosed(run(language)(buffer), `stock ${language} ${label}`);
+      }
     }
   }
   for (const [language, buffer, label] of TRIGGER_CONTROLS) {
@@ -416,14 +520,26 @@ function assertFixedParams(run, unchanged) {
       TEMPLATE_COMMENT_CONTROL,
       `${language} substitution comment`,
     );
-    for (const [buffer, label] of REGEX_CASES) {
+    for (const [buffer, label, comments = []] of REGEX_CASES) {
       const html = run(language)(buffer);
       assertParamsClosed(html, `${language} ${label}`);
       assert.ok(
         html.includes('class="hljs-regexp"'),
         `${label}: regex colored`,
       );
-      assert.ok(!html.includes('class="hljs-comment"'), `${label}: no comment`);
+      assert.equal(
+        (html.match(/<span class="hljs-comment">/g) ?? []).length,
+        comments.length,
+        `${label}: only expected comments`,
+      );
+      for (const comment of comments) {
+        assert.ok(
+          html
+            .replaceAll("&#x27;", "'")
+            .includes(`<span class="hljs-comment">${comment}</span>`),
+          `${label}: comment colored`,
+        );
+      }
     }
     for (const [buffer, label] of DIVISION_CASES) {
       assertDivision(run(language)(buffer), `${language} ${label}`);

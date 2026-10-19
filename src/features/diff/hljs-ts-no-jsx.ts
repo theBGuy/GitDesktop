@@ -56,11 +56,12 @@ export function stripJsxModes(root: Mode): number {
   return removed;
 }
 
-// Regex follows operators, `( [ { , ; : ?`, or whole expression keywords, never
-// properties like `obj.in`; any prefix `!` run may intervene. Operands,
-// TypeScript non-null `x!`, and postfix `++`/`--` never start a regex.
+// Regex follows operators, `( [ { , ; : ?`, or whole expression keywords.
+// Properties, operands, non-null `x!`, and postfix `++`/`--` cannot start it.
+// Comments and prefix `!` may intervene. The leading slash keeps lookbehind
+// off non-slash positions.
 const REGEX_START =
-  /(?<=(?:[=:(,{[&|?;~^%*<>]|(?<![\w$)\]]\+)\+|(?<![\w$)\]]-)-|(?<![\w$.])(?:return|throw|case|typeof|void|delete|instanceof|in|of|new|else|do|await|yield))\s*(?:!\s*)*)\/(?=[^/\n]*\/)/;
+  /\/(?<=(?:[=:(,{[&|?;~^%*<>]|(?<![\w$)\]]\+)\+|(?<![\w$)\]]-)-|(?<![\w$.])(?:return|throw|case|typeof|void|delete|instanceof|in|of|new|else|do|await|yield))(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*\n|!)*\/)(?=[^/\n]*\/)/;
 
 /**
  * Splice COMMENT then regex into brace-pairing and template-substitution modes:
