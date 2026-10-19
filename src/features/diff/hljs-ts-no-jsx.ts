@@ -56,14 +56,22 @@ export function stripJsxModes(root: Mode): number {
   return removed;
 }
 
+// Regex follows operators, `( [ { , ; : ?`, or whole expression keywords, never
+// properties like `obj.in`; any prefix `!` run may intervene. Operands,
+// TypeScript non-null `x!`, and postfix `++`/`--` never start a regex.
+const REGEX_START =
+  /(?<=(?:[=:(,{[&|?;~^%*<>]|(?<![\w$)\]]\+)\+|(?<![\w$)\]]-)-|(?<![\w$.])(?:return|throw|case|typeof|void|delete|instanceof|in|of|new|else|do|await|yield))\s*(?:!\s*)*)\/(?=[^/\n]*\/)/;
+
 /**
  * Splice COMMENT then regex into brace-pairing and template-substitution modes:
  * quotes or backticks in unrecognized comments can leave enclosing spans open
  * even after a later quote closes the string when ignoreIllegals is enabled.
  * Returns inserted-mode count; 0 means already spliced, target shape moved,
  * or no comment wrapper or matching regex mode found. Pins catch shape drift.
- * Two divisions on one line may color as regex; JSX stays out, so JSX text
- * holding `//` or `/*` in these contexts can still open a comment.
+ * A regex starting a statement after `)` or `}` is not recognized, so `//` or
+ * `/*` inside one still opens a comment.
+ * JSX stays out, so JSX text holding `//` or `/*` in these contexts can still
+ * open a comment.
  */
 export function spliceParamsComment(root: Mode): number {
   const targets: Mode[] = [];
@@ -117,6 +125,10 @@ export function spliceParamsComment(root: Mode): number {
   };
   visit(root);
   if (!comment || !regexp) return 0;
+  const expressionRegexp: Mode = {
+    ...regexp,
+    begin: REGEX_START,
+  };
   let spliced = 0;
   for (const mode of targets) {
     if (!mode.contains) continue;
@@ -138,7 +150,7 @@ export function spliceParamsComment(root: Mode): number {
           (child.className === "regexp" || child.scope === "regexp"),
       )
     ) {
-      contains.splice(commentIndex + 1, 0, regexp);
+      contains.splice(commentIndex + 1, 0, expressionRegexp);
       spliced++;
     }
     mode.contains = contains;

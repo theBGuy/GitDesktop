@@ -110,12 +110,15 @@ const PARAMS_REGEX_CLASS =
   "function f(x = {pattern: /[/*]/}) {}\nconst y = 1;\n";
 const PARAMS_REGEX_URL =
   String.raw`function f(x = {pattern: /https?:\/\//}) {}` + "\nconst y = 1;\n";
+const PARAMS_REGEX_COMMA =
+  String.raw`function f(x = {a: 1, b: /x\/y/}) {}` + "\nconst y = 1;\n";
 const PARAMS_DIVISION = "function f(x = {value: a / b / c}) {}\nconst y = 1;\n";
 const TEMPLATE_REGEX_CLASS = "const s = `${ /[/*]/ }`;\nconst y = 1;\n";
 const TEMPLATE_REGEX_URL = "const s = `${ /https?:\\/\\// }`;\nconst y = 1;\n";
 const TEMPLATE_DIVISION = "const s = `${ a / b / c }`;\nconst y = 1;\n";
 const TEMPLATE_BRACE_DIVISION =
   "const s = `${ {value: a / b / c} }`;\nconst y = 1;\n";
+const TEMPLATE_TAIL_DIVISION = "const s = `${ a / b } / more`;\nconst x = 1;\n";
 
 const TS_COMMENT_CASES = [
   [TS_PARAMS_REPRO, "JSDoc"],
@@ -126,13 +129,158 @@ const TS_COMMENT_CASES = [
 const REGEX_CASES = [
   [PARAMS_REGEX_CLASS, "params regex character class"],
   [PARAMS_REGEX_URL, "params URL regex"],
+  [PARAMS_REGEX_COMMA, "params regex property after comma"],
   [TEMPLATE_REGEX_CLASS, "substitution regex character class"],
   [TEMPLATE_REGEX_URL, "substitution URL regex"],
+  ...[
+    "value = /re/",
+    "(/re/)",
+    "(value, /re/)",
+    "[/re/]",
+    "!/re/",
+    "value & /re/",
+    "value | /re/",
+    "value ? /re/ : false",
+  ].map((expression) => [
+    `const s = \`\${ ${expression} }\`;\nconst x = 1;\n`,
+    `substitution regex expression start: ${expression}`,
+  ]),
+  [
+    "function f(x = {method() { a; /re/; }}) {}\nconst y = 1;\n",
+    "params brace regex after semicolon",
+  ],
+  ...[
+    "typeof /[/*]/",
+    "void /[/*]/",
+    "await /[/*]/",
+    "a in /[/*]/",
+    "a instanceof /[/*]/",
+    "a + /[/*]/.source",
+    "a - /[/*]/",
+    "a * /[/*]/",
+    "a < /[/*]/",
+    "a > /[/*]/",
+    "~/[/*]/",
+    "(u) => /[/*]/.test(u)",
+    "!!/[/*]/",
+    "a && !/[/*]/.test(s)",
+  ].flatMap((expression) => [
+    [
+      `const s = \`\${ ${expression} }\`;\nconst x = 1;\n`,
+      `substitution regex extended start: ${expression}`,
+    ],
+    [
+      `function f(x = {k: ${expression}}) {}\nconst y = 1;\n`,
+      `params regex extended start: ${expression}`,
+    ],
+  ]),
+  ...[
+    "return /[/*]/;",
+    "return !/[/*]/.test(s);",
+    "throw /[/*]/;",
+    "switch (v) { case /[/*]/: }",
+  ].map((statement) => [
+    `function f(x = { m() { ${statement} } }) {}\nconst y = 1;\n`,
+    `params method regex: ${statement}`,
+  ]),
+  [
+    "function f(x = { *m() { yield /[/*]/; } }) {}\nconst y = 1;\n",
+    "params generator regex: yield",
+  ],
+  [
+    "const s = `${ " +
+      String.raw`list.map((u) => /^https?:\/\//.test(u))` +
+      " }`;\nconst x = 1;\n",
+    "substitution URL regex in arrow callback",
+  ],
 ];
 const DIVISION_CASES = [
   [PARAMS_DIVISION, "params double division"],
   [TEMPLATE_DIVISION, "substitution double division"],
   [TEMPLATE_BRACE_DIVISION, "substitution brace double division"],
+  [
+    TEMPLATE_TAIL_DIVISION,
+    "division before substitution end and template slash",
+  ],
+  ...["a / b", "(a) / b / c", "1 / b / c", "values[0] / b / c"].flatMap(
+    (expression) => [
+      [
+        `function f(x = {value: ${expression}}) {}\nconst y = 1;\n`,
+        `params division: ${expression}`,
+      ],
+      [
+        `const s = \`\${ ${expression} }\`;\nconst x = 1;\n`,
+        `substitution division: ${expression}`,
+      ],
+    ],
+  ),
+  ...[
+    "a! / b / c",
+    "f(a)! / b / c",
+    "a?.b! / c / d",
+    "v[0]! / b / c",
+    "i++ / n / 2",
+    "i-- / n / 2",
+    "obj.return / b / c",
+    "item.in / b / c",
+    "min / b / c",
+    "avoid / b / c",
+  ].flatMap((expression) => [
+    [
+      `const s = \`\${ ${expression} }\`;\nconst x = 1;\n`,
+      `substitution division after operand: ${expression}`,
+    ],
+    [
+      `function f(x = {k: ${expression}}) {}\nconst y = 1;\n`,
+      `params division after operand: ${expression}`,
+    ],
+  ]),
+  [
+    "function f(x = {k: a! / b}) {} // see a/b\nconst y = 1;\n",
+    "params non-null division before trailing comment slash",
+  ],
+  [
+    "function f(x = { pct: done! / total, label: 'a/b' }) {}\nconst y = 1;\n",
+    "params non-null division before string slash",
+  ],
+  [
+    "const s = `${ n! / d }/${ m }`;\nconst x = 1;\n",
+    "substitution non-null division before template separator",
+  ],
+  [
+    "const s = `${ (n! / d).toFixed(1) } km/h`;\nconst x = 1;\n",
+    "substitution non-null division before template unit slash",
+  ],
+  [
+    "const s = `${ i++ / n }/${ m }`;\nconst x = 1;\n",
+    "substitution postfix division before template separator",
+  ],
+  [
+    "function f(x = {k: a! / b[c / 2]}) {}\nconst y = 1;\n",
+    "params non-null division with indexed divisor",
+  ],
+];
+const DIVISION_COMMENT_CASES = [
+  [
+    "function f(x = {value: a / b /* it's fine */}) {}\nconst y = 1;\n",
+    "params division before block comment",
+    "/* it's fine */",
+  ],
+  [
+    "const s = `${ a / b /* it's fine */ }`;\nconst x = 1;\n",
+    "substitution division before block comment",
+    "/* it's fine */",
+  ],
+  [
+    "function f(x = {value: a / b // it's fine\n}) {}\nconst y = 1;\n",
+    "params division before line comment",
+    "// it's fine",
+  ],
+  [
+    "const s = `${ a / b // it's fine\n }`;\nconst x = 1;\n",
+    "substitution division before line comment",
+    "// it's fine",
+  ],
 ];
 
 const TRIGGER_CONTROLS = [
@@ -223,6 +371,11 @@ function assertParamsFixed(highlight, buffer, control, label) {
   assert.equal(probeLine(html), probeLine(highlight(control)), label);
 }
 
+function assertDivision(html, label) {
+  assertParamsClosed(html, label);
+  assert.ok(!html.includes('class="hljs-regexp"'), `${label}: no regex span`);
+}
+
 function assertStockParams(run) {
   for (const [buffer, label] of TS_COMMENT_CASES) {
     assertParamsCollapsed(run("typescript"), buffer, `stock ${label}`);
@@ -273,7 +426,17 @@ function assertFixedParams(run, unchanged) {
       assert.ok(!html.includes('class="hljs-comment"'), `${label}: no comment`);
     }
     for (const [buffer, label] of DIVISION_CASES) {
-      assertParamsClosed(run(language)(buffer), `${language} ${label}`);
+      assertDivision(run(language)(buffer), `${language} ${label}`);
+    }
+    for (const [buffer, label, comment] of DIVISION_COMMENT_CASES) {
+      const html = run(language)(buffer);
+      assertDivision(html, `${language} ${label}`);
+      assert.ok(
+        html
+          .replaceAll("&#x27;", "'")
+          .includes(`<span class="hljs-comment">${comment}</span>`),
+        `${label}: comment colored`,
+      );
     }
   }
   for (const [language, buffer, label] of TRIGGER_CONTROLS) {
