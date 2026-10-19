@@ -547,6 +547,17 @@ const binarySections = [
       "index 7777777..8888888 100644\n" +
       'Binary files "a/img/caf\\303\\251.png" and "b/img/caf\\303\\251.png" differ\n',
   },
+  {
+    // reconstruct_file_diff (forge/gitlab.rs) writes the header and both file
+    // lines, then GitLab's own per-file diff text.
+    name: "a GitLab-rebuilt binary, file headers ahead of the marker",
+    path: "img/gl.png",
+    section:
+      "diff --git a/img/gl.png b/img/gl.png\n" +
+      "--- a/img/gl.png\n" +
+      "+++ b/img/gl.png\n" +
+      "Binary files a/img/gl.png and b/img/gl.png differ\n",
+  },
 ];
 
 // Text diffs whose hunk CONTENT mentions binary files: every hunk line carries

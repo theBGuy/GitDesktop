@@ -426,21 +426,12 @@ const RAW_COPY_ICON_BUTTON_RE =
 // the two duplicates actually took, not the whole class.
 const KIND_BADGE_DEF_RE = /\bconst\s+KIND_BADGE\b/;
 
-// A git binary-marker check spelled out. Read, either initial case: a string
-// literal that IS "Binary files" (any quote kind, optional trailing space, led
-// by any run of `\n` `\r` `\x0a` `\u000a` `\u{a}` `^` escapes, RegExp() strings
-// included), a template line opening with it, and a regex literal of it (led by
-// those escapes, `[\n]` or a `(?<![^\n])`/`(?<=\n)` lookbehind; ` ?` at the
-// end allowed). A quoted or code-spanned mention inside a string trips it too
-// ('rows saying "Binary files" read bin'), as does a label that is exactly
-// that: reword or allowlist. Not read (review concerns): the singular
-// "Binary file" (real UI copy), shorter pieces (startsWith("Binary") &&
-// endsWith(" differ")), extra text in the literal ("Binary files differ",
-// /^Binary files .* differ$/m), escapes or patterns inside the words
-// ("Binary\x20files", /Binary\sfiles/), interpolation beside them, split or
-// concatenated literals, a second loose literal in an allowlisted file or
-// anywhere in the exempt diff-split.ts, and lines the shared comment stripper
-// blanks (stripComments' docblock).
+// Reads "Binary files" as a whole string (line-break escape or `^` leads,
+// RegExp() strings too), a template's closing line, or a regex literal (plus
+// `[\n]`, `(?<=\n)`, `(?<![^\n])` leads); exact labels and quoted/code-spanned
+// mentions trip it: reword or allowlist. Not read: singular "Binary file" (UI
+// copy); extra text, escapes or interpolation beside the words; split or joined
+// literals; repeats in exempt/allowlisted files; lines stripComments blanks.
 const BINARY_MARKER_RE = new RegExp(
   [
     /(["'`])(?:\\{1,2}[nr]|\\x0[aA]|\\u000[aA]|\\u\{0*[aA]\}|\^)*[Bb]inary [Ff]iles ?\1/
@@ -5130,8 +5121,8 @@ export const CHECKS = [
     appliesTo: (file) => file !== "src/lib/git/diff-split.ts",
     scan: perLine(BINARY_MARKER_RE),
     allowlist: [
-      // Anchored already; adopting sectionIsBinary is a recorded follow-up
-      // (src/lib/ai was fenced for a sibling lane when the helper landed).
+      // stripBinarySections already matches the line-anchored
+      // "\nBinary files " literal.
       "src/lib/ai/prompt.ts",
     ],
     message:
