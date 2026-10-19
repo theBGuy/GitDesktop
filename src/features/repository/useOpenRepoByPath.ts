@@ -10,6 +10,7 @@ import { validateRepo } from "@/lib/git/api";
 import type { RepoInfo } from "@/lib/git/types";
 import { migrateRepoData } from "@/lib/repo-data-migration";
 import { scriptsKeys } from "@/lib/scripts/queries";
+import { repoDisplayName } from "@/lib/settings/api";
 import {
   useAddRecentRepo,
   useRelocateRecentRepo,
@@ -134,7 +135,7 @@ export function useOpenRepoByPath() {
         // (alias or name), else the moved folder's basename.
         const oldRow = recentRepos?.find((r) => r.path === oldPath);
         const oldName =
-          oldRow?.alias?.trim() || oldRow?.name || repoNameFromPath(oldPath);
+          (oldRow && repoDisplayName(oldRow)) || repoNameFromPath(oldPath);
         const confirmed = await useConfirm.getState().ask({
           title: `Relocate "${oldName}"?`,
           body: `GitDesktop will point this entry at ${info.root} — its alias, local PRs, issues, review history, and settings will follow the folder. If this is a different repository, that data is merged in and can't be undone.`,
@@ -220,8 +221,7 @@ export function useOpenRepoByPath() {
           // A folder git can't read is still a repository: git's own message,
           // and no Locate/Remove offer to drop it from recents.
           const row = recentRepos?.find((r) => r.path === path);
-          const name =
-            row?.alias?.trim() || row?.name || repoNameFromPath(path);
+          const name = (row && repoDisplayName(row)) || repoNameFromPath(path);
           toastComposedError({
             title: `Couldn't open ${name}`,
             errors: [e],

@@ -14,7 +14,6 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -34,6 +33,7 @@ import {
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
@@ -91,6 +91,7 @@ import {
   openStatusErrorDetails,
   StatusReadErrorState,
   StatusRefreshFailedStrip,
+  statusReadFailed,
   useRetainedStatusError,
 } from "./StatusReadError";
 import { STATUS_READ_FAILED_REASON } from "./sync-controls-state";
@@ -371,10 +372,7 @@ export function ChangesPanel({
   // row (a background arm, with the caret in the filter or outside the list).
   const pendingFocusSource = useRef<string | null>(null);
 
-  // Sticky, never `isError`: a never-loaded query that errored goes back to
-  // pending on every poll, which would swap the error block for the skeleton.
-  const statusReadFailed =
-    status.data === undefined && status.errorUpdateCount > 0;
+  const readFailed = statusReadFailed(status);
   // query-core keeps `error` through a refetch while data is held, so this
   // holds steady across polls and clears on the first good read.
   const statusRefreshFailed = status.data !== undefined && status.isError;
@@ -384,16 +382,18 @@ export function ChangesPanel({
   });
 
   const entries = status.data?.entries ?? [];
-  // The error block's buttons unmount when the first good read lands; the
-  // landing above the list or the clean state takes the focus they held, never
-  // focus the user moved elsewhere.
-  const statusErrorShown = useRef(statusReadFailed);
-  useLayoutEffect(() => {
-    const was = statusErrorShown.current;
-    statusErrorShown.current = statusReadFailed;
-    if (was && !statusReadFailed && document.activeElement === document.body)
-      markerLandingRef.current?.focus({ preventScroll: true });
-  }, [statusReadFailed]);
+  // The error block unmounts when the first good read lands. Only when focus
+  // was inside it then and fell to <body> does the landing above the list or
+  // the clean state take it.
+  const { hostRef: rescueHostRef, retryRef: errorBlockRef } =
+    useRetryFocusRescue(readFailed);
+  const markerLandingEl = useCallback(
+    (node: HTMLSpanElement | null) => {
+      markerLandingRef.current = node;
+      rescueHostRef(node);
+    },
+    [rescueHostRef],
+  );
   const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
@@ -1416,7 +1416,7 @@ export function ChangesPanel({
   // component; it may announce for a load that resolves inside the skeleton's
   // 150ms visual delay (a polite region, accepted).
   let statusAnnouncement: string | null = null;
-  if (statusReadFailed) statusAnnouncement = STATUS_READ_FAILED_REASON;
+  if (readFailed) statusAnnouncement = STATUS_READ_FAILED_REASON;
   else if (status.isPending) statusAnnouncement = "Loading changes…";
   const statusLiveRegion = (
     <span role="status" className="sr-only">
@@ -1426,7 +1426,7 @@ export function ChangesPanel({
 
   // Ahead of the skeleton: each poll of a never-loaded failed read flips it back
   // to pending, so this order is what holds the block steady.
-  if (statusReadFailed) {
+  if (readFailed) {
     return (
       <>
         {statusLiveRegion}
@@ -1434,6 +1434,7 @@ export function ChangesPanel({
           error={status.error ?? status.failureReason ?? retainedStatusError}
           onRetry={() => void status.refetch()}
           repoPath={repoPath}
+          rescueRef={errorBlockRef}
         />
       </>
     );
@@ -1649,7 +1650,7 @@ export function ChangesPanel({
           onRetry={() => void status.refetch()}
           onDetails={() => openStatusErrorDetails(status.error)}
         />
-        <span ref={markerLandingRef} tabIndex={-1} className="outline-none" />
+        <span ref={markerLandingEl} tabIndex={-1} className="outline-none" />
 
         {entries.length === 0 ? (
           <ChangesEmptyState

@@ -87,6 +87,7 @@ import {
   publishPendingReason,
   usePublishProviders,
 } from "./PublishRepoControl";
+import { statusReadFailed } from "./StatusReadError";
 import {
   deriveSyncControls,
   headFacts,
@@ -293,7 +294,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // goes back to pending on every refetch, which would flip the reason per poll.
   const syncInput = {
     head,
-    statusError: status.data === undefined && status.errorUpdateCount > 0,
+    statusError: statusReadFailed(status),
     remotes: remotes.data,
     remotesError: remotes.data === undefined && remotes.errorUpdateCount > 0,
     busy,

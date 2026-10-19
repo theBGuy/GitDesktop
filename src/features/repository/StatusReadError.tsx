@@ -4,7 +4,7 @@ import {
   TerminalIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useState } from "react";
+import { type Ref, useEffect, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,6 +29,16 @@ import { cn } from "@/lib/utils";
 /** Details on a status error that has no object yet: a remount over a cached
  *  failure holds only the sticky gate until the next failed check lands. */
 const NO_DETAILS_YET_REASON = "Details arrive with the next check";
+
+/** A status read that failed with nothing loaded. Sticky, never `isError`: a
+ *  never-loaded query that errored goes back to pending on every poll, which
+ *  would flip each surface back to its loading state. */
+export function statusReadFailed(q: {
+  data: unknown;
+  errorUpdateCount: number;
+}): boolean {
+  return q.data === undefined && q.errorUpdateCount > 0;
+}
 
 /** Opens the shared error dialog (full raw text with Copy) on a status error. */
 export function openStatusErrorDetails(error: unknown) {
@@ -76,11 +86,15 @@ export function StatusReadErrorState({
   error,
   onRetry,
   repoPath,
+  rescueRef,
   compact = false,
 }: {
   error: unknown;
   onRetry: () => void;
   repoPath: string;
+  /** `useRetryFocusRescue`'s `retryRef`, on the box holding every action, so
+   *  the host knows whether focus was in the block when it unmounted. */
+  rescueRef?: Ref<HTMLDivElement>;
   /** Tighter spacing for a pane that is not the whole Changes tab. */
   compact?: boolean;
 }) {
@@ -88,7 +102,7 @@ export function StatusReadErrorState({
   const summary = error == null ? null : presentError(error).summary;
 
   return (
-    <Empty className={cn("flex-1", compact && "gap-3 p-4")}>
+    <Empty ref={rescueRef} className={cn("flex-1", compact && "gap-3 p-4")}>
       <EmptyHeader className="w-full">
         <EmptyMedia variant="icon">
           {/* Tint on the icon only: the title carries the state in words. */}

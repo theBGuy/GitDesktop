@@ -1,3 +1,4 @@
+import { statusReadFailed } from "@/features/repository/StatusReadError";
 import { useRepoStatus } from "@/lib/git/queries";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { restingDiffMessage } from "./diff-resting-message";
@@ -21,7 +22,7 @@ export function DiffRestingFallback({ repoPath }: { repoPath: string }) {
           message={restingDiffMessage(
             status.isPending,
             status.data?.entries.length ?? 0,
-            status.data === undefined && status.errorUpdateCount > 0,
+            statusReadFailed(status),
           )}
         />
       </div>

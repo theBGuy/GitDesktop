@@ -284,16 +284,19 @@ fn identity_from_git(
     }
 }
 
-/// Whether a failed git run proves `cwd` is not a repository: git's own exit-128
-/// "not a git repository" line (the runner pins LC_ALL=C). Other exit-128
-/// failures (permissions, unsafe ownership, a broken `core.worktree`, a bare
-/// repo) do not prove it. The one spelling of this rule, so identity and
-/// validation can't drift.
+/// Whether a failed git run proves `cwd` is not a repository: an exit-128 line
+/// saying "not a git repository", or "gitfile does not point to a valid
+/// repository", which some git builds print for a `.git` file whose git dir is
+/// missing or not a valid repository. Matching English text is sound because
+/// the runner pins LC_ALL=C. Other exit-128 failures (permissions, unsafe
+/// ownership, a broken `core.worktree`, a bare repo) do not prove it. The one
+/// spelling of this rule, so identity and validation can't drift.
 fn git_says_not_a_repository(code: i32, stderr: &str) -> bool {
     code == 128
-        && stderr
-            .lines()
-            .any(|line| line.contains("not a git repository"))
+        && stderr.lines().any(|line| {
+            line.contains("not a git repository")
+                || line.contains("gitfile does not point to a valid repository")
+        })
 }
 
 /// Resolve a repo's worktree-stable identity key for the frontend stores (see
@@ -335,7 +338,12 @@ pub async fn validate_repo(path: String) -> AppResult<RepoInfo> {
         return Err(AppError::NotARepo(path));
     }
     let out = out.exit_verdict()?;
-    let root = out.stdout_lossy().trim().to_string();
+    // Line endings ONLY: a trailing space can be part of the folder name, and
+    // `trim()` would turn it into a path that does not exist.
+    let root = out
+        .stdout_lossy()
+        .trim_end_matches(['\r', '\n'])
+        .to_string();
     if root.is_empty() {
         // Defensive: a bare repo fails rev-parse above (exit 128, "must be run
         // in a work tree"; measured, git 2.51.1) rather than printing nothing.
@@ -892,6 +900,10 @@ mod validate_repo_tests {
             128,
             "fatal: not a git repository: C:\\checkout\\gone-gitdir"
         ));
+        assert!(git_says_not_a_repository(
+            128,
+            "fatal: gitfile does not point to a valid repository: /tmp/dangling/.git"
+        ));
         assert!(!git_says_not_a_repository(128, CANNOT_CHDIR_LINE));
         assert!(!git_says_not_a_repository(128, NO_WORK_TREE_LINE));
         assert!(!git_says_not_a_repository(129, NOT_A_REPO_LINE));
@@ -984,6 +996,19 @@ mod validate_repo_tests {
         }
     }
 
+    /// A trailing space belongs to the folder's name, so the root keeps it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_folder_name_s_trailing_space_survives_into_the_root() {
+        let (_dir, root) = outside_any_repo();
+        let checkout = root.join("trailing ");
+        std::fs::create_dir(&checkout).unwrap();
+        git(&checkout, &["init", "-q"]).await;
+        let info = validate_repo(s(&checkout)).await.unwrap();
+        assert!(info.root.ends_with("/trailing "), "{:?}", info.root);
+        assert_eq!(info.name, "trailing ");
+    }
+
     /// The git dir the gitfile names really is gone: git's own verdict holds.
     #[tokio::test]
     async fn a_dangling_gitfile_is_not_a_repository() {
@@ -999,9 +1024,14 @@ mod validate_repo_tests {
         )
         .await
         .unwrap();
-        assert_eq!(
-            (raw.code, raw.stderr),
-            (128, format!("fatal: not a git repository: {gitdir}"))
+        // git builds word this differently ("not a git repository: <gitdir>",
+        // "…: (null)", "gitfile does not point to a valid repository: …"), so
+        // the raw shape is checked through the predicate itself.
+        assert!(
+            git_says_not_a_repository(raw.code, &raw.stderr),
+            "{} {}",
+            raw.code,
+            raw.stderr
         );
         assert!(matches!(
             validate_repo(s(&checkout)).await,

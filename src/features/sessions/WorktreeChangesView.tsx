@@ -1,15 +1,17 @@
 import { useQuery } from "@tanstack/react-query";
-import { useDeferredValue, useLayoutEffect, useRef, useState } from "react";
+import { useDeferredValue, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { PathText } from "@/components/path-text";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import {
   openStatusErrorDetails,
   StatusReadErrorState,
   StatusRefreshFailedStrip,
+  statusReadFailed,
   useRetainedStatusError,
 } from "@/features/repository/StatusReadError";
 import { STATUS_READ_FAILED_REASON } from "@/features/repository/sync-controls-state";
@@ -61,25 +63,17 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
   const entries = (status.data?.entries ?? []).filter(
     (e) => e.unstaged || e.staged,
   );
-  // Sticky, never `isError`: each poll of a never-loaded failed read flips it
-  // back to pending.
-  const statusReadFailed =
-    status.data === undefined && status.errorUpdateCount > 0;
-  // The error block's buttons unmount when the first good read lands; the
-  // landing above the view takes the focus they held, never focus moved away.
-  const landingRef = useRef<HTMLSpanElement>(null);
-  const statusErrorShown = useRef(statusReadFailed);
-  useLayoutEffect(() => {
-    const was = statusErrorShown.current;
-    statusErrorShown.current = statusReadFailed;
-    if (was && !statusReadFailed && document.activeElement === document.body)
-      landingRef.current?.focus({ preventScroll: true });
-  }, [statusReadFailed]);
+  const readFailed = statusReadFailed(status);
+  // The error block unmounts when the first good read lands. Only when focus
+  // was inside it then and fell to <body> does the landing above the view
+  // take it.
+  const { hostRef: landingRef, retryRef: errorBlockRef } =
+    useRetryFocusRescue(readFailed);
   // First in every arm so the region stays mounted across them: it announces
   // only text that arrives after it is in the DOM.
   const statusLiveRegion = (
     <span role="status" className="sr-only">
-      {statusReadFailed ? STATUS_READ_FAILED_REASON : null}
+      {readFailed ? STATUS_READ_FAILED_REASON : null}
     </span>
   );
 
@@ -109,7 +103,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
   });
 
   // Ahead of the skeleton, on the sticky gate.
-  if (statusReadFailed) {
+  if (readFailed) {
     return (
       <>
         {statusLiveRegion}
@@ -119,6 +113,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
             error={status.error ?? status.failureReason ?? retainedError}
             onRetry={() => void status.refetch()}
             repoPath={repoPath}
+            rescueRef={errorBlockRef}
           />
         </div>
       </>

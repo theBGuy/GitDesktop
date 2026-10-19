@@ -175,6 +175,7 @@ import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { RebaseOntoDialog } from "./RebaseOntoDialog";
 import { RenameBranchDialog } from "./RenameBranchDialog";
 import { StashesDialog } from "./StashesDialog";
+import { statusReadFailed } from "./StatusReadError";
 import { SwitchWithChangesDialog } from "./SwitchWithChangesDialog";
 import {
   STATUS_PENDING_REASON,
@@ -3302,7 +3303,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // Sticky, never `isError`: a never-loaded query that errored goes back to
   // pending on every refetch, which would flip the trigger back to its skeleton.
-  const failedRead = status.data === undefined && status.errorUpdateCount > 0;
+  const failedRead = statusReadFailed(status);
 
   return (
     <>
