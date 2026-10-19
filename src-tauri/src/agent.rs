@@ -5113,6 +5113,9 @@ opencode/x-preview-f-free
             "\n",
             r#"{"type":"result","subtype":"success","is_error":false,"result":"The review.","total_cost_usd":0.25}"#,
             "\n",
+            // A second terminal after the first: the return must stay the first.
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"A later answer.","total_cost_usd":0.5}"#,
+            "\n",
         );
         std::fs::write(dir.join("run.jsonl"), jsonl).expect("fixture file");
         // Prints the fixture as the CLI's stdout, run from its directory.
@@ -5144,16 +5147,22 @@ opencode/x-preview-f-free
             .expect("the run streams")
             .expect("a terminal is returned");
         assert!(
-            matches!(&returned, ReviewEvent::Done { is_error: false, text, .. } if text == "The review.")
+            matches!(&returned, ReviewEvent::Done { is_error: false, text, .. } if text == "The review."),
+            "the return is the first terminal, got {returned:?}"
         );
+        // The pump keeps reading after a terminal, so both reach the sink in order.
         let events = sink.events.into_inner().unwrap();
-        let first_terminal = events
+        let terminals: Vec<&ReviewEvent> = events
             .iter()
-            .find(|e| matches!(e, ReviewEvent::Done { .. } | ReviewEvent::Error { .. }))
-            .expect("the sink received a terminal");
+            .filter(|e| matches!(e, ReviewEvent::Done { .. } | ReviewEvent::Error { .. }))
+            .collect();
+        assert_eq!(terminals.len(), 2, "both terminals are forwarded");
         assert_eq!(
             serde_json::to_value(&returned).unwrap(),
-            serde_json::to_value(first_terminal).unwrap()
+            serde_json::to_value(terminals[0]).unwrap()
+        );
+        assert!(
+            matches!(terminals[1], ReviewEvent::Done { text, .. } if text == "A later answer.")
         );
     }
 

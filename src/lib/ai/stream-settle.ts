@@ -95,10 +95,7 @@ export interface CliSettleCallbacks {
 /** A short, human status line for a tool step, from the normalized kind + target
  *  (the `target` may be null — degrade to the bare verb). Surfaces the agentic
  *  run's exploration in the panel's existing status line. */
-export function toolStatusLine(
-  tool: AgentToolKind,
-  target: string | null,
-): string {
+function toolStatusLine(tool: AgentToolKind, target: string | null): string {
   const at = target?.trim();
   switch (tool) {
     case "read":

@@ -126,7 +126,7 @@ export async function runCliStream({
             return;
           case "incomplete":
             reject(
-              new Error("The review ended before its final message arrived."),
+              new Error("The AI run ended before its final message arrived."),
             );
             return;
         }
