@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::commit::ExpectedRef;
+use crate::git::commit::{ExpectedRef, SWITCH_ROLLBACK_HINT};
 use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::ignored_guard::{self, ignored_files_in_the_way};
@@ -762,16 +762,17 @@ const RESET_TREE_ROLLED_BACK: &str = "Updating your files failed, so the branch 
                                       Some files may already show the reset's changes.";
 
 /// The ref moved again before the rollback could move it back, so it stays where the
-/// other process put it.
+/// other process put it. This verdict and the two below end their lead with
+/// `SWITCH_ROLLBACK_HINT`, as every "couldn't be moved back" verdict does.
 const RESET_TREE_ROLLBACK_LOST: &str = "Updating your files failed, and another Git process \
-                                        moved the branch before it could be moved back. Check \
-                                        the branch in a terminal; the reflog has every tip.";
+                                        moved the branch before it could be moved back.";
 
 /// The rollback itself failed with the ref still at the reset's target: a stale ref
 /// `.lock`, not a race.
 fn reset_tree_rollback_failed(oid: &str) -> String {
     format!(
-        "Updating your files failed, and the branch couldn't be moved back: it now points at {}.",
+        "Updating your files failed, and the branch couldn't be moved back: it now points at \
+         {}. {SWITCH_ROLLBACK_HINT}",
         crate::git::commit::short_oid(oid)
     )
 }
@@ -911,6 +912,7 @@ pub(crate) async fn git_reset_core_expecting(
         Some(&peeled),
         RESET_BRANCH_SWITCHED,
         "reset",
+        true,
     )
     .await?;
     #[cfg(test)]
@@ -954,11 +956,15 @@ async fn roll_back_reset(
     use crate::git::commit::RolledBack;
     let message = match cas.roll_back(repo_path, old, Some(peeled)).await {
         RolledBack::Restored => format!("{RESET_TREE_ROLLED_BACK}\n{git_text}"),
-        RolledBack::Lost => format!("{RESET_TREE_ROLLBACK_LOST}\n{git_text}"),
+        RolledBack::Lost => {
+            format!("{RESET_TREE_ROLLBACK_LOST} {SWITCH_ROLLBACK_HINT}\n{git_text}")
+        }
         RolledBack::Stuck(why) => {
             format!("{}\n{git_text}\n{why}", reset_tree_rollback_failed(peeled))
         }
-        RolledBack::Unread(why) => format!("{RESET_TREE_ROLLBACK_UNREAD}\n{git_text}\n{why}"),
+        RolledBack::Unread(why) => {
+            format!("{RESET_TREE_ROLLBACK_UNREAD} {SWITCH_ROLLBACK_HINT}\n{git_text}\n{why}")
+        }
     };
     AppError::Git {
         code,
@@ -7642,7 +7648,10 @@ mod tests {
             .await;
 
         let message = reset_message(result);
-        assert_eq!(message.lines().next(), Some(RESET_TREE_ROLLBACK_LOST));
+        assert_eq!(
+            message.lines().next(),
+            Some(format!("{RESET_TREE_ROLLBACK_LOST} {SWITCH_ROLLBACK_HINT}").as_str())
+        );
         assert_eq!(
             rev(&repo, &branch).await,
             elsewhere,

@@ -735,9 +735,9 @@ async fn clear_update_holder(
             if marker::claim_dead_update_worktree(state, repo_path, holder).await {
                 return Ok(true);
             }
-            // Provably dead but unclaimed (the admin domain was busy, or the lock no
-            // longer read released) — the hidden path is nothing the user can act on,
-            // so name the state instead.
+            // Provably dead but unclaimed (the admin domain was busy, the lock no longer
+            // read released, or its removal failed and kept the marker for a retry) — the
+            // hidden path is nothing the user can act on, so name the state instead.
             Err(marker::interrupted_update_refusal(branch))
         }
         LockProbe::Missing | LockProbe::Unknown => Ok(false),

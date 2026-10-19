@@ -31,13 +31,16 @@ export interface BlameLine {
   content: string;
 }
 
+/** What a raced amend rewrote instead of the commit the user saw. */
+export interface AmendRace {
+  rewrote: string | null;
+  branch: string | null;
+  detached: boolean;
+}
+
 export interface CommitResult {
   hash: string;
-  raced?: {
-    rewrote: string | null;
-    branch: string | null;
-    detached: boolean;
-  } | null;
+  raced: AmendRace | null;
 }
 
 /** One TODO/FIXME/HACK/… comment found in the working tree by `git_todo_scan`. */

@@ -11,7 +11,7 @@ import {
 import { headBranchPin } from "@/lib/git/api";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { repoKeys, useCommit, useRepoStatus } from "@/lib/git/queries";
-import type { ChangeKind, CommitResult, FileEntry } from "@/lib/git/types";
+import type { AmendRace, ChangeKind, FileEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
@@ -27,7 +27,7 @@ export type AmendHold = "none" | "commit" | "branch";
  *  and a commit the reflog couldn't name, or a pin that was never read, takes the
  *  generic form. */
 function racedAmendMessage(
-  raced: NonNullable<CommitResult["raced"]>,
+  raced: AmendRace,
   expectedHead: string | null,
 ): string {
   if (raced.branch !== null) {
@@ -257,9 +257,9 @@ export function useCommitSubmit(
         });
       }
       // A raced amend still landed, so it closes and clears like any other; only the
-      // report differs.
+      // report differs, a warning since the commit itself succeeded.
       if (result.raced) {
-        toast.error(racedAmendMessage(result.raced, expectedHead));
+        toast.warning(racedAmendMessage(result.raced, expectedHead));
       } else {
         toast.success(
           `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,

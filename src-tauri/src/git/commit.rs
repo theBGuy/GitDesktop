@@ -381,6 +381,8 @@ impl CasRef {
     /// compare-and-swap, and an unreadable HEAD there fails closed, as a switch. A detached
     /// HEAD the switch replaced holds nothing of the move's, and moving it back would undo
     /// the switch itself; unreadable, it gets `op`'s own verdict instead, claiming nothing.
+    /// `files_untouched` says the caller stops here before writing any file (a reset's
+    /// read-tree), which that verdict then states.
     pub(crate) async fn refuse_if_switched(
         &self,
         repo_path: &str,
@@ -388,14 +390,18 @@ impl CasRef {
         new: Option<&str>,
         switched: &str,
         op: &str,
+        files_untouched: bool,
     ) -> AppResult<()> {
         let rolled = match (self, self.still_checked_out(repo_path).await) {
             (_, Ok(true)) => return Ok(()),
             (Self::Detached, Ok(false)) => RolledBack::Restored,
             (Self::Detached, Err(e)) => {
-                // The swap's own value, since the read just failed; a reset stops here before
-                // read-tree, so its files still match the old tip.
-                let files = if op == "reset" { ", and your files were not updated" } else { "" };
+                // The swap's own value, since the read just failed.
+                let files = if files_untouched {
+                    ", and your files were not updated"
+                } else {
+                    ""
+                };
                 return Err(AppError::Git {
                     code: 1,
                     stderr: format!(
@@ -482,7 +488,8 @@ pub(crate) fn short_oid(oid: &str) -> &str {
 
 /// The recovery hint every failed-rollback verdict for a caught switch ends its lead with.
 /// KEEP IN STEP with the "couldn't be moved back" family of ops.rs's tree-step verdicts.
-const SWITCH_ROLLBACK_HINT: &str = "Check the branch in a terminal; the reflog has every tip.";
+pub(crate) const SWITCH_ROLLBACK_HINT: &str =
+    "Check the branch in a terminal; the reflog has every tip.";
 
 /// Records `old` in ORIG_HEAD after a reset-style move, as `git reset` does. Best-effort, as
 /// in git: the move already landed, so a failed write never fails it.
@@ -685,24 +692,25 @@ async fn amend_race(
     })
 }
 
-/// The parent oids in `oid`'s raw commit header, `None` when the object can't be read.
-/// The raw object, not `rev-list --parents`, for the root undo's graft reason below.
+/// The parent oids of `oid` as `commit --amend` sees them, `None` when they can't be read.
+/// Through the shallow graft, unlike the root undo's raw-object read: a depth-1 clone's
+/// boundary commit has no parents there, so the amend of it is parentless too (measured,
+/// git 2.51.1), and comparing the raw header would call that clean amend a race.
 async fn commit_parents(repo_path: &str, oid: &str) -> Option<Vec<String>> {
-    let object = run_git_raw(
+    let out = run_git_raw(
         Some(repo_path),
-        &["cat-file", "commit", oid],
+        // A user's `log.showSignature` would otherwise print gpg output into the list.
+        &["log", "-1", "--no-show-signature", "--format=%P", oid],
         DEFAULT_TIMEOUT,
     )
     .await
     .ok()?;
-    if object.code != 0 {
+    if out.code != 0 {
         return None;
     }
-    let text = object.stdout_lossy();
     Some(
-        text.lines()
-            .take_while(|line| !line.is_empty())
-            .filter_map(|line| line.strip_prefix("parent "))
+        out.stdout_lossy()
+            .split_whitespace()
             .map(str::to_string)
             .collect(),
     )
@@ -769,6 +777,9 @@ pub async fn git_undo_commit(
 /// lands after the checks refuses the undo, and HEAD is re-read right after the move, so
 /// that process's branch switch puts the branch back and refuses too. A switch landing
 /// after that re-read is unseen.
+///
+/// `update-ref` skips both `reset --soft`'s mid-merge refusal and its cancelling of a
+/// stopped pick, so both arms refuse those states first.
 pub(crate) async fn git_undo_commit_core(
     state: &AppState,
     repo_path: String,
@@ -793,6 +804,23 @@ pub(crate) async fn git_undo_commit_core(
     if let Some(expected) = &expected_head {
         if head.as_deref() != Some(expected.as_str()) {
             return Err(moved());
+        }
+    }
+    if head.is_some() {
+        let refuse = |copy: &str| AppError::Git {
+            code: 1,
+            stderr: copy.to_string(),
+        };
+        let ops = crate::git::ops::op_state(&repo_path).await?;
+        if ops.cherry_picking || ops.reverting {
+            return Err(refuse(UNDO_MID_PICK));
+        }
+        // The pair `reset --soft` itself refuses on (measured, git 2.51.1).
+        if ops.merging {
+            return Err(refuse(UNDO_MID_MERGE));
+        }
+        if crate::git::ops::has_unmerged(&repo_path).await? {
+            return Err(refuse(UNDO_UNRESOLVED));
         }
     }
     // The parent of the oid read above, never `HEAD~1` again: a switch between two
@@ -889,6 +917,7 @@ pub(crate) async fn git_undo_commit_core(
                 None,
                 UNDO_BRANCH_SWITCHED,
                 "undo",
+                false,
             )
             .await?;
     }
@@ -897,30 +926,14 @@ pub(crate) async fn git_undo_commit_core(
 
 /// The undo of a commit with a parent: `reset --soft`'s ref move as a compare-and-swap of
 /// the ref HEAD named under the hold, from `head_oid` to `parent`. The index and tree stay
-/// as they are, so the undone commit's changes stay staged. `update-ref` skips both
-/// `reset --soft`'s mid-merge refusal and its cancelling of a stopped pick, so this
-/// refuses either state first.
+/// as they are, so the undone commit's changes stay staged. The caller has already refused
+/// the mid-operation states.
 async fn soft_undo(
     repo_path: &str,
     pin: &ExpectedRef,
     head_oid: &str,
     parent: &str,
 ) -> AppResult<()> {
-    let refuse = |copy: &str| AppError::Git {
-        code: 1,
-        stderr: copy.to_string(),
-    };
-    let ops = crate::git::ops::op_state(repo_path).await?;
-    if ops.cherry_picking || ops.reverting {
-        return Err(refuse(UNDO_MID_PICK));
-    }
-    // The pair `reset --soft` itself refuses on (measured, git 2.51.1).
-    if ops.merging {
-        return Err(refuse(UNDO_MID_MERGE));
-    }
-    if crate::git::ops::has_unmerged(repo_path).await? {
-        return Err(refuse(UNDO_UNRESOLVED));
-    }
     let cas = pin.cas_ref(repo_path).await?;
     #[cfg(test)]
     run_phase_hook(&UNDO_SOFT_HOOK).await;
@@ -947,6 +960,7 @@ async fn soft_undo(
         Some(parent),
         UNDO_BRANCH_SWITCHED,
         "undo",
+        false,
     )
     .await?;
     record_orig_head(repo_path, head_oid).await;
@@ -2148,6 +2162,45 @@ mod tests {
         }
     }
 
+    /// The root arm shares those refusals: a branch whose only commit has a stopped
+    /// cherry-pick on it refuses the undo rather than deleting the branch under the pick.
+    #[tokio::test]
+    async fn root_undo_refuses_while_a_pick_is_stopped() {
+        let (dir, repo) = amend_fixture("gd-undo-root-mid-pick-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let full = run(&repo, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let start = run(&repo, &["symbolic-ref", "--short", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        // A root commit of its own writing `a.txt` too, so picking it is an add/add conflict.
+        run(&repo, &["switch", "-q", "--orphan", "other"]).await;
+        let other = raw_commit(&dir, &repo, "a.txt", "other").await;
+        run(&repo, &["switch", "-q", &start]).await;
+        let stopped = run_git_raw(Some(&repo), &["cherry-pick", &other], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(stopped.code, 0, "fixture: the pick stops on its conflict");
+        resolve_ours(&repo).await;
+
+        assert_undo_refused(
+            undo_on(&repo, Some(a.clone()), branch_here(&repo).await).await,
+            UNDO_MID_PICK,
+        );
+        assert_eq!(
+            ref_oid(&repo, &full).await.unwrap(),
+            Some(a),
+            "the branch is intact"
+        );
+        assert!(
+            ref_oid(&repo, "CHERRY_PICK_HEAD").await.unwrap().is_some(),
+            "the pick is still there to finish or abort"
+        );
+    }
+
     /// Another process commits on top of the pin after the amend's checks. The amend still
     /// lands, rewriting the racer's commit, and reports that commit by its oid.
     #[tokio::test]
@@ -2329,6 +2382,93 @@ mod tests {
             assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None, "{target}");
             assert_eq!(reflog_subject(&repo, &full).await, "reset: rolling back");
         }
+    }
+
+    /// A depth-1 clone's boundary commit records a parent it never fetched, and
+    /// `commit --amend` reads it through the shallow graft, minting a parentless commit. A
+    /// clean amend there is no race. A commit landing on top of the boundary still is,
+    /// caught by the parents alone once the racer's reflog is gone.
+    #[tokio::test]
+    async fn an_amend_of_a_shallow_boundary_reads_parents_through_the_graft() {
+        let (dir, source) = amend_fixture("gd-amend-shallow-", &[]).await;
+        raw_commit(&dir, &source, "a.txt", "A").await;
+        raw_commit(&dir, &source, "b.txt", "B").await;
+        // `--depth` is ignored for a plain local path, so the source goes by URL.
+        let path = source.replace('\\', "/");
+        let url = if path.starts_with('/') {
+            format!("file://{path}")
+        } else {
+            format!("file:///{path}")
+        };
+        let clone = dir.path().join("clone").to_string_lossy().into_owned();
+        run_git(
+            None,
+            &["clone", "-q", "--depth", "1", &url, &clone],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .expect("the shallow clone succeeds");
+        run(&clone, &["config", "user.email", "t@t.local"]).await;
+        run(&clone, &["config", "user.name", "T"]).await;
+        let boundary = head(&clone).await;
+
+        let clean = amend_on(
+            &clone,
+            "B reworded",
+            Some(boundary),
+            branch_here(&clone).await,
+        )
+        .await
+        .expect("the amend runs");
+        assert_eq!(
+            clean.raced, None,
+            "a clean amend of the boundary is no race"
+        );
+
+        // HEAD@{1} answers from a fresh log's one entry, and from the branch's log when HEAD
+        // has none, so the reflog signal is silenced only by no logs at all (measured, git
+        // 2.51.1).
+        run(&clone, &["config", "core.logAllRefUpdates", "false"]).await;
+        let (commit, landed) = racing_commit(&clone, "c.txt");
+        let expire: PhaseHook = std::sync::Arc::new({
+            let clone = clone.clone();
+            move || {
+                let (clone, commit) = (clone.clone(), commit.clone());
+                Box::pin(async move {
+                    commit().await;
+                    let logs = run(&clone, &["rev-parse", "--git-path", "logs"]).await;
+                    std::fs::remove_dir_all(std::path::Path::new(&clone).join(logs.trim()))
+                        .unwrap();
+                })
+            }
+        });
+        let raced = AMEND_PHASE_HOOK
+            .scope(
+                expire,
+                amend_on(
+                    &clone,
+                    "B again",
+                    Some(clean.hash.clone()),
+                    branch_here(&clone).await,
+                ),
+            )
+            .await
+            .expect("a raced amend still lands");
+        assert_eq!(
+            raced.raced,
+            Some(AmendRace {
+                rewrote: None,
+                branch: None,
+                detached: false,
+            }),
+            "with no reflog to read, the parents name the race"
+        );
+        assert_eq!(
+            run(&clone, &["rev-parse", "HEAD~1"]).await.trim(),
+            clean.hash,
+            "the amend replaced the racer's {}",
+            racer_landed(&landed)
+        );
     }
 
     /// No race, no report: a pinned amend on the branch it saw, and an unpinned one.

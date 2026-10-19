@@ -236,7 +236,8 @@ pub struct CommitResult {
 /// so the wire keys need no rename.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AmendRace {
-    /// The full oid the amend replaced, `None` when HEAD's reflog couldn't name it.
+    /// The full oid the amend replaced, `None` when HEAD's reflog couldn't name it or it
+    /// was the pinned commit itself (a branch switch at that commit).
     pub rewrote: Option<String>,
     /// The branch HEAD was on instead of the pinned one, `None` when it wasn't on another
     /// named branch.

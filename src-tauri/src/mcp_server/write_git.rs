@@ -675,9 +675,11 @@ impl GitDesktopMcp {
                        work is lost, the changes return to the index). A root commit has no parent, \
                        so its branch ref is removed instead; with HEAD detached there, or at a \
                        shallow clone's boundary commit, it refuses: there is nothing to undo \
-                       onto. An optional `expectedHead` (a full commit id) makes the undo run \
-                       only while the latest commit is still that id; it pins the commit id \
-                       only, not which branch HEAD is on. Requires --allow-git-write.",
+                       onto. It also refuses while a merge, cherry-pick or revert is in \
+                       progress or conflicts are unresolved. An optional `expectedHead` (a full \
+                       commit id) makes the undo run only while the latest commit is still that \
+                       id; it pins the commit id only, not which branch HEAD is on. Requires \
+                       --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn undo_last_commit(
