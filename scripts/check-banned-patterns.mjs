@@ -430,8 +430,9 @@ const KIND_BADGE_DEF_RE = /\bconst\s+KIND_BADGE\b/;
 // RegExp() strings too), a template's closing line, or a regex literal (plus
 // `[\n]`, `(?<=\n)`, `(?<![^\n])` leads); exact labels and quoted/code-spanned
 // mentions trip it: reword or allowlist. Not read: singular "Binary file" (UI
-// copy); extra text, escapes or interpolation beside the words; split or joined
-// literals; repeats in exempt/allowlisted files; lines stripComments blanks.
+// copy); extra text, other escapes or interpolation in or beside the words;
+// split or joined literals; a repeat in an exempt or allowlisted file; and
+// lines that stripComments blanks.
 const BINARY_MARKER_RE = new RegExp(
   [
     /(["'`])(?:\\{1,2}[nr]|\\x0[aA]|\\u000[aA]|\\u\{0*[aA]\}|\^)*[Bb]inary [Ff]iles ?\1/
