@@ -227,6 +227,22 @@ pub struct CommitDetails {
 #[serde(rename_all = "camelCase")]
 pub struct CommitResult {
     pub hash: String,
+    /// A pinned amend that still landed after another git process moved HEAD first;
+    /// `None` on every clean commit and every unpinned one.
+    pub raced: Option<AmendRace>,
+}
+
+/// What a raced amend rewrote instead of the commit the user saw. Single-word fields,
+/// so the wire keys need no rename.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AmendRace {
+    /// The full oid the amend replaced, `None` when HEAD's reflog couldn't name it.
+    pub rewrote: Option<String>,
+    /// The branch HEAD was on instead of the pinned one, `None` when it wasn't on another
+    /// named branch.
+    pub branch: Option<String>,
+    /// HEAD was detached instead of on the pinned branch.
+    pub detached: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

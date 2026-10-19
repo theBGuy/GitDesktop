@@ -635,8 +635,8 @@ pub(crate) async fn spawn_orphan_sweep(state: &AppState, repo_path: &str) {
 
 /// Clears the ONE dead `gd-update-*` leftover at `holder`, a path a caller just read
 /// out of `worktree list --porcelain`. `true` means it is gone and the caller should
-/// re-probe; `false` means it must not proceed (still live, unprobeable, or the admin
-/// domain was busy).
+/// re-probe; `false` means it must not proceed (still live, unprobeable, the admin
+/// domain was busy, or the removal failed and left the marker for a retry).
 ///
 /// No age gate, unlike the background sweep, and `Released` is what buys that: the mint
 /// writes and locks the marker BEFORE `worktree add`, so a registered checkout whose
@@ -683,8 +683,7 @@ pub(crate) async fn claim_dead_update_worktree(
     if probe_lock(&lock) != LockProbe::Released {
         return false;
     }
-    remove_update_leftover(repo_path, root, stem).await;
-    true
+    remove_update_leftover(repo_path, root, stem).await
 }
 
 /// Clears the leftovers of DEAD updates of `branch` specifically, age-free, so the very
@@ -725,7 +724,8 @@ async fn claim_dead_stems_for_branch_locked(repo_path: &str, root: &Path, branch
         if probe_lock(&root.join(format!("{stem}.lock"))) != LockProbe::Released {
             continue;
         }
-        remove_update_leftover(repo_path, root, &stem).await;
+        // Healing is best-effort here: a failed removal keeps its marker for the retry.
+        let _ = remove_update_leftover(repo_path, root, &stem).await;
     }
 }
 
@@ -791,13 +791,16 @@ async fn sweep_roots(repo_path: &str, roots: &MarkerRoots, min_age: Duration) {
 /// temp directory without waiting out the real one.
 async fn sweep_in(repo_path: &str, root: &Path, min_age: Duration) {
     for stem in orphaned_update_stems(root, min_age) {
-        remove_update_leftover(repo_path, root, &stem).await;
+        // A failed removal keeps its marker, so the next pass retries it.
+        let _ = remove_update_leftover(repo_path, root, &stem).await;
     }
 }
 
-/// Removes one claimed leftover: its checkout, git's admin entry, and the marker pair.
+/// Removes one claimed leftover: its checkout, git's admin entry, and — once both are
+/// confirmed gone — the marker pair; `true` means all of it is gone. A failed removal keeps
+/// the pair, so the marker keeps probing `Released` and the next claim retries it age-free.
 /// Lock-free runners — every caller already holds the worktree-admin domain.
-async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) {
+async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) -> bool {
     let dir = root.join(stem);
     if dir.exists() {
         let dir_str = dir.to_string_lossy().into_owned();
@@ -807,7 +810,6 @@ async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) {
             WORKTREE_OP_TIMEOUT,
         )
         .await;
-        let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
         // git's own recursive delete mishandles Windows reparse points, and an
         // unregistered leftover is never its job at all. Blocking I/O over a whole
         // checkout, so it runs off the async workers.
@@ -815,8 +817,36 @@ async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) {
             let _ = tokio::fs::remove_dir_all(&dir).await;
         }
     }
+    // Whatever the delete above did: a registration whose checkout is already gone (a
+    // partial forced remove, a hand-deleted directory) clears only here.
+    let _ = run_git_raw(Some(repo_path), &["worktree", "prune"], DEFAULT_TIMEOUT).await;
+    if dir.exists() || still_registered(repo_path, &dir).await {
+        return false;
+    }
     let _ = std::fs::remove_file(root.join(format!("{stem}.lock")));
     let _ = std::fs::remove_file(root.join(format!("{stem}.json")));
+    true
+}
+
+/// Whether `worktree list` still names `dir`. A list that can't be read counts as still
+/// registered: the marker pair then survives for the retry rather than going on a guess.
+async fn still_registered(repo_path: &str, dir: &Path) -> bool {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    let listed = match run_git_raw(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(out) if out.code == 0 => out.stdout_lossy(),
+        _ => return true,
+    };
+    let dir = dir.to_string_lossy();
+    let (canon, norm) = (canonical_wt_path(&dir), normalize_wt_path(&dir));
+    crate::git::ops::parse_worktree_paths(&listed)
+        .iter()
+        .any(|path| canonical_wt_path(path) == canon || normalize_wt_path(path) == norm)
 }
 
 /// The claim decision: which `gd-update-<stem>` leftovers under `root` a sweep may
@@ -1067,6 +1097,112 @@ mod tests {
             .stdout_lossy()
     }
 
+    /// An empty repository under `base` for a removal to run git against: it registers no
+    /// leftover, so every removal falls through to the filesystem delete, and its
+    /// `worktree list` is what confirms a leftover gone.
+    async fn scratch_repo(base: &Path) -> String {
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo = repo.to_string_lossy().into_owned();
+        git(&repo, &["init", "-q"]).await;
+        repo
+    }
+
+    /// A removal confirms the checkout is gone from disk AND from `worktree list` before it
+    /// deletes the marker pair. The failure fixture is a plain FILE where the checkout
+    /// was: `worktree remove` refuses it and `remove_dir_all` fails on a file, so both
+    /// sidecars must survive, the lock still probing `Released` for an age-free retry.
+    // The serializing guard MUST span the awaits — it is what keeps the process-wide
+    // root override installed for the claim half.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_failed_removal_keeps_the_marker_for_the_retry() {
+        let (_guard, base) = temp_root("removal-outcome");
+        let repo = base.join("repo");
+        let root = base.join("worktrees");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        git(&repo_s, &["init", "-q"]).await;
+        git(&repo_s, &["config", "user.email", "t@t.local"]).await;
+        git(&repo_s, &["config", "user.name", "T"]).await;
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        git(&repo_s, &["add", "-A"]).await;
+        git(&repo_s, &["commit", "-qm", "seed"]).await;
+        let sidecars = |stem: &str| {
+            [
+                root.join(format!("{stem}.lock")),
+                root.join(format!("{stem}.json")),
+            ]
+        };
+        let listed = || async { git(&repo_s, &["worktree", "list", "--porcelain"]).await };
+
+        let registered = |stem: &'static str, branch: &'static str| {
+            let (repo_s, root) = (repo_s.clone(), root.clone());
+            async move {
+                git(&repo_s, &["branch", branch]).await;
+                let path = root.join(stem).to_string_lossy().into_owned();
+                git(&repo_s, &["worktree", "add", "--quiet", &path, branch]).await;
+                write_released_marker(&root, stem, branch);
+            }
+        };
+
+        registered("gd-update-gone", "removal-outcome-gone").await;
+        assert!(remove_update_leftover(&repo_s, &root, "gd-update-gone").await);
+        assert!(
+            !root.join("gd-update-gone").exists(),
+            "the checkout is gone"
+        );
+        assert!(
+            !listed().await.contains("gd-update-gone"),
+            "and unregistered"
+        );
+        assert!(
+            sidecars("gd-update-gone").iter().all(|p| !p.exists()),
+            "so the marker pair goes with it"
+        );
+
+        let decoy = root.join("gd-update-decoy");
+        std::fs::write(&decoy, b"not a checkout\n").unwrap();
+        write_released_marker(&root, "gd-update-decoy", "removal-outcome-decoy");
+        assert!(!remove_update_leftover(&repo_s, &root, "gd-update-decoy").await);
+        assert!(decoy.is_file(), "the fixture defeats every removal step");
+        assert!(
+            sidecars("gd-update-decoy").iter().all(|p| p.exists()),
+            "a failed removal keeps both sidecars"
+        );
+        assert_eq!(
+            probe_lock(&root.join("gd-update-decoy.lock")),
+            LockProbe::Released,
+            "so the leftover still reads as a dead update to claim again"
+        );
+
+        // The claim reports the same outcome its removal had.
+        let _serialized = test_root_lock();
+        let _override = TestRootOverride::set(&root);
+        let state = AppState::default();
+        assert!(!claim_dead_update_worktree(&state, &repo_s, &decoy.to_string_lossy()).await);
+        assert!(sidecars("gd-update-decoy").iter().all(|p| p.exists()));
+        registered("gd-update-claimed", "removal-outcome-claimed").await;
+        let claimed = root.join("gd-update-claimed");
+        assert!(claim_dead_update_worktree(&state, &repo_s, &claimed.to_string_lossy()).await);
+        assert!(!claimed.exists() && !listed().await.contains("gd-update-claimed"));
+        assert!(sidecars("gd-update-claimed").iter().all(|p| !p.exists()));
+
+        // A registration whose checkout is already gone (a hand-deleted directory) is
+        // pruned, so the claim still succeeds and the marker pair goes.
+        registered("gd-update-orphaned", "removal-outcome-orphaned").await;
+        let orphaned = root.join("gd-update-orphaned");
+        std::fs::remove_dir_all(&orphaned).unwrap();
+        assert!(
+            listed().await.contains("gd-update-orphaned"),
+            "fixture: the registration outlives its checkout"
+        );
+        assert!(claim_dead_update_worktree(&state, &repo_s, &orphaned.to_string_lossy()).await);
+        assert!(!listed().await.contains("gd-update-orphaned"));
+        assert!(sidecars("gd-update-orphaned").iter().all(|p| !p.exists()));
+    }
+
     /// The production primary-root composition — the resolver plus the mapping that
     /// [`roots_for`]'s non-test arm chains. Callable here because the mapping takes an
     /// already-resolved identity, so the `cfg(test)` override never stands in the way.
@@ -1165,11 +1301,12 @@ mod tests {
         drop(live);
 
         // RELEASED in the pre-rekey root: taken by the branch-scoped, age-free claim.
-        // The repo path is bogus on purpose — every git call fails and the filesystem
-        // fallback finishes the job, as in the single-root claim test.
+        // The repo registers none of these leftovers, so the filesystem fallback finishes
+        // the job, as in the single-root claim test.
+        let repo = scratch_repo(&base).await;
         std::fs::create_dir_all(legacy.join("gd-update-dead")).unwrap();
         write_released_marker(&legacy, "gd-update-dead", "feature");
-        claim_dead_stems_for_branch_locked("C:/nonexistent-repo", &legacy, "feature").await;
+        claim_dead_stems_for_branch_locked(&repo, &legacy, "feature").await;
         assert!(
             !legacy.join("gd-update-dead").exists()
                 && !legacy.join("gd-update-dead.lock").exists()
@@ -1180,7 +1317,7 @@ mod tests {
         // And by the background sweep, which reads both roots in one pass.
         write_released_marker(&legacy, "gd-update-stale", "feature");
         write_released_marker(&primary, "gd-update-fresh", "feature");
-        sweep_roots("C:/nonexistent-repo", &roots, Duration::ZERO).await;
+        sweep_roots(&repo, &roots, Duration::ZERO).await;
         assert!(
             !legacy.join("gd-update-stale.lock").exists()
                 && !primary.join("gd-update-fresh.lock").exists(),
@@ -1464,17 +1601,17 @@ mod tests {
 
         // And the removal it authorizes takes only that stem, with no age gate — the
         // headline crash-recovery case, where the next update heals its predecessor.
-        // The repo path is bogus on purpose: every git call fails and the filesystem
-        // fallback finishes the job, which is the arm that must not touch a neighbour.
+        // The repo registers none of these stems, so the filesystem fallback finishes the
+        // job, which is the arm that must not touch a neighbour.
+        let (_repo_guard, repo_base) = temp_root("branch-claim-repo");
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("test runtime")
-            .block_on(claim_dead_stems_for_branch_locked(
-                "C:/nonexistent-repo",
-                &root,
-                "feature",
-            ));
+            .block_on(async {
+                let repo = scratch_repo(&repo_base).await;
+                claim_dead_stems_for_branch_locked(&repo, &root, "feature").await;
+            });
         assert!(
             !root.join("gd-update-dead").exists(),
             "the leftover is gone"

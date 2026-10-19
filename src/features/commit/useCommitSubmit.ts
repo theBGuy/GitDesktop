@@ -11,7 +11,7 @@ import {
 import { headBranchPin } from "@/lib/git/api";
 import { coAuthorTrailers } from "@/lib/git/co-authors";
 import { repoKeys, useCommit, useRepoStatus } from "@/lib/git/queries";
-import type { ChangeKind, FileEntry } from "@/lib/git/types";
+import type { ChangeKind, CommitResult, FileEntry } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useAiConfigured, useAiEnabled } from "@/lib/settings/queries";
 import { commitDraftKey, useUiStore } from "@/lib/stores/ui";
@@ -21,6 +21,26 @@ import { useGenerateCommitMessage } from "./useGenerateCommitMessage";
 /** Why an amend holds, for the surfaces' banner: the commit moved, then the branch;
  *  `"none"` while it can run, or when not amending. */
 export type AmendHold = "none" | "commit" | "branch";
+
+/** The report for an amend that landed after another Git process moved HEAD: where
+ *  it landed (another branch, then a detached HEAD) outranks the commit it rewrote,
+ *  and a commit the reflog couldn't name, or a pin that was never read, takes the
+ *  generic form. */
+function racedAmendMessage(
+  raced: NonNullable<CommitResult["raced"]>,
+  expectedHead: string | null,
+): string {
+  if (raced.branch !== null) {
+    return `The branch switched to ${raced.branch} before the amend ran, so the amend landed there. The commit it replaced is in the reflog.`;
+  }
+  if (raced.detached) {
+    return "HEAD was detached before the amend ran, so the amend landed there. The commit it replaced is in the reflog.";
+  }
+  if (raced.rewrote !== null && expectedHead !== null) {
+    return `Another Git process committed first, so the amend rewrote ${raced.rewrote.slice(0, 7)} instead of ${expectedHead.slice(0, 7)}. The original ${raced.rewrote.slice(0, 7)} is in the reflog.`;
+  }
+  return "Another Git process committed first, so the amend rewrote a different commit than the one shown. The original is in the reflog.";
+}
 
 /**
  * The commit machinery behind both composing surfaces — the inline CommitBox and
@@ -236,9 +256,15 @@ export function useCommitSubmit(
           },
         });
       }
-      toast.success(
-        `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,
-      );
+      // A raced amend still landed, so it closes and clears like any other; only the
+      // report differs.
+      if (result.raced) {
+        toast.error(racedAmendMessage(result.raced, expectedHead));
+      } else {
+        toast.success(
+          `${wasAmending ? "Amended" : "Committed"} ${result.hash.slice(0, 7)}`,
+        );
+      }
       // Amending rewrites an existing commit; only new commits fire
       // on-commit automations.
       if (!wasAmending) {

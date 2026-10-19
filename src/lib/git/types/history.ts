@@ -33,6 +33,11 @@ export interface BlameLine {
 
 export interface CommitResult {
   hash: string;
+  raced?: {
+    rewrote: string | null;
+    branch: string | null;
+    detached: boolean;
+  } | null;
 }
 
 /** One TODO/FIXME/HACK/… comment found in the working tree by `git_todo_scan`. */

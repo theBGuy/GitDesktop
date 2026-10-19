@@ -620,7 +620,12 @@ impl GitDesktopMcp {
                        `amend`, rewrites the previous commit instead; an optional `expectedHead` \
                        (a full commit id) then makes the amend run only while HEAD is still that \
                        commit. It pins the commit id only, not which branch HEAD is on. Returns \
-                       the new commit hash as JSON. Requires --allow-git-write.",
+                       JSON with the new commit `hash` and `raced`, which is null unless another \
+                       git process seems to have moved HEAD between that check and the amend. \
+                       Such an amend still lands, and `raced.rewrote` names the commit it \
+                       replaced instead (null when the reflog can't tell). The report is \
+                       best-effort: part of it reads HEAD's reflog, which a commit hook that \
+                       itself commits can mislead. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn commit(
@@ -1969,6 +1974,29 @@ mod tests {
             .await
             .expect("the current HEAD amends");
         assert_eq!(subjects(&repo).await, ["B reworded", "A"]);
+    }
+
+    /// The commit tool's result carries the amend's race report, `null` for a clean amend,
+    /// as its description promises.
+    #[tokio::test]
+    async fn mcp_clean_amend_reports_raced_null() {
+        let (_dir, repo, _a, b) = two_commit_repo("gd-mcp-amend-raced-").await;
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, false);
+        let args = serde_json::from_value::<CommitArgs>(serde_json::json!({
+            "message": "B reworded",
+            "amend": true,
+            "expectedHead": b,
+        }))
+        .unwrap();
+
+        let result = h.commit(Parameters(args)).await.expect("the amend runs");
+
+        let json: serde_json::Value = serde_json::from_str(&text_of(&result)).unwrap();
+        let head = git(&repo, &["rev-parse", "HEAD"]).await;
+        assert_eq!(
+            json,
+            serde_json::json!({ "hash": head.trim(), "raced": null })
+        );
     }
 
     /// The same wire pin for the undo, plus the absent field's unpinned default.

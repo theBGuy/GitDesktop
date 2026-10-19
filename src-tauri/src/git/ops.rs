@@ -342,6 +342,143 @@ pub(crate) async fn has_unmerged(repo: &str) -> AppResult<bool> {
     Ok(!out.stdout_lossy().trim().is_empty())
 }
 
+/// The branch state `git reset` clears once it moves HEAD, both `--hard` and `--soft`
+/// (measured, git 2.51.1): the merge and squash message files, rerere's `MERGE_RR`, and
+/// the `AUTO_MERGE`, `CHERRY_PICK_HEAD` and `REVERT_HEAD` refs, and a stopped
+/// `merge --autostash`'s `MERGE_AUTOSTASH`, which it files in the stash list. For the
+/// resets that move their ref with `update-ref`, which clears none of it. Best-effort, as
+/// in git: the move already landed, so nothing here fails it.
+pub(crate) async fn clear_branch_state(repo: &str) {
+    let mut args = vec!["rev-parse"];
+    for name in ["MERGE_MSG", "SQUASH_MSG", "MERGE_MODE", "MERGE_RR"] {
+        args.extend(["--git-path", name]);
+    }
+    if let Ok(out) = run_git(Some(repo), &args, DEFAULT_TIMEOUT).await {
+        for path in out.stdout_lossy().lines() {
+            let _ = std::fs::remove_file(Path::new(repo).join(path.trim_end_matches('\r')));
+        }
+    }
+    for name in ["AUTO_MERGE", "CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+        let _ = run_git_raw(
+            Some(repo),
+            &["update-ref", "--no-deref", "-d", name],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+    }
+    // git's own message for the entry (measured, git 2.51.1). Unlike git, the ref goes only
+    // once the stash list holds the entry, so a failed store never loses it.
+    if let Ok(Some(stash)) = crate::git::commit::ref_oid(repo, "MERGE_AUTOSTASH").await {
+        let stored = run_git_raw(
+            Some(repo),
+            &["stash", "store", "-m", "autostash", "-q", &stash],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        if matches!(stored, Ok(out) if out.code == 0) {
+            let _ = run_git_raw(
+                Some(repo),
+                &["update-ref", "--no-deref", "-d", "MERGE_AUTOSTASH", &stash],
+                DEFAULT_TIMEOUT,
+            )
+            .await;
+        }
+    }
+}
+
+/// Branch-state fixtures the reset and undo parity pins share across modules. A test
+/// module, so the guard scripts read the fixture merge as test code. Test-only.
+#[cfg(test)]
+pub(crate) mod branch_state_fixtures {
+    use super::*;
+
+    /// Which branch-state names exist in `repo` now, as files or as refs. Test-only: the
+    /// parity pins compare it across git's own reset and the compare-and-swap ones.
+    pub(crate) async fn branch_state_present(repo: &str) -> Vec<&'static str> {
+        let mut present = Vec::new();
+        for name in ["MERGE_MSG", "SQUASH_MSG", "MERGE_MODE", "MERGE_RR"] {
+            if git_path_exists(repo, name).await {
+                present.push(name);
+            }
+        }
+        for name in [
+            "AUTO_MERGE",
+            "CHERRY_PICK_HEAD",
+            "REVERT_HEAD",
+            "MERGE_AUTOSTASH",
+        ] {
+            if crate::git::commit::ref_oid(repo, name)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                present.push(name);
+            }
+        }
+        present
+    }
+
+    /// Writes every branch-state name `git reset` clears that no operation marker guards:
+    /// the message files and rerere's `MERGE_RR` with throwaway bodies, and `AUTO_MERGE` at
+    /// `oid`. Test-only, the synthetic half of the parity pins.
+    pub(crate) async fn write_unguarded_branch_state(repo: &str, oid: &str) {
+        for name in ["MERGE_MSG", "SQUASH_MSG", "MERGE_MODE", "MERGE_RR"] {
+            let path = git_dir_path(repo, name)
+                .await
+                .expect("the git path resolves");
+            std::fs::write(path, "x\n").unwrap();
+        }
+        run_git(
+            Some(repo),
+            &["update-ref", "AUTO_MERGE", oid],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Stops a conflicted `merge --squash --autostash` on top of HEAD, a dirty tracked file
+    /// stashed, and resolves it to HEAD's side: a clean tree holding MERGE_AUTOSTASH beside the
+    /// squash's own state. Returns the autostash's oid. Test-only, the autostash parity pins.
+    pub(crate) async fn stop_an_autostashed_squash(repo: &str) -> String {
+        let dir = Path::new(repo);
+        let git = |args: &'static [&'static str]| async move {
+            run_git(Some(repo), args, DEFAULT_TIMEOUT).await.unwrap()
+        };
+        let start = crate::git::branches::current_branch_name(repo)
+            .await
+            .unwrap()
+            .expect("fixture: HEAD is on a branch");
+        std::fs::write(dir.join("auto.txt"), "base\n").unwrap();
+        std::fs::write(dir.join("dirt.txt"), "clean\n").unwrap();
+        git(&["add", "auto.txt", "dirt.txt"]).await;
+        git(&["commit", "-qm", "autostash base"]).await;
+        git(&["switch", "-qc", "autostash-feature"]).await;
+        std::fs::write(dir.join("auto.txt"), "theirs\n").unwrap();
+        git(&["commit", "-qam", "autostash theirs"]).await;
+        run_git(Some(repo), &["switch", "-q", &start], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        std::fs::write(dir.join("auto.txt"), "mine\n").unwrap();
+        git(&["commit", "-qam", "autostash mine"]).await;
+        std::fs::write(dir.join("dirt.txt"), "dirty\n").unwrap();
+        let squash = run_git_raw(
+            Some(repo),
+            &["merge", "--squash", "--autostash", "autostash-feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(squash.code, 0, "fixture: the squash stops on its conflict");
+        git(&["checkout", "--ours", "--", "auto.txt"]).await;
+        git(&["add", "auto.txt"]).await;
+        crate::git::commit::ref_oid(repo, "MERGE_AUTOSTASH")
+            .await
+            .unwrap()
+            .expect("fixture: the autostash is held")
+    }
+}
+
 /// Whether the repo is left mid-op. Reuses [`op_state`]'s detection so this gate
 /// and the conflict banner can't drift apart. Best-effort, not fail-closed: the
 /// probes swallow read failures into absent, so the `Err` arm is defensive
@@ -579,16 +716,17 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
 /// Every `--hard` guard and the reset itself run under ONE working-tree-lock hold,
 /// so no other caller in THIS PROCESS can dirty the tree or start a merge between the
 /// checks and a rewrite that has no stash and no reflog to recover from. The hold
-/// is why the reset runs on the lock-free `run_git`: `run_git_mutating` re-acquires
-/// the same non-reentrant mutex and deadlocks, so this trades away its one-shot
-/// index.lock retry — the same bargain `git_stash_all_core` and the cherry-pick
-/// compound make. The `--mixed` arm keeps `run_git_mutating`: it has no guards to
-/// protect, so there is no check-then-act window and the retry is worth more than
-/// a hold.
+/// is why the reset runs on the lock-free runners: `run_git_mutating` re-acquires
+/// the same non-reentrant mutex and deadlocks, so its one-shot index.lock retry rides
+/// `run_git_raw_index_retry` instead. The `--mixed` arm keeps `run_git_mutating`: it
+/// has no guards to protect, so there is no check-then-act window and the retry is
+/// worth more than a hold.
 ///
 /// The hold's reach ends at this process, as `run_git_mutating`'s own doc says: a
 /// separate MCP-server process holds its own lock, and no lock constrains a
-/// terminal git or an editor writing files.
+/// terminal git or an editor writing files. So the `--hard` ref move is a
+/// compare-and-swap against the tip the guards read: another process's commit in that
+/// window refuses the reset instead of being discarded.
 ///
 /// Worktree-correct without extra work: every spawn runs with `repo_path` as its
 /// cwd, so a linked worktree resets ITS own HEAD and ITS own tree.
@@ -617,6 +755,44 @@ const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothi
 const RESET_BRANCH_SWITCHED: &str =
     "The checked-out branch changed since you confirmed — nothing was reset.";
 
+/// The verdicts for a hard reset whose tree step failed after its ref moved, each leading
+/// git's own text. `read-tree -u` can write some files before failing and moving the ref
+/// back doesn't undo them, so none of them says nothing was reset.
+const RESET_TREE_ROLLED_BACK: &str = "Updating your files failed, so the branch was moved back. \
+                                      Some files may already show the reset's changes.";
+
+/// The ref moved again before the rollback could move it back, so it stays where the
+/// other process put it.
+const RESET_TREE_ROLLBACK_LOST: &str = "Updating your files failed, and another Git process \
+                                        moved the branch before it could be moved back. Check \
+                                        the branch in a terminal; the reflog has every tip.";
+
+/// The rollback itself failed with the ref still at the reset's target: a stale ref
+/// `.lock`, not a race.
+fn reset_tree_rollback_failed(oid: &str) -> String {
+    format!(
+        "Updating your files failed, and the branch couldn't be moved back: it now points at {}.",
+        crate::git::commit::short_oid(oid)
+    )
+}
+
+/// The rollback failed and the ref couldn't be re-read, so no commit is named.
+const RESET_TREE_ROLLBACK_UNREAD: &str =
+    "Updating your files failed, and the branch couldn't be moved back.";
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Awaited by the hard reset it is scoped to, after its guards and before the
+    /// compare-and-swap, so a test can move HEAD inside that window.
+    static RESET_PHASE_HOOK: crate::git::commit::PhaseHook;
+    /// Awaited by the hard reset it is scoped to, after the compare-and-swap landed and
+    /// before HEAD is re-read, so a test can switch branches inside that window.
+    static RESET_SWAPPED_HOOK: crate::git::commit::PhaseHook;
+    /// Awaited by the hard reset it is scoped to, after HEAD's re-read and before
+    /// `read-tree`, so a test can fail the tree step or move the ref inside that window.
+    static RESET_TREE_HOOK: crate::git::commit::PhaseHook;
+}
+
 pub(crate) async fn git_reset_core(
     state: &AppState,
     repo_path: String,
@@ -628,8 +804,8 @@ pub(crate) async fn git_reset_core(
 
 /// `expected_head` and `expected_ref` are consulted in the hard arm only: the reset then
 /// runs only while HEAD is still that full oid on that branch (or detached, as it says),
-/// checked first under the guards' hold. The mixed arm ignores both, since its callers
-/// name an explicit user-chosen commit.
+/// checked first under the guards' hold, and the ref moves only while it still holds that
+/// oid. The mixed arm ignores both, since its callers name an explicit user-chosen commit.
 pub(crate) async fn git_reset_core_expecting(
     state: &AppState,
     repo_path: String,
@@ -670,7 +846,7 @@ pub(crate) async fn git_reset_core_expecting(
             stderr: RESET_BRANCH_SWITCHED.to_string(),
         });
     }
-    if let Some(expected) = expected_head {
+    if let Some(expected) = &expected_head {
         let current =
             run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
         // A non-zero exit is an unborn HEAD.
@@ -687,14 +863,107 @@ pub(crate) async fn git_reset_core_expecting(
             "an operation is still in progress — finish or abort it before resetting".into(),
         ));
     }
-    refuse_untracked_reset_collisions(&repo_path, &hash).await?;
-    run_git(
+    // `update-ref` takes an oid as given where `reset --hard` peels, so the target is
+    // resolved once and every step below writes that commit.
+    let peeled = run_git(
         Some(&repo_path),
-        &["reset", "--hard", &hash],
+        &["rev-parse", "--verify", &format!("{hash}^{{commit}}")],
         DEFAULT_TIMEOUT,
     )
+    .await?
+    .stdout_lossy()
+    .trim()
+    .to_string();
+    refuse_untracked_reset_collisions(&repo_path, &peeled).await?;
+    let cas = expected_ref.cas_ref(&repo_path).await?;
+    // The swapped ref's own value, never HEAD's dereferenced one. `None` is an unborn
+    // branch, reachable only unpinned (a pin refused it above); the swap then creates the
+    // branch only while it still doesn't exist.
+    let old = match expected_head {
+        Some(expected) => Some(expected),
+        None => cas.oid(&repo_path).await?,
+    };
+    #[cfg(test)]
+    crate::git::commit::run_phase_hook(&RESET_PHASE_HOOK).await;
+    let message = format!("reset: moving to {hash}");
+    let out = cas
+        .swap(&repo_path, &message, &peeled, old.as_deref())
+        .await?;
+    if out.code != 0 {
+        return Err(cas
+            .refusal(
+                &repo_path,
+                &expected_ref,
+                old.as_deref(),
+                &out,
+                RESET_HEAD_MOVED,
+                RESET_BRANCH_SWITCHED,
+            )
+            .await?);
+    }
+    #[cfg(test)]
+    crate::git::commit::run_phase_hook(&RESET_SWAPPED_HOOK).await;
+    // Before `read-tree`, so no file is written under a switched HEAD. A switch landing
+    // between this read and `read-tree` taking index.lock stays unseen.
+    cas.refuse_if_switched(
+        &repo_path,
+        old.as_deref(),
+        Some(&peeled),
+        RESET_BRANCH_SWITCHED,
+        "reset",
+    )
     .await?;
+    #[cfg(test)]
+    crate::git::commit::run_phase_hook(&RESET_TREE_HOOK).await;
+    let tree = run_git_raw_index_retry(
+        &repo_path,
+        &["read-tree", "-u", "--reset", &peeled],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    // A spawn failure or timeout rolls back like a failed exit: the ref already moved.
+    let tree_failure = match &tree {
+        Ok(out) if out.code == 0 => None,
+        Ok(out) => Some((out.code, out.full_failure_text())),
+        Err(e) => Some((1, e.to_string())),
+    };
+    if let Some((code, git_text)) = tree_failure {
+        return Err(
+            roll_back_reset(&repo_path, &cas, old.as_deref(), &peeled, code, &git_text).await,
+        );
+    }
+    // After the tree step, as `git reset` writes it, so a rolled-back reset leaves it alone.
+    if let Some(old) = &old {
+        crate::git::commit::record_orig_head(&repo_path, old).await;
+    }
+    clear_branch_state(&repo_path).await;
     Ok(())
+}
+
+/// A hard reset's ref put back after its tree step failed, by a compare-and-swap from the
+/// reset's own `peeled` target: it restores `old` only while nothing else moved the ref,
+/// so a ref another process moved meanwhile is never moved back over it.
+async fn roll_back_reset(
+    repo_path: &str,
+    cas: &crate::git::commit::CasRef,
+    old: Option<&str>,
+    peeled: &str,
+    code: i32,
+    git_text: &str,
+) -> AppError {
+    use crate::git::commit::RolledBack;
+    let message = match cas.roll_back(repo_path, old, Some(peeled)).await {
+        RolledBack::Restored => format!("{RESET_TREE_ROLLED_BACK}\n{git_text}"),
+        RolledBack::Lost => format!("{RESET_TREE_ROLLBACK_LOST}\n{git_text}"),
+        RolledBack::Stuck(why) => {
+            format!("{}\n{git_text}\n{why}", reset_tree_rollback_failed(peeled))
+        }
+        RolledBack::Unread(why) => format!("{RESET_TREE_ROLLBACK_UNREAD}\n{git_text}\n{why}"),
+    };
+    AppError::Git {
+        code,
+        stderr: message,
+    }
 }
 
 #[tauri::command]
@@ -6091,6 +6360,9 @@ pub async fn git_list_tags(repo_path: String) -> AppResult<Vec<TagInfo>> {
 
 #[cfg(test)]
 mod tests {
+    use super::branch_state_fixtures::{
+        branch_state_present, stop_an_autostashed_squash, write_unguarded_branch_state,
+    };
     use super::*;
     // Test-only: the interleave control queues on the lock WITHOUT a wait bound.
     use crate::git::runner::acquire_repo_lock_unbounded;
@@ -6870,6 +7142,555 @@ mod tests {
 
         assert_eq!(rev(&repo, "HEAD").await, base);
         assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+    }
+
+    async fn reset_hard_on(
+        state: &AppState,
+        repo: &str,
+        target: &str,
+        seen: &str,
+        on: ExpectedRef,
+    ) -> AppResult<()> {
+        git_reset_core_expecting(
+            state,
+            repo.to_string(),
+            target.to_string(),
+            Some("hard".into()),
+            Some(seen.to_string()),
+            on,
+        )
+        .await
+    }
+
+    async fn reflog_subject(repo: &str, name: &str) -> String {
+        git(repo, &["reflog", "-1", "--format=%gs", name])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// HEAD's branch as its full ref.
+    async fn head_ref(repo: &str) -> String {
+        git(repo, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    async fn orig_head(repo: &str) -> Option<String> {
+        crate::git::commit::ref_oid(repo, "ORIG_HEAD")
+            .await
+            .unwrap()
+    }
+
+    fn racer_landed(slot: &std::sync::Mutex<Option<String>>) -> String {
+        slot.lock().unwrap().clone().expect("the racer committed")
+    }
+
+    /// A seam that creates each of `locks`, left held for the test to remove, then runs
+    /// `steps` as raw git.
+    fn locking(
+        repo: &str,
+        locks: Vec<std::path::PathBuf>,
+        steps: &[&[&str]],
+    ) -> crate::git::commit::PhaseHook {
+        let racer = crate::git::commit::racing_git(repo, steps);
+        std::sync::Arc::new(move || {
+            for lock in &locks {
+                std::fs::write(lock, b"").unwrap();
+            }
+            racer()
+        })
+    }
+
+    fn reset_message(result: AppResult<()>) -> String {
+        match result {
+            Err(AppError::Git { stderr, .. }) => stderr,
+            other => panic!("expected a git error, got {other:?}"),
+        }
+    }
+
+    /// Another process commits on top of the confirmed tip after the guards: the swap from
+    /// that tip refuses, so the racer's commit stays the tip and the tree is untouched.
+    #[tokio::test]
+    async fn reset_hard_refuses_a_commit_landing_before_its_swap() {
+        let (dir, repo) = setup_repo("reset-hard-raced").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let seen = rev(&repo, "HEAD").await;
+        let on = ExpectedRef::Branch(head_branch(&repo).await);
+        let (commit, landed) = crate::git::commit::racing_commit(&repo, "r.txt");
+        let state = AppState::default();
+
+        let result = RESET_PHASE_HOOK
+            .scope(commit, reset_hard_on(&state, &repo, &base, &seen, on))
+            .await;
+
+        assert_reset_head_moved(result);
+        assert_eq!(rev(&repo, "HEAD").await, racer_landed(&landed));
+        assert_eq!(rev(&repo, "HEAD~1").await, seen);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+        assert_eq!(orig_head(&repo).await, None);
+    }
+
+    /// The swap records what `git reset --hard` does: tree and index at the target,
+    /// ORIG_HEAD at the old tip, and the move in the branch's reflog AND HEAD's (git logs
+    /// HEAD when it moves HEAD's referent), under the hash as the caller spelled it.
+    #[tokio::test]
+    async fn reset_hard_records_orig_head_and_logs_both_reflogs() {
+        let (dir, repo) = setup_repo("reset-hard-logs").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        commit_file(&repo, dir.path(), "b.txt", "b\n", "third").await;
+        let tip = rev(&repo, "HEAD").await;
+        let full = head_ref(&repo).await;
+        let short = &base[..12];
+        let state = AppState::default();
+
+        reset_hard_on(
+            &state,
+            &repo,
+            short,
+            &tip,
+            ExpectedRef::Branch(head_branch(&repo).await),
+        )
+        .await
+        .expect("the reset runs");
+
+        assert_eq!(rev(&repo, "HEAD").await, base);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v0\n");
+        assert!(!dir.path().join("b.txt").exists());
+        assert_eq!(
+            git(&repo, &["status", "--porcelain"]).await,
+            "",
+            "index and tree match the target"
+        );
+        assert_eq!(orig_head(&repo).await, Some(tip));
+        for log in [full.as_str(), "HEAD"] {
+            assert_eq!(
+                reflog_subject(&repo, log).await,
+                format!("reset: moving to {short}"),
+                "{log}"
+            );
+        }
+    }
+
+    /// `update-ref` takes an oid as given, so a tag object's oid is peeled to its commit
+    /// first, as `reset --hard` peels it: the branch never points at a tag.
+    #[tokio::test]
+    async fn reset_hard_peels_an_annotated_tag_to_its_commit() {
+        let (dir, repo) = setup_repo("reset-hard-peel").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["tag", "-a", "v0", "-m", "tag"]).await;
+        let tag_object = rev(&repo, "refs/tags/v0").await;
+        assert_ne!(tag_object, base, "fixture: the tag is its own object");
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let full = head_ref(&repo).await;
+        let state = AppState::default();
+
+        reset_hard_on(&state, &repo, &tag_object, &tip, ExpectedRef::Any)
+            .await
+            .expect("the reset runs");
+
+        assert_eq!(rev(&repo, &full).await, base);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v0\n");
+    }
+
+    /// Unpinned on an unborn branch, the swap creates the branch only while it still
+    /// doesn't exist, and there is no old tip for ORIG_HEAD.
+    #[tokio::test]
+    async fn reset_hard_unpinned_creates_an_unborn_branch() {
+        let (dir, repo) = setup_repo("reset-hard-unborn").await;
+        let base = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", "-q", "--orphan", "fresh"]).await;
+        let state = AppState::default();
+
+        git_reset_core(&state, repo.clone(), base.clone(), Some("hard".into()))
+            .await
+            .expect("the reset creates the branch");
+
+        assert_eq!(rev(&repo, "refs/heads/fresh").await, base);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v0\n");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+        assert_eq!(orig_head(&repo).await, None);
+    }
+
+    /// Detached, the swap moves HEAD itself (`--no-deref`): a commit landing first refuses
+    /// it, and a clean one leaves the branch HEAD came from where it was while HEAD's
+    /// reflog records the move.
+    #[tokio::test]
+    async fn reset_hard_detached_moves_head_itself() {
+        let (dir, repo) = setup_repo("reset-hard-detached").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_ref(&repo).await;
+        git(&repo, &["checkout", "-q", "--detach"]).await;
+        let (commit, landed) = crate::git::commit::racing_commit(&repo, "r.txt");
+        let state = AppState::default();
+
+        let result = RESET_PHASE_HOOK
+            .scope(
+                commit,
+                reset_hard_on(&state, &repo, &base, &tip, ExpectedRef::Detached),
+            )
+            .await;
+
+        assert_reset_head_moved(result);
+        let racer = racer_landed(&landed);
+        assert_eq!(rev(&repo, "HEAD").await, racer);
+
+        reset_hard_on(&state, &repo, &base, &racer, ExpectedRef::Detached)
+            .await
+            .expect("a detached reset runs");
+        assert_eq!(rev(&repo, "HEAD").await, base);
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None,
+            "HEAD stays detached"
+        );
+        assert_eq!(rev(&repo, &branch).await, tip, "the branch stays put");
+        assert_eq!(
+            reflog_subject(&repo, "HEAD").await,
+            format!("reset: moving to {base}")
+        );
+        assert_eq!(orig_head(&repo).await, Some(racer));
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+    }
+
+    fn assert_reset_switched(result: AppResult<()>, case: &str) {
+        match result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_eq!(stderr, RESET_BRANCH_SWITCHED, "{case}")
+            }
+            other => panic!("{case}: expected the branch-switched refusal, got {other:?}"),
+        }
+    }
+
+    /// Another process switches branches right after the swap landed, which the swap (it
+    /// compares only the branch's own oid) can't see: HEAD's re-read moves the branch back
+    /// and refuses before any file is written. A branch at another commit and one at the
+    /// confirmed tip both count.
+    #[tokio::test]
+    async fn reset_hard_moves_back_and_refuses_a_switch_right_after_its_swap() {
+        for target in ["side", "twin"] {
+            let (dir, repo) = setup_repo("reset-hard-switched-after").await;
+            let base = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+            let tip = rev(&repo, "HEAD").await;
+            let full = head_ref(&repo).await;
+            let start = head_branch(&repo).await;
+            git(&repo, &["branch", "twin"]).await;
+            git(&repo, &["switch", "-qc", "side"]).await;
+            commit_file(&repo, dir.path(), "s.txt", "s\n", "side work").await;
+            git(&repo, &["switch", "-q", &start]).await;
+            let state = AppState::default();
+
+            let result = RESET_SWAPPED_HOOK
+                .scope(
+                    crate::git::commit::racing_git(&repo, &[&["switch", "-q", target]]),
+                    reset_hard_on(&state, &repo, &base, &tip, ExpectedRef::Branch(start)),
+                )
+                .await;
+
+            assert_reset_switched(result, target);
+            assert_eq!(rev(&repo, &full).await, tip, "{target}: the branch is back");
+            assert_eq!(
+                head_branch(&repo).await,
+                target,
+                "{target}: the switch stands"
+            );
+            assert_eq!(
+                tree_text(dir.path(), "a.txt"),
+                "v1\n",
+                "{target}: no file was written"
+            );
+            assert_eq!(git(&repo, &["status", "--porcelain"]).await, "", "{target}");
+            assert_eq!(orig_head(&repo).await, None, "{target}");
+            assert_eq!(reflog_subject(&repo, &full).await, "reset: rolling back");
+        }
+    }
+
+    /// Detached, a switch onto a branch right after the swap replaced HEAD itself, so the
+    /// swap left nothing to move back (moving HEAD back would undo the switch): the reset
+    /// refuses with HEAD on the branch the switch chose and no file written.
+    #[tokio::test]
+    async fn reset_hard_detached_refuses_an_attach_right_after_its_swap() {
+        let (dir, repo) = setup_repo("reset-hard-attached-after").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let start = head_branch(&repo).await;
+        git(&repo, &["checkout", "-q", "--detach"]).await;
+        let state = AppState::default();
+        let attach = crate::git::commit::racing_git(&repo, &[&["switch", "-q", start.as_str()]]);
+
+        let result = RESET_SWAPPED_HOOK
+            .scope(
+                attach,
+                reset_hard_on(&state, &repo, &base, &tip, ExpectedRef::Detached),
+            )
+            .await;
+
+        assert_reset_switched(result, "detached");
+        assert_eq!(head_branch(&repo).await, start);
+        assert_eq!(rev(&repo, "HEAD").await, tip);
+        assert_eq!(
+            tree_text(dir.path(), "a.txt"),
+            "v1\n",
+            "no file was written"
+        );
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+        assert_eq!(orig_head(&repo).await, None);
+    }
+
+    /// Parity with git's own `reset --hard`, measured on twin repos (git 2.51.1): both clear
+    /// MERGE_MSG, SQUASH_MSG, MERGE_MODE, MERGE_RR and AUTO_MERGE. git also clears
+    /// CHERRY_PICK_HEAD and REVERT_HEAD, which never reach this reset: the op-state guard
+    /// refuses them first. A resolved squash merge (no MERGE_HEAD, so no guard) is the real
+    /// state that does reach it, autostash included.
+    #[tokio::test]
+    async fn reset_hard_clears_the_branch_state_git_reset_clears() {
+        let unguarded = [
+            "MERGE_MSG",
+            "SQUASH_MSG",
+            "MERGE_MODE",
+            "MERGE_RR",
+            "AUTO_MERGE",
+        ];
+        let state = AppState::default();
+        for ours in [false, true] {
+            let (dir, repo) = setup_repo("reset-hard-parity").await;
+            let base = rev(&repo, "HEAD").await;
+            commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+            write_unguarded_branch_state(&repo, &rev(&repo, "HEAD").await).await;
+            assert_eq!(branch_state_present(&repo).await, unguarded);
+
+            if ours {
+                git_reset_core(&state, repo.clone(), base, Some("hard".into()))
+                    .await
+                    .expect("the reset runs");
+            } else {
+                git(&repo, &["reset", "--hard", &base]).await;
+            }
+
+            assert!(branch_state_present(&repo).await.is_empty(), "ours: {ours}");
+        }
+
+        for name in ["CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+            for ours in [false, true] {
+                let (dir, repo) = setup_repo("reset-hard-parity-pick").await;
+                let base = rev(&repo, "HEAD").await;
+                commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+                git(&repo, &["update-ref", name, "HEAD"]).await;
+                if ours {
+                    let err = git_reset_core(&state, repo.clone(), base, Some("hard".into()))
+                        .await
+                        .expect_err("the op-state guard refuses first");
+                    assert!(
+                        matches!(&err, AppError::InvalidArgument(m) if m.contains("in progress"))
+                    );
+                    assert_eq!(branch_state_present(&repo).await, [name]);
+                } else {
+                    git(&repo, &["reset", "--hard", &base]).await;
+                    assert!(
+                        branch_state_present(&repo).await.is_empty(),
+                        "git clears {name}"
+                    );
+                }
+            }
+        }
+
+        for ours in [false, true] {
+            let (dir, repo) = setup_repo("reset-hard-parity-squash").await;
+            let base = rev(&repo, "HEAD").await;
+            let start = head_branch(&repo).await;
+            git(&repo, &["switch", "-qc", "feature"]).await;
+            commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+            git(&repo, &["switch", "-q", &start]).await;
+            commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+            let squash = run_git_raw(
+                Some(&repo),
+                &["merge", "--squash", "feature"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_ne!(squash.code, 0, "fixture: the squash stops on its conflict");
+            git(&repo, &["checkout", "--ours", "--", "a.txt"]).await;
+            git(&repo, &["add", "a.txt"]).await;
+            assert!(
+                ensure_clean_tree(&repo).await.is_ok(),
+                "fixture: a clean tree"
+            );
+            assert_eq!(
+                branch_state_present(&repo).await,
+                ["MERGE_MSG", "SQUASH_MSG", "AUTO_MERGE"],
+                "fixture: what the resolved squash leaves"
+            );
+
+            if ours {
+                git_reset_core(&state, repo.clone(), base, Some("hard".into()))
+                    .await
+                    .expect("a resolved squash leaves nothing to refuse");
+            } else {
+                git(&repo, &["reset", "--hard", &base]).await;
+            }
+
+            assert!(branch_state_present(&repo).await.is_empty(), "ours: {ours}");
+        }
+
+        // A stopped `merge --squash --autostash`: git files MERGE_AUTOSTASH in the stash
+        // list as "autostash" instead of dropping it.
+        for ours in [false, true] {
+            let (_dir, repo) = setup_repo("reset-hard-parity-autostash").await;
+            let base = rev(&repo, "HEAD").await;
+            let autostash = stop_an_autostashed_squash(&repo).await;
+            assert!(
+                ensure_clean_tree(&repo).await.is_ok(),
+                "fixture: a clean tree"
+            );
+
+            if ours {
+                git_reset_core(&state, repo.clone(), base, Some("hard".into()))
+                    .await
+                    .expect("the reset runs");
+            } else {
+                git(&repo, &["reset", "--hard", &base]).await;
+            }
+
+            assert!(branch_state_present(&repo).await.is_empty(), "ours: {ours}");
+            assert_eq!(
+                git(&repo, &["stash", "list", "--format=%gs"]).await,
+                "autostash\n",
+                "ours: {ours}"
+            );
+            assert_eq!(rev(&repo, "stash@{0}").await, autostash, "ours: {ours}");
+        }
+    }
+
+    /// The tree step fails after the swap (a held index.lock): the branch goes back by a
+    /// swap from the reset's own target, ORIG_HEAD stays unwritten, and the verdict says
+    /// the branch moved back without claiming nothing was reset.
+    #[tokio::test]
+    async fn reset_hard_moves_the_branch_back_when_the_tree_step_fails() {
+        let (dir, repo) = setup_repo("reset-hard-tree-fail").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let on = ExpectedRef::Branch(head_branch(&repo).await);
+        let index_lock = dir.path().join(".git").join("index.lock");
+        let state = AppState::default();
+
+        let result = RESET_TREE_HOOK
+            .scope(
+                locking(&repo, vec![index_lock.clone()], &[]),
+                reset_hard_on(&state, &repo, &base, &tip, on),
+            )
+            .await;
+
+        let message = reset_message(result);
+        assert_eq!(message.lines().next(), Some(RESET_TREE_ROLLED_BACK));
+        assert!(
+            message.contains("index.lock"),
+            "git's own text follows: {message}"
+        );
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            tip,
+            "the branch is back where it was"
+        );
+        assert_eq!(orig_head(&repo).await, None);
+        std::fs::remove_file(&index_lock).unwrap();
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+    }
+
+    /// Another process moves the branch while the tree step fails: the rollback's swap from
+    /// the reset's target refuses, so the branch stays exactly where that process put it.
+    #[tokio::test]
+    async fn reset_hard_never_moves_back_a_ref_another_process_moved() {
+        let (dir, repo) = setup_repo("reset-hard-rollback-lost").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_ref(&repo).await;
+        let elsewhere = git(
+            &repo,
+            &["commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "side"],
+        )
+        .await
+        .trim()
+        .to_string();
+        let index_lock = dir.path().join(".git").join("index.lock");
+        let state = AppState::default();
+        let racer = locking(
+            &repo,
+            vec![index_lock.clone()],
+            &[&["update-ref", branch.as_str(), elsewhere.as_str()]],
+        );
+
+        let result = RESET_TREE_HOOK
+            .scope(
+                racer,
+                reset_hard_on(&state, &repo, &base, &tip, ExpectedRef::Any),
+            )
+            .await;
+
+        let message = reset_message(result);
+        assert_eq!(message.lines().next(), Some(RESET_TREE_ROLLBACK_LOST));
+        assert_eq!(
+            rev(&repo, &branch).await,
+            elsewhere,
+            "where the racer put it"
+        );
+        std::fs::remove_file(&index_lock).unwrap();
+    }
+
+    /// The rollback's own swap is blocked by a stale ref lock while the branch still sits
+    /// at the reset's target: the verdict names that commit, never the race copy.
+    #[tokio::test]
+    async fn reset_hard_names_where_the_branch_stuck_when_its_rollback_is_blocked() {
+        let (dir, repo) = setup_repo("reset-hard-rollback-blocked").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let full = head_ref(&repo).await;
+        let git_dir = dir.path().join(".git");
+        let locks = vec![
+            git_dir.join("index.lock"),
+            git_dir.join(format!("{full}.lock")),
+        ];
+        let state = AppState::default();
+
+        let result = RESET_TREE_HOOK
+            .scope(
+                locking(&repo, locks.clone(), &[]),
+                reset_hard_on(
+                    &state,
+                    &repo,
+                    &base,
+                    &tip,
+                    ExpectedRef::Branch(head_branch(&repo).await),
+                ),
+            )
+            .await;
+
+        let message = reset_message(result);
+        assert_eq!(
+            message.lines().next(),
+            Some(reset_tree_rollback_failed(&base).as_str())
+        );
+        assert!(message.contains(&base[..7]));
+        assert!(!message.contains(RESET_TREE_ROLLBACK_LOST));
+        assert_eq!(rev(&repo, &full).await, base);
+        for lock in &locks {
+            std::fs::remove_file(lock).unwrap();
+        }
     }
 
     #[tokio::test]

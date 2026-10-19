@@ -111,6 +111,12 @@ const REFSPEC_ALLOWLIST = [
       "the fast-forward's local `fetch .` destination; validates branch and base with validate_branch_name at fn entry",
   },
   {
+    file: "git/commit.rs",
+    fn: "cas_ref",
+    rationale:
+      "validates with validate_branch_name in the Branch arm; the full ref is update-ref's compare-and-swap target, never a refspec",
+  },
+  {
     file: "git/ops.rs",
     fn: "fast_import_chain",
     rationale:

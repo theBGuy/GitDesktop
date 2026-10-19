@@ -582,10 +582,11 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   description from your staged diff (see *AI & automations*).
 {{/ai}}- After committing, **Undo** ({{kbd:undo-commit}}) reverses the last commit and
   returns your message to the box. Undoing a branch's *first* commit asks first — it
-  has no parent to fall back to, so the branch ref goes with it. If a commit lands,
-  or the branch is switched, from elsewhere before the undo runs, nothing is undone
-  and Undo says so; on a detached first commit there is nothing to undo onto, and
-  Undo says that instead.
+  has no parent to fall back to, so the branch ref goes with it. If another Git
+  process commits or switches branches while the undo runs, Undo stops, puts back the
+  branch you were on, and says so. Undo also asks you to finish or abort a merge,
+  cherry-pick or revert in progress, and to resolve any conflicts, first. On a
+  detached first commit there is nothing to undo onto, and Undo says that instead.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright. The exception is a name Windows reserves for a device
@@ -615,7 +616,10 @@ selection to compare a range.
   new commit lands, or HEAD detaches from that branch or reattaches from a detached
   start, the commit box holds the amend and says why until HEAD is back where you
   started; switching to another branch shows that branch's own draft instead. While it
-  holds, **Stop amending** ends amend mode with your message kept.
+  holds, **Stop amending** ends amend mode with your message kept. If another Git
+  process moves HEAD in the instant before the amend runs, the amend still completes,
+  and a toast says the amend raced another Git process and names the commit or branch
+  when it can tell; the replaced commit stays in the reflog.
 - **Revert** — create a new commit that undoes a commit's changes. It asks first, and
   says that history keeps both commits. Reverting or cherry-picking a merge commit asks
   which of its parents counts as the mainline instead, with Parent 1 (the usual choice)

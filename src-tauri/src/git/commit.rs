@@ -7,7 +7,7 @@ use crate::git::runner::{
     run_git_raw, run_git_raw_index_retry, with_config_write_lock, GitOutput, DEFAULT_TIMEOUT,
     LOCK_WAIT_TIMEOUT,
 };
-use crate::git::types::{CommitAuthor, CommitResult, CommitSummary};
+use crate::git::types::{AmendRace, CommitAuthor, CommitResult, CommitSummary};
 use crate::state::AppState;
 
 /// The identity `git commit` would use in this repo (config user.name /
@@ -261,6 +261,238 @@ impl ExpectedRef {
             .as_deref()
             != wanted)
     }
+
+    /// The ref a compare-and-swap moves for this pin, resolved under the caller's hold: the
+    /// pinned branch's full ref, HEAD itself when detached, and for `Any` whatever HEAD names
+    /// now. Never a dereferenced `HEAD`: `update-ref` resolves a symbolic HEAD when it runs,
+    /// so a switch landing after the caller's checks would redirect the move.
+    pub(crate) async fn cas_ref(&self, repo_path: &str) -> AppResult<CasRef> {
+        Ok(match self {
+            Self::Branch(name) => {
+                crate::git::branches::validate_branch_name(name)?;
+                CasRef::Branch(format!("refs/heads/{name}"))
+            }
+            Self::Detached => CasRef::Detached,
+            Self::Any => match crate::git::branches::current_branch_ref(repo_path).await? {
+                Some(full) => CasRef::Branch(full),
+                None => CasRef::Detached,
+            },
+        })
+    }
+}
+
+/// The one ref a pinned rewrite moves, compared-and-swapped against the oid its checks read,
+/// so a commit another process lands after those checks refuses the move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CasRef {
+    /// A branch, by its full ref.
+    Branch(String),
+    /// HEAD itself, updated `--no-deref`.
+    Detached,
+}
+
+impl CasRef {
+    fn name(&self) -> &str {
+        match self {
+            Self::Branch(full) => full,
+            Self::Detached => "HEAD",
+        }
+    }
+
+    /// The ref's oid now, `None` when it doesn't resolve (an unborn branch).
+    pub(crate) async fn oid(&self, repo_path: &str) -> AppResult<Option<String>> {
+        ref_oid(repo_path, self.name()).await
+    }
+
+    /// Moves the ref to `new` only while it still holds `old` (`None`: only while it doesn't
+    /// exist). Moving the branch HEAD is on logs HEAD's reflog too (measured, git 2.51.1).
+    pub(crate) async fn swap(
+        &self,
+        repo_path: &str,
+        message: &str,
+        new: &str,
+        old: Option<&str>,
+    ) -> AppResult<GitOutput> {
+        let mut args = vec!["update-ref"];
+        if *self == Self::Detached {
+            args.push("--no-deref");
+        }
+        args.extend(["-m", message, self.name(), new, old.unwrap_or("")]);
+        run_git_raw_index_retry(repo_path, &args, DEFAULT_TIMEOUT).await
+    }
+
+    /// Puts the ref back from `current` to `old` by the same compare-and-swap, so it never
+    /// moves a ref another process moved meanwhile. `None` on either side is an absent ref:
+    /// an `old` of `None` deletes exactly the ref a swap from `None` created, undereferenced
+    /// (HEAD always exists, so no such swap of it lands), and a `current` of `None`
+    /// re-creates a deleted ref only while it is still absent.
+    pub(crate) async fn roll_back(
+        &self,
+        repo_path: &str,
+        old: Option<&str>,
+        current: Option<&str>,
+    ) -> RolledBack {
+        let message = "reset: rolling back";
+        let restored = match (old, current) {
+            (Some(old), current) => self.swap(repo_path, message, old, current).await,
+            (None, Some(current)) => {
+                run_git_raw_index_retry(
+                    repo_path,
+                    &["update-ref", "--no-deref", "-d", self.name(), current],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+            }
+            (None, None) => return RolledBack::Restored,
+        };
+        let why = match restored {
+            Ok(out) if out.code == 0 => return RolledBack::Restored,
+            Ok(out) => out.full_failure_text(),
+            Err(e) => e.to_string(),
+        };
+        match self.oid(repo_path).await {
+            Ok(now) if now.as_deref() == old => RolledBack::Restored,
+            Ok(now) if now.as_deref() == current => RolledBack::Stuck(why),
+            Ok(_) => RolledBack::Lost,
+            Err(_) => RolledBack::Unread(why),
+        }
+    }
+
+    /// The branch this names, for a verdict; neutral for a detached HEAD.
+    fn label(&self) -> &str {
+        match self {
+            Self::Branch(full) => full.strip_prefix("refs/heads/").unwrap_or(full),
+            Self::Detached => "the branch",
+        }
+    }
+
+    /// Whether HEAD still names this ref: on this branch, or still detached.
+    async fn still_checked_out(&self, repo_path: &str) -> AppResult<bool> {
+        let now = crate::git::branches::current_branch_ref(repo_path).await?;
+        Ok(match self {
+            Self::Branch(full) => now.as_deref() == Some(full.as_str()),
+            Self::Detached => now.is_none(),
+        })
+    }
+
+    /// Refuses with `switched` when HEAD stopped naming this ref right after its move from
+    /// `old` to `new` (`None`: the move deleted it) landed: the move compares only the ref's
+    /// own oid, so any branch switch in that instant passes it. A branch is moved back by
+    /// compare-and-swap, and an unreadable HEAD there fails closed, as a switch. A detached
+    /// HEAD the switch replaced holds nothing of the move's, and moving it back would undo
+    /// the switch itself; unreadable, it gets `op`'s own verdict instead, claiming nothing.
+    pub(crate) async fn refuse_if_switched(
+        &self,
+        repo_path: &str,
+        old: Option<&str>,
+        new: Option<&str>,
+        switched: &str,
+        op: &str,
+    ) -> AppResult<()> {
+        let rolled = match (self, self.still_checked_out(repo_path).await) {
+            (_, Ok(true)) => return Ok(()),
+            (Self::Detached, Ok(false)) => RolledBack::Restored,
+            (Self::Detached, Err(e)) => {
+                // The swap's own value, since the read just failed; a reset stops here before
+                // read-tree, so its files still match the old tip.
+                let files = if op == "reset" { ", and your files were not updated" } else { "" };
+                return Err(AppError::Git {
+                    code: 1,
+                    stderr: format!(
+                        "Couldn't confirm what is checked out after the {op}; HEAD was moved \
+                         to {}{files}.\n{e}",
+                        new.map_or("", short_oid)
+                    ),
+                });
+            }
+            (Self::Branch(_), _) => self.roll_back(repo_path, old, new).await,
+        };
+        let label = self.label();
+        let stderr = match rolled {
+            RolledBack::Restored => switched.to_string(),
+            RolledBack::Lost => format!(
+                "The checked-out branch changed, and another Git process moved {label} before \
+                 it could be moved back. {SWITCH_ROLLBACK_HINT}"
+            ),
+            RolledBack::Stuck(why) => {
+                let now = match new {
+                    Some(oid) => format!("it now points at {}", short_oid(oid)),
+                    None => "it no longer exists".to_string(),
+                };
+                format!(
+                    "The checked-out branch changed, and {label} couldn't be moved back: {now}. \
+                     {SWITCH_ROLLBACK_HINT}\n{why}"
+                )
+            }
+            RolledBack::Unread(why) => format!(
+                "The checked-out branch changed, and {label} couldn't be moved back. \
+                 {SWITCH_ROLLBACK_HINT}\n{why}"
+            ),
+        };
+        Err(AppError::Git { code: 1, stderr })
+    }
+
+    /// Why a swap of this ref from `old` failed, read under the caller's hold: HEAD off the
+    /// pin answers `switched`, the ref off `old` answers `moved`, and anything else (a stale
+    /// ref `.lock`) keeps git's own error.
+    pub(crate) async fn refusal(
+        &self,
+        repo_path: &str,
+        pin: &ExpectedRef,
+        old: Option<&str>,
+        failed: &GitOutput,
+        moved: &str,
+        switched: &str,
+    ) -> AppResult<AppError> {
+        let copy = if pin.moved(repo_path).await? {
+            switched
+        } else if self.oid(repo_path).await?.as_deref() != old {
+            moved
+        } else {
+            return Ok(AppError::Git {
+                code: failed.code,
+                stderr: failed.full_failure_text(),
+            });
+        };
+        Ok(AppError::Git {
+            code: 1,
+            stderr: copy.to_string(),
+        })
+    }
+}
+
+/// How a [`CasRef::roll_back`] ended.
+pub(crate) enum RolledBack {
+    /// The ref holds its old value again.
+    Restored,
+    /// Another process moved the ref meanwhile, so it stays where that process put it.
+    Lost,
+    /// The ref still holds the swapped-in value: the rollback failed on its own (a stale ref
+    /// `.lock`, not a race). Carries git's text.
+    Stuck(String),
+    /// The rollback failed and the ref couldn't be re-read, so where it points is unknown.
+    /// Carries git's text.
+    Unread(String),
+}
+
+/// The first seven hex digits a verdict names a commit by.
+pub(crate) fn short_oid(oid: &str) -> &str {
+    &oid[..oid.len().min(7)]
+}
+
+/// The recovery hint every failed-rollback verdict for a caught switch ends its lead with.
+/// KEEP IN STEP with the "couldn't be moved back" family of ops.rs's tree-step verdicts.
+const SWITCH_ROLLBACK_HINT: &str = "Check the branch in a terminal; the reflog has every tip.";
+
+/// Records `old` in ORIG_HEAD after a reset-style move, as `git reset` does. Best-effort, as
+/// in git: the move already landed, so a failed write never fails it.
+pub(crate) async fn record_orig_head(repo_path: &str, old: &str) {
+    let _ = run_git_raw(
+        Some(repo_path),
+        &["update-ref", "ORIG_HEAD", old],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
 }
 
 #[tauri::command]
@@ -311,8 +543,9 @@ pub(crate) async fn git_commit_core(
 /// `expected_head` is consulted only when `amend` is set: the amend then runs only
 /// if HEAD is still that full oid, and on `expected_ref`'s branch (or detached, as it
 /// says), both checked under the same working-tree hold as the commit. The hold
-/// serializes this process only, so a separate process can still move HEAD in the
-/// milliseconds between the check and the commit spawn.
+/// serializes this process only, and the amend stays `git commit --amend` (the one route
+/// that runs the user's hooks), so a separate process can still move HEAD in the
+/// milliseconds before the spawn: such an amend still lands, reported in `raced`.
 pub(crate) async fn git_commit_core_expecting(
     state: &AppState,
     repo_path: String,
@@ -340,7 +573,8 @@ pub(crate) async fn git_commit_core_expecting(
     // Raw: a refusing `commit` writes its whole report to stdout and leaves
     // stderr EMPTY (measured, git 2.51.1) — this is the commit box's own error
     // path, so "git exited with code 1" would be the user's only explanation.
-    let commit = match expected_head.filter(|_| amend) {
+    // `verified` is the pinned arm's new hash and race report, both read under its hold.
+    let (commit, verified) = match expected_head.filter(|_| amend) {
         // The guard drops at the block's end, so the pick-close below takes its
         // store locks outside the working-tree hold.
         Some(expected) => {
@@ -362,9 +596,22 @@ pub(crate) async fn git_commit_core_expecting(
                     stderr: AMEND_HEAD_MOVED.to_string(),
                 });
             }
-            run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?
+            #[cfg(test)]
+            run_phase_hook(&AMEND_PHASE_HOOK).await;
+            let commit = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
+            let verified = if commit.code == 0 {
+                let hash = head_hash(&repo_path).await?;
+                let raced = amend_race(&repo_path, &expected, &expected_ref, &hash).await;
+                Some((hash, raced))
+            } else {
+                None
+            };
+            (commit, verified)
         }
-        None => run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?,
+        None => (
+            run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?,
+            None,
+        ),
     };
     if commit.code != 0 {
         return Err(AppError::Git {
@@ -380,10 +627,85 @@ pub(crate) async fn git_commit_core_expecting(
     if was_cherry_picking && !crate::git::ops::cherry_pick_marker_present(&repo_path) {
         crate::oplog::close_paused_pick(&repo_path, crate::oplog::PausedOutcome::Continued).await;
     }
-    let out = run_git(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
-    Ok(CommitResult {
-        hash: out.stdout_lossy().trim().to_string(),
+    let (hash, raced) = match verified {
+        Some(verified) => verified,
+        None => (head_hash(&repo_path).await?, None),
+    };
+    Ok(CommitResult { hash, raced })
+}
+
+async fn head_hash(repo_path: &str) -> AppResult<String> {
+    let out = run_git(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+    Ok(out.stdout_lossy().trim().to_string())
+}
+
+/// What a pinned amend rewrote instead of `expected` on the pinned ref, `None` when it
+/// rewrote exactly that commit; read under the commit's hold right after it landed. Three
+/// signals: HEAD off the pin, a parent set unlike the pin's (a commit landed on top first),
+/// and HEAD's reflog naming another previous tip (another amend kept the pin's parents).
+/// A probe that can't answer abstains, since the amend itself already happened.
+async fn amend_race(
+    repo_path: &str,
+    expected: &str,
+    pin: &ExpectedRef,
+    hash: &str,
+) -> Option<AmendRace> {
+    let switched = pin.moved(repo_path).await.unwrap_or(false);
+    let parents_differ = match (
+        commit_parents(repo_path, hash).await,
+        commit_parents(repo_path, expected).await,
+    ) {
+        (Some(now), Some(pinned)) => now != pinned,
+        _ => false,
+    };
+    // Best-effort: a HEAD move that skipped HEAD's reflog reads as a race here, and so does
+    // a post-commit or post-rewrite hook that itself commits or amends (HEAD@{1} is then
+    // this amend's own intermediate commit).
+    let rewrote = ref_oid(repo_path, "HEAD@{1}")
+        .await
+        .ok()
+        .flatten()
+        .filter(|previous| previous != expected);
+    if !switched && !parents_differ && rewrote.is_none() {
+        return None;
+    }
+    let (branch, detached) = if switched {
+        match crate::git::branches::current_branch_name(repo_path).await {
+            Ok(Some(name)) => (Some(name), false),
+            Ok(None) => (None, true),
+            Err(_) => (None, false),
+        }
+    } else {
+        (None, false)
+    };
+    Some(AmendRace {
+        rewrote,
+        branch,
+        detached,
     })
+}
+
+/// The parent oids in `oid`'s raw commit header, `None` when the object can't be read.
+/// The raw object, not `rev-list --parents`, for the root undo's graft reason below.
+async fn commit_parents(repo_path: &str, oid: &str) -> Option<Vec<String>> {
+    let object = run_git_raw(
+        Some(repo_path),
+        &["cat-file", "commit", oid],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    if object.code != 0 {
+        return None;
+    }
+    let text = object.stdout_lossy();
+    Some(
+        text.lines()
+            .take_while(|line| !line.is_empty())
+            .filter_map(|line| line.strip_prefix("parent "))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
 /// The refusal an undo gets when HEAD is no longer the commit the user chose.
@@ -395,6 +717,21 @@ const UNDO_HEAD_MOVED: &str = "The latest commit changed — nothing was undone.
 /// The refusal an undo gets when HEAD sits on another branch (or none) than the one
 /// the user saw, even at the same commit. KEEP IN STEP with the family above.
 const UNDO_BRANCH_SWITCHED: &str = "The checked-out branch changed — nothing was undone.";
+
+/// The refusal for an undo while a merge is stopped (MERGE_HEAD): `reset --soft` refuses
+/// there, and the undo's `update-ref` would not. KEEP IN STEP with the family above.
+const UNDO_MID_MERGE: &str =
+    "A merge is in progress — finish or abort it first; nothing was undone.";
+
+/// The refusal for an undo over unmerged entries with no merge stopped (a conflicted
+/// squash, stash pop or rebase), the other half of `reset --soft`'s refusal. KEEP IN STEP
+/// with the family above.
+const UNDO_UNRESOLVED: &str = "Resolve the conflicts first; nothing was undone.";
+
+/// The refusal for an undo while a cherry-pick or revert is stopped: `reset --soft` would
+/// cancel it, clearing its sequencer only on the last pick. KEEP IN STEP with the family above.
+const UNDO_MID_PICK: &str =
+    "A cherry-pick or revert is in progress — finish or abort it first; nothing was undone.";
 
 /// The refusal for a detached HEAD at a parentless commit: `update-ref -d HEAD`
 /// there deletes `.git/HEAD` itself and git stops recognizing the repository
@@ -427,9 +764,11 @@ pub async fn git_undo_commit(
 /// Every read and the mutation share one working-tree hold. With `expected_head`
 /// the undo runs only while HEAD is still that full oid, and with `expected_ref` only
 /// while HEAD names that branch (or none); `None` and `Any` (the MCP default)
-/// undo whatever HEAD is, though the root deletion still compares-and-swaps on
-/// the oid read under the hold. A separate process can still move HEAD in the
-/// milliseconds before the soft reset spawns, the window the amend pin accepts.
+/// undo whatever HEAD is. Either way the ref moves (or, at a root commit, is deleted) by
+/// compare-and-swap against the oid read under the hold, so a commit a separate process
+/// lands after the checks refuses the undo, and HEAD is re-read right after the move, so
+/// that process's branch switch puts the branch back and refuses too. A switch landing
+/// after that re-read is unseen.
 pub(crate) async fn git_undo_commit_core(
     state: &AppState,
     repo_path: String,
@@ -456,25 +795,14 @@ pub(crate) async fn git_undo_commit_core(
             return Err(moved());
         }
     }
-    let has_parent = run_git_raw(
-        Some(&repo_path),
-        &["rev-parse", "--verify", "--quiet", "HEAD~1"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .code
-        == 0;
-    if has_parent {
-        let out =
-            run_git_raw_index_retry(&repo_path, &["reset", "--soft", "HEAD~1"], DEFAULT_TIMEOUT)
-                .await?;
-        if out.code != 0 {
-            return Err(AppError::Git {
-                code: out.code,
-                stderr: out.full_failure_text(),
-            });
-        }
-        return Ok(());
+    // The parent of the oid read above, never `HEAD~1` again: a switch between two
+    // HEAD-relative reads would aim this branch at another branch's parent.
+    let parent = match &head {
+        Some(head_oid) => ref_oid(&repo_path, &format!("{head_oid}~1")).await?,
+        None => None,
+    };
+    if let (Some(head_oid), Some(parent)) = (&head, parent) {
+        return soft_undo(&repo_path, &expected_ref, head_oid, &parent).await;
     }
     let head_oid = head.unwrap_or_default();
     // What the root arm deletes: the ref HEAD named under this hold; `None` when
@@ -526,7 +854,7 @@ pub(crate) async fn git_undo_commit_core(
         target = Some(attached.stdout_lossy().trim().to_string());
     }
     #[cfg(test)]
-    undo_root_phase().await;
+    run_phase_hook(&UNDO_ROOT_HOOK).await;
     // The old value (passed even unpinned) means a branch that just gained a commit is
     // never deleted; naming the ref means another process's switch can't redirect it.
     let out = match &target {
@@ -549,11 +877,87 @@ pub(crate) async fn git_undo_commit_core(
             stderr: out.full_failure_text(),
         });
     }
+    if let Some(full_ref) = target {
+        #[cfg(test)]
+        run_phase_hook(&UNDO_ROOT_DELETED_HOOK).await;
+        // A switch that lands on another branch after the delete gets the branch re-created,
+        // only while it is still absent.
+        CasRef::Branch(full_ref)
+            .refuse_if_switched(
+                &repo_path,
+                Some(&head_oid),
+                None,
+                UNDO_BRANCH_SWITCHED,
+                "undo",
+            )
+            .await?;
+    }
     Ok(())
 }
 
+/// The undo of a commit with a parent: `reset --soft`'s ref move as a compare-and-swap of
+/// the ref HEAD named under the hold, from `head_oid` to `parent`. The index and tree stay
+/// as they are, so the undone commit's changes stay staged. `update-ref` skips both
+/// `reset --soft`'s mid-merge refusal and its cancelling of a stopped pick, so this
+/// refuses either state first.
+async fn soft_undo(
+    repo_path: &str,
+    pin: &ExpectedRef,
+    head_oid: &str,
+    parent: &str,
+) -> AppResult<()> {
+    let refuse = |copy: &str| AppError::Git {
+        code: 1,
+        stderr: copy.to_string(),
+    };
+    let ops = crate::git::ops::op_state(repo_path).await?;
+    if ops.cherry_picking || ops.reverting {
+        return Err(refuse(UNDO_MID_PICK));
+    }
+    // The pair `reset --soft` itself refuses on (measured, git 2.51.1).
+    if ops.merging {
+        return Err(refuse(UNDO_MID_MERGE));
+    }
+    if crate::git::ops::has_unmerged(repo_path).await? {
+        return Err(refuse(UNDO_UNRESOLVED));
+    }
+    let cas = pin.cas_ref(repo_path).await?;
+    #[cfg(test)]
+    run_phase_hook(&UNDO_SOFT_HOOK).await;
+    let out = cas
+        .swap(repo_path, "reset: moving to HEAD~1", parent, Some(head_oid))
+        .await?;
+    if out.code != 0 {
+        return Err(cas
+            .refusal(
+                repo_path,
+                pin,
+                Some(head_oid),
+                &out,
+                UNDO_HEAD_MOVED,
+                UNDO_BRANCH_SWITCHED,
+            )
+            .await?);
+    }
+    #[cfg(test)]
+    run_phase_hook(&UNDO_SWAPPED_HOOK).await;
+    cas.refuse_if_switched(
+        repo_path,
+        Some(head_oid),
+        Some(parent),
+        UNDO_BRANCH_SWITCHED,
+        "undo",
+    )
+    .await?;
+    record_orig_head(repo_path, head_oid).await;
+    crate::git::ops::clear_branch_state(repo_path).await;
+    Ok(())
+}
+
+/// A test seam awaited inside a rewrite's hold, where a raw `git` spawned by the test is a
+/// separate process: exactly the racer the compare-and-swaps answer.
 #[cfg(test)]
-type UndoRootHook = std::sync::Arc<
+pub(crate) type PhaseHook = std::sync::Arc<
     dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;
 
@@ -561,19 +965,78 @@ type UndoRootHook = std::sync::Arc<
 tokio::task_local! {
     /// Awaited by the root undo it is scoped to, after `symbolic-ref` named the branch
     /// and before the delete, so a test can switch HEAD inside that window.
-    static UNDO_ROOT_HOOK: UndoRootHook;
+    static UNDO_ROOT_HOOK: PhaseHook;
+    /// Awaited by the pinned amend it is scoped to, after the pin checks and before the
+    /// `commit --amend` spawn, so a test can move HEAD inside that window.
+    static AMEND_PHASE_HOOK: PhaseHook;
+    /// Awaited by the soft undo it is scoped to, after the head and parent reads and
+    /// before the compare-and-swap, so a test can move HEAD inside that window.
+    static UNDO_SOFT_HOOK: PhaseHook;
+    /// Awaited by the soft undo it is scoped to, after the compare-and-swap landed and
+    /// before HEAD is re-read, so a test can switch branches inside that window.
+    static UNDO_SWAPPED_HOOK: PhaseHook;
+    /// Awaited by the root undo it is scoped to, after the branch delete landed and before
+    /// HEAD is re-read, so a test can switch branches inside that window.
+    static UNDO_ROOT_DELETED_HOOK: PhaseHook;
 }
 
+/// Runs `hook`'s seam when the calling task is scoped to one.
 #[cfg(test)]
-async fn undo_root_phase() {
-    if let Ok(wait) = UNDO_ROOT_HOOK.try_with(|hook| hook()) {
+pub(crate) async fn run_phase_hook(hook: &'static tokio::task::LocalKey<PhaseHook>) {
+    if let Ok(wait) = hook.try_with(|hook| hook()) {
         wait.await;
     }
+}
+
+/// A seam that runs each of `steps` in `repo` as a raw `git` process. Test-only.
+#[cfg(test)]
+pub(crate) fn racing_git(repo: &str, steps: &[&[&str]]) -> PhaseHook {
+    let repo = repo.to_string();
+    let steps: Vec<Vec<String>> = steps
+        .iter()
+        .map(|step| step.iter().map(|arg| arg.to_string()).collect())
+        .collect();
+    std::sync::Arc::new(move || {
+        let (repo, steps) = (repo.clone(), steps.clone());
+        Box::pin(async move {
+            for step in &steps {
+                let args: Vec<&str> = step.iter().map(String::as_str).collect();
+                run_git(Some(&repo), &args, DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap_or_else(|e| panic!("the racer's git {args:?} failed: {e}"));
+            }
+        })
+    })
+}
+
+/// A seam that commits a new `file` in `repo` through raw `git`, recording the racer's
+/// commit in the returned slot. Test-only.
+#[cfg(test)]
+pub(crate) fn racing_commit(
+    repo: &str,
+    file: &str,
+) -> (PhaseHook, std::sync::Arc<std::sync::Mutex<Option<String>>>) {
+    let landed = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (repo, file, slot) = (repo.to_string(), file.to_string(), landed.clone());
+    let hook: PhaseHook = std::sync::Arc::new(move || {
+        let (repo, file, slot) = (repo.clone(), file.clone(), slot.clone());
+        Box::pin(async move {
+            std::fs::write(std::path::Path::new(&repo).join(&file), "racer\n").unwrap();
+            for args in [&["add", "-A"][..], &["commit", "-qm", "racer"]] {
+                run_git(Some(&repo), args, DEFAULT_TIMEOUT).await.unwrap();
+            }
+            *slot.lock().unwrap() = Some(head_hash(&repo).await.unwrap());
+        })
+    });
+    (hook, landed)
 }
 
 /// The root undo's mutation: deletes `full_ref` only while it still points at `oid`.
 /// Never `HEAD`: `update-ref` dereferences a symbolic HEAD when it runs, so a switch
 /// that lands after the caller's checks would redirect the delete to another branch.
+/// It can't also verify HEAD in the same transaction: git 2.51.1 refuses `symref-verify
+/// HEAD` beside a delete of its referent ("fatal: prepare: multiple updates for 'HEAD'
+/// (including one via its referent 'refs/heads/main') are not allowed", measured).
 async fn delete_root_ref(repo_path: &str, full_ref: &str, oid: &str) -> AppResult<GitOutput> {
     run_git_raw_index_retry(
         repo_path,
@@ -584,7 +1047,7 @@ async fn delete_root_ref(repo_path: &str, full_ref: &str, oid: &str) -> AppResul
 }
 
 /// The oid `name` resolves to, `None` when it doesn't resolve.
-async fn ref_oid(repo_path: &str, name: &str) -> AppResult<Option<String>> {
+pub(crate) async fn ref_oid(repo_path: &str, name: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
         Some(repo_path),
         &["rev-parse", "--verify", "--quiet", name],
@@ -621,6 +1084,9 @@ pub async fn git_recent_commits(repo_path: String, limit: u32) -> AppResult<Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::ops::branch_state_fixtures::{
+        branch_state_present, stop_an_autostashed_squash, write_unguarded_branch_state,
+    };
 
     async fn run(repo: &str, args: &[&str]) -> String {
         run_git(Some(repo), args, DEFAULT_TIMEOUT)
@@ -1342,27 +1808,32 @@ mod tests {
     }
 
     /// A switch that lands after the root undo's `symbolic-ref` read and before its
-    /// delete must not redirect it: the branch read under the hold goes, and the branch
-    /// HEAD switched to (same root commit) survives with HEAD still on it.
+    /// delete must not redirect it: the delete takes the branch read under the hold, the
+    /// re-read after it sees HEAD on the other branch, and the deleted branch is re-created.
+    /// The branch HEAD switched to (same root commit) survives with HEAD still on it.
     #[tokio::test]
-    async fn root_undo_deletes_the_branch_it_read_when_head_switches_before_the_delete() {
+    async fn root_undo_puts_back_the_branch_it_read_when_head_switches_before_the_delete() {
         let (dir, repo) = amend_fixture("gd-undo-root-switched-", &[]).await;
         let root = raw_commit(&dir, &repo, "a.txt", "A").await;
         run(&repo, &["branch", "-m", "checked"]).await;
         let hook_repo = repo.clone();
-        let switch: UndoRootHook = std::sync::Arc::new(move || {
+        let switch: PhaseHook = std::sync::Arc::new(move || {
             let repo = hook_repo.clone();
             Box::pin(async move {
                 run(&repo, &["switch", "-qc", "switched-to"]).await;
             })
         });
 
-        UNDO_ROOT_HOOK
+        let result = UNDO_ROOT_HOOK
             .scope(switch, undo(&repo, Some(root.clone())))
-            .await
-            .expect("the undo deletes the branch it read");
+            .await;
 
-        assert_eq!(ref_oid(&repo, "refs/heads/checked").await.unwrap(), None);
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(
+            ref_oid(&repo, "refs/heads/checked").await.unwrap(),
+            Some(root.clone()),
+            "the branch the undo read is back"
+        );
         assert_eq!(
             ref_oid(&repo, "refs/heads/switched-to").await.unwrap(),
             Some(root),
@@ -1371,6 +1842,542 @@ mod tests {
         assert_eq!(
             run(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
             "refs/heads/switched-to"
+        );
+    }
+
+    /// Another process switches branches right after the root undo's delete landed: the
+    /// re-read sees HEAD elsewhere, so the deleted branch is re-created at its commit (only
+    /// while still absent) and the undo refuses, with the index exactly as it was.
+    #[tokio::test]
+    async fn root_undo_recreates_and_refuses_a_switch_right_after_its_delete() {
+        let (dir, repo) = amend_fixture("gd-undo-root-deleted-", &[]).await;
+        let root = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let full = run(&repo, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let seen = branch_here(&repo).await;
+        run(&repo, &["branch", "twin"]).await;
+        let index = run(&repo, &["ls-files", "--stage"]).await;
+
+        let result = UNDO_ROOT_DELETED_HOOK
+            .scope(
+                racing_git(&repo, &[&["switch", "-q", "twin"]]),
+                undo_on(&repo, Some(root.clone()), seen),
+            )
+            .await;
+
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(ref_oid(&repo, &full).await.unwrap(), Some(root.clone()));
+        assert_eq!(reflog_subject(&repo, &full).await, "reset: rolling back");
+        assert_eq!(
+            run(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .trim(),
+            "twin",
+            "the switch stands"
+        );
+        assert_eq!(run(&repo, &["ls-files", "--stage"]).await, index);
+        assert_eq!(
+            porcelain(&repo).await,
+            "",
+            "index and tree match the commit"
+        );
+    }
+
+    async fn reflog_subject(repo: &str, name: &str) -> String {
+        run(repo, &["reflog", "-1", "--format=%gs", name])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    fn racer_landed(slot: &std::sync::Mutex<Option<String>>) -> String {
+        slot.lock().unwrap().clone().expect("the racer committed")
+    }
+
+    /// Another process commits on top of the pin after the undo's checks: the swap from
+    /// the pin refuses, so the racer's commit stays the tip and nothing is recorded.
+    #[tokio::test]
+    async fn soft_undo_refuses_a_commit_landing_before_its_swap() {
+        let (dir, repo) = amend_fixture("gd-undo-soft-raced-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let seen = branch_here(&repo).await;
+        let (commit, landed) = racing_commit(&repo, "c.txt");
+
+        let result = UNDO_SOFT_HOOK
+            .scope(commit, undo_on(&repo, Some(b.clone()), seen))
+            .await;
+
+        assert_undo_refused(result, UNDO_HEAD_MOVED);
+        assert_eq!(
+            head(&repo).await,
+            racer_landed(&landed),
+            "the racer's tip stands"
+        );
+        assert_eq!(run(&repo, &["rev-parse", "HEAD~1"]).await.trim(), b);
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+        assert_eq!(porcelain(&repo).await, "", "index and tree are untouched");
+    }
+
+    /// The swap records what `reset --soft` does: ORIG_HEAD at the undone tip, and the move
+    /// in the branch's reflog AND HEAD's, which git logs when it moves HEAD's referent.
+    /// Detached, HEAD itself moves and logs, and the branch stays put.
+    #[tokio::test]
+    async fn soft_undo_records_orig_head_and_logs_both_reflogs() {
+        let (dir, repo) = amend_fixture("gd-undo-soft-logs-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let full = run(&repo, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        undo_on(&repo, Some(b.clone()), branch_here(&repo).await)
+            .await
+            .expect("the undo runs");
+
+        assert_eq!(head(&repo).await, a);
+        assert_eq!(
+            run(&repo, &["diff", "--cached", "--name-only"])
+                .await
+                .trim(),
+            "b.txt",
+            "the undone commit's changes stay staged"
+        );
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), Some(b));
+        for log in [full.as_str(), "HEAD"] {
+            assert_eq!(
+                reflog_subject(&repo, log).await,
+                "reset: moving to HEAD~1",
+                "{log}"
+            );
+        }
+
+        let c = raw_commit(&dir, &repo, "c.txt", "C").await;
+        run(&repo, &["checkout", "-q", "--detach"]).await;
+        undo_on(&repo, Some(c.clone()), ExpectedRef::Detached)
+            .await
+            .expect("a detached undo runs");
+
+        assert_eq!(head(&repo).await, a);
+        assert_eq!(ref_oid(&repo, &full).await.unwrap(), Some(c.clone()));
+        assert_eq!(
+            reflog_subject(&repo, "HEAD").await,
+            "reset: moving to HEAD~1"
+        );
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), Some(c));
+    }
+
+    /// `feature` and the base branch each rewrite `a.txt` on top of A, so merging or
+    /// picking `feature` conflicts. HEAD ends on the base branch at B; returns (A, B).
+    async fn diverged(dir: &tempfile::TempDir, repo: &str) -> (String, String) {
+        let a = raw_commit(dir, repo, "a.txt", "A").await;
+        let base = run(repo, &["symbolic-ref", "--short", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(repo, &["switch", "-qc", "feature"]).await;
+        raw_commit(dir, repo, "a.txt", "theirs").await;
+        run(repo, &["switch", "-q", &base]).await;
+        let b = raw_commit(dir, repo, "a.txt", "mine").await;
+        (a, b)
+    }
+
+    async fn resolve_ours(repo: &str) {
+        run(repo, &["checkout", "--ours", "--", "a.txt"]).await;
+        run(repo, &["add", "a.txt"]).await;
+    }
+
+    /// The swap would move a branch under a stopped merge, so the undo refuses on the pair
+    /// `reset --soft` refuses on, each with its own copy: MERGE_HEAD, or unmerged entries
+    /// without it (a conflicted squash). Once the squash is resolved neither is left, and
+    /// the undo runs as git's would, clearing the squash's message files with it.
+    #[tokio::test]
+    async fn soft_undo_refuses_mid_merge_and_runs_after_a_resolved_squash() {
+        let (dir, repo) = amend_fixture("gd-undo-mid-merge-", &[]).await;
+        let (_, b) = diverged(&dir, &repo).await;
+        let merge = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(merge.code, 0, "fixture: the merge stops on its conflict");
+        resolve_ours(&repo).await;
+        assert!(crate::git::ops::op_state(&repo).await.unwrap().merging);
+        assert_undo_refused(
+            undo_on(&repo, Some(b.clone()), branch_here(&repo).await).await,
+            UNDO_MID_MERGE,
+        );
+        assert_eq!(head(&repo).await, b);
+
+        let (dir, repo) = amend_fixture("gd-undo-mid-squash-", &[]).await;
+        let (a, b) = diverged(&dir, &repo).await;
+        let squash = run_git_raw(
+            Some(&repo),
+            &["merge", "--squash", "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(squash.code, 0, "fixture: the squash stops on its conflict");
+        assert_eq!(ref_oid(&repo, "MERGE_HEAD").await.unwrap(), None);
+        assert_undo_refused(
+            undo_on(&repo, Some(b.clone()), branch_here(&repo).await).await,
+            UNDO_UNRESOLVED,
+        );
+        assert_eq!(head(&repo).await, b);
+
+        resolve_ours(&repo).await;
+        assert!(
+            branch_state_present(&repo).await.contains(&"SQUASH_MSG"),
+            "fixture: the resolved squash leaves its message behind"
+        );
+        undo_on(&repo, Some(b), branch_here(&repo).await)
+            .await
+            .expect("a resolved squash leaves nothing to refuse");
+        assert_eq!(head(&repo).await, a);
+        assert!(branch_state_present(&repo).await.is_empty());
+    }
+
+    /// Parity with git's own `reset --soft HEAD~1`, measured on twin repos (git 2.51.1):
+    /// both clear MERGE_MSG, SQUASH_MSG, MERGE_MODE, MERGE_RR and AUTO_MERGE. git's reset
+    /// also clears CHERRY_PICK_HEAD and REVERT_HEAD, which the undo never reaches: it
+    /// refuses a stopped pick or revert (the test below) rather than cancel it. Both file a
+    /// stopped autostash in the stash list.
+    #[tokio::test]
+    async fn soft_undo_clears_the_branch_state_git_reset_clears() {
+        let unguarded = [
+            "MERGE_MSG",
+            "SQUASH_MSG",
+            "MERGE_MODE",
+            "MERGE_RR",
+            "AUTO_MERGE",
+        ];
+        for ours in [false, true] {
+            let (dir, repo) = amend_fixture("gd-undo-parity-", &[]).await;
+            raw_commit(&dir, &repo, "a.txt", "A").await;
+            let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+            write_unguarded_branch_state(&repo, &b).await;
+            assert_eq!(branch_state_present(&repo).await, unguarded);
+
+            if ours {
+                undo(&repo, Some(b)).await.expect("the undo runs");
+            } else {
+                run(&repo, &["reset", "--soft", "HEAD~1"]).await;
+            }
+
+            assert!(branch_state_present(&repo).await.is_empty(), "ours: {ours}");
+        }
+        for name in ["CHERRY_PICK_HEAD", "REVERT_HEAD"] {
+            let (dir, repo) = amend_fixture("gd-undo-parity-pick-", &[]).await;
+            raw_commit(&dir, &repo, "a.txt", "A").await;
+            let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+            run(&repo, &["update-ref", name, &b]).await;
+            run(&repo, &["reset", "--soft", "HEAD~1"]).await;
+            assert!(
+                branch_state_present(&repo).await.is_empty(),
+                "git's reset clears {name}"
+            );
+        }
+        // A stopped `merge --squash --autostash`: git files MERGE_AUTOSTASH in the stash
+        // list as "autostash" instead of dropping it.
+        for ours in [false, true] {
+            let (dir, repo) = amend_fixture("gd-undo-parity-autostash-", &[]).await;
+            raw_commit(&dir, &repo, "a.txt", "A").await;
+            let autostash = stop_an_autostashed_squash(&repo).await;
+            let tip = head(&repo).await;
+
+            if ours {
+                undo(&repo, Some(tip)).await.expect("the undo runs");
+            } else {
+                run(&repo, &["reset", "--soft", "HEAD~1"]).await;
+            }
+
+            assert!(branch_state_present(&repo).await.is_empty(), "ours: {ours}");
+            assert_eq!(
+                run(&repo, &["stash", "list", "--format=%gs"]).await,
+                "autostash\n",
+                "ours: {ours}"
+            );
+            assert_eq!(
+                run(&repo, &["rev-parse", "stash@{0}"]).await.trim(),
+                autostash,
+                "ours: {ours}"
+            );
+        }
+    }
+
+    /// A stopped cherry-pick or revert refuses the undo: git's `reset --soft` would cancel
+    /// it, keeping or clearing its sequencer by how many picks remain. The pick stays
+    /// exactly as it was, to finish or abort.
+    #[tokio::test]
+    async fn soft_undo_refuses_while_a_pick_or_revert_is_stopped() {
+        for (verb, marker) in [
+            ("cherry-pick", "CHERRY_PICK_HEAD"),
+            ("revert", "REVERT_HEAD"),
+        ] {
+            let (dir, repo) = amend_fixture("gd-undo-mid-pick-", &[]).await;
+            let (_, b) = diverged(&dir, &repo).await;
+            let target = if verb == "revert" {
+                // Rewritten again on top, so reverting B conflicts.
+                raw_commit(&dir, &repo, "a.txt", "later").await;
+                b
+            } else {
+                "feature".to_string()
+            };
+            let stopped = run_git_raw(Some(&repo), &[verb, "--no-edit", &target], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            assert_ne!(stopped.code, 0, "fixture: the {verb} stops on its conflict");
+            resolve_ours(&repo).await;
+            let tip = head(&repo).await;
+
+            assert_undo_refused(
+                undo_on(&repo, Some(tip.clone()), branch_here(&repo).await).await,
+                UNDO_MID_PICK,
+            );
+            assert_eq!(head(&repo).await, tip);
+            assert!(
+                ref_oid(&repo, marker).await.unwrap().is_some(),
+                "the {verb} is still there to finish or abort"
+            );
+        }
+    }
+
+    /// Another process commits on top of the pin after the amend's checks. The amend still
+    /// lands, rewriting the racer's commit, and reports that commit by its oid.
+    #[tokio::test]
+    async fn a_raced_amend_reports_the_commit_it_rewrote() {
+        let (dir, repo) = amend_fixture("gd-amend-raced-commit-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let seen = branch_here(&repo).await;
+        let (commit, landed) = racing_commit(&repo, "c.txt");
+
+        let result = AMEND_PHASE_HOOK
+            .scope(commit, amend_on(&repo, "B reworded", Some(b.clone()), seen))
+            .await
+            .expect("a raced amend still lands");
+
+        let racer = racer_landed(&landed);
+        assert_eq!(
+            result.raced,
+            Some(AmendRace {
+                rewrote: Some(racer.clone()),
+                branch: None,
+                detached: false,
+            })
+        );
+        assert_eq!(head(&repo).await, result.hash);
+        assert_eq!(head_subject(&repo).await, "B reworded");
+        assert_eq!(run(&repo, &["rev-parse", "HEAD~1"]).await.trim(), b);
+        assert_eq!(
+            run(&repo, &["rev-parse", "HEAD@{1}"]).await.trim(),
+            racer,
+            "the racer's commit is in the reflog"
+        );
+    }
+
+    /// A racer that amends the pin itself keeps the pin's parents, so HEAD's reflog is
+    /// what names the commit the amend rewrote.
+    #[tokio::test]
+    async fn a_raced_amend_reports_a_racers_amend_of_the_pin() {
+        let (dir, repo) = amend_fixture("gd-amend-raced-amend-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let seen = branch_here(&repo).await;
+        let amend = racing_git(&repo, &[&["commit", "--amend", "-qm", "B by racer"]]);
+
+        let result = AMEND_PHASE_HOOK
+            .scope(amend, amend_on(&repo, "B reworded", Some(b.clone()), seen))
+            .await
+            .expect("a raced amend still lands");
+
+        let race = result.raced.expect("the race is reported");
+        assert_eq!(race.branch, None);
+        let rewrote = race
+            .rewrote
+            .expect("HEAD's reflog names the rewritten commit");
+        assert_ne!(rewrote, b);
+        assert_eq!(
+            run(&repo, &["log", "-1", "--format=%s", &rewrote])
+                .await
+                .trim(),
+            "B by racer"
+        );
+        assert_eq!(head_subject(&repo).await, "B reworded");
+    }
+
+    /// Another process switches to a new branch at the pinned commit after the checks:
+    /// the amend lands there, reported by that branch's name, and the pinned branch keeps
+    /// the commit the user saw.
+    #[tokio::test]
+    async fn a_raced_amend_reports_the_branch_it_landed_on() {
+        let (dir, repo) = amend_fixture("gd-amend-raced-switch-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let full = run(&repo, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let seen = branch_here(&repo).await;
+        let switch = racing_git(&repo, &[&["switch", "-qc", "other"]]);
+
+        let result = AMEND_PHASE_HOOK
+            .scope(switch, amend_on(&repo, "B reworded", Some(b.clone()), seen))
+            .await
+            .expect("a raced amend still lands");
+
+        assert_eq!(
+            result.raced,
+            Some(AmendRace {
+                rewrote: None,
+                branch: Some("other".into()),
+                detached: false,
+            })
+        );
+        assert_eq!(
+            ref_oid(&repo, &full).await.unwrap(),
+            Some(b),
+            "the pin's branch"
+        );
+        assert_eq!(
+            ref_oid(&repo, "refs/heads/other").await.unwrap(),
+            Some(result.hash)
+        );
+    }
+
+    /// Another process detaches HEAD at the pinned commit after the checks: the amend lands
+    /// on the detached HEAD, reported as detached, and the pinned branch keeps its commit.
+    #[tokio::test]
+    async fn a_raced_amend_reports_a_detached_head() {
+        let (dir, repo) = amend_fixture("gd-amend-raced-detach-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let full = run(&repo, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let seen = branch_here(&repo).await;
+        let detach = racing_git(&repo, &[&["checkout", "-q", "--detach"]]);
+
+        let result = AMEND_PHASE_HOOK
+            .scope(detach, amend_on(&repo, "B reworded", Some(b.clone()), seen))
+            .await
+            .expect("a raced amend still lands");
+
+        assert_eq!(
+            result.raced,
+            Some(AmendRace {
+                rewrote: None,
+                branch: None,
+                detached: true,
+            })
+        );
+        assert_eq!(
+            ref_oid(&repo, &full).await.unwrap(),
+            Some(b),
+            "the pin's branch"
+        );
+        assert_eq!(head(&repo).await, result.hash);
+    }
+
+    /// Another process switches branches right after the undo's swap landed, which the swap
+    /// (it compares only the branch's own oid) can't see: HEAD's re-read moves the branch
+    /// back exactly and refuses. A branch at another commit and one at the pinned tip both
+    /// count.
+    #[tokio::test]
+    async fn soft_undo_moves_back_and_refuses_a_switch_right_after_its_swap() {
+        for target in ["side", "twin"] {
+            let (dir, repo) = amend_fixture("gd-undo-switched-after-", &[]).await;
+            raw_commit(&dir, &repo, "a.txt", "A").await;
+            let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+            let full = run(&repo, &["symbolic-ref", "HEAD"])
+                .await
+                .trim()
+                .to_string();
+            let seen = branch_here(&repo).await;
+            let start = run(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .await
+                .trim()
+                .to_string();
+            run(&repo, &["branch", "twin"]).await;
+            run(&repo, &["switch", "-qc", "side"]).await;
+            raw_commit(&dir, &repo, "s.txt", "S").await;
+            run(&repo, &["switch", "-q", &start]).await;
+
+            let result = UNDO_SWAPPED_HOOK
+                .scope(
+                    racing_git(&repo, &[&["switch", "-q", target]]),
+                    undo_on(&repo, Some(b.clone()), seen),
+                )
+                .await;
+
+            assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+            assert_eq!(ref_oid(&repo, &full).await.unwrap(), Some(b), "{target}");
+            assert_eq!(
+                run(&repo, &["symbolic-ref", "--short", "HEAD"])
+                    .await
+                    .trim(),
+                target,
+                "the switch stands"
+            );
+            assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None, "{target}");
+            assert_eq!(reflog_subject(&repo, &full).await, "reset: rolling back");
+        }
+    }
+
+    /// No race, no report: a pinned amend on the branch it saw, and an unpinned one.
+    #[tokio::test]
+    async fn a_clean_amend_reports_no_race() {
+        let (dir, repo) = amend_fixture("gd-amend-clean-", &[]).await;
+        raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        let seen = branch_here(&repo).await;
+
+        let pinned = amend_on(&repo, "B reworded", Some(b), seen)
+            .await
+            .expect("the amend runs");
+        assert_eq!(pinned.raced, None);
+        assert_eq!(pinned.hash, head(&repo).await);
+
+        let unpinned = amend_expecting(&repo, "B again", None)
+            .await
+            .expect("the amend runs");
+        assert_eq!(unpinned.raced, None);
+        assert_eq!(head_subject(&repo).await, "B again");
+    }
+
+    /// The wire shape the commit box and the MCP commit tool read: exactly `hash` and
+    /// `raced`, the race's single-word fields inside, and `raced: null` when clean.
+    #[test]
+    fn commit_result_serializes_its_race_report() {
+        let clean = CommitResult {
+            hash: "abc".into(),
+            raced: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&clean).unwrap(),
+            serde_json::json!({ "hash": "abc", "raced": null })
+        );
+        let raced = CommitResult {
+            hash: "abc".into(),
+            raced: Some(AmendRace {
+                rewrote: Some("def".into()),
+                branch: None,
+                detached: false,
+            }),
+        };
+        assert_eq!(
+            serde_json::to_value(&raced).unwrap(),
+            serde_json::json!({
+                "hash": "abc",
+                "raced": { "rewrote": "def", "branch": null, "detached": false }
+            })
         );
     }
 }
