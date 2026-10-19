@@ -796,10 +796,11 @@ async fn sweep_in(repo_path: &str, root: &Path, min_age: Duration) {
     }
 }
 
-/// Removes one claimed leftover: its checkout, git's admin entry, and — once both are
-/// confirmed gone — the marker pair; `true` means all of it is gone. A failed removal keeps
-/// the pair, so the marker keeps probing `Released` and the next claim retries it age-free.
-/// Lock-free runners — every caller already holds the worktree-admin domain.
+/// Removes one claimed leftover: its checkout, git's admin entry, and then the marker
+/// pair. `true` means the checkout and its registration are gone, so the branch is free.
+/// The pair's delete is best-effort: callers refuse on `false`, and the sweep collects a
+/// surviving sidecar. A failed checkout removal keeps the pair, so the next claim
+/// retries it age-free. Lock-free runners — every caller already holds the admin domain.
 async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) -> bool {
     let dir = root.join(stem);
     if dir.exists() {
@@ -1201,6 +1202,31 @@ mod tests {
         assert!(claim_dead_update_worktree(&state, &repo_s, &orphaned.to_string_lossy()).await);
         assert!(!listed().await.contains("gd-update-orphaned"));
         assert!(sidecars("gd-update-orphaned").iter().all(|p| !p.exists()));
+    }
+
+    /// A sidecar a removal couldn't delete is still the sweep's to collect: a lone manifest
+    /// (no lock, so it probes `Missing`) and a lone released lock each age from their own
+    /// mtime with no checkout beside them, and the sweep clears both.
+    #[tokio::test]
+    async fn the_sweep_collects_a_lone_surviving_sidecar() {
+        let (_guard, base) = temp_root("lone-sidecar");
+        let root = base.join("worktrees");
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = scratch_repo(&base).await;
+        std::fs::write(root.join("gd-update-json-only.json"), b"{}").unwrap();
+        std::fs::write(root.join("gd-update-lock-only.lock"), b"").unwrap();
+
+        assert_eq!(
+            orphaned_update_stems(&root, Duration::ZERO),
+            vec![
+                "gd-update-json-only".to_string(),
+                "gd-update-lock-only".to_string()
+            ]
+        );
+        sweep_in(&repo, &root, Duration::ZERO).await;
+
+        assert!(!root.join("gd-update-json-only.json").exists());
+        assert!(!root.join("gd-update-lock-only.lock").exists());
     }
 
     /// The production primary-root composition — the resolver plus the mapping that

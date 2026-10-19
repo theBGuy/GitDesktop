@@ -381,8 +381,8 @@ impl CasRef {
     /// compare-and-swap, and an unreadable HEAD there fails closed, as a switch. A detached
     /// HEAD the switch replaced holds nothing of the move's, and moving it back would undo
     /// the switch itself; unreadable, it gets `op`'s own verdict instead, claiming nothing.
-    /// `files_untouched` says the caller stops here before writing any file (a reset's
-    /// read-tree), which that verdict then states.
+    /// `files_pending` says the caller writes files after this check and hasn't yet (a hard
+    /// reset's read-tree), which that verdict then states.
     pub(crate) async fn refuse_if_switched(
         &self,
         repo_path: &str,
@@ -390,14 +390,14 @@ impl CasRef {
         new: Option<&str>,
         switched: &str,
         op: &str,
-        files_untouched: bool,
+        files_pending: bool,
     ) -> AppResult<()> {
         let rolled = match (self, self.still_checked_out(repo_path).await) {
             (_, Ok(true)) => return Ok(()),
             (Self::Detached, Ok(false)) => RolledBack::Restored,
             (Self::Detached, Err(e)) => {
                 // The swap's own value, since the read just failed.
-                let files = if files_untouched {
+                let files = if files_pending {
                     ", and your files were not updated"
                 } else {
                     ""
@@ -487,7 +487,7 @@ pub(crate) fn short_oid(oid: &str) -> &str {
 }
 
 /// The recovery hint every failed-rollback verdict for a caught switch ends its lead with.
-/// KEEP IN STEP with the "couldn't be moved back" family of ops.rs's tree-step verdicts.
+/// ops.rs's tree-step rollback verdicts append it too.
 pub(crate) const SWITCH_ROLLBACK_HINT: &str =
     "Check the branch in a terminal; the reflog has every tip.";
 

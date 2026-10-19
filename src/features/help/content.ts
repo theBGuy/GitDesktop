@@ -583,8 +583,8 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 {{/ai}}- After committing, **Undo** ({{kbd:undo-commit}}) reverses the last commit and
   returns your message to the box. Undoing a branch's *first* commit asks first — it
   has no parent to fall back to, so the branch ref goes with it. If another Git
-  process commits or switches branches while the undo runs, Undo stops, puts back the
-  branch you were on, and says so. Undo also asks you to finish or abort a merge,
+  process commits or switches branches while the undo runs, Undo stops without
+  undoing anything and says so. Undo also asks you to finish or abort a merge,
   cherry-pick or revert in progress, and to resolve any conflicts, first. On a
   detached first commit there is nothing to undo onto, and Undo says that instead.
 

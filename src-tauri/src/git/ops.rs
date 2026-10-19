@@ -762,8 +762,8 @@ const RESET_TREE_ROLLED_BACK: &str = "Updating your files failed, so the branch 
                                       Some files may already show the reset's changes.";
 
 /// The ref moved again before the rollback could move it back, so it stays where the
-/// other process put it. This verdict and the two below end their lead with
-/// `SWITCH_ROLLBACK_HINT`, as every "couldn't be moved back" verdict does.
+/// other process put it. `roll_back_reset` appends `SWITCH_ROLLBACK_HINT` to this verdict
+/// and the two below.
 const RESET_TREE_ROLLBACK_LOST: &str = "Updating your files failed, and another Git process \
                                         moved the branch before it could be moved back.";
 
@@ -771,8 +771,7 @@ const RESET_TREE_ROLLBACK_LOST: &str = "Updating your files failed, and another 
 /// `.lock`, not a race.
 fn reset_tree_rollback_failed(oid: &str) -> String {
     format!(
-        "Updating your files failed, and the branch couldn't be moved back: it now points at \
-         {}. {SWITCH_ROLLBACK_HINT}",
+        "Updating your files failed, and the branch couldn't be moved back: it now points at {}.",
         crate::git::commit::short_oid(oid)
     )
 }
@@ -959,9 +958,10 @@ async fn roll_back_reset(
         RolledBack::Lost => {
             format!("{RESET_TREE_ROLLBACK_LOST} {SWITCH_ROLLBACK_HINT}\n{git_text}")
         }
-        RolledBack::Stuck(why) => {
-            format!("{}\n{git_text}\n{why}", reset_tree_rollback_failed(peeled))
-        }
+        RolledBack::Stuck(why) => format!(
+            "{} {SWITCH_ROLLBACK_HINT}\n{git_text}\n{why}",
+            reset_tree_rollback_failed(peeled)
+        ),
         RolledBack::Unread(why) => {
             format!("{RESET_TREE_ROLLBACK_UNREAD} {SWITCH_ROLLBACK_HINT}\n{git_text}\n{why}")
         }
@@ -7692,7 +7692,13 @@ mod tests {
         let message = reset_message(result);
         assert_eq!(
             message.lines().next(),
-            Some(reset_tree_rollback_failed(&base).as_str())
+            Some(
+                format!(
+                    "{} {SWITCH_ROLLBACK_HINT}",
+                    reset_tree_rollback_failed(&base)
+                )
+                .as_str()
+            )
         );
         assert!(message.contains(&base[..7]));
         assert!(!message.contains(RESET_TREE_ROLLBACK_LOST));
