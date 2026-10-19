@@ -29,7 +29,7 @@ jobs:
     # The cron would otherwise run — and red-fail on the missing secret —
     # in forks that enable Actions.
     if: github.repository == 'theBGuy/GitDesktop'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Trigger Cloudflare Pages rebuild

@@ -86,7 +86,7 @@ jobs:
   #            in `.rs` files, via `.github/scripts/canonicalize-rust.py`.
   gate:
     name: gate (skip if this Rust content already passed)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:

@@ -30,7 +30,7 @@ jobs:
   # BLOCKING. The eleven scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Nothing here uses the git credential after checkout, so it is not left
       # in .git/config for later steps to reach.
@@ -99,7 +99,7 @@ jobs:
   # publish to the step summary, where findings are readable from the checks tab
   # without opening logs.
   advisory:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
