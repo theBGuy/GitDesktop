@@ -153,7 +153,8 @@ export function PrFilesPane({
   blameRev,
 }: {
   files: PrFile[];
-  /** Paths the loaded PR diff marks binary; absent/empty = no rows flagged. */
+  /** Rows to show as binary (`binaryRowPaths`: 0/0 forge counts over a marker
+   *  section); absent/empty = no rows flagged. */
   binaryPaths?: ReadonlySet<string>;
   effectivePath: string | null;
   onSelectPath: (path: string) => void;

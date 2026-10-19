@@ -173,7 +173,7 @@ export function sectionFilePath(section: string): string | undefined {
 /** True when a diff section carries git's own binary marker at line start —
  *  hunk body lines are prefixed (+/-/space), so content can't match. A
  *  section never STARTS with the marker (every section opens with
- *  `diff --git`, or `---`/`+++` for a synthesized one), so the \n-prefixed
+ *  `diff --git`, or `---`/`+++` for a headerless patch), so the \n-prefixed
  *  literal needs no start-of-string arm — and it must stay this literal:
  *  diffSectionStats' behavior is pinned on it. */
 export function sectionIsBinary(section: string): boolean {

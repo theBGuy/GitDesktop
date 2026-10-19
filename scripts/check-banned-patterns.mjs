@@ -426,15 +426,30 @@ const RAW_COPY_ICON_BUTTON_RE =
 // the two duplicates actually took, not the whole class.
 const KIND_BADGE_DEF_RE = /\bconst\s+KIND_BADGE\b/;
 
-// A git binary-marker check spelled out: a string literal that IS "Binary
-// files" (optional `\n` prefix or trailing space, any quote kind) or a regex
-// literal of just that; prose containing the words mid-string must not match.
-// Not read (review concerns): "\r\n" prefixes, regexes with more pattern around
-// the words (/^Binary files .* differ$/m), RegExp() strings, split literals, and
-// a second loose literal in an allowlisted file. A UI label that is exactly
-// "Binary files" trips it: reword or allowlist it.
-const BINARY_MARKER_RE =
-  /(["'`])(\\n)?Binary files ?\1|\/(\\n|\^)?Binary files ?\//;
+// A git binary-marker check spelled out. Read, either initial case: a string
+// literal that IS "Binary files" (any quote kind, optional trailing space, led
+// by any run of `\n` `\r` `\x0a` `\u000a` `\u{a}` `^` escapes, RegExp() strings
+// included), a template line opening with it, and a regex literal of it (led by
+// those escapes, `[\n]` or a `(?<![^\n])`/`(?<=\n)` lookbehind; ` ?` at the
+// end allowed). A quoted or code-spanned mention inside a string trips it too
+// ('rows saying "Binary files" read bin'), as does a label that is exactly
+// that: reword or allowlist. Not read (review concerns): the singular
+// "Binary file" (real UI copy), shorter pieces (startsWith("Binary") &&
+// endsWith(" differ")), extra text in the literal ("Binary files differ",
+// /^Binary files .* differ$/m), escapes or patterns inside the words
+// ("Binary\x20files", /Binary\sfiles/), interpolation beside them, split or
+// concatenated literals, a second loose literal in an allowlisted file or
+// anywhere in the exempt diff-split.ts, and lines the shared comment stripper
+// blanks (stripComments' docblock).
+const BINARY_MARKER_RE = new RegExp(
+  [
+    /(["'`])(?:\\{1,2}[nr]|\\x0[aA]|\\u000[aA]|\\u\{0*[aA]\}|\^)*[Bb]inary [Ff]iles ?\1/
+      .source,
+    /^\s*[Bb]inary [Ff]iles ?`/.source,
+    /\/(?:\\[nr]|\\x0[aA]|\\u000[aA]|\\u\{0*[aA]\}|\^|\[\\n\]|\(\?<!\[\^\\n\]\)|\(\?<=\\n\))*[Bb]inary [Ff]iles ?\??\//
+      .source,
+  ].join("|"),
+);
 
 // `<Activity` as a JSX open tag. The lookahead is what separates it from the
 // app's own `<ActivityDock>`/`<ActivityBell>`/`<ActivityStrip>` components, and
@@ -5120,7 +5135,7 @@ export const CHECKS = [
       "src/lib/ai/prompt.ts",
     ],
     message:
-      'the git binary-marker check lives in sectionIsBinary (src/lib/git/diff-split.ts) — a re-spelled "Binary files" literal or regex re-mints the loose-match class (a text diff whose CONTENT mentions binary files read as binary, shipped in v0.13.5) or drifts from the line-anchored form one site at a time; import the helper',
+      'the git binary-marker check lives in sectionIsBinary (src/lib/git/diff-split.ts) — a re-spelled "Binary files" literal or regex re-mints the loose-match class (a text diff whose CONTENT mentions binary files read as binary) or drifts from the line-anchored form one site at a time; import the helper',
   },
   {
     name: "lone-activity-boundary",

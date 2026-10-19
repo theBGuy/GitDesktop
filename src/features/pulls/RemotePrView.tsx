@@ -2356,15 +2356,18 @@ export function RemotePrView({
     () => splitUnifiedDiff(prDiff.data ?? ""),
     [prDiff.data],
   );
-  // No flag from a previous PR's placeholder diff OR placeholder details: both
-  // reads key on shownNumber but settle independently, and showsLoadingFrame
+  // The pane keeps rendering the previous PR's diff through a switch, so its lines
+  // can belong to another PR than the `number` a new thread would be created under.
+  // Both reads key on shownNumber but settle independently, and showsLoadingFrame
   // hides the details placeholder only in the hold's loading phase.
+  const diffStale = detailsPlaceholder || prDiff.isPlaceholderData;
+  // No binary flag from a previous PR's placeholder diff or details.
   const binaryPaths = useMemo(
     () =>
-      prDiff.isPlaceholderData || detailsPlaceholder
+      diffStale
         ? new Set<string>()
         : binaryRowPaths(pr?.files ?? [], fileSections),
-    [prDiff.isPlaceholderData, detailsPlaceholder, pr?.files, fileSections],
+    [diffStale, pr?.files, fileSections],
   );
 
   // Reset per-PR view state when a different PR is shown — a render-time state
@@ -2990,9 +2993,6 @@ export function RemotePrView({
   const fileDiffLookup = (path: string): string | undefined =>
     fileSections.get(path);
 
-  // The pane keeps rendering the previous PR's diff through a switch, so its lines
-  // can belong to another PR than the `number` a new thread would be created under.
-  const diffStale = detailsPlaceholder || prDiff.isPlaceholderData;
   // The inline line-comment composer for the Files tab: only when the provider allows
   // creating a thread, anchored to the selected file (its section prefills a
   // suggestion's code). Absent otherwise ⇒ read-only diff.

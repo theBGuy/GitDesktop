@@ -1474,6 +1474,48 @@ test("binary-marker-single-source flags a re-spelled marker check", () => {
   );
 });
 
+test("binary-marker-single-source reads other newline spellings, cases and regex leads", () => {
+  for (const source of [
+    // String arm: any run of newline escapes, RegExp() strings, either case.
+    's.includes("\\r\\nBinary files ")',
+    's.includes("\\n\\nBinary files ")',
+    's.includes("\\x0aBinary files ")',
+    's.includes("\\u000aBinary files ")',
+    's.includes("\\u{a}Binary files ")',
+    's.toLowerCase().includes("\\nbinary files ")',
+    'new RegExp("^Binary files ", "m")',
+    'new RegExp("\\\\nBinary files ")',
+    // Template arm: the marker after a real newline inside a template.
+    "  Binary files `)",
+    // Regex arm: newline tokens, a class, the house lookbehinds, ` ?`, a case flag.
+    "/^\\nBinary files/.test(s)",
+    "/[\\n]Binary files /.test(s)",
+    "/\\x0aBinary files /.test(s)",
+    "/(?<![^\\n])Binary files /.test(s)",
+    "/(?<=\\n)Binary files /.test(s)",
+    "/Binary files ?/.test(s)",
+    "/binary files /i.test(s)",
+    // Fails closed by design: a quoted mention inside prose.
+    "'rows saying \"Binary files\" read bin'",
+  ])
+    assert.deepEqual(binaryMarker(source), [1], `should flag ${source}`);
+});
+
+test("binary-marker-single-source near misses stop at the arm they target", () => {
+  for (const source of [
+    // Template arm: opens on the words, but text, not a backtick, follows.
+    "  Binary files read \\`bin\\` in the list",
+    // String arm: quote and words match, but text, not the quote, follows.
+    's.includes("Binary files differ")',
+    // Regex arm: lead and words match, but pattern, not the slash, follows.
+    "/^Binary files .* differ$/m.test(s)",
+    // The singular is UI copy, so no arm reads it.
+    'const label = "Binary file";',
+    's.includes("\\nBinary file")',
+  ])
+    assert.deepEqual(binaryMarker(source), [], `should ignore ${source}`);
+});
+
 test("binary-marker-single-source leaves prose and the helper call alone", () => {
   for (const source of [
     // The live prose negatives: the words sit mid-string.
