@@ -2295,6 +2295,56 @@ const CHILD_EXIT_GRACE: Duration = Duration::from_secs(10);
 /// Second, shorter grace after a tree-kill: the child is being force-killed, so this
 /// only covers reaping it.
 const CHILD_REAP_GRACE: Duration = Duration::from_secs(5);
+/// How often the non-reaping exit wait re-probes the leader.
+#[cfg(unix)]
+const CHILD_EXIT_POLL: Duration = Duration::from_millis(100);
+
+/// Whether process `pid` (our unreaped child) has exited, probed WITHOUT reaping it
+/// (`WNOWAIT`), so its pid and process group stay pinned for a following `killpg`.
+#[cfg(unix)]
+fn exited_unreaped(pid: u32) -> bool {
+    // SAFETY: an all-zero `siginfo_t` is a valid value (integers, a raw pointer and
+    // padding), and `waitid` only writes into the struct we hand it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if rc == -1 {
+        // ECHILD: nothing left to wait for. Anything else: not yet, poll again.
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD);
+    }
+    // Under WNOHANG a child that hasn't exited leaves `si_pid` zero. The accessor, not
+    // the field: linux-gnu keeps `si_pid` inside a union.
+    // SAFETY: `info` was zeroed above and filled by a successful `waitid`.
+    unsafe { info.si_pid() != 0 }
+}
+
+/// Waits up to `grace` for our child `pid` to exit, leaving it unreaped.
+#[cfg(unix)]
+async fn wait_exit_unreaped(pid: u32, grace: Duration) {
+    let deadline = tokio::time::Instant::now() + grace;
+    while !exited_unreaped(pid) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(CHILD_EXIT_POLL).await;
+    }
+}
+
+/// Sends `ev`, keeping it as the run's outcome when it is the FIRST terminal
+/// (`Done`/`Error`) sent: the one the frontend settles on, whatever follows it.
+fn send_noting_terminal(
+    on_event: &dyn EventSink,
+    terminal: &mut Option<ReviewEvent>,
+    ev: ReviewEvent,
+) {
+    if terminal.is_none() && matches!(ev, ReviewEvent::Done { .. } | ReviewEvent::Error { .. }) {
+        *terminal = Some(ev.clone());
+    }
+    on_event.send(ev);
+}
 
 /// Whether `id` is an acceptable cancel-registry key. Every id is minted by
 /// `crypto.randomUUID()` on the frontend — an RFC 4122 v4 uuid, 36 lowercase
@@ -2339,6 +2389,10 @@ impl Drop for AgentCancelGuard<'_> {
 /// `cancel` is the caller's registered cancel handle (registered at command entry,
 /// so a cancel racing the setup below is never lost), and `noun` colors the failure
 /// copy.
+///
+/// Returns the first terminal event it sent, after sending it, so the frontend can
+/// settle a run whose channel copy hasn't arrived; `None` only when the run was
+/// cancelled.
 #[allow(clippy::too_many_arguments)]
 async fn stream_agent(
     cancel: Arc<Notify>,
@@ -2356,13 +2410,19 @@ async fn stream_agent(
     // `(runtime, container name)` to force-remove on cancel/timeout — killing the
     // `run` client alone leaves the engine's container running.
     container_kill: Option<(PathBuf, String)>,
+    // Unix: kill the child's process group on EVERY exit, the clean one included, so a
+    // member holding only stderr (an SDK-spawned MCP server) can't outlive the run.
+    // Reviews only: a session's group may hold processes its agent started on purpose.
+    kill_group_on_exit: bool,
     // Extra environment for the spawned process — used to pass a Copilot container's
     // `COPILOT_GITHUB_TOKEN` to the docker/podman client by name (the run args carry
     // `-e COPILOT_GITHUB_TOKEN` with no value, so the token is inherited here and
     // never appears in argv / `docker inspect`).
     extra_env: &[(&str, String)],
     on_event: &dyn EventSink,
-) -> AppResult<()> {
+) -> AppResult<Option<ReviewEvent>> {
+    #[cfg(not(unix))]
+    let _ = kill_group_on_exit;
     let mut cmd = Command::new(binary);
     sanitize_child_env(&mut cmd);
     cmd.args(args)
@@ -2429,6 +2489,7 @@ async fn stream_agent(
     let mut copilot_error: Option<String> = None;
     let mut cancelled = false;
     let mut timed_out = false;
+    let mut terminal: Option<ReviewEvent> = None;
 
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -2476,7 +2537,7 @@ async fn stream_agent(
                             ),
                         };
                         if let Some(ev) = ev {
-                            on_event.send(ev);
+                            send_noting_terminal(on_event, &mut terminal, ev);
                         }
                     }
                     Ok(None) => break, // EOF: process closed stdout
@@ -2486,13 +2547,29 @@ async fn stream_agent(
         }
     }
 
-    // The EOF / read-error breaks reach here with nothing having killed the child, so
-    // both waits below are bounded: a surviving grandchild holding the pipes must cost
-    // a bounded delay, never a hung command. Nothing is killed on the timeout-free
-    // path until this grace actually elapses — a clean EOF normally exits at once.
-    if tokio::time::timeout(CHILD_EXIT_GRACE, child.wait())
-        .await
-        .is_err()
+    // Group kill on every exit: wait (bounded) for the leader WITHOUT reaping it, kill
+    // its process group, then reap. Kill-before-reap is the invariant — an unreaped
+    // zombie pins its pid and pgid, so the `killpg` can't land on a recycled group. The
+    // non-reaping wait still lets a cleanly exiting leader flush stderr first.
+    #[cfg(unix)]
+    let group_killed = match child.id() {
+        Some(pid) if kill_group_on_exit => {
+            wait_exit_unreaped(pid, CHILD_EXIT_GRACE).await;
+            kill_process_tree(&mut child);
+            let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
+            true
+        }
+        _ => false,
+    };
+    #[cfg(not(unix))]
+    let group_killed = false;
+    // Without the group kill above (sessions, and runs off unix) both waits below stay
+    // bounded: a surviving grandchild holding the pipes costs a bounded delay, never a
+    // hung command, and on a clean EOF nothing is killed until this grace elapses.
+    if !group_killed
+        && tokio::time::timeout(CHILD_EXIT_GRACE, child.wait())
+            .await
+            .is_err()
     {
         kill_process_tree(&mut child);
         let _ = tokio::time::timeout(CHILD_REAP_GRACE, child.wait()).await;
@@ -2516,7 +2593,7 @@ async fn stream_agent(
 
     if cancelled {
         // The frontend tore down its UI on cancel; nothing to emit.
-        return Ok(());
+        return Ok(None);
     }
     if timed_out {
         // Codex accumulates whole messages and only surfaces them at `turn.completed`, so
@@ -2528,24 +2605,32 @@ async fn stream_agent(
             }
             _ => None,
         };
-        on_event.send(ReviewEvent::Error {
-            message: timeout_message(noun, timeout, timeout_hint),
-            partial_text,
-            timed_out: true,
-        });
-        return Ok(());
+        send_noting_terminal(
+            on_event,
+            &mut terminal,
+            ReviewEvent::Error {
+                message: timeout_message(noun, timeout, timeout_hint),
+                partial_text,
+                timed_out: true,
+            },
+        );
+        return Ok(terminal);
     }
-    if !saw_result {
+    if terminal.is_none() {
         // No terminal result event — surface stderr. Covers auth/quota
         // failures and the empty-stdout-without-a-TTY class of CLI bugs.
         let msg = stderr_text.trim();
-        on_event.send(ReviewEvent::error(if msg.is_empty() {
-            format!("The {noun} process ended without producing any output.")
-        } else {
-            msg.to_string()
-        }));
+        send_noting_terminal(
+            on_event,
+            &mut terminal,
+            ReviewEvent::error(if msg.is_empty() {
+                format!("The {noun} process ended without producing any output.")
+            } else {
+                msg.to_string()
+            }),
+        );
     }
-    Ok(())
+    Ok(terminal)
 }
 
 #[tauri::command]
@@ -2578,7 +2663,7 @@ pub async fn agent_review(
     timeout_configurable: Option<bool>,
     review_id: String,
     on_event: Channel<ReviewEvent>,
-) -> AppResult<()> {
+) -> AppResult<Option<ReviewEvent>> {
     if !valid_cancel_id(&review_id) {
         return Err(AppError::InvalidArgument("invalid review id".into()));
     }
@@ -2701,6 +2786,7 @@ pub async fn agent_review(
         "review",
         timeout_configurable.unwrap_or(false),
         None,
+        true,
         &extra_env,
         &on_event,
     )
@@ -2778,7 +2864,7 @@ pub async fn agent_session(
     // opencode and container Claude/Copilot/opencode/Codex (the composer gates it).
     mcp_servers: Option<Vec<crate::mcp::McpServerSpec>>,
     on_event: Channel<ReviewEvent>,
-) -> AppResult<()> {
+) -> AppResult<Option<ReviewEvent>> {
     if !valid_cancel_id(&session_id) {
         return Err(AppError::InvalidArgument("invalid session id".into()));
     }
@@ -3143,6 +3229,7 @@ pub async fn agent_session(
             "session",
             false,
             Some((runtime.clone(), name)),
+            false,
             &extra_env,
             &on_event,
         )
@@ -3181,6 +3268,7 @@ pub async fn agent_session(
         "session",
         false,
         None,
+        false,
         &host_extra_env,
         &on_event,
     )
@@ -4401,6 +4489,26 @@ opencode/x-preview-f-free
     }
 
     #[test]
+    fn agent_command_return_is_the_event_or_null() {
+        // `agent_review` / `agent_session` return `Option<ReviewEvent>`, which the TS
+        // mirror reads as `ReviewEvent | null`: Some is the event's own object, None null.
+        let done = ReviewEvent::Done {
+            text: "body".to_string(),
+            is_error: false,
+            cost_usd: Some(0.5),
+        };
+        let own = serde_json::to_value(&done).expect("Done serializes");
+        let returned = serde_json::to_value(Some(done)).expect("Some(Done) serializes");
+        assert_eq!(returned, own);
+        assert_eq!(returned["kind"], "done");
+        assert_eq!(returned["costUsd"], 0.5);
+        assert_eq!(
+            serde_json::to_value(None::<ReviewEvent>).expect("None serializes"),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
     fn claude_is_error_flag_alone_is_decisive() {
         // The flag pinned in ISOLATION: no api_error_status, no terminal_reason, and
         // result text no other signal can catch.
@@ -4984,6 +5092,197 @@ opencode/x-preview-f-free
         assert_eq!(events.len(), 2);
         assert!(matches!(&events[0], ReviewEvent::Delta { text } if text == "hello"));
         assert!(matches!(&events[1], ReviewEvent::Error { message, .. } if message == "boom"));
+    }
+
+    // --- stream_agent end of run ----------------------------------------------
+
+    fn collector() -> CollectorSink {
+        CollectorSink {
+            events: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_agent_returns_the_first_terminal_it_sent() {
+        let dir = std::env::temp_dir().join(format!("gd-stream-terminal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let jsonl = concat!(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The review."}}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"The review.","total_cost_usd":0.25}"#,
+            "\n",
+        );
+        std::fs::write(dir.join("run.jsonl"), jsonl).expect("fixture file");
+        // Prints the fixture as the CLI's stdout, run from its directory.
+        let (bin, args): (&str, Vec<String>) = if cfg!(windows) {
+            ("cmd", vec!["/C".into(), "type".into(), "run.jsonl".into()])
+        } else {
+            ("cat", vec!["run.jsonl".into()])
+        };
+        let sink = collector();
+        let result = stream_agent(
+            Arc::new(Notify::new()),
+            AgentKind::Claude,
+            Path::new(bin),
+            args,
+            String::new(),
+            dir.to_str().expect("utf-8 temp dir"),
+            Duration::from_secs(60),
+            "review",
+            false,
+            None,
+            true,
+            &[],
+            &sink,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let returned = result
+            .expect("the run streams")
+            .expect("a terminal is returned");
+        assert!(
+            matches!(&returned, ReviewEvent::Done { is_error: false, text, .. } if text == "The review.")
+        );
+        let events = sink.events.into_inner().unwrap();
+        let first_terminal = events
+            .iter()
+            .find(|e| matches!(e, ReviewEvent::Done { .. } | ReviewEvent::Error { .. }))
+            .expect("the sink received a terminal");
+        assert_eq!(
+            serde_json::to_value(&returned).unwrap(),
+            serde_json::to_value(first_terminal).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_agent_returns_none_only_for_a_cancelled_run() {
+        // The permit is stored before the call, so the cancel arm wins as soon as the
+        // select polls it; the fixture blocks so stdout can't reach EOF first.
+        let cancel = Arc::new(Notify::new());
+        cancel.notify_one();
+        let (bin, args): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "cmd",
+                vec![
+                    "/C".into(),
+                    "ping".into(),
+                    "-n".into(),
+                    "6".into(),
+                    "127.0.0.1".into(),
+                ],
+            )
+        } else {
+            ("sleep", vec!["5".into()])
+        };
+        let dir = std::env::temp_dir();
+        let sink = collector();
+        let result = stream_agent(
+            cancel,
+            AgentKind::Claude,
+            Path::new(bin),
+            args,
+            String::new(),
+            dir.to_str().expect("utf-8 temp dir"),
+            Duration::from_secs(60),
+            "review",
+            false,
+            None,
+            true,
+            &[],
+            &sink,
+        )
+        .await;
+        assert!(
+            matches!(result, Ok(None)),
+            "a cancelled run returns no terminal"
+        );
+        let events = sink.events.into_inner().unwrap();
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, ReviewEvent::Done { .. } | ReviewEvent::Error { .. })));
+    }
+
+    /// Whether `pid` is gone: no such process, or (linux) a zombie its new parent has
+    /// not reaped yet, so a slow init can't read as a survivor.
+    #[cfg(unix)]
+    fn process_is_dead(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only probes whether the process exists.
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return true;
+        }
+        // The state letter follows the parenthesized command name.
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            return stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn review_eof_kills_a_group_member_holding_only_stderr() {
+        let dir = std::env::temp_dir().join(format!("gd-eof-group-kill-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let pid_path = dir.join("grandchild.pid");
+        // The sleeper's stdout goes elsewhere, so stdout reaches EOF when `sh` exits
+        // while the sleeper still holds the inherited stderr pipe.
+        let args = vec![
+            "-c".to_string(),
+            "sleep 30 >/dev/null & echo $! > \"$1\"".to_string(),
+            "sh".to_string(),
+            pid_path.to_string_lossy().into_owned(),
+        ];
+        let sink = collector();
+        let started = Instant::now();
+        let result = stream_agent(
+            Arc::new(Notify::new()),
+            AgentKind::Claude,
+            Path::new("sh"),
+            args,
+            String::new(),
+            dir.to_str().expect("utf-8 temp dir"),
+            Duration::from_secs(600),
+            "review",
+            false,
+            None,
+            true,
+            &[],
+            &sink,
+        )
+        .await;
+        let elapsed = started.elapsed();
+        let gpid: libc::pid_t = std::fs::read_to_string(&pid_path)
+            .expect("the leader wrote the sleeper's pid")
+            .trim()
+            .parse()
+            .expect("a numeric pid");
+        let mut dead = process_is_dead(gpid);
+        for _ in 0..20 {
+            if dead {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            dead = process_is_dead(gpid);
+        }
+        if !dead && gpid > 1 {
+            // SAFETY: plain integers; a surviving sleeper must not outlive the test.
+            unsafe { libc::kill(gpid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A survivor holding stderr would burn the stderr join's full grace.
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "stream_agent took {elapsed:?}"
+        );
+        assert!(dead, "the stderr-holding group member outlived the run");
+        // No claude-format line streamed, so the no-result arm reports the run.
+        assert!(matches!(result, Ok(Some(ReviewEvent::Error { .. }))));
     }
 
     #[test]

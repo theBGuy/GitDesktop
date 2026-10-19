@@ -6,11 +6,10 @@ import {
   gitReviewWorktree,
 } from "@/lib/git/api";
 import { toastError } from "@/lib/toast";
-import type { AgentToolKind } from "./agent";
 import { cancelAgentReview, providerKind, runAgentReview } from "./agent";
 import { createAiClient, runAgenticStream } from "./client";
 import { isCliProvider } from "./providers";
-import { terminalErrorMessage } from "./terminal-error";
+import { type CliSettleOutcome, createCliSettle } from "./stream-settle";
 import type { AiSettings } from "./types";
 
 export interface CliStreamOpts {
@@ -52,33 +51,17 @@ export interface CliStreamOpts {
    *  reason a caller keeps and labels whatever text arrived. The rejection still
    *  carries the timeout message, so a caller that ignores this is unaffected. */
   onTimedOut?: () => void;
-}
-
-/** A short, human status line for a tool step, from the normalized kind + target
- *  (the `target` may be null — degrade to the bare verb). Surfaces the agentic
- *  run's exploration in the panel's existing status line. */
-function toolStatusLine(tool: AgentToolKind, target: string | null): string {
-  const at = target?.trim();
-  switch (tool) {
-    case "read":
-      return at ? `Reading ${at}…` : "Reading a file…";
-    case "search":
-      return at ? `Searching ${at}…` : "Searching…";
-    case "list":
-      return at ? `Listing ${at}…` : "Listing files…";
-    case "web-fetch":
-    case "web-search":
-      return "Searching the web…";
-    case "run":
-      return "Running a command…";
-    default:
-      return "Working…";
-  }
+  /** Whether the caller asked this run to stop. A run that ends with no terminal
+   *  event resolves only when this says so, and otherwise rejects as incomplete;
+   *  omitted, such a run is trusted as the backend's cancel and resolves. */
+  isCancelled?: () => boolean;
 }
 
 /**
  * Drives one streaming agent-CLI run, accumulating deltas into `setText`.
- * Shared by the PR review and the Actions "Debug with AI" flows.
+ * Shared by the PR review and the Actions "Debug with AI" flows. Resolves on a
+ * finished run or a cancel; rejects on a failed run and on one that ended before
+ * its final message.
  */
 export async function runCliStream({
   ai,
@@ -96,6 +79,7 @@ export async function runCliStream({
   timeoutConfigurable,
   onThoughts,
   onTimedOut,
+  isCancelled,
 }: CliStreamOpts): Promise<void> {
   const kind = providerKind(ai.provider);
   if (!kind) throw new Error(`Unsupported CLI provider: ${ai.provider}`);
@@ -121,9 +105,31 @@ export async function runCliStream({
   }
 
   try {
-    let buffer = "";
-    let settled = false;
     await new Promise<void>((resolve, reject) => {
+      const run = createCliSettle({ setText, setStatus });
+      const settle = (outcome: CliSettleOutcome | null) => {
+        if (!outcome) return;
+        switch (outcome.kind) {
+          case "done":
+            onCost?.(outcome.costUsd);
+            if (outcome.thoughts) onThoughts?.(outcome.thoughts);
+            resolve();
+            return;
+          case "failed":
+            if (outcome.costUsd !== undefined) onCost?.(outcome.costUsd);
+            if (outcome.timedOut) onTimedOut?.();
+            reject(new Error(outcome.message));
+            return;
+          case "cancelled":
+            resolve();
+            return;
+          case "incomplete":
+            reject(
+              new Error("The review ended before its final message arrived."),
+            );
+            return;
+        }
+      };
       runAgentReview({
         kind,
         binPath: ai.cliPath?.trim() || null,
@@ -137,66 +143,11 @@ export async function runCliStream({
         timeoutSecs: timeoutSecs ?? null,
         timeoutConfigurable: Boolean(timeoutConfigurable),
         reviewId,
-        onEvent: (event) => {
-          if (event.kind === "delta") {
-            buffer += event.text;
-            setText(buffer);
-          } else if (event.kind === "status") {
-            setStatus(event.text);
-          } else if (event.kind === "tool") {
-            setStatus(toolStatusLine(event.tool, event.target));
-          } else if (event.kind === "done") {
-            settled = true;
-            onCost?.(event.costUsd);
-            // An errored run keeps whatever streamed — partial text plus the error, no strip.
-            // Surface the terminal text as the reason only when it's error-shaped
-            // (terminalErrorMessage refuses run output, e.g. a body ended by session.error).
-            if (event.isError) {
-              reject(new Error(terminalErrorMessage(event.text)));
-              return;
-            }
-            // The terminal event's text IS the agent's final answer. The delta buffer
-            // additionally holds any tool-using narration ("Let me check…") that streamed
-            // ahead of it, and adopting the buffer here leaks that narration into the review
-            // — so the final answer wins (buffer only as a fallback for a degenerate empty
-            // terminal event) and the narration is peeled off as separate "thoughts".
-            const final = event.text.trim() ? event.text : buffer;
-            setText(final);
-            // Peel narration ONLY on a genuine suffix match (deltas may prepend a separator
-            // before the final answer). A mismatched buffer is NOT narration — it's a
-            // fallen-short delta stream or a drifted wire format, and a spurious "thoughts"
-            // copy of the review body is worse than no thoughts.
-            if (
-              event.text.trim() &&
-              buffer !== event.text &&
-              buffer.endsWith(event.text)
-            ) {
-              const thoughts = buffer
-                .slice(0, buffer.length - event.text.length)
-                .trim();
-              if (thoughts) onThoughts?.(thoughts);
-            }
-            resolve();
-          } else if (event.kind === "error") {
-            settled = true;
-            // A whole-message CLI (Codex) streams no deltas, so a killed run's output
-            // arrives only here — adopt it when nothing streamed, so the failure keeps
-            // the work instead of discarding it.
-            const partial = event.partialText?.trim() ? event.partialText : "";
-            if (partial && !buffer) {
-              buffer = partial;
-              setText(buffer);
-            }
-            if (event.timedOut) onTimedOut?.();
-            reject(new Error(event.message));
-          }
-          // nativeSession (the CLI's turn-1 resume id) is session-only — reviews ignore it.
-        },
+        onEvent: (event) => settle(run.onEvent(event)),
       })
-        // Backend returned without a terminal event — the cancel path.
-        .then(() => {
-          if (!settled) resolve();
-        })
+        // A returned terminal already reached onEvent through the gate, so this
+        // settles only a run that ended without one.
+        .then((returned) => settle(run.finish(returned, isCancelled?.())))
         .catch(reject);
     });
   } finally {
@@ -243,6 +194,9 @@ export interface StreamAiOpts {
   /** Called when the backend killed a CLI run at its deadline, before the rejection.
    *  CLI path only — an HTTP stream has no backend deadline. */
   onTimedOut?: () => void;
+  /** Whether the caller cancelled the run — tells a CLI run that ended with no
+   *  terminal event a cancel from an incomplete run. CLI path only. */
+  isCancelled?: () => boolean;
   /** CLI path: receives the agent review id (cancel via `cancelAgentReview`). */
   onCliId: (id: string) => void;
   /** HTTP path: receives the AbortController driving the stream (cancel via
@@ -272,6 +226,7 @@ export async function streamAi({
   setStatus,
   onThoughts,
   onTimedOut,
+  isCancelled,
   onCliId,
   onAbort,
 }: StreamAiOpts): Promise<void> {
@@ -291,6 +246,7 @@ export async function streamAi({
       registerId: onCliId,
       onThoughts,
       onTimedOut,
+      isCancelled,
     });
     return;
   }
@@ -392,6 +348,7 @@ export function useAiTextStream() {
           repoPath: args.repoPath,
           setText: putText,
           setStatus: putStatus,
+          isCancelled: () => cancelledRef.current,
           onCliId: (id) => {
             if (isCurrent()) cliIdRef.current = id;
           },

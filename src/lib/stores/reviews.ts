@@ -485,7 +485,6 @@ export async function startReview(
 
   const patch = (p: Partial<ReviewEntry>) =>
     useReviewStore.getState().patch(key, p);
-  const pushText = (t: string) => useReviewStore.getState().setText(key, t);
   const local = isLocalProvider(ai.provider);
   const lane = local ? localLane : cloudLane;
   // Register the run and mark it queued before any async work, so the
@@ -499,6 +498,12 @@ export async function startReview(
     lane,
   };
   controls.set(key, control);
+  // Stream writes land only while this run still owns the key, so a late event from a
+  // cancelled run can't overwrite the entry a successor run now streams into.
+  const owns = () => controls.get(key) === control;
+  const pushText = (t: string) => {
+    if (owns()) useReviewStore.getState().setText(key, t);
+  };
   // A fresh run owns the key now: drop any queue left behind by a cancelled/superseded
   // predecessor, so that stale queued mode can't later drain onto THIS run (the
   // cancel-then-fresh-run resurrection guard, on the queuedRuns side).
@@ -783,11 +788,16 @@ export async function startReview(
       effort,
       reviewTools,
       setText: pushText,
-      setStatus: (s) => patch({ status: s }),
-      onThoughts: (t) => patch({ thoughts: t }),
+      setStatus: (s) => {
+        if (owns()) patch({ status: s });
+      },
+      onThoughts: (t) => {
+        if (owns()) patch({ thoughts: t });
+      },
       onTimedOut: () => {
         timedOut = true;
       },
+      isCancelled: () => control.cancelled,
       onCliId: (id) => {
         control.cliReviewId = id;
       },
@@ -797,7 +807,8 @@ export async function startReview(
     });
     if (control.cancelled) return;
     // The stream's final text, read from the store so it covers the CLI and HTTP paths
-    // alike; a cancelled run returned above, so this is never a mid-stream fragment.
+    // alike. A CLI run resolves only on its terminal answer or a cancel (returned
+    // above); one cut off before its final message rejects into the catch below.
     const finalText = useReviewStore.getState().texts[key] ?? "";
     // A run that settled with nothing failed, however the provider reported it — throw
     // so it rides the catch below (error phase + inbox row) rather than settling "done"

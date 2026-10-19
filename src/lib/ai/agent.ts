@@ -1,6 +1,7 @@
 import { Channel } from "@tauri-apps/api/core";
 import type { AppSettings, McpServer } from "@/lib/settings/api";
 import { invoke } from "@/lib/tauri/invoke";
+import { type ChannelGate, createChannelGate } from "./stream-settle";
 import type { AiProviderId } from "./types";
 
 const AGENT_KINDS = ["claude", "codex", "copilot", "opencode"] as const;
@@ -237,14 +238,42 @@ export interface AgentReviewArgs {
   onEvent: (event: ReviewEvent) => void;
 }
 
-/**
- * Runs a streaming review through the agent CLI. Resolves when the backend
- * command returns (terminal `done`/`error` events arrive via `onEvent`).
- */
-export async function runAgentReview(args: AgentReviewArgs): Promise<void> {
+/** How long a terminal the command returned waits for the channel's own copy
+ *  (and any deltas still in flight ahead of it) before it is replayed. */
+const CHANNEL_TERMINAL_WAIT_MS = 5000;
+
+/** A channel for one agent run, gated so `onEvent` sees a single terminal after
+ *  every delta the channel delivers before it. A throwing consumer is logged and
+ *  skipped: a handler that throws must never stall the channel's ordered queue. */
+function gatedChannel(onEvent: (event: ReviewEvent) => void): {
+  channel: Channel<ReviewEvent>;
+  gate: ChannelGate;
+} {
+  const gate = createChannelGate({
+    boundMs: CHANNEL_TERMINAL_WAIT_MS,
+    deliver: (event) => {
+      try {
+        onEvent(event);
+      } catch (e) {
+        console.error("[agent] event handler failed", e);
+      }
+    },
+  });
   const channel = new Channel<ReviewEvent>();
-  channel.onmessage = args.onEvent;
-  await invoke<void>("agent_review", {
+  channel.onmessage = gate.onMessage;
+  return { channel, gate };
+}
+
+/**
+ * Runs a streaming review through the agent CLI. Resolves with the run's
+ * terminal event once `onEvent` has received a terminal (after every delta the
+ * channel delivers before it), or at once with `null` when the run was cancelled.
+ */
+export async function runAgentReview(
+  args: AgentReviewArgs,
+): Promise<ReviewEvent | null> {
+  const { channel, gate } = gatedChannel(args.onEvent);
+  const returned = await invoke<ReviewEvent | null>("agent_review", {
     kind: args.kind,
     binPath: args.binPath,
     model: args.model,
@@ -259,6 +288,8 @@ export async function runAgentReview(args: AgentReviewArgs): Promise<void> {
     reviewId: args.reviewId,
     onEvent: channel,
   });
+  await gate.finish(returned);
+  return returned;
 }
 
 /** Signals an in-flight review to stop (kills the subprocess). */
@@ -320,12 +351,15 @@ export interface AgentSessionArgs {
  * state. On the host each CLI is worktree-confined — Codex via its own OS sandbox
  * (`-s workspace-write`), the others "soft" (Claude `bypassPermissions`, Copilot
  * `--add-dir`, opencode `--dangerously-skip-permissions`); Claude and Codex can
- * also run in a container (kernel boundary).
+ * also run in a container (kernel boundary). Settles like {@link runAgentReview}:
+ * with the turn's terminal event after `onEvent` received one, or with `null` at
+ * once on cancel.
  */
-export async function runAgentSession(args: AgentSessionArgs): Promise<void> {
-  const channel = new Channel<ReviewEvent>();
-  channel.onmessage = args.onEvent;
-  await invoke<void>("agent_session", {
+export async function runAgentSession(
+  args: AgentSessionArgs,
+): Promise<ReviewEvent | null> {
+  const { channel, gate } = gatedChannel(args.onEvent);
+  const returned = await invoke<ReviewEvent | null>("agent_session", {
     agent: args.agent,
     binPath: args.binPath,
     model: args.model,
@@ -343,6 +377,8 @@ export async function runAgentSession(args: AgentSessionArgs): Promise<void> {
     mcpServers: args.mcpServers,
     onEvent: channel,
   });
+  await gate.finish(returned);
+  return returned;
 }
 
 /** Signals an in-flight session to stop (shares the backend cancel registry). */

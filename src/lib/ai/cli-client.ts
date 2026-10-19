@@ -71,10 +71,10 @@ export function createCliClient(settings: AiSettings): AiClient {
         wake?.();
       };
 
-      // The backend promise. It resolves either after a terminal event (done/error)
-      // OR without one on the cancel path (subprocess killed) — mirroring
-      // runCliStream. `settled` tracks whether a terminal event was seen so the
-      // generator's finally knows if it still needs to cancel.
+      // The backend promise. It settles after its terminal event (done/error) has
+      // been pushed, or without one when the run was cancelled. `settled` tracks
+      // whether a terminal event was seen so the generator's finally knows if it
+      // still needs to cancel.
       let settled = false;
       let backendDone = false;
       let backendError: unknown = null;
@@ -113,12 +113,18 @@ export function createCliClient(settings: AiSettings): AiClient {
             );
           }
           if (queue.length === 0) {
-            // Nothing buffered: if the backend already returned without a terminal
-            // event, this is the cancel path — end iteration cleanly (no throw). A
-            // rejected invoke promise is re-thrown below.
+            // Nothing buffered and the backend is done without a terminal event: a
+            // rejected invoke is re-thrown, and any other ending (our own cancel threw
+            // above) is incomplete, so it fails rather than pass a partial draft off as
+            // the whole generation.
             if (backendDone) {
               if (backendError && !settled) {
                 throw new Error(errorMessage(backendError));
+              }
+              if (!settled) {
+                throw new Error(
+                  "The generation ended before its final message arrived.",
+                );
               }
               return;
             }

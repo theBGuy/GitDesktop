@@ -1813,6 +1813,7 @@ async function generateReviewText(
       onTimedOut: () => {
         progress.timedOut = true;
       },
+      isCancelled: () => signal.aborted,
     });
     return { text: progress.text, thoughts };
   }
