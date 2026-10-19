@@ -284,18 +284,20 @@ fn identity_from_git(
     }
 }
 
-/// Whether a failed git run proves `cwd` is not a repository: an exit-128 line
-/// saying "not a git repository", or "gitfile does not point to a valid
-/// repository", which some git builds print for a `.git` file whose git dir is
-/// missing or not a valid repository. Matching English text is sound because
-/// the runner pins LC_ALL=C. Other exit-128 failures (permissions, unsafe
-/// ownership, a broken `core.worktree`, a bare repo) do not prove it. The one
-/// spelling of this rule, so identity and validation can't drift.
+/// Whether a failed git run proves `cwd` is not a repository: exit 128 with a
+/// line that OPENS with git's verdict, "fatal: not a git repository" or "fatal:
+/// gitfile does not point to a valid repository" (some git builds' wording for a
+/// `.git` file whose git dir is missing or not a valid repository). Anchored at
+/// the line start because other failures echo paths, and a folder can be named
+/// anything. Matching English text is sound because the runner pins LC_ALL=C.
+/// Other exit-128 failures (permissions, unsafe ownership, a broken
+/// `core.worktree`, a bare repo) do not prove it. The one spelling of this
+/// rule, so identity and validation can't drift.
 fn git_says_not_a_repository(code: i32, stderr: &str) -> bool {
     code == 128
         && stderr.lines().any(|line| {
-            line.contains("not a git repository")
-                || line.contains("gitfile does not point to a valid repository")
+            line.starts_with("fatal: not a git repository")
+                || line.starts_with("fatal: gitfile does not point to a valid repository")
         })
 }
 
@@ -811,6 +813,9 @@ mod validate_repo_tests {
     const CANNOT_CHDIR_LINE: &str =
         "fatal: cannot chdir to '../../../gone': No such file or directory";
     const NO_WORK_TREE_LINE: &str = "fatal: this operation must be run in a work tree";
+    /// The cannot-chdir failure for a missing folder whose NAME is git's verdict.
+    const NAMED_LIKE_THE_VERDICT_LINE: &str =
+        "fatal: cannot chdir to '../../../not a git repository': No such file or directory";
 
     fn s(p: &Path) -> String {
         p.to_string_lossy().into_owned()
@@ -905,6 +910,7 @@ mod validate_repo_tests {
             "fatal: gitfile does not point to a valid repository: /tmp/dangling/.git"
         ));
         assert!(!git_says_not_a_repository(128, CANNOT_CHDIR_LINE));
+        assert!(!git_says_not_a_repository(128, NAMED_LIKE_THE_VERDICT_LINE));
         assert!(!git_says_not_a_repository(128, NO_WORK_TREE_LINE));
         assert!(!git_says_not_a_repository(129, NOT_A_REPO_LINE));
     }
@@ -967,6 +973,21 @@ mod validate_repo_tests {
                 assert!(!stderr.contains("not a git repository"), "{stderr}");
             }
             other => panic!("expected a failed status read, got {:?}", other.is_ok()),
+        }
+    }
+
+    /// A missing work-tree folder named like git's verdict is still git's
+    /// cannot-chdir failure: the path echo must not read as "not a repository".
+    #[tokio::test]
+    async fn a_broken_worktree_named_like_the_verdict_is_still_a_git_error() {
+        let (_dir, root) = outside_any_repo();
+        let (_sup, sub) = broken_submodule(&root, "../../../not a git repository").await;
+        match validate_repo(s(&sub)).await {
+            Err(AppError::Git { code, stderr }) => {
+                assert_eq!((code, stderr.as_str()), (128, NAMED_LIKE_THE_VERDICT_LINE));
+            }
+            Err(other) => panic!("expected a git error, got {other:?}"),
+            Ok(info) => panic!("expected a git error, got Ok({:?})", info.root),
         }
     }
 
