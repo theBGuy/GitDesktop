@@ -10,7 +10,8 @@ const isTerminal = (event: ReviewEvent) =>
 
 export interface ChannelGateOptions {
   /** The caller's consumer: every event the gate lets through, in channel
-   *  order, ending with exactly one terminal. */
+   *  order, ending with at most one terminal (none for a cancelled run, whose
+   *  late deltas still pass). */
   deliver: (event: ReviewEvent) => void;
   /** How long a returned terminal waits for the channel's own copy before the
    *  returned one is replayed. */

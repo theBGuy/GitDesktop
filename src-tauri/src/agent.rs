@@ -2252,7 +2252,8 @@ fn has_blank_line(text: &str) -> bool {
     })
 }
 
-/// Kills the entire process tree of a host-mode agent child on cancel/timeout.
+/// Kills the entire process tree of a host-mode agent child: on cancel or timeout,
+/// when the post-run exit grace runs out, and on unix at every review run's exit.
 ///
 /// `child.start_kill()` reaches only the direct child, but the agent CLI is a
 /// shim that spawns node workers, MCP servers and tool subprocesses — killing
@@ -2435,9 +2436,9 @@ async fn stream_agent(
         .stderr(Stdio::piped());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    // Put the child in its own process group so a group-kill on cancel/timeout
-    // reaches the whole tree (the CLI shim spawns node workers, MCP-server
-    // children, and tool subprocesses). See `kill_process_tree`.
+    // Put the child in its own process group so a group-kill (on cancel, timeout, and
+    // every review run's exit) reaches the whole tree (the CLI shim spawns node
+    // workers, MCP-server children, and tool subprocesses). See `kill_process_tree`.
     #[cfg(unix)]
     cmd.process_group(0);
     cmd.kill_on_drop(true);
@@ -2547,10 +2548,11 @@ async fn stream_agent(
         }
     }
 
-    // Group kill on every exit: wait (bounded) for the leader WITHOUT reaping it, kill
-    // its process group, then reap. Kill-before-reap is the invariant — an unreaped
-    // zombie pins its pid and pgid, so the `killpg` can't land on a recycled group. The
-    // non-reaping wait still lets a cleanly exiting leader flush stderr first.
+    // On a review run (`kill_group_on_exit`), group kill on every exit: wait (bounded)
+    // for the leader WITHOUT reaping it, kill its process group, then reap.
+    // Kill-before-reap is the invariant — an unreaped zombie pins its pid and pgid, so
+    // the `killpg` can't land on a recycled group. The non-reaping wait still lets a
+    // cleanly exiting leader flush stderr first.
     #[cfg(unix)]
     let group_killed = match child.id() {
         Some(pid) if kill_group_on_exit => {

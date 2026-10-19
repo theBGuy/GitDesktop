@@ -242,9 +242,9 @@ export interface AgentReviewArgs {
  *  (and any deltas still in flight ahead of it) before it is replayed. */
 const CHANNEL_TERMINAL_WAIT_MS = 5000;
 
-/** A channel for one agent run, gated so `onEvent` sees a single terminal after
- *  every delta the channel delivers before it. A throwing consumer is logged and
- *  skipped: a handler that throws must never stall the channel's ordered queue. */
+/** A channel for one agent run, gated so `onEvent` sees at most one terminal,
+ *  after every delta the channel delivers before it. A throwing consumer is logged
+ *  and skipped: a handler that throws must never stall the channel's ordered queue. */
 function gatedChannel(onEvent: (event: ReviewEvent) => void): {
   channel: Channel<ReviewEvent>;
   gate: ChannelGate;

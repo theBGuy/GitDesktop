@@ -118,15 +118,11 @@ export function createCliClient(settings: AiSettings): AiClient {
             // above) is incomplete, so it fails rather than pass a partial draft off as
             // the whole generation.
             if (backendDone) {
-              if (backendError && !settled) {
-                throw new Error(errorMessage(backendError));
-              }
-              if (!settled) {
-                throw new Error(
-                  "The generation ended before its final message arrived.",
-                );
-              }
-              return;
+              throw new Error(
+                backendError
+                  ? errorMessage(backendError)
+                  : "The generation ended before its final message arrived.",
+              );
             }
             await new Promise<void>((resolve) => {
               wake = resolve;

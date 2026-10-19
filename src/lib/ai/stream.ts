@@ -59,9 +59,10 @@ export interface CliStreamOpts {
 
 /**
  * Drives one streaming agent-CLI run, accumulating deltas into `setText`.
- * Shared by the PR review and the Actions "Debug with AI" flows. Resolves on a
- * finished run or a cancel; rejects on a failed run and on one that ended before
- * its final message.
+ * Shared by the PR review, automated reviews, and (through useAiTextStream) the
+ * Actions "Debug with AI" and conflict-resolution flows. Resolves on a finished
+ * run or a cancel; rejects on a failed run and on one that ended before its
+ * final message.
  */
 export async function runCliStream({
   ai,
