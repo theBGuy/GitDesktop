@@ -798,9 +798,10 @@ async fn sweep_in(repo_path: &str, root: &Path, min_age: Duration) {
 
 /// Removes one claimed leftover: its checkout, git's admin entry, and then the marker
 /// pair. `true` means the checkout and its registration are gone, so the branch is free.
-/// The pair's delete is best-effort: callers refuse on `false`, and the sweep collects a
-/// surviving sidecar. A failed checkout removal keeps the pair, so the next claim
-/// retries it age-free. Lock-free runners — every caller already holds the admin domain.
+/// The pair's delete is best-effort: `claim_dead_update_worktree`'s callers refuse on
+/// `false`, and the sweep collects a surviving sidecar. A failed checkout removal keeps
+/// the pair, so the next claim retries it age-free. Lock-free runners — every caller
+/// already holds the admin domain.
 async fn remove_update_leftover(repo_path: &str, root: &Path, stem: &str) -> bool {
     let dir = root.join(stem);
     if dir.exists() {

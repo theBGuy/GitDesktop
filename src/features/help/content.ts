@@ -1062,8 +1062,9 @@ ids, the force-push confirmation warns that pushing would put the old history ba
 and the Pull menu offers a confirmed **Reset to _origin/…_** that lines the two up
 instead. The reset won't overwrite untracked files or folders unless they're ignored: if
 any sit where the upstream version has files, it stops and names them so you can move
-them aside first. If the branch moves, or you switch branches, before the reset runs,
-nothing is reset and the view refreshes so you can decide again.
+them aside first. If the branch moves or you switch branches before the reset runs,
+or another Git process commits or switches branches while it runs, nothing is reset
+and the view refreshes so you can decide again.
 
 ## Resolving conflicts
 

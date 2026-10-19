@@ -487,7 +487,7 @@ pub(crate) fn short_oid(oid: &str) -> &str {
 }
 
 /// The recovery hint every failed-rollback verdict for a caught switch ends its lead with.
-/// ops.rs's tree-step rollback verdicts append it too.
+/// ops.rs's three failed tree-step rollback verdicts append it too.
 pub(crate) const SWITCH_ROLLBACK_HINT: &str =
     "Check the branch in a terminal; the reflog has every tip.";
 
