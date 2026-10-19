@@ -369,7 +369,7 @@ highlighter.setMaxLineToIgnoreSyntax(SYNTAX_LINE_CAP);
 // tree-shaken.
 installHljsGapIsolation();
 // Before any tokenize, and before ensureCustomLanguages (createDiffFile) so a
-// user grammar registered under `typescript`/`tsx` still wins.
+// user grammar registered under `typescript`/`tsx`/`javascript` still wins.
 installTsNoJsx(highlighter.getHighlighterEngine());
 
 /**

@@ -19,9 +19,9 @@
  * notify; subscribed Markdown components re-render, marked re-parses, and fences
  * that rendered plain now highlight.
  *
- * The singleton's `typescript` is swapped for the JSX-less grammar (see
- * hljs-ts-no-jsx.ts) here at module scope and again once the full build lands,
- * since that build re-registers the stock grammar. The `lib/common` import is
+ * The singleton's `typescript` and `javascript` are swapped for the patched
+ * grammars (see hljs-ts-no-jsx.ts) here and again once the full build lands,
+ * since that build re-registers the stock grammars. The `lib/common` import is
  * the one markdown.tsx already makes statically, not the full build.
  * BlameDialog, CodeTodoDetailView and HighlightedCode share the same core
  * singleton and get the swap only because this module sits in the startup
