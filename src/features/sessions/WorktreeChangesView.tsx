@@ -1,11 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useLayoutEffect, useRef, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { PathText } from "@/components/path-text";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
+import {
+  openStatusErrorDetails,
+  StatusReadErrorState,
+  StatusRefreshFailedStrip,
+  useRetainedStatusError,
+} from "@/features/repository/StatusReadError";
+import { STATUS_READ_FAILED_REASON } from "@/features/repository/sync-controls-state";
 import { gitDiffFile, gitStatus } from "@/lib/git/api";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
@@ -44,11 +51,36 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
     // the same holds for every `networkMode` in this file.
     networkMode: "always",
   });
+  const retainedError = useRetainedStatusError({
+    repoPath,
+    error: status.error ?? status.failureReason,
+  });
   // Anything the agent touched: it writes into the working tree (unstaged) and
   // creates new (untracked) files; it never stages, but include staged
   // defensively so nothing is hidden.
   const entries = (status.data?.entries ?? []).filter(
     (e) => e.unstaged || e.staged,
+  );
+  // Sticky, never `isError`: each poll of a never-loaded failed read flips it
+  // back to pending.
+  const statusReadFailed =
+    status.data === undefined && status.errorUpdateCount > 0;
+  // The error block's buttons unmount when the first good read lands; the
+  // landing above the view takes the focus they held, never focus moved away.
+  const landingRef = useRef<HTMLSpanElement>(null);
+  const statusErrorShown = useRef(statusReadFailed);
+  useLayoutEffect(() => {
+    const was = statusErrorShown.current;
+    statusErrorShown.current = statusReadFailed;
+    if (was && !statusReadFailed && document.activeElement === document.body)
+      landingRef.current?.focus({ preventScroll: true });
+  }, [statusReadFailed]);
+  // First in every arm so the region stays mounted across them: it announces
+  // only text that arrives after it is in the DOM.
+  const statusLiveRegion = (
+    <span role="status" className="sr-only">
+      {statusReadFailed ? STATUS_READ_FAILED_REASON : null}
+    </span>
   );
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -76,17 +108,55 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
     networkMode: "always",
   });
 
-  if (status.isPending) {
+  // Ahead of the skeleton, on the sticky gate.
+  if (statusReadFailed) {
     return (
-      <div className="space-y-3 p-4">
-        <Skeleton className="h-5 w-2/3" />
-        <Skeleton className="h-32 w-full" />
-      </div>
+      <>
+        {statusLiveRegion}
+        <div className="flex h-full flex-col">
+          <StatusReadErrorState
+            compact
+            error={status.error ?? status.failureReason ?? retainedError}
+            onRetry={() => void status.refetch()}
+            repoPath={repoPath}
+          />
+        </div>
+      </>
     );
   }
+  if (status.isPending) {
+    return (
+      <>
+        {statusLiveRegion}
+        <div className="space-y-3 p-4">
+          <Skeleton className="h-5 w-2/3" />
+          <Skeleton className="h-32 w-full" />
+        </div>
+      </>
+    );
+  }
+  const landing = (
+    <span ref={landingRef} tabIndex={-1} className="outline-none" />
+  );
+  const refreshStrip = (
+    <StatusRefreshFailedStrip
+      degraded={status.isError}
+      onRetry={() => void status.refetch()}
+      onDetails={() => openStatusErrorDetails(status.error)}
+    />
+  );
   if (entries.length === 0) {
     return (
-      <DiffPlaceholder message="The agent is working — no file changes yet this turn." />
+      <>
+        {statusLiveRegion}
+        <div className="flex h-full flex-col">
+          {landing}
+          {refreshStrip}
+          <div className="min-h-0 flex-1">
+            <DiffPlaceholder message="The agent is working — no file changes yet this turn." />
+          </div>
+        </div>
+      </>
     );
   }
 
@@ -99,60 +169,65 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
   });
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
-        <span className="font-medium">Working changes</span>
-        <span className="text-muted-foreground">· uncommitted this turn</span>
-        <span className="flex-1" />
-        <span className="text-muted-foreground">
-          {entries.length} file{entries.length === 1 ? "" : "s"}
-        </span>
-      </header>
+    <>
+      {statusLiveRegion}
+      <div className="flex h-full flex-col">
+        {landing}
+        {refreshStrip}
+        <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
+          <span className="font-medium">Working changes</span>
+          <span className="text-muted-foreground">· uncommitted this turn</span>
+          <span className="flex-1" />
+          <span className="text-muted-foreground">
+            {entries.length} file{entries.length === 1 ? "" : "s"}
+          </span>
+        </header>
 
-      <DetailRailRow>
-        <DetailRail ariaLabel="Changed files">
-          {/* overflow-hidden contains the list's natural height (vendored Root is
+        <DetailRailRow>
+          <DetailRail ariaLabel="Changed files">
+            {/* overflow-hidden contains the list's natural height (vendored Root is
               `relative`-only) so a long file list can't leak a window scrollbar. */}
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-            <div onKeyDown={onFilesKeyDown}>
-              {entries.map((file) => (
-                <button
-                  type="button"
-                  key={file.path}
-                  data-path={file.path}
-                  className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
-                    effectivePath === file.path
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-muted/60",
-                  )}
-                  onClick={() => setSelectedPath(file.path)}
-                >
-                  <PathText path={file.path} className="flex-1 font-mono" />
-                  <span className="shrink-0 text-muted-foreground">
-                    {KIND_LABEL[entryKind(file)]}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </ScrollArea>
-        </DetailRail>
-        <main className="min-w-0 flex-1">
-          {deferredPath ? (
-            <DiffSurface
-              filePath={deferredPath}
-              diff={diff}
-              repoPath={repoPath}
-              imageRevs={{ old: "HEAD", new: null }}
-              contentRevs={
-                untracked ? { newRev: null } : { oldRev: ":0", newRev: null }
-              }
-            />
-          ) : (
-            <DiffPlaceholder message="Select a file to see its changes" />
-          )}
-        </main>
-      </DetailRailRow>
-    </div>
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <div onKeyDown={onFilesKeyDown}>
+                {entries.map((file) => (
+                  <button
+                    type="button"
+                    key={file.path}
+                    data-path={file.path}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
+                      effectivePath === file.path
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-muted/60",
+                    )}
+                    onClick={() => setSelectedPath(file.path)}
+                  >
+                    <PathText path={file.path} className="flex-1 font-mono" />
+                    <span className="shrink-0 text-muted-foreground">
+                      {KIND_LABEL[entryKind(file)]}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </ScrollArea>
+          </DetailRail>
+          <main className="min-w-0 flex-1">
+            {deferredPath ? (
+              <DiffSurface
+                filePath={deferredPath}
+                diff={diff}
+                repoPath={repoPath}
+                imageRevs={{ old: "HEAD", new: null }}
+                contentRevs={
+                  untracked ? { newRev: null } : { oldRev: ":0", newRev: null }
+                }
+              />
+            ) : (
+              <DiffPlaceholder message="Select a file to see its changes" />
+            )}
+          </main>
+        </DetailRailRow>
+      </div>
+    </>
   );
 }

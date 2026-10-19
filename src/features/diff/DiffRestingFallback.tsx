@@ -21,6 +21,7 @@ export function DiffRestingFallback({ repoPath }: { repoPath: string }) {
           message={restingDiffMessage(
             status.isPending,
             status.data?.entries.length ?? 0,
+            status.data === undefined && status.errorUpdateCount > 0,
           )}
         />
       </div>

@@ -476,6 +476,11 @@ menu item appears only when you have it, greyed out while your access is being c
 The **Changes** tab ({{kbd:tab-changes}}) lists your modified files, split into
 **Staged** (included in the next commit) and **Changes** (not yet staged).
 
+If Git can't read the status (a broken submodule, for example), the tab says so with
+Git's message: **Retry** checks again, **Details** shows the full text with Copy, and
+the view keeps checking on its own. A check that fails after the list has loaded keeps
+the last list up, with a line above it saying it couldn't refresh.
+
 ## Staging
 
 - Click a file to see its diff. Toggle **unified / split** at the top of the diff.

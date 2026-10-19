@@ -277,15 +277,23 @@ fn identity_from_git(
                 Ok(dir)
             }
         }
-        // The runner pins LC_ALL=C; other exit-128 failures (permissions, unsafe
-        // ownership, corrupt metadata) do not prove this is a non-repository.
-        Err(AppError::Git { code: 128, stderr })
-            if stderr.lines().any(|line| line.contains("not a git repository")) =>
-        {
+        Err(AppError::Git { code, stderr }) if git_says_not_a_repository(code, &stderr) => {
             Ok(repo_path.to_string())
         }
         Err(err) => Err(err),
     }
+}
+
+/// Whether a failed git run proves `cwd` is not a repository: git's own exit-128
+/// "not a git repository" line (the runner pins LC_ALL=C). Other exit-128
+/// failures (permissions, unsafe ownership, a broken `core.worktree`, a bare
+/// repo) do not prove it. The one spelling of this rule, so identity and
+/// validation can't drift.
+fn git_says_not_a_repository(code: i32, stderr: &str) -> bool {
+    code == 128
+        && stderr
+            .lines()
+            .any(|line| line.contains("not a git repository"))
 }
 
 /// Resolve a repo's worktree-stable identity key for the frontend stores (see
@@ -320,17 +328,29 @@ pub async fn validate_repo(path: String) -> AppResult<RepoInfo> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if out.code != 0 {
+    // Only git's own verdict reads as NotARepo; any other failure stays git's
+    // error, so the frontend's Locate/Remove offer stays away from a repo git
+    // merely can't read.
+    if git_says_not_a_repository(out.code, &out.stderr) {
         return Err(AppError::NotARepo(path));
     }
+    let out = out.exit_verdict()?;
     let root = out.stdout_lossy().trim().to_string();
     if root.is_empty() {
-        // bare repository: rev-parse succeeds but prints no toplevel
+        // Defensive: a bare repo fails rev-parse above (exit 128, "must be run
+        // in a work tree"; measured, git 2.51.1) rather than printing nothing.
         return Err(AppError::NotARepo(path));
     }
     // git prints forward slashes; normalize so recents dedupe properly
     #[cfg(windows)]
     let root = root.replace('/', "\\");
+    // An absolute `core.worktree` naming a moved folder passes rev-parse, which
+    // prints the configured path without entering it (measured, git 2.51.1).
+    if !Path::new(&root).is_dir() {
+        return Err(AppError::Command(format!(
+            "Git points this repository's working tree at {root}, which doesn't exist."
+        )));
+    }
     let name = root
         .rsplit(['/', '\\'])
         .next()
@@ -767,6 +787,247 @@ mod path_is_dir_tests {
         // existence doesn't prove — a file at that path is not a checkout.
         assert!(!path_is_dir(file.to_string_lossy().into_owned()).await);
         assert!(!path_is_dir(dir.path().join("gone").to_string_lossy().into_owned()).await);
+    }
+}
+
+#[cfg(test)]
+mod validate_repo_tests {
+    use super::{git_says_not_a_repository, validate_repo};
+    use crate::error::AppError;
+    use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
+    use std::path::{Path, PathBuf};
+
+    /// git's own words for each shape (measured, git 2.51.1.windows.1).
+    const NOT_A_REPO_LINE: &str =
+        "fatal: not a git repository (or any of the parent directories): .git";
+    const CANNOT_CHDIR_LINE: &str =
+        "fatal: cannot chdir to '../../../gone': No such file or directory";
+    const NO_WORK_TREE_LINE: &str = "fatal: this operation must be run in a work tree";
+
+    fn s(p: &Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    async fn git(repo: &Path, args: &[&str]) {
+        run_git(Some(&s(repo)), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    }
+
+    /// A temp root with no repository above it. `validate_repo` runs without
+    /// GIT_CEILING_DIRECTORIES, so an enclosing repo would answer for every
+    /// fixture under it.
+    fn outside_any_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-validate-")
+            .tempdir()
+            .unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        assert!(std::env::var_os("GIT_DIR").is_none());
+        for ancestor in root.ancestors() {
+            assert!(
+                !ancestor.join(".git").exists(),
+                "temp root sits inside a repository at {}",
+                ancestor.display()
+            );
+        }
+        (dir, root)
+    }
+
+    /// A superproject whose submodule's `core.worktree` is set to `worktree`, a
+    /// directory that is gone, while the submodule folder and its gitfile stay in
+    /// place. Returns (superproject, submodule folder).
+    async fn broken_submodule(root: &Path, worktree: &str) -> (PathBuf, PathBuf) {
+        let ident: &[&str] = &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        let src = root.join("src");
+        std::fs::create_dir(&src).unwrap();
+        git(&src, &["init", "-q"]).await;
+        git(
+            &src,
+            &[
+                ident,
+                ["commit", "-q", "--allow-empty", "-m", "init"].as_slice(),
+            ]
+            .concat(),
+        )
+        .await;
+        let sup = root.join("super");
+        std::fs::create_dir(&sup).unwrap();
+        git(&sup, &["init", "-q"]).await;
+        let src_path = s(&src);
+        git(
+            &sup,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &src_path,
+                "sub",
+            ],
+        )
+        .await;
+        git(
+            &sup,
+            &[ident, ["commit", "-q", "-m", "add sub"].as_slice()].concat(),
+        )
+        .await;
+        let config = s(&sup.join(".git").join("modules").join("sub").join("config"));
+        git(&sup, &["config", "-f", &config, "core.worktree", worktree]).await;
+        (sup.clone(), sup.join("sub"))
+    }
+
+    #[test]
+    fn only_git_s_own_not_a_repository_line_proves_a_non_repository() {
+        assert!(git_says_not_a_repository(128, NOT_A_REPO_LINE));
+        assert!(git_says_not_a_repository(
+            128,
+            "fatal: not a git repository: C:\\checkout\\gone-gitdir"
+        ));
+        assert!(!git_says_not_a_repository(128, CANNOT_CHDIR_LINE));
+        assert!(!git_says_not_a_repository(128, NO_WORK_TREE_LINE));
+        assert!(!git_says_not_a_repository(129, NOT_A_REPO_LINE));
+    }
+
+    #[tokio::test]
+    async fn a_plain_directory_is_not_a_repository() {
+        let (_dir, root) = outside_any_repo();
+        let plain = root.join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let raw = run_git_raw(
+            Some(&s(&plain)),
+            &["rev-parse", "--show-toplevel"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        // Contains, not equals: a filesystem boundary on Linux and macOS ends
+        // git's discovery walk with "(or any parent up to mount point …)".
+        assert_eq!(raw.code, 128);
+        assert!(
+            raw.stderr.contains("not a git repository"),
+            "{}",
+            raw.stderr
+        );
+        assert!(matches!(
+            validate_repo(s(&plain)).await,
+            Err(AppError::NotARepo(path)) if path == s(&plain)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_missing_folder_is_not_a_repository() {
+        let (_dir, root) = outside_any_repo();
+        let gone = s(&root.join("gone"));
+        assert!(matches!(
+            validate_repo(gone.clone()).await,
+            Err(AppError::NotARepo(path)) if path == gone
+        ));
+    }
+
+    /// The submodule folder exists and holds a gitfile, so git's failure is that
+    /// it can't READ the repo, which must never read as "not a repository".
+    #[tokio::test]
+    async fn a_broken_submodule_worktree_is_a_git_error_with_git_s_message() {
+        let (_dir, root) = outside_any_repo();
+        // git's own relative spelling for a submodule's work tree.
+        let (sup, sub) = broken_submodule(&root, "../../../gone").await;
+        match validate_repo(s(&sub)).await {
+            Err(AppError::Git { code, stderr }) => {
+                assert_eq!((code, stderr.as_str()), (128, CANNOT_CHDIR_LINE));
+            }
+            other => panic!("expected a git error, got {:?}", other.map(|i| i.root)),
+        }
+        // The superproject still opens, and its status read is what fails.
+        assert_eq!(validate_repo(s(&sup)).await.unwrap().root, s(&sup));
+        match crate::git::status::status_core(&s(&sup)).await {
+            Err(AppError::Git { code, stderr }) => {
+                assert_eq!(code, 128);
+                assert!(stderr.starts_with(CANNOT_CHDIR_LINE), "{stderr}");
+                assert!(!stderr.contains("not a git repository"), "{stderr}");
+            }
+            other => panic!("expected a failed status read, got {:?}", other.is_ok()),
+        }
+    }
+
+    /// An absolute `core.worktree` naming a moved folder passes rev-parse, which
+    /// prints that folder, so the open must refuse on the missing directory itself.
+    #[tokio::test]
+    async fn a_working_tree_folder_that_is_gone_is_refused_by_name() {
+        let (_dir, root) = outside_any_repo();
+        let missing = s(&root.join("moved-away"));
+        let (_sup, sub) = broken_submodule(&root, &missing).await;
+        let raw = run_git_raw(
+            Some(&s(&sub)),
+            &["rev-parse", "--show-toplevel"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(raw.code, 0, "{}", raw.stderr);
+        match validate_repo(s(&sub)).await {
+            Err(AppError::Command(message)) => assert_eq!(
+                message,
+                format!(
+                    "Git points this repository's working tree at {missing}, which doesn't exist."
+                )
+            ),
+            other => panic!("expected a command error, got {:?}", other.map(|i| i.root)),
+        }
+    }
+
+    /// The git dir the gitfile names really is gone: git's own verdict holds.
+    #[tokio::test]
+    async fn a_dangling_gitfile_is_not_a_repository() {
+        let (_dir, root) = outside_any_repo();
+        let checkout = root.join("dangling");
+        std::fs::create_dir(&checkout).unwrap();
+        let gitdir = s(&root.join("gone-gitdir"));
+        std::fs::write(checkout.join(".git"), format!("gitdir: {gitdir}\n")).unwrap();
+        let raw = run_git_raw(
+            Some(&s(&checkout)),
+            &["rev-parse", "--show-toplevel"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (raw.code, raw.stderr),
+            (128, format!("fatal: not a git repository: {gitdir}"))
+        );
+        assert!(matches!(
+            validate_repo(s(&checkout)).await,
+            Err(AppError::NotARepo(path)) if path == s(&checkout)
+        ));
+    }
+
+    /// A bare repo, and a `.git` folder picked directly, are repositories with no
+    /// work tree: git's error, not "not a repository".
+    #[tokio::test]
+    async fn a_bare_repository_is_a_git_error_with_git_s_message() {
+        let (_dir, root) = outside_any_repo();
+        let bare = root.join("bare.git");
+        std::fs::create_dir(&bare).unwrap();
+        git(&bare, &["init", "-q", "--bare"]).await;
+        let checkout = root.join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        git(&checkout, &["init", "-q"]).await;
+        for path in [bare, checkout.join(".git")] {
+            match validate_repo(s(&path)).await {
+                Err(AppError::Git { code, stderr }) => {
+                    assert_eq!((code, stderr.as_str()), (128, NO_WORK_TREE_LINE));
+                }
+                other => panic!("expected a git error, got {:?}", other.map(|i| i.root)),
+            }
+        }
     }
 }
 

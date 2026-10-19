@@ -14,6 +14,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -86,6 +87,13 @@ import { ConflictBanner } from "./ConflictBanner";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
+import {
+  openStatusErrorDetails,
+  StatusReadErrorState,
+  StatusRefreshFailedStrip,
+  useRetainedStatusError,
+} from "./StatusReadError";
+import { STATUS_READ_FAILED_REASON } from "./sync-controls-state";
 
 /** The pathspecs that unstage one entry — a staged rename is "delete old path +
  *  add new path", so both halves are needed or the old path's deletion stays
@@ -341,7 +349,8 @@ export function ChangesPanel({
   const filterRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLElement | null>(null);
   const viewToggleRef = useRef<HTMLButtonElement>(null);
-  // A silent focus landing for a clean tree, where no toolbar renders.
+  // A silent focus landing above the list: a clean tree's, where no toolbar
+  // renders, and the file list's when a failed status read recovers.
   const markerLandingRef = useRef<HTMLSpanElement>(null);
   // Where focus goes when the banner's reapply rows unmount under it: the
   // tree-view toggle while the toolbar is mounted, else the landing span.
@@ -362,7 +371,29 @@ export function ChangesPanel({
   // row (a background arm, with the caret in the filter or outside the list).
   const pendingFocusSource = useRef<string | null>(null);
 
+  // Sticky, never `isError`: a never-loaded query that errored goes back to
+  // pending on every poll, which would swap the error block for the skeleton.
+  const statusReadFailed =
+    status.data === undefined && status.errorUpdateCount > 0;
+  // query-core keeps `error` through a refetch while data is held, so this
+  // holds steady across polls and clears on the first good read.
+  const statusRefreshFailed = status.data !== undefined && status.isError;
+  const retainedStatusError = useRetainedStatusError({
+    repoPath,
+    error: status.error ?? status.failureReason,
+  });
+
   const entries = status.data?.entries ?? [];
+  // The error block's buttons unmount when the first good read lands; the
+  // landing above the list or the clean state takes the focus they held, never
+  // focus the user moved elsewhere.
+  const statusErrorShown = useRef(statusReadFailed);
+  useLayoutEffect(() => {
+    const was = statusErrorShown.current;
+    statusErrorShown.current = statusReadFailed;
+    if (was && !statusReadFailed && document.activeElement === document.body)
+      markerLandingRef.current?.focus({ preventScroll: true });
+  }, [statusReadFailed]);
   const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
@@ -1378,6 +1409,36 @@ export function ChangesPanel({
     canResolveConflicts,
   );
 
+  // First in every arm so the region stays mounted across them: it announces
+  // only text that arrives after it is in the DOM. The content beside it is
+  // keyed per arm, so the list still mounts (and fades in) fresh. Outside the
+  // skeleton's aria-busy subtree, for the same reason as the shared skeleton
+  // component; it may announce for a load that resolves inside the skeleton's
+  // 150ms visual delay (a polite region, accepted).
+  let statusAnnouncement: string | null = null;
+  if (statusReadFailed) statusAnnouncement = STATUS_READ_FAILED_REASON;
+  else if (status.isPending) statusAnnouncement = "Loading changes…";
+  const statusLiveRegion = (
+    <span role="status" className="sr-only">
+      {statusAnnouncement}
+    </span>
+  );
+
+  // Ahead of the skeleton: each poll of a never-loaded failed read flips it back
+  // to pending, so this order is what holds the block steady.
+  if (statusReadFailed) {
+    return (
+      <>
+        {statusLiveRegion}
+        <StatusReadErrorState
+          error={status.error ?? status.failureReason ?? retainedStatusError}
+          onRetry={() => void status.refetch()}
+          repoPath={repoPath}
+        />
+      </>
+    );
+  }
+
   if (status.isPending) {
     return (
       // Geometry copied from the empty state (Empty gap-4 p-6; EmptyMedia
@@ -1389,13 +1450,9 @@ export function ChangesPanel({
       // A delayed paint isn't motion, so the 0-duration animation runs
       // unconditionally; the fade is the motion-safe layer on top.
       <>
-        {/* Outside the aria-busy subtree, for the same reason as the shared
-            skeleton component. It may announce for a load that resolves inside
-            the 150ms visual delay — a polite region, accepted. */}
-        <span role="status" className="sr-only">
-          Loading changes…
-        </span>
+        {statusLiveRegion}
         <div
+          key="skeleton"
           aria-busy
           className="flex flex-1 flex-col items-center justify-center gap-4 p-6 animate-in fade-in-0 delay-150 duration-0 fill-mode-backwards motion-safe:duration-200"
         >
@@ -1569,293 +1626,308 @@ export function ChangesPanel({
     );
   };
 
+  // Calm fade as data replaces the loading skeleton (runs once on mount; a
+  // one-shot opacity fade is the existing tw-animate-css idiom, lighter than
+  // wrapping this whole tree in a motion component). Reduced-motion-safe.
   return (
-    // Calm fade as data replaces the loading skeleton (runs once on mount; a
-    // one-shot opacity fade is the existing tw-animate-css idiom, lighter than
-    // wrapping this whole tree in a motion component). Reduced-motion-safe.
-    <div className="flex min-h-0 flex-1 flex-col motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200">
-      <ConflictBanner
-        repoPath={repoPath}
-        conflictedPaths={conflictedPaths}
-        statusUpdatedAt={status.dataUpdatedAt}
-        landingRef={landingRef}
-      />
-      <span ref={markerLandingRef} tabIndex={-1} className="outline-none" />
-
-      {entries.length === 0 ? (
-        <ChangesEmptyState
+    <>
+      {statusLiveRegion}
+      <div
+        key="changes"
+        className="flex min-h-0 flex-1 flex-col motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200"
+      >
+        <ConflictBanner
           repoPath={repoPath}
-          isUnborn={isUnborn}
-          ghReady={ghReady}
-          proposeCount={proposeCount}
-          currentName={currentName}
-          defaultName={defaultName}
+          conflictedPaths={conflictedPaths}
+          statusUpdatedAt={status.dataUpdatedAt}
+          landingRef={landingRef}
         />
-      ) : (
-        <>
-          <div className="flex items-center gap-1 border-b p-2">
-            <Popover.Root>
-              <Popover.Trigger
-                render={
-                  <Button
-                    variant="outline"
-                    size="icon-sm"
-                    aria-label={
-                      activeKinds.size > 0
-                        ? `Filter options (${activeKinds.size} active)`
-                        : "Filter options"
-                    }
-                    className="relative"
-                  />
-                }
-              >
-                <FunnelIcon />
-                {activeKinds.size > 0 && (
-                  <span
-                    aria-hidden
-                    className="absolute -top-1 -right-1 flex size-3.5 items-center justify-center bg-primary text-[9px] font-medium text-primary-foreground tabular-nums"
-                  >
-                    {activeKinds.size}
-                  </span>
-                )}
-              </Popover.Trigger>
-              <Popover.Portal container={portalContainer}>
-                <Popover.Positioner
-                  align="start"
-                  sideOffset={4}
-                  className="isolate z-50"
+        {/* Above the empty state too: a clean tree's refresh failure would
+          otherwise hide behind a possibly stale "No local changes". */}
+        <StatusRefreshFailedStrip
+          degraded={statusRefreshFailed}
+          onRetry={() => void status.refetch()}
+          onDetails={() => openStatusErrorDetails(status.error)}
+        />
+        <span ref={markerLandingRef} tabIndex={-1} className="outline-none" />
+
+        {entries.length === 0 ? (
+          <ChangesEmptyState
+            repoPath={repoPath}
+            isUnborn={isUnborn}
+            ghReady={ghReady}
+            proposeCount={proposeCount}
+            currentName={currentName}
+            defaultName={defaultName}
+          />
+        ) : (
+          <>
+            <div className="flex items-center gap-1 border-b p-2">
+              <Popover.Root>
+                <Popover.Trigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      aria-label={
+                        activeKinds.size > 0
+                          ? `Filter options (${activeKinds.size} active)`
+                          : "Filter options"
+                      }
+                      className="relative"
+                    />
+                  }
                 >
-                  <Popover.Popup className="w-56 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-                    <p className="px-1 pb-1.5 text-xs font-medium">
-                      Filter Options
-                    </p>
-                    {(Object.keys(FILTER_LABELS) as FilterKind[]).map(
-                      (kind) => (
-                        <label
-                          key={kind}
-                          className="flex cursor-pointer items-center gap-2 rounded-none px-1 py-1.5 text-xs hover:bg-muted/60"
-                        >
-                          <Checkbox
-                            checked={activeKinds.has(kind)}
-                            onCheckedChange={(v) =>
-                              toggleKind(kind, v === true)
-                            }
-                          />
-                          <span className="flex-1">{FILTER_LABELS[kind]}</span>
-                          <span className="text-muted-foreground">
-                            ({entries.filter(FILTER_PREDICATES[kind]).length})
-                          </span>
-                        </label>
-                      ),
-                    )}
-                  </Popover.Popup>
-                </Popover.Positioner>
-              </Popover.Portal>
-            </Popover.Root>
-            <Input
-              ref={filterRef}
-              value={filterText}
-              onChange={(e) => setFilterText(e.target.value)}
-              placeholder="Filter"
-              className="h-7 flex-1"
-              autoComplete="off"
-            />
-            <Button
-              ref={viewToggleRef}
-              variant={treeMode ? "secondary" : "outline"}
-              size="icon-sm"
-              aria-pressed={treeMode}
-              aria-label="Directory tree view"
-              title={
-                treeMode
-                  ? "Show changes as a flat list"
-                  : "Group changes by directory"
-              }
-              onClick={toggleViewMode}
-            >
-              <TreeViewIcon />
-            </Button>
-          </div>
-
-          {/* Gate on settings.data being loaded so "Don't show again" (which
-              merges into it) can't silently no-op during the brief cold load. */}
-          {settings.data &&
-            (settings.data.showSelectionHint ?? true) &&
-            entries.length >= 2 && (
-              <InfoNote
-                className="px-2.5"
-                action={
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (!settings.data) return;
-                      void saveSettings
-                        .mutateAsync({
-                          ...settings.data,
-                          showSelectionHint: false,
-                        })
-                        .catch(() => undefined);
-                    }}
-                    className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+                  <FunnelIcon />
+                  {activeKinds.size > 0 && (
+                    <span
+                      aria-hidden
+                      className="absolute -top-1 -right-1 flex size-3.5 items-center justify-center bg-primary text-[9px] font-medium text-primary-foreground tabular-nums"
+                    >
+                      {activeKinds.size}
+                    </span>
+                  )}
+                </Popover.Trigger>
+                <Popover.Portal container={portalContainer}>
+                  <Popover.Positioner
+                    align="start"
+                    sideOffset={4}
+                    className="isolate z-50"
                   >
-                    Don't show again
-                  </button>
+                    <Popover.Popup className="w-56 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
+                      <p className="px-1 pb-1.5 text-xs font-medium">
+                        Filter Options
+                      </p>
+                      {(Object.keys(FILTER_LABELS) as FilterKind[]).map(
+                        (kind) => (
+                          <label
+                            key={kind}
+                            className="flex cursor-pointer items-center gap-2 rounded-none px-1 py-1.5 text-xs hover:bg-muted/60"
+                          >
+                            <Checkbox
+                              checked={activeKinds.has(kind)}
+                              onCheckedChange={(v) =>
+                                toggleKind(kind, v === true)
+                              }
+                            />
+                            <span className="flex-1">
+                              {FILTER_LABELS[kind]}
+                            </span>
+                            <span className="text-muted-foreground">
+                              ({entries.filter(FILTER_PREDICATES[kind]).length})
+                            </span>
+                          </label>
+                        ),
+                      )}
+                    </Popover.Popup>
+                  </Popover.Positioner>
+                </Popover.Portal>
+              </Popover.Root>
+              <Input
+                ref={filterRef}
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+                placeholder="Filter"
+                className="h-7 flex-1"
+                autoComplete="off"
+              />
+              <Button
+                ref={viewToggleRef}
+                variant={treeMode ? "secondary" : "outline"}
+                size="icon-sm"
+                aria-pressed={treeMode}
+                aria-label="Directory tree view"
+                title={
+                  treeMode
+                    ? "Show changes as a flat list"
+                    : "Group changes by directory"
                 }
+                onClick={toggleViewMode}
               >
-                {formatBinding("mod")}-click to select files individually,
-                Shift-click for a range.
-              </InfoNote>
-            )}
+                <TreeViewIcon />
+              </Button>
+            </div>
 
-          <ContextMenu>
-            {/* Keyed on repoPath so a repo switch mints a fresh virtualizer at
+            {/* Gate on settings.data being loaded so "Don't show again" (which
+              merges into it) can't silently no-op during the brief cold load. */}
+            {settings.data &&
+              (settings.data.showSelectionHint ?? true) &&
+              entries.length >= 2 && (
+                <InfoNote
+                  className="px-2.5"
+                  action={
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!settings.data) return;
+                        void saveSettings
+                          .mutateAsync({
+                            ...settings.data,
+                            showSelectionHint: false,
+                          })
+                          .catch(() => undefined);
+                      }}
+                      className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+                    >
+                      Don't show again
+                    </button>
+                  }
+                >
+                  {formatBinding("mod")}-click to select files individually,
+                  Shift-click for a range.
+                </InfoNote>
+              )}
+
+            <ContextMenu>
+              {/* Keyed on repoPath so a repo switch mints a fresh virtualizer at
                 offset 0, exactly like a fresh open. A persisted instance carries
                 its offset across element swaps: virtual-core writes scrollOffset
                 from the scroll listener, never on re-observe, and derives the
                 range from it unclamped. An uncached switch already remounts this
                 via the empty-state transit; the key covers the cached one. */}
-            <VirtualizedChangeList
-              key={repoPath}
-              flatRows={flatRows}
-              hasStaged={stagedEntries.length > 0}
-              entries={status.data?.entries}
-              text={text}
-              activeKinds={activeKinds}
-              viewMode={viewMode}
-              collapsedFolders={collapsedFolders}
-              activeRowKey={cursorKey}
-              nothingMatches={nothingMatches}
-              onClearFilter={() => {
-                setFilterText("");
-                setActiveKinds(new Set());
-              }}
-              onListKeyDown={handleListKeyDown}
-              onListFocus={handleRowFocus}
-              onListEl={handleListEl}
-              onContextMenuCapture={handleContextMenu}
-              onCursorScrolled={claimPendingFocus}
-              renderRow={renderRow}
-            />
-            <ContextMenuContent className="min-w-64">
-              <ChangesContextMenuItems
-                target={menuTarget}
-                repoPath={repoPath}
-                inSelection={
-                  menuTarget?.kind === "row"
-                    ? selectedKeys.has(
-                        keyOf(menuTarget.entry.path, menuTarget.staged),
-                      )
-                    : false
-                }
-                selectionCount={selectionCount}
-                stageableSelectionCount={stageableSelected.length}
-                selectedTrackedCount={selectedTracked.length}
-                actions={{
-                  discardAll: () =>
-                    setDiscardScope({ kind: "all", repo: repoPath }),
-                  stashAll: () =>
-                    setStashScope({ kind: "all", repo: repoPath }),
-                  stageSelected: () => void stageSelected(),
-                  unstageSelected: () => void unstageSelected(),
-                  discardSelected: requestDiscardSelected,
-                  stashSelected: requestStashSelected,
-                  ignoreSelected: () => void ignoreSelected(),
-                  untrackSelected: () => void untrackSelected(),
-                  toggle: handleToggle,
-                  resolveWithAi: (path) => startResolveOne(path, repoPath),
-                  discardFile: (entry) =>
-                    setDiscardScope({
-                      kind: "files",
-                      entries: [entry],
-                      repo: repoPath,
-                    }),
-                  stashFile: (entry) =>
-                    setStashScope({
-                      kind: "files",
-                      entries: [entry],
-                      repo: repoPath,
-                    }),
-                  viewHistory: setHistoryPath,
-                  blame: setBlamePath,
-                  ignore: (pattern, label) => void ignoreOne(pattern, label),
-                  untrack: (pathspec, ignorePattern, label) =>
-                    void untrackOne(pathspec, ignorePattern, label),
-                  aiExclude: (patterns, label) =>
-                    void aiExcludeOne(patterns, label),
-                  aiExcludeSelected: () => void aiExcludeSelected(),
+              <VirtualizedChangeList
+                key={repoPath}
+                flatRows={flatRows}
+                hasStaged={stagedEntries.length > 0}
+                entries={status.data?.entries}
+                text={text}
+                activeKinds={activeKinds}
+                viewMode={viewMode}
+                collapsedFolders={collapsedFolders}
+                activeRowKey={cursorKey}
+                nothingMatches={nothingMatches}
+                onClearFilter={() => {
+                  setFilterText("");
+                  setActiveKinds(new Set());
                 }}
+                onListKeyDown={handleListKeyDown}
+                onListFocus={handleRowFocus}
+                onListEl={handleListEl}
+                onContextMenuCapture={handleContextMenu}
+                onCursorScrolled={claimPendingFocus}
+                renderRow={renderRow}
               />
-            </ContextMenuContent>
-          </ContextMenu>
-        </>
-      )}
+              <ContextMenuContent className="min-w-64">
+                <ChangesContextMenuItems
+                  target={menuTarget}
+                  repoPath={repoPath}
+                  inSelection={
+                    menuTarget?.kind === "row"
+                      ? selectedKeys.has(
+                          keyOf(menuTarget.entry.path, menuTarget.staged),
+                        )
+                      : false
+                  }
+                  selectionCount={selectionCount}
+                  stageableSelectionCount={stageableSelected.length}
+                  selectedTrackedCount={selectedTracked.length}
+                  actions={{
+                    discardAll: () =>
+                      setDiscardScope({ kind: "all", repo: repoPath }),
+                    stashAll: () =>
+                      setStashScope({ kind: "all", repo: repoPath }),
+                    stageSelected: () => void stageSelected(),
+                    unstageSelected: () => void unstageSelected(),
+                    discardSelected: requestDiscardSelected,
+                    stashSelected: requestStashSelected,
+                    ignoreSelected: () => void ignoreSelected(),
+                    untrackSelected: () => void untrackSelected(),
+                    toggle: handleToggle,
+                    resolveWithAi: (path) => startResolveOne(path, repoPath),
+                    discardFile: (entry) =>
+                      setDiscardScope({
+                        kind: "files",
+                        entries: [entry],
+                        repo: repoPath,
+                      }),
+                    stashFile: (entry) =>
+                      setStashScope({
+                        kind: "files",
+                        entries: [entry],
+                        repo: repoPath,
+                      }),
+                    viewHistory: setHistoryPath,
+                    blame: setBlamePath,
+                    ignore: (pattern, label) => void ignoreOne(pattern, label),
+                    untrack: (pathspec, ignorePattern, label) =>
+                      void untrackOne(pathspec, ignorePattern, label),
+                    aiExclude: (patterns, label) =>
+                      void aiExcludeOne(patterns, label),
+                    aiExcludeSelected: () => void aiExcludeSelected(),
+                  }}
+                />
+              </ContextMenuContent>
+            </ContextMenu>
+          </>
+        )}
 
-      {(stashCount.data ?? 0) > 0 && (
-        <button
-          type="button"
-          onClick={() => setStashesOpen(true)}
-          className="flex shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-xs hover:bg-muted/60"
-          title="View stashed changes on this branch"
-        >
-          <StackIcon className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="flex-1 font-medium">Stashed Changes</span>
-          <span className="text-muted-foreground tabular-nums">
-            {stashCount.data}
-          </span>
-          <CaretRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        </button>
-      )}
+        {(stashCount.data ?? 0) > 0 && (
+          <button
+            type="button"
+            onClick={() => setStashesOpen(true)}
+            className="flex shrink-0 items-center gap-2 border-t px-3 py-2 text-left text-xs hover:bg-muted/60"
+            title="View stashed changes on this branch"
+          >
+            <StackIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="flex-1 font-medium">Stashed Changes</span>
+            <span className="text-muted-foreground tabular-nums">
+              {stashCount.data}
+            </span>
+            <CaretRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+          </button>
+        )}
 
-      <StashesDialog
-        repoPath={repoPath}
-        open={stashesOpen}
-        onOpenChange={setStashesOpen}
-      />
-
-      {historyPath && (
-        <FileHistoryDialog
+        <StashesDialog
           repoPath={repoPath}
-          path={historyPath}
-          open
-          onOpenChange={(o) => {
-            if (!o) setHistoryPath(null);
-          }}
+          open={stashesOpen}
+          onOpenChange={setStashesOpen}
         />
-      )}
-      {blamePath && (
-        <BlameDialog
-          repoPath={repoPath}
-          path={blamePath}
-          open
-          onOpenChange={(o) => {
-            if (!o) setBlamePath(null);
-          }}
+
+        {historyPath && (
+          <FileHistoryDialog
+            repoPath={repoPath}
+            path={historyPath}
+            open
+            onOpenChange={(o) => {
+              if (!o) setHistoryPath(null);
+            }}
+          />
+        )}
+        {blamePath && (
+          <BlameDialog
+            repoPath={repoPath}
+            path={blamePath}
+            open
+            onOpenChange={(o) => {
+              if (!o) setBlamePath(null);
+            }}
+          />
+        )}
+
+        <ConfirmDialog
+          open={discardScope !== null}
+          onCancel={() => setDiscardScope(null)}
+          title={discardTitle}
+          body={discardBody}
+          confirmLabel={
+            shownDiscardScope?.kind === "all" ? "Discard all" : "Discard"
+          }
+          confirmVariant="destructive"
+          pending={discardPaths.isPending || discardAll.isPending}
+          onConfirm={() => void confirmDiscard()}
         />
-      )}
 
-      <ConfirmDialog
-        open={discardScope !== null}
-        onCancel={() => setDiscardScope(null)}
-        title={discardTitle}
-        body={discardBody}
-        confirmLabel={
-          shownDiscardScope?.kind === "all" ? "Discard all" : "Discard"
-        }
-        confirmVariant="destructive"
-        pending={discardPaths.isPending || discardAll.isPending}
-        onConfirm={() => void confirmDiscard()}
-      />
-
-      <ConfirmDialog
-        open={stashScope !== null}
-        onCancel={() => setStashScope(null)}
-        title={stashTitle}
-        body={stashBody}
-        confirmLabel={shownStashScope?.kind === "all" ? "Stash all" : "Stash"}
-        pending={stashPaths.isPending || stashAll.isPending}
-        onConfirm={() => void confirmStash()}
-      />
-    </div>
+        <ConfirmDialog
+          open={stashScope !== null}
+          onCancel={() => setStashScope(null)}
+          title={stashTitle}
+          body={stashBody}
+          confirmLabel={shownStashScope?.kind === "all" ? "Stash all" : "Stash"}
+          pending={stashPaths.isPending || stashAll.isPending}
+          onConfirm={() => void confirmStash()}
+        />
+      </div>
+    </>
   );
 }
 
