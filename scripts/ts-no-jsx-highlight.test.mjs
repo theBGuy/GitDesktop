@@ -12,6 +12,7 @@
 // skips only when one of those PACKAGES is unresolved; GD_EXPECT_DEPS turns
 // that skip into a failure on frontend.yml's installed, enforced run.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 import { diffLang } from "../src/features/diff/diff-lang.ts";
@@ -258,6 +259,19 @@ const REGEX_CASES = [
     "params line comment before URL regex",
     ["// note"],
   ],
+  [
+    "const s = `${ a < /[/*]/ }`;\nconst x = 1;\n",
+    "substitution spaced less-than before regex",
+  ],
+  [
+    "function f(x = {k: a < /[/*]/}) {}\nconst y = 1;\n",
+    "params spaced less-than before regex",
+  ],
+  [
+    "function f(x = {pattern: /** doc */ /[/*]/}) {}\nconst y = 1;\n",
+    "params JSDoc comment before regex",
+    ["/** doc */"],
+  ],
 ];
 const DIVISION_CASES = [
   [PARAMS_DIVISION, "params double division"],
@@ -351,6 +365,68 @@ const DIVISION_CASES = [
   [
     "function f(x = {k: a // note\n / b}) {}\nconst y = 1;\n",
     "params division after line comment",
+  ],
+  [
+    'const a = /* x */ 1;\nconst s = `${ c /* px */ / 2 + "a/b" }`;\n' +
+      "const x = 1;\n",
+    "substitution division after an earlier block comment",
+  ],
+  [
+    "const g = '**/*.ts';\nconst s = `${ size /* bytes */ / 1024 }/s`;\n" +
+      "const x = 1;\n",
+    "substitution division after glob string and block comment",
+  ],
+  [
+    'function f(x = { w: total /* bytes */ / 1024, u: "a/b" }) {}\n' +
+      "const y = 1;\n",
+    "params division after block comment before string slash",
+  ],
+  [
+    'const s = `${ "a://b"\n / 2 + "a/b" }`;\nconst x = 1;\n',
+    "substitution division after URL string on prior line",
+  ],
+  [
+    "const s = `${ a // http://x\n / b }/`;\nconst x = 1;\n",
+    "substitution division after URL in line comment",
+  ],
+  [
+    "const s = `${ a // TODO: //\n / b }/`;\nconst x = 1;\n",
+    "substitution division after inner line-comment opener",
+  ],
+  [
+    'function Button({ icon = <span>Go</span>, href = "/home" }) {}\n' +
+      "const y = 1;\n",
+    "params JSX closing tag before path string",
+  ],
+  [
+    "const s = `${ <b>x</b> }/path`;\nconst x = 1;\n",
+    "substitution JSX closing tag before template path",
+  ],
+  [
+    "function C({ title = <b>Hi</b> }) { // default title\n" +
+      "  return title;\n}\nconst y = 1;\n",
+    "params JSX closing tag before function-body comment",
+  ],
+  [
+    'function f({ a = <Fade in />, to = "/x" }) {}\nconst y = 1;\n',
+    "params JSX keyword attribute before self-closing slash",
+  ],
+  [
+    'const s = `${ x!++ / 2 + "a/b" }`;\nconst x = 1;\n',
+    "substitution non-null postfix division",
+  ],
+  [
+    'const s = `${ a ++ / 2 + "a/b" }`;\nconst x = 1;\n',
+    "substitution spaced postfix division",
+  ],
+  [
+    'const s = `${ caf\u00e9++ / 2 + "a/b" }`;\nconst x = 1;\n',
+    "substitution non-ASCII identifier postfix division",
+  ],
+  [
+    'class C { #in = 1; m(x = { r: this.#in / 2, s: "/" }) {} }\n' +
+      "const y = 1;\n",
+    "params division after private keyword name",
   ],
 ];
 const DIVISION_COMMENT_CASES = [
@@ -566,6 +642,32 @@ function assertFixedParams(run, unchanged) {
   assert.equal(run("typescript")(TS_PAREN_COMMENT), unchanged[0]);
   assert.equal(run("typescript")(CONTROL), unchanged[1]);
 }
+
+test("comment chain highlighting finishes in a bounded child process", {
+  skip,
+}, () => {
+  const transformUrl = new URL(
+    "../src/features/diff/hljs-ts-no-jsx.ts",
+    import.meta.url,
+  ).href;
+  const coreUrl = import.meta.resolve("highlight.js/lib/core");
+  const script = [
+    `import hljsCore from ${JSON.stringify(coreUrl)};`,
+    `import { ensureTsNoJsx } from ${JSON.stringify(transformUrl)};`,
+    "const hljs = hljsCore.newInstance();",
+    "ensureTsNoJsx(hljs);",
+    'const code = "const s = `${ c " + "/* n */ ".repeat(40) + "/ 2 }`;";',
+    'hljs.highlight(code, { language: "typescript", ignoreIllegals: true });',
+    'console.log("params-comment-chain-ok");',
+  ].join("\n");
+  const child = spawnSync(
+    process.execPath,
+    ["--input-type=module", "-e", script],
+    { timeout: 10000, encoding: "utf8", windowsHide: true },
+  );
+  assert.equal(child.status, 0, child.error?.message ?? child.stderr);
+  assert.equal(child.stdout.trim(), "params-comment-chain-ok");
+});
 
 test("brace/subst shape: four inserted modes per grammar, then idempotent", {
   skip,
