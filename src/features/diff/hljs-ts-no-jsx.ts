@@ -56,14 +56,15 @@ export function stripJsxModes(root: Mode): number {
   return removed;
 }
 
-// Regex follows operators or `( [ { , ; : ?`; `<` excludes `</`, and `+`/`-`
-// exclude doubles. Whole expression keywords exclude preceding `.`, `#`, or
-// identifier characters and following `/>`. Whitespace, comments and `!` may
-// intervene. Each comment is one item: block bodies exclude `*/` and `/*`;
-// line comments follow whitespace/start and use the line's first `//`. This
-// keeps lookbehind linear; the leading slash skips non-slash positions.
+// Regex follows operators or `( [ { , ; : ?`; `>` excludes `/>`, `<` excludes
+// `</`, and `+`/`-` exclude doubles. Whole expression keywords exclude `.`,
+// `#`, identifier/non-ASCII letters before them and `/>` after them. Regex
+// never starts with `>`. Whitespace, comments and prefix `!` may intervene.
+// Block bodies exclude `*/`; openers cannot follow words, `*`, quotes, `/`,
+// or `[`. Line comments follow whitespace/`(`/`[`/`{`, with no earlier `//`
+// within 256 characters. All checks are linear and run only at slashes.
 const REGEX_START =
-  /\/(?<=(?:[=:(,{[&|?;~^%*>]|<(?!\/)|(?<!\+)\+|(?<!-)-|(?<![\w$.#\u0080-\uFFFF])(?:return|throw|case|typeof|void|delete|instanceof|in|of|new|else|do|await|yield)(?!\s*\/>))(?:\s|\/\*(?:[^*/]|\*(?!\/)|\/(?!\*))*\*\/|(?<![^\s])(?<!\/\/[^\n]*)\/\/[^\n]*\n|!)*\/)(?=[^/\n]*\/)/;
+  /\/(?!>)(?<=(?:[=:(,{[&|?;~^%*]|(?<!\/)>|<(?!\/)|(?<!\+)\+|(?<!-)-|(?<![\w$.#]|(?!\s)[\u0080-\uFFFF]|\.\s*)(?:return|throw|case|typeof|void|delete|instanceof|in|of|new|else|do|await|yield)(?!\s*\/>)(?<=[a-z]))(?:\s|(?<![\w$*'"\x60/[])\/\*(?:[^*]|\*(?!\/))*\*\/|(?<![^\s([{])(?<!\/\/[^\n]{0,256})\/\/[^\n]*\n|!)*\/)(?=[^/\n]*\/)/;
 
 /**
  * Splice COMMENT then regex into brace-pairing and template-substitution modes:
@@ -71,9 +72,11 @@ const REGEX_START =
  * even after a later quote closes the string when ignoreIllegals is enabled.
  * Returns inserted-mode count; 0 means already spliced, target shape moved,
  * or no comment wrapper or matching regex mode found. Pins catch shape drift.
- * A regex after `)`, `}` or a division's slash is not recognized, so `//` or
- * `/*` inside one still opens a comment. Division after a type argument's `>`
- * or after `of`/`await`/`yield` used as names reads as regex.
+ * Rare misses: regex after `)`, `}`, a division's slash, bare `<`, or the
+ * third sign of `+++`/`---`, or starting with `>`, is not recognized; `//` or
+ * `/*` inside it opens a comment. Line comments glued to `:`, `,` or `=`
+ * are not skipped. Division after a type argument's `>` or names
+ * `of`/`await`/`yield` reads as regex.
  * JSX stays out, so JSX text holding `//` or `/*` in these contexts can still
  * open a comment.
  */

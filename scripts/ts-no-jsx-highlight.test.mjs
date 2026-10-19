@@ -272,6 +272,41 @@ const REGEX_CASES = [
     "params JSDoc comment before regex",
     ["/** doc */"],
   ],
+  [
+    "function f(x = {k: f(/* default: lib/* */ " +
+      String.raw`/^https?:\/\//.test(u))}) {}` +
+      "\nconst y = 1;\n",
+    "params nested opener in block comment before URL regex",
+    ["/* default: lib/* */"],
+  ],
+  [
+    "function f(x = {k: /* http://x.com/*/ /[/*]/}) {}\nconst y = 1;\n",
+    "params slash-ending block comment before regex",
+    ["/* http://x.com/*/"],
+  ],
+  [
+    "function f(x = {r: /* matches /* */ /[/*]/}) {}\nconst y = 1;\n",
+    "params nested comment marker before regex",
+    ["/* matches /* */"],
+  ],
+  [
+    "function f(x = {k: f(// c\n " +
+      String.raw`/^https?:\/\//.test(u))}) {}` +
+      "\nconst y = 1;\n",
+    "params paren-glued line comment before URL regex",
+    ["// c"],
+  ],
+  [
+    "function f(x = {k: [// c\n " +
+      String.raw`/\/\//]}) {}` +
+      "\nconst y = 1;\n",
+    "params bracket-glued line comment before regex",
+    ["// c"],
+  ],
+  [
+    "function f(x = {k: x\u00a0in /[/*]/}) {}\nconst y = 1;\n",
+    "params no-break space before expression keyword regex",
+  ],
 ];
 const DIVISION_CASES = [
   [PARAMS_DIVISION, "params double division"],
@@ -427,6 +462,23 @@ const DIVISION_CASES = [
     'class C { #in = 1; m(x = { r: this.#in / 2, s: "/" }) {} }\n' +
       "const y = 1;\n",
     "params division after private keyword name",
+  ],
+  [
+    'function Card({ el = <Foo<T> />, y = "/b" }) {}\nconst y = 1;\n',
+    "params generic JSX self-closing slash",
+  ],
+  [
+    'const s = `a${ <A in /> / 2 + "a/b" }b`;\nconst x = 1;\n',
+    "substitution division after JSX self-closing tag",
+  ],
+  [
+    'function f(x = {k: obj.\n  in / 2 + "a/b",\n  j: "p/q"}) {}\n' +
+      "const y = 1;\n",
+    "params division after property keyword on next line",
+  ],
+  [
+    "const s = `${ '/* x' /* c */ / 2 }/`;\nconst x = 1;\n",
+    "substitution division after comment-opener string and comment",
   ],
 ];
 const DIVISION_COMMENT_CASES = [
@@ -658,6 +710,11 @@ test("comment chain highlighting finishes in a bounded child process", {
     "ensureTsNoJsx(hljs);",
     'const code = "const s = `${ c " + "/* n */ ".repeat(40) + "/ 2 }`;";',
     'hljs.highlight(code, { language: "typescript", ignoreIllegals: true });',
+    'const spaces = "const s = `${ a" + " ".repeat(160000) + "/ b }`;";',
+    'hljs.highlight(spaces, { language: "typescript", ignoreIllegals: true });',
+    'const slashes = "const s = `${ a\\n// " + "// ".repeat(160000) +',
+    '  "\\n/ b }`;";',
+    'hljs.highlight(slashes, { language: "typescript", ignoreIllegals: true });',
     'console.log("params-comment-chain-ok");',
   ].join("\n");
   const child = spawnSync(
