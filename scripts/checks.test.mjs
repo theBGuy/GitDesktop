@@ -38,6 +38,7 @@ import {
   generateChordCalls,
   isPreparingSlotHost,
   MCP_FLUSH_CALLER,
+  MCP_FLUSH_MODULE,
   MCP_SECRET_API,
   MCP_SECRET_READ_ONLY,
   okReportLine,
@@ -10158,6 +10159,43 @@ const MCP_DECOY = [
 const mcpDecoyed = (header) =>
   mcpAfter(mcpSwap(MCP_SCREEN_BASE, 8, header), 23, ...MCP_DECOY);
 
+const MCP_FLUSH = "src/features/settings/mcp/flush-mcp-secrets.ts";
+
+/** The flush module as the formatter lays it out. */
+const MCP_FLUSH_BASE = [
+  'import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";', // 1
+  'import type { McpSecretDelete, McpStagedSecret } from "./secret-ops";', // 2
+  "", // 3
+  "// The guard pins this module's code and lets only the settings screen", // 4
+  "// import it.", // 5
+  "", // 6
+  "/** Writes each staged value in turn and returns the entries that failed. */", // 7
+  "", // 8
+  "", // 9
+  "export async function flushMcpSecretSets(", // 10
+  "  sets: readonly McpStagedSecret[],", // 11
+  "): Promise<McpStagedSecret[]> {", // 12
+  "  const failed: McpStagedSecret[] = [];", // 13
+  "  for (const entry of sets) {", // 14
+  "    try {", // 15
+  "      await setMcpSecret(entry.serverId, entry.key, entry.value);", // 16
+  "    } catch {", // 17
+  "      failed.push(entry);", // 18
+  "    }", // 19
+  "  }", // 20
+  "  return failed;", // 21
+  "}", // 22
+  "", // 23
+  "/** Fires each delete without waiting. */", // 24
+  "", // 25
+  "export function flushMcpSecretDeletes(", // 26
+  "  deletes: readonly McpSecretDelete[],", // 27
+  "): void {", // 28
+  "  for (const { serverId, key } of deletes)", // 29
+  "    void (async () => deleteMcpSecret(serverId, key))().catch(() => undefined);", // 30
+  "}", // 31
+];
+
 const MCP_FIXTURES = [
   // P1: names are read on raw source, so no lexing gap can hide a call.
   {
@@ -10667,6 +10705,275 @@ const MCP_FIXTURES = [
     lines: [...MCP_SCREEN_BASE, "const x = `open"],
     expected: [1, 2, 3, 4, 12, 18],
   },
+  // F1: a binding-free catch is a block, the repo's idiom.
+  {
+    name: "catch-binding-free-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        try { void 0; } catch { ${MCP_DEL} }`,
+    ),
+    expected: [],
+  },
+  {
+    name: "catch-with-binding-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        try { void 0; } catch (err) { ${MCP_DEL} }`,
+    ),
+    expected: [],
+  },
+  // F2: a brace after `}` is a block only when that `}` closed a block.
+  {
+    name: "function-object-return-type",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        function later(): { ok: true } { ${MCP_DEL} return { ok: true }; } setTimeout(later, 1000);`,
+    ),
+    expected: [1, 18],
+  },
+  {
+    name: "function-expression-object-return-type",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        const later = function (): { ok: true } { ${MCP_DEL} return { ok: true }; }; window.addEventListener("blur", later);`,
+    ),
+    expected: [1, 18],
+  },
+  {
+    name: "function-union-return-type",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        function later(): null | { n: number } { ${MCP_DEL} return null; } setTimeout(later, 1000);`,
+    ),
+    expected: [1, 18],
+  },
+  {
+    name: "function-object-return-type-multiline",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      "        function later(): {",
+      "          ok: true;",
+      "        } {",
+      `          ${MCP_DEL}`,
+      "          return { ok: true };",
+      "        }",
+      "        setTimeout(later, 1000);",
+    ),
+    expected: [1, 21],
+  },
+  {
+    name: "bare-block-after-if-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        if (x) { void 0; } { ${MCP_DEL} }`,
+    ),
+    expected: [],
+  },
+  // F3: function closures never count as blocks.
+  {
+    name: "function-declaration-closure",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        function finish() { ${MCP_DEL} } queueMicrotask(finish);`,
+    ),
+    expected: [1, 18],
+  },
+  {
+    name: "function-expression-closure",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        const finish = function () { ${MCP_DEL} };`,
+    ),
+    expected: [1, 18],
+  },
+  {
+    name: "async-function-closure",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        async function finish() { ${MCP_DEL} }`,
+    ),
+    expected: [1, 18],
+  },
+  // F4: useAppForm type arguments the walk can't read fail closed.
+  {
+    name: "unreadable-type-args-on-the-save",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      6,
+      "  const form = useAppForm<{ a: string; b: number }>({",
+    ),
+    expected: [1, 12, 18],
+  },
+  {
+    name: "unreadable-type-args-on-a-second-call",
+    file: MCP_SCREEN,
+    lines: mcpAfter(
+      MCP_SCREEN_BASE,
+      23,
+      "  const other = useAppForm<{ a: string; b: number }>({ ...settingsFormOpts });",
+    ),
+    expected: [1, 12, 18],
+  },
+  // F5: a comment inside a pinned Save statement voids the match.
+  {
+    name: "block-comment-inside-save-statement",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      12,
+      "        const failed = /* flushMcpSecretDeletes(x) */ await flushMcpSecretSets(plan.flush);",
+    ),
+    expected: [1, 12],
+  },
+  {
+    name: "line-comment-inside-save-statement",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      12,
+      "        const failed = // was flushMcpSecretDeletes(x)",
+      "          await flushMcpSecretSets(plan.flush);",
+    ),
+    expected: [1, 12, 13],
+  },
+  // F6: the flush module's code is pinned; nothing else there may name a token.
+  {
+    name: "flush-module-real-layout",
+    file: MCP_FLUSH,
+    lines: MCP_FLUSH_BASE,
+    expected: [],
+  },
+  {
+    name: "flush-module-scope-listener",
+    file: MCP_FLUSH,
+    lines: [
+      ...MCP_FLUSH_BASE,
+      'window.addEventListener("blur", () => void flushMcpSecretSets(x));',
+    ],
+    expected: [32],
+  },
+  {
+    name: "flush-module-deferred-retry",
+    file: MCP_FLUSH,
+    lines: mcpAfter(
+      MCP_FLUSH_BASE,
+      16,
+      "      setTimeout(() => void setMcpSecret(a, b, c), 5000);",
+    ),
+    expected: [1, 10, 16, 17],
+  },
+  {
+    name: "flush-module-comment-inside-pin",
+    file: MCP_FLUSH,
+    lines: mcpAfter(MCP_FLUSH_BASE, 20, "  // retried by the caller"),
+    expected: [1, 10, 16],
+  },
+  // F8: documented rules, each on the real-file layout.
+  {
+    name: "duplicate-onSubmit-identifier",
+    file: MCP_SCREEN,
+    lines: mcpAfter(MCP_SCREEN_BASE, 22, "    onSubmit: async () => {},"),
+    expected: [1, 12, 18],
+  },
+  {
+    name: "duplicate-onSubmit-quoted",
+    file: MCP_SCREEN,
+    lines: mcpAfter(MCP_SCREEN_BASE, 22, '    "onSubmit": async () => {},'),
+    expected: [1, 12, 18],
+  },
+  {
+    name: "while-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        while (again) { ${MCP_DEL} break; }`,
+    ),
+    expected: [],
+  },
+  {
+    name: "do-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        do { ${MCP_DEL} } while (false);`,
+    ),
+    expected: [],
+  },
+  {
+    name: "for-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        for (const d of [deletes]) { ${MCP_DEL} }`,
+    ),
+    expected: [],
+  },
+  {
+    name: "for-await-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        for await (const d of stream) { ${MCP_DEL} }`,
+    ),
+    expected: [],
+  },
+  {
+    name: "bare-block-after-semicolon",
+    file: MCP_SCREEN,
+    lines: mcpSwap(MCP_SCREEN_BASE, 18, `        void 0; { ${MCP_DEL} }`),
+    expected: [],
+  },
+  {
+    name: "else-if-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        if (a) { void 0; } else if (b) { ${MCP_DEL} }`,
+    ),
+    expected: [],
+  },
+  {
+    name: "save-entry-tail-as-cast",
+    file: MCP_SCREEN,
+    lines: mcpSwap(MCP_SCREEN_BASE, 22, "    } as SubmitFn,"),
+    expected: [1, 12, 18],
+  },
+  {
+    name: "class-static-block",
+    file: MCP_SCREEN,
+    lines: mcpSwap(
+      MCP_SCREEN_BASE,
+      18,
+      `        class Later { static { ${MCP_DEL} } }`,
+    ),
+    expected: [1, 18],
+  },
 ];
 
 for (const { name, file, lines, expected } of MCP_FIXTURES)
@@ -10685,9 +10992,9 @@ test("mcp-secret-keychain-sites pins, allowlist and scope", () => {
   assert.equal(MCP_SECRET_API.file, "src/lib/git/api/mcp.ts");
   assert.equal(MCP_SECRET_API.definitions.length, 2);
   assert.deepEqual([...MCP_SECRET_READ_ONLY], ["mcp_secret_exists"]);
-  assert.deepEqual(MCP_CHECK.allowlist, [
-    "src/features/settings/mcp/flush-mcp-secrets.ts",
-  ]);
+  assert.equal(MCP_FLUSH_MODULE.file, MCP_FLUSH);
+  assert.equal(MCP_FLUSH_MODULE.statements.length, 3);
+  assert.deepEqual(MCP_CHECK.allowlist, []);
   assert.deepEqual(MCP_CHECK.expectScanned, {
     atLeast: 500,
     hint: "every .ts/.tsx under src/",
@@ -10702,7 +11009,7 @@ test("mcp-secret-keychain-sites pins, allowlist and scope", () => {
     assert.equal(MCP_CHECK.appliesTo(file), true, file);
 });
 
-test("mcp-secret-keychain-sites passes the real files and needs the flush row", () => {
+test("mcp-secret-keychain-sites passes the real files with no allowlist row", () => {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const files = [
     MCP_SCREEN,
@@ -10715,6 +11022,21 @@ test("mcp-secret-keychain-sites passes the real files and needs the flush row", 
   const { violations, stale } = runCheck(MCP_CHECK, files, views);
   assert.deepEqual(violations, []);
   assert.deepEqual(stale, []);
-  // The flush module names the API pair, so its row is live, not stale.
-  assert.notDeepEqual(MCP_CHECK.scan(views.get(files[2]), files[2]), []);
+  // Every pinned file scans clean on its own, the flush module included.
+  for (const f of files)
+    assert.deepEqual(MCP_CHECK.scan(views.get(f), f), [], f);
+});
+
+test("mcp-secret-keychain-sites: the flush module's extra code violates under runCheck", () => {
+  const lines = [
+    ...MCP_FLUSH_BASE,
+    'window.addEventListener("blur", () => void flushMcpSecretSets(x));',
+  ];
+  const { violations, stale } = runCheck(
+    MCP_CHECK,
+    [MCP_FLUSH],
+    new Map([[MCP_FLUSH, view(lines.join("\n"))]]),
+  );
+  assert.deepEqual(violations, [`${MCP_FLUSH}:32`]);
+  assert.deepEqual(stale, []);
 });

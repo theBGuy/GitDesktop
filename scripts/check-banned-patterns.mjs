@@ -4793,19 +4793,23 @@ const mutationDefaults = (fileView) => {
   return [...hits];
 };
 
-// MCP keychain writes. Target model: a keychain write reaches Rust only through
-// mcp.ts's two pinned definitions; those are named only inside
-// flush-mcp-secrets.ts; that module is reachable only through SettingsScreen's
-// one pinned import; and its two functions run only as the two pinned
-// statements, directly inside the Save handler's body. Every token is matched on
-// RAW source, comments and strings included, so no lexing gap can hide one.
+// MCP keychain writes. Target model, holding for all three pinned files since
+// no file is allowlisted: a keychain write reaches Rust only through mcp.ts's
+// two pinned definitions; those are called only from the flush module's two
+// pinned functions; that module is reachable only through SettingsScreen's one
+// pinned import; and its functions run only as the two pinned statements,
+// directly inside the Save handler's body. Every token is matched on RAW source,
+// comments and strings included, and a pinned Save statement holding a comment
+// is never accepted, so no lexing gap can hide one.
 
 /** The API pair and the flush module's two functions, by name. */
 const MCP_KEYCHAIN_NAME_RE =
   /\b(?:setMcpSecret|deleteMcpSecret|flushMcpSecretSets|flushMcpSecretDeletes)\b/g;
-/** Tauri commands in the mcp_secret family, whatever verb they carry. */
+/** Any mcp_secret-family word, whatever surrounds it: matched word by word, so
+ *  Tauri command names and every other spelling of the family alike. */
 const MCP_SECRET_COMMAND_RE = /\b[a-z0-9_]*mcp_secrets?[a-z0-9_]*\b/g;
-/** Commands of that family that only read: a new one is a one-word edit. */
+/** Words of that family that only read. A new read-only command goes here and
+ *  in its test pin. */
 export const MCP_SECRET_READ_ONLY = new Set(["mcp_secret_exists"]);
 /** The flush module's file stem: naming it in any form reaches the module. */
 const MCP_FLUSH_MODULE_TOKEN = "flush-mcp-secrets";
@@ -4821,13 +4825,28 @@ export const MCP_SECRET_API = {
   ],
 };
 
+/** The flush module's code, each piece pinned as its whole statement: the API
+ *  import and the two exported functions. Any other token mention in that file
+ *  fails (module-scope side effects included), and so does any edit inside a
+ *  pinned function, a deferred retry or a comment alike: re-point the pins in
+ *  the same change. */
+export const MCP_FLUSH_MODULE = {
+  file: "src/features/settings/mcp/flush-mcp-secrets.ts",
+  statements: [
+    'import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";',
+    "export async function flushMcpSecretSets( sets: readonly McpStagedSecret[], ): Promise<McpStagedSecret[]> { const failed: McpStagedSecret[] = []; for (const entry of sets) { try { await setMcpSecret(entry.serverId, entry.key, entry.value); } catch { failed.push(entry); } } return failed; }",
+    "export function flushMcpSecretDeletes( deletes: readonly McpSecretDelete[], ): void { for (const { serverId, key } of deletes) void (async () => deleteMcpSecret(serverId, key))().catch(() => undefined); }",
+  ],
+};
+
 /** The settings Save's own uses of the flush module. `imports` matches once,
  *  anywhere in the file at a code position. `onSubmit` statements match on the
  *  masked source, once each, only directly inside the Save body (the
  *  `onSubmit: async (…) => {` entry of the file's one `useAppForm({…})` call):
  *  after `;`, `{` or `}`, with every enclosing brace in the body a block
- *  (try, finally, else, do, if/for/while/switch/catch heads, or a bare block),
- *  never a closure, method, object literal, case or label. */
+ *  (try, finally, else, do, catch, if/for/while/switch/catch heads, or a bare
+ *  block), never a closure, method, object literal, case or label, and holding
+ *  nothing but code (a comment inside voids the match). */
 export const MCP_FLUSH_CALLER = {
   file: "src/features/settings/SettingsScreen.tsx",
   imports: [
@@ -4935,15 +4954,16 @@ function classifyFormEntry(masked, source, s, e) {
  *  the file's one `useAppForm(…)` call, whose first argument must be an object
  *  literal with no computed key, no spread after `onSubmit`, and exactly one
  *  entry named `onSubmit` in any spelling, written as
- *  `onSubmit: async (…)[: T] => {…}`. Null when any of that fails to hold, so
- *  nothing is exempted and the caller fails line 1. */
+ *  `onSubmit: async (…)[: T] => {…}`. Null when any of that fails to hold, or a
+ *  `useAppForm<…>` type-argument list can't be read, so nothing is exempted and
+ *  the caller fails line 1. */
 function mcpSaveBody(masked, source) {
   const calls = [];
   for (const m of masked.matchAll(/(?<![\w$])useAppForm(?![\w$])/g)) {
     let j = skipSpace(masked, m.index + m[0].length);
     if (masked[j] === "<") {
       j = skipTypeArgs(masked, j);
-      if (j === -1) continue;
+      if (j === -1) return null;
       j = skipSpace(masked, j);
     }
     if (masked[j] === "(") calls.push(j);
@@ -5007,12 +5027,14 @@ function mcpSaveBody(masked, source) {
 }
 
 /** Whether every brace between the Save body's `{` (at `open`) and `at` is a
- *  statement block: try, finally, else, do, an if/for/while/switch/catch head,
- *  or a bare block after `;` `{` `}`. A closure, method, object literal, case
- *  or label brace, or an open paren or bracket, makes it false. */
+ *  statement block: try, finally, else, do, catch, an if/for/while/switch/catch
+ *  head, or a bare block (see mcpBraceIsBlock). A closure, method, object
+ *  literal, type, case or label brace, or an open paren or bracket, makes it
+ *  false. */
 function mcpInBlocksOnly(masked, open, at) {
   const stack = [];
   const parenOpenFor = new Map();
+  const closedBlock = new Map();
   for (let i = open + 1; i < at; i++) {
     const c = masked[i];
     if (c === "(" || c === "[") stack.push({ c, i });
@@ -5021,23 +5043,35 @@ function mcpInBlocksOnly(masked, open, at) {
       if (!top || top.c === "{") return false;
       parenOpenFor.set(i, top.i);
     } else if (c === "{") {
-      stack.push({ c, block: mcpBraceIsBlock(masked, open, i, parenOpenFor) });
+      stack.push({
+        c,
+        block: mcpBraceIsBlock(masked, open, i, parenOpenFor, closedBlock),
+      });
     } else if (c === "}") {
       const top = stack.pop();
       if (!top || top.c !== "{") return false;
+      closedBlock.set(i, top.block);
     }
   }
   return stack.every((x) => x.c === "{" && x.block);
 }
 
 const BLOCK_HEAD_KEYWORDS = new Set(["if", "for", "while", "switch", "catch"]);
-const BLOCK_KEYWORDS = new Set(["try", "finally", "else", "do"]);
+const BLOCK_KEYWORDS = new Set(["try", "finally", "else", "do", "catch"]);
 
-function mcpBraceIsBlock(masked, open, i, parenOpenFor) {
+/** Whether the `{` at `i` opens a statement block. After `;` or `{` it is a
+ *  bare block; after `}` only when that `}` closed a block itself (so a
+ *  function's object-type return annotation, `(): { ok: true } {`, never makes
+ *  its body one); after `)` only behind an if/for/while/switch/catch head (or
+ *  `for await`); after a name only behind try, finally, else, do or a
+ *  binding-free catch. Anything else (`=>`, `:`, `=`, a function or method
+ *  name) is not a block. */
+function mcpBraceIsBlock(masked, open, i, parenOpenFor, closedBlock) {
   const j = prevCodeIndex(masked, i);
   if (j < open) return false;
   const c = masked[j];
-  if (c === ";" || c === "{" || c === "}") return true;
+  if (c === ";" || c === "{") return true;
+  if (c === "}") return closedBlock.get(j) === true;
   if (c === ")") {
     const paren = parenOpenFor.get(j);
     if (paren === undefined) return false;
@@ -5057,14 +5091,17 @@ function mcpBraceIsBlock(masked, open, i, parenOpenFor) {
 }
 
 /** Scanner: every MCP keychain token on the raw source (API and flush names,
- *  mcp_secret-family commands but the read-only ones, the flush module's stem),
+ *  mcp_secret-family words but the read-only ones, the flush module's stem),
  *  but those inside an accepted pin in its own file, plus line 1 there when a
- *  pin has no accepted match, the Save body can't be found, or ts-mask can't
- *  lex the file. */
+ *  pin has no accepted match, a Save statement is accepted more than once, the
+ *  Save body can't be found, or ts-mask can't lex the file. */
 const mcpKeychainSites = ({ source }, file) => {
   const hits = new Set();
   const exempt = [];
-  const pinned = file === MCP_SECRET_API.file || file === MCP_FLUSH_CALLER.file;
+  const pinned =
+    file === MCP_SECRET_API.file ||
+    file === MCP_FLUSH_MODULE.file ||
+    file === MCP_FLUSH_CALLER.file;
   if (pinned) {
     let masked = null;
     try {
@@ -5085,6 +5122,8 @@ const mcpKeychainSites = ({ source }, file) => {
       };
       if (file === MCP_SECRET_API.file)
         for (const pin of MCP_SECRET_API.definitions) anywhere(pin);
+      else if (file === MCP_FLUSH_MODULE.file)
+        for (const pin of MCP_FLUSH_MODULE.statements) anywhere(pin);
       else {
         for (const pin of MCP_FLUSH_CALLER.imports) anywhere(pin);
         const body = mcpSaveBody(masked, source);
@@ -5095,6 +5134,7 @@ const mcpKeychainSites = ({ source }, file) => {
                 (m) =>
                   m.index > body.open &&
                   m.index + m[0].length < body.close &&
+                  source.slice(m.index, m.index + m[0].length) === m[0] &&
                   ";{}".includes(masked[prevCodeIndex(masked, m.index)]) &&
                   mcpInBlocksOnly(masked, body.open, m.index),
               )
@@ -5790,16 +5830,15 @@ export const CHECKS = [
   {
     name: "mcp-secret-keychain-sites",
     // Repo-wide: a keychain write fired from any draft surface would bypass
-    // Save/Discard. The target model and the pin rules sit on MCP_SECRET_API
-    // and MCP_FLUSH_CALLER. File-level allowlist rows skip a whole file, so
-    // only the flush module keeps one: under the module-stem token its contents
-    // are reachable only through the two pinned Save statements.
+    // Save/Discard. The target model and the pin rules sit on MCP_SECRET_API,
+    // MCP_FLUSH_MODULE and MCP_FLUSH_CALLER. No file is allowlisted: a row
+    // skips a whole file, so all three pinned files pin their code instead.
     appliesTo: () => true,
     scan: mcpKeychainSites,
-    allowlist: ["src/features/settings/mcp/flush-mcp-secrets.ts"],
+    allowlist: [],
     expectScanned: { atLeast: 500, hint: "every .ts/.tsx under src/" },
     message:
-      "MCP keychain writes stay behind the settings Save, so a Discard can take back every MCP server edit, secrets included. Target model: a keychain write reaches Rust only through src/lib/git/api/mcp.ts's two pinned definitions (MCP_SECRET_API: setMcpSecret and deleteMcpSecret, each its whole statement); those are named only inside src/features/settings/mcp/flush-mcp-secrets.ts; that module is reachable only through SettingsScreen's one pinned import; and its two functions (flushMcpSecretSets, flushMcpSecretDeletes) run only as the two pinned statements, directly inside the Save handler's body (MCP_FLUSH_CALLER: the `onSubmit: async (…) => {…}` entry of SettingsScreen's one `useAppForm({…})` call). A draft surface stages its values in the settings screen's buffer instead. Every token is matched on raw source, comments and strings included: the four names, any mcp_secret-family command but the read-only ones (MCP_SECRET_READ_ONLY), and the module stem `flush-mcp-secrets` in any form (an import, `export * from`, `import()`, `require`). A pin's tokens and punctuation are exact; where the pin has a space the source may have any whitespace, line breaks included, or none (at least one between two name characters). Each pin is accepted once: the definitions and the import at a code position anywhere in their file, each Save statement on the masked source after `;` `{` or `}`, with only block braces (try, finally, else, do, if/for/while/switch/catch heads, bare blocks) between it and the Save body's own brace. Line 1 fails when a pin has no accepted match (or a Save statement more than one), when the Save body can't be found (not exactly one `useAppForm(` call with an object-literal first argument, any computed key, a spread after onSubmit, not exactly one entry named onSubmit in any spelling, a duplicate onSubmit key included, or that entry not `onSubmit: async (…)[: T] => {…}`), or when ts-mask can't lex a pinned file: re-point the pins in the same change. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: names or commands assembled at runtime through the @/lib/git/api barrel (`api[\"set\" + name]`, a template-built command, `Object.values(api)`); unicode- or hex-escaped spellings of a name or command; what fires onSubmit (`form.handleSubmit()` from a non-Save path: the guard pins where the flush sits, not what triggers it); the exempt statements' reachability and argument provenance (after `return`, under `if (false)`); a module glob that loads the flush module without naming it; the cold-start store helpers (`coldStartSetSecret(\"mcp-server/…\")`, test mode only: an `mcp-server/` token would false-close src/lib/settings/mcp.ts and src/lib/settings/api.ts); a keychain-writing Rust command whose name lacks mcp_secret; and eval, `new Function` and prototype pollution. Fails closed (false positives; re-point the pins in the same change): a comment naming a token; a Save written any other way (a method, a concise body, extracted to a const, wrapped in useCallback); a computed key or a later spread in the form options, or an entry there the classifier can't read (an escaped key, a depth-1 comma inside type arguments); a reworded pinned statement, or one the formatter rewraps with added punctuation (a trailing comma, parentheses); and a flush statement nested in a closure, in a case or label block, or behind a prefix (`void`, `=>`, a brace-less `if`)",
+      "MCP keychain writes stay behind the settings Save, so a Discard can take back every MCP server edit, secrets included. Target model, holding for all three files since none is allowlisted: a keychain write reaches Rust only through src/lib/git/api/mcp.ts's two pinned definitions (MCP_SECRET_API: setMcpSecret and deleteMcpSecret, each its whole statement); those are called only from src/features/settings/mcp/flush-mcp-secrets.ts's two pinned functions (MCP_FLUSH_MODULE: the API import and each function's whole declaration); that module is reachable only through SettingsScreen's one pinned import; and its functions (flushMcpSecretSets, flushMcpSecretDeletes) run only as the two pinned statements, directly inside the Save handler's body (MCP_FLUSH_CALLER: the `onSubmit: async (…) => {…}` entry of SettingsScreen's one `useAppForm({…})` call). A draft surface stages its values in the settings screen's buffer instead. Every token is matched on raw source, comments and strings included: the four names, any mcp_secret-family word (word-level, so command names and every other spelling alike) but the read-only ones (MCP_SECRET_READ_ONLY), and the module stem `flush-mcp-secrets` in any form (an import, `export * from`, `import()`, `require`). A pin's tokens and punctuation are exact; where the pin has a space the source may have any whitespace, line breaks included, or none (at least one between two name characters). Each pin is accepted once: the definitions, the flush module's code and the import at a code position anywhere in their file (a comment inside breaks the match), each Save statement on the masked source holding nothing but code, after `;` `{` or `}`, with only block braces (try, finally, else, do, catch, if/for/while/switch/catch heads, bare blocks after `;` `{` or a block's `}`) between it and the Save body's own brace. Line 1 fails when a pin has no accepted match (or a Save statement more than one), when the Save body can't be found (not exactly one `useAppForm(` call with an object-literal first argument, a `useAppForm<…>` type-argument list the walk can't read, any computed key, a spread after onSubmit, not exactly one entry named onSubmit in any spelling, a duplicate onSubmit key included, or that entry not `onSubmit: async (…)[: T] => {…}`), or when ts-mask can't lex a pinned file: re-point the pins in the same change. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: names or commands assembled at runtime through the @/lib/git/api barrel (`api[\"set\" + name]`, a template-built command, `Object.values(api)`); unicode- or hex-escaped spellings of a name or command; what fires onSubmit (`form.handleSubmit()` from a non-Save path: the guard pins where the flush sits, not what triggers it); the exempt statements' reachability and argument provenance (after `return`, under `if (false)`); an import whose specifier is computed rather than a literal naming the flush module (a glob, a concatenated stem, or the module importing itself through `import.meta.url`); the cold-start store helpers (`coldStartSetSecret(\"mcp-server/…\")`, test mode only: an `mcp-server/` token would false-close src/lib/settings/mcp.ts and src/lib/settings/api.ts); a keychain-writing Rust command whose name lacks mcp_secret; and eval, `new Function` and prototype pollution. Fails closed (false positives; re-point the pins in the same change): a comment naming a token; a comment inside any pinned statement; any other mention of a token, a same-named local (a useState setter named setMcpSecret), a string or a type position included (the remedy is a rename); any edit to the flush module's pinned code (re-point MCP_FLUSH_MODULE); a Save written any other way (a method, a concise body, extracted to a const, wrapped in useCallback); a computed key or a later spread in the form options, or an entry there the classifier can't read (an escaped key, a depth-1 comma inside type arguments); a reworded pinned statement, or one the formatter rewraps with added punctuation (a trailing comma, parentheses); and a flush statement nested in a closure, in a case or label block, or behind a prefix (`void`, `=>`, a brace-less `if`)",
   },
 ];
 

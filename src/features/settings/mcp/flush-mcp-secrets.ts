@@ -1,8 +1,8 @@
 import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";
 import type { McpSecretDelete, McpStagedSecret } from "./secret-ops";
 
-// The keychain calls live here because the mcp-secret-keychain-sites guard lets
-// only SettingsScreen's Save import this module.
+// The MCP keychain guard pins this code and lets only SettingsScreen's Save run
+// it: an edit here re-points MCP_FLUSH_MODULE in the same change.
 
 /** Writes each staged value in turn and returns the entries that failed — the
  *  input objects themselves, which the settle matches by identity. Never throws:
