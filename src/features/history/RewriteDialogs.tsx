@@ -169,8 +169,9 @@ export function SquashDialog({
 
   // The squash can be dismissed while it runs, and the host mounts this dialog
   // per squash: a settle closes it only while this instance is still the open
-  // one on the same run. The dismissal flag covers the unmount (a frozen prop ref
-  // can't see the host's next squash); the live steps cover a retarget in place.
+  // one on the same run. The dismissal flag covers a dismissed unmount (a frozen
+  // prop ref can't see the host's next squash), the host's ctx-scoped close a
+  // reset unmount; the live steps cover a retarget in place.
   const dismissedRef = useRef(false);
   const liveSteps = useLatestRef(steps);
   const onDialogOpenChange = (next: boolean) => {

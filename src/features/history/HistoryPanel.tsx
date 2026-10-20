@@ -250,8 +250,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     pendingTagPushes.find((p) => p.tag === tag);
   const branches = useBranches(repoPath);
 
-  // The reset, delete-tag and pick-onto confirms record the repo they opened in:
-  // this panel outlives a repo switch, and a confirm answered after one refuses.
+  // The reset, delete-tag, pick-onto and merge-parent dialogs record the repo
+  // they opened in: a switch closes them, and the stamp refuses an answer
+  // already in flight when it lands.
   const [reset, setReset] = useState<{ hash: string; repo: string } | null>(
     null,
   );
@@ -1291,8 +1292,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
       <AmendForcePushDialog {...forcePushDialog} />
 
-      {/* These six are keyed so a switch remounts them closed: an exit animation
-          would wait out the hidden tab, then play over the new repo. */}
+      {/* Keyed so a switch remounts these six closed (a deferred exit animation
+          would play over the new repo); their session-scoped closes keep a
+          frozen instance's late settle from reaching the new repo's dialog. */}
       <DeleteTagDialog
         key={`delete-tag:${repoPath}`}
         repoPath={repoPath}
@@ -1300,7 +1302,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         openedIn={deleteTag?.repo ?? null}
         remote={deleteTagRemote}
         onRemoteChange={setDeleteTagRemote}
-        onClose={() => setDeleteTag(null)}
+        onClose={() => setDeleteTag((d) => (d === deleteTag ? null : d))}
       />
 
       <ResetCommitDialog
@@ -1308,7 +1310,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         repoPath={repoPath}
         hash={reset?.hash ?? null}
         openedIn={reset?.repo ?? null}
-        onClose={() => setReset(null)}
+        onClose={() => setReset((r) => (r === reset ? null : r))}
       />
 
       <CreateRefFromCommitDialog
@@ -1351,8 +1353,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         onBranchChange={setPickOntoBranch}
         branches={targetBranches}
         currentBranch={currentBranch}
-        onClose={() => setPickOnto(null)}
-        onDone={() => setSelected(new Set())}
+        onClose={() => setPickOnto((p) => (p === pickOnto ? null : p))}
+        onDone={() => {
+          if (useUiStore.getState().repoPath === repoPath) {
+            setSelected(new Set());
+          }
+        }}
       />
 
       <MergeParentDialog
@@ -1360,7 +1366,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         repoPath={repoPath}
         target={mergePick}
         openedIn={mergePick?.repo ?? null}
-        onClose={() => setMergePick(null)}
+        onClose={() => setMergePick((m) => (m === mergePick ? null : m))}
       />
     </>
   );

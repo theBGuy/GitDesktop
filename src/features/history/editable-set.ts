@@ -197,7 +197,7 @@ export type SquashHold =
   | "op" // an operation is in progress (checked FIRST)
   | "filter-hides-range" // a client filter hides commits inside the range
   | "not-adjacent-unpushed" // non-contiguous, pushed, no base, or merge in range
-  | "refreshing"; // log and status disagree on HEAD (not `agreed`)
+  | "refreshing"; // the reads don't agree (viewAgrees is false)
 
 /** Squash's gate: the selection must be >1, contiguous in real history (not
  *  the filtered view), entirely unpushed, merge-free above a loaded base, with
