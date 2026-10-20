@@ -42,7 +42,7 @@ function secretHold(c: ImportCandidate): string | null {
     (s) => !secretValueFits(s.value, isWindows),
   );
   if (tooLong)
-    return `Secret ${noun} "${tooLong.key}" can't move to your keychain: Windows Credential Manager holds values up to 1,280 characters.`;
+    return `Secret ${noun} "${tooLong.key}" can't move to your keychain: Windows allows at most 1,280 characters.`;
   return null;
 }
 
@@ -93,8 +93,10 @@ export function ImportMcpDialog({
           toImportCandidate(d, existingNames, repoPath),
         );
         setCandidates(cands);
-        // Pre-tick everything that isn't already in the registry and isn't held
-        // by the host gate — a gated row is the user's call after allowing it.
+        // Pre-tick everything that isn't already in the registry, isn't held by
+        // the host gate (a gated row is the user's call after allowing it) and
+        // isn't held by a secret the keychain would refuse, a hold that is
+        // static per candidate.
         setPicked(
           new Set(
             cands
@@ -130,6 +132,8 @@ export function ImportMcpDialog({
   function runImport() {
     // Re-check the host gate at fire time: a tick taken while the host was
     // allowed must not import if the draft allow list has since lost the entry.
+    // The secret hold is static per candidate; it is re-checked only so this
+    // filter matches pickedCount's.
     const chosen = candidates.filter(
       (c) =>
         picked.has(c.server.id) &&

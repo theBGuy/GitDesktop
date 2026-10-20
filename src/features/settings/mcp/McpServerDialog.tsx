@@ -171,7 +171,7 @@ export function McpServerDialog({
       (w) => !secretValueFits(w.value, isWindows),
     );
     if (tooLong)
-      return `Secret ${noun} "${tooLong.key}" is too long for Windows Credential Manager: values can be at most 1,280 characters.`;
+      return `Secret ${noun} "${tooLong.key}" is too long for your keychain: Windows allows at most 1,280 characters.`;
     if (plan.secretWrites.length > 0 && !isSafeMcpSecretKey(draft.id))
       return "This server's id (edited in your settings file) can only use letters, numbers, dots, dashes and underscores to store secrets.";
     return null;

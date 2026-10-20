@@ -4792,6 +4792,43 @@ const mutationDefaults = (fileView) => {
   return [...hits];
 };
 
+// MCP keychain writes and deletes: the API pair, its raw command strings, and
+// the flush module's two exports, which are the only route to them.
+const MCP_KEYCHAIN_RE =
+  /\b(?:setMcpSecret|deleteMcpSecret|set_mcp_secret|delete_mcp_secret|flushMcpSecretSets|flushMcpSecretDeletes)\b/g;
+/** The settings Save's own uses of the flush module, each exempted as this
+ *  exact statement (whitespace-normalized), once, in this file. Any other
+ *  mention there still fails, so a second flush call (say, from discard())
+ *  can't hide behind them; a statement that is gone fails too, since the Save
+ *  would no longer flush. */
+export const MCP_FLUSH_CALLER = {
+  file: "src/features/settings/SettingsScreen.tsx",
+  statements: [
+    'import { flushMcpSecretDeletes, flushMcpSecretSets, } from "./mcp/flush-mcp-secrets";',
+    "const failed = await flushMcpSecretSets(plan.flush);",
+    "flushMcpSecretDeletes(deletes);",
+  ],
+};
+
+/** Scanner: every MCP keychain mention but MCP_FLUSH_CALLER's statements in
+ *  its own file, plus line 1 there for each statement no longer present. */
+const mcpKeychainSites = ({ text, starts }, file) => {
+  const hits = new Set();
+  const exempt = [];
+  if (file === MCP_FLUSH_CALLER.file) {
+    for (const statement of MCP_FLUSH_CALLER.statements) {
+      const start = text.indexOf(statement);
+      if (start === -1) hits.add(1);
+      else exempt.push([start, start + statement.length]);
+    }
+  }
+  for (const m of text.matchAll(MCP_KEYCHAIN_RE)) {
+    if (exempt.some(([from, to]) => m.index >= from && m.index < to)) continue;
+    hits.add(lineAt(starts, m.index));
+  }
+  return [...hits];
+};
+
 /**
  * A path-pinned check goes inert the moment its path moves: it scans nothing and
  * prints OK, which is the silent fail-open this file exists to prevent. Returns a
@@ -5457,19 +5494,18 @@ export const CHECKS = [
     name: "mcp-secret-keychain-sites",
     // Repo-wide: a keychain write or delete fired from any draft surface would
     // bypass Save/Discard. File-level allowlist rows skip a whole file, so the
-    // settings screen, MCP section and dialogs stay scanned by keeping the
-    // calls in one dedicated module. The raw command names count too; the
-    // read-only probe (mcpSecretExists / mcp_secret_exists) stays unmatched.
+    // keychain calls live in one dedicated module and its flush functions are
+    // exempted per statement in the settings screen, keeping the screen, the
+    // MCP section and the dialogs scanned. The raw command names count too;
+    // the read-only probe (mcpSecretExists / mcp_secret_exists) stays unmatched.
     appliesTo: () => true,
-    scan: perLine(
-      /\b(?:setMcpSecret|deleteMcpSecret|set_mcp_secret|delete_mcp_secret)\b/,
-    ),
+    scan: mcpKeychainSites,
     allowlist: [
       "src/lib/git/api/mcp.ts",
       "src/features/settings/mcp/flush-mcp-secrets.ts",
     ],
     message:
-      "MCP keychain writes and deletes fire only through src/features/settings/mcp/flush-mcp-secrets.ts at the settings Save flush, so a Discard can take back every MCP server edit, secrets included — a new caller stages its values in the settings screen's buffer or routes through that module, never importing setMcpSecret/deleteMcpSecret directly",
+      "MCP keychain writes and deletes fire only through src/features/settings/mcp/flush-mcp-secrets.ts, and only the settings Save (SettingsScreen's onSubmit) calls its flushMcpSecretSets/flushMcpSecretDeletes, so a Discard can take back every MCP server edit, secrets included — a draft surface stages its values in the settings screen's buffer and never names setMcpSecret/deleteMcpSecret, their command strings or the flush functions. The Save's three uses are exempted as exact statements, once each (MCP_FLUSH_CALLER); any other mention in that file fails, and so does an exempted statement that is gone (line 1): the Save would no longer flush, or the statement was reworded, so re-point MCP_FLUSH_CALLER in the same change",
   },
 ];
 

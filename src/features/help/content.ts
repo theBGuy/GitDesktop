@@ -3190,8 +3190,9 @@ GitHub results are rougher — ones with a manifest add cleanly, the rest arrive
 
 Already have servers configured? Use **Import** in that panel to pull them in from the
 open repo's \`.mcp.json\` or your global Claude config — you pick which ones, they arrive
-**disabled** for you to review, and any secret-looking values are moved to your keychain.
-Nothing is inherited automatically; the source files are left untouched.
+**disabled** for you to review, and any secret-looking values are moved to your keychain
+when you save. A server whose secret can't be stored there is held, with the reason on its
+row. Nothing is inherited automatically; the source files are left untouched.
 
 Each server is **scoped** either **Global** (every repo) or to **one repo** — import sets
 this from where the server came from, and you can change it when editing. The panel groups

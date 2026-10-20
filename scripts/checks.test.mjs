@@ -37,6 +37,7 @@ import {
   EXTENSIONS,
   generateChordCalls,
   isPreparingSlotHost,
+  MCP_FLUSH_CALLER,
   okReportLine,
   preparingSlotSites,
   reachesGitQueriesInternal,
@@ -10071,6 +10072,10 @@ test("mcp-secret-keychain-sites flags keychain write/delete references", () => {
     'invoke<void>("set_mcp_secret", { serverId, key, value });',
     'invoke<void>("delete_mcp_secret", { serverId, key });',
     'import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";',
+    // The flush module's exports, called from a draft surface at gesture time.
+    "flushMcpSecretSets(plan.flush);",
+    "void flushMcpSecretDeletes([{ serverId, key }]);",
+    'import { flushMcpSecretSets } from "./mcp/flush-mcp-secrets";',
   ])
     assert.deepEqual(mcpSecretKeychainSites(source), [1], source);
 });
@@ -10080,7 +10085,7 @@ test("mcp-secret-keychain-sites ignores the read-only probe, longer names and co
     "const exists = await mcpSecretExists(id, key);",
     'invoke<boolean>("mcp_secret_exists", { serverId, key });',
     "const setMcpSecrets = 1;",
-    "flushMcpSecretSets(plan.flush);",
+    "const flushMcpSecretSetsLater = 1;",
     "// setMcpSecret used to run here",
   ])
     assert.deepEqual(mcpSecretKeychainSites(source), [], source);
@@ -10107,4 +10112,68 @@ test("mcp-secret-keychain-sites allowlists exactly the API module and the flush 
     "src/lib/git/api/mcp.ts",
     "src/features/settings/mcp/flush-mcp-secrets.ts",
   ]);
+});
+
+/** The settings screen's permitted flush uses, as the formatter lays them out. */
+const SETTINGS_SAVE_FLUSH = [
+  "import {",
+  "  flushMcpSecretDeletes,",
+  "  flushMcpSecretSets,",
+  '} from "./mcp/flush-mcp-secrets";',
+  "async function onSubmit() {",
+  "  const failed = await flushMcpSecretSets(plan.flush);",
+  "  flushMcpSecretDeletes(deletes);",
+  "}",
+];
+
+function scanAs(file, lines) {
+  const { scan } = CHECKS.find((c) => c.name === "mcp-secret-keychain-sites");
+  return scan(view(lines.join("\n")), file).sort((a, b) => a - b);
+}
+
+test("mcp-secret-keychain-sites exempts exactly the settings Save's flush statements", () => {
+  assert.deepEqual(MCP_FLUSH_CALLER, {
+    file: "src/features/settings/SettingsScreen.tsx",
+    statements: [
+      'import { flushMcpSecretDeletes, flushMcpSecretSets, } from "./mcp/flush-mcp-secrets";',
+      "const failed = await flushMcpSecretSets(plan.flush);",
+      "flushMcpSecretDeletes(deletes);",
+    ],
+  });
+  assert.deepEqual(scanAs(MCP_FLUSH_CALLER.file, SETTINGS_SAVE_FLUSH), []);
+  // The same statements anywhere else are a draft surface's flush call.
+  assert.deepEqual(
+    scanAs("src/features/settings/McpServersSection.tsx", SETTINGS_SAVE_FLUSH),
+    [2, 3, 6, 7],
+  );
+});
+
+test("mcp-secret-keychain-sites fails a second flush call, or a missing one, in the settings screen", () => {
+  // A second call (say, from discard()) can't hide behind the exempt one.
+  assert.deepEqual(
+    scanAs(MCP_FLUSH_CALLER.file, [
+      ...SETTINGS_SAVE_FLUSH,
+      "function discard() {",
+      "  flushMcpSecretDeletes(deletes);",
+      "  void flushMcpSecretSets(stagedRef.current);",
+      "}",
+    ]),
+    [10, 11],
+  );
+  // A keychain API call in the screen itself is never exempt.
+  assert.deepEqual(
+    scanAs(MCP_FLUSH_CALLER.file, [
+      ...SETTINGS_SAVE_FLUSH,
+      'void setMcpSecret("id", "KEY", "test-value-1");',
+    ]),
+    [9],
+  );
+  // An exempted statement that is gone means the Save no longer flushes.
+  assert.deepEqual(
+    scanAs(
+      MCP_FLUSH_CALLER.file,
+      SETTINGS_SAVE_FLUSH.filter((l) => !l.includes("deletes);")),
+    ),
+    [1],
+  );
 });
