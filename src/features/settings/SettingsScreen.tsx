@@ -43,6 +43,19 @@ import {
 import { InstructionsSection } from "./InstructionsSection";
 import { KeyboardSection } from "./KeyboardSection";
 import { McpServersSection } from "./McpServersSection";
+import {
+  flushMcpSecretDeletes,
+  flushMcpSecretSets,
+} from "./mcp/flush-mcp-secrets";
+import {
+  type McpSecretsHandle,
+  type McpStagedSecret,
+  mcpSecretDeletes,
+  pruneStagedServer,
+  settleStaged,
+  stagedSetFlushPlan,
+  stageMcpSecretSets,
+} from "./mcp/secret-ops";
 import { NotificationsSection } from "./NotificationsSection";
 import { settingsFormOpts, toDraft } from "./settings-form";
 import { TerminalSection } from "./TerminalSection";
@@ -121,6 +134,23 @@ export function SettingsScreen() {
   // hold its imperative save so "Save and close" persists it too.
   const [automationsDirty, setAutomationsDirty] = useState(false);
   const saveAutomationsRef = useRef<(() => void) | null>(null);
+  // Typed MCP secret values wait here until Save, in renderer memory only. It
+  // lives on the screen, not the MCP section, so it outlives pane switches
+  // exactly as the form draft does.
+  const [stagedSecrets, setStagedSecrets] = useState<McpStagedSecret[]>([]);
+  const stagedRef = useLatestRef(stagedSecrets);
+  // The mcpServers this form last saw saved: the delete diff only removes
+  // secrets of servers it knew about, never one another window added.
+  const mcpBaseline = useRef<unknown>(null);
+  const secretsDirty = stagedSecrets.length > 0;
+  const secrets: McpSecretsHandle = {
+    stage: (serverId, writes, liveSecretKeys) =>
+      setStagedSecrets((staged) =>
+        stageMcpSecretSets({ staged, serverId, writes, liveSecretKeys }),
+      ),
+    pruneServer: (serverId) =>
+      setStagedSecrets((staged) => pruneStagedServer(staged, serverId)),
+  };
 
   // A deep-link fired while Settings is already open (no remount) still routes
   // to the requested section; consume the target so it doesn't re-fire.
@@ -149,6 +179,10 @@ export function SettingsScreen() {
   const form = useAppForm({
     ...settingsFormOpts,
     onSubmit: async ({ value }) => {
+      // Press-time captures: a Discard during the awaits below rewrites both the
+      // buffer and the baseline, and neither rewrite may reach this Save.
+      const stagedAtPress = stagedRef.current;
+      const baselineAtPress = mcpBaseline.current;
       const current = settings.data;
       if (!current) return;
       await saveSettings.mutateAsync({ ...current, ...value });
@@ -157,11 +191,42 @@ export function SettingsScreen() {
       // (which still sees settingsFormOpts' static defaults) clobbers the
       // values right back on the next render.
       form.reset(value, { keepDefaultValues: true });
-      toast.success("Settings saved");
-      if (closeAfterSave.current) {
+      // Sets and deletes fire only after the committed write, from what this
+      // form saw: a failed save writes nothing, a failed set stays staged, and
+      // a failed delete orphans at worst.
+      const plan = stagedSetFlushPlan({
+        staged: stagedAtPress,
+        committed: value.mcpServers,
+      });
+      const failed = await flushMcpSecretSets(plan.flush);
+      setStagedSecrets((cur) =>
+        settleStaged({
+          current: cur,
+          pressed: stagedAtPress,
+          keep: [...failed, ...plan.retain],
+        }),
+      );
+      const deletes = mcpSecretDeletes({
+        baseline: baselineAtPress,
+        saved: current.mcpServers,
+        committed: value.mcpServers,
+      });
+      mcpBaseline.current = value.mcpServers;
+      const unstored = failed.length + plan.retain.length;
+      if (unstored > 0) {
+        toast.error(
+          `Settings saved, but ${unstored} secret value${unstored === 1 ? "" : "s"} couldn't be stored in your keychain. Save again to retry.`,
+        );
         closeAfterSave.current = false;
-        closeSettings();
+      } else {
+        toast.success("Settings saved");
+        if (closeAfterSave.current) {
+          closeAfterSave.current = false;
+          // The flush awaited above: a user who already left must not be moved.
+          if (useUiStore.getState().view === "settings") closeSettings();
+        }
       }
+      flushMcpSecretDeletes(deletes);
     },
   });
 
@@ -171,6 +236,7 @@ export function SettingsScreen() {
   useEffect(() => {
     if (settings.data && !seeded.current) {
       seeded.current = true;
+      mcpBaseline.current = settings.data.mcpServers;
       form.reset(toDraft(settings.data), { keepDefaultValues: true });
     }
   }, [settings.data, form]);
@@ -228,7 +294,7 @@ export function SettingsScreen() {
 
   // Either the settings form or the Automations panel having unsaved edits
   // should guard closing the screen.
-  const closeDirty = dirty || automationsDirty;
+  const closeDirty = dirty || automationsDirty || secretsDirty;
 
   function save(andClose: boolean) {
     // Persist the Automations panel's own draft alongside the settings form —
@@ -240,6 +306,8 @@ export function SettingsScreen() {
   }
 
   function discard() {
+    setStagedSecrets([]);
+    mcpBaseline.current = settings.data?.mcpServers ?? null;
     if (saved) form.reset(saved, { keepDefaultValues: true });
   }
 
@@ -306,7 +374,7 @@ export function SettingsScreen() {
               )}
               {activePanel === "commands" && <CommandsSection form={form} />}
               {activePanel === "mcp-servers" && (
-                <McpServersSection form={form} />
+                <McpServersSection form={form} secrets={secrets} />
               )}
               {activePanel === "automations" && (
                 <AutomationsSection
@@ -358,7 +426,7 @@ export function SettingsScreen() {
         </div>
       )}
 
-      {dirty && (
+      {(dirty || secretsDirty) && (
         <footer
           role="status"
           className="flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2.5"

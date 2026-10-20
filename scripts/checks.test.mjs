@@ -10058,3 +10058,53 @@ test("reused-view-pending: the masker reads `of` as a name outside a for-of head
     assert.deepEqual(rvReads(rvView(line)), [], line);
   }
 });
+
+// ---------------------------------------------------- mcp-secret-keychain-sites
+
+const mcpSecretKeychainSites = scanner("mcp-secret-keychain-sites");
+
+test("mcp-secret-keychain-sites flags keychain write/delete references", () => {
+  for (const source of [
+    'import { setMcpSecret } from "@/lib/git/api";',
+    "await setMcpSecret(server.id, key, value);",
+    "void deleteMcpSecret(server.id, key).catch(() => undefined);",
+    'invoke<void>("set_mcp_secret", { serverId, key, value });',
+    'invoke<void>("delete_mcp_secret", { serverId, key });',
+    'import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";',
+  ])
+    assert.deepEqual(mcpSecretKeychainSites(source), [1], source);
+});
+
+test("mcp-secret-keychain-sites ignores the read-only probe, longer names and comments", () => {
+  for (const source of [
+    "const exists = await mcpSecretExists(id, key);",
+    'invoke<boolean>("mcp_secret_exists", { serverId, key });',
+    "const setMcpSecrets = 1;",
+    "flushMcpSecretSets(plan.flush);",
+    "// setMcpSecret used to run here",
+  ])
+    assert.deepEqual(mcpSecretKeychainSites(source), [], source);
+});
+
+test("mcp-secret-keychain-sites allowlists exactly the API module and the flush module", () => {
+  const { appliesTo, allowlist } = CHECKS.find(
+    (c) => c.name === "mcp-secret-keychain-sites",
+  );
+  assert.equal(appliesTo("src/features/settings/SettingsScreen.tsx"), true);
+  assert.equal(appliesTo("src/features/settings/McpServersSection.tsx"), true);
+  assert.equal(
+    appliesTo("src/features/settings/mcp/McpServerDialog.tsx"),
+    true,
+  );
+  assert.equal(
+    appliesTo("src/features/settings/mcp/ImportMcpDialog.tsx"),
+    true,
+  );
+  // Repo-wide, not just the settings folder.
+  assert.equal(appliesTo("src/lib/git/api/secrets.ts"), true);
+  assert.equal(appliesTo("src/features/agent/x.tsx"), true);
+  assert.deepEqual(allowlist, [
+    "src/lib/git/api/mcp.ts",
+    "src/features/settings/mcp/flush-mcp-secrets.ts",
+  ]);
+});

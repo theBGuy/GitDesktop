@@ -5453,6 +5453,24 @@ export const CHECKS = [
     message:
       "react-query mutation defaults are banned (gd-conventions, 'Mutation identity pinning') — @/lib/started-mutation installs mutationFn/onMutate/onSuccess/onError/onSettled trampolines on every construction, and react-query spreads a construction's own options over the client's defaults, so a default mutationFn or callback would be shadowed without a sound. The check passes only what it can prove harmless. Any mention of `setDefaultOptions`, `getDefaultOptions`, `setMutationDefaults`, `getMutationDefaults` or `defaultMutationOptions` fails, quoted, optional, escaped or bound alike (`getDefaultOptions()` hands out the live defaults object, and `defaultMutationOptions` is query-core's merge point, which a subclass or patch could override). Every `defaultOptions` mention fails unless it is a type position with no value (`defaultOptions?: T` ending at `;` `,` `)` or `}`, or `defaultOptions: T` ending a member with `;` or a parameter list with `)`, member modifiers skipped, with no `=` and no `/` in the annotation) or an object-entry key whose value is a literal holding only a bare `queries` entry and closing its entry (`,` `}` `;` or `)` next, past any `as T` / `satisfies T`). So shorthands, bindings, assignments, member reads and writes, getters, methods, parameter defaults, class-field initializers, non-literal values, a literal read after it closes (`.constructor(…)`, `['queries']`) and any other entry (`mutations`, a spread, a quoted or computed key) fail. Put the behavior in the construction, or teach the helper to merge the defaults first. Threat model: these scans target accidental use, not deliberate evasion, so spellings only an evader would write are named under Not seen rather than chased. Not seen: keys or members assembled at runtime (`qc[\"set\" + name]`), reach through `Object.values` / `Object.entries`, prototype pollution, and the shared comment stripper's lexing gaps (a `/*` inside a multi-line template literal, a regex literal, a backslash-continued string or JSX text blanks the scan up to the next `*/`, and a `//` in JSX text, a regex or a template tail blanks the rest of its line). Fails closed (false positives, an allowlist entry with rationale is the remedy): an annotated parameter followed by another parameter, which can't be told from an object entry; an interface member ending without `;`; JSX `defaultOptions={…}`; type-level references (`QueryClientConfig['defaultOptions']`, a `Pick`/`Omit` of it); a nested `defaultOptions` key inside `queries`; a `/` inside a string within an annotation (`Foo<\"a/b\">`); and a getter, method or quoted `queries` entry",
   },
+  {
+    name: "mcp-secret-keychain-sites",
+    // Repo-wide: a keychain write or delete fired from any draft surface would
+    // bypass Save/Discard. File-level allowlist rows skip a whole file, so the
+    // settings screen, MCP section and dialogs stay scanned by keeping the
+    // calls in one dedicated module. The raw command names count too; the
+    // read-only probe (mcpSecretExists / mcp_secret_exists) stays unmatched.
+    appliesTo: () => true,
+    scan: perLine(
+      /\b(?:setMcpSecret|deleteMcpSecret|set_mcp_secret|delete_mcp_secret)\b/,
+    ),
+    allowlist: [
+      "src/lib/git/api/mcp.ts",
+      "src/features/settings/mcp/flush-mcp-secrets.ts",
+    ],
+    message:
+      "MCP keychain writes and deletes fire only through src/features/settings/mcp/flush-mcp-secrets.ts at the settings Save flush, so a Discard can take back every MCP server edit, secrets included — a new caller stages its values in the settings screen's buffer or routes through that module, never importing setMcpSecret/deleteMcpSecret directly",
+  },
 ];
 
 /**

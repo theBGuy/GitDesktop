@@ -11,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
-import { setMcpSecret } from "@/lib/git/api";
+import { isWindows } from "@/lib/hotkeys/binding";
 import type { McpServer } from "@/lib/settings/api";
 import { mcpHostAllowFixable, mcpHostGateReason } from "@/lib/settings/mcp";
 import {
@@ -21,6 +21,30 @@ import {
 } from "@/lib/settings/mcp-import";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import {
+  isSafeMcpSecretKey,
+  type McpStagedSecret,
+  secretValueFits,
+} from "./secret-ops";
+
+/** Why a candidate can't be imported: a secret the keychain would refuse (an
+ *  unsafe name, a non-string value from a hand-edited config, or a value over
+ *  the Windows cap) would commit a pair no Save could store, so the row is held. */
+function secretHold(c: ImportCandidate): string | null {
+  const noun = c.server.transport === "stdio" ? "variable" : "header";
+  const badKey = c.secretWrites.find((s) => !isSafeMcpSecretKey(s.key));
+  if (badKey)
+    return `Secret ${noun} "${badKey.key}" can't move to your keychain: its name can only use letters, numbers, dots, dashes and underscores.`;
+  const notString = c.secretWrites.find((s) => typeof s.value !== "string");
+  if (notString)
+    return `Secret ${noun} "${notString.key}" can't move to your keychain: its value isn't a string.`;
+  const tooLong = c.secretWrites.find(
+    (s) => !secretValueFits(s.value, isWindows),
+  );
+  if (tooLong)
+    return `Secret ${noun} "${tooLong.key}" can't move to your keychain: Windows Credential Manager holds values up to 1,280 characters.`;
+  return null;
+}
 
 /**
  * Reviewed import of servers the user already configured for Claude — the open
@@ -44,13 +68,12 @@ export function ImportMcpDialog({
   /** Add a URL's host to the draft allow list — the one-click fix behind a
    *  gated row's note. Mutates the draft settings, not persisted settings. */
   onAllowHost: (url: string) => void;
-  onImport: (servers: McpServer[]) => void;
+  onImport: (servers: McpServer[], writes: McpStagedSecret[]) => void;
   onClose: () => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [importing, setImporting] = useState(false);
   // Read the registry through a ref so discovery runs once (keyed on repoPath)
   // and isn't re-triggered — wiping the user's ticks — by the parent handing a
   // new `existing` array reference on re-render. The allow list rides a ref for
@@ -78,7 +101,8 @@ export function ImportMcpDialog({
               .filter(
                 (c) =>
                   !c.duplicate &&
-                  !mcpHostGateReason(c.server, allowedHostsRef.current),
+                  !mcpHostGateReason(c.server, allowedHostsRef.current) &&
+                  secretHold(c) === null,
               )
               .map((c) => c.server.id),
           ),
@@ -103,44 +127,47 @@ export function ImportMcpDialog({
       return next;
     });
 
-  async function runImport() {
+  function runImport() {
     // Re-check the host gate at fire time: a tick taken while the host was
     // allowed must not import if the draft allow list has since lost the entry.
     const chosen = candidates.filter(
       (c) =>
-        picked.has(c.server.id) && !mcpHostGateReason(c.server, allowedHosts),
+        picked.has(c.server.id) &&
+        !mcpHostGateReason(c.server, allowedHosts) &&
+        secretHold(c) === null,
     );
     if (chosen.length === 0) return;
-    setImporting(true);
-    try {
-      // Stash secret-looking values in the keychain before the server lands in
-      // settings (so the value is never persisted there). Best-effort per entry.
-      for (const c of chosen) {
-        for (const s of c.secretWrites)
-          await setMcpSecret(c.server.id, s.key, s.value);
-      }
-      onImport(chosen.map((c) => c.server));
-      toast.success(
-        `Imported ${chosen.length} server${chosen.length === 1 ? "" : "s"} — review and enable them`,
-      );
-    } catch (e) {
-      setImporting(false);
-      toastError(e);
-    }
+    // Secret-looking values go to the settings screen's Save buffer, never into
+    // the server itself; the keychain sees them only when Save commits.
+    onImport(
+      chosen.map((c) => c.server),
+      chosen.flatMap((c) =>
+        c.secretWrites.map((s) => ({
+          serverId: c.server.id,
+          key: s.key,
+          value: s.value,
+        })),
+      ),
+    );
+    toast.success(
+      `Imported ${chosen.length} server${chosen.length === 1 ? "" : "s"} — review and enable them`,
+    );
   }
 
   // Counts what Import will actually write, so the button label can't promise a
   // row the gate would drop.
   const pickedCount = candidates.filter(
     (c) =>
-      picked.has(c.server.id) && !mcpHostGateReason(c.server, allowedHosts),
+      picked.has(c.server.id) &&
+      !mcpHostGateReason(c.server, allowedHosts) &&
+      secretHold(c) === null,
   ).length;
 
   return (
     <Dialog
       open
       onOpenChange={(o) => {
-        if (!o && !importing) onClose();
+        if (!o) onClose();
       }}
     >
       <DialogContent className="sm:max-w-xl">
@@ -174,7 +201,11 @@ export function ImportMcpDialog({
               const gateReason = c.duplicate
                 ? null
                 : mcpHostGateReason(c.server, allowedHosts);
-              const held = c.duplicate || gateReason !== null;
+              const secretHoldReason = c.duplicate ? null : secretHold(c);
+              const showKeychainCount =
+                c.server.secretKeys.length > 0 && secretHoldReason === null;
+              const held =
+                c.duplicate || gateReason !== null || secretHoldReason !== null;
               const allowFixable =
                 !c.duplicate && mcpHostAllowFixable(c.server, allowedHosts);
               return (
@@ -193,7 +224,7 @@ export function ImportMcpDialog({
                   >
                     <Checkbox
                       checked={picked.has(c.server.id)}
-                      disabled={held || importing}
+                      disabled={held}
                       onCheckedChange={(on) => toggle(c.server.id, on === true)}
                       className="mt-0.5"
                     />
@@ -219,10 +250,10 @@ export function ImportMcpDialog({
                           Already in your registry.
                         </p>
                       ) : (
-                        (c.renamed || c.server.secretKeys.length > 0) && (
+                        (c.renamed || showKeychainCount) && (
                           <p className="text-[10px] text-muted-foreground">
                             {c.renamed && `Renamed from “${c.sourceName}”. `}
-                            {c.server.secretKeys.length > 0 &&
+                            {showKeychainCount &&
                               `${c.server.secretKeys.length} secret value${
                                 c.server.secretKeys.length === 1 ? "" : "s"
                               } → keychain.`}
@@ -234,6 +265,11 @@ export function ImportMcpDialog({
                           {gateReason}
                           {allowFixable &&
                             " The agent CLI connects outside GitDesktop's AI allowlist, so allow it before importing."}
+                        </p>
+                      )}
+                      {secretHoldReason && (
+                        <p className="text-[10px] text-warning">
+                          {secretHoldReason}
                         </p>
                       )}
                     </div>
@@ -257,14 +293,10 @@ export function ImportMcpDialog({
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={onClose} disabled={importing}>
+          <Button variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button
-            onClick={runImport}
-            disabled={pickedCount === 0 || importing || loading}
-          >
-            {importing && <Spinner data-icon="inline-start" />}
+          <Button onClick={runImport} disabled={pickedCount === 0 || loading}>
             Import{pickedCount > 0 ? ` ${pickedCount}` : ""}
           </Button>
         </DialogFooter>

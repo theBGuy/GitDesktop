@@ -14,7 +14,6 @@ import { Switch } from "@/components/ui/switch";
 import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { withForm } from "@/lib/form";
-import { deleteMcpSecret } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { asMcpServerArray, type McpServer } from "@/lib/settings/api";
@@ -35,6 +34,7 @@ import { GitDesktopAsServer } from "./mcp/GitDesktopAsServer";
 import { ImportMcpDialog } from "./mcp/ImportMcpDialog";
 import { McpServerDialog } from "./mcp/McpServerDialog";
 import { PerRepoStateControl } from "./mcp/PerRepoStateControl";
+import type { McpSecretsHandle, McpStagedSecret } from "./mcp/secret-ops";
 import { settingsFormOpts } from "./settings-form";
 
 /** The row's small warning chip, restyled from the Badge base it rides. Its
@@ -45,7 +45,12 @@ const MCP_CHIP_CLASS =
 
 export const McpServersSection = withForm({
   ...settingsFormOpts,
-  render: function McpServersSectionRender({ form }) {
+  props: {
+    /** The screen's Save buffer for typed secret values. Required, so a missed
+     *  wiring fails at the first stage rather than silently dropping values. */
+    secrets: undefined as unknown as McpSecretsHandle,
+  },
+  render: function McpServersSectionRender({ form, secrets }) {
     // The registry as an array whatever the stored container is: `loadSettings`
     // preserves a corrupt non-array rather than destroying it, so this section
     // renders empty and every edit below BUILDS FROM this guarded view — writing a
@@ -101,9 +106,20 @@ export const McpServersSection = withForm({
       return admitted;
     }
 
-    function addServers(added: McpServer[]) {
+    function addServers(added: McpServer[], writes: McpStagedSecret[]) {
       const admitted = admitServers(added);
       if (admitted.length) setServers([...list, ...admitted]);
+      // Stage exactly what landed in the draft: a refused server's values would
+      // only sit in the buffer until a Save pruned them.
+      for (const server of admitted) {
+        const own = writes.filter((w) => w.serverId === server.id);
+        if (own.length)
+          secrets.stage(
+            server.id,
+            own.map(({ key, value }) => ({ key, value })),
+            server.secretKeys,
+          );
+      }
       setImportOpen(false);
     }
 
@@ -117,7 +133,10 @@ export const McpServersSection = withForm({
       ]);
     }
 
-    async function saveServer(server: McpServer) {
+    async function saveServer(
+      server: McpServer,
+      secretWrites: { key: string; value: string }[],
+    ) {
       // Refuse before the optimistic close, so a rejected draft stays on screen
       // for the user to fix rather than vanishing with its edits.
       if (admitServers([server]).length === 0) return;
@@ -140,13 +159,16 @@ export const McpServersSection = withForm({
           ? cur.map((s) => (s.id === folded.id ? folded : s))
           : [...cur, folded];
       });
+      // Staged in the same tick as the row lands, so a Save pressed during the
+      // fold above commits neither half and the next Save commits both.
+      secrets.stage(folded.id, secretWrites, folded.secretKeys);
     }
 
     function removeServer(server: McpServer) {
       setServers(list.filter((s) => s.id !== server.id));
-      // Tidy up any keychain secrets the server owned (best-effort).
-      for (const key of server.secretKeys)
-        void deleteMcpSecret(server.id, key).catch(() => undefined);
+      // Its saved secrets are deleted by the Save that commits the removal; its
+      // unsaved typed values just leave the buffer.
+      secrets.pruneServer(server.id);
       toast.success(`Removed "${server.name}"`);
     }
 
