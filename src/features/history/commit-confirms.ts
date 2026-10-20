@@ -124,6 +124,10 @@ export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own"
  *  unpushed, and which commit is HEAD, are unknown until they agree again. */
 export const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
+/** Menu-row reason while a merge/rebase/cherry-pick/revert is mid-flight —
+ *  Edit history, Squash and Cherry-pick to branch all say it. */
+export const OP_IN_PROGRESS_HINT = " (finish the operation in Changes first)";
+
 /** A parentless commit has nothing to soft-reset to, so undo deletes the branch
  *  ref instead — the one undo that doesn't just re-stage in place. Scoped to the
  *  branch, never the repository: an orphan branch's first commit takes this path

@@ -4,7 +4,7 @@
 // without an upstream, on a count read as fresh as the log), keep the last
 // agreeing set through a mismatch only while the log still shows its head,
 // and fall to nothing editable otherwise; plus the sync gates that refetch the
-// trailing side without looping.
+// trailing side without looping, and squash's gate with its hold precedence.
 //
 // Not testable here: the component's ref holding the last-seen oid (its update
 // rule is `observeHeadOid`, pinned below), the render-time setState loop,
@@ -23,6 +23,7 @@ import {
   isNoUpstream,
   observeHeadOid,
   resolveUnpushedView,
+  squashGate,
   statusLogAction,
   viewAgrees,
 } from "../src/features/history/editable-set.ts";
@@ -636,4 +637,111 @@ test("observeHeadOid: seeds once, keeps through null, fires once per move", () =
   // A null between two equal oids is no move.
   const held = observeHeadOid(observeHeadOid("A", null).next, "A");
   assert.equal(held.changed, false);
+});
+
+// HEAD-first, all non-merge; selections index into it.
+const GATE_LOG = ["a", "b", "c", "d", "e"].map((h) => commit(h));
+const ALL_UNPUSHED = new Set(hashes(GATE_LOG));
+const gate = (over) =>
+  squashGate({
+    selectedIndices: [0, 1],
+    commits: GATE_LOG,
+    unpushed: ALL_UNPUSHED,
+    filterActive: false,
+    agreed: true,
+    opInProgress: false,
+    ...over,
+  });
+const holds = (hold) => ({ canSquash: false, hold });
+
+test("squashGate: an operation in progress holds first", () => {
+  assert.deepEqual(gate({ opInProgress: true }), holds("op"), "OP-1");
+  assert.deepEqual(
+    gate({ opInProgress: true, filterActive: true, selectedIndices: [0, 2] }),
+    holds("op"),
+    "OP-2: ahead of the filter and adjacency holds",
+  );
+  assert.deepEqual(
+    gate({ opInProgress: true, agreed: false }),
+    holds("op"),
+    "OP-3: ahead of the refreshing hold",
+  );
+});
+
+test("squashGate: with no operation, today's gate and hints", () => {
+  assert.deepEqual(
+    gate({ filterActive: true, selectedIndices: [0, 2] }),
+    holds("filter-hides-range"),
+    "REG-1",
+  );
+  assert.deepEqual(
+    gate({ selectedIndices: [0, 2] }),
+    holds("not-adjacent-unpushed"),
+    "REG-2: non-contiguous",
+  );
+  assert.deepEqual(
+    gate({ unpushed: new Set(["a"]) }),
+    holds("not-adjacent-unpushed"),
+    "REG-3: one member pushed",
+  );
+  assert.deepEqual(
+    gate({ selectedIndices: [3, 4] }),
+    holds("not-adjacent-unpushed"),
+    "REG-4: no base below the range",
+  );
+  const merged = ["m", "b", "c", "d", "e"].map((h) => commit(h, h === "m"));
+  assert.deepEqual(
+    gate({
+      commits: merged,
+      unpushed: new Set(hashes(merged)),
+      selectedIndices: [1, 2],
+    }),
+    holds("not-adjacent-unpushed"),
+    "REG-5: a merge above the base",
+  );
+  assert.deepEqual(
+    gate({ agreed: false }),
+    holds("refreshing"),
+    "REG-6: reads disagree",
+  );
+  assert.deepEqual(
+    gate({ selectedIndices: [1, 2] }),
+    { canSquash: true, hold: null },
+    "REG-7: happy path",
+  );
+  assert.deepEqual(
+    gate({ selectedIndices: [1] }),
+    holds("not-adjacent-unpushed"),
+    "REG-8: single selection",
+  );
+  assert.deepEqual(
+    gate({ selectedIndices: [] }),
+    holds("not-adjacent-unpushed"),
+    "REG-8: empty selection",
+  );
+  assert.deepEqual(
+    gate({ filterActive: true, selectedIndices: [1, 2] }),
+    { canSquash: true, hold: null },
+    "REG-9: a filter over a contiguous range",
+  );
+  assert.deepEqual(
+    gate({ filterActive: true, selectedIndices: [1, 2], agreed: false }),
+    holds("refreshing"),
+    "REG-10",
+  );
+  assert.deepEqual(
+    gate({ selectedIndices: [0, 2], agreed: false }),
+    holds("not-adjacent-unpushed"),
+    "adjacency is checked before refreshing",
+  );
+  assert.deepEqual(
+    gate({ unpushed: new Set(["a"]), agreed: false }),
+    holds("refreshing"),
+    "refreshing is checked before the not-allowed fallback",
+  );
+  assert.deepEqual(
+    gate({ filterActive: true, selectedIndices: [0, 2], agreed: false }),
+    holds("filter-hides-range"),
+    "the filter hold is checked before refreshing",
+  );
 });

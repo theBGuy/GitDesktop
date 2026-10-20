@@ -95,6 +95,7 @@ import {
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
   HISTORY_REFRESHING_HINT,
+  OP_IN_PROGRESS_HINT,
   RANGE_MERGE_ITEM_REASON,
   revertCommitConfirm,
   UNDO_ROOT_COMMIT_CONFIRM,
@@ -106,6 +107,8 @@ import {
   isNoUpstream,
   observeHeadOid,
   resolveUnpushedView,
+  type SquashHold,
+  squashGate,
   statusLogAction,
   type UnpushedSnapshot,
   viewAgrees,
@@ -132,6 +135,17 @@ const UNDO_DETACHED_ROOT =
 /** The menu item's short form of {@link UNDO_DETACHED_ROOT}. */
 const UNDO_DETACHED_ROOT_HINT =
   " (detached at the first commit — nothing to undo onto)";
+
+/** Squash's menu-row reason per hold. The filter arm names the easy-to-miss
+ *  case: a range that looks adjacent in the filtered view isn't adjacent in
+ *  history. */
+const SQUASH_HOLD_HINT: Record<SquashHold, string> = {
+  op: OP_IN_PROGRESS_HINT,
+  "filter-hides-range":
+    " (clear the filter — a squash range must be adjacent in history)",
+  "not-adjacent-unpushed": " (must be adjacent and unpushed)",
+  refreshing: HISTORY_REFRESHING_HINT,
+};
 
 // Keeps the log and its side reads in step with status's HEAD: refetches the
 // log when status saw a new HEAD first, refreshes the side reads once per
@@ -293,12 +307,32 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     count: number;
     defaultMessage: string;
   } | null>(null);
-  const [editHistoryOpen, setEditHistoryOpen] = useState(false);
+  // Edit history's open session: an opener mints a token, and a close clears
+  // only its own, so a late settle can't close a dialog reopened since.
+  const [editHistoryOpen, setEditHistoryOpen] = useState<object | null>(null);
   // The commit the one shared context menu acts on; its position is derived at
   // render, since the log can gain a top commit while the menu is open.
   const [menuTarget, setMenuTarget] = useState<{
     commit: CommitSummary;
   } | null>(null);
+  // This panel survives repo switches (mounted unkeyed), so its per-repo
+  // dialogs and selection reset in the render that switches; an effect would
+  // paint them open over the new repo first.
+  const [dialogsFor, setDialogsFor] = useState(repoPath);
+  if (dialogsFor !== repoPath) {
+    setDialogsFor(repoPath);
+    setEditHistoryOpen(null);
+    setSquashCtx(null);
+    setReset(null);
+    setDeleteTag(null);
+    setPickOnto(null);
+    setMergePick(null);
+    setBranchHash(null);
+    setTagHash(null);
+    setSelected(new Set());
+    setAnchorHash(null);
+    setMenuTarget(null);
+  }
 
   const searchActive = searchMode && filterText.trim().length > 0;
   const search = useCommitSearch(
@@ -767,33 +801,27 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       .reverse();
   }
 
-  // Squash: the selection must be >1, contiguous in real history (not the
-  // filtered view), entirely unpushed, and have a commit below it as base.
+  // Hold Squash, Edit history and Cherry-pick to branch while a merge/rebase/
+  // cherry-pick/revert is mid-flight — a new rebase or pick would clobber the
+  // in-flight one's state (the banner drives it). The backend refuses too;
+  // this just keeps the actions from looking live.
+  const opInProgress = Boolean(
+    opState.data?.merging ||
+      opState.data?.rebasing ||
+      opState.data?.cherryPicking ||
+      opState.data?.reverting,
+  );
+
+  const { canSquash, hold: squashHold } = squashGate({
+    selectedIndices,
+    commits,
+    unpushed: unpushedHashes,
+    filterActive: query !== "",
+    agreed,
+    opInProgress,
+  });
+  const squashDisabledHint = squashHold ? SQUASH_HOLD_HINT[squashHold] : "";
   const squashMax = selectedIndices.at(-1) ?? -1;
-  const contiguousInHistory =
-    selectedIndices.length > 1 &&
-    squashMax - (selectedIndices[0] ?? 0) + 1 === selectedIndices.length;
-  const squashAllowed =
-    contiguousInHistory &&
-    selectedIndices.every((i) => unpushedHashes.has(commits[i].hash)) &&
-    squashMax + 1 < commits.length &&
-    // The replayed range (everything above the base) must be merge-free.
-    commits.slice(0, squashMax + 1).every((c) => !c.isMerge);
-  // Opening also waits for agreement: during a mismatch the view may still
-  // serve the last agreeing set while HEAD has moved past it.
-  const canSquash = squashAllowed && agreed;
-  // Why squash is unavailable — in particular the easy-to-miss case where a client
-  // filter hides commits between the selected ones, so a range that looks adjacent
-  // in the filtered view isn't adjacent in real history. Adjacency reads the live
-  // log either way; only the unpushed set is unknown while the reads disagree.
-  const squashDisabledHint = (() => {
-    if (query && !contiguousInHistory)
-      return " (clear the filter — a squash range must be adjacent in history)";
-    if (!contiguousInHistory) return " (must be adjacent and unpushed)";
-    if (!agreed) return HISTORY_REFRESHING_HINT;
-    if (squashAllowed) return "";
-    return " (must be adjacent and unpushed)";
-  })();
 
   function openSquash() {
     if (!canSquash) return;
@@ -826,22 +854,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     view.count,
     view.hasNextPage,
   );
-  // Block editing history while a merge/rebase/cherry-pick/revert is mid-flight —
-  // a new edit-rebase would clobber the in-flight one's state (the banner drives
-  // it). The backend refuses too; this just keeps the action from looking live.
-  const opInProgress = Boolean(
-    opState.data?.merging ||
-      opState.data?.rebasing ||
-      opState.data?.cherryPicking ||
-      opState.data?.reverting,
-  );
   // Waits for agreement like squash: a mismatch may serve a set HEAD has
   // already moved past.
   const canEditHistory = editLen >= 1 && !opInProgress && agreed;
   const editHistoryHint = (() => {
     switch (true) {
       case opInProgress:
-        return " (finish the operation in Changes first)";
+        return OP_IN_PROGRESS_HINT;
       case !agreed:
         return HISTORY_REFRESHING_HINT;
       default:
@@ -852,7 +871,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // in-flight operation (the pick's own conflict path pauses one), then a repo
   // whose every other branch is archived — offerable-looking, but not offered.
   const pickOntoDisabledHint = (() => {
-    if (opInProgress) return " (finish the operation in Changes first)";
+    if (opInProgress) return OP_IN_PROGRESS_HINT;
     if (targetBranches.length > 0) return "";
     if (pickOntoCandidates.length > 0)
       return " (all other branches are archived — unarchive one first)";
@@ -955,7 +974,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           <ContextMenuItem
             className={MENU_HELD_ROW_CLASS}
             disabled={!canEditHistory}
-            onClick={() => setEditHistoryOpen(true)}
+            onClick={() => setEditHistoryOpen({})}
           >
             Edit history…
             {editHistoryHint}
@@ -1049,7 +1068,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}
           disabled={!canEditHistory}
-          onClick={() => setEditHistoryOpen(true)}
+          onClick={() => setEditHistoryOpen({})}
         >
           Edit history…
           {editHistoryHint}
@@ -1106,7 +1125,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           autoComplete="off"
         />
       </div>
-      <ContextMenu>
+      {/* Keyed so a repo switch remounts it closed: clearing menuTarget under
+          an open menu would leave Base UI's popup empty. */}
+      <ContextMenu key={repoPath}>
         <ContextMenuTrigger
           render={
             // Native overflow scroll container (not the Base-UI ScrollArea) so
@@ -1239,9 +1260,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           defaultMessage={squashCtx.defaultMessage}
           open
           onOpenChange={(open) => {
-            if (!open) setSquashCtx(null);
+            if (!open) setSquashCtx((c) => (c === squashCtx ? null : c));
           }}
-          onDone={() => setSelected(new Set())}
+          onDone={() => {
+            if (useUiStore.getState().repoPath === repoPath) {
+              setSelected(new Set());
+            }
+          }}
         />
       )}
 
@@ -1251,14 +1276,25 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           base={editBase}
           commits={editCommits}
           open
-          onOpenChange={setEditHistoryOpen}
-          onDone={() => setSelected(new Set())}
+          onOpenChange={(o) => {
+            if (!o) {
+              setEditHistoryOpen((t) => (t === editHistoryOpen ? null : t));
+            }
+          }}
+          onDone={() => {
+            if (useUiStore.getState().repoPath === repoPath) {
+              setSelected(new Set());
+            }
+          }}
         />
       )}
 
       <AmendForcePushDialog {...forcePushDialog} />
 
+      {/* These six are keyed so a switch remounts them closed: an exit animation
+          would wait out the hidden tab, then play over the new repo. */}
       <DeleteTagDialog
+        key={`delete-tag:${repoPath}`}
         repoPath={repoPath}
         name={deleteTag?.name ?? null}
         openedIn={deleteTag?.repo ?? null}
@@ -1268,6 +1304,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       />
 
       <ResetCommitDialog
+        key={`reset:${repoPath}`}
         repoPath={repoPath}
         hash={reset?.hash ?? null}
         openedIn={reset?.repo ?? null}
@@ -1275,6 +1312,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       />
 
       <CreateRefFromCommitDialog
+        key={`branch:${repoPath}`}
         form={branchForm}
         open={branchHash !== null}
         onClose={() => {
@@ -1289,6 +1327,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       />
 
       <CreateRefFromCommitDialog
+        key={`tag:${repoPath}`}
         form={tagForm}
         open={tagHash !== null}
         onClose={() => {
@@ -1303,6 +1342,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       />
 
       <CherryPickOntoDialog
+        key={`pick-onto:${repoPath}`}
         repoPath={repoPath}
         hashes={pickOnto?.hashes ?? null}
         isMerge={pickOnto?.isMerge ?? false}
@@ -1316,6 +1356,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       />
 
       <MergeParentDialog
+        key={`merge-parent:${repoPath}`}
         repoPath={repoPath}
         target={mergePick}
         openedIn={mergePick?.repo ?? null}

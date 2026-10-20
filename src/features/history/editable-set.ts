@@ -192,6 +192,57 @@ export function resolveUnpushedView<C extends { hash: string }>(args: {
   return { commits: args.commits, count: 0, hasNextPage: args.hasNextPage };
 }
 
+/** Why squash is held, in display precedence order; null = available. */
+export type SquashHold =
+  | "op" // an operation is in progress (checked FIRST)
+  | "filter-hides-range" // a client filter hides commits inside the range
+  | "not-adjacent-unpushed" // non-contiguous, pushed, no base, or merge in range
+  | "refreshing"; // log and status disagree on HEAD (not `agreed`)
+
+/** Squash's gate: the selection must be >1, contiguous in real history (not
+ *  the filtered view), entirely unpushed, merge-free above a loaded base, with
+ *  the reads agreeing and no operation in progress. Returns a reason code, not
+ *  copy, so this module stays free of runtime imports. */
+export function squashGate(input: {
+  /** Selected positions in HEAD-order real history, ascending (the panel's
+   *  `selectedIndices`). */
+  selectedIndices: readonly number[];
+  /** The loaded log, HEAD-first (CommitSummary satisfies EditableCommit). */
+  commits: readonly EditableCommit[];
+  /** Hashes currently marked unpushed (the panel's `unpushedHashes`). */
+  unpushed: ReadonlySet<string>;
+  /** A client filter is active (the panel's `query` is non-empty). */
+  filterActive: boolean;
+  agreed: boolean;
+  opInProgress: boolean;
+}): { canSquash: boolean; hold: SquashHold | null } {
+  const { selectedIndices, commits } = input;
+  const squashMax = selectedIndices.at(-1) ?? -1;
+  const contiguous =
+    selectedIndices.length > 1 &&
+    squashMax - (selectedIndices[0] ?? 0) + 1 === selectedIndices.length;
+  const allowed =
+    contiguous &&
+    selectedIndices.every((i) => input.unpushed.has(commits[i].hash)) &&
+    squashMax + 1 < commits.length &&
+    // The replayed range (everything above the base) must be merge-free.
+    commits.slice(0, squashMax + 1).every((c) => !c.isMerge);
+  // Opening also waits for agreement: during a mismatch the view may still
+  // serve the last agreeing set while HEAD has moved past it.
+  const canSquash = allowed && input.agreed && !input.opInProgress;
+  // Adjacency reads the live log either way; only the unpushed set is unknown
+  // while the reads disagree.
+  const hold = ((): SquashHold | null => {
+    if (input.opInProgress) return "op";
+    if (input.filterActive && !contiguous) return "filter-hides-range";
+    if (!contiguous) return "not-adjacent-unpushed";
+    if (!input.agreed) return "refreshing";
+    if (allowed) return null;
+    return "not-adjacent-unpushed";
+  })();
+  return { canSquash, hold };
+}
+
 /** Edit history's range: the top `count` commits, capped at EDIT_MAX and
  *  stopped at the first merge (merges can't be replayed), keeping the bottom
  *  commit of a fully loaded history as the base. `editBase` is the commit
