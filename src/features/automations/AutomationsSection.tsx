@@ -47,7 +47,8 @@ function sanitizeLifecycles(draft: LifecycleDraft): LifecycleDraft {
 }
 
 /** JSON with object keys sorted, so the dirty check ignores key order (mirrors
- *  SettingsScreen's stableStringify — the Tauri store reorders nested keys). */
+ *  stableStringify in settings/save-reset.ts — the Tauri store reorders nested
+ *  keys). */
 function sortedJson(value: unknown): string {
   return JSON.stringify(value, (_key, val) =>
     val && typeof val === "object" && !Array.isArray(val)

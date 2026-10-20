@@ -2,6 +2,7 @@ import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { NavRail } from "@/components/NavRail";
 import { Button } from "@/components/ui/button";
@@ -488,10 +489,15 @@ export function SettingsScreen() {
             <Button variant="outline" size="sm" onClick={discard}>
               Discard
             </Button>
-            <Button size="sm" onClick={() => save(false)} disabled={saving}>
+            <DisabledReasonButton
+              size="sm"
+              onClick={() => save(false)}
+              disabled={saving}
+              reason="Saving…"
+            >
               {saving && <Spinner data-icon="inline-start" />}
               Save changes
-            </Button>
+            </DisabledReasonButton>
           </div>
         </footer>
       )}
@@ -518,16 +524,17 @@ export function SettingsScreen() {
             >
               Discard and close
             </Button>
-            <Button
+            <DisabledReasonButton
               onClick={() => {
                 setConfirmClose(false);
                 save(true);
               }}
               disabled={saving}
+              reason="Saving…"
             >
               {saving && <Spinner data-icon="inline-start" />}
               Save and close
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -163,8 +163,8 @@ export const McpServersSection = withForm({
       // fold above commits neither half and the next Save commits both: that
       // Save skips its post-write reset when the form changed during the write,
       // so a fold landing during it stays on screen like one landing after it.
-      // A Discard during that write drops the row, and the next Save drops any
-      // secret staged for it unwritten.
+      // A Discard during that write drops the row; a secret staged for it keeps
+      // the Save bar up until the next Save drops it unwritten.
       secrets.stage(folded.id, secretWrites, folded.secretKeys);
     }
 
