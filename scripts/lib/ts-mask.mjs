@@ -316,6 +316,19 @@ export function matchBrace(masked, open) {
   return -1;
 }
 
+/** Index of the `>` closing the JSX opening tag that starts at `start` in
+ *  masked text: the first `>` at brace depth 0, or -1. */
+export function tagEnd(masked, start) {
+  let depth = 0;
+  for (let i = start + 1; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === "{") depth++;
+    else if (c === "}") depth--;
+    else if (c === ">" && depth === 0) return i;
+  }
+  return -1;
+}
+
 export const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 export function* sourceFiles(dir) {

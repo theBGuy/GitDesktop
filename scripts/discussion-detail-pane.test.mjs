@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { lineOf, maskNonCode, matchBrace } from "./lib/ts-mask.mjs";
+import { lineOf, maskNonCode, matchBrace, tagEnd } from "./lib/ts-mask.mjs";
 
 const FILE = "src/features/discussions/DiscussionView.tsx";
 
@@ -76,18 +76,6 @@ function soleCall(masked, name, body) {
     `${FILE}: expected exactly one \`${name}(\` call in DiscussionView, found ${calls.length}`,
   );
   return calls[0];
-}
-
-/** Where a JSX opening tag starting at `start` ends (its closing `>`). */
-function tagEnd(masked, start) {
-  let depth = 0;
-  for (let i = start + 1; i < masked.length; i++) {
-    const c = masked[i];
-    if (c === "{") depth++;
-    else if (c === "}") depth--;
-    else if (c === ">" && depth === 0) return i;
-  }
-  return -1;
 }
 
 /** The ranges of every `<DegradedListNotice …>` opening tag. */

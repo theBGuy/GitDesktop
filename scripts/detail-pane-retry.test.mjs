@@ -17,6 +17,7 @@ import {
   maskNonCode,
   OPEN,
   sourceFiles,
+  tagEnd,
 } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -35,18 +36,6 @@ function ladderCallers() {
     if (LADDER_CALL.test(masked)) files.push({ rel, raw, masked });
   }
   return files;
-}
-
-/** Where a JSX opening tag starting at `start` ends (its closing `>`). */
-function tagEnd(masked, start) {
-  let depth = 0;
-  for (let i = start + 1; i < masked.length; i++) {
-    const c = masked[i];
-    if (c === "{") depth++;
-    else if (c === "}") depth--;
-    else if (c === ">" && depth === 0) return i;
-  }
-  return -1;
 }
 
 /** The `<` opening the tag whose attribute sits at `at`: the nearest `<Name`
