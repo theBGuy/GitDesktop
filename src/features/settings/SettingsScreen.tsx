@@ -59,6 +59,7 @@ import {
   stageMcpSecretSets,
 } from "./mcp/secret-ops";
 import { NotificationsSection } from "./NotificationsSection";
+import { resetsAfterSave, stableStringify } from "./save-reset";
 import { settingsFormOpts, toDraft } from "./settings-form";
 import { TerminalSection } from "./TerminalSection";
 import { UpdatesSection } from "./UpdatesSection";
@@ -93,22 +94,6 @@ const PANELS = [
 ] as const;
 
 type PanelId = (typeof PANELS)[number]["id"];
-
-/** JSON with object keys sorted, so the dirty check is insensitive to key
- *  order. The Tauri store round-trips nested objects (e.g. an imported
- *  TextMate grammar) with reordered keys, which would otherwise leave the
- *  Save bar stuck on "unsaved changes" forever. */
-function stableStringify(value: unknown): string {
-  return JSON.stringify(value, (_key, val) =>
-    val && typeof val === "object" && !Array.isArray(val)
-      ? Object.fromEntries(
-          Object.keys(val as Record<string, unknown>)
-            .sort()
-            .map((k) => [k, (val as Record<string, unknown>)[k]]),
-        )
-      : val,
-  );
-}
 
 /** Panels that only make sense when AI features are enabled. */
 const AI_PANELS = new Set<PanelId>([
@@ -150,6 +135,8 @@ export function SettingsScreen() {
   // The mcpServers this form last saw saved: the delete diff only removes
   // secrets of servers it knew about, never one another window added.
   const mcpBaseline = useRef<unknown>(null);
+  // Bumped by every Discard, so a Save can tell one ran during its write.
+  const discards = useRef(0);
   const secretsDirty = stagedSecrets.length > 0;
   const secrets: McpSecretsHandle = {
     stage: (serverId, writes, liveSecretKeys) =>
@@ -210,14 +197,24 @@ export function SettingsScreen() {
         // the buffer and the baseline, and neither rewrite may reach this Save.
         const stagedAtPress = stagedRef.current;
         const baselineAtPress = mcpBaseline.current;
+        const discardsAtPress = discards.current;
         const current = settings.data;
         if (!current) return;
         await saveSettings.mutateAsync({ ...current, ...value });
         // keepDefaultValues everywhere we reset-with-values: otherwise reset
         // rewrites the form's defaultValues and the per-render options sync
         // (which still sees settingsFormOpts' static defaults) clobbers the
-        // values right back on the next render.
-        form.reset(value, { keepDefaultValues: true });
+        // values right back on the next render. An edit that landed during the
+        // write skips the reset and stays dirty for the next Save; a Discard
+        // during it put back pre-save values, so it resets as before.
+        if (
+          resetsAfterSave({
+            discarded: discards.current !== discardsAtPress,
+            current: form.state.values,
+            written: value,
+          })
+        )
+          form.reset(value, { keepDefaultValues: true });
         // Sets and deletes fire only after the committed write, from what this
         // form saw: a failed save writes nothing, a failed set stays staged, and
         // a failed delete orphans at worst.
@@ -358,6 +355,7 @@ export function SettingsScreen() {
   }
 
   function discard() {
+    discards.current += 1;
     commitStaged([]);
     mcpBaseline.current = settings.data?.mcpServers ?? null;
     if (saved) form.reset(saved, { keepDefaultValues: true });
