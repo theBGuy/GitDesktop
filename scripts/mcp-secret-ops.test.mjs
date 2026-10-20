@@ -14,12 +14,14 @@ const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
 const {
+  createCallQueue,
   entryPlanFromRows,
   isSafeMcpSecretKey,
   MAX_WINDOWS_SECRET_UTF16,
   mcpSecretDeletes,
   pruneStagedServer,
   secretValueFits,
+  secretWriteProblem,
   settleStaged,
   stagedSetFlushPlan,
   stageMcpSecretSets,
@@ -423,8 +425,10 @@ test("settleStaged: plan -> failed subset -> settle keeps exactly the failed ent
   ];
   const plan = stagedSetFlushPlan({ staged: buffer, committed: REGISTRY });
   assert.equal(plan.flush.length, 3);
-  // flushMcpSecretSets returns the failed INPUT objects themselves.
-  const failed = [plan.flush[1]];
+  // flushMcpSecretSets returns each failure's `entry` as the INPUT object
+  // itself, beside the error the keychain raised; the Save keeps those entries.
+  const failures = [{ entry: plan.flush[1], error: new Error("test failure") }];
+  const failed = failures.map((f) => f.entry);
   const result = settleStaged({
     current: buffer,
     pressed: buffer,
@@ -541,4 +545,142 @@ test("secretValueFits counts an astral character as two UTF-16 units", () => {
   assert.equal(secretValueFits(astral.repeat(640), true), true);
   assert.equal(secretValueFits(astral.repeat(641), true), false);
   assert.equal(secretValueFits(astral.repeat(641), false), true);
+});
+
+// ------------------------------------------------------------- createCallQueue
+
+/** A promise with its settle functions exposed. */
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+test("createCallQueue holds a call until the one before it settles", async () => {
+  const inOrder = createCallQueue();
+  const log = [];
+  const slow = deferred();
+  const first = inOrder(() => {
+    log.push("first start");
+    return slow.promise.then(() => log.push("first done"));
+  });
+  const second = inOrder(async () => {
+    log.push("second start");
+  });
+  // Let every pending microtask run: the second call must still be waiting.
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(log, ["first start"]);
+  slow.resolve();
+  await Promise.all([first, second]);
+  assert.deepEqual(log, ["first start", "first done", "second start"]);
+});
+
+test("createCallQueue continues the chain past a rejection", async () => {
+  const inOrder = createCallQueue();
+  const failing = inOrder(() => Promise.reject(new Error("test failure")));
+  const next = inOrder(async () => "test-value-1");
+  await assert.rejects(failing, /test failure/);
+  assert.equal(await next, "test-value-1");
+});
+
+test("createCallQueue turns a sync throw into that call's rejection", async () => {
+  const inOrder = createCallQueue();
+  const throwing = inOrder(() => {
+    throw new Error("thrown synchronously");
+  });
+  assert.ok(throwing instanceof Promise);
+  const next = inOrder(async () => "test-value-2");
+  await assert.rejects(throwing, /thrown synchronously/);
+  assert.equal(await next, "test-value-2");
+});
+
+test("createCallQueue passes each call's value through", async () => {
+  const inOrder = createCallQueue();
+  const values = await Promise.all([
+    inOrder(async () => 1),
+    inOrder(async () => "two"),
+    inOrder(async () => ({ three: 3 })),
+  ]);
+  assert.deepEqual(values, [1, "two", { three: 3 }]);
+});
+
+test("createCallQueue queues are independent of each other", async () => {
+  const a = createCallQueue();
+  const b = createCallQueue();
+  const held = deferred();
+  void a(() => held.promise);
+  // b's call runs at once, though a's first call never settles.
+  assert.equal(await b(async () => "test-value-3"), "test-value-3");
+  held.resolve();
+});
+
+// ---------------------------------------------------------- secretWriteProblem
+
+test("secretWriteProblem returns null for storable writes", () => {
+  assert.equal(
+    secretWriteProblem([{ key: "API_KEY", value: "test-value-1" }], true),
+    null,
+  );
+  assert.equal(secretWriteProblem([], true), null);
+});
+
+test("secretWriteProblem flags an unsafe name first", () => {
+  assert.deepEqual(
+    secretWriteProblem(
+      [
+        { key: "OK_KEY", value: "a".repeat(2000) },
+        { key: "MY KEY", value: 5 },
+      ],
+      true,
+    ),
+    { key: "MY KEY", kind: "name" },
+  );
+});
+
+test("secretWriteProblem flags a non-string value before an over-long one", () => {
+  assert.deepEqual(
+    secretWriteProblem(
+      [
+        { key: "LONG_SECRET", value: "a".repeat(1281) },
+        { key: "API_TOKEN", value: 12345 },
+      ],
+      true,
+    ),
+    { key: "API_TOKEN", kind: "value" },
+  );
+  for (const value of [null, undefined, true, {}, ["x"]])
+    assert.equal(
+      secretWriteProblem([{ key: "K", value }], false)?.kind,
+      "value",
+      JSON.stringify(value),
+    );
+});
+
+test("secretWriteProblem flags an over-long value on Windows only", () => {
+  const writes = [
+    { key: "SHORT", value: "a".repeat(MAX_WINDOWS_SECRET_UTF16) },
+    { key: "LONG_SECRET", value: "a".repeat(MAX_WINDOWS_SECRET_UTF16 + 1) },
+  ];
+  assert.deepEqual(secretWriteProblem(writes, true), {
+    key: "LONG_SECRET",
+    kind: "length",
+  });
+  assert.equal(secretWriteProblem(writes, false), null);
+});
+
+test("secretWriteProblem names the FIRST failing write of a kind", () => {
+  assert.deepEqual(
+    secretWriteProblem(
+      [
+        { key: "A B", value: "x" },
+        { key: "C D", value: "y" },
+      ],
+      false,
+    ),
+    { key: "A B", kind: "name" },
+  );
 });

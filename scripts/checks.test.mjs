@@ -10164,36 +10164,46 @@ const MCP_FLUSH = "src/features/settings/mcp/flush-mcp-secrets.ts";
 /** The flush module as the formatter lays it out. */
 const MCP_FLUSH_BASE = [
   'import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";', // 1
-  'import type { McpSecretDelete, McpStagedSecret } from "./secret-ops";', // 2
-  "", // 3
-  "// The guard pins this module's code and lets only the settings screen", // 4
-  "// import it.", // 5
-  "", // 6
-  "/** Writes each staged value in turn and returns the entries that failed. */", // 7
+  "import {", // 2
+  "  createCallQueue,", // 3
+  "  type McpSecretDelete,", // 4
+  "  type McpSetFailure,", // 5
+  "  type McpStagedSecret,", // 6
+  '} from "./secret-ops";', // 7
   "", // 8
-  "", // 9
-  "export async function flushMcpSecretSets(", // 10
-  "  sets: readonly McpStagedSecret[],", // 11
-  "): Promise<McpStagedSecret[]> {", // 12
-  "  const failed: McpStagedSecret[] = [];", // 13
-  "  for (const entry of sets) {", // 14
-  "    try {", // 15
-  "      await setMcpSecret(entry.serverId, entry.key, entry.value);", // 16
-  "    } catch {", // 17
-  "      failed.push(entry);", // 18
-  "    }", // 19
-  "  }", // 20
-  "  return failed;", // 21
-  "}", // 22
-  "", // 23
-  "/** Fires each delete without waiting. */", // 24
-  "", // 25
-  "export function flushMcpSecretDeletes(", // 26
-  "  deletes: readonly McpSecretDelete[],", // 27
-  "): void {", // 28
-  "  for (const { serverId, key } of deletes)", // 29
-  "    void (async () => deleteMcpSecret(serverId, key))().catch(() => undefined);", // 30
-  "}", // 31
+  "// The guard pins this module's code and lets only the settings screen", // 9
+  "// import it.", // 10
+  "", // 11
+  "// One queue orders every keychain call this window issues.", // 12
+  "", // 13
+  "const inOrder = createCallQueue();", // 14
+  "", // 15
+  "/** Writes each staged value in turn and returns the failures. */", // 16
+  "", // 17
+  "", // 18
+  "", // 19
+  "export async function flushMcpSecretSets(", // 20
+  "  sets: readonly McpStagedSecret[],", // 21
+  "): Promise<McpSetFailure[]> {", // 22
+  "  const failed: McpSetFailure[] = [];", // 23
+  "  for (const entry of sets) {", // 24
+  "    try {", // 25
+  "      await inOrder(() => setMcpSecret(entry.serverId, entry.key, entry.value));", // 26
+  "    } catch (error) {", // 27
+  "      failed.push({ entry, error });", // 28
+  "    }", // 29
+  "  }", // 30
+  "  return failed;", // 31
+  "}", // 32
+  "", // 33
+  "/** Fires each delete without waiting, in queue order. */", // 34
+  "", // 35
+  "export function flushMcpSecretDeletes(", // 36
+  "  deletes: readonly McpSecretDelete[],", // 37
+  "): void {", // 38
+  "  for (const { serverId, key } of deletes)", // 39
+  "    void inOrder(() => deleteMcpSecret(serverId, key)).catch(() => undefined);", // 40
+  "}", // 41
 ];
 
 const MCP_FIXTURES = [
@@ -10871,23 +10881,23 @@ const MCP_FIXTURES = [
       ...MCP_FLUSH_BASE,
       'window.addEventListener("blur", () => void flushMcpSecretSets(x));',
     ],
-    expected: [32],
+    expected: [42],
   },
   {
     name: "flush-module-deferred-retry",
     file: MCP_FLUSH,
     lines: mcpAfter(
       MCP_FLUSH_BASE,
-      16,
+      26,
       "      setTimeout(() => void setMcpSecret(a, b, c), 5000);",
     ),
-    expected: [1, 10, 16, 17],
+    expected: [1, 20, 26, 27],
   },
   {
     name: "flush-module-comment-inside-pin",
     file: MCP_FLUSH,
-    lines: mcpAfter(MCP_FLUSH_BASE, 20, "  // retried by the caller"),
-    expected: [1, 10, 16],
+    lines: mcpAfter(MCP_FLUSH_BASE, 30, "  // retried by the caller"),
+    expected: [1, 20, 26],
   },
   // F8: documented rules, each on the real-file layout.
   {
@@ -11037,6 +11047,6 @@ test("mcp-secret-keychain-sites: the flush module's extra code violates under ru
     [MCP_FLUSH],
     new Map([[MCP_FLUSH, view(lines.join("\n"))]]),
   );
-  assert.deepEqual(violations, [`${MCP_FLUSH}:32`]);
+  assert.deepEqual(violations, [`${MCP_FLUSH}:42`]);
   assert.deepEqual(stale, []);
 });

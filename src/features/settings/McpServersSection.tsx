@@ -160,7 +160,10 @@ export const McpServersSection = withForm({
           : [...cur, folded];
       });
       // Staged in the same tick as the row lands, so a Save pressed during the
-      // fold above commits neither half and the next Save commits both.
+      // fold above commits neither half. A fold landing after that Save's
+      // settings write lets the next Save commit both; one landing during it
+      // loses the row to the form reset, and the next Save drops its staged
+      // secret unwritten.
       secrets.stage(folded.id, secretWrites, folded.secretKeys);
     }
 

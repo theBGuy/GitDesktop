@@ -26,6 +26,7 @@ import { subscribeMcpRehome } from "@/lib/settings/api";
 import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { toastComposedError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { AboutSection } from "./AboutSection";
 import { AccountsSection } from "./AccountsSection";
@@ -224,7 +225,7 @@ export function SettingsScreen() {
           committed: value.mcpServers,
         });
         const failed = await flushMcpSecretSets(plan.flush);
-        const keep = [...failed, ...plan.retain];
+        const keep = [...failed.map((f) => f.entry), ...plan.retain];
         const next = settleStaged({
           current: stagedRef.current,
           pressed: stagedAtPress,
@@ -243,9 +244,17 @@ export function SettingsScreen() {
         const andClose = closeAfterSave.current;
         closeAfterSave.current = false;
         if (unstored > 0) {
-          toast.error(
-            `Settings saved, but ${unstored} secret value${unstored === 1 ? "" : "s"} couldn't be stored in your keychain. Save again to retry.`,
-          );
+          const title = `Settings saved, but ${unstored} secret value${unstored === 1 ? "" : "s"} couldn't be stored in your keychain. Save again to retry.`;
+          // The keychain's own reason (a locked or missing keychain, a denied
+          // prompt) rides Details; a value only retained has no error to show.
+          const raised = failed.filter((f) => next.includes(f.entry));
+          if (raised.length > 0)
+            toastComposedError({
+              title,
+              errors: raised.map((f) => f.error),
+              headings: raised.map((f) => `Secret "${f.entry.key}"`),
+            });
+          else toast.error(title);
         } else {
           toast.success("Settings saved");
           // The flush awaited above: close only if nothing changed meanwhile,

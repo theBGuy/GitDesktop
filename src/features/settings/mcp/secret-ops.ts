@@ -47,6 +47,55 @@ export function secretValueFits(value: string, windows: boolean): boolean {
   return !windows || value.length <= MAX_WINDOWS_SECRET_UTF16;
 }
 
+/** The first secret write the keychain would refuse, and why. Writes whose
+ *  values are typed `string` can't hit the non-string arm, so their result type
+ *  leaves `"value"` out. */
+export interface McpSecretWriteProblem<V = unknown> {
+  key: string;
+  kind: "name" | "length" | ([V] extends [string] ? never : "value");
+}
+
+/** Checks secret writes in a fixed precedence: an unsafe name, then a value
+ *  that isn't a string (a hand-edited config), then a value over the Windows
+ *  cap. Returns the first failing write's key with its kind, or null. */
+export function secretWriteProblem<V>(
+  writes: readonly { key: string; value: V }[],
+  windows: boolean,
+): McpSecretWriteProblem<V> | null {
+  const badName = writes.find((w) => !isSafeMcpSecretKey(w.key));
+  if (badName) return { key: badName.key, kind: "name" };
+  const notString = writes.find((w) => typeof w.value !== "string");
+  if (notString)
+    return { key: notString.key, kind: "value" } as McpSecretWriteProblem<V>;
+  const tooLong = writes.find(
+    (w) => !secretValueFits(w.value as string, windows),
+  );
+  if (tooLong) return { key: tooLong.key, kind: "length" };
+  return null;
+}
+
+/** A staged value the keychain refused, with the error it raised. `entry` is
+ *  the staged input object itself: the settle matches it by identity. */
+export interface McpSetFailure {
+  entry: McpStagedSecret;
+  error: unknown;
+}
+
+/** A queue that starts each call only after every earlier call has settled,
+ *  resolved or rejected. A rejection or sync throw becomes that call's own
+ *  rejection and never stalls the calls behind it. */
+export function createCallQueue(): <T>(call: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return <T>(call: () => Promise<T>): Promise<T> => {
+    const run = tail.then(call);
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+}
+
 /** The dialog's one derivation of a server's entries from its editor rows. A
  *  typed secret value goes only to `secretWrites`, never into `entries` or
  *  `secretKeys`, which become part of the settings draft. */

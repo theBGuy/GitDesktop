@@ -22,28 +22,37 @@ import {
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import {
-  isSafeMcpSecretKey,
+  MAX_WINDOWS_SECRET_UTF16,
+  type McpSecretWriteProblem,
   type McpStagedSecret,
-  secretValueFits,
+  secretWriteProblem,
 } from "./secret-ops";
+
+/** The held row's reason for a secret the keychain would refuse. */
+const SECRET_HOLD: Record<
+  McpSecretWriteProblem["kind"],
+  (noun: string, key: string) => string
+> = {
+  name: (noun, key) =>
+    `Secret ${noun} "${key}" can't move to your keychain: its name can only use letters, numbers, dots, dashes and underscores.`,
+  value: (noun, key) =>
+    `Secret ${noun} "${key}" can't move to your keychain: its value isn't a string.`,
+  length: (noun, key) =>
+    `Secret ${noun} "${key}" can't move to your keychain: Windows allows at most ${MAX_WINDOWS_SECRET_UTF16.toLocaleString("en-US")} characters.`,
+};
 
 /** Why a candidate can't be imported: a secret the keychain would refuse (an
  *  unsafe name, a non-string value from a hand-edited config, or a value over
  *  the Windows cap) would commit a pair no Save could store, so the row is held. */
 function secretHold(c: ImportCandidate): string | null {
-  const noun = c.server.transport === "stdio" ? "variable" : "header";
-  const badKey = c.secretWrites.find((s) => !isSafeMcpSecretKey(s.key));
-  if (badKey)
-    return `Secret ${noun} "${badKey.key}" can't move to your keychain: its name can only use letters, numbers, dots, dashes and underscores.`;
-  const notString = c.secretWrites.find((s) => typeof s.value !== "string");
-  if (notString)
-    return `Secret ${noun} "${notString.key}" can't move to your keychain: its value isn't a string.`;
-  const tooLong = c.secretWrites.find(
-    (s) => !secretValueFits(s.value, isWindows),
+  // Typed as strings, but a hand-edited config can hold any JSON value.
+  const writes: readonly { key: string; value: unknown }[] = c.secretWrites;
+  const problem = secretWriteProblem(writes, isWindows);
+  if (!problem) return null;
+  return SECRET_HOLD[problem.kind](
+    c.server.transport === "stdio" ? "variable" : "header",
+    problem.key,
   );
-  if (tooLong)
-    return `Secret ${noun} "${tooLong.key}" can't move to your keychain: Windows allows at most 1,280 characters.`;
-  return null;
 }
 
 /**

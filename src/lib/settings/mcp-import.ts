@@ -52,7 +52,7 @@ export interface ImportCandidate {
   /** Original source name, shown when normalization changed it. */
   sourceName: string;
   renamed: boolean;
-  /** Secret-flagged values to write to the keychain on import. */
+  /** Secret-flagged values, staged for the keychain at the settings Save. */
   secretWrites: { key: string; value: string }[];
   /** A registry server already uses this (normalized) name. */
   duplicate: boolean;

@@ -4834,8 +4834,8 @@ export const MCP_FLUSH_MODULE = {
   file: "src/features/settings/mcp/flush-mcp-secrets.ts",
   statements: [
     'import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";',
-    "export async function flushMcpSecretSets( sets: readonly McpStagedSecret[], ): Promise<McpStagedSecret[]> { const failed: McpStagedSecret[] = []; for (const entry of sets) { try { await setMcpSecret(entry.serverId, entry.key, entry.value); } catch { failed.push(entry); } } return failed; }",
-    "export function flushMcpSecretDeletes( deletes: readonly McpSecretDelete[], ): void { for (const { serverId, key } of deletes) void (async () => deleteMcpSecret(serverId, key))().catch(() => undefined); }",
+    "export async function flushMcpSecretSets( sets: readonly McpStagedSecret[], ): Promise<McpSetFailure[]> { const failed: McpSetFailure[] = []; for (const entry of sets) { try { await inOrder(() => setMcpSecret(entry.serverId, entry.key, entry.value)); } catch (error) { failed.push({ entry, error }); } } return failed; }",
+    "export function flushMcpSecretDeletes( deletes: readonly McpSecretDelete[], ): void { for (const { serverId, key } of deletes) void inOrder(() => deleteMcpSecret(serverId, key)).catch(() => undefined); }",
   ],
 };
 

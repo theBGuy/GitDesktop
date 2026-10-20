@@ -38,9 +38,22 @@ import { EntryEditor } from "./EntryEditor";
 import {
   entryPlanFromRows,
   isSafeMcpSecretKey,
-  secretValueFits,
+  MAX_WINDOWS_SECRET_UTF16,
+  type McpSecretWriteProblem,
+  secretWriteProblem,
 } from "./secret-ops";
 import type { EntryRow } from "./shared";
+
+/** The validation line for a typed secret value the keychain would refuse. */
+const SECRET_REFUSAL: Record<
+  McpSecretWriteProblem<string>["kind"],
+  (noun: string, key: string) => string
+> = {
+  name: (noun, key) =>
+    `Secret ${noun} "${key}" can only use letters, numbers, dots, dashes and underscores in its name.`,
+  length: (noun, key) =>
+    `Secret ${noun} "${key}" is too long for your keychain: Windows allows at most ${MAX_WINDOWS_SECRET_UTF16.toLocaleString("en-US")} characters.`,
+};
 
 function toRows(server: McpServer): EntryRow[] {
   const secretKeys = new Set(server.secretKeys);
@@ -163,15 +176,12 @@ export function McpServerDialog({
   // typed value hitting either would commit a pair no Save could ever store;
   // refuse it here instead.
   function secretRefusal(): string | null {
-    const noun = isStdio ? "variable" : "header";
-    const badKey = plan.secretWrites.find((w) => !isSafeMcpSecretKey(w.key));
-    if (badKey)
-      return `Secret ${noun} "${badKey.key}" can only use letters, numbers, dots, dashes and underscores in its name.`;
-    const tooLong = plan.secretWrites.find(
-      (w) => !secretValueFits(w.value, isWindows),
-    );
-    if (tooLong)
-      return `Secret ${noun} "${tooLong.key}" is too long for your keychain: Windows allows at most 1,280 characters.`;
+    const problem = secretWriteProblem(plan.secretWrites, isWindows);
+    if (problem)
+      return SECRET_REFUSAL[problem.kind](
+        isStdio ? "variable" : "header",
+        problem.key,
+      );
     if (plan.secretWrites.length > 0 && !isSafeMcpSecretKey(draft.id))
       return "This server's id (edited in your settings file) can only use letters, numbers, dots, dashes and underscores to store secrets.";
     return null;
