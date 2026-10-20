@@ -43,9 +43,9 @@ export function CommandPalette({
     if (a.id === "command-palette" || !available.has(a.id)) return false;
     return matchesActionText(tokens, a.label, a.category);
   });
-  // The marker, Enter, the scroll and the arrow steps all read this ONE clamped
-  // cursor: the list can shrink under the open palette, and a raw stored index
-  // would leave Enter running a row that no row shows as selected.
+  // The marker, Enter and the scroll read this ONE clamped cursor; the arrows
+  // step from the same clamp inside stepHighlight. The list can shrink under
+  // the open palette, and a raw index would leave Enter on an unmarked row.
   const active = clampHighlight(highlight, items.length);
   const highlighted = items[active];
 

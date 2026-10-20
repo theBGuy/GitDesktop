@@ -1,8 +1,8 @@
 // Pins the command palette's cursor math (src/features/shortcuts/palette-highlight.ts):
 // one clamped index, -1 on an empty list, arrow steps from the CLAMPED cursor, and
 // empty-list arrows that leave the stored value alone. Also pins, by source shape,
-// that CommandPalette.tsx reads that one clamped index for the marker, Enter, the
-// scroll effect and both arrow arms.
+// that CommandPalette.tsx reads that one clamped index for the marker, Enter and
+// the scroll effect, and that each arrow arm steps the stored value via the helper.
 //
 // Not testable here: the live render and dispatch (which row the user sees marked,
 // what Enter runs, scroll-into-view). Those need the running app; the shape pins
@@ -125,9 +125,14 @@ test("CommandPalette: the scroll effect is keyed on the clamped index", () => {
   assert.match(paletteSource, /\},\s*\[\s*active\s*\]\s*\);/);
 });
 
-test("CommandPalette: both arrow arms step through the helper", () => {
-  assert.ok(
-    countMatches(paletteSource, /stepHighlight\(/) >= 2,
-    "ArrowDown and ArrowUp each call stepHighlight",
+test("CommandPalette: each arrow arm steps the stored index", () => {
+  const down = /stepHighlight\(\s*highlight\s*,\s*items\.length\s*,\s*1\s*\)/;
+  const up = /stepHighlight\(\s*highlight\s*,\s*items\.length\s*,\s*-1\s*\)/;
+  assert.equal(countMatches(paletteSource, down), 1, "ArrowDown steps +1");
+  assert.equal(countMatches(paletteSource, up), 1, "ArrowUp steps -1");
+  assert.equal(
+    countMatches(paletteSource, /stepHighlight\(/),
+    2,
+    "no other step call",
   );
 });

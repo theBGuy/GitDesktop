@@ -9,7 +9,7 @@ export function clampHighlight(stored: number, count: number): number {
 }
 
 /** The next stored value after an arrow step. Steps from the CLAMPED cursor,
- *  never the raw stored value, so the first press always moves the row the
+ *  never the raw stored value, so the first press steps from the row the
  *  user sees; an empty list returns `stored` unchanged (React bails on the
  *  same-value set). */
 export function stepHighlight(
