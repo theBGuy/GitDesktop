@@ -15,6 +15,7 @@ import {
   EXPR_OPENERS,
   lineOf,
   maskNonCode,
+  matchBrace,
   ScanError,
 } from "./lib/ts-mask.mjs";
 
@@ -4797,30 +4798,75 @@ const mutationDefaults = (fileView) => {
 const MCP_KEYCHAIN_RE =
   /\b(?:setMcpSecret|deleteMcpSecret|set_mcp_secret|delete_mcp_secret|flushMcpSecretSets|flushMcpSecretDeletes)\b/g;
 /** The settings Save's own uses of the flush module, each exempted as this
- *  exact statement (whitespace-normalized), once, in this file. Any other
- *  mention there still fails, so a second flush call (say, from discard())
- *  can't hide behind them; a statement that is gone fails too, since the Save
- *  would no longer flush. */
+ *  exact statement (whitespace-normalized), once, in this file: the import
+ *  anywhere (it calls nothing), the two calls only inside the body of the
+ *  screen's `onSubmit: async (…) => { … }` property. Any other mention fails,
+ *  so a flush call moved to or copied into discard() can't hide behind them;
+ *  an exempted statement missing from its place fails too (line 1), since the
+ *  Save would no longer flush. */
 export const MCP_FLUSH_CALLER = {
   file: "src/features/settings/SettingsScreen.tsx",
-  statements: [
+  imports: [
     'import { flushMcpSecretDeletes, flushMcpSecretSets, } from "./mcp/flush-mcp-secrets";',
+  ],
+  onSubmit: [
     "const failed = await flushMcpSecretSets(plan.flush);",
     "flushMcpSecretDeletes(deletes);",
   ],
 };
 
+const ON_SUBMIT_RE = /\bonSubmit\s*:\s*async\s*\([^()]*\)\s*=>\s*\{/g;
+
+/** The source lines of the ONE `onSubmit: async (…) => {` body, braces
+ *  included, found on ts-mask's masked text so braces inside strings and
+ *  template literals can't steer it. Null when it can't be read (no such
+ *  property, several, or source ts-mask can't lex): the caller then exempts
+ *  nothing inside it. */
+function onSubmitBodyLines(source, file) {
+  let masked;
+  try {
+    masked = maskNonCode(source, file.endsWith(".tsx"));
+  } catch (e) {
+    if (e instanceof ScanError) return null;
+    throw e;
+  }
+  const found = [...masked.matchAll(ON_SUBMIT_RE)];
+  if (found.length !== 1) return null;
+  const open = found[0].index + found[0][0].length - 1;
+  const close = matchBrace(masked, open);
+  if (close === -1) return null;
+  return { from: lineOf(source, open), to: lineOf(source, close) };
+}
+
 /** Scanner: every MCP keychain mention but MCP_FLUSH_CALLER's statements in
- *  its own file, plus line 1 there for each statement no longer present. */
-const mcpKeychainSites = ({ text, starts }, file) => {
+ *  their places in its own file, plus line 1 there when onSubmit's body can't
+ *  be read or an exempted statement is missing from its place. */
+const mcpKeychainSites = ({ text, starts, source }, file) => {
   const hits = new Set();
   const exempt = [];
   if (file === MCP_FLUSH_CALLER.file) {
-    for (const statement of MCP_FLUSH_CALLER.statements) {
-      const start = text.indexOf(statement);
-      if (start === -1) hits.add(1);
-      else exempt.push([start, start + statement.length]);
-    }
+    const body = onSubmitBodyLines(source, file);
+    if (!body) hits.add(1);
+    const take = (statement, inPlace) => {
+      for (
+        let at = text.indexOf(statement);
+        at !== -1;
+        at = text.indexOf(statement, at + 1)
+      ) {
+        if (inPlace(lineAt(starts, at))) {
+          exempt.push([at, at + statement.length]);
+          return;
+        }
+      }
+      hits.add(1);
+    };
+    for (const statement of MCP_FLUSH_CALLER.imports)
+      take(statement, () => true);
+    for (const statement of MCP_FLUSH_CALLER.onSubmit)
+      take(
+        statement,
+        (line) => body !== null && line > body.from && line < body.to,
+      );
   }
   for (const m of text.matchAll(MCP_KEYCHAIN_RE)) {
     if (exempt.some(([from, to]) => m.index >= from && m.index < to)) continue;
@@ -5495,8 +5541,8 @@ export const CHECKS = [
     // Repo-wide: a keychain write or delete fired from any draft surface would
     // bypass Save/Discard. File-level allowlist rows skip a whole file, so the
     // keychain calls live in one dedicated module and its flush functions are
-    // exempted per statement in the settings screen, keeping the screen, the
-    // MCP section and the dialogs scanned. The raw command names count too;
+    // exempted per statement inside SettingsScreen's onSubmit, keeping the
+    // screen, the MCP section and the dialogs scanned. The raw command names count too;
     // the read-only probe (mcpSecretExists / mcp_secret_exists) stays unmatched.
     appliesTo: () => true,
     scan: mcpKeychainSites,
@@ -5505,7 +5551,7 @@ export const CHECKS = [
       "src/features/settings/mcp/flush-mcp-secrets.ts",
     ],
     message:
-      "MCP keychain writes and deletes fire only through src/features/settings/mcp/flush-mcp-secrets.ts, and only the settings Save (SettingsScreen's onSubmit) calls its flushMcpSecretSets/flushMcpSecretDeletes, so a Discard can take back every MCP server edit, secrets included — a draft surface stages its values in the settings screen's buffer and never names setMcpSecret/deleteMcpSecret, their command strings or the flush functions. The Save's three uses are exempted as exact statements, once each (MCP_FLUSH_CALLER); any other mention in that file fails, and so does an exempted statement that is gone (line 1): the Save would no longer flush, or the statement was reworded, so re-point MCP_FLUSH_CALLER in the same change",
+      "MCP keychain writes and deletes fire only through src/features/settings/mcp/flush-mcp-secrets.ts, and only the settings Save (SettingsScreen's onSubmit) calls its flushMcpSecretSets/flushMcpSecretDeletes, so a Discard can take back every MCP server edit, secrets included — a draft surface stages its values in the settings screen's buffer and never names setMcpSecret/deleteMcpSecret, their command strings or the flush functions. The Save's uses are exempted as exact statements, once each (MCP_FLUSH_CALLER): the flush module's import anywhere in that file, and the two flush calls only inside SettingsScreen's onSubmit (the `onSubmit: async (…) => { … }` property, found with ts-mask). Any other mention in that file fails, a flush call moved out of onSubmit included, and line 1 fails when onSubmit's body can't be read (missing, duplicated, or unlexable) or an exempted statement is missing from its place: the Save would no longer flush, or the statement was reworded, so re-point MCP_FLUSH_CALLER in the same change",
   },
 ];
 

@@ -10114,15 +10114,22 @@ test("mcp-secret-keychain-sites allowlists exactly the API module and the flush 
   ]);
 });
 
-/** The settings screen's permitted flush uses, as the formatter lays them out. */
+/** The settings screen's permitted flush uses, laid out as the formatter does,
+ *  with a toast template (`${…}` braces) inside onSubmit and a discard() after. */
 const SETTINGS_SAVE_FLUSH = [
   "import {",
   "  flushMcpSecretDeletes,",
   "  flushMcpSecretSets,",
   '} from "./mcp/flush-mcp-secrets";',
-  "async function onSubmit() {",
-  "  const failed = await flushMcpSecretSets(plan.flush);",
-  "  flushMcpSecretDeletes(deletes);",
+  "const form = useAppForm({",
+  "  onSubmit: async ({ value }) => {",
+  "    const failed = await flushMcpSecretSets(plan.flush);",
+  '    toast.error(`saved ${n} value${n === 1 ? "" : "s"}`);',
+  "    flushMcpSecretDeletes(deletes);",
+  "  },",
+  "});",
+  "function discard() {",
+  "  commitStaged([]);",
   "}",
 ];
 
@@ -10131,34 +10138,60 @@ function scanAs(file, lines) {
   return scan(view(lines.join("\n")), file).sort((a, b) => a - b);
 }
 
+/** SETTINGS_SAVE_FLUSH with `line` (1-based) replaced by `lines`. */
+const spliced = (line, ...lines) => [
+  ...SETTINGS_SAVE_FLUSH.slice(0, line - 1),
+  ...lines,
+  ...SETTINGS_SAVE_FLUSH.slice(line),
+];
+
 test("mcp-secret-keychain-sites exempts exactly the settings Save's flush statements", () => {
   assert.deepEqual(MCP_FLUSH_CALLER, {
     file: "src/features/settings/SettingsScreen.tsx",
-    statements: [
+    imports: [
       'import { flushMcpSecretDeletes, flushMcpSecretSets, } from "./mcp/flush-mcp-secrets";',
+    ],
+    onSubmit: [
       "const failed = await flushMcpSecretSets(plan.flush);",
       "flushMcpSecretDeletes(deletes);",
     ],
   });
+  // All three in place, the two calls inside onSubmit: clean.
   assert.deepEqual(scanAs(MCP_FLUSH_CALLER.file, SETTINGS_SAVE_FLUSH), []);
   // The same statements anywhere else are a draft surface's flush call.
   assert.deepEqual(
     scanAs("src/features/settings/McpServersSection.tsx", SETTINGS_SAVE_FLUSH),
-    [2, 3, 6, 7],
+    [2, 3, 7, 9],
   );
+});
+
+test("mcp-secret-keychain-sites fails a flush call moved out of onSubmit", () => {
+  // The delete moved from onSubmit into discard(): the copy in discard() hits
+  // at its own line, and onSubmit lacking it hits at line 1.
+  const moved = spliced(9);
+  moved.splice(12, 0, "  flushMcpSecretDeletes(deletes);");
+  assert.equal(moved[11], "  commitStaged([]);");
+  assert.deepEqual(scanAs(MCP_FLUSH_CALLER.file, moved), [1, 13]);
+  // The same for the set flush.
+  const movedSets = spliced(7);
+  movedSets.splice(
+    12,
+    0,
+    "  const failed = await flushMcpSecretSets(plan.flush);",
+  );
+  assert.deepEqual(scanAs(MCP_FLUSH_CALLER.file, movedSets), [1, 13]);
 });
 
 test("mcp-secret-keychain-sites fails a second flush call, or a missing one, in the settings screen", () => {
   // A second call (say, from discard()) can't hide behind the exempt one.
   assert.deepEqual(
     scanAs(MCP_FLUSH_CALLER.file, [
-      ...SETTINGS_SAVE_FLUSH,
-      "function discard() {",
+      ...SETTINGS_SAVE_FLUSH.slice(0, 13),
       "  flushMcpSecretDeletes(deletes);",
       "  void flushMcpSecretSets(stagedRef.current);",
       "}",
     ]),
-    [10, 11],
+    [14, 15],
   );
   // A keychain API call in the screen itself is never exempt.
   assert.deepEqual(
@@ -10166,14 +10199,36 @@ test("mcp-secret-keychain-sites fails a second flush call, or a missing one, in 
       ...SETTINGS_SAVE_FLUSH,
       'void setMcpSecret("id", "KEY", "test-value-1");',
     ]),
-    [9],
+    [15],
   );
   // An exempted statement that is gone means the Save no longer flushes.
+  assert.deepEqual(scanAs(MCP_FLUSH_CALLER.file, spliced(9)), [1]);
+  assert.deepEqual(
+    scanAs(MCP_FLUSH_CALLER.file, SETTINGS_SAVE_FLUSH.slice(4)),
+    [1],
+  );
+});
+
+test("mcp-secret-keychain-sites fails closed when onSubmit's body can't be read", () => {
+  // No onSubmit property at all: nothing is exempted inside it.
   assert.deepEqual(
     scanAs(
       MCP_FLUSH_CALLER.file,
-      SETTINGS_SAVE_FLUSH.filter((l) => !l.includes("deletes);")),
+      spliced(6, "  onSave: async ({ value }) => {"),
     ),
-    [1],
+    [1, 7, 9],
+  );
+  // Two onSubmit properties: which one is the Save is unreadable.
+  assert.deepEqual(
+    scanAs(MCP_FLUSH_CALLER.file, [
+      ...SETTINGS_SAVE_FLUSH,
+      "const other = { onSubmit: async () => {} };",
+    ]),
+    [1, 7, 9],
+  );
+  // Source ts-mask can't lex (an unterminated template literal).
+  assert.deepEqual(
+    scanAs(MCP_FLUSH_CALLER.file, [...SETTINGS_SAVE_FLUSH, "const x = `open"]),
+    [1, 7, 9],
   );
 });
