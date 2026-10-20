@@ -6,8 +6,9 @@ import {
   type McpStagedSecret,
 } from "./secret-ops";
 
-// The MCP keychain guard pins this code and lets only SettingsScreen's Save run
-// it: an edit here re-points MCP_FLUSH_MODULE in the same change.
+// The MCP keychain guard pins every statement here but the secret-ops import,
+// and lets only SettingsScreen's Save run this module: an edit to a pinned
+// statement re-points MCP_FLUSH_MODULE in the same change.
 
 // The Rust keychain commands run on unordered threads, so one queue orders every
 // MCP keychain call this window issues: a delete never lands after a later set.

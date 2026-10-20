@@ -52,6 +52,7 @@ import {
   type McpSecretsHandle,
   type McpStagedSecret,
   mcpSecretDeletes,
+  mcpSetFailureHeadings,
   pruneStagedServer,
   settleStaged,
   stagedSetFlushPlan,
@@ -252,7 +253,10 @@ export function SettingsScreen() {
             toastComposedError({
               title,
               errors: raised.map((f) => f.error),
-              headings: raised.map((f) => `Secret "${f.entry.key}"`),
+              headings: mcpSetFailureHeadings({
+                failures: raised,
+                committed: value.mcpServers,
+              }),
             });
           else toast.error(title);
         } else {

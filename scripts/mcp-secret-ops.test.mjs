@@ -19,6 +19,7 @@ const {
   isSafeMcpSecretKey,
   MAX_WINDOWS_SECRET_UTF16,
   mcpSecretDeletes,
+  mcpSetFailureHeadings,
   pruneStagedServer,
   secretValueFits,
   secretWriteProblem,
@@ -683,4 +684,73 @@ test("secretWriteProblem names the FIRST failing write of a kind", () => {
     ),
     { key: "A B", kind: "name" },
   );
+});
+
+// ------------------------------------------------------- mcpSetFailureHeadings
+
+const failure = (serverId, key) => ({
+  entry: staged(serverId, key),
+  error: new Error("test failure"),
+});
+
+test("mcpSetFailureHeadings names the server, so a shared key reads apart", () => {
+  const committed = [
+    server("srv-a", ["API_KEY"], { name: "github" }),
+    server("srv-b", ["API_KEY"], { name: "linear" }),
+  ];
+  const headings = mcpSetFailureHeadings({
+    failures: [failure("srv-a", "API_KEY"), failure("srv-b", "API_KEY")],
+    committed,
+  });
+  assert.deepEqual(headings, [
+    'Secret "API_KEY" on "github"',
+    'Secret "API_KEY" on "linear"',
+  ]);
+  assert.notEqual(headings[0], headings[1]);
+});
+
+test("mcpSetFailureHeadings falls back to the server id without a usable name", () => {
+  const committed = [
+    server("srv-a", ["K"], { name: "" }),
+    server("srv-b", ["K"], { name: "   " }),
+    { id: "srv-c", secretKeys: ["K"], name: 42 },
+    { id: "srv-d", secretKeys: ["K"] },
+    null,
+    "junk",
+  ];
+  assert.deepEqual(
+    mcpSetFailureHeadings({
+      failures: ["srv-a", "srv-b", "srv-c", "srv-d", "srv-gone"].map((id) =>
+        failure(id, "K"),
+      ),
+      committed,
+    }),
+    [
+      'Secret "K" on "srv-a"',
+      'Secret "K" on "srv-b"',
+      'Secret "K" on "srv-c"',
+      'Secret "K" on "srv-d"',
+      'Secret "K" on "srv-gone"',
+    ],
+  );
+  for (const junk of [null, undefined, {}, "servers"])
+    assert.deepEqual(
+      mcpSetFailureHeadings({
+        failures: [failure("srv-a", "K")],
+        committed: junk,
+      }),
+      ['Secret "K" on "srv-a"'],
+    );
+});
+
+test("mcpSetFailureHeadings keeps the failures' order, one heading each", () => {
+  const committed = [server("srv-a", ["A", "B"], { name: "one" })];
+  assert.deepEqual(
+    mcpSetFailureHeadings({
+      failures: [failure("srv-a", "B"), failure("srv-a", "A")],
+      committed,
+    }),
+    ['Secret "B" on "one"', 'Secret "A" on "one"'],
+  );
+  assert.deepEqual(mcpSetFailureHeadings({ failures: [], committed }), []);
 });

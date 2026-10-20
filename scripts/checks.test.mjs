@@ -10894,6 +10894,38 @@ const MCP_FIXTURES = [
     expected: [1, 20, 26, 27],
   },
   {
+    // The queue binding is pinned: a wrapped or passthrough queue would let a
+    // delete land after a later set of the same pair.
+    name: "flush-module-queue-retry",
+    file: MCP_FLUSH,
+    lines: mcpSwap(
+      MCP_FLUSH_BASE,
+      14,
+      "const inOrder = withRetry(createCallQueue());",
+    ),
+    expected: [1],
+  },
+  {
+    name: "flush-module-queue-passthrough",
+    file: MCP_FLUSH,
+    lines: mcpSwap(
+      MCP_FLUSH_BASE,
+      14,
+      "const inOrder = <T,>(call: () => Promise<T>) => call();",
+    ),
+    expected: [1],
+  },
+  {
+    name: "flush-module-queue-per-call",
+    file: MCP_FLUSH,
+    lines: mcpSwap(
+      MCP_FLUSH_BASE,
+      14,
+      "const inOrder = <T,>(call: () => Promise<T>) => createCallQueue()(call);",
+    ),
+    expected: [1],
+  },
+  {
     name: "flush-module-comment-inside-pin",
     file: MCP_FLUSH,
     lines: mcpAfter(MCP_FLUSH_BASE, 30, "  // retried by the caller"),
@@ -11003,7 +11035,11 @@ test("mcp-secret-keychain-sites pins, allowlist and scope", () => {
   assert.equal(MCP_SECRET_API.definitions.length, 2);
   assert.deepEqual([...MCP_SECRET_READ_ONLY], ["mcp_secret_exists"]);
   assert.equal(MCP_FLUSH_MODULE.file, MCP_FLUSH);
-  assert.equal(MCP_FLUSH_MODULE.statements.length, 3);
+  assert.equal(MCP_FLUSH_MODULE.statements.length, 4);
+  assert.equal(
+    MCP_FLUSH_MODULE.statements[1],
+    "const inOrder = createCallQueue();",
+  );
   assert.deepEqual(MCP_CHECK.allowlist, []);
   assert.deepEqual(MCP_CHECK.expectScanned, {
     atLeast: 500,

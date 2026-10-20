@@ -261,3 +261,28 @@ export function mcpSecretDeletes({
   }
   return out;
 }
+
+/** The keychain-failure Details heading for each failure: its key and its
+ *  server's name from the committed registry, so two servers failing on the
+ *  same key read apart (the keychain's own error never names the account). A
+ *  row without a non-blank string name falls back to the server id. */
+export function mcpSetFailureHeadings({
+  failures,
+  committed,
+}: {
+  failures: readonly McpSetFailure[];
+  committed: unknown;
+}): string[] {
+  const names = new Map<string, string>();
+  if (Array.isArray(committed))
+    for (const row of committed) {
+      if (!isRow(row) || typeof row.id !== "string" || names.has(row.id))
+        continue;
+      if (typeof row.name === "string" && row.name.trim())
+        names.set(row.id, row.name);
+    }
+  return failures.map(
+    ({ entry }) =>
+      `Secret "${entry.key}" on "${names.get(entry.serverId) ?? entry.serverId}"`,
+  );
+}

@@ -161,9 +161,10 @@ export const McpServersSection = withForm({
       });
       // Staged in the same tick as the row lands, so a Save pressed during the
       // fold above commits neither half. A fold landing after that Save's
-      // settings write lets the next Save commit both; one landing during it
-      // loses the row to the form reset, and the next Save drops its staged
-      // secret unwritten.
+      // settings write lets the next Save commit both. One landing during it
+      // loses a new row to the form reset, and the next Save drops its secret
+      // unwritten; an edited row is reverted instead, so the next Save still
+      // writes its re-typed secrets while the dialog's other edits are lost.
       secrets.stage(folded.id, secretWrites, folded.secretKeys);
     }
 
