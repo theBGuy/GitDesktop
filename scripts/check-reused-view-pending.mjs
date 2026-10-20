@@ -145,7 +145,7 @@ export const ALLOWLIST = [
     ["checkout", "useCheckoutCommit", ["isPending"], WORKING_TREE],
   ]),
   ...entries("src/features/discussions/DiscussionView.tsx", "DiscussionView", [
-    ["details", "useDiscussionDetails", ["isPending"], QUERY],
+    ["details", "useDiscussionDetails", ["isPending", "isPaused"], QUERY],
   ]),
   ...entries("src/features/pulls/LocalPrView.tsx", "LocalPrView", [
     ["defaultBranch", "useDefaultBranch", ["isPending"], QUERY],

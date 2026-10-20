@@ -5,7 +5,7 @@ import {
   DotsThreeIcon,
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useRef, useState } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
@@ -37,11 +37,21 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import { DeleteCommentDialog } from "@/features/conversations/DeleteCommentDialog";
 import { LabelsPopover } from "@/features/conversations/LabelsPopover";
 import { makeQuoteReply } from "@/features/conversations/quoteReply";
 import { ReactionBar } from "@/features/conversations/ReactionBar";
+import {
+  detailNoticeMessage,
+  offlinePendingMessage,
+  refreshFailed,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import {
   AuthorAvatar,
   hasVisibleBody,
@@ -52,6 +62,7 @@ import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotk
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { ScopeRefreshHint } from "@/features/repo-settings/ScopeRefreshHint";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import type {
   DiscussionCloseReason,
   DiscussionLockReason,
@@ -300,10 +311,7 @@ export function DiscussionView({
   const d = details.data;
 
   const threadActive =
-    selectedDiscussion?.number === number &&
-    !!d &&
-    !details.isPlaceholderData &&
-    !details.isError;
+    selectedDiscussion?.number === number && !!d && !details.isPlaceholderData;
   const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box, so reaching it never depends on
   // tabbing the whole thread. Only the view that owns the selection answers —
@@ -314,17 +322,94 @@ export function DiscussionView({
     threadActive,
   );
 
-  if (details.isPending) {
-    return (
+  const detailPane = resolveDetailPane({
+    pending: details.isPending,
+    error: details.isError,
+    hasData: d !== undefined,
+    paused: details.isPaused,
+    fetching: details.isFetching,
+  });
+  // Retry resets the read to pending: the skeleton, or after an in-view switch
+  // the previous discussion as placeholder. Every arm's root is the same host
+  // div, so React keeps that node through the swap and focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    detailPane === "error" && details.isError,
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = detailPane === "content-degraded" ? "content" : detailPane;
+  // An arm swap that unmounts the focused node would drop focus to <body>; land
+  // it on the host. Change-only, so a mount never takes focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${discussionIdentity}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  const shell = (content: ReactNode) => (
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex h-full flex-col outline-none"
+    >
+      {content}
+    </div>
+  );
+
+  if (detailPane === "skeleton") {
+    return shell(
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
         <Skeleton className="h-4 w-1/3" />
         <Skeleton className="h-32 w-full" />
-      </div>
+      </div>,
     );
   }
-  if (details.isError || !d) {
-    return <DiffPlaceholder message="Could not load this discussion" />;
+  if (detailPane === "offline") {
+    return shell(
+      <DiffPlaceholder message={offlinePendingMessage("this discussion")} />,
+    );
+  }
+  if (detailPane === "error" || !d) {
+    // Discussions are GitHub-only, so the headline names the host outright; the
+    // summary beneath carries the reason.
+    const errorSummary = details.error
+      ? presentError(details.error).summary
+      : null;
+    return shell(
+      <DiffPlaceholder
+        message={
+          details.isError
+            ? "Couldn't load this discussion from GitHub."
+            : "Could not load this discussion"
+        }
+        action={
+          details.isError ? (
+            <div className="flex flex-col items-center gap-2">
+              {errorSummary ? (
+                <p className="max-w-md text-center text-xs">{errorSummary}</p>
+              ) : null}
+              <Button
+                ref={retryRef}
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                disabled={details.isFetching}
+                onClick={() => details.refetch()}
+              >
+                {details.isFetching ? "Retrying…" : "Retry"}
+              </Button>
+            </div>
+          ) : undefined
+        }
+      />,
+    );
   }
 
   // Placeholder details are the previous discussion's, and every write on this
@@ -335,6 +420,12 @@ export function DiscussionView({
   const staleReason = detailsStale ? "Loading this discussion…" : undefined;
   // A disabled menu item drops pointer events, so its reason rides the label.
   const staleSuffix = staleReason ? ` — ${staleReason}` : "";
+  const detailFailed = refreshFailed(details);
+  const detailNotice = detailNoticeMessage({
+    noun: "discussion",
+    isError: detailFailed,
+    stale: detailsStale,
+  });
   // The rendered discussion's own writes: another discussion's never hold this one.
   const commenting = pendingDiscussionWrite(
     discussionWrites,
@@ -769,8 +860,15 @@ export function DiscussionView({
     closeIfStillOpen();
   }
 
-  return (
-    <div className="flex h-full flex-col">
+  return shell(
+    <>
+      <DegradedListNotice
+        noun="this discussion"
+        degraded={detailPane === "content-degraded"}
+        message={detailNotice}
+        onRetry={detailFailed ? () => details.refetch() : undefined}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
       <header className="space-y-2 border-b px-4 py-3">
         <div className="flex items-start gap-2">
           <h2 className="text-sm font-medium">
@@ -1270,6 +1368,6 @@ export function DiscussionView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </>,
   );
 }
