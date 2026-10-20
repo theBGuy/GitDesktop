@@ -655,16 +655,20 @@ const gate = (over) =>
 const holds = (hold) => ({ canSquash: false, hold });
 
 test("squashGate: an operation in progress holds first", () => {
-  assert.deepEqual(gate({ opInProgress: true }), holds("op"), "OP-1");
+  assert.deepEqual(
+    gate({ opInProgress: true }),
+    holds("op"),
+    "an operation alone holds an otherwise valid range",
+  );
   assert.deepEqual(
     gate({ opInProgress: true, filterActive: true, selectedIndices: [0, 2] }),
     holds("op"),
-    "OP-2: ahead of the filter and adjacency holds",
+    "ahead of the filter and adjacency holds",
   );
   assert.deepEqual(
     gate({ opInProgress: true, agreed: false }),
     holds("op"),
-    "OP-3: ahead of the refreshing hold",
+    "ahead of the refreshing hold",
   );
 });
 
@@ -672,22 +676,22 @@ test("squashGate: with no operation, today's gate and hints", () => {
   assert.deepEqual(
     gate({ filterActive: true, selectedIndices: [0, 2] }),
     holds("filter-hides-range"),
-    "REG-1",
+    "a filter hiding commits inside the range",
   );
   assert.deepEqual(
     gate({ selectedIndices: [0, 2] }),
     holds("not-adjacent-unpushed"),
-    "REG-2: non-contiguous",
+    "non-contiguous",
   );
   assert.deepEqual(
     gate({ unpushed: new Set(["a"]) }),
     holds("not-adjacent-unpushed"),
-    "REG-3: one member pushed",
+    "one member pushed",
   );
   assert.deepEqual(
     gate({ selectedIndices: [3, 4] }),
     holds("not-adjacent-unpushed"),
-    "REG-4: no base below the range",
+    "no base below the range",
   );
   const merged = ["m", "b", "c", "d", "e"].map((h) => commit(h, h === "m"));
   assert.deepEqual(
@@ -697,37 +701,37 @@ test("squashGate: with no operation, today's gate and hints", () => {
       selectedIndices: [1, 2],
     }),
     holds("not-adjacent-unpushed"),
-    "REG-5: a merge above the base",
+    "a merge above the base",
   );
   assert.deepEqual(
     gate({ agreed: false }),
     holds("refreshing"),
-    "REG-6: reads disagree",
+    "reads disagree",
   );
   assert.deepEqual(
     gate({ selectedIndices: [1, 2] }),
     { canSquash: true, hold: null },
-    "REG-7: happy path",
+    "happy path",
   );
   assert.deepEqual(
     gate({ selectedIndices: [1] }),
     holds("not-adjacent-unpushed"),
-    "REG-8: single selection",
+    "single selection",
   );
   assert.deepEqual(
     gate({ selectedIndices: [] }),
     holds("not-adjacent-unpushed"),
-    "REG-8: empty selection",
+    "empty selection",
   );
   assert.deepEqual(
     gate({ filterActive: true, selectedIndices: [1, 2] }),
     { canSquash: true, hold: null },
-    "REG-9: a filter over a contiguous range",
+    "a filter over a contiguous range",
   );
   assert.deepEqual(
     gate({ filterActive: true, selectedIndices: [1, 2], agreed: false }),
     holds("refreshing"),
-    "REG-10",
+    "a filter over a contiguous range while the reads disagree",
   );
   assert.deepEqual(
     gate({ selectedIndices: [0, 2], agreed: false }),

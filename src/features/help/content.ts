@@ -588,10 +588,11 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 {{/ai}}- After committing, **Undo** ({{kbd:undo-commit}}) reverses the last commit and
   returns your message to the box. Undoing a branch's *first* commit asks first — it
   has no parent to fall back to, so the branch ref goes with it. If another Git
-  process commits or switches branches before or while the undo runs, Undo stops without
-  undoing anything and says so. Undo also asks you to finish or abort a merge,
-  cherry-pick or revert in progress, and to resolve any conflicts, first. On a
-  detached first commit there is nothing to undo onto, and Undo says that instead.
+  process commits or switches branches after History last showed it, or while the
+  undo runs, Undo stops without undoing anything and says so. Undo also asks you
+  to finish or abort a merge, cherry-pick or revert in progress, and to resolve
+  any conflicts, first. On a detached first commit there is nothing to undo onto,
+  and Undo says that instead.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright. The exception is a name Windows reserves for a device

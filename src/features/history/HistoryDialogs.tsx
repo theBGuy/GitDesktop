@@ -66,13 +66,15 @@ import {
 const onError = (e: unknown) => toastError(e);
 
 // The delete-tag, reset, cherry-pick and merge-parent dialogs below can be
-// dismissed while their write runs, and the host (one panel across repo switches)
-// may reopen one on another subject or repo before the settle: a settle closes
-// only while the dialog still shows its subject in the repo it fired in, both read
-// off live props. Each of these takes `openedIn`, the repo its host opened it in,
-// and refuses (closing) when answered after a switch. A selection clear has its
-// own rule, at its site; the create-from-commit dialogs settle by open session in
-// their host.
+// dismissed while their write runs, and an unkeyed host (one instance across
+// repo switches) may reopen one on another subject or repo before the settle: a
+// settle closes only while the dialog still shows its subject in the repo it
+// fired in, both read off live props. A host that keys them by repo must scope
+// its onClose/onDone to the open session or the live repo (as HistoryPanel
+// does): the unmounted instance's props stop updating, so those reads freeze.
+// Each of these takes `openedIn`, the repo its host opened it in, and refuses
+// (closing) when answered after a switch. A selection clear has its own rule, at
+// its site; the create-from-commit dialogs settle by open session in their host.
 
 /** Confirm-and-delete a tag, optionally on origin too. Owns its mutation; the
  *  parent keeps the open + "delete on origin" state (reset on each open). */
@@ -461,7 +463,8 @@ export function CherryPickOntoDialog({
         `Copied ${applied} commit${applied === 1 ? "" : "s"} onto ${target}${note}`,
       );
     }
-    // Another repo's dialog and selection are never this pick's to clear.
+    // Another repo's dialog and selection are never this pick's to clear (a
+    // repo-keyed host scopes its own callbacks; see the header comment).
     if (liveRepo.current !== startedIn) return;
     // The pick moved HEAD to the destination, so the source selection no longer
     // describes the view — a dismissed dialog's included. Only a pick reopened on
