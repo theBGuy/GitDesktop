@@ -1,0 +1,133 @@
+// Pins the command palette's cursor math (src/features/shortcuts/palette-highlight.ts):
+// one clamped index, -1 on an empty list, arrow steps from the CLAMPED cursor, and
+// empty-list arrows that leave the stored value alone. Also pins, by source shape,
+// that CommandPalette.tsx reads that one clamped index for the marker, Enter, the
+// scroll effect and both arrow arms.
+//
+// Not testable here: the live render and dispatch (which row the user sees marked,
+// what Enter runs, scroll-into-view). Those need the running app; the shape pins
+// cover the wiring's text, not its runtime.
+//
+// The import reaches straight into `src/` under Node's type stripping, which
+// resolves no bundler aliases, so the module must stay free of runtime imports.
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+
+import {
+  clampHighlight,
+  stepHighlight,
+} from "../src/features/shortcuts/palette-highlight.ts";
+
+test("clampHighlight: an empty list has no cursor", () => {
+  assert.equal(clampHighlight(0, 0), -1);
+  assert.equal(clampHighlight(5, 0), -1);
+  assert.equal(clampHighlight(-1, 0), -1);
+});
+
+test("clampHighlight: in-range values pass through", () => {
+  assert.equal(clampHighlight(0, 1), 0);
+  assert.equal(clampHighlight(2, 5), 2);
+  assert.equal(clampHighlight(4, 5), 4);
+  assert.equal(clampHighlight(1, 2), 1);
+});
+
+test("clampHighlight: over-range clamps to the last row", () => {
+  assert.equal(clampHighlight(8, 5), 4);
+  assert.equal(clampHighlight(5, 5), 4);
+  assert.equal(clampHighlight(3, 1), 0);
+  assert.equal(clampHighlight(2, 2), 1);
+});
+
+test("clampHighlight: a negative stored value floors at row 0", () => {
+  assert.equal(clampHighlight(-1, 3), 0);
+  assert.equal(clampHighlight(-1, 1), 0);
+});
+
+test("stepHighlight: an empty list leaves the stored value unchanged", () => {
+  assert.equal(stepHighlight(0, 0, 1), 0);
+  assert.equal(stepHighlight(5, 0, -1), 5);
+  assert.equal(stepHighlight(5, 0, 1), 5);
+  assert.equal(stepHighlight(0, 0, -1), 0);
+});
+
+test("stepHighlight: steps clamp at both ends", () => {
+  assert.equal(stepHighlight(4, 5, 1), 4);
+  assert.equal(stepHighlight(0, 5, -1), 0);
+  assert.equal(stepHighlight(0, 1, 1), 0);
+  assert.equal(stepHighlight(0, 1, -1), 0);
+});
+
+test("stepHighlight: in-range steps move one row", () => {
+  assert.equal(stepHighlight(2, 5, 1), 3);
+  assert.equal(stepHighlight(2, 5, -1), 1);
+  assert.equal(stepHighlight(0, 2, 1), 1);
+});
+
+test("stepHighlight: steps from the clamped cursor, not the stored value", () => {
+  assert.equal(stepHighlight(8, 5, 1), 4);
+  assert.equal(stepHighlight(8, 5, -1), 3);
+  assert.equal(stepHighlight(-1, 3, 1), 1);
+  assert.equal(stepHighlight(-1, 3, -1), 0);
+});
+
+test("stepHighlight: every non-empty result lands in [0, count-1]", () => {
+  for (const count of [1, 2, 5]) {
+    for (const stored of [-1, 0, 2, count - 1, count, count + 3]) {
+      for (const delta of [1, -1]) {
+        const next = stepHighlight(stored, count, delta);
+        assert.ok(
+          next >= 0 && next <= count - 1,
+          `stepHighlight(${stored}, ${count}, ${delta}) = ${next}`,
+        );
+      }
+    }
+  }
+});
+
+// Comments are stripped first so a comment can neither satisfy a positive pin nor
+// trip a negative one. CommandPalette.tsx carries no `//` inside a string literal.
+const paletteSource = readFileSync(
+  new URL("../src/features/shortcuts/CommandPalette.tsx", import.meta.url),
+  "utf8",
+)
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/\/\/.*$/gm, "");
+
+function countMatches(source, re) {
+  return (source.match(new RegExp(re.source, "g")) ?? []).length;
+}
+
+test("CommandPalette: no raw comparison against the stored index", () => {
+  assert.doesNotMatch(
+    paletteSource,
+    /[!=]==?\s*highlight\b|\bhighlight\s*[!=]==?/,
+  );
+});
+
+test("CommandPalette: no inline clamp at the Enter target", () => {
+  assert.doesNotMatch(paletteSource, /items\[\s*Math\.min\(/);
+});
+
+test("CommandPalette: marker and Enter read the one clamped index", () => {
+  assert.match(
+    paletteSource,
+    /const\s+active\s*=\s*clampHighlight\(\s*highlight\s*,\s*items\.length\s*\)/,
+  );
+  assert.match(paletteSource, /items\[\s*active\s*\]/);
+  assert.ok(
+    countMatches(paletteSource, /index\s*===\s*active/) >= 2,
+    "both the data-highlighted attr and the accent class compare against active",
+  );
+});
+
+test("CommandPalette: the scroll effect is keyed on the clamped index", () => {
+  assert.match(paletteSource, /\},\s*\[\s*active\s*\]\s*\);/);
+});
+
+test("CommandPalette: both arrow arms step through the helper", () => {
+  assert.ok(
+    countMatches(paletteSource, /stepHighlight\(/) >= 2,
+    "ArrowDown and ArrowUp each call stepHighlight",
+  );
+});
