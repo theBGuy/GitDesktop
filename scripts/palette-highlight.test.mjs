@@ -1,8 +1,9 @@
-// Pins the command palette's cursor math (src/features/shortcuts/palette-highlight.ts):
-// one clamped index, -1 on an empty list, arrow steps from the CLAMPED cursor, and
-// empty-list arrows that leave the stored value alone. Also pins, by source shape,
-// that CommandPalette.tsx reads that one clamped index for the marker, Enter and
-// the scroll effect, and that each arrow arm steps the stored value via the helper.
+// Pins the cursor math both palette-style pickers share
+// (src/features/shortcuts/palette-highlight.ts): one clamped index, -1 on an
+// empty list, arrow steps from the CLAMPED cursor, and empty-list arrows that
+// leave the stored value alone. Also pins, by source shape, that each picker in
+// CALL_SITES reads that one clamped index for the marker, Enter and the scroll
+// effect, and that each arrow arm steps the stored value via the helper.
 //
 // Not testable here: the live render and dispatch (which row the user sees marked,
 // what Enter runs, scroll-into-view). Those need the running app; the shape pins
@@ -85,54 +86,60 @@ test("stepHighlight: every non-empty result lands in [0, count-1]", () => {
   }
 });
 
+// The palette-style pickers that share the helper; every source-shape pin runs
+// per file, so a failure names the picker that broke.
+const CALL_SITES = [
+  "src/features/shortcuts/CommandPalette.tsx",
+  "src/features/scripts/RunTaskPicker.tsx",
+];
+
 // Comments are stripped first so a comment can neither satisfy a positive pin nor
-// trip a negative one. CommandPalette.tsx carries no `//` inside a string literal.
-const paletteSource = readFileSync(
-  new URL("../src/features/shortcuts/CommandPalette.tsx", import.meta.url),
-  "utf8",
-)
-  .replace(/\/\*[\s\S]*?\*\//g, "")
-  .replace(/\/\/.*$/gm, "");
+// trip a negative one. Neither call site carries `//` inside a string literal.
+const readStripped = (rel) =>
+  readFileSync(new URL(`../${rel}`, import.meta.url), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
 
 function countMatches(source, re) {
   return (source.match(new RegExp(re.source, "g")) ?? []).length;
 }
 
-test("CommandPalette: no raw comparison against the stored index", () => {
-  assert.doesNotMatch(
-    paletteSource,
-    /[!=]==?\s*highlight\b|\bhighlight\s*[!=]==?/,
-  );
-});
+for (const file of CALL_SITES) {
+  const source = readStripped(file);
 
-test("CommandPalette: no inline clamp at the Enter target", () => {
-  assert.doesNotMatch(paletteSource, /items\[\s*Math\.min\(/);
-});
+  test(`${file}: no raw comparison against the stored index`, () => {
+    assert.doesNotMatch(source, /[!=]==?\s*highlight\b|\bhighlight\s*[!=]==?/);
+  });
 
-test("CommandPalette: marker and Enter read the one clamped index", () => {
-  assert.match(
-    paletteSource,
-    /const\s+active\s*=\s*clampHighlight\(\s*highlight\s*,\s*items\.length\s*\)/,
-  );
-  assert.match(paletteSource, /items\[\s*active\s*\]/);
-  assert.ok(
-    countMatches(paletteSource, /index\s*===\s*active/) >= 2,
-    "both the data-highlighted attr and the accent class compare against active",
-  );
-});
+  test(`${file}: no inline clamp at the Enter target`, () => {
+    assert.doesNotMatch(source, /items\[\s*Math\.min\(/);
+  });
 
-test("CommandPalette: the scroll effect is keyed on the clamped index", () => {
-  assert.match(paletteSource, /\},\s*\[\s*active\s*\]\s*\);/);
-});
+  test(`${file}: marker and Enter read the one clamped index`, () => {
+    assert.match(
+      source,
+      /const\s+active\s*=\s*clampHighlight\(\s*highlight\s*,\s*items\.length\s*\)/,
+    );
+    assert.match(source, /items\[\s*active\s*\]/);
+    assert.ok(
+      countMatches(source, /index\s*===\s*active/) >= 2,
+      "both the data-highlighted attr and the accent class compare against active",
+    );
+  });
 
-test("CommandPalette: each arrow arm steps the stored index", () => {
-  const down = /stepHighlight\(\s*highlight\s*,\s*items\.length\s*,\s*1\s*\)/;
-  const up = /stepHighlight\(\s*highlight\s*,\s*items\.length\s*,\s*-1\s*\)/;
-  assert.equal(countMatches(paletteSource, down), 1, "ArrowDown steps +1");
-  assert.equal(countMatches(paletteSource, up), 1, "ArrowUp steps -1");
-  assert.equal(
-    countMatches(paletteSource, /stepHighlight\(/),
-    2,
-    "no other step call",
-  );
-});
+  test(`${file}: the scroll effect is keyed on the clamped index`, () => {
+    assert.match(source, /\},\s*\[\s*active\s*\]\s*\);/);
+  });
+
+  test(`${file}: each arrow arm steps the stored index`, () => {
+    const down = /stepHighlight\(\s*highlight\s*,\s*items\.length\s*,\s*1\s*\)/;
+    const up = /stepHighlight\(\s*highlight\s*,\s*items\.length\s*,\s*-1\s*\)/;
+    assert.equal(countMatches(source, down), 1, "ArrowDown steps +1");
+    assert.equal(countMatches(source, up), 1, "ArrowUp steps -1");
+    assert.equal(
+      countMatches(source, /stepHighlight\(/),
+      2,
+      "no other step call",
+    );
+  });
+}

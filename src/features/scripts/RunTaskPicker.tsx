@@ -3,6 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { PALETTE_DIALOG_CLASS } from "@/features/shortcuts/palette-dialog";
+import {
+  clampHighlight,
+  stepHighlight,
+} from "@/features/shortcuts/palette-highlight";
 import { clipTitle } from "@/lib/clip-title";
 import { useScripts, useTaskRepoKeys } from "@/lib/scripts/queries";
 import { taskInScope } from "@/lib/scripts/scope";
@@ -56,11 +60,10 @@ export function RunTaskPicker({
             t.description.toLowerCase().includes(q)),
       )
     : [];
-  // ONE clamped cursor drives the Enter target, the rendered highlight, and the
-  // arrow steps: the list shrinks under an open picker (a repo switch, the
-  // settled flip), and clamping in only one of those places runs a row that no
-  // row shows as selected. Empty list = -1, which indexes to undefined.
-  const active = items.length > 0 ? Math.min(highlight, items.length - 1) : -1;
+  // The marker, Enter and the scroll read this ONE clamped cursor; the arrows
+  // step from the same clamp inside stepHighlight. A repo switch or the
+  // settled flip can shrink the list past a raw index and unmark Enter's row.
+  const active = clampHighlight(highlight, items.length);
   const highlighted = items[active];
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: scrolls to whichever row carries the highlight
@@ -78,15 +81,12 @@ export function RunTaskPicker({
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
-    // The steps read the CLAMPED cursor, not the stored one: a stale-high stored
-    // value would otherwise step from a row the user never saw highlighted.
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      if (items.length > 0)
-        setHighlight(Math.min(active + 1, items.length - 1));
+      setHighlight(stepHighlight(highlight, items.length, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      if (items.length > 0) setHighlight(Math.max(active - 1, 0));
+      setHighlight(stepHighlight(highlight, items.length, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       if (highlighted) run(highlighted.id);
