@@ -564,7 +564,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Retry focus rescue** — a Retry control whose press can unmount it (an
   error arm swapping to a skeleton or notice) rides `useRetryFocusRescue`
   (ConversationListPanel) with a stable `tabIndex={-1}` host element; focus
-  must never fall to `<body>` on the shown→hidden edge.
+  must never fall to `<body>` on the shown→hidden edge. A detail pane's
+  error-arm Retry carries no disabled state or in-flight label (the arm
+  unmounts the moment the retry fetches), pinned by
+  `scripts/detail-pane-retry.test.mjs`.
 - **Empty-picker copy** — a picker's line while it draws no options rides
   `emptyPickerCopy` (remote-section-state); a read parked with nothing loaded,
   or over a failure, says offline; only a successful read may claim none.

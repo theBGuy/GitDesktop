@@ -400,10 +400,9 @@ export function DiscussionView({
                 variant="outline"
                 size="sm"
                 className="cursor-pointer"
-                disabled={details.isFetching}
                 onClick={() => details.refetch()}
               >
-                {details.isFetching ? "Retrying…" : "Retry"}
+                Retry
               </Button>
             </div>
           ) : undefined

@@ -20,7 +20,7 @@ let loaded;
 function load() {
   if (loaded) return loaded;
   const raw = readFileSync(
-    new URL("../src/features/discussions/DiscussionView.tsx", import.meta.url),
+    new URL(`../${FILE}`, import.meta.url),
     "utf8",
   ).replace(/\r\n/g, "\n");
   loaded = { raw, masked: maskNonCode(raw, true) };
