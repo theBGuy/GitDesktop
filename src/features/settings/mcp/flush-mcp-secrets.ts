@@ -1,8 +1,8 @@
 import { deleteMcpSecret, setMcpSecret } from "@/lib/git/api";
 import type { McpSecretDelete, McpStagedSecret } from "./secret-ops";
 
-// Keychain calls are centralized here because the mcp-secret-keychain-sites
-// guard allowlists this file, not its callers, keeping every draft surface scanned.
+// The keychain calls live here because the mcp-secret-keychain-sites guard lets
+// only SettingsScreen's Save import this module.
 
 /** Writes each staged value in turn and returns the entries that failed — the
  *  input objects themselves, which the settle matches by identity. Never throws:
