@@ -214,7 +214,7 @@ const typescriptWithJsx: LanguageFn = (hljs) => {
 type Register = (name: string, language: LanguageFn) => void;
 
 /** Register all three grammars through `register`. A throw keeps stock. */
-function registerTsNoJsx(register: Register): void {
+function registerPatchedJsGrammars(register: Register): void {
   try {
     register("tsx", typescriptWithJsx);
     register("typescript", typescriptNoJsx);
@@ -234,10 +234,10 @@ export function isTsNoJsx(lang: Language | undefined): boolean {
  * singleton), once per engine: a later custom grammar the user registers under
  * any of these ids must win, so this never re-runs over it.
  */
-export function installTsNoJsx(engine: { register: Register }): void {
+export function installPatchedJsGrammars(engine: { register: Register }): void {
   try {
     if (TS_NO_JSX in engine) return;
-    registerTsNoJsx(engine.register);
+    registerPatchedJsGrammars(engine.register);
     Object.defineProperty(engine, TS_NO_JSX, { value: true });
   } catch {
     // fail soft: ids not yet registered keep their stock grammars
@@ -249,14 +249,14 @@ export function installTsNoJsx(engine: { register: Register }): void {
  * its `typescript` or `javascript` isn't ours — loading the full build restores
  * stock grammars, so this re-checks both registered languages rather than a flag.
  */
-export function ensureTsNoJsx(hljs: HLJSApi): void {
+export function ensurePatchedJsGrammars(hljs: HLJSApi): void {
   try {
     if (
       isTsNoJsx(hljs.getLanguage("typescript")) &&
       isJsParamsComment(hljs.getLanguage("javascript"))
     )
       return;
-    registerTsNoJsx(hljs.registerLanguage);
+    registerPatchedJsGrammars(hljs.registerLanguage);
   } catch {
     // fail soft: ids not yet registered keep their stock grammars
   }

@@ -25,8 +25,8 @@ let hljsCore;
 let stockTypescript;
 let stockJavascript;
 let xml;
-let ensureTsNoJsx;
-let installTsNoJsx;
+let ensurePatchedJsGrammars;
+let installPatchedJsGrammars;
 let isTsNoJsx;
 let stripJsxModes;
 let typescriptNoJsx;
@@ -53,8 +53,8 @@ if (failures.length === 0) {
     { default: stockJavascript },
     { default: xml },
     {
-      ensureTsNoJsx,
-      installTsNoJsx,
+      ensurePatchedJsGrammars,
+      installPatchedJsGrammars,
       isTsNoJsx,
       stripJsxModes,
       typescriptNoJsx,
@@ -653,19 +653,19 @@ function assertFixedParams(run, unchanged) {
       assertParamsClosed(html, `${language} ${label}`);
       assert.ok(
         html.includes('class="hljs-regexp"'),
-        `${label}: regex colored`,
+        `${language} ${label}: regex colored`,
       );
       assert.equal(
         (html.match(/<span class="hljs-comment">/g) ?? []).length,
         comments.length,
-        `${label}: only expected comments`,
+        `${language} ${label}: only expected comments`,
       );
       for (const comment of comments) {
         assert.ok(
           html
             .replaceAll("&#x27;", "'")
             .includes(`<span class="hljs-comment">${comment}</span>`),
-          `${label}: comment colored`,
+          `${language} ${label}: comment colored`,
         );
       }
     }
@@ -679,7 +679,7 @@ function assertFixedParams(run, unchanged) {
         html
           .replaceAll("&#x27;", "'")
           .includes(`<span class="hljs-comment">${comment}</span>`),
-        `${label}: comment colored`,
+        `${language} ${label}: comment colored`,
       );
     }
   }
@@ -688,7 +688,7 @@ function assertFixedParams(run, unchanged) {
     assertParamsClosed(html, `spliced ${label}`);
     assert.ok(
       html.includes('class="hljs-comment"'),
-      `${label}: comment colored`,
+      `${language} ${label}: comment colored`,
     );
   }
   assert.equal(run("typescript")(TS_PAREN_COMMENT), unchanged[0]);
@@ -705,9 +705,9 @@ test("comment chain highlighting finishes in a bounded child process", {
   const coreUrl = import.meta.resolve("highlight.js/lib/core");
   const script = [
     `import hljsCore from ${JSON.stringify(coreUrl)};`,
-    `import { ensureTsNoJsx } from ${JSON.stringify(transformUrl)};`,
+    `import { ensurePatchedJsGrammars } from ${JSON.stringify(transformUrl)};`,
     "const hljs = hljsCore.newInstance();",
-    "ensureTsNoJsx(hljs);",
+    "ensurePatchedJsGrammars(hljs);",
     'const code = "const s = `${ c " + "/* n */ ".repeat(40) + "/ 2 }`;";',
     'hljs.highlight(code, { language: "typescript", ignoreIllegals: true });',
     'const spaces = "const s = `${ a" + " ".repeat(160000) + "/ b }`;";',
@@ -756,12 +756,14 @@ test("markdown params: stock collapses, patched ids and aliases close spans", {
     hljs.highlight(code, { language, ignoreIllegals: true }).value;
   const unchanged = assertStockParams(run);
 
-  ensureTsNoJsx(hljs);
+  ensurePatchedJsGrammars(hljs);
   assertFixedParams(run, unchanged);
   for (const id of ["javascript", "js", "mjs", "cjs", "jsx"]) {
     assertParamsFixed(run(id), JS_PARAMS_REPRO, JS_PARAMS_CONTROL, id);
   }
-  assertParamsFixed(run("tsx"), TS_PARAMS_REPRO, TS_PARAMS_CONTROL, "tsx");
+  for (const id of ["ts", "mts", "cts"]) {
+    assertParamsFixed(run(id), TS_PARAMS_REPRO, TS_PARAMS_CONTROL, id);
+  }
 });
 
 test("markdown params: late full-build and half-ours states re-apply", {
@@ -773,14 +775,14 @@ test("markdown params: late full-build and half-ours states re-apply", {
       language: "javascript",
       ignoreIllegals: true,
     }).value;
-  ensureTsNoJsx(hljs);
+  ensurePatchedJsGrammars(hljs);
   for (const replaceTypescript of [true, false]) {
     if (replaceTypescript) hljs.registerLanguage("typescript", stockTypescript);
     hljs.registerLanguage("javascript", stockJavascript);
     assert.equal(isTsNoJsx(hljs.getLanguage("typescript")), !replaceTypescript);
     assert.ok(!isJsParamsComment(hljs.getLanguage("javascript")));
     assertParamsCollapsed(run, JS_PARAMS_REPRO, "late stock javascript");
-    ensureTsNoJsx(hljs);
+    ensurePatchedJsGrammars(hljs);
     assert.ok(isTsNoJsx(hljs.getLanguage("typescript")));
     assert.ok(isJsParamsComment(hljs.getLanguage("javascript")));
     assertParamsFixed(run, JS_PARAMS_REPRO, JS_PARAMS_CONTROL, "re-applied JS");
@@ -795,7 +797,7 @@ test("the structural predicate removes exactly javascript's JSX mode", {
   assert.equal(stripJsxModes(typescriptNoJsx(hljs)), 0);
 });
 
-test("markdown engine (lib/core): stock collapses, ensureTsNoJsx fixes", {
+test("markdown (lib/core): stock collapses, ensurePatchedJsGrammars fixes", {
   skip,
 }, () => {
   const hljs = hljsCore.newInstance();
@@ -809,7 +811,7 @@ test("markdown engine (lib/core): stock collapses, ensureTsNoJsx fixes", {
   assertCollapsed(run("typescript"), REPRO, "stock");
   assertCollapsed(run("typescript"), IN_TEMPLATE, "stock template");
 
-  ensureTsNoJsx(hljs);
+  ensurePatchedJsGrammars(hljs);
   assert.ok(isTsNoJsx(hljs.getLanguage("typescript")));
   for (const id of ["typescript", "ts", "mts", "cts"]) {
     assertFixed(run(id), REPRO, CONTROL, id);
@@ -828,14 +830,14 @@ test("markdown engine (lib/core): stock collapses, ensureTsNoJsx fixes", {
     ["tsx"],
   );
 
-  // The full-build upgrade re-registers stock; ensureTsNoJsx re-applies.
+  // Full-build registration restores stock; ensurePatchedJsGrammars re-applies.
   hljs.registerLanguage("typescript", stockTypescript);
   assertCollapsed(run("typescript"), REPRO, "re-registered stock");
-  ensureTsNoJsx(hljs);
+  ensurePatchedJsGrammars(hljs);
   assertFixed(run("typescript"), REPRO, CONTROL, "re-applied");
 });
 
-test("diff engine (lowlight): stock collapses, installTsNoJsx fixes", {
+test("diff (lowlight): stock collapses, installPatchedJsGrammars fixes", {
   skip,
 }, () => {
   const engine = highlighter.getHighlighterEngine();
@@ -847,7 +849,7 @@ test("diff engine (lowlight): stock collapses, installTsNoJsx fixes", {
   assertCollapsed(run(lang), REPRO, "stock");
   const unchanged = assertStockParams(run);
 
-  installTsNoJsx(engine);
+  installPatchedJsGrammars(engine);
   assertFixedParams(run, unchanged);
   assertFixed(run(lang), REPRO, CONTROL, ".mts");
   assertFixed(
@@ -867,7 +869,7 @@ test("diff engine (lowlight): stock collapses, installTsNoJsx fixes", {
   const custom = () => ({ contains: [{ scope: "keyword", begin: "const" }] });
   engine.register("typescript", custom);
   engine.register("gd-custom", custom);
-  installTsNoJsx(engine);
+  installPatchedJsGrammars(engine);
   const html = run("typescript")(REPRO);
   assert.ok(!html.includes("hljs-attr"), "custom typescript grammar in use");
   assert.ok(run("gd-custom")("const").includes("hljs-keyword"));

@@ -28,9 +28,9 @@
  * import graph ahead of them — keep it statically imported.
  */
 import hljs from "highlight.js/lib/common";
-import { ensureTsNoJsx } from "@/features/diff/hljs-ts-no-jsx";
+import { ensurePatchedJsGrammars } from "@/features/diff/hljs-ts-no-jsx";
 
-ensureTsNoJsx(hljs);
+ensurePatchedJsGrammars(hljs);
 
 const subscribers = new Set<() => void>();
 
@@ -75,7 +75,7 @@ export function upgradeToFullHljs(): void {
       // non-common grammar (the lazy chunk builds empty and dockerfile &c. never
       // highlight). Reading the default export keeps the whole build live.
       registeredCount = mod.default.listLanguages().length;
-      ensureTsNoJsx(mod.default);
+      ensurePatchedJsGrammars(mod.default);
       fullLoaded = true;
       notify();
     })
