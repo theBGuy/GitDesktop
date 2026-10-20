@@ -1,7 +1,9 @@
 // Pins DiscussionView's adoption of the shared detail-pane ladder: a failed or
 // parked refresh keeps the loaded discussion under the degraded notice instead
-// of swapping the pane for a placeholder. The helper's own transitions are
-// pinned by remote-list-state.test.mjs; these scans pin only the wiring.
+// of swapping the pane for a placeholder. The scans pin the wiring alone (the
+// ladder's five inputs, the notice and its copy, the error arm and its Retry
+// rescue, the one focusable host every arm renders in, the arm-change focus
+// key); remote-list-state.test.mjs pins the helpers' own transitions.
 //
 // Every scan runs on `maskNonCode`'s output, so comments and string/JSX text
 // can't satisfy a pin; a string literal's value is read from the raw source at
@@ -211,14 +213,164 @@ test("no raw error swap replaces loaded content", () => {
   );
 });
 
-test("the ladder reads the fetch in flight", () => {
+/** Each `key: value` pair of `pairs` occurs exactly once in `text` (a masked
+ *  object literal), and its key nowhere else there. */
+function assertPairs(text, call, pairs) {
+  for (const [key, value, shown] of pairs) {
+    const keys = text.match(new RegExp(`(?<![\\w$.])${key}\\s*:`, "g")) ?? [];
+    const exact =
+      text.match(
+        new RegExp(`(?<![\\w$.])${key}\\s*:\\s*${value}\\s*(?=[,}])`, "g"),
+      ) ?? [];
+    assert.ok(
+      keys.length === 1 && exact.length === 1,
+      `${call}( must pass \`${key}: ${shown}\` exactly once`,
+    );
+  }
+}
+
+test("the ladder reads its five inputs from the details read", () => {
   const { masked } = load();
   const body = componentBody(masked);
   const call = soleCall(masked, "resolveDetailPane", body);
+  assertPairs(masked.slice(call.open, call.close + 1), "resolveDetailPane", [
+    ["pending", "details\\s*\\.\\s*isPending", "details.isPending"],
+    ["error", "details\\s*\\.\\s*isError", "details.isError"],
+    ["hasData", "d\\s*!==\\s*undefined", "d !== undefined"],
+    ["paused", "details\\s*\\.\\s*isPaused", "details.isPaused"],
+    ["fetching", "details\\s*\\.\\s*isFetching", "details.isFetching"],
+  ]);
+});
+
+test("the notice copy reads the failure and the switch window", () => {
+  const { raw, masked } = load();
+  const body = componentBody(masked);
+  const failed = masked
+    .slice(body.open, body.close)
+    .match(
+      /\bconst\s+detailFailed\s*=\s*refreshFailed\s*\(\s*details\s*\)\s*;/g,
+    );
+  assert.equal(
+    failed?.length ?? 0,
+    1,
+    `${FILE}: expected one \`const detailFailed = refreshFailed(details);\``,
+  );
+  const call = soleCall(masked, "detailNoticeMessage", body);
+  const args = masked.slice(call.open, call.close + 1);
+  assertPairs(args, "detailNoticeMessage", [
+    ["isError", "detailFailed", "detailFailed"],
+    ["stale", "detailsStale", "detailsStale"],
+  ]);
+  const nouns = [...args.matchAll(/(?<![\w$.])noun\s*:\s*(?=["'])/g)];
+  assert.equal(nouns.length, 1, "detailNoticeMessage( must pass one `noun:`");
+  assert.equal(
+    literalAt(masked, raw, call.open + nouns[0].index + nouns[0][0].length),
+    "discussion",
+  );
+});
+
+test("every arm draws inside the one focusable host", () => {
+  const { raw, masked } = load();
+  const body = componentBody(masked);
+  const def =
+    /\bconst\s+shell\s*=\s*\(\s*content\s*(?::\s*ReactNode\s*)?\)\s*=>\s*\(/.exec(
+      masked,
+    );
+  assert.ok(def, `${FILE}: anchor \`const shell = (content) => (\` missing`);
+  const open = def.index + def[0].length - 1;
+  const close = matchBrace(masked, open);
+  assert.ok(close > open, "the shell helper never closes");
+  const shellText = masked.slice(open, close + 1);
+  const div = /^\(\s*<div\b/.exec(shellText);
+  assert.ok(div, "shell( must render a <div host");
+  const tagStart = open + div[0].length - 4;
+  const tag = masked.slice(tagStart, tagEnd(masked, tagStart) + 1);
+  assert.match(tag, /\btabIndex=\{\s*-1\s*\}/, "the host needs tabIndex={-1}");
+  const ref = /\bref=\{\s*\(\s*(\w+)\s*\)\s*=>\s*\{/.exec(tag);
+  assert.ok(ref, "the host's ref must be a `(node) => { … }` callback");
+  const refOpen = tagStart + ref.index + ref[0].length - 1;
+  const refBody = masked.slice(refOpen, matchBrace(masked, refOpen) + 1);
+  const node = ref[1];
   assert.match(
-    masked.slice(call.open, call.close + 1),
-    /\bfetching\s*:\s*details\s*\.\s*isFetching\b/,
-    "resolveDetailPane( must pass `fetching: details.isFetching`",
+    refBody,
+    new RegExp(`\\bhostRef\\s*\\(\\s*${node}\\s*\\)`),
+    `the host's ref must call hostRef(${node})`,
+  );
+  assert.match(
+    refBody,
+    new RegExp(`\\bfocusHost\\s*\\.\\s*current\\s*=\\s*${node}\\b`),
+    `the host's ref must set focusHost.current = ${node}`,
+  );
+  assert.match(shellText, /\{\s*content\s*\}/, "the host must render content");
+
+  // The three arms and the content return all go through it.
+  const arms = paneArms(masked, raw, body);
+  assert.deepEqual(
+    arms.map((a) => a.literal).sort(),
+    ["error", "offline", "skeleton"],
+    `${FILE}: expected one skeleton, one offline and one error arm`,
+  );
+  const unshelled = [];
+  const viaShell = (at) => /^return\s+shell\s*\(/.test(masked.slice(at));
+  for (const a of arms) {
+    const returns = [...masked.slice(a.from, a.to).matchAll(/\breturn\b/g)];
+    if (
+      returns.length === 0 ||
+      !returns.every((r) => viaShell(a.from + r.index))
+    )
+      unshelled.push(`line ${a.line}`);
+  }
+  let depth = 0;
+  let topReturns = 0;
+  for (let i = body.open + 1; i < body.close; i++) {
+    const c = masked[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (
+      depth === 0 &&
+      /^return\b/.test(masked.slice(i, i + 7)) &&
+      !/[\w$.]/.test(masked[i - 1])
+    ) {
+      topReturns++;
+      if (!viaShell(i)) unshelled.push(`line ${lineOf(raw, i)}`);
+    }
+  }
+  assert.ok(topReturns > 0, `${FILE}: DiscussionView has no content return`);
+  assert.deepEqual(unshelled, [], `${FILE}: a return bypasses shell(`);
+});
+
+test("Retry's focus rescue wraps the error arm's own button", () => {
+  const { raw, masked } = load();
+  const body = componentBody(masked);
+  const rescue = soleCall(masked, "useRetryFocusRescue", body);
+  const arg =
+    /^\(\s*detailPane\s*===\s*("[^"]*")\s*&&\s*details\s*\.\s*isError\s*,?\s*\)$/d.exec(
+      masked.slice(rescue.open, rescue.close + 1),
+    );
+  assert.ok(
+    arg,
+    'useRetryFocusRescue( must take exactly `detailPane === "error" && details.isError`',
+  );
+  assert.equal(
+    literalAt(masked, raw, rescue.open + arg.indices[1][0]),
+    "error",
+  );
+
+  const arm = errorArm(masked, raw, body);
+  const buttons = [];
+  for (const m of masked.slice(arm.from, arm.to).matchAll(/<Button\b/g)) {
+    const start = arm.from + m.index;
+    buttons.push(masked.slice(start, tagEnd(masked, start) + 1));
+  }
+  assert.ok(
+    buttons.some(
+      (t) =>
+        /\bref=\{\s*retryRef\s*\}/.test(t) &&
+        /\bonClick=\{\s*\(\s*\)\s*=>\s*details\s*\.\s*refetch\s*\(\s*\)\s*\}/.test(
+          t,
+        ),
+    ),
+    "the error arm's Retry <Button must take ref={retryRef} and onClick={() => details.refetch()}",
   );
 });
 
