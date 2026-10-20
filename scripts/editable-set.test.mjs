@@ -672,7 +672,7 @@ test("squashGate: an operation in progress holds first", () => {
   );
 });
 
-test("squashGate: with no operation, today's gate and hints", () => {
+test("squashGate: hold precedence with no operation in progress", () => {
   assert.deepEqual(
     gate({ filterActive: true, selectedIndices: [0, 2] }),
     holds("filter-hides-range"),
