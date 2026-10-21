@@ -1,13 +1,30 @@
-import { useDeferredValue, useState } from "react";
+import {
+  type ReactNode,
+  useDeferredValue,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { PathText } from "@/components/path-text";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  refreshFailed,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { clipTitleFromText } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
 import {
   useBranchDiffFiles,
   useBranchFileDiff,
@@ -74,24 +91,111 @@ export function BranchDiffView({
       ? mergeBase.data
       : null;
 
+  // A failed refresh keeps the loaded comparison under a notice; only a read
+  // with nothing loaded replaces the pane.
+  const pane = resolveDetailPane({
+    pending: files.isPending,
+    error: files.isError,
+    hasData: files.data !== undefined,
+    paused: files.isPaused,
+    fetching: files.isFetching,
+  });
+  const failed = refreshFailed(files);
+  // Retry resets the read to pending, swapping the error arm for the skeleton;
+  // every arm renders in the same host div, so focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && files.isError,
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap that unmounts the focused node would drop focus to <body>; land
+  // it on the host. Change-only, so a mount never takes focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${cmpKey}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  const shell = (content: ReactNode) => (
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex h-full flex-col outline-none"
+    >
+      {content}
+    </div>
+  );
+
   // A placeholder list is the PREVIOUS comparison's, so an empty one says nothing
   // about this pair — hold the skeleton rather than claim "no changes" below.
-  if (files.isPending || (files.isPlaceholderData && files.data.length === 0)) {
-    return (
+  // The read is local, so it never parks offline: that arm loads too.
+  if (
+    pane === "skeleton" ||
+    pane === "offline" ||
+    (files.isPlaceholderData && files.data?.length === 0)
+  ) {
+    return shell(
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
         <Skeleton className="h-32 w-full" />
-      </div>
+      </div>,
     );
   }
-  if (files.isError) {
-    return <DiffPlaceholder message="Could not compare these branches" />;
-  }
-  if (files.data.length === 0) {
-    return (
+  if (pane === "error" || !files.data) {
+    return shell(
       <DiffPlaceholder
-        message={`${compare} has no changes relative to ${base}`}
-      />
+        message="Could not compare these branches"
+        action={
+          files.isError ? (
+            <div className="flex flex-col items-center gap-2">
+              <p className="max-w-md text-center text-xs">
+                {presentError(files.error).summary}
+              </p>
+              <Button
+                ref={retryRef}
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                onClick={() => void files.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : undefined
+        }
+      />,
+    );
+  }
+  // Mounted in every content render: its live region announces only text that
+  // arrives after it is in the DOM.
+  const notice = (
+    <DegradedListNotice
+      noun="this comparison"
+      degraded={pane === "content-degraded"}
+      message={detailNoticeMessage({
+        noun: "comparison",
+        isError: failed,
+        stale: files.isPlaceholderData,
+      })}
+      onRetry={failed ? () => void files.refetch() : undefined}
+      className="shrink-0 border-b px-4 py-1.5"
+    />
+  );
+  if (files.data.length === 0) {
+    return shell(
+      <>
+        {notice}
+        <DiffPlaceholder
+          message={`${compare} has no changes relative to ${base}`}
+        />
+      </>,
     );
   }
 
@@ -114,7 +218,7 @@ export function BranchDiffView({
     rowAttr: "data-path",
   });
 
-  return (
+  return shell(
     <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
       <header className="flex items-center gap-2 border-b px-4 py-3 text-xs">
         {/* Branch names are unbreakable tokens — without the clamp a long pair
@@ -139,6 +243,7 @@ export function BranchDiffView({
         />
       </header>
 
+      {notice}
       <DetailRailRow>
         <DetailRail
           className={cn(PLACEHOLDER_FADE, staleDim)}
@@ -204,6 +309,6 @@ export function BranchDiffView({
           )}
         </main>
       </DetailRailRow>
-    </div>
+    </div>,
   );
 }

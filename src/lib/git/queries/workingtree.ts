@@ -99,7 +99,11 @@ export function useSessionFileDiff(
     queryKey: [...repoKeys.diff(repo, filePath, false), "session-base", base],
     queryFn: () => api.gitSessionFileDiff(repo, filePath, base),
     enabled: enabled && Boolean(repo && filePath && base),
-    refetchInterval: enabled && live ? 1500 : false,
+    // An errored read stops polling: each poll would flip `isFetching` and
+    // remount the failure notice and its Retry. Retry, invalidation and focus
+    // refetches still resume it, and a success re-arms the poll.
+    refetchInterval: (query) =>
+      enabled && live && query.state.status !== "error" ? 1500 : false,
     refetchIntervalInBackground: false,
     networkMode: "always",
   });

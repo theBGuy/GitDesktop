@@ -1,5 +1,12 @@
 import { TrashIcon } from "@phosphor-icons/react";
-import { useDeferredValue, useEffectEvent, useState } from "react";
+import {
+  type ReactNode,
+  useDeferredValue,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DiffStat } from "@/components/diff-stat";
@@ -16,9 +23,19 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  refreshFailed,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import type { ImageRevs } from "@/features/diff/ImageDiff";
+import { presentError } from "@/lib/error-summary";
 import {
   useOrphanedStashes,
   useOrphanedStashFileDiff,
@@ -534,14 +551,88 @@ function StashFiles({
       }
     : undefined;
 
-  if (files.isPending) {
-    return null;
+  // A failed refresh keeps the loaded file list under a notice; only a read with
+  // nothing loaded replaces it.
+  const pane = resolveDetailPane({
+    pending: files.isPending,
+    error: files.isError,
+    hasData: files.data !== undefined,
+    paused: files.isPaused,
+    fetching: files.isFetching,
+  });
+  const failed = refreshFailed(files);
+  // Retry resets the read to pending, swapping the error arm for the empty
+  // pending arm; every arm renders in the same column, so focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && files.isError,
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap that unmounts the focused node would drop focus to <body>; land
+  // it on the host. Change-only, so a mount never takes focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${source.kind}:${base}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  const shell = (content: ReactNode) => (
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex min-w-0 flex-1 flex-col outline-none"
+    >
+      <DegradedListNotice
+        noun="this stash"
+        degraded={pane === "content-degraded"}
+        message={detailNoticeMessage({
+          noun: "stash",
+          isError: failed,
+          stale: files.isPlaceholderData,
+        })}
+        onRetry={failed ? () => void files.refetch() : undefined}
+        className="shrink-0 border-b px-3 py-1.5"
+      />
+      <div className="flex min-h-0 flex-1">{content}</div>
+    </div>
+  );
+
+  // The read is local, so it never parks offline: that arm loads too.
+  if (pane === "skeleton" || pane === "offline") {
+    return shell(null);
   }
-  if (files.isError || !files.data) {
-    return (
+  if (pane === "error" || !files.data) {
+    return shell(
       <div className="flex-1">
-        <DiffPlaceholder message="Could not load this stash" />
-      </div>
+        <DiffPlaceholder
+          message="Could not load this stash"
+          action={
+            files.isError ? (
+              <div className="flex flex-col items-center gap-2">
+                <p className="max-w-md text-center text-xs">
+                  {presentError(files.error).summary}
+                </p>
+                <Button
+                  ref={retryRef}
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => void files.refetch()}
+                >
+                  Retry
+                </Button>
+              </div>
+            ) : undefined
+          }
+        />
+      </div>,
     );
   }
 
@@ -555,7 +646,7 @@ function StashFiles({
     rowAttr: "data-path",
   });
 
-  return (
+  return shell(
     <>
       <aside className="flex w-60 shrink-0 flex-col border-r">
         <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
@@ -606,6 +697,6 @@ function StashFiles({
           <DiffPlaceholder message="This stash has no files" />
         )}
       </main>
-    </>
+    </>,
   );
 }

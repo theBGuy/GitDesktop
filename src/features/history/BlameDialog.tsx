@@ -1,5 +1,11 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
@@ -17,8 +23,18 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  refreshFailed,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { diffLang } from "@/features/diff/diff-lang";
 import { HighlightedLine } from "@/features/diff/HighlightedLine";
+import { presentError } from "@/lib/error-summary";
 import { useBlame } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
 import { createCardLatch } from "@/lib/hover-card-latch";
@@ -81,8 +97,37 @@ export function BlameDialog({
   // getVirtualItems() returns [] and no rows paint. See
   // docs/list-virtualization.md and HistoryPanel's `setScrollEl` wiring.
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  // A failed refresh keeps the loaded lines under a notice; only a read with
+  // nothing loaded replaces them.
+  const pane = resolveDetailPane({
+    pending: blame.isPending,
+    error: blame.isError,
+    hasData: blame.data !== undefined,
+    paused: blame.isPaused,
+    fetching: blame.isFetching,
+  });
+  const failed = refreshFailed(blame);
+  // Retry resets the read to pending, swapping the error arm for the spinner;
+  // every arm renders in the same wrapper around the list, so focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && blame.isError,
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap that unmounts the focused node would drop focus to <body>; land
+  // it on the host. Change-only, so a mount never takes focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${path}@${rev ?? ""}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
 
-  return (
+  const shell = (content: ReactNode) => (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* ph-no-capture: file name, path, and full file content — block from replay. */}
       <DialogContent className="ph-no-capture flex h-[80vh] flex-col sm:max-w-4xl">
@@ -95,52 +140,105 @@ export function BlameDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {/* Native overflow scroll container (not the Base-UI ScrollArea) so the
-            virtualizer's getScrollElement gets the real scrollable node — see
-            docs/list-virtualization.md. Fixed-height flex child so getTotalSize
-            resolves (max-h would leave it unbounded → 0). */}
+        {/* The host wraps the list rather than being it: a tabIndex on the
+            scroller would take the keyboard tab stop Chromium gives a scroller
+            with no focusable rows. */}
         <div
-          ref={setScrollEl}
-          // List semantics only while listitem rows are actually rendered — the
-          // pending/error/empty branches would otherwise sit as non-listitem
-          // children of a role="list" (an invalid a11y tree).
-          role={
-            !blame.isPending && !blame.isError && lines.length > 0
-              ? "list"
-              : undefined
-          }
-          aria-label={`Blame for ${name}`}
-          className="min-h-0 flex-1 overflow-auto border"
+          ref={(node) => {
+            hostRef(node);
+            focusHost.current = node;
+          }}
+          tabIndex={-1}
+          className="flex min-h-0 flex-1 flex-col outline-none"
         >
-          {blame.isPending ? (
-            <div className="flex justify-center p-4">
-              <Spinner />
-            </div>
-          ) : blame.isError ? (
-            <p className="p-3 text-xs text-muted-foreground">
-              {shortRev
-                ? `Couldn't blame this file at ${shortRev} — it may not exist at that revision, or the commit isn't available locally.`
-                : "Couldn't blame this file (it may be binary or untracked)."}
-            </p>
-          ) : lines.length === 0 ? (
-            <p className="p-3 text-xs text-muted-foreground">Empty file.</p>
-          ) : (
-            // Data-gated child: the useVirtualizer call lives here (never in the
-            // dialog host) so (a) BlameDialog keeps compiling under the React
-            // Compiler — useVirtualizer bails its host out — and (b) the
-            // virtualizer only mounts once there are lines, dodging the
-            // variable-height first-row measureElement race
-            // (docs/list-virtualization.md).
-            <BlameLines
-              scrollEl={scrollEl}
-              lines={lines}
-              language={lang}
-              onOpenChange={onOpenChange}
-            />
-          )}
+          {/* A sibling of the list, never inside it: a role="list" container
+              takes listitem children only. */}
+          <DegradedListNotice
+            noun="this file's blame"
+            degraded={pane === "content-degraded"}
+            message={detailNoticeMessage({
+              noun: "file's blame",
+              isError: failed,
+              stale: blame.isPlaceholderData,
+            })}
+            onRetry={failed ? () => void blame.refetch() : undefined}
+            className="shrink-0 border-b px-3 py-1.5"
+          />
+          {/* Native overflow scroll container (not the Base-UI ScrollArea) so
+              the virtualizer's getScrollElement gets the real scrollable node
+              — see docs/list-virtualization.md. Fixed-height flex child so
+              getTotalSize resolves (max-h would leave it unbounded → 0). */}
+          <div
+            ref={setScrollEl}
+            // List semantics only while listitem rows are actually rendered —
+            // the pending/error/empty branches would otherwise sit as
+            // non-listitem children of a role="list" (an invalid a11y tree).
+            role={
+              (pane === "content" || pane === "content-degraded") &&
+              lines.length > 0
+                ? "list"
+                : undefined
+            }
+            aria-label={`Blame for ${name}`}
+            className="min-h-0 flex-1 overflow-auto border"
+          >
+            {content}
+          </div>
         </div>
       </DialogContent>
     </Dialog>
+  );
+
+  // The read is local, so it never parks offline: that arm keeps loading.
+  if (pane === "skeleton" || pane === "offline") {
+    return shell(
+      <div className="flex justify-center p-4">
+        <Spinner />
+      </div>,
+    );
+  }
+  if (pane === "error" || !blame.data) {
+    return shell(
+      <div className="flex flex-col items-start gap-2 p-3 text-xs text-muted-foreground">
+        <p>
+          {shortRev
+            ? `Couldn't blame this file at ${shortRev} — it may not exist at that revision, or the commit isn't available locally.`
+            : "Couldn't blame this file (it may be binary or untracked)."}
+        </p>
+        {blame.isError ? (
+          <>
+            <p>{presentError(blame.error).summary}</p>
+            <Button
+              ref={retryRef}
+              variant="outline"
+              size="sm"
+              className="cursor-pointer"
+              onClick={() => void blame.refetch()}
+            >
+              Retry
+            </Button>
+          </>
+        ) : null}
+      </div>,
+    );
+  }
+  if (lines.length === 0) {
+    return shell(
+      <p className="p-3 text-xs text-muted-foreground">Empty file.</p>,
+    );
+  }
+  // Data-gated child: the useVirtualizer call lives here (never in the dialog
+  // host) so (a) BlameDialog keeps compiling under the React Compiler —
+  // useVirtualizer bails its host out — and (b) the virtualizer only mounts once
+  // there are lines, dodging the variable-height first-row measureElement race
+  // (docs/list-virtualization.md).
+  return shell(
+    <BlameLines
+      scrollEl={scrollEl}
+      lines={lines}
+      language={lang}
+      onOpenChange={onOpenChange}
+    />,
   );
 }
 
