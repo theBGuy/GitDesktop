@@ -669,6 +669,16 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
 /// removal is `git_discard_paths`' recycle-bin path).
 #[tauri::command]
 pub async fn git_discard_untracked_lines(
+    state: State<'_, AppState>,
+    repo_path: String,
+    path: String,
+    lines: Vec<u32>,
+) -> AppResult<()> {
+    git_discard_untracked_lines_core(&state, repo_path, path, lines).await
+}
+
+pub(crate) async fn git_discard_untracked_lines_core(
+    state: &AppState,
     repo_path: String,
     path: String,
     lines: Vec<u32>,
@@ -676,8 +686,20 @@ pub async fn git_discard_untracked_lines(
     if lines.is_empty() {
         return Err(AppError::InvalidArgument("no lines selected".into()));
     }
-    let full = Path::new(&repo_path).join(&path);
+    let rel = discard_rel_path(&path).map_err(|why| line_discard_refusal(&path, why))?;
+    // Status and rewrite share one hold; lock-free runners avoid re-acquiring it.
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a discard").await?;
+    let top = crate::git::runner::worktree_toplevel(&repo_path).await?;
+    let listed = untracked_paths(&top).await?;
+    if !listed.contains(&rel) {
+        return Err(line_discard_refusal(&path, DISCARD_NOT_NEW));
+    }
     tauri::async_runtime::spawn_blocking(move || -> AppResult<()> {
+        if linked_component(&top, &rel, true)? {
+            return Err(line_discard_refusal(&path, DISCARD_LINKED));
+        }
+        let full = Path::new(&top).join(&rel);
         let content = std::fs::read_to_string(&full)?;
         let drop: std::collections::HashSet<u32> = lines.into_iter().collect();
         std::fs::write(&full, remove_lines(&content, &drop))?;
@@ -1517,9 +1539,11 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
     // point-of-acquisition semantics.
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a discard").await?;
+    // Names from git status are root-relative, so join them onto the checkout root.
+    let top = crate::git::runner::worktree_toplevel(&repo_path).await?;
 
     let status_out = run_git(
-        Some(&repo_path),
+        Some(&top),
         &[
             "status",
             "--porcelain=v2",
@@ -1538,20 +1562,18 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
         .collect();
 
     if !untracked.is_empty() {
-        let repo = repo_path.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            for path in untracked {
-                let full = Path::new(&repo).join(&path);
-                crate::fsops::trash_delete(&full).map_err(AppError::Io)?;
-            }
-            Ok::<(), AppError>(())
-        })
-        .await
-        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
+        let top = top.clone();
+        let entries: Vec<_> = untracked
+            .into_iter()
+            .map(|rel| (rel.clone(), rel))
+            .collect();
+        tauri::async_runtime::spawn_blocking(move || trash_entries(&top, &entries))
+            .await
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
     }
 
     let head_exists = run_git_raw(
-        Some(&repo_path),
+        Some(&top),
         &["rev-parse", "--verify", "--quiet", "HEAD"],
         DEFAULT_TIMEOUT,
     )
@@ -1559,12 +1581,7 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
     .code
         == 0;
     if head_exists {
-        run_git(
-            Some(&repo_path),
-            &["reset", "--hard", "HEAD"],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        run_git(Some(&top), &["reset", "--hard", "HEAD"], DEFAULT_TIMEOUT).await?;
     }
     Ok(())
 }
@@ -1647,12 +1664,151 @@ pub(crate) fn stash_saved_nothing(stdout: &str) -> bool {
     stdout.trim_start().starts_with("No local changes to save")
 }
 
-/// One selected file to discard, paired with whether it's untracked (which
-/// decides recycle-bin vs. `git restore`).
+/// One selected file to discard; an untracked flag must agree with git status
+/// before the file can go to the recycle bin.
 #[derive(serde::Deserialize)]
 pub struct DiscardPath {
     pub path: String,
     pub untracked: bool,
+}
+
+const DISCARD_OUTSIDE: &str = "it isn't inside this repository's working tree";
+const DISCARD_GIT_DIR: &str = "it's inside the repository's .git folder";
+const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
+const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and try again";
+
+/// Pure lexical gate; returns git's spelling without resolving filesystem names.
+fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
+    let s = if cfg!(windows) {
+        raw.replace('\\', "/")
+    } else {
+        raw.to_string()
+    };
+    if s.is_empty() || s.contains('\0') || s.starts_with('/') {
+        return Err(DISCARD_OUTSIDE);
+    }
+    if cfg!(windows) && s.contains(':') {
+        return Err(DISCARD_OUTSIDE);
+    }
+    let body = s.strip_suffix('/').unwrap_or(&s);
+    if body.is_empty() {
+        return Err(DISCARD_OUTSIDE);
+    }
+    for seg in body.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return Err(DISCARD_OUTSIDE);
+        }
+        let trimmed = seg.trim_end_matches(['.', ' ']);
+        if cfg!(windows) && trimmed.is_empty() {
+            return Err(DISCARD_OUTSIDE);
+        }
+        if trimmed.eq_ignore_ascii_case(".git") {
+            return Err(DISCARD_GIT_DIR);
+        }
+    }
+    Ok(s)
+}
+
+fn discard_shown(raw: &str) -> String {
+    let shown: String = raw
+        .chars()
+        .filter(|&c| {
+            !matches!(
+                c as u32,
+                0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069
+                    | 0x00AD | 0x061C | 0xFEFF
+            )
+        })
+        .map(|c| {
+            if c.is_control() {
+                char::REPLACEMENT_CHARACTER
+            } else {
+                c
+            }
+        })
+        .collect();
+    if shown.is_empty() {
+        "an empty path".to_string()
+    } else {
+        shown
+    }
+}
+
+fn discard_refusal(raw: &str, why: &str) -> AppError {
+    let shown = discard_shown(raw);
+    AppError::InvalidArgument(format!(
+        "Can't discard {shown} — {why}. Nothing was discarded."
+    ))
+}
+
+fn line_discard_refusal(raw: &str, why: &str) -> AppError {
+    let shown = discard_shown(raw);
+    AppError::InvalidArgument(format!(
+        "Can't discard lines from {shown} — {why}. Nothing was changed."
+    ))
+}
+
+/// Exact UTF-8 status names only; caller holds the working-tree lock.
+async fn untracked_paths(top: &str) -> AppResult<std::collections::HashSet<String>> {
+    let out = run_git(
+        Some(top),
+        &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let mut paths = std::collections::HashSet::new();
+    let mut records = out.stdout.split(|&b| b == 0);
+    while let Some(record) = records.next() {
+        if let Some(path) = record.strip_prefix(b"? ") {
+            if let Ok(path) = std::str::from_utf8(path) {
+                paths.insert(path.to_string());
+            }
+        } else if record.starts_with(b"2 ") {
+            records.next();
+        }
+    }
+    Ok(paths)
+}
+
+/// Probe below the root without following links; line rewrites also probe the leaf.
+fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std::io::Result<bool> {
+    let segments: Vec<_> = rel.strip_suffix('/').unwrap_or(rel).split('/').collect();
+    let count = segments.len().saturating_sub(usize::from(!include_leaf));
+    let mut p = Path::new(top).to_path_buf();
+    for seg in segments.iter().take(count) {
+        p.push(seg);
+        #[cfg(windows)]
+        let spelling = crate::fsops::verbatim_path(&p).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no verbatim form")
+        })?;
+        #[cfg(not(windows))]
+        let spelling = &p;
+        match std::fs::symlink_metadata(spelling) {
+            Ok(m) if m.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+fn refuse_linked(top: &str, entries: &[(String, String)]) -> AppResult<()> {
+    for (raw, rel) in entries {
+        if linked_component(top, rel, false)? {
+            return Err(discard_refusal(raw, DISCARD_LINKED));
+        }
+    }
+    Ok(())
+}
+
+/// Every entry must pass the link walk before the first recycle-bin operation.
+fn trash_entries(top: &str, entries: &[(String, String)]) -> AppResult<()> {
+    refuse_linked(top, entries)?;
+    for (_, rel) in entries {
+        crate::fsops::trash_delete(&Path::new(top).join(rel))?;
+    }
+    Ok(())
 }
 
 /// Discards working-tree changes for a selection of files: tracked files are
@@ -1672,38 +1828,52 @@ pub(crate) async fn git_discard_paths_core(
     repo_path: String,
     paths: Vec<DiscardPath>,
 ) -> AppResult<()> {
-    let untracked: Vec<String> = paths
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let relative: Vec<String> = paths
         .iter()
-        .filter(|p| p.untracked)
-        .map(|p| p.path.clone())
-        .collect();
-    // Literal pathspecs: a `[slug]`-style path would otherwise also restore its
-    // glob-siblings, discarding edits the user never selected. The untracked half
-    // below takes the path as a filesystem name instead, so it must stay raw.
-    let tracked: Vec<String> = paths
-        .iter()
-        .filter(|p| !p.untracked)
-        .map(|p| crate::git::pathspec::literal(&p.path))
-        .collect();
+        .map(|p| discard_rel_path(&p.path).map_err(|why| discard_refusal(&p.path, why)))
+        .collect::<AppResult<_>>()?;
 
-    if !untracked.is_empty() {
-        let repo = repo_path.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            for path in untracked {
-                let full = Path::new(&repo).join(&path);
-                crate::fsops::trash_delete(&full).map_err(AppError::Io)?;
+    // Status, trash and restore share ONE hold. Only lock-free runners belong
+    // inside it: run_git_mutating would re-acquire this non-reentrant lock.
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a discard").await?;
+    let top = crate::git::runner::worktree_toplevel(&repo_path).await?;
+    let listed = untracked_paths(&top).await?;
+
+    // The flag and status must both say untracked, or the whole batch is refused.
+    // A restore fallback would break the confirmation's recycle-bin promise.
+    let mut trash = Vec::new();
+    let mut tracked = Vec::new();
+    for (p, rel) in paths.into_iter().zip(relative) {
+        if p.untracked {
+            if !listed.contains(&rel) {
+                return Err(discard_refusal(&p.path, DISCARD_NOT_NEW));
             }
-            Ok::<(), AppError>(())
-        })
-        .await
-        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
+            trash.push((p.path, rel));
+        } else {
+            // Literal pathspecs: a `[slug]`-style path would otherwise also restore its
+            // glob-siblings. Trash entries instead use normalized filesystem names.
+            tracked.push(crate::git::pathspec::literal(&rel));
+        }
+    }
+
+    if !trash.is_empty() {
+        let top = top.clone();
+        tauri::async_runtime::spawn_blocking(move || trash_entries(&top, &trash))
+            .await
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
     }
 
     // Chunked to stay under the Windows ~32K command-line limit on big selections.
     for batch in tracked.chunks(100) {
         let mut args = vec!["restore", "--"];
         args.extend(batch.iter().map(String::as_str));
-        run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+        run_git_raw_index_retry(&top, &args, DEFAULT_TIMEOUT)
+            .await?
+            .exit_verdict()?;
     }
     Ok(())
 }
@@ -15541,6 +15711,583 @@ detached
         );
     }
 
+    async fn discard_pin_excludes(repo: &str, dir: &Path) {
+        git(
+            repo,
+            &[
+                "config",
+                "core.excludesFile",
+                dir.join("no-global-excludes").to_str().unwrap(),
+            ],
+        )
+        .await;
+    }
+
+    fn discard_arg(path: &str, untracked: bool) -> DiscardPath {
+        DiscardPath {
+            path: path.into(),
+            untracked,
+        }
+    }
+
+    fn discard_message(error: AppError) -> String {
+        match error {
+            AppError::InvalidArgument(message) => message,
+            other => panic!("expected discard refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discard_rel_path_accepts_git_spellings_and_refuses_escapes() {
+        for raw in [
+            "a.txt",
+            "src/new.txt",
+            "sub/",
+            ".gitignore",
+            ".github/x.yml",
+            "x.git",
+            ".git2/a",
+            "dir.with.dots/x",
+        ] {
+            assert_eq!(discard_rel_path(raw), Ok(raw.to_string()), "{raw:?}");
+        }
+        for raw in [
+            "",
+            "/etc/passwd",
+            "../x",
+            "a/../b",
+            "./a",
+            "a/./b",
+            "a//b",
+            ".",
+            "..",
+            "/",
+            "a\0b",
+        ] {
+            assert_eq!(discard_rel_path(raw), Err(DISCARD_OUTSIDE), "{raw:?}");
+        }
+        for raw in [
+            ".git",
+            ".git/config",
+            ".GIT/config",
+            "sub/.git/HEAD",
+            "sub/.Git",
+            ".git./config",
+            ".git /config",
+        ] {
+            assert_eq!(discard_rel_path(raw), Err(DISCARD_GIT_DIR), "{raw:?}");
+        }
+        #[cfg(windows)]
+        {
+            assert_eq!(discard_rel_path(r"a\b.txt"), Ok("a/b.txt".into()));
+            for raw in [
+                r"a\..\b",
+                "C:/x",
+                "C:x",
+                r"\\server\share\x",
+                r"\\?\C:\x",
+                "a.txt:s",
+                "...",
+                "a/.. /b",
+                ". ",
+            ] {
+                assert_eq!(discard_rel_path(raw), Err(DISCARD_OUTSIDE), "{raw:?}");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(discard_rel_path(r"a\b"), Ok(r"a\b".into()));
+            assert_eq!(discard_rel_path("..."), Ok("...".into()));
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_paths_with_no_paths_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        git_discard_paths_core(
+            &AppState::default(),
+            dir.path().to_string_lossy().into_owned(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn discard_paths_refuses_an_outside_path_and_discards_nothing() {
+        let (dir, repo) = setup_repo("discard-outside").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "keep").unwrap();
+        for raw in [
+            victim.to_string_lossy().into_owned(),
+            format!(
+                "../{}/victim.txt",
+                outside.path().file_name().unwrap().to_string_lossy()
+            ),
+        ] {
+            let error = git_discard_paths_core(
+                &AppState::default(),
+                repo.clone(),
+                vec![discard_arg("keep.txt", true), discard_arg(&raw, true)],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                discard_message(error),
+                format!("Can't discard {raw} — {DISCARD_OUTSIDE}. Nothing was discarded.")
+            );
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+                "keep"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_paths_refuses_git_metadata_paths() {
+        let (dir, repo) = setup_repo("discard-metadata").await;
+        let before = std::fs::read(dir.path().join(".git/config")).unwrap();
+        for raw in [".git/config", ".GIT/HEAD"] {
+            let error = git_discard_paths_core(
+                &AppState::default(),
+                repo.clone(),
+                vec![discard_arg(raw, true)],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                discard_message(error),
+                format!("Can't discard {raw} — {DISCARD_GIT_DIR}. Nothing was discarded.")
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join(".git/config")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_paths_refuses_a_tracked_file_flagged_untracked() {
+        let (dir, repo) = setup_repo("discard-tracked-flag").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        commit_file(&repo, dir.path(), "t.txt", "v0\n", "tracked").await;
+        std::fs::write(dir.path().join("t.txt"), "dirty\n").unwrap();
+        std::fs::write(dir.path().join("u.txt"), "new\n").unwrap();
+        let error = git_discard_paths_core(
+            &AppState::default(),
+            repo,
+            vec![discard_arg("u.txt", true), discard_arg("t.txt", true)],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard t.txt — Git doesn't list it as a new file, so refresh and try again. Nothing was discarded.");
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("t.txt")).unwrap()),
+            "dirty\n"
+        );
+        assert!(dir.path().join("u.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn discard_paths_refuses_a_staged_new_file_flagged_untracked() {
+        let (dir, repo) = setup_repo("discard-staged-flag").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::write(dir.path().join("n.txt"), "new\n").unwrap();
+        git(&repo, &["add", "n.txt"]).await;
+        let error = git_discard_paths_core(
+            &AppState::default(),
+            repo.clone(),
+            vec![discard_arg("n.txt", true)],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard n.txt — Git doesn't list it as a new file, so refresh and try again. Nothing was discarded.");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("n.txt")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(
+            git(&repo, &["diff", "--cached", "--name-only"])
+                .await
+                .trim(),
+            "n.txt"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_paths_trashes_confirmed_untracked_and_restores_tracked() {
+        let (dir, repo) = setup_repo("discard-mixed").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::write(dir.path().join("u.txt"), "new\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), "dirty\n").unwrap();
+        git_discard_paths_core(
+            &AppState::default(),
+            repo,
+            vec![discard_arg("u.txt", true), discard_arg("a.txt", false)],
+        )
+        .await
+        .unwrap();
+        assert!(!dir.path().join("u.txt").exists());
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("a.txt")).unwrap()),
+            "v0\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discard_paths_holds_the_repo_across_the_untracked_sweep() {
+        let (dir, repo) = setup_repo("discard-paths-hold").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::write(dir.path().join("untracked.txt"), "new\n").unwrap();
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.working_tree_lock(&repo).await;
+        let guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+        let discard = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                git_discard_paths_core(&state, repo, vec![discard_arg("untracked.txt", true)]).await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            dir.path().join("untracked.txt").exists(),
+            "the untracked sweep must wait for the lock"
+        );
+        drop(guard);
+        discard.await.unwrap().unwrap();
+        assert!(!dir.path().join("untracked.txt").exists());
+    }
+
+    #[cfg(any(windows, unix))]
+    fn discard_directory_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &target.to_string_lossy(),
+                ])
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn discard_linked_component_flags_links_between_root_and_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+        std::fs::write(outside.path().join("victim.txt"), "precious").unwrap();
+        discard_directory_link(&root.path().join("link"), outside.path());
+        let top = root.path().to_str().unwrap();
+        assert!(linked_component(top, "link/victim.txt", false).unwrap());
+        assert!(!linked_component(top, "real/x.txt", false).unwrap());
+        assert!(!linked_component(top, "link", false).unwrap());
+        assert!(linked_component(top, "link", true).unwrap());
+        assert!(!linked_component(top, "missing/x", false).unwrap());
+    }
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn discard_paths_refuses_an_entry_beyond_a_link() {
+        let (dir, repo) = setup_repo("discard-link").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        discard_directory_link(&dir.path().join("link"), outside.path());
+        let error = git_discard_paths_core(
+            &AppState::default(),
+            repo.clone(),
+            vec![discard_arg("link/victim.txt", true)],
+        )
+        .await
+        .unwrap_err();
+        let message = discard_message(error);
+        println!("link traversal refusal: {message}");
+        assert!(
+            [DISCARD_NOT_NEW, DISCARD_LINKED].iter().any(|why| message
+                == format!("Can't discard link/victim.txt — {why}. Nothing was discarded.")),
+            "unexpected refusal: {message}"
+        );
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
+        #[cfg(windows)]
+        {
+            let _ =
+                git_discard_paths_core(&AppState::default(), repo, vec![discard_arg("link", true)])
+                    .await;
+            assert!(
+                victim.exists(),
+                "recycling the junction leaf must preserve its destination"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discard_paths_resolves_against_the_checkout_root_from_a_subdirectory() {
+        let (dir, repo) = setup_repo("discard-subdir").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        commit_file(&repo, dir.path(), "sub/s.txt", "sub\n", "subdirectory").await;
+        std::fs::write(dir.path().join("a.txt"), "dirty\n").unwrap();
+        let sub = dir.path().join("sub").to_string_lossy().into_owned();
+        git_discard_paths_core(
+            &AppState::default(),
+            sub.clone(),
+            vec![discard_arg("a.txt", false)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("a.txt")).unwrap()),
+            "v0\n"
+        );
+        #[cfg(windows)]
+        {
+            std::fs::write(dir.path().join("top.txt"), "new\n").unwrap();
+            git_discard_paths_core(
+                &AppState::default(),
+                sub,
+                vec![discard_arg("top.txt", true)],
+            )
+            .await
+            .unwrap();
+            assert!(!dir.path().join("top.txt").exists());
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_all_resolves_against_the_checkout_root_from_a_subdirectory() {
+        let (dir, repo) = setup_repo("discard-all-subdir").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        commit_file(&repo, dir.path(), "sub/s.txt", "sub\n", "subdirectory").await;
+        std::fs::write(dir.path().join("a.txt"), "dirty\n").unwrap();
+        std::fs::write(dir.path().join("top.txt"), "new\n").unwrap();
+        std::fs::write(dir.path().join("sub/new.txt"), "new\n").unwrap();
+        git_discard_all_core(
+            &AppState::default(),
+            dir.path().join("sub").to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+        assert!(!dir.path().join("top.txt").exists());
+        assert!(!dir.path().join("sub/new.txt").exists());
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("a.txt")).unwrap()),
+            "v0\n"
+        );
+    }
+
+    #[test]
+    fn discard_cores_trash_only_through_trash_entries() {
+        let source = include_str!("ops.rs");
+        let strip_comments = |s: &str| -> String {
+            s.lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let body = |name: &str| -> String {
+            let (_, tail) = source.split_once(&format!("fn {name}(")).unwrap();
+            strip_comments(tail.split_once("\n}").unwrap().0)
+        };
+        for name in ["git_discard_paths_core", "git_discard_all_core"] {
+            let code = body(name);
+            assert!(code.contains("trash_entries("), "{name}");
+            assert!(!code.contains("trash_delete("), "{name}");
+            assert!(!code.contains("refuse_linked("), "{name}");
+        }
+        let trash = body("trash_entries");
+        let check = trash.find("refuse_linked(").unwrap();
+        assert_eq!(trash.matches("refuse_linked(").count(), 1);
+        assert!(check < trash.find("for ").unwrap());
+        assert!(check < trash.find("trash_delete(").unwrap());
+        let production = strip_comments(source.split_once("\nmod tests {").unwrap().0);
+        assert_eq!(production.matches("trash_delete(").count(), 1);
+        assert_eq!(trash.matches("trash_delete(").count(), 1);
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn discard_trash_entries_refuses_a_linked_entry_before_trashing_any() {
+        let top = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(top.path().join("real.txt"), "keep").unwrap();
+        std::fs::write(outside.path().join("victim.txt"), "precious").unwrap();
+        discard_directory_link(&top.path().join("link"), outside.path());
+        let error = trash_entries(
+            top.path().to_str().unwrap(),
+            &[
+                ("real.txt".into(), "real.txt".into()),
+                ("link/victim.txt".into(), "link/victim.txt".into()),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard link/victim.txt — it's reached through a symbolic link or junction. Nothing was discarded.");
+        assert_eq!(
+            std::fs::read_to_string(top.path().join("real.txt")).unwrap(),
+            "keep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
+            "precious"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_all_refuses_an_entry_beyond_a_link_before_trashing_or_resetting() {
+        let (dir, repo) = setup_repo("discard-all-link").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, b"precious\r\nsecond line").unwrap();
+        std::fs::write(dir.path().join("keep.txt"), b"keep\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"dirty\n").unwrap();
+        discard_directory_link(&dir.path().join("link"), outside.path());
+
+        let error = git_discard_all_core(&AppState::default(), repo)
+            .await
+            .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard link/victim.txt — it's reached through a symbolic link or junction. Nothing was discarded.");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious\r\nsecond line");
+        assert_eq!(
+            std::fs::read(dir.path().join("keep.txt")).unwrap(),
+            b"keep\n"
+        );
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"dirty\n");
+    }
+
+    #[test]
+    fn discard_refusals_show_empty_paths_and_strip_line_separators() {
+        let separators: String = [0x2028, 0x2029]
+            .into_iter()
+            .map(|code| char::from_u32(code).unwrap())
+            .collect();
+        for raw in ["", separators.as_str()] {
+            assert_eq!(
+                discard_message(discard_refusal(raw, DISCARD_OUTSIDE)),
+                "Can't discard an empty path — it isn't inside this repository's working tree. Nothing was discarded."
+            );
+            assert_eq!(
+                discard_message(line_discard_refusal(raw, DISCARD_OUTSIDE)),
+                "Can't discard lines from an empty path — it isn't inside this repository's working tree. Nothing was changed."
+            );
+        }
+        assert_eq!(discard_shown(&format!("a{separators}.txt")), "a.txt");
+    }
+
+    #[tokio::test]
+    async fn discard_untracked_lines_refuses_outside_tracked_and_ignored_paths() {
+        let (dir, repo) = setup_repo("discard-lines-refusal").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.path().join("ignored.txt"), "ignored\n").unwrap();
+        let raw = format!(
+            "../{}/victim.txt",
+            outside.path().file_name().unwrap().to_string_lossy()
+        );
+        for (path, why) in [
+            (&*raw, DISCARD_OUTSIDE),
+            ("a.txt", DISCARD_NOT_NEW),
+            ("ignored.txt", DISCARD_NOT_NEW),
+        ] {
+            let error = git_discard_untracked_lines_core(
+                &AppState::default(),
+                repo.clone(),
+                path.into(),
+                vec![1],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                discard_message(error),
+                format!("Can't discard lines from {path} — {why}. Nothing was changed.")
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert_eq!(
+            nlf(std::fs::read_to_string(dir.path().join("a.txt")).unwrap()),
+            "v0\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("ignored.txt")).unwrap(),
+            "ignored\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn discard_untracked_lines_removes_only_the_selected_lines() {
+        let (dir, repo) = setup_repo("discard-lines-content").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::write(dir.path().join("n.txt"), "1\r\n2\r\n3").unwrap();
+        git_discard_untracked_lines_core(&AppState::default(), repo, "n.txt".into(), vec![2])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("n.txt")).unwrap(), b"1\r\n3");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discard_untracked_lines_refuses_a_linked_entry() {
+        let (dir, repo) = setup_repo("discard-lines-link").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("link")).unwrap();
+        let error =
+            git_discard_untracked_lines_core(&AppState::default(), repo, "link".into(), vec![1])
+                .await
+                .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard lines from link — it's reached through a symbolic link or junction. Nothing was changed.");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_untracked_lines_refuses_a_linked_ancestor() {
+        let (dir, repo) = setup_repo("discard-lines-ancestor").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, b"precious\r\nsecond line").unwrap();
+        discard_directory_link(&dir.path().join("link"), outside.path());
+
+        let error = git_discard_untracked_lines_core(
+            &AppState::default(),
+            repo,
+            "link/victim.txt".into(),
+            vec![1],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard lines from link/victim.txt — it's reached through a symbolic link or junction. Nothing was changed.");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious\r\nsecond line");
+    }
+
     /// Discarding a path holding glob metacharacters touches ONLY that path.
     /// Pathspecs glob, so a raw `src/app/[slug]/page.tsx` also restores the
     /// character-class sibling `src/app/s/page.tsx` — silently destroying
@@ -15598,6 +16345,7 @@ detached
     #[tokio::test]
     async fn discard_removes_reserved_device_named_files() {
         let (dir, repo) = setup_repo("discard-reserved").await;
+        discard_pin_excludes(&repo, dir.path()).await;
         let root = dir.path().to_path_buf();
         for name in ["nul", "nul.txt"] {
             std::fs::write(verbatim(&root, name), b"x\n").expect("verbatim write");
@@ -15643,6 +16391,7 @@ detached
     #[tokio::test(flavor = "multi_thread")]
     async fn discard_all_holds_the_repo_across_the_untracked_sweep() {
         let (dir, repo) = setup_repo("discard-hold").await;
+        discard_pin_excludes(&repo, dir.path()).await;
         commit_file(&repo, dir.path(), "tracked.txt", "v0\n", "add tracked").await;
         std::fs::write(dir.path().join("tracked.txt"), "dirty\n").unwrap();
         std::fs::write(dir.path().join("untracked.txt"), "u\n").unwrap();

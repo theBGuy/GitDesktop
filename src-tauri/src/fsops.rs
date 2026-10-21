@@ -128,7 +128,7 @@ pub(crate) fn path_has_reserved_component(path: &Path) -> bool {
 /// process cwd would target a file the caller never named — and for a `\\.\`
 /// device-namespace path, which names a device rather than a file on disk.
 #[cfg(windows)]
-fn verbatim_path(path: &Path) -> Option<PathBuf> {
+pub(crate) fn verbatim_path(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
