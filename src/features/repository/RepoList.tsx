@@ -21,6 +21,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  clampHighlight,
+  stepHighlight,
+} from "@/features/shortcuts/palette-highlight";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { applyFrozenOrder, frozenPathKey } from "@/lib/frozen-order";
@@ -292,7 +296,12 @@ export function RepoList({
     ...recent,
     ...groupNames.flatMap((name) => groups.get(name) ?? []),
   ];
-  const highlightedPath = visible[highlight]?.path ?? null;
+  // -1 sentinel = the user hasn't arrowed since the last filter edit. With a
+  // filter typed the first match is the cursor (Enter opens it, so it must be
+  // marked); with none there is no cursor, so a stray Enter never opens a repo.
+  const active =
+    !q && highlight < 0 ? -1 : clampHighlight(highlight, visible.length);
+  const highlightedPath = visible[active]?.path ?? null;
 
   // Keep the keyboard highlight in view as it moves.
   // biome-ignore lint/correctness/useExhaustiveDependencies: scrolls to whichever row carries the current highlight
@@ -300,7 +309,7 @@ export function RepoList({
     listRef.current
       ?.querySelector('[data-highlighted="true"]')
       ?.scrollIntoView({ block: "nearest" });
-  }, [highlight]);
+  }, [active]);
 
   async function handleOpen(path: string) {
     setOpeningPath(path);
@@ -316,15 +325,23 @@ export function RepoList({
   function handleKeyDown(e: React.KeyboardEvent) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setHighlight((h) => Math.min(h + 1, visible.length - 1));
+      setHighlight(
+        active < 0
+          ? clampHighlight(0, visible.length)
+          : stepHighlight(active, visible.length, 1),
+      );
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setHighlight((h) => Math.max(h - 1, 0));
+      setHighlight(
+        active < 0
+          ? clampHighlight(0, visible.length)
+          : stepHighlight(active, visible.length, -1),
+      );
     } else if (e.key === "Enter") {
-      // Open the highlighted repo, or the first match of a typed filter.
-      // Plain Enter with no highlight and no filter does nothing, so an
+      // Open the marked row; while filtering the first match carries the
+      // cursor. With no filter and no arrowing nothing is marked, so an
       // accidental keypress never opens a repo.
-      const target = visible[highlight] ?? (q ? visible[0] : undefined);
+      const target = visible[active];
       if (target && !openingPath) handleOpen(target.path);
     }
   }

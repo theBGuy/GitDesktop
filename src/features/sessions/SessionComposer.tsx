@@ -11,6 +11,7 @@ import {
 } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { clampHighlight } from "@/features/shortcuts/palette-highlight";
 import { type AgentKind, defaultAgentKind } from "@/lib/ai/agent";
 import { estimateRunCost } from "@/lib/ai/cost";
 import type { ContainerStatus } from "@/lib/ai/sandbox";
@@ -570,6 +571,10 @@ export function SessionComposer({
     () => (slash ? filterCommands(commands, slash.query) : []),
     [slash, commands],
   );
+  // The one cursor per popup that the marker, aria and Enter read: either list
+  // can shrink under a stored index (a refetch, an agent switch).
+  const mentionActive = clampHighlight(mentionIndex, matches.length);
+  const slashActive = clampHighlight(slashIndex, slashMatches.length);
 
   const clearDraft = () => {
     setDraft("");
@@ -752,19 +757,19 @@ export function SessionComposer({
       if (slashMatches.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          setSlashIndex((i) => (i + 1) % slashMatches.length);
+          setSlashIndex((slashActive + 1) % slashMatches.length);
           return;
         }
         if (e.key === "ArrowUp") {
           e.preventDefault();
           setSlashIndex(
-            (i) => (i - 1 + slashMatches.length) % slashMatches.length,
+            (slashActive - 1 + slashMatches.length) % slashMatches.length,
           );
           return;
         }
         if (e.key === "Enter" || e.key === "Tab") {
           e.preventDefault();
-          selectSlash(slashMatches[slashIndex]);
+          selectSlash(slashMatches[slashActive]);
           return;
         }
       } else if (e.key === "Tab") {
@@ -783,17 +788,19 @@ export function SessionComposer({
       if (matches.length > 0) {
         if (e.key === "ArrowDown") {
           e.preventDefault();
-          setMentionIndex((i) => (i + 1) % matches.length);
+          setMentionIndex((mentionActive + 1) % matches.length);
           return;
         }
         if (e.key === "ArrowUp") {
           e.preventDefault();
-          setMentionIndex((i) => (i - 1 + matches.length) % matches.length);
+          setMentionIndex(
+            (mentionActive - 1 + matches.length) % matches.length,
+          );
           return;
         }
         if (e.key === "Enter" || e.key === "Tab") {
           e.preventDefault();
-          insertMention(matches[mentionIndex]);
+          insertMention(matches[mentionActive]);
           return;
         }
       } else if (e.key === "Enter" || e.key === "Tab") {
@@ -859,7 +866,7 @@ export function SessionComposer({
           {mention && (
             <MentionList
               matches={matches}
-              index={mentionIndex}
+              index={mentionActive}
               loading={tracked.isPending}
               query={mention.query}
               onPick={insertMention}
@@ -869,7 +876,7 @@ export function SessionComposer({
           {slash && (
             <SlashList
               matches={slashMatches}
-              index={slashIndex}
+              index={slashActive}
               loading={discovered.isPending && draft.startsWith("/")}
               query={slash.query}
               onPick={selectSlash}
@@ -898,9 +905,9 @@ export function SessionComposer({
               }
               aria-activedescendant={
                 mention && matches.length > 0
-                  ? `session-mention-${mentionIndex}`
+                  ? `session-mention-${mentionActive}`
                   : slash && slashMatches.length > 0
-                    ? `session-slash-${slashIndex}`
+                    ? `session-slash-${slashActive}`
                     : undefined
               }
               placeholder={

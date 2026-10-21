@@ -6,6 +6,10 @@ import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  clampHighlight,
+  stepHighlight,
+} from "@/features/shortcuts/palette-highlight";
 import { presentError } from "@/lib/error-summary";
 import {
   useBbAddDefaultReviewer,
@@ -238,7 +242,7 @@ function AddReviewerPopover({
     .slice(0, 8);
 
   const optionCount = suggestions.length;
-  const active = optionCount > 0 ? Math.min(activeIndex, optionCount - 1) : 0;
+  const active = clampHighlight(activeIndex, optionCount);
 
   function add(user: ForgeUserRef) {
     if (!online) return;
@@ -251,10 +255,10 @@ function AddReviewerPopover({
   function onInputKeyDown(e: React.KeyboardEvent) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveIndex(Math.min(active + 1, optionCount - 1));
+      setActiveIndex(stepHighlight(activeIndex, optionCount, 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActiveIndex(Math.max(active - 1, 0));
+      setActiveIndex(stepHighlight(activeIndex, optionCount, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
       const match = suggestions[active];
