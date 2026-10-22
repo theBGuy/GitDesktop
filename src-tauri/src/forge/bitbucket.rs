@@ -3109,7 +3109,11 @@ pub async fn merge_pr(
                     "Bitbucket accepted the merge but returned no task-status URL to poll.".into(),
                 )
             })?;
-            poll_merge_task(&creds, &task_url).await
+            poll_merge_task(&creds, &task_url).await.map_err(|err| {
+                AppError::Bitbucket(format!(
+                    "Bitbucket accepted the merge, but GitDesktop couldn't confirm completion: {err}"
+                ))
+            })
         }
         _ => Err(http::http_error(status, &body)),
     }
@@ -3119,6 +3123,8 @@ pub async fn merge_pr(
 /// to ~30 tries, 2s apart); `SUCCESS` → Ok; anything else → an error carrying the raw
 /// body. A non-2xx poll response errors via [`http::bb_error_detail`] as a read
 /// (the poll GETs status; the merge POST's own failures stay on the write arm).
+/// `task_url` is the 202's `Location`, used as-is, and `http`'s `resolve_url`
+/// refuses one outside the API base before any request.
 async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()> {
     for _ in 0..30 {
         let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None).await?;
