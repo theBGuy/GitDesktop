@@ -1742,8 +1742,9 @@ export function JiraIssueView({
   // Degraded content is the same arm, so a failed or recovered refresh never
   // moves focus.
   const arm = pane === "content-degraded" ? "content" : pane;
-  // An arm swap that unmounts the focused node would drop focus to <body>; land
-  // it on the host. Change-only, so a mount never takes focus from elsewhere.
+  // An arm swap or record switch that unmounts the focused node would drop
+  // focus to <body>; land it on the host. Change-only, so a mount never takes
+  // focus from elsewhere.
   const focusHost = useRef<HTMLDivElement | null>(null);
   const viewFrame = `${arm}:${issueIdentity}`;
   const lastViewFrame = useRef(viewFrame);

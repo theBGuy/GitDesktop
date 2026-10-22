@@ -573,6 +573,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   error-arm Retry carries no disabled state or in-flight label (the arm
   unmounts the moment the retry fetches), pinned by
   `scripts/detail-pane-retry.test.mjs`.
+- **Detail-pane retention** — a detail pane over a read renders through
+  `resolveDetailPane` + `DegradedListNotice`: a failed refresh keeps the loaded
+  content under the notice and its Retry, never a swap to an error on a raw
+  `isError`, which would make a transient failure read as data loss.
+  `scripts/detail-pane-retention.test.mjs` pins the adopters; a new pane joins
+  its `SITES`.
 - **Empty-picker copy** — a picker's line while it draws no options rides
   `emptyPickerCopy` (remote-section-state); a read parked with nothing loaded,
   or over a failure, says offline; only a successful read may claim none.

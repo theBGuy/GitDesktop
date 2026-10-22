@@ -3,7 +3,8 @@
 // rescue), per surface: the ladder's five inputs from the surface's own read,
 // the notice in every content render with detailNoticeMessage copy, no raw
 // `isError` swap, an error arm with the failure reason and a rescue-wired
-// Retry, and the arm-change focus key. It also pins the transcript diff's poll
+// Retry, and the arm-or-record focus key (or its absence where a site opts
+// out with `frameEffect: false`). It also pins the transcript diff's poll
 // stopping while its read is errored, which keeps that pane's notice steady.
 // remote-list-state.test.mjs pins the helpers' own transitions, and
 // detail-pane-retry.test.mjs keeps every rescue-wired Retry free of a disabled
@@ -12,6 +13,9 @@
 // Every scan runs on `maskNonCode`'s output, so comments and string/JSX text
 // can't satisfy a pin; expected values are compared against the raw source at
 // the masked offsets. A missing anchor fails, never skips.
+//
+// SITES is a closed roster: a new detail pane over a read joins it in the same
+// change, or nothing here pins its retention.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -106,8 +110,10 @@ const SITES = [
     noun: "diff",
     noticeNoun: "this diff",
     stale: "diff.isPlaceholderData",
-    identity: ["filePath", 'repoPath ?? ""'],
     shell: "notice",
+    // No arm-swap refocus: several steps' diffs can be open at once, so one
+    // landing while focus sits on <body> would take focus it never held.
+    frameEffect: false,
   },
   {
     file: "src/features/issues/JiraIssueView.tsx",
@@ -132,6 +138,38 @@ const SITES = [
     identity: ["commit.oid"],
     shell: null,
   },
+  {
+    file: "src/features/code-todos/CodeTodoDetailView.tsx",
+    component: "CodeTodoDetailView",
+    read: "blame",
+    noun: "excerpt",
+    noticeNoun: "this excerpt",
+    stale: "blame.isPlaceholderData",
+    identity: ["path", "line"],
+    shell: "notice",
+    // Blame failing with nothing loaded is an untracked file's designed
+    // disk-read fallback; the error arm is both sources failing.
+    errorIf: "previewUnavailable",
+    rescue: "previewUnavailable",
+    retry: {
+      name: "retryErrored",
+      body: "{ if (blame.isError) void blame.refetch(); if (fileText.isError) void fileText.refetch(); }",
+    },
+    isErrorDecls: ["untracked", "previewUnavailable", "retryErrored"],
+    // The notice follows the source on screen: the disk read for an untracked
+    // file, blame otherwise.
+    notice: {
+      failed: "noticeFailed",
+      retry: "noticeRetry",
+      degraded: 'pane === "content-degraded" || noticeFailed',
+      decls: {
+        noticeFailed:
+          "untracked ? fileText.data !== undefined && refreshFailed(fileText) : failed",
+        noticeRetry:
+          "untracked ? () => void fileText.refetch() : () => void blame.refetch()",
+      },
+    },
+  },
 ];
 
 /** Fills the single-read defaults: the ladder, the failure flag and the rescue
@@ -139,6 +177,7 @@ const SITES = [
 function expected(site) {
   if (site.inputs) return site;
   const r = site.read;
+  const inline = `() => void ${r}.refetch()`;
   return {
     ...site,
     inputs: {
@@ -152,8 +191,9 @@ function expected(site) {
       name: site.failedName ?? "failed",
       init: `refreshFailed(${r})`,
     },
-    rescue: `pane === "error" && ${r}.isError`,
-    retry: { inline: `() => void ${r}.refetch()` },
+    rescue: site.rescue ?? `pane === "error" && ${r}.isError`,
+    retry: site.retry ?? { inline },
+    noticeRetry: site.noticeRetry ?? inline,
   };
 }
 
@@ -366,6 +406,19 @@ function arms(site, masked, raw, body, nested) {
     );
     out.push({ ...s, lits });
   }
+  // A pane whose ladder "error" is a designed fallback names its true error
+  // arm by condition instead.
+  if (site.errorIf) {
+    const hits = ifs(masked, raw, body, nested).filter(
+      (s) => squash(s.cond) === squash(site.errorIf),
+    );
+    assert.equal(
+      hits.length,
+      1,
+      `${site.file}: expected one \`if (${site.errorIf})\` error arm`,
+    );
+    out.push({ ...hits[0], lits: ["error"] });
+  }
   const sw = /(?<![\w$])switch\s*\(\s*pane\s*\)\s*\{/.exec(masked);
   if (sw) {
     const open = sw.index + sw[0].length - 1;
@@ -526,6 +579,8 @@ for (const raw of SITES) {
 
   test(`${label}: the notice mounts in every content render with the shared copy`, () => {
     const { raw: src, masked, body, nested, arms: paneArms } = scan(site);
+    const noticeFailed = site.notice?.failed ?? site.failed.name;
+    const degraded = site.notice?.degraded ?? 'pane === "content-degraded"';
     const tags = noticeTags(masked, { from: body.open, to: body.close });
     assert.ok(
       tags.length > 0,
@@ -544,9 +599,21 @@ for (const raw of SITES) {
     );
     assert.equal(
       squash(attrs.get("degraded") ?? ""),
-      squash('pane === "content-degraded"'),
-      `${site.file}: the notice must take degraded={pane === "content-degraded"}`,
+      squash(degraded),
+      `${site.file}: the notice must take degraded={${degraded}}`,
     );
+    for (const [name, init] of Object.entries(site.notice?.decls ?? {})) {
+      const d = new RegExp(`\\bconst\\s+${name}\\s*=\\s*`).exec(
+        masked.slice(body.open, body.close),
+      );
+      assert.ok(d, `${site.file}: no \`const ${name} =\``);
+      const at = body.open + d.index + d[0].length;
+      assert.equal(
+        squash(src.slice(at, statementEnd(masked, at) - 1)),
+        squash(init),
+        `${site.file}: \`${name}\` must be \`${init}\``,
+      );
+    }
     // The copy: inline, or a const holding the one detailNoticeMessage( call.
     const msgCall = soleCall(site, masked, "detailNoticeMessage", body);
     const message = squash(attrs.get("message") ?? "");
@@ -573,19 +640,23 @@ for (const raw of SITES) {
     );
     assert.equal(
       squash(pairs.get("isError") ?? ""),
-      site.failed.name,
-      `${site.file}: the copy's isError must read \`${site.failed.name}\``,
+      noticeFailed,
+      `${site.file}: the copy's isError must read \`${noticeFailed}\``,
     );
     assert.equal(
       squash(pairs.get("stale") ?? ""),
       squash(site.stale),
       `${site.file}: the copy's stale must read \`${site.stale}\``,
     );
-    const retry = site.retry.name ?? site.retry.inline;
+    const retry =
+      site.notice?.retry ??
+      site.noticeRetry ??
+      site.retry.name ??
+      site.retry.inline;
     assert.equal(
       squash(attrs.get("onRetry") ?? ""),
-      squash(`${site.failed.name} ? ${retry} : undefined`),
-      `${site.file}: the notice must take onRetry={${site.failed.name} ? ${retry} : undefined}`,
+      squash(`${noticeFailed} ? ${retry} : undefined`),
+      `${site.file}: the notice must take onRetry={${noticeFailed} ? ${retry} : undefined}`,
     );
 
     // Every render that isn't a skeleton/offline/error arm draws the notice:
@@ -659,7 +730,9 @@ for (const raw of SITES) {
       const at = body.open + m.index + m[0].length - 1;
       const value = masked.slice(at + 1, matchBrace(masked, at)).trim();
       let fn = value;
-      if (/^[\w$]+$/.test(value)) {
+      // A host with no refocus effect passes hostRef itself.
+      if (value === "hostRef") fn = "hostRef(node)";
+      else if (/^[\w$]+$/.test(value)) {
         const def = new RegExp(
           `\\bconst\\s+${value}\\s*=\\s*useCallback\\s*\\(`,
         ).exec(masked.slice(body.open, body.close));
@@ -684,11 +757,12 @@ for (const raw of SITES) {
     const [host] = hosts;
     const node = /\bhostRef\s*\(\s*([\w$]+)\s*\)/.exec(host.fn);
     assert.ok(node, `${site.file}: the host's ref must call hostRef(node)`);
-    assert.match(
-      host.fn,
-      new RegExp(`\\bfocusHost\\s*\\.\\s*current\\s*=\\s*${node[1]}\\b`),
-      `${site.file}: the host's ref must set focusHost.current = ${node[1]}`,
-    );
+    if (site.frameEffect !== false)
+      assert.match(
+        host.fn,
+        new RegExp(`\\bfocusHost\\s*\\.\\s*current\\s*=\\s*${node[1]}\\b`),
+        `${site.file}: the host's ref must set focusHost.current = ${node[1]}`,
+      );
     const { attrs } = tagAttrs(masked, src, host.start);
     assert.equal(
       squash(attrs.get("tabIndex") ?? ""),
@@ -847,7 +921,19 @@ for (const raw of SITES) {
     );
   });
 
-  test(`${label}: an arm swap lands focus on the host, and only an arm swap`, () => {
+  if (site.frameEffect === false) {
+    test(`${label}: no arm-swap effect refocuses the host from <body>`, () => {
+      const { masked, body } = scan(site);
+      assert.doesNotMatch(
+        masked.slice(body.open, body.close),
+        /\bdocument\s*\.\s*activeElement\s*===\s*document\s*\.\s*body\b/,
+        `${site.file}: ${site.component} must not move focus from <body> on its own`,
+      );
+    });
+    continue;
+  }
+
+  test(`${label}: an arm or record change refocuses the host, from <body> only`, () => {
     const { raw: src, masked, body } = scan(site);
     const text = masked.slice(body.open, body.close);
     const collapse =
@@ -887,17 +973,29 @@ for (const raw of SITES) {
       const bodyClose = matchBrace(masked, bodyOpen);
       const fn = masked.slice(bodyOpen, bodyClose + 1);
       const guard =
-        /\bif\s*\(\s*\w+\s*\.\s*current\s*===\s*viewFrame\s*\)\s*return\b/.exec(
+        /\bif\s*\(\s*([\w$]+)\s*\.\s*current\s*===\s*viewFrame\s*\)\s*return\b/.exec(
           fn,
         );
+      if (!guard) return false;
+      // The guard's ref is seeded from the frame and advanced to it, so only
+      // a changed frame passes the guard.
+      const ref = guard[1];
+      const advance = new RegExp(
+        `\\b${ref}\\s*\\.\\s*current\\s*=\\s*viewFrame\\s*;`,
+      ).exec(fn);
+      const seeded = new RegExp(
+        `\\bconst\\s+${ref}\\s*=\\s*useRef\\s*\\(\\s*viewFrame\\s*\\)`,
+      ).test(text);
       const focus =
         /\bfocusHost\s*\.\s*current\s*\?\.\s*focus\s*\(\s*\{\s*preventScroll\s*:\s*true\s*\}\s*\)/.exec(
           fn,
         );
       return (
-        guard !== null &&
+        seeded &&
+        advance !== null &&
+        guard.index < advance.index &&
         focus !== null &&
-        guard.index < focus.index &&
+        advance.index < focus.index &&
         /\bdocument\s*\.\s*activeElement\s*===\s*document\s*\.\s*body\b/.test(
           fn,
         ) &&
@@ -908,7 +1006,7 @@ for (const raw of SITES) {
     });
     assert.ok(
       ok,
-      `${site.file}: no useLayoutEffect returns early on an unchanged viewFrame, refocuses focusHost only from <body>, and depends on [viewFrame] alone`,
+      `${site.file}: no useLayoutEffect returns early on an unchanged viewFrame (its ref seeded with useRef(viewFrame) and advanced to it), refocuses focusHost only from <body>, and depends on [viewFrame] alone`,
     );
   });
 }
@@ -969,6 +1067,35 @@ test("the transcript diff's notice sits above its scroller, which the host wraps
   assert.ok(
     notice > shell.from && notice < start && start < shell.to,
     `${file}: the notice must precede the scroller inside the shell`,
+  );
+});
+
+test("a TODO's untracked fallback opens only on a blame with nothing loaded", () => {
+  const file = "src/features/code-todos/CodeTodoDetailView.tsx";
+  const { raw, masked } = load(file);
+  const m = /\bconst\s+untracked\s*=\s*/.exec(masked);
+  assert.ok(m, `${file}: anchor \`const untracked =\` missing`);
+  const at = m.index + m[0].length;
+  assert.equal(
+    squash(raw.slice(at, statementEnd(masked, at) - 1)),
+    squash("blame.isError && blame.data === undefined"),
+    `${file}: untracked must be \`blame.isError && blame.data === undefined\``,
+  );
+  const read = /(?<![\w$.])useFileText\s*\(/.exec(masked);
+  assert.ok(read, `${file}: no useFileText( call`);
+  const open = read.index + read[0].length - 1;
+  const args = squash(raw.slice(open + 1, matchBrace(masked, open))).split(",");
+  assert.equal(
+    args[2],
+    "untracked",
+    `${file}: the disk read must be enabled on \`untracked\` alone`,
+  );
+  const excerpt =
+    /\bconst\s+excerptLines\s*:[^=]*=\s*untracked\s*\?/.test(masked) &&
+    /\{\s*untracked\s*&&\s*\(/.test(masked);
+  assert.ok(
+    excerpt,
+    `${file}: the excerpt source and the untracked note must gate on \`untracked\``,
   );
 });
 

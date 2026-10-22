@@ -11,13 +11,7 @@ import {
   WrenchIcon,
 } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
-import {
-  type ComponentType,
-  type ReactNode,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { type ComponentType, type ReactNode, useState } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { PathText } from "@/components/path-text";
 import {
@@ -212,32 +206,14 @@ function InlineDiff({
   const { hostRef, retryRef } = useRetryFocusRescue(
     pane === "error" && diff.isError,
   );
-  // Degraded content is the same arm, so a failed or recovered refresh never
-  // moves focus.
-  const arm = pane === "content-degraded" ? "content" : pane;
-  // An arm swap that unmounts the focused node would drop focus to <body>; land
-  // it on the host. Change-only, so a mount never takes focus from elsewhere.
-  const focusHost = useRef<HTMLDivElement | null>(null);
-  const viewFrame = `${arm}:${filePath}:${repoPath ?? ""}`;
-  const lastViewFrame = useRef(viewFrame);
-  useLayoutEffect(() => {
-    if (lastViewFrame.current === viewFrame) return;
-    lastViewFrame.current = viewFrame;
-    if (document.activeElement === document.body)
-      focusHost.current?.focus({ preventScroll: true });
-  }, [viewFrame]);
+  // No arm-swap refocus here: several steps' diffs can be open at once, and one
+  // landing while focus sits on <body> would take focus it never held. The two
+  // Retry rescues cover the only focus targets an arm swap removes.
   // The host wraps the scroller rather than being it: a tabIndex on the
   // scroller would take the keyboard tab stop Chromium gives a scroller with no
   // focusable content. The notice sits above it, so it never scrolls away.
   const shell = (content: ReactNode) => (
-    <div
-      ref={(node) => {
-        hostRef(node);
-        focusHost.current = node;
-      }}
-      tabIndex={-1}
-      className="outline-none"
-    >
+    <div ref={hostRef} tabIndex={-1} className="outline-none">
       <DegradedListNotice
         noun="this diff"
         degraded={pane === "content-degraded"}
