@@ -864,7 +864,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `parseableDate` for ISO strings, `validEpochMs` for epoch numbers
   (`src/lib/time.ts`); never raw `new Date(x)` on forge/CLI data.
 - **Windows spawning:** never pass multi-line argv to `.cmd` shims
-  (BatBadBut rejection) — feed multi-line input via stdin.
+  (BatBadBut rejection) — feed multi-line input via stdin. Generated launcher
+  scripts build through `agent_sandbox`'s `cmd_script_quoted`/`cmd_script_arg`
+  helpers under `CMD_SCRIPT_PRELUDE` (refusals before any write; `%` escaped;
+  trailing backslashes per the receiving program) — never inline
+  quote-wrapping into a script body.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
