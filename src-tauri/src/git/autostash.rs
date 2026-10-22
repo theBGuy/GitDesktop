@@ -385,8 +385,8 @@ pub(crate) async fn git_rebase_autostash_core(
     let stashed = autostash_push(&repo_path).await?;
     // Read after the push, as in `git_merge_autostash_core`.
     let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
-    // Inlined rather than delegating to `git_rebase_core`: that one runs through
-    // `run_git_mutating_raw`, which re-acquires the lock held here (module doc).
+    // Inlined rather than delegating to `git_rebase_core`: it takes the working-tree
+    // lock itself, which would deadlock under the hold here (module doc).
     // `core.editor=true` mirrors it so git never blocks on an editor.
     let op = run_git_raw(
         Some(&repo_path),
@@ -467,6 +467,14 @@ pub(crate) async fn git_switch_autostash_core(
     validate_ref_name(&name)?;
     if let Some(remote) = &remote {
         validate_ref_name(remote)?;
+        crate::git::branches::refuse_session_branch_name(&name)?;
+    } else if crate::git::branches::is_session_branch_name(&name)
+        && crate::git::branches::branch_tip_sha(&repo_path, &name)
+            .await?
+            .is_none()
+    {
+        // Refuse only guess-creation so existing session-named branches stay reachable.
+        crate::git::branches::refuse_session_branch_name(&name)?;
     }
     // The full ref, as `git_checkout_remote_branch_core` passes it: a tag or local
     // branch named `<remote>/<name>` makes the bare form ambiguous, and git refuses it.
@@ -1414,6 +1422,95 @@ mod tests {
         assert_eq!(head_branch(&repo).await, "feat");
         assert!(!stash_list(&repo).await.is_empty());
         assert!(unmerged(&repo).await.contains("a.txt"));
+    }
+
+    #[tokio::test]
+    async fn switch_autostash_switches_to_an_existing_session_branch_any_case() {
+        for packed in [false, true] {
+            let (dir, repo) = setup_repo("existing-session-branch").await;
+            git(&repo, &["update-ref", "refs/heads/GD/Session/x", "HEAD"]).await;
+            if packed {
+                git(&repo, &["pack-refs", "--all"]).await;
+            }
+            write(dir.path(), "a.txt", "dirty\n");
+            let stashes = git(&repo, &["stash", "list"]).await;
+            let outcome = git_switch_autostash_core(
+                &AppState::default(),
+                repo.clone(),
+                "GD/Session/x".into(),
+                None,
+                true,
+            )
+            .await
+            .expect("existing session branch remains reachable with autostash");
+            assert!(matches!(outcome, AutostashOutcome::Reapplied), "{outcome:?}");
+            assert_eq!(
+                git(&repo, &["symbolic-ref", "HEAD"]).await.trim(),
+                "refs/heads/GD/Session/x"
+            );
+            assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"dirty\n");
+            assert_eq!(git(&repo, &["stash", "list"]).await, stashes);
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_autostash_refuses_guessing_a_session_branch_name_any_case() {
+        let (dir, repo) = setup_repo("guess-session-branch-name").await;
+        git(&repo, &["remote", "add", "origin", &repo]).await;
+        git(&repo, &["update-ref", "refs/remotes/origin/GD/Session/x", "HEAD"]).await;
+        write(dir.path(), "a.txt", "dirty\n");
+        let head = git(&repo, &["symbolic-ref", "HEAD"]).await;
+        let stashes = git(&repo, &["stash", "list"]).await;
+        assert!(git(&repo, &["for-each-ref", "refs/heads/GD/Session/x"])
+            .await
+            .is_empty());
+        let result = git_switch_autostash_core(
+            &AppState::default(),
+            repo.clone(),
+            "GD/Session/x".into(),
+            None,
+            true,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(message)) if message ==
+                "\"GD/Session/x\" is in gd/session/, which is reserved for agent sessions — choose another name."),
+            "expected session branch refusal, got {result:?}"
+        );
+        assert!(git(&repo, &["for-each-ref", "refs/heads/GD/Session/x"])
+            .await
+            .is_empty());
+        assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).await, head);
+        assert_eq!(git(&repo, &["stash", "list"]).await, stashes);
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"dirty\n");
+    }
+
+    #[tokio::test]
+    async fn switch_autostash_refuses_session_branch_name_any_case() {
+        let (dir, repo) = setup_repo("session-branch-name").await;
+        git(&repo, &["remote", "add", "origin", &repo]).await;
+        git(&repo, &["update-ref", "refs/remotes/origin/GD/Session/x", "HEAD"]).await;
+        write(dir.path(), "a.txt", "dirty\n");
+        let head = git(&repo, &["symbolic-ref", "HEAD"]).await;
+        let refs = git(&repo, &["for-each-ref", "refs/heads"]).await;
+        let stashes = git(&repo, &["stash", "list"]).await;
+        let result = git_switch_autostash_core(
+            &AppState::default(),
+            repo.clone(),
+            "GD/Session/x".into(),
+            Some("origin".into()),
+            true,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(message)) if message ==
+                "\"GD/Session/x\" is in gd/session/, which is reserved for agent sessions — choose another name."),
+            "{result:?}"
+        );
+        assert_eq!(git(&repo, &["symbolic-ref", "HEAD"]).await, head);
+        assert_eq!(git(&repo, &["for-each-ref", "refs/heads"]).await, refs);
+        assert_eq!(git(&repo, &["stash", "list"]).await, stashes);
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"dirty\n");
     }
 
     #[tokio::test]

@@ -111,6 +111,12 @@ const REFSPEC_ALLOWLIST = [
       "the fast-forward's local `fetch .` destination; validates branch and base with validate_branch_name at fn entry",
   },
   {
+    file: "git/branches.rs",
+    fn: "git_delete_remote_branch_core",
+    rationale:
+      "validates remote and name with validate_ref_name at fn entry; the full ref is the push --delete destination",
+  },
+  {
     file: "git/commit.rs",
     fn: "cas_ref",
     rationale:

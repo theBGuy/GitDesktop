@@ -868,7 +868,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
-  refspec or re-derive the validation. MCP tools push only through
+  refspec or re-derive the validation. Session-reserved branch names refuse
+  through the shared `refuse_session_branch_name`/`is_session_branch_name`
+  guard (git/branches.rs, case-insensitive) at every branch-minting entry
+  point; the two local-switch routes refuse only guess-creation so existing
+  session-named branches stay reachable — never re-derive the prefix check. MCP tools push only through
   `git_push_same_name_core` (it refuses a named push onto a differently named
   branch of a named remote) and the HEAD-only `git_force_push_head_core`
   (git/remote.rs); `git_push_core`, the GUI's follow-tracking entry, stays

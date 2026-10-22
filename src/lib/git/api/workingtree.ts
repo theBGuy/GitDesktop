@@ -123,7 +123,7 @@ export const gitApplyPartial = (
 /** Replace lines `[startLine, startLine + expectedLines.length)` (1-based) of a
  *  file with `replacementLines` — GitHub's "Commit suggestion", applied locally.
  *  The backend verifies `expectedLines` still match before editing (a mismatch is
- *  a specific error), preserves EOL/BOM/trailing newline, and stages the file only
+ *  a specific error), preserves each line's ending and the BOM, and stages the file only
  *  when `stageWhenClean` and it had no other local changes. */
 export const gitReplaceFileLines = (
   repoPath: string,
