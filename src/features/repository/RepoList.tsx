@@ -112,8 +112,8 @@ function resolveProvider(
  * dialogs nested in here).
  *
  * Keyboard-first: the filter autofocuses; ArrowUp/Down move a highlight
- * through the visible rows and Enter opens the highlighted repo (or the
- * first match when filtering).
+ * through the visible rows and Enter opens the highlighted repo; while
+ * filtering, the first match starts highlighted.
  */
 export function RepoList({
   currentPath,
