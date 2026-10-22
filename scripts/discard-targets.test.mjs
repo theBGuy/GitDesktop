@@ -3,9 +3,10 @@
 // batch naming one path both ways.
 //
 // The import reaches straight into `src/` under Node's type stripping, so
-// `discard-targets.ts` must stay free of runtime and aliased imports. The
-// ChangesPanel/ChangesContextMenu wiring is pinned by mask-aware source scans,
-// each with in-memory mutation controls that must turn it red.
+// `discard-targets.ts` must keep to type-only imports, which stripping erases:
+// Node can't resolve the app's `@/` aliases. The ChangesPanel and
+// ChangesContextMenu wiring is pinned by mask-aware source scans, each with
+// in-memory mutation controls that must turn it red.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";

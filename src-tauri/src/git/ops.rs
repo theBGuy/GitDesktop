@@ -1688,8 +1688,7 @@ const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and
 const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try again";
 const DISCARD_WIN_TRAILING: &str =
     "Windows reads a name ending in a dot or space as a different path";
-const DISCARD_WIN_SHELL_FOLDER: &str =
-    "Windows treats a folder name ending in a {GUID} as a shell link";
+const DISCARD_WIN_SHELL_FOLDER: &str = "Windows treats a name ending in .{GUID} as a shell link";
 
 /// Pure lexical gate; returns git's spelling without resolving filesystem names.
 fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
@@ -1793,8 +1792,12 @@ async fn untracked_paths(top: &str) -> AppResult<std::collections::HashSet<Strin
         DEFAULT_TIMEOUT,
     )
     .await?;
+    Ok(untracked_from_status(&out.stdout))
+}
+
+fn untracked_from_status(stdout: &[u8]) -> std::collections::HashSet<String> {
     let mut paths = std::collections::HashSet::new();
-    let mut records = out.stdout.split(|&b| b == 0);
+    let mut records = stdout.split(|&b| b == 0);
     while let Some(record) = records.next() {
         if let Some(path) = record.strip_prefix(b"? ") {
             if let Ok(path) = std::str::from_utf8(path) {
@@ -1804,7 +1807,7 @@ async fn untracked_paths(top: &str) -> AppResult<std::collections::HashSet<Strin
             records.next();
         }
     }
-    Ok(paths)
+    paths
 }
 
 /// Probe below the root without following links; line rewrites also probe the leaf.
@@ -16102,6 +16105,80 @@ detached
         std::os::unix::fs::symlink(target, link).unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discard_untracked_lines_waits_for_the_repo_lock_before_rewriting() {
+        let (dir, repo) = setup_repo("discard-lines-hold").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let file = dir.path().join("untracked.txt");
+        std::fs::write(&file, b"1\r\n2\r\n3").unwrap();
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.working_tree_lock(&repo).await;
+        let guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+        let discard = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                git_discard_untracked_lines_core(&state, repo, "untracked.txt".into(), vec![2])
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(std::fs::read(&file).unwrap(), b"1\r\n2\r\n3");
+        drop(guard);
+        discard.await.unwrap().unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"1\r\n3");
+    }
+
+    #[test]
+    fn untracked_from_status_skips_rename_origins_and_invalid_utf8() {
+        let stdout = b"2 R. N... 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 R100 renamed.txt\0\
+            ? phantom.txt\0? real.txt\0\
+            1 .M N... 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 tracked.txt\0\
+            u UU N... 100644 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 conflict.txt\0\
+            ? invalid-\xff.txt\0";
+        assert_eq!(
+            untracked_from_status(stdout),
+            std::collections::HashSet::from(["real.txt".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_paths_lists_untracked_files_beside_a_staged_rename() {
+        let (dir, repo) = setup_repo("untracked-paths-rename").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        git(&repo, &["config", "status.renames", "true"]).await;
+        commit_file(
+            &repo,
+            dir.path(),
+            "2 original.txt",
+            "rename me\n",
+            "add original",
+        )
+        .await;
+        std::fs::rename(
+            dir.path().join("2 original.txt"),
+            dir.path().join("renamed.txt"),
+        )
+        .unwrap();
+        git(&repo, &["add", "--all"]).await;
+        std::fs::write(dir.path().join("untracked.txt"), b"new\n").unwrap();
+        let status = run_git(
+            Some(&repo),
+            &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let records: Vec<_> = status.stdout.split(|&byte| byte == 0).collect();
+        assert!(records
+            .windows(2)
+            .any(|pair| { pair[0].starts_with(b"2 ") && pair[1] == b"2 original.txt" }));
+        let listed = untracked_paths(&repo).await.unwrap();
+        assert_eq!(
+            listed,
+            std::collections::HashSet::from(["untracked.txt".to_string()])
+        );
+    }
+
     #[cfg(any(windows, unix))]
     #[test]
     fn discard_linked_component_flags_links_between_root_and_entry() {
@@ -16295,9 +16372,9 @@ detached
             std::fs::write(outside.path().join("f"), b"outside").unwrap();
             if variant != "bare" {
                 let output = std::process::Command::new("powershell.exe")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut($env:Z3_LINK); $shortcut.TargetPath = $env:Z3_TARGET; $shortcut.Save()"])
-                    .env("Z3_LINK", folder.join("target.lnk"))
-                    .env("Z3_TARGET", outside.path())
+                    .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut($env:LNK_PATH); $shortcut.TargetPath = $env:LNK_TARGET; $shortcut.Save()"])
+                    .env("LNK_PATH", folder.join("target.lnk"))
+                    .env("LNK_TARGET", outside.path())
                     .output()
                     .unwrap();
                 assert!(output.status.success(), "{output:?}");
@@ -16420,6 +16497,7 @@ detached
     async fn discard_all_refuses_windows_trailing_dot_paths_before_changing_tree_or_index() {
         let (dir, repo, outside) = setup_discard_trailing_dot_repo("discard-trailing-all").await;
         std::fs::write(dir.path().join(".git/info/exclude"), b"/dir/\n").unwrap();
+        std::fs::write(dir.path().join("0first.txt"), b"first\n").unwrap();
         std::fs::write(dir.path().join("keep.txt"), b"keep\n").unwrap();
         std::fs::write(dir.path().join("a.txt"), b"staged\n").unwrap();
         git(&repo, &["add", "a.txt"]).await;
@@ -16429,6 +16507,10 @@ detached
         assert!(!listed.contains("dir/victim.txt"));
         let index_before = std::fs::read(dir.path().join(".git/index")).unwrap();
         let result = git_discard_all_core(&AppState::default(), repo).await;
+        assert_eq!(
+            std::fs::read(dir.path().join("0first.txt")).unwrap(),
+            b"first\n"
+        );
         assert!(
             outside.path().join("victim.txt").exists(),
             "outside sentinel was recycled"
