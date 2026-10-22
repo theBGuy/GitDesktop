@@ -303,14 +303,14 @@ export function RepoList({
     !q && highlight < 0 ? -1 : clampHighlight(highlight, visible.length);
   const highlightedPath = visible[active]?.path ?? null;
 
-  // Keep the marked row in view. Keyed on its identity, not its index: while
-  // filtering the cursor stays at 0 as the row there changes.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run per marked row
+  // Keep the marked row in view, re-running when its index or its identity
+  // changes: filtering can move one without the other.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run per marked row and slot
   useEffect(() => {
     listRef.current
       ?.querySelector('[data-highlighted="true"]')
       ?.scrollIntoView({ block: "nearest" });
-  }, [highlightedPath]);
+  }, [active, highlightedPath]);
 
   async function handleOpen(path: string) {
     setOpeningPath(path);

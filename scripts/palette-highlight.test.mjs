@@ -394,11 +394,14 @@ const SITE_PINS = [
         ],
       },
       {
-        name: "the scroll effect is keyed on the marked row",
+        name: "the scroll effect is keyed on the marked row's index and identity",
         check: has(
-          /\.scrollIntoView\(\s*\{[^}]*\}\s*\)\s*;\s*\}\s*,\s*\[\s*highlightedPath\s*\]\s*\)\s*;/,
+          /\.scrollIntoView\(\s*\{[^}]*\}\s*\)\s*;\s*\}\s*,\s*\[\s*(?:active\s*,\s*highlightedPath|highlightedPath\s*,\s*active)\s*,?\s*\]\s*\)\s*;/,
         ),
-        mutant: ["}, [highlightedPath]);", "}, [active]);"],
+        mutant: ["}, [active, highlightedPath]);", "}, [active]);"],
+        extraMutants: [
+          ["}, [active, highlightedPath]);", "}, [highlightedPath]);"],
+        ],
       },
       {
         name: "ArrowDown steps from the cursor",
