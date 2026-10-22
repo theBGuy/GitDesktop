@@ -766,19 +766,40 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Windows: write a temp `.cmd` that cds to the repo, runs the (double-quoted)
-/// command, and pauses; `start` it so it gets a fresh, fully-wired console.
+/// The cmd interpreter's script reads %~N directly, so trailing backslashes stay undoubled.
+/// Other programs, including batch shims, need MSVC doubling at the receiving executable.
+#[cfg(any(all(windows, debug_assertions), test))]
+fn task_terminal_script(
+    cwd: &str,
+    bin: &str,
+    argv: &[String],
+    interpreter: &str,
+) -> AppResult<String> {
+    let quote_arg = if interpreter == "cmd" {
+        crate::agent_sandbox::cmd_script_quoted
+    } else {
+        crate::agent_sandbox::cmd_script_arg
+    };
+    let cwd = crate::agent_sandbox::cmd_script_quoted(cwd)?;
+    let mut line = crate::agent_sandbox::cmd_script_quoted(bin)?;
+    for a in argv {
+        line.push(' ');
+        line.push_str(&quote_arg(a)?);
+    }
+    Ok(format!(
+        "{}title GitDesktop task\r\ncd /d {cwd}\r\n{line}\r\necho.\r\necho (task exited) Press any key to close...\r\npause >nul\r\n",
+        crate::agent_sandbox::CMD_SCRIPT_PRELUDE
+    ))
+}
+
+/// Windows: `start` a temp `.cmd` for a fresh, fully-wired console.
+/// Every cwd/program/argv value goes through `cmd_script_quoted` /
+/// `cmd_script_arg` under their documented contract.
 #[cfg(all(windows, debug_assertions))]
-fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
+fn spawn_terminal(cwd: &str, bin: &str, argv: &[String], interpreter: &str) -> AppResult<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut line = format!("\"{bin}\"");
-    for a in argv {
-        line.push_str(&format!(" \"{a}\""));
-    }
-    let script = format!(
-        "@echo off\r\ntitle GitDesktop task\r\ncd /d \"{cwd}\"\r\n{line}\r\necho.\r\necho (task exited) Press any key to close...\r\npause >nul\r\n"
-    );
+    let script = task_terminal_script(cwd, bin, argv, interpreter)?;
     let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path =
         std::env::temp_dir().join(format!("gd-task-run-{}-{n}.cmd", std::process::id()));
@@ -879,6 +900,14 @@ async fn task_open_terminal_impl(
     path: Option<String>,
     args: Vec<String>,
 ) -> AppResult<()> {
+    // Windows script refusals must precede resolution and inline-body writes.
+    #[cfg(windows)]
+    {
+        crate::agent_sandbox::cmd_script_quoted(&cwd)?;
+        for arg in &args {
+            crate::agent_sandbox::cmd_script_quoted(arg)?;
+        }
+    }
     let (names, ext, build_args) = task_interp(&interpreter).ok_or_else(|| {
         AppError::Command(format!("unknown task interpreter '{interpreter}'"))
     })?;
@@ -889,6 +918,9 @@ async fn task_open_terminal_impl(
                 "couldn't find the '{interpreter}' interpreter on your PATH — is it installed?"
             ))
         })?;
+
+    #[cfg(windows)]
+    crate::agent_sandbox::cmd_script_quoted(&bin.to_string_lossy())?;
 
     let script_path = match path.as_deref().filter(|p| !p.is_empty()) {
         Some(file) => {
@@ -926,7 +958,14 @@ async fn task_open_terminal_impl(
     let mut argv = build_args(&script_path);
     argv.extend(args);
     let bin = bin.to_string_lossy().into_owned();
-    spawn_terminal(&cwd, &bin, &argv)
+    #[cfg(windows)]
+    {
+        spawn_terminal(&cwd, &bin, &argv, &interpreter)
+    }
+    #[cfg(not(windows))]
+    {
+        spawn_terminal(&cwd, &bin, &argv)
+    }
 }
 
 #[cfg(test)]
@@ -1423,5 +1462,118 @@ mod tests {
         let (_n, ext, build) = task_interp("cmd").unwrap();
         assert_eq!(ext, "cmd");
         assert_eq!(build("x.cmd"), vec!["/c".to_string(), "x.cmd".to_string()]);
+    }
+
+    #[test]
+    fn cmd_script_task_golden() {
+        let cwd = "C:\\Users\\José\\rate 100%\\repo";
+        let bin = "C:\\Program Files\\nodejs\\node.exe";
+        let argv: Vec<String> = [
+            "C:\\Users\\dev\\AppData\\Local\\Temp\\gd-task-inline-1-0.js",
+            "out dir\\",
+            "R&D (v2)^!",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let expected = concat!(
+            "@echo off\r\n",
+            "chcp 65001 >nul\r\n",
+            "setlocal DisableDelayedExpansion\r\n",
+            "title GitDesktop task\r\n",
+            "cd /d \"C:\\Users\\José\\rate 100%%\\repo\"\r\n",
+            "\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Users\\dev\\AppData\\Local\\Temp\\gd-task-inline-1-0.js\" \"out dir\\\\\" \"R&D (v2)^!\"\r\n",
+            "echo.\r\n",
+            "echo (task exited) Press any key to close...\r\n",
+            "pause >nul\r\n",
+        );
+        assert_eq!(task_terminal_script(cwd, bin, &argv, "node").unwrap(), expected);
+    }
+
+    #[test]
+    fn cmd_script_task_refuses_cwd() {
+        for value in ["a\"b", "a\nb", "a\rb", "a\0b", "a\tb"] {
+            assert!(matches!(
+                task_terminal_script(value, "node", &[], "node"),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn cmd_script_task_refuses_argv() {
+        for value in ["a\"b", "a\nb", "a\rb", "a\0b", "a\tb"] {
+            let argv = vec!["task.js".to_string(), value.to_string()];
+            assert!(matches!(
+                task_terminal_script("C:\\repos", "node", &argv, "node"),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn cmd_script_task_refuses_bin() {
+        assert!(matches!(
+            task_terminal_script("C:\\repos", "a\"b", &[], "node"),
+            Err(AppError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn cmd_script_task_cmd_golden() {
+        let bin = "C:\\Windows\\System32\\cmd.exe";
+        let (_, _, build_args) = task_interp("cmd").unwrap();
+        let mut argv = build_args("C:\\repos\\task.cmd");
+        argv.push("out dir\\".to_string());
+        let expected = concat!(
+            "@echo off\r\n",
+            "chcp 65001 >nul\r\n",
+            "setlocal DisableDelayedExpansion\r\n",
+            "title GitDesktop task\r\n",
+            "cd /d \"C:\\repos\"\r\n",
+            "\"C:\\Windows\\System32\\cmd.exe\" \"/c\" \"C:\\repos\\task.cmd\" \"out dir\\\"\r\n",
+            "echo.\r\n",
+            "echo (task exited) Press any key to close...\r\n",
+            "pause >nul\r\n",
+        );
+        assert_eq!(
+            task_terminal_script("C:\\repos", bin, &argv, "cmd").unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cmd_script_task_batch_shims_get_native_quoting() {
+        for bin in ["C:\\tools\\node.cmd", "C:\\tools\\node.BaT"] {
+            let argv = vec!["out dir\\".to_string(), "100%!".to_string()];
+            let script = task_terminal_script("C:\\repos", bin, &argv, "node").unwrap();
+            assert!(script.contains(&format!("\"{bin}\" \"out dir\\\\\" \"100%%!\"\r\n")));
+        }
+    }
+
+    #[test]
+    fn cmd_script_task_cwd_keeps_trailing_backslash() {
+        let script = task_terminal_script("C:\\", "node.exe", &[], "node").unwrap();
+        assert!(script.lines().any(|line| line == "cd /d \"C:\\\""));
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[tokio::test]
+    async fn task_open_terminal_refuses_before_resolution() {
+        // The post-resolution bin check is not covered by this shape.
+        for (cwd, args) in [
+            ("a\"b".to_string(), vec![]),
+            ("C:\\repos".to_string(), vec!["a\nb".to_string()]),
+        ] {
+            let result = task_open_terminal_impl(
+                cwd,
+                "no-such-interp".into(),
+                Some("echo".into()),
+                None,
+                args,
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::InvalidArgument(_))), "{result:?}");
+        }
     }
 }
