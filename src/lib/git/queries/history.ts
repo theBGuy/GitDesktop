@@ -203,7 +203,8 @@ export function useBlame(
 
 /** Raw working-tree text of a repo-relative file — the Code TODOs excerpt fallback when
  *  `git blame` refuses the file (an untracked but `--untracked`-scanned file). `enabled`
- *  defers the read until blame has errored, so tracked files never pay for it. */
+ *  holds the read until blame has errored with nothing loaded. A failed refresh with
+ *  cached blame does not trigger it. */
 export function useFileText(repo: string, path: string, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "file-text", path] as const,

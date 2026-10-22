@@ -11,12 +11,23 @@ import {
   WrenchIcon,
 } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
-import { type ComponentType, useState } from "react";
+import { type ComponentType, type ReactNode, useState } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { PathText } from "@/components/path-text";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  DEGRADED_ACTION_CLASS,
+  detailNoticeMessage,
+  refreshFailed,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
+import { presentError } from "@/lib/error-summary";
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useContainerWidth } from "@/lib/use-container-width";
@@ -179,33 +190,89 @@ function InlineDiff({
   // narrower than a diff pane at any window size — measure it so split never
   // renders below two legible columns.
   const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
-  let body: React.ReactNode;
-  if (diff.isPending) {
-    body = <InlineNote>Loading diff…</InlineNote>;
-  } else if (diff.isError || !diff.data) {
-    body = <InlineNote>Couldn't load the diff for this file.</InlineNote>;
-  } else if (diff.data.isBinary) {
-    body = <InlineNote>Binary file — no text diff.</InlineNote>;
-  } else if (!diff.data.text.trim()) {
-    body = <InlineNote>No changes to show.</InlineNote>;
-  } else {
-    body = (
-      <GitDiffView
-        filePath={filePath}
-        text={diff.data.text}
-        repoPath={repoPath}
-        forceUnified={paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX}
+  // A failed refresh keeps the loaded diff under a notice; only a read with
+  // nothing loaded replaces it. An errored read stops the live poll, so the
+  // notice and its Retry hold steady until a refetch resumes it.
+  const pane = resolveDetailPane({
+    pending: diff.isPending,
+    error: diff.isError,
+    hasData: diff.data !== undefined,
+    paused: diff.isPaused,
+    fetching: diff.isFetching,
+  });
+  const failed = refreshFailed(diff);
+  // Retry resets the read to pending, swapping the error arm for the loading
+  // line; every arm renders in the same host, so focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && diff.isError,
+  );
+  // No arm-swap refocus here: several steps' diffs can be open at once, and one
+  // landing while focus sits on <body> would take focus it never held. The two
+  // Retry rescues cover the only focus targets an arm swap removes.
+  // The host wraps the scroller rather than being it: a tabIndex on the
+  // scroller would take the keyboard tab stop Chromium gives a scroller with no
+  // focusable content. The notice sits above it, so it never scrolls away.
+  const shell = (content: ReactNode) => (
+    <div ref={hostRef} tabIndex={-1} className="outline-none">
+      <DegradedListNotice
+        noun="this diff"
+        degraded={pane === "content-degraded"}
+        message={detailNoticeMessage({
+          noun: "diff",
+          isError: failed,
+          stale: diff.isPlaceholderData,
+        })}
+        onRetry={failed ? () => void diff.refetch() : undefined}
+        className="border-t border-border/60 px-2 py-1"
       />
+      {/* ph-no-capture: the diff is user code/paths — keep it out of session replay. */}
+      <div
+        ref={paneRef}
+        className="ph-no-capture max-h-96 overflow-auto border-t border-border/60 text-xs"
+      >
+        {content}
+      </div>
+    </div>
+  );
+
+  // The read is local, so it never parks offline: that arm loads too.
+  if (pane === "skeleton" || pane === "offline") {
+    return shell(<InlineNote>Loading diff…</InlineNote>);
+  }
+  if (pane === "error" || !diff.data) {
+    return shell(
+      <InlineNote>
+        Couldn't load the diff for this file.
+        {diff.isError ? (
+          <>
+            {" "}
+            {presentError(diff.error).summary}{" "}
+            <button
+              ref={retryRef}
+              type="button"
+              onClick={() => void diff.refetch()}
+              className={DEGRADED_ACTION_CLASS}
+            >
+              Retry
+            </button>
+          </>
+        ) : null}
+      </InlineNote>,
     );
   }
-  // ph-no-capture: the diff is user code/paths — keep it out of session replay.
-  return (
-    <div
-      ref={paneRef}
-      className="ph-no-capture max-h-96 overflow-auto border-t border-border/60 text-xs"
-    >
-      {body}
-    </div>
+  if (diff.data.isBinary) {
+    return shell(<InlineNote>Binary file — no text diff.</InlineNote>);
+  }
+  if (!diff.data.text.trim()) {
+    return shell(<InlineNote>No changes to show.</InlineNote>);
+  }
+  return shell(
+    <GitDiffView
+      filePath={filePath}
+      text={diff.data.text}
+      repoPath={repoPath}
+      forceUnified={paneWidth !== null && paneWidth < SPLIT_MIN_CONTAINER_PX}
+    />,
   );
 }
 

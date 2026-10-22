@@ -1,5 +1,5 @@
 import { CopyIcon } from "@phosphor-icons/react";
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
 import { DiffStat } from "@/components/diff-stat";
 import { PathText } from "@/components/path-text";
@@ -7,7 +7,10 @@ import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import {
   detailNoticeMessage,
   offlinePendingMessage,
@@ -18,6 +21,7 @@ import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import { sectionIsBinary, splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
   useCommitComments,
@@ -182,9 +186,36 @@ export function PrCommitDetail({
     fetching: diff.isFetching,
   });
   const failed = refreshFailed(diff);
+  // The root survives every arm, so a Retry that swaps the error arm for the
+  // skeleton lands focus there instead of on <body>.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && diff.isError,
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap or record switch that unmounts the focused node would drop
+  // focus to <body>; land it on the host. Change-only, so a mount never takes
+  // focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${commit.oid}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
 
   return (
-    <div className="flex h-full flex-col">
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex h-full flex-col outline-none"
+    >
       <header className="space-y-1 border-b px-4 py-3">
         <Button
           variant="ghost"
@@ -246,7 +277,27 @@ export function PrCommitDetail({
             );
           case "error":
             return (
-              <DiffPlaceholder message="Could not load this commit's changes" />
+              <DiffPlaceholder
+                message="Could not load this commit's changes"
+                action={
+                  diff.isError ? (
+                    <div className="flex flex-col items-center gap-2">
+                      <p className="max-w-md text-center text-xs">
+                        {presentError(diff.error).summary}
+                      </p>
+                      <Button
+                        ref={retryRef}
+                        variant="outline"
+                        size="sm"
+                        className="cursor-pointer"
+                        onClick={() => void diff.refetch()}
+                      >
+                        Retry
+                      </Button>
+                    </div>
+                  ) : undefined
+                }
+              />
             );
           case "content":
           case "content-degraded":

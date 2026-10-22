@@ -3,16 +3,26 @@ import {
   FolderOpenIcon,
   NotePencilIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  refreshFailed,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { diffLang } from "@/features/diff/diff-lang";
 import { HighlightedLine } from "@/features/diff/HighlightedLine";
 import { CreateLocalIssueDialog } from "@/features/issues/CreateLocalIssueDialog";
 import { useOpenFile } from "@/features/sessions/useOpenFile";
+import { presentError } from "@/lib/error-summary";
 import {
   useBlame,
   useFileText,
@@ -44,10 +54,22 @@ export function CodeTodoDetailView({
   text: string;
 }) {
   const blame = useBlame(repoPath, path);
+  // A failed blame refresh keeps the loaded excerpt and attribution under a
+  // notice; only a blame with nothing loaded falls back to the disk read below.
+  const pane = resolveDetailPane({
+    pending: blame.isPending,
+    error: blame.isError,
+    hasData: blame.data !== undefined,
+    paused: blame.isPaused,
+    fetching: blame.isFetching,
+  });
+  const failed = refreshFailed(blame);
   // Fallback content source: `git blame` refuses untracked files, but we scan
   // `--untracked`, so a brand-new file's content is read straight off disk.
-  // Deferred until blame has actually errored, so tracked files never pay it.
-  const fileText = useFileText(repoPath, path, blame.isError);
+  // Only a blame that errored with nothing loaded counts: a tracked file's
+  // failed refresh keeps its blame, never pays the read, never reads untracked.
+  const untracked = blame.isError && blame.data === undefined;
+  const fileText = useFileText(repoPath, path, untracked);
   const openFile = useOpenFile();
   const rescan = useTodoScanInvalidate(repoPath);
   const [promoteOpen, setPromoteOpen] = useState(false);
@@ -61,14 +83,14 @@ export function CodeTodoDetailView({
   const todoLine: BlameLine | undefined = blameLines[line - 1];
 
   // A unified excerpt source: prefer blame (content + attribution in one call),
-  // fall back to the raw file read when blame errored. Both yield 1-based
-  // { lineNo, content } rows the excerpt renders identically. When blame errored
-  // but the fallback hasn't resolved yet, `data` is undefined and this stays
-  // empty (so nothing renders until the read lands — pending is handled below).
-  // Strip one trailing terminator then split CRLF-safely (mirroring `capHunkLines`
-  // in ai/review-tools.ts) so CRLF worktrees + a final newline can't skew the
+  // fall back to the raw file read for an untracked file. Both yield 1-based
+  // { lineNo, content } rows the excerpt renders identically. When the fallback
+  // hasn't resolved yet, `data` is undefined and this stays empty (so nothing
+  // renders until the read lands — pending is handled below). Strip one
+  // trailing terminator then split CRLF-safely (mirroring `capHunkLines` in
+  // ai/review-tools.ts) so CRLF worktrees + a final newline can't skew the
   // stale boundary or render stray CRs.
-  const excerptLines: { lineNo: number; content: string }[] = blame.isError
+  const excerptLines: { lineNo: number; content: string }[] = untracked
     ? fileText.data !== undefined
       ? fileText.data
           .replace(/\r?\n$/, "")
@@ -107,20 +129,60 @@ export function CodeTodoDetailView({
   // Still resolving the content source: blame pending, or the file-read fallback
   // in flight after a blame error. Show skeletons rather than a false "stale"/
   // "no preview" verdict computed against a not-yet-known length.
-  const sourcePending =
-    blame.isPending || (blame.isError && fileText.isPending);
+  const sourcePending = blame.isPending || (untracked && fileText.isPending);
   // Both sources failed (blame refused AND the file couldn't be read — e.g.
-  // deleted mid-session): no preview to show.
+  // deleted mid-session): no preview to show, and Retry re-asks both. A failed
+  // re-read of a file already shown keeps it, and the notice says so.
   const previewUnavailable =
-    !sourcePending && blame.isError && fileText.isError;
+    !sourcePending &&
+    untracked &&
+    fileText.isError &&
+    fileText.data === undefined;
+  const retryErrored = () => {
+    if (blame.isError) void blame.refetch();
+    if (fileText.isError) void fileText.refetch();
+  };
+  // The notice follows the source on screen: an untracked file's disk read,
+  // or its blame.
+  const noticeFailed = untracked
+    ? fileText.data !== undefined && refreshFailed(fileText)
+    : failed;
+  const noticeRetry = untracked
+    ? () => void fileText.refetch()
+    : () => void blame.refetch();
   // The file drifted: the scan pointed past the current file length (including a
   // file emptied to zero lines — an empty successful blame is stale, not "no
   // preview", so Rescan stays reachable). Only judged once a source resolved.
   const stale =
     !sourcePending && !previewUnavailable && line > excerptLines.length;
 
-  return (
-    <div className="flex h-full min-h-0 flex-col">
+  // Retry resets both reads, swapping the error arm for the skeleton; every arm
+  // renders in the same host, so focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(previewUnavailable);
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap or record switch that unmounts the focused node would drop
+  // focus to <body>; land it on the host. Change-only, so a mount never takes
+  // focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${path}:${line}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  const shell = (content: ReactNode) => (
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex h-full min-h-0 flex-col outline-none"
+    >
       <div className="border-b p-4">
         <div className="flex items-start gap-2">
           <MarkerChip marker={marker} className="mt-0.5 shrink-0" />
@@ -149,7 +211,7 @@ export function CodeTodoDetailView({
             ) : null}
           </p>
         )}
-        {blame.isError && (
+        {untracked && (
           <p className="mt-2 text-xs text-muted-foreground">
             Not tracked yet — no history.
           </p>
@@ -179,66 +241,18 @@ export function CodeTodoDetailView({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
-        {sourcePending ? (
-          <div className="space-y-1.5 p-3">
-            {Array.from({ length: 10 }, (_, i) => (
-              <Skeleton key={i} className="h-4 w-full" />
-            ))}
-          </div>
-        ) : stale ? (
-          <div className="p-4 text-xs">
-            <p className="text-muted-foreground">
-              This line is no longer in the file — the scan may be stale.
-            </p>
-            <Button
-              variant="outline"
-              size="xs"
-              className="mt-3"
-              onClick={() => rescan()}
-            >
-              Rescan
-            </Button>
-          </div>
-        ) : previewUnavailable || excerpt.length === 0 ? (
-          // Both blame and the file read failed (e.g. deleted mid-session), or
-          // there's simply nothing to show. Header + actions still work.
-          <p className="p-4 text-xs text-muted-foreground">
-            No file preview available.
-          </p>
-        ) : (
-          <div className="font-mono text-[11px] leading-relaxed">
-            {excerpt.map((bl) => {
-              const isTodo = bl.lineNo === line;
-              return (
-                <div
-                  key={bl.lineNo}
-                  className={cn(
-                    "flex w-full items-start",
-                    isTodo && "bg-accent text-accent-foreground",
-                  )}
-                >
-                  <span
-                    aria-hidden
-                    className="w-4 shrink-0 select-none text-center text-muted-foreground/70"
-                  >
-                    {isTodo ? "▸" : ""}
-                  </span>
-                  <span
-                    className={cn(
-                      "w-10 shrink-0 select-none px-1 text-right text-muted-foreground/70",
-                      isTodo && "font-bold text-accent-foreground",
-                    )}
-                  >
-                    {bl.lineNo}
-                  </span>
-                  <HighlightedLine content={bl.content} language={lang} />
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+      <DegradedListNotice
+        noun="this excerpt"
+        degraded={pane === "content-degraded" || noticeFailed}
+        message={detailNoticeMessage({
+          noun: "excerpt",
+          isError: noticeFailed,
+          stale: blame.isPlaceholderData,
+        })}
+        onRetry={noticeFailed ? noticeRetry : undefined}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
+      <div className="min-h-0 flex-1 overflow-auto">{content}</div>
 
       <CreateLocalIssueDialog
         repoPath={repoPath}
@@ -253,6 +267,93 @@ export function CodeTodoDetailView({
         }}
       />
     </div>
+  );
+
+  if (sourcePending) {
+    return shell(
+      <div className="space-y-1.5 p-3">
+        {Array.from({ length: 10 }, (_, i) => (
+          <Skeleton key={i} className="h-4 w-full" />
+        ))}
+      </div>,
+    );
+  }
+  if (stale) {
+    return shell(
+      <div className="p-4 text-xs">
+        <p className="text-muted-foreground">
+          This line is no longer in the file — the scan may be stale.
+        </p>
+        <Button
+          variant="outline"
+          size="xs"
+          className="mt-3"
+          onClick={() => rescan()}
+        >
+          Rescan
+        </Button>
+      </div>,
+    );
+  }
+  if (previewUnavailable) {
+    // Both blame and the file read failed (e.g. deleted mid-session). Header +
+    // actions still work.
+    const reason = fileText.error ?? blame.error;
+    return shell(
+      <div className="flex flex-col items-start gap-2 p-4 text-xs text-muted-foreground">
+        <p>No file preview available.</p>
+        {reason ? <p>{presentError(reason).summary}</p> : null}
+        <Button
+          ref={retryRef}
+          variant="outline"
+          size="sm"
+          className="cursor-pointer"
+          onClick={retryErrored}
+        >
+          Retry
+        </Button>
+      </div>,
+    );
+  }
+  if (excerpt.length === 0) {
+    // Nothing to show. Header + actions still work.
+    return shell(
+      <p className="p-4 text-xs text-muted-foreground">
+        No file preview available.
+      </p>,
+    );
+  }
+  return shell(
+    <div className="font-mono text-[11px] leading-relaxed">
+      {excerpt.map((bl) => {
+        const isTodo = bl.lineNo === line;
+        return (
+          <div
+            key={bl.lineNo}
+            className={cn(
+              "flex w-full items-start",
+              isTodo && "bg-accent text-accent-foreground",
+            )}
+          >
+            <span
+              aria-hidden
+              className="w-4 shrink-0 select-none text-center text-muted-foreground/70"
+            >
+              {isTodo ? "▸" : ""}
+            </span>
+            <span
+              className={cn(
+                "w-10 shrink-0 select-none px-1 text-right text-muted-foreground/70",
+                isTodo && "font-bold text-accent-foreground",
+              )}
+            >
+              {bl.lineNo}
+            </span>
+            <HighlightedLine content={bl.content} language={lang} />
+          </div>
+        );
+      })}
+    </div>,
   );
 }
 

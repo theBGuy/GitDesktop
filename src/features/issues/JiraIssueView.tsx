@@ -12,6 +12,8 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -46,7 +48,10 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CommentComposer } from "@/features/conversations/CommentComposer";
 import { CommentEditor } from "@/features/conversations/CommentEditor";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { ConversationScrollArea } from "@/features/conversations/ConversationScrollArea";
 import {
   detailNoticeMessage,
@@ -59,6 +64,7 @@ import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotk
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { JiraIssueSidebar } from "@/features/issues/JiraIssueSidebar";
 import { ISSUE_SWITCH_LOADING_REASON } from "@/features/issues/RemoteIssueViewParts";
+import { presentError } from "@/lib/error-summary";
 import { type PendingRepoWrite, pendingWriteMatching } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -1718,6 +1724,49 @@ export function JiraIssueView({
     threadActive && canComment,
   );
 
+  // Loaded content always renders: an errored background refetch keeps the
+  // issue on screen rather than wiping it for a placeholder.
+  const pane = resolveDetailPane({
+    pending: details.isPending,
+    error: details.isError,
+    hasData: details.data !== undefined,
+    paused: details.isPaused,
+    fetching: details.isFetching,
+  });
+  // Retry resets the read to pending: the skeleton, or after an in-view switch
+  // the previous issue as placeholder. Every arm renders in the same host div,
+  // so React keeps that node through the swap and focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && details.isError,
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap or record switch that unmounts the focused node would drop
+  // focus to <body>; land it on the host. Change-only, so a mount never takes
+  // focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${issueIdentity}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  const shell = (content: ReactNode) => (
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex h-full flex-col outline-none"
+    >
+      {content}
+    </div>
+  );
+
   // The link resolved to nothing (unlinked, or unlinked while this view was
   // open): the issue query is disabled, so it would otherwise sit on a pending
   // skeleton forever. Teach + offer a way back rather than stranding it. Wait for
@@ -1735,32 +1784,45 @@ export function JiraIssueView({
     );
   }
 
-  // Loaded content always renders: an errored background refetch keeps the
-  // issue on screen rather than wiping it for a placeholder.
-  const pane = resolveDetailPane({
-    pending: details.isPending,
-    error: details.isError,
-    hasData: details.data !== undefined,
-    paused: details.isPaused,
-    fetching: details.isFetching,
-  });
   if (pane === "skeleton") {
-    return (
+    return shell(
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
         <Skeleton className="h-4 w-1/3" />
         <Skeleton className="h-4 w-1/2" />
         <Skeleton className="h-32 w-full" />
-      </div>
+      </div>,
     );
   }
   if (pane === "offline") {
-    return (
-      <DiffPlaceholder message={offlinePendingMessage("this Jira issue")} />
+    return shell(
+      <DiffPlaceholder message={offlinePendingMessage("this Jira issue")} />,
     );
   }
-  if (!details.data) {
-    return <DiffPlaceholder message="Could not load this Jira issue" />;
+  if (pane === "error" || !details.data) {
+    return shell(
+      <DiffPlaceholder
+        message="Could not load this Jira issue"
+        action={
+          details.isError ? (
+            <div className="flex flex-col items-center gap-2">
+              <p className="max-w-md text-center text-xs">
+                {presentError(details.error).summary}
+              </p>
+              <Button
+                ref={retryRef}
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                onClick={() => void details.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : undefined
+        }
+      />,
+    );
   }
 
   const issue: JiraIssueDetails = details.data;
@@ -1848,7 +1910,7 @@ export function JiraIssueView({
     );
   }
 
-  return (
+  return shell(
     <div
       className="@container/jira-detail flex h-full flex-col"
       aria-busy={Boolean(staleDim)}
@@ -2049,6 +2111,6 @@ export function JiraIssueView({
           disabled={commenting !== undefined}
         />
       )}
-    </div>
+    </div>,
   );
 }

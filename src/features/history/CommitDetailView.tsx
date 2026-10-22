@@ -1,6 +1,13 @@
 import { CopyIcon, DotsThreeVerticalIcon } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useDeferredValue, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useDeferredValue,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { DetailRail, DetailRailRow } from "@/components/detail-rail";
@@ -20,6 +27,14 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  detailNoticeMessage,
+  resolveDetailPane,
+} from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
@@ -32,6 +47,7 @@ import {
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
+import { presentError } from "@/lib/error-summary";
 import type { CommitParent } from "@/lib/git/api";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
@@ -274,17 +290,99 @@ export function CommitDetailView({
   const isHead = isLatest && headAgrees(logTop, head?.oid);
   const onError = (e: unknown) => toastError(e);
 
-  if (details.isPending || files.isPending) {
-    return (
+  // The commit renders only with both reads loaded, so the ladder merges them:
+  // a failure beside the other read's refetch in flight hasn't settled.
+  const pane = resolveDetailPane({
+    pending: details.isPending || files.isPending,
+    error: details.isError || files.isError,
+    hasData: details.data !== undefined && files.data !== undefined,
+    paused: details.isPaused || files.isPaused,
+    fetching: details.isFetching || files.isFetching,
+  });
+  const failed =
+    (details.isError || files.isError) &&
+    !details.isFetching &&
+    !files.isFetching &&
+    !details.isPaused &&
+    !files.isPaused;
+  // Only the failed read refetches: a healthy one would churn its placeholder.
+  const retryErrored = () => {
+    if (details.isError) void details.refetch();
+    if (files.isError) void files.refetch();
+  };
+  // Retry resets the failed read to pending, swapping the error arm for the
+  // skeleton; every arm renders in the same host div, so focus lands there.
+  const { hostRef, retryRef } = useRetryFocusRescue(
+    pane === "error" && (details.isError || files.isError),
+  );
+  // Degraded content is the same arm, so a failed or recovered refresh never
+  // moves focus.
+  const arm = pane === "content-degraded" ? "content" : pane;
+  // An arm swap or record switch that unmounts the focused node would drop
+  // focus to <body>; land it on the host. Change-only, so a mount never takes
+  // focus from elsewhere.
+  const focusHost = useRef<HTMLDivElement | null>(null);
+  const viewFrame = `${arm}:${hash}`;
+  const lastViewFrame = useRef(viewFrame);
+  useLayoutEffect(() => {
+    if (lastViewFrame.current === viewFrame) return;
+    lastViewFrame.current = viewFrame;
+    if (document.activeElement === document.body)
+      focusHost.current?.focus({ preventScroll: true });
+  }, [viewFrame]);
+  const shell = (content: ReactNode) => (
+    <div
+      ref={(node) => {
+        hostRef(node);
+        focusHost.current = node;
+      }}
+      tabIndex={-1}
+      className="flex h-full flex-col outline-none"
+    >
+      {content}
+    </div>
+  );
+
+  // Both reads are local ("always" networkMode), so they never park offline;
+  // that arm keeps the loading state rather than claim a network wait.
+  if (pane === "skeleton" || pane === "offline") {
+    return shell(
       <div className="space-y-3 p-4">
         <Skeleton className="h-5 w-2/3" />
         <Skeleton className="h-4 w-1/3" />
         <Skeleton className="h-32 w-full" />
-      </div>
+      </div>,
     );
   }
-  if (details.isError || files.isError) {
-    return <DiffPlaceholder message="Could not load this commit" />;
+  if (pane === "error" || !details.data || !files.data) {
+    const reason = details.isError
+      ? details.error
+      : files.isError
+        ? files.error
+        : null;
+    return shell(
+      <DiffPlaceholder
+        message="Could not load this commit"
+        action={
+          reason ? (
+            <div className="flex flex-col items-center gap-2">
+              <p className="max-w-md text-center text-xs">
+                {presentError(reason).summary}
+              </p>
+              <Button
+                ref={retryRef}
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                onClick={retryErrored}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : undefined
+        }
+      />,
+    );
   }
 
   const commit = details.data;
@@ -413,7 +511,7 @@ export function CommitDetailView({
     rowAttr: "data-path",
   });
 
-  return (
+  return shell(
     <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
       <header className="flex flex-col gap-1 border-b px-4 py-3">
         <h2 className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}>
@@ -527,6 +625,17 @@ export function CommitDetailView({
         </div>
       </header>
 
+      <DegradedListNotice
+        noun="this commit"
+        degraded={pane === "content-degraded"}
+        message={detailNoticeMessage({
+          noun: "commit",
+          isError: failed,
+          stale,
+        })}
+        onRetry={failed ? retryErrored : undefined}
+        className="shrink-0 border-b px-4 py-1.5"
+      />
       <DetailRailRow>
         <DetailRail
           ariaLabel="Changed files"
@@ -637,6 +746,6 @@ export function CommitDetailView({
         openedIn={mergePick?.repo ?? null}
         onClose={() => setMergePick(null)}
       />
-    </div>
+    </div>,
   );
 }
