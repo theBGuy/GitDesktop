@@ -3115,31 +3115,33 @@ pub async fn merge_pr(
     }
 }
 
+fn merge_unconfirmed(err: AppError) -> AppError {
+    AppError::Bitbucket(format!(
+        "Bitbucket accepted the merge, but GitDesktop couldn't confirm completion.\n{err}"
+    ))
+}
+
 /// Poll a Bitbucket merge task-status URL until it resolves. `PENDING` loops (bounded
-/// to ~30 tries, 2s apart); `SUCCESS` → Ok; anything else → an error carrying the raw
-/// body. A non-2xx poll response errors via [`http::bb_error_detail`] as a read
-/// (the poll GETs status; the merge POST's own failures stay on the write arm).
+/// to ~30 tries, 2s apart); `SUCCESS` → Ok; definite task failures carry the task
+/// status with no accepted-merge lead. A non-2xx poll response errors via
+/// [`http::bb_error_detail`] as a read (the poll GETs status; the merge POST's own
+/// failures stay on the write arm).
 /// `task_url` is the 202's `Location`, used as-is, and `http`'s `resolve_url`
 /// refuses one outside the API base before any request.
 async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()> {
-    let unconfirmed = |err: AppError| {
-        AppError::Bitbucket(format!(
-            "Bitbucket accepted the merge, but GitDesktop couldn't confirm completion: {err}"
-        ))
-    };
     for _ in 0..30 {
         let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None)
             .await
-            .map_err(unconfirmed)?;
+            .map_err(merge_unconfirmed)?;
         if !(200..300).contains(&status) {
-            return Err(unconfirmed(AppError::Bitbucket(http::bb_error_detail(
+            return Err(merge_unconfirmed(AppError::Bitbucket(http::bb_error_detail(
                 status,
                 &body,
                 BbOpKind::Read,
             ))));
         }
         let task: BbMergeTask = serde_json::from_str(&body).map_err(|e| {
-            unconfirmed(http::bb_unreadable(
+            merge_unconfirmed(http::bb_unreadable(
                 "the merge status",
                 format!("could not parse Bitbucket merge status: {e}"),
             ))
@@ -3156,7 +3158,7 @@ async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()>
             }
         }
     }
-    Err(unconfirmed(AppError::Bitbucket(
+    Err(merge_unconfirmed(AppError::Bitbucket(
         "Bitbucket merge is still processing — check the pull request on Bitbucket.".into(),
     )))
 }
@@ -7616,6 +7618,20 @@ mod tests {
     }
 
     // ── Write-side unit tests (pure; no network) ────────────────────────────────
+
+    #[test]
+    fn merge_unconfirmed_keeps_acceptance_on_the_first_line() {
+        let cause = format!(
+            "Bitbucket request failed: x: {}",
+            http::TRANSPORT_CONNECT_FAILED
+        );
+        let message = merge_unconfirmed(AppError::Bitbucket(cause.clone())).to_string();
+        assert_eq!(
+            message.lines().next(),
+            Some("Bitbucket accepted the merge, but GitDesktop couldn't confirm completion.")
+        );
+        assert!(message.contains(&cause));
+    }
 
     #[test]
     fn merge_strategy_maps_neutral_to_bitbucket_enum() {
