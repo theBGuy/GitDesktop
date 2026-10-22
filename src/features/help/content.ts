@@ -529,8 +529,8 @@ the last list up, with a line above it saying it couldn't refresh.
   and another GitDesktop action started meanwhile waits for it: if the discard is still
   going after ten seconds, that action stops with *A discard is still running — try
   again when it finishes.* rather than landing partway through. On Windows, if any new
-  file Git lists sits behind a junction or other link, or has a path part ending in a dot
-  or space, nothing is discarded and the message names that file.
+  file Git lists sits behind a junction or other link, or has a path part ending in a dot,
+  a space, or \`.{GUID}\`, nothing is discarded and the message names that file.
 
 ## The diff viewer
 

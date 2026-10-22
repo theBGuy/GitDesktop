@@ -5,7 +5,8 @@
   On Windows, to keep discards inside the repository, a discard stops
   before changing anything, and names the file, when a new file it would
   recycle sits behind a junction or other link, or has a path part ending
-  in a dot or space. Discard all changes checks every new file Git lists first.
+  in a dot, a space, or `.{GUID}`. Discard all changes checks every new file
+  Git lists first.
   Discards also wait their turn behind GitDesktop's other Git operations on
   the repository. The MCP server's `discard_changes` and `discard_all_changes`
   tools read paths from the repository root, even when the server is
