@@ -1165,6 +1165,8 @@ pub(crate) async fn git_checkout_branch_core(
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
     let mut args = vec!["switch"];
     if session_name {
+        // The existence check runs outside the lock; a concurrent delete must
+        // not re-open guess-creation at the switch.
         args.push("--no-guess");
     }
     args.push(&name);

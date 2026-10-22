@@ -516,6 +516,8 @@ pub(crate) async fn git_switch_autostash_core(
         None => {
             let mut args = vec!["switch"];
             if session_name {
+                // The existence check runs outside the lock; a concurrent delete
+                // must not re-open guess-creation at the switch.
                 args.push("--no-guess");
             }
             args.push(&name);

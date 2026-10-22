@@ -1,3 +1,3 @@
-- Adding a worktree at a relative folder path now checks that folder inside the
-  repository, so an existing folder is caught up front instead of failing
-  mid-creation.
+- Adding a worktree at a relative folder path now resolves it from the
+  repository folder, so a folder that already exists there is caught before
+  anything is created.
