@@ -662,6 +662,9 @@ selection to compare a range.
   first and explains the detached HEAD you land in), or copy
   its SHA.
 
+The commit detail view stays on screen if a background refresh fails, with a line saying it
+couldn't refresh and a **Retry**. A commit that fails to load says why and offers **Retry**.
+
 ## Commit comments
 
 When the repo is connected to **GitHub**, **GitLab**, or **Bitbucket** and the commit is
@@ -683,6 +686,9 @@ list (in **History**, or a PR's **Commits** tab), in a PR's **Files** tab, or in
 that commit or branch — you see the file *as of* that revision, not your working copy.
 The **Blame file…** command (from the command palette) opens a fuzzy picker of every
 tracked file and blames the one you choose as it is now.
+
+Blame keeps its lines up if a background refresh fails, with a line saying it couldn't
+refresh and a **Retry**. A file that fails to blame says why and offers **Retry**.
 
 > History-rewriting actions (reset, Edit history, squash) only ever touch **unpushed**
 > commits, and a push of rewritten history becomes a safe
@@ -836,6 +842,10 @@ with a file-by-file diff preview. **Restore to working tree** re-applies the one
 it's non-destructive (it applies the stash, never dropping or committing anything), so you
 can safely preview and recover work you thought was gone.
 
+In both tabs, a stash's file list stays up if a background refresh fails, with a line
+saying it couldn't refresh and a **Retry**. One that fails to load says why and offers
+**Retry**.
+
 **Operation history** (in the branch ⋮ menu, or the command palette) opens a
 journal of the *risky* operations GitDesktop runs: local PR merges, cherry-picks, history
 edits, interactive rebases, and a rebase pull that drops commits. Each is recorded with the
@@ -857,6 +867,9 @@ show. The base-branch picker is searchable — type to filter — hides archived
 shows which branches live in other worktrees plus, when a branch has diverged, how far it
 is ahead of and behind your current branch. From here you can merge, rebase, or jump
 straight to opening a pull request.
+
+The diff stays on screen if a background refresh fails, with a line saying it couldn't
+refresh and a **Retry**. One that fails to load says why and offers **Retry**.
 
 {{Secondaryclick}} any commit in the ahead or behind list for **Checkout commit**,
 **Cherry-pick commit**, **Create branch from commit…**, **Create tag…**, and **Copy SHA**.
@@ -1553,6 +1566,11 @@ with create / edit / delete of your own, on GitHub, GitLab, and Bitbucket. A dra
 a real range on **GitLab**; **GitHub** and **Bitbucket** commit comments anchor to a single
 line, and the composer says so.
 
+The detail view keeps the commit's changes on screen if a background refresh fails, with a
+line saying it couldn't refresh and a **Retry**; while you're offline, the line says so
+instead. One that fails to load says why and offers **Retry**, and while you're offline,
+one that hasn't loaded yet says it will load once you're back online.
+
 Create a PR with **Create pull request** ({{kbd:create-pr}}) or from the Compare tab — as
 a **draft** if you like, and set its **labels** and **assignees** right in the dialog
 (GitHub and GitLab; Bitbucket PRs have neither, so it shows only its reviewers picker
@@ -2000,6 +2018,11 @@ ones. The open / closed / all filter maps to Jira's status **categories** — "T
 **assignee**, and **labels**, plus the Markdown **description** and **comments** — the
 command palette's **Focus the comment box** jumps to the composer here too. Every
 issue links out with **View in Jira**.
+
+An open issue stays on screen if a background refresh fails, with a line at the top saying
+it couldn't refresh and a **Retry**; while you're offline, the line says so instead. One
+that fails to load says why and offers **Retry**, and while you're offline, one that
+hasn't loaded yet says it will load once you're back online.
 
 When the project uses them, issues also show their **agile fields** — **story points** (both
 on the list rows and in the detail), **sprint**, a clickable **epic / parent** (open it to
@@ -2958,7 +2981,11 @@ Bitbucket).
 - Quick links jump to the pages best viewed on the web — GitHub's Pulse, Network,
   Dependents, and Actions (the Network graph is where forks of forks live); GitLab's
   Activity, CI/CD analytics, and value stream analytics; or Bitbucket's Commits,
-  Branches, Pipelines, and Deployments.`,
+  Branches, Pipelines, and Deployments.
+
+The repository statistics stay up if a background refresh fails, with a line saying they
+couldn't refresh and a **Retry**. If they fail to load, the panel says why and offers
+**Retry**.`,
   },
   {
     id: "code-todos",
@@ -2986,6 +3013,11 @@ is fully keyboard-navigable.
 
 Select a TODO to see a **syntax-highlighted excerpt** of the code around that line, along
 with **blame attribution** — who wrote that line, and how long ago.
+
+The excerpt and its attribution stay on screen if a background refresh fails, with a line
+saying it couldn't refresh and a **Retry**. A file Git doesn't track yet shows its excerpt
+read straight from disk, marked *Not tracked yet*. Only when nothing can be read does the
+pane say why and offer **Retry**.
 
 From there you can:
 
@@ -3064,7 +3096,10 @@ throwaway branch (\`gd/session/…\`) that never touches your working tree, and 
 **checkpoint** each turn. It works in the open: the conversation shows a **step-by-step
 transcript** of each file it reads, edits, searches, and command it runs, interleaved
 with its narration. **Expand any edit step** to see that file's diff inline, watch its
-**live changes** mid-turn, or read the cumulative diff under **Changes**.
+**live changes** mid-turn, or read the cumulative diff under **Changes**. If a step's diff
+fails to refresh, the last one stays with a line saying it couldn't refresh and a
+**Retry**, and its live changes pause until a refresh succeeds, such as after **Retry** or
+when you come back to the window. One that fails to load says why and offers **Retry**.
 
 In the composer you can:
 

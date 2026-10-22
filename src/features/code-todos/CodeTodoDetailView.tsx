@@ -85,10 +85,10 @@ export function CodeTodoDetailView({
   // A unified excerpt source: prefer blame (content + attribution in one call),
   // fall back to the raw file read for an untracked file. Both yield 1-based
   // { lineNo, content } rows the excerpt renders identically. When the fallback
-  // hasn't resolved yet, `data` is undefined and this stays
-  // empty (so nothing renders until the read lands — pending is handled below).
-  // Strip one trailing terminator then split CRLF-safely (mirroring `capHunkLines`
-  // in ai/review-tools.ts) so CRLF worktrees + a final newline can't skew the
+  // hasn't resolved yet, `data` is undefined and this stays empty (so nothing
+  // renders until the read lands — pending is handled below). Strip one
+  // trailing terminator then split CRLF-safely (mirroring `capHunkLines` in
+  // ai/review-tools.ts) so CRLF worktrees + a final newline can't skew the
   // stale boundary or render stray CRs.
   const excerptLines: { lineNo: number; content: string }[] = untracked
     ? fileText.data !== undefined
