@@ -534,8 +534,11 @@ struct PreviewMergeArgs {
 struct DiscardPathArg {
     /// Repo-relative path to discard.
     path: String,
-    /// Whether this path is untracked (a new file). Untracked files go to the OS
-    /// recycle bin; tracked files are restored from the index. Defaults to false.
+    /// Whether this path is a new (untracked) file. The server checks every path's flag
+    /// against git status and refuses the whole request on any mismatch. Matching flagged
+    /// paths go to the OS recycle bin, or are deleted outright when Windows reserves the
+    /// name (such as nul or com3); matching unflagged paths are restored from the index.
+    /// Defaults to false.
     #[serde(default)]
     untracked: bool,
 }

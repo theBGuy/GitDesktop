@@ -91,6 +91,7 @@ export function ChangesContextMenuItems({
   repoPath,
   inSelection,
   selectionCount,
+  discardSelectionCount,
   stageableSelectionCount,
   selectedTrackedCount,
   actions,
@@ -100,6 +101,9 @@ export function ChangesContextMenuItems({
   /** Whether the right-clicked row is part of the active multi-selection. */
   inSelection: boolean;
   selectionCount: number;
+  /** Discard targets behind the selection, one per path: Git can list a path
+   *  as two records, which discard sends as one. */
+  discardSelectionCount: number;
   /** Selected files staging can actually reach — the whole selection minus the
    *  Windows-reserved device names `git add` refuses. Drives the Stage item's
    *  count, and disables it at 0. */
@@ -151,7 +155,7 @@ export function ChangesContextMenuItems({
           </ContextMenuItem>
         )}
         <ContextMenuItem onClick={actions.discardSelected}>
-          Discard {selectionCount} changes…
+          {`Discard ${discardSelectionCount} change${discardSelectionCount === 1 ? "" : "s"}…`}
         </ContextMenuItem>
         <ContextMenuItem onClick={actions.stashSelected}>
           Stash {selectionCount} changes…
