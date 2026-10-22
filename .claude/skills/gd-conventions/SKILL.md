@@ -84,13 +84,15 @@ the same change (`listKeyboardNav` in `src/lib/list-keyboard-nav.ts`) — an
 invariant, not polish. A list container that co-hosts a text editor (inline
 edit field, reply box) passes `ignoreTextEntry` so arrows keep moving the
 caret; leave it off where arrows deliberately drive nav from a filter input.
-A picker that stores a raw cursor index (command palette, task picker,
-co-author and Bitbucket-reviewer popovers, RepoList, the session composer's
-@ and / menus) derives it through `clampHighlight`/`stepHighlight`
-(`src/features/shortcuts/palette-highlight.ts`), so the marker, Enter, aria and
-scroll read one clamped index even when the list shrinks under it;
-`scripts/palette-highlight.test.mjs` pins each one, uniform palette-shaped
-pickers in `CALL_SITES` and the rest in per-site `SITE_PINS`.
+The clamped pickers (command palette, task picker, the co-author and
+Bitbucket add-reviewer popovers, RepoList, the session composer's @ and /
+menus) derive their stored cursor through `clampHighlight`/`stepHighlight`
+(`src/features/shortcuts/palette-highlight.ts`), so the marker, Enter and any
+aria or scroll the picker has read one clamped index even when the list shrinks
+under it; `scripts/palette-highlight.test.mjs` pins each one, uniform
+palette-shaped pickers in `CALL_SITES` and the rest in per-site `SITE_PINS`.
+Not adopters: `mention-autocomplete.tsx` clamps inline to the same effect, and
+`listKeyboardNav` lists are a separate primitive.
 Destructive paths stay behind confirmation via the
 shared `useConfirm`/`ConfirmDialogHost` primitive (`src/lib/stores/confirm.ts`,
 host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm

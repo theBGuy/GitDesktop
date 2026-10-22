@@ -296,20 +296,21 @@ export function RepoList({
     ...recent,
     ...groupNames.flatMap((name) => groups.get(name) ?? []),
   ];
-  // -1 sentinel = the user hasn't arrowed since the last filter edit. With a
-  // filter typed the first match is the cursor (Enter opens it, so it must be
-  // marked); with none there is no cursor, so a stray Enter never opens a repo.
+  // -1 sentinel = no cursor yet (unarrowed since the last filter edit, or the
+  // list was empty). With a filter typed the first match is the cursor (Enter
+  // opens it, so it must be marked); with none, a stray Enter opens nothing.
   const active =
     !q && highlight < 0 ? -1 : clampHighlight(highlight, visible.length);
   const highlightedPath = visible[active]?.path ?? null;
 
-  // Keep the keyboard highlight in view as it moves.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scrolls to whichever row carries the current highlight
+  // Keep the marked row in view. Keyed on its identity, not its index: while
+  // filtering the cursor stays at 0 as the row there changes.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run per marked row
   useEffect(() => {
     listRef.current
       ?.querySelector('[data-highlighted="true"]')
       ?.scrollIntoView({ block: "nearest" });
-  }, [active]);
+  }, [highlightedPath]);
 
   async function handleOpen(path: string) {
     setOpeningPath(path);

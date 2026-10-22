@@ -1,4 +1,4 @@
-// Pins the cursor math every raw-index picker shares
+// Pins the cursor math the clamped pickers share
 // (src/features/shortcuts/palette-highlight.ts): one clamped index, -1 on an
 // empty list, arrow steps from the CLAMPED cursor, and empty-list arrows that
 // leave the stored value alone. Also pins, by source shape, that each picker in
@@ -296,8 +296,15 @@ const popoverPins = (enterPin, enterMutant, ariaId) => [
   },
   {
     name: "no comparison against the stored value",
-    check: hasNot(/[=!]==\s*activeIndex|activeIndex\s*[=!]==/),
+    // Relational too; the lookbehind keeps an arrow's `=>` out of the ban.
+    check: hasNot(
+      /(?:[=!]==|(?<!=)[<>]=?)\s*activeIndex|activeIndex\s*(?:[=!]==|[<>]=?)/,
+    ),
     mutant: [enterMutant[0], `void (activeIndex === 0); ${enterMutant[0]}`],
+    extraMutants: [
+      [enterMutant[0], `void (activeIndex >= 0); ${enterMutant[0]}`],
+      [enterMutant[0], `void (0 < activeIndex); ${enterMutant[0]}`],
+    ],
   },
 ];
 
@@ -387,9 +394,11 @@ const SITE_PINS = [
         ],
       },
       {
-        name: "the scroll effect is keyed on the clamped index",
-        check: has(/\}\s*,\s*\[\s*active\s*\]\s*\)\s*;/),
-        mutant: ["}, [active]);", "}, [highlight]);"],
+        name: "the scroll effect is keyed on the marked row",
+        check: has(
+          /\.scrollIntoView\(\s*\{[^}]*\}\s*\)\s*;\s*\}\s*,\s*\[\s*highlightedPath\s*\]\s*\)\s*;/,
+        ),
+        mutant: ["}, [highlightedPath]);", "}, [active]);"],
       },
       {
         name: "ArrowDown steps from the cursor",
@@ -547,6 +556,23 @@ const SITE_PINS = [
           assert.ok(source.includes("session-slash-${slashActive}")),
         mutant: ["session-slash-${slashActive}", "session-slash-${slashIndex}"],
       },
+      // Masked companions to the two raw pins above, which a comment carrying
+      // the id text would satisfy: the interpolation itself must be code.
+      {
+        name: "the @ aria id interpolates the clamped index once",
+        check: (source) =>
+          assert.equal(countMatches(source, /\$\{\s*mentionActive\s*\}/), 1),
+        mutant: [
+          "session-mention-${mentionActive}",
+          "session-mention-${mentionIndex}",
+        ],
+      },
+      {
+        name: "the / aria id interpolates the clamped index once",
+        check: (source) =>
+          assert.equal(countMatches(source, /\$\{\s*slashActive\s*\}/), 1),
+        mutant: ["session-slash-${slashActive}", "session-slash-${slashIndex}"],
+      },
       {
         name: "no @ read indexed by the stored value",
         check: hasNot(/matches\s*\[\s*mentionIndex\s*\]/),
@@ -587,11 +613,17 @@ const SITE_PINS = [
         mutant: ["index={slashActive}", "index={slashIndex}"],
       },
       {
-        name: "no wrap from the raw stored value",
-        check: hasNot(/\(\s*i\s*[+-]\s*1/),
+        name: "no wrap from a raw stored value",
+        check: hasNot(/\(\s*(?:i|mentionIndex|slashIndex)\s*[+-]\s*1/),
         mutant: [
           "setSlashIndex((slashActive + 1) % slashMatches.length)",
           "setSlashIndex((i) => (i + 1) % slashMatches.length)",
+        ],
+        extraMutants: [
+          [
+            "setSlashIndex((slashActive + 1) % slashMatches.length)",
+            "setSlashIndex((slashIndex + 1) % slashMatches.length)",
+          ],
         ],
       },
     ],
@@ -599,12 +631,13 @@ const SITE_PINS = [
 ];
 
 // Planted before each site's cursor derivation by the green controls, once as a
-// comment and once as a string: every pinned and banned spelling, plus a step
-// call for the count pins. The mask blanks both, so every pin must stay green.
+// comment and once as a string: every banned spelling, plus a step call for the
+// count pins. The mask blanks both, so no pin may trip on them.
 const PROBE_TOKENS = [
   "clampHighlight(highlight, visible.length)",
   "stepHighlight(activeIndex, optionCount, 1)",
-  "[activeIndex] x === activeIndex Math.min(activeIndex, 1) `${activeIndex}`",
+  "[activeIndex] x === activeIndex activeIndex >= 0 Math.min(activeIndex, 1)",
+  "`${activeIndex}` (slashIndex + 1)",
   "visible[highlight] ?? (q ? visible[0] : undefined)",
   "matches[mentionIndex] slashMatches[slashIndex] ${mentionIndex} ${slashIndex}",
   "index={mentionIndex} index={slashIndex} (i + 1) pin probe",
@@ -640,7 +673,7 @@ for (const site of SITE_PINS) {
   }
 
   for (const [where, probe] of Object.entries(PROBES)) {
-    test(`${site.file}: a planted ${where} neither satisfies nor trips a pin (green control)`, () => {
+    test(`${site.file}: a planted ${where} does not trip a pin (green control)`, () => {
       assert.equal(countLiteral(raw, site.probeBefore), 1);
       const probed = raw.replace(site.probeBefore, (m) => probe + m);
       for (const pin of site.pins) {
