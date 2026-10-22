@@ -3,7 +3,9 @@
 // empty list, arrow steps from the CLAMPED cursor, and empty-list arrows that
 // leave the stored value alone. Also pins, by source shape, that each picker in
 // CALL_SITES reads that one clamped index for the marker, Enter and the scroll
-// effect, and that each arrow arm steps the stored value via the helper.
+// effect, and that each arrow arm steps the stored value via the helper; and,
+// in SITE_PINS, the per-site variants of that wiring (a composite option count,
+// RepoList's -1 sentinel, the composer's wrap stepping).
 //
 // Not testable here: the live render and dispatch (which row the user sees marked,
 // what Enter runs, scroll-into-view). Those need the running app; the shape pins
@@ -198,14 +200,14 @@ const hasNot = (re) =>
   Object.assign((source) => assert.doesNotMatch(source, re), {
     negative: true,
   });
-const twoSteps = Object.assign(
-  (source) =>
-    assert.equal(
-      countMatches(source, /stepHighlight\s*\(/),
-      2,
-      "exactly the two arrow steps",
-    ),
-  { negative: true },
+const countIs = (re, n, msg) =>
+  Object.assign((source) => assert.equal(countMatches(source, re), n, msg), {
+    negative: true,
+  });
+const twoSteps = countIs(
+  /stepHighlight\s*\(/,
+  2,
+  "exactly the two arrow steps",
 );
 
 const ADD_REVIEWER_STATE = "const [activeIndex, setActiveIndex] = useState";
@@ -563,8 +565,7 @@ const SITE_PINS = [
       // the id text would satisfy: the interpolation itself must be code.
       {
         name: "the @ aria id interpolates the clamped index once",
-        check: (source) =>
-          assert.equal(countMatches(source, /\$\{\s*mentionActive\s*\}/), 1),
+        check: countIs(/\$\{\s*mentionActive\s*\}/, 1, "one ${mentionActive}"),
         mutant: [
           "session-mention-${mentionActive}",
           "session-mention-${mentionIndex}",
@@ -572,8 +573,7 @@ const SITE_PINS = [
       },
       {
         name: "the / aria id interpolates the clamped index once",
-        check: (source) =>
-          assert.equal(countMatches(source, /\$\{\s*slashActive\s*\}/), 1),
+        check: countIs(/\$\{\s*slashActive\s*\}/, 1, "one ${slashActive}"),
         mutant: ["session-slash-${slashActive}", "session-slash-${slashIndex}"],
       },
       {
@@ -616,8 +616,12 @@ const SITE_PINS = [
         mutant: ["index={slashActive}", "index={slashIndex}"],
       },
       {
+        // Scoped to the two setters: a functional updater or arithmetic on the
+        // stored index there steps from the raw value, not the clamped cursor.
         name: "no wrap from a raw stored value",
-        check: hasNot(/\(\s*(?:i|mentionIndex|slashIndex)\s*[+-]\s*1/),
+        check: hasNot(
+          /set(?:Mention|Slash)Index\(\s*(?:(?:\(\s*\w*\s*\)|\w+)\s*=>|\(?\s*(?:mentionIndex|slashIndex)\s*[+-])/,
+        ),
         mutant: [
           "setSlashIndex((slashActive + 1) % slashMatches.length)",
           "setSlashIndex((i) => (i + 1) % slashMatches.length)",
@@ -626,6 +630,10 @@ const SITE_PINS = [
           [
             "setSlashIndex((slashActive + 1) % slashMatches.length)",
             "setSlashIndex((slashIndex + 1) % slashMatches.length)",
+          ],
+          [
+            "setMentionIndex((mentionActive + 1) % matches.length)",
+            "setMentionIndex(mentionIndex + 1)",
           ],
         ],
       },
@@ -640,10 +648,10 @@ const PROBE_TOKENS = [
   "clampHighlight(highlight, visible.length)",
   "stepHighlight(activeIndex, optionCount, 1)",
   "[activeIndex] x === activeIndex activeIndex >= 0 Math.min(activeIndex, 1)",
-  "`${activeIndex}` (slashIndex + 1)",
-  "visible[highlight] ?? (q ? visible[0] : undefined)",
+  "`${activeIndex}` visible[highlight] ?? (q ? visible[0] : undefined)",
   "matches[mentionIndex] slashMatches[slashIndex] ${mentionIndex} ${slashIndex}",
-  "index={mentionIndex} index={slashIndex} (i + 1) pin probe",
+  "index={mentionIndex} index={slashIndex} ${mentionActive} ${slashActive}",
+  "setSlashIndex((i) => (i + 1)) setMentionIndex((mentionIndex + 1)) pin probe",
 ].join(" ");
 const PROBES = {
   comment: `// ${PROBE_TOKENS}\n`,
