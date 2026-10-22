@@ -2019,10 +2019,10 @@ ones. The open / closed / all filter maps to Jira's status **categories** — "T
 command palette's **Focus the comment box** jumps to the composer here too. Every
 issue links out with **View in Jira**.
 
-An open issue stays on screen if a background refresh fails, with a line at the top saying
-it couldn't refresh and a **Retry**; while you're offline, the line says so instead. One
-that fails to load says why and offers **Retry**, and while you're offline, one that
-hasn't loaded yet says it will load once you're back online.
+An issue you're reading stays on screen if a background refresh fails, with a line at the
+top saying it couldn't refresh and a **Retry**; while you're offline, the line says so
+instead. One that fails to load says why and offers **Retry**, and while you're offline,
+one that hasn't loaded yet says it will load once you're back online.
 
 When the project uses them, issues also show their **agile fields** — **story points** (both
 on the list rows and in the detail), **sprint**, a clickable **epic / parent** (open it to
