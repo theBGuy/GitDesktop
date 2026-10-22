@@ -85,6 +85,7 @@ import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
+import { collapseDiscardEntries } from "./discard-targets";
 import { FileRow } from "./FileRow";
 import { StashesDialog } from "./StashesDialog";
 import {
@@ -474,13 +475,15 @@ export function ChangesPanel({
   const activeKey = selectedFile
     ? keyOf(selectedFile.path, selectedFile.staged)
     : null;
-  // Entries behind the multi-selection (deduped to one per path), driving the
-  // bulk context menu and its confirm dialogs.
+  // One entry per status record behind the multi-selection, so a path Git
+  // splits (a staged `D.` beside an untracked `?`) contributes both: unstage
+  // needs the `D.` record, while discard collapses to one target per path.
   const selectedPaths = new Set(
     [...selectedKeys].map((k) => k.slice(k.indexOf(":") + 1)),
   );
   const selectedEntries = entries.filter((e) => selectedPaths.has(e.path));
   const selectionCount = selectedEntries.length;
+  const discardableSelected = collapseDiscardEntries(selectedEntries);
   const stageableSelected = selectedEntries.filter(canStage);
   // Untracking only applies to files git already tracks (not fresh untracked
   // files or brand-new staged adds) — mirrors FileRow's per-file rule.
@@ -1202,10 +1205,10 @@ export function ChangesPanel({
   }
 
   function requestDiscardSelected() {
-    if (selectionCount > 0)
+    if (discardableSelected.length > 0)
       setDiscardScope({
         kind: "files",
-        entries: selectedEntries,
+        entries: discardableSelected,
         repo: repoPath,
       });
   }
@@ -1820,6 +1823,7 @@ export function ChangesPanel({
                       : false
                   }
                   selectionCount={selectionCount}
+                  discardSelectionCount={discardableSelected.length}
                   stageableSelectionCount={stageableSelected.length}
                   selectedTrackedCount={selectedTracked.length}
                   actions={{

@@ -700,6 +700,10 @@ pub(crate) async fn git_discard_untracked_lines_core(
             return Err(line_discard_refusal(&path, DISCARD_LINKED));
         }
         let full = Path::new(&top).join(&rel);
+        #[cfg(windows)]
+        let full = crate::fsops::verbatim_path(&full).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "no verbatim form")
+        })?;
         let content = std::fs::read_to_string(&full)?;
         let drop: std::collections::HashSet<u32> = lines.into_iter().collect();
         std::fs::write(&full, remove_lines(&content, &drop))?;
@@ -1565,8 +1569,11 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
         let top = top.clone();
         let entries: Vec<_> = untracked
             .into_iter()
-            .map(|rel| (rel.clone(), rel))
-            .collect();
+            .map(|path| {
+                let rel = discard_rel_path(&path).map_err(|why| discard_refusal(&path, why))?;
+                Ok((path, rel))
+            })
+            .collect::<AppResult<_>>()?;
         tauri::async_runtime::spawn_blocking(move || trash_entries(&top, &entries))
             .await
             .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??;
@@ -1664,8 +1671,10 @@ pub(crate) fn stash_saved_nothing(stdout: &str) -> bool {
     stdout.trim_start().starts_with("No local changes to save")
 }
 
-/// One selected file to discard; an untracked flag must agree with git status
-/// before the file can go to the recycle bin.
+/// One selected file to discard. Its `untracked` flag must match git status both
+/// ways or the whole batch is refused. Flagged paths go to the recycle bin, or are
+/// deleted outright when Windows reserves the name; unflagged ones are restored
+/// from the index.
 #[derive(serde::Deserialize)]
 pub struct DiscardPath {
     pub path: String,
@@ -1677,6 +1686,10 @@ const DISCARD_GIT_DIR: &str = "it's inside the repository's .git folder";
 const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
 const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and try again";
 const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try again";
+const DISCARD_WIN_TRAILING: &str =
+    "Windows reads a name ending in a dot or space as a different path";
+const DISCARD_WIN_SHELL_FOLDER: &str =
+    "Windows treats a folder name ending in a {GUID} as a shell link";
 
 /// Pure lexical gate; returns git's spelling without resolving filesystem names.
 fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
@@ -1703,13 +1716,36 @@ fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
         if cfg!(windows) && trimmed.is_empty() {
             return Err(DISCARD_OUTSIDE);
         }
-        if trimmed.eq_ignore_ascii_case(".git") {
+        if (cfg!(windows) && trimmed.eq_ignore_ascii_case(".git"))
+            || (!cfg!(windows) && seg == ".git")
+        {
             return Err(DISCARD_GIT_DIR);
+        }
+        if cfg!(windows) && seg.ends_with(['.', ' ']) {
+            return Err(DISCARD_WIN_TRAILING);
+        }
+        if cfg!(windows)
+            && seg.rsplit_once(".{").is_some_and(|(_, suffix)| {
+                suffix.strip_suffix('}').is_some_and(|guid| {
+                    guid.len() == 36
+                        && guid.bytes().enumerate().all(|(i, byte)| {
+                            if matches!(i, 8 | 13 | 18 | 23) {
+                                byte == b'-'
+                            } else {
+                                byte.is_ascii_hexdigit()
+                            }
+                        })
+                })
+            })
+        {
+            return Err(DISCARD_WIN_SHELL_FOLDER);
         }
     }
     Ok(s)
 }
 
+/// The path as refusal text: strips the bidi and zero-width format characters
+/// below and masks controls, so they can't reorder or hide part of the name.
 fn discard_shown(raw: &str) -> String {
     let shown: String = raw
         .chars()
@@ -15777,19 +15813,20 @@ detached
         ] {
             assert_eq!(discard_rel_path(raw), Err(DISCARD_OUTSIDE), "{raw:?}");
         }
-        for raw in [
-            ".git",
-            ".git/config",
-            ".GIT/config",
-            "sub/.git/HEAD",
-            "sub/.Git",
-            ".git./config",
-            ".git /config",
-        ] {
+        for raw in [".git", ".git/config", "sub/.git/HEAD"] {
             assert_eq!(discard_rel_path(raw), Err(DISCARD_GIT_DIR), "{raw:?}");
         }
         #[cfg(windows)]
         {
+            for raw in [
+                ".GIT/config",
+                "sub/.Git",
+                ".git./config",
+                ".git /config",
+                ".git.",
+            ] {
+                assert_eq!(discard_rel_path(raw), Err(DISCARD_GIT_DIR), "{raw:?}");
+            }
             assert_eq!(discard_rel_path(r"a\b.txt"), Ok("a/b.txt".into()));
             for raw in [
                 r"a\..\b",
@@ -15804,11 +15841,26 @@ detached
             ] {
                 assert_eq!(discard_rel_path(raw), Err(DISCARD_OUTSIDE), "{raw:?}");
             }
+            for raw in ["dir./x", "dir /x", "a/b./c", "x.", "x "] {
+                assert_eq!(discard_rel_path(raw), Err(DISCARD_WIN_TRAILING), "{raw:?}");
+            }
         }
         #[cfg(not(windows))]
         {
+            for raw in [
+                ".GIT/config",
+                "sub/.Git",
+                ".git./config",
+                ".git /config",
+                ".git.",
+            ] {
+                assert_eq!(discard_rel_path(raw), Ok(raw.to_string()), "{raw:?}");
+            }
             assert_eq!(discard_rel_path(r"a\b"), Ok(r"a\b".into()));
             assert_eq!(discard_rel_path("..."), Ok("...".into()));
+            for raw in ["dir./x", "dir /x", "a/b./c", "x.", "x "] {
+                assert_eq!(discard_rel_path(raw), Ok(raw.to_string()), "{raw:?}");
+            }
         }
     }
 
@@ -15862,7 +15914,12 @@ detached
     async fn discard_paths_refuses_git_metadata_paths() {
         let (dir, repo) = setup_repo("discard-metadata").await;
         let before = std::fs::read(dir.path().join(".git/config")).unwrap();
-        for raw in [".git/config", ".GIT/HEAD"] {
+        for raw in [
+            ".git/config",
+            ".git/HEAD",
+            #[cfg(windows)]
+            ".GIT/HEAD",
+        ] {
             let error = git_discard_paths_core(
                 &AppState::default(),
                 repo.clone(),
@@ -16207,6 +16264,198 @@ detached
         assert_eq!(
             std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
             "precious"
+        );
+    }
+
+    #[cfg(windows)]
+    async fn setup_discard_trailing_dot_repo(
+        marker: &str,
+    ) -> (tempfile::TempDir, String, tempfile::TempDir) {
+        let (dir, repo) = setup_repo(marker).await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let outside = tempfile::tempdir().unwrap();
+        let literal_dir = crate::fsops::verbatim_path(&dir.path().join("dir.")).unwrap();
+        std::fs::create_dir(&literal_dir).unwrap();
+        std::fs::write(literal_dir.join("inside.txt"), b"inside\n").unwrap();
+        std::fs::write(outside.path().join("victim.txt"), b"sentinel\n").unwrap();
+        discard_directory_link(&dir.path().join("dir"), outside.path());
+        (dir, repo, outside)
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_paths_refuses_windows_shell_namespace_folders() {
+        for variant in ["full", "shortcut-only", "bare"] {
+            let (top, repo) = setup_repo("discard-shell-folder").await;
+            discard_pin_excludes(&repo, top.path()).await;
+            let outside = tempfile::tempdir().unwrap();
+            let folder = top.path().join("x.{0AFACED1-E828-11D1-9187-B532F1E9575D}");
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::write(folder.join("f"), b"inside").unwrap();
+            std::fs::write(outside.path().join("f"), b"outside").unwrap();
+            if variant != "bare" {
+                let output = std::process::Command::new("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference = 'Stop'; $shell = New-Object -ComObject WScript.Shell; $shortcut = $shell.CreateShortcut($env:Z3_LINK); $shortcut.TargetPath = $env:Z3_TARGET; $shortcut.Save()"])
+                    .env("Z3_LINK", folder.join("target.lnk"))
+                    .env("Z3_TARGET", outside.path())
+                    .output()
+                    .unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+            if variant == "full" {
+                std::fs::write(
+                    folder.join("desktop.ini"),
+                    b"[.ShellClassInfo]\r\nCLSID2={0AFACED1-E828-11D1-9187-B532F1E9575D}\r\n",
+                )
+                .unwrap();
+                assert!(std::process::Command::new("attrib.exe")
+                    .args(["+s", "+r"])
+                    .arg(&folder)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let rel = "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}/f";
+            assert!(untracked_paths(&repo).await.unwrap().contains(rel));
+            let result = git_discard_paths_core(
+                &AppState::default(),
+                repo.clone(),
+                vec![discard_arg(rel, true)],
+            )
+            .await;
+            assert!(std::process::Command::new("attrib.exe")
+                .args(["-s", "-r"])
+                .arg(&folder)
+                .status()
+                .unwrap()
+                .success());
+            assert_eq!(std::fs::read(outside.path().join("f")).unwrap(), b"outside");
+            assert_eq!(std::fs::read(folder.join("f")).unwrap(), b"inside");
+            assert_eq!(
+                discard_message(result.unwrap_err()),
+                discard_message(discard_refusal(rel, DISCARD_WIN_SHELL_FOLDER))
+            );
+        }
+    }
+
+    #[test]
+    fn discard_rel_path_checks_windows_shell_folder_suffixes() {
+        for raw in [
+            "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}/f",
+            "sub/x.{0afaced1-e828-11d1-9187-b532f1e9575d}/f",
+            ".{00000000-0000-0000-0000-000000000000}",
+        ] {
+            #[cfg(windows)]
+            assert_eq!(discard_rel_path(raw), Err(DISCARD_WIN_SHELL_FOLDER));
+            #[cfg(not(windows))]
+            assert_eq!(discard_rel_path(raw), Ok(raw.to_string()));
+        }
+        for raw in [
+            "x.{not-a-guid}/f",
+            "x.{0AFACED1-E828-11D1-9187-B532F1E9575Z}/f",
+            "x.{0AFACED1_E828-11D1-9187-B532F1E9575D}/f",
+            "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}.txt",
+        ] {
+            assert_eq!(discard_rel_path(raw), Ok(raw.to_string()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_untracked_lines_rewrites_a_reserved_name_verbatim() {
+        let (dir, repo) = setup_repo("discard-lines-reserved").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let full = crate::fsops::verbatim_path(&dir.path().join("nul.txt")).unwrap();
+        std::fs::write(&full, b"1\r\n2\r\n3").unwrap();
+        assert!(untracked_paths(&repo).await.unwrap().contains("nul.txt"));
+        git_discard_untracked_lines_core(&AppState::default(), repo, "nul.txt".into(), vec![2])
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&full).unwrap(), b"1\r\n3");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_paths_refuses_a_listed_windows_trailing_dot_path() {
+        let (dir, repo, outside) = setup_discard_trailing_dot_repo("discard-trailing-path").await;
+        let status = run_git(
+            Some(&repo),
+            &["status", "--porcelain=v2", "--untracked-files=all", "-z"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(
+            status
+                .stdout
+                .split(|&byte| byte == 0)
+                .any(|record| record == b"? dir./victim.txt"),
+            "git must list the trailing-dot path for this refusal test"
+        );
+        let result = git_discard_paths_core(
+            &AppState::default(),
+            repo,
+            vec![discard_arg("dir./victim.txt", true)],
+        )
+        .await;
+        assert!(
+            outside.path().join("victim.txt").exists(),
+            "outside sentinel was recycled"
+        );
+        let error = result.unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard dir./victim.txt — Windows reads a name ending in a dot or space as a different path. Nothing was discarded.");
+        assert_eq!(
+            std::fs::read(outside.path().join("victim.txt")).unwrap(),
+            b"sentinel\n"
+        );
+        let literal_dir = crate::fsops::verbatim_path(&dir.path().join("dir.")).unwrap();
+        assert_eq!(
+            std::fs::read(literal_dir.join("inside.txt")).unwrap(),
+            b"inside\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_all_refuses_windows_trailing_dot_paths_before_changing_tree_or_index() {
+        let (dir, repo, outside) = setup_discard_trailing_dot_repo("discard-trailing-all").await;
+        std::fs::write(dir.path().join(".git/info/exclude"), b"/dir/\n").unwrap();
+        std::fs::write(dir.path().join("keep.txt"), b"keep\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"staged\n").unwrap();
+        git(&repo, &["add", "a.txt"]).await;
+        std::fs::write(dir.path().join("a.txt"), b"dirty\n").unwrap();
+        let listed = untracked_paths(&repo).await.unwrap();
+        assert!(listed.contains("dir./victim.txt"));
+        assert!(!listed.contains("dir/victim.txt"));
+        let index_before = std::fs::read(dir.path().join(".git/index")).unwrap();
+        let result = git_discard_all_core(&AppState::default(), repo).await;
+        assert!(
+            outside.path().join("victim.txt").exists(),
+            "outside sentinel was recycled"
+        );
+        let error = result.unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard dir./victim.txt — Windows reads a name ending in a dot or space as a different path. Nothing was discarded.");
+        assert_eq!(
+            std::fs::read(outside.path().join("victim.txt")).unwrap(),
+            b"sentinel\n"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("keep.txt")).unwrap(),
+            b"keep\n"
+        );
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"dirty\n");
+        let literal_dir = crate::fsops::verbatim_path(&dir.path().join("dir.")).unwrap();
+        assert_eq!(
+            std::fs::read(literal_dir.join("inside.txt")).unwrap(),
+            b"inside\n"
+        );
+        assert!(std::fs::symlink_metadata(dir.path().join("dir"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(dir.path().join(".git/index")).unwrap(),
+            index_before
         );
     }
 
