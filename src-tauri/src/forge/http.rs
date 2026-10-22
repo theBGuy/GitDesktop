@@ -72,9 +72,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// logs 307 to a pre-signed S3 URL on another host where reqwest STRIPS it (the URL
 /// carries its own auth; sending our Basic creds to S3 would leak them). Don't
 /// override the policy without preserving both behaviours.
-/// Requests built here re-attach Basic auth to the URL they are given, so
-/// `resolve_url` accepts an absolute URL (a pagination `next`, a merge task's
-/// `Location`) only on `BB_API_BASE`.
 static CLIENT: OnceLock<Client> = OnceLock::new();
 
 fn client() -> &'static Client {

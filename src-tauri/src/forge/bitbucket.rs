@@ -3109,11 +3109,7 @@ pub async fn merge_pr(
                     "Bitbucket accepted the merge but returned no task-status URL to poll.".into(),
                 )
             })?;
-            poll_merge_task(&creds, &task_url).await.map_err(|err| {
-                AppError::Bitbucket(format!(
-                    "Bitbucket accepted the merge, but GitDesktop couldn't confirm completion: {err}"
-                ))
-            })
+            poll_merge_task(&creds, &task_url).await
         }
         _ => Err(http::http_error(status, &body)),
     }
@@ -3126,20 +3122,27 @@ pub async fn merge_pr(
 /// `task_url` is the 202's `Location`, used as-is, and `http`'s `resolve_url`
 /// refuses one outside the API base before any request.
 async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()> {
+    let unconfirmed = |err: AppError| {
+        AppError::Bitbucket(format!(
+            "Bitbucket accepted the merge, but GitDesktop couldn't confirm completion: {err}"
+        ))
+    };
     for _ in 0..30 {
-        let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None).await?;
+        let (status, _, body) = http::bb_send(creds, reqwest::Method::GET, task_url, None)
+            .await
+            .map_err(unconfirmed)?;
         if !(200..300).contains(&status) {
-            return Err(AppError::Bitbucket(http::bb_error_detail(
+            return Err(unconfirmed(AppError::Bitbucket(http::bb_error_detail(
                 status,
                 &body,
                 BbOpKind::Read,
-            )));
+            ))));
         }
         let task: BbMergeTask = serde_json::from_str(&body).map_err(|e| {
-            http::bb_unreadable(
+            unconfirmed(http::bb_unreadable(
                 "the merge status",
                 format!("could not parse Bitbucket merge status: {e}"),
-            )
+            ))
         })?;
         match task.task_status.as_str() {
             "SUCCESS" => return Ok(()),
@@ -3153,9 +3156,9 @@ async fn poll_merge_task(creds: &BbCredentials, task_url: &str) -> AppResult<()>
             }
         }
     }
-    Err(AppError::Bitbucket(
+    Err(unconfirmed(AppError::Bitbucket(
         "Bitbucket merge is still processing — check the pull request on Bitbucket.".into(),
-    ))
+    )))
 }
 
 /// A minimal PR shape for the edit read-back — just the reviewer uuids we must echo.
