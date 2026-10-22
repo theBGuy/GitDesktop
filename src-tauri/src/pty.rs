@@ -1556,4 +1556,24 @@ mod tests {
         let script = task_terminal_script("C:\\", "node.exe", &[], "node").unwrap();
         assert!(script.lines().any(|line| line == "cd /d \"C:\\\""));
     }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[tokio::test]
+    async fn task_open_terminal_refuses_before_resolution() {
+        // The post-resolution bin check is not covered by this shape.
+        for (cwd, args) in [
+            ("a\"b".to_string(), vec![]),
+            ("C:\\repos".to_string(), vec!["a\nb".to_string()]),
+        ] {
+            let result = task_open_terminal_impl(
+                cwd,
+                "no-such-interp".into(),
+                Some("echo".into()),
+                None,
+                args,
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::InvalidArgument(_))), "{result:?}");
+        }
+    }
 }

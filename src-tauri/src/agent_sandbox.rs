@@ -1280,10 +1280,11 @@ fn shell_quote(s: &str) -> String {
 pub(crate) const CMD_SCRIPT_PRELUDE: &str =
     "@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n";
 
-/// Quotes a program path or a `cd /d` operand for a generated `.cmd` line.
+/// Quotes a program path, a `cd /d` operand, or an argv element a cmd-interpreter
+/// script reads via `%~N`.
 /// Double quotes and U+0000..=U+001F are refused; `%` becomes `%%`.
 /// With `CMD_SCRIPT_PRELUDE`, all other characters stay literal inside quotes.
-/// Program-name and builtin parsing require trailing backslashes to stay unchanged.
+/// Program-name, builtin, and `%~N` parsing keep trailing backslashes unchanged.
 #[cfg(any(windows, test))]
 pub(crate) fn cmd_script_quoted(value: &str) -> AppResult<String> {
     if value.chars().any(|c| c == '"' || c <= '\x1f') {
