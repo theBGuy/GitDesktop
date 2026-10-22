@@ -523,6 +523,7 @@ pub async fn create_repo(
             "invalid branch name: {branch}"
         )));
     }
+    crate::git::branches::refuse_session_branch_name(branch)?;
 
     let root = Path::new(&options.parent_dir).join(name);
     let occupied = root.exists()

@@ -2550,6 +2550,8 @@ pub(crate) async fn replace_file_lines(
     }
 
     let replaced = &existing[start..end];
+    // The last replacement inherits the range's final ending, including unterminated EOF.
+    // Extra lines use its first terminator, falling back to the preceding line's.
     let fallback = replaced
         .iter()
         .map(|(_, ending)| *ending)

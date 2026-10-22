@@ -741,7 +741,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     return (remoteBranchesQuery.data ?? [])
       .filter(
         (b) =>
-          !b.name.startsWith("gd/session/") &&
+          !isSessionBranchName(b.name) &&
           !localNames.has(b.name) &&
           (!bq || b.name.toLowerCase().includes(bq)),
       )

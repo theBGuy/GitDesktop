@@ -1157,12 +1157,18 @@ pub(crate) async fn git_checkout_branch_core(
     name: String,
 ) -> AppResult<()> {
     validate_ref_name(&name)?;
+    let session_name = is_session_branch_name(&name);
     // Refuse only guess-creation so existing session-named branches stay reachable.
-    if is_session_branch_name(&name) && branch_tip_sha(&repo_path, &name).await?.is_none() {
+    if session_name && !branch_exists_exact(&repo_path, &name).await? {
         refuse_session_branch_name(&name)?;
     }
     crate::git::update_marker::refuse_if_branch_updating(state, &repo_path, &name).await?;
-    run_git_mutating(state, &repo_path, &["switch", &name], DEFAULT_TIMEOUT).await?;
+    let mut args = vec!["switch"];
+    if session_name {
+        args.push("--no-guess");
+    }
+    args.push(&name);
+    run_git_mutating(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
     Ok(())
 }
 
@@ -2527,6 +2533,20 @@ struct UpdatePins {
     base_sha: String,
 }
 
+/// Enumerate stored names so case-insensitive loose-ref lookups cannot alias a branch.
+pub(crate) async fn branch_exists_exact(repo_path: &str, name: &str) -> AppResult<bool> {
+    let refs = run_git(
+        Some(repo_path),
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(refs
+        .stdout_lossy()
+        .lines()
+        .any(|line| line.strip_prefix("refs/heads/") == Some(name)))
+}
+
 /// The sha `refs/heads/<branch>` points at, or `None` when there is no such branch.
 /// The FULL ref path is the point: under a bare `rev-parse <branch>` a tag sharing
 /// the name would shadow it, and the pin would then guard the wrong object.
@@ -3048,6 +3068,28 @@ mod tests {
             );
             assert_eq!(run(&repo, &["for-each-ref", "refs/heads"]).await, before);
         }
+    }
+
+    #[tokio::test]
+    async fn checkout_refuses_a_case_alias_of_a_session_branch_name() {
+        let (_base, base) = temp_base("checkout-session-case-alias");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        run(&repo, &["update-ref", "refs/heads/gd/session/x", "HEAD"]).await;
+        let head = run(&repo, &["symbolic-ref", "HEAD"]).await;
+        // On a case-sensitive filesystem this is a passing control.
+        let result = super::git_checkout_branch_core(
+            &AppState::default(),
+            repo.clone(),
+            "GD/Session/x".into(),
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(message)) if message ==
+                "\"GD/Session/x\" is in gd/session/, which is reserved for agent sessions — choose another name."),
+            "expected session branch refusal, got {result:?}"
+        );
+        assert_eq!(run(&repo, &["symbolic-ref", "HEAD"]).await, head);
     }
 
     #[tokio::test]
