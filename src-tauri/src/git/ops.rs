@@ -1676,6 +1676,7 @@ const DISCARD_OUTSIDE: &str = "it isn't inside this repository's working tree";
 const DISCARD_GIT_DIR: &str = "it's inside the repository's .git folder";
 const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
 const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and try again";
+const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try again";
 
 /// Pure lexical gate; returns git's spelling without resolving filesystem names.
 fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
@@ -1843,15 +1844,25 @@ pub(crate) async fn git_discard_paths_core(
     let top = crate::git::runner::worktree_toplevel(&repo_path).await?;
     let listed = untracked_paths(&top).await?;
 
-    // The flag and status must both say untracked, or the whole batch is refused.
-    // A restore fallback would break the confirmation's recycle-bin promise.
+    // Every path's flag must agree with git status, or the whole batch is refused.
+    // Resolve every mismatch before de-duplicating, trashing or restoring paths.
+    for (p, rel) in paths.iter().zip(&relative) {
+        if p.untracked {
+            if !listed.contains(rel) {
+                return Err(discard_refusal(&p.path, DISCARD_NOT_NEW));
+            }
+        } else if listed.contains(rel) {
+            return Err(discard_refusal(&p.path, DISCARD_NOW_NEW));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
     let mut trash = Vec::new();
     let mut tracked = Vec::new();
     for (p, rel) in paths.into_iter().zip(relative) {
+        if !seen.insert(rel.clone()) {
+            continue;
+        }
         if p.untracked {
-            if !listed.contains(&rel) {
-                return Err(discard_refusal(&p.path, DISCARD_NOT_NEW));
-            }
             trash.push((p.path, rel));
         } else {
             // Literal pathspecs: a `[slug]`-style path would otherwise also restore its
@@ -15918,6 +15929,52 @@ detached
         );
     }
 
+    #[tokio::test]
+    async fn discard_paths_refuses_an_untracked_file_flagged_tracked() {
+        let (dir, repo) = setup_repo("discard-untracked-flag").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::write(dir.path().join("u1.txt"), b"first\n").unwrap();
+        std::fs::write(dir.path().join("u2.txt"), b"second\n").unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"dirty\n").unwrap();
+        let error = git_discard_paths_core(
+            &AppState::default(),
+            repo,
+            vec![
+                discard_arg("u1.txt", true),
+                discard_arg("u2.txt", false),
+                discard_arg("a.txt", false),
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(discard_message(error), "Can't discard u2.txt — Git lists it as a new file, so refresh and try again. Nothing was discarded.");
+        assert_eq!(
+            std::fs::read(dir.path().join("u1.txt")).unwrap(),
+            b"first\n"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("u2.txt")).unwrap(),
+            b"second\n"
+        );
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"dirty\n");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn discard_paths_trashes_a_duplicate_untracked_path_once() {
+        let (dir, repo) = setup_repo("discard-duplicate").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        std::fs::write(dir.path().join("u.txt"), b"new\n").unwrap();
+        git_discard_paths_core(
+            &AppState::default(),
+            repo,
+            vec![discard_arg("u.txt", true), discard_arg("u.txt", true)],
+        )
+        .await
+        .unwrap();
+        assert!(!dir.path().join("u.txt").exists());
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn discard_paths_trashes_confirmed_untracked_and_restores_tracked() {
@@ -15941,7 +15998,7 @@ detached
 
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread")]
-    async fn discard_paths_holds_the_repo_across_the_untracked_sweep() {
+    async fn discard_paths_waits_for_the_repo_lock_before_the_untracked_sweep() {
         let (dir, repo) = setup_repo("discard-paths-hold").await;
         discard_pin_excludes(&repo, dir.path()).await;
         std::fs::write(dir.path().join("untracked.txt"), "new\n").unwrap();
@@ -16021,21 +16078,21 @@ detached
         .await
         .unwrap_err();
         let message = discard_message(error);
-        println!("link traversal refusal: {message}");
-        assert!(
-            [DISCARD_NOT_NEW, DISCARD_LINKED].iter().any(|why| message
-                == format!("Can't discard link/victim.txt — {why}. Nothing was discarded.")),
-            "unexpected refusal: {message}"
-        );
+        #[cfg(windows)]
+        assert_eq!(message, "Can't discard link/victim.txt — it's reached through a symbolic link or junction. Nothing was discarded.");
+        #[cfg(unix)]
+        assert_eq!(message, "Can't discard link/victim.txt — Git doesn't list it as a new file, so refresh and try again. Nothing was discarded.");
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious");
         #[cfg(windows)]
         {
-            let _ =
+            let error =
                 git_discard_paths_core(&AppState::default(), repo, vec![discard_arg("link", true)])
-                    .await;
+                    .await
+                    .unwrap_err();
+            assert_eq!(discard_message(error), "Can't discard link — Git doesn't list it as a new file, so refresh and try again. Nothing was discarded.");
             assert!(
                 victim.exists(),
-                "recycling the junction leaf must preserve its destination"
+                "refusing the unlisted junction leaf must preserve its destination"
             );
         }
     }
