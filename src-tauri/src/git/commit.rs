@@ -415,6 +415,8 @@ impl CasRef {
     /// Re-attachment needs a checkout from the full `old` oid; its write compares HEAD's oid
     /// and the branch's oid atomically. A third process can still attach HEAD at the same oid
     /// between the pre-check and write. Other subjects roll back.
+    /// Git before 2.46 lacks symref-update: the write fails and rollback refuses the operation,
+    /// leaving HEAD detached at `old`.
     /// Another worktree can claim the branch first; hooks moving HEAD are outside these guarantees.
     /// Same-commit detached checkouts log nothing. Expiry between snapshot and swap forces refusal.
     /// Two entries above ours force refusal, and their failed rollback CAS can report Lost though
@@ -1334,6 +1336,26 @@ mod tests {
             .await
             .unwrap()
             .stdout_lossy()
+    }
+
+    async fn supports_symref_transactions() -> bool {
+        static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+        *SUPPORTED
+            .get_or_init(|| async {
+                let version = run_git(None, &["version"], DEFAULT_TIMEOUT)
+                    .await
+                    .unwrap()
+                    .stdout_lossy();
+                let mut parts = version
+                    .trim()
+                    .strip_prefix("git version ")
+                    .expect("git version prefix")
+                    .split('.');
+                let major: u32 = parts.next().unwrap().parse().expect("git major version");
+                let minor: u32 = parts.next().unwrap().parse().expect("git minor version");
+                (major, minor) >= (2, 46)
+            })
+            .await
     }
 
     /// Every local value of `key`, empty when unset.
@@ -2341,7 +2363,19 @@ mod tests {
                     undo_on(&repo, Some(b.clone()), pin),
                 )
                 .await;
-            assert_attach_refused(result, &repo, &b, &index, UNDO_BRANCH_SWITCHED).await;
+            if supports_symref_transactions().await {
+                assert_attach_refused(result, &repo, &b, &index, UNDO_BRANCH_SWITCHED).await;
+            } else {
+                assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+                assert_eq!(
+                    crate::git::branches::current_branch_ref(&repo)
+                        .await
+                        .unwrap(),
+                    None
+                );
+                assert_eq!(head(&repo).await, b);
+                assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+            }
         }
     }
 
@@ -2363,14 +2397,29 @@ mod tests {
                 ),
             )
             .await;
-        assert_attach_refused(
-            result,
-            &repo,
-            &b,
-            &index,
-            "The checked-out branch changed since you confirmed — nothing was reset.",
-        )
-        .await;
+        if supports_symref_transactions().await {
+            assert_attach_refused(
+                result,
+                &repo,
+                &b,
+                &index,
+                "The checked-out branch changed since you confirmed — nothing was reset.",
+            )
+            .await;
+        } else {
+            assert_undo_refused(
+                result,
+                "The checked-out branch changed since you confirmed — nothing was reset.",
+            );
+            assert_eq!(
+                crate::git::branches::current_branch_ref(&repo)
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(head(&repo).await, b);
+            assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+        }
     }
 
     #[tokio::test]
