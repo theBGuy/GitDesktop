@@ -414,13 +414,13 @@ impl CasRef {
             .collect())
     }
 
-    /// Best-effort: git cannot atomically require a direct HEAD; `Any` starts at `cas_ref`.
-    /// Missing/unreadable logs and same-value swaps abstain; the detached re-check still runs.
-    /// Same-commit detached checkouts log nothing; hooks moving HEAD are outside these guarantees.
-    /// Expiry between snapshot and swap forces refusal. Before the post-read, full expiry abstains
-    /// and partial expiry refuses; expiry after the post-read is unseen.
-    /// Two entries above ours force refusal, and their failed rollback CAS can report Lost though
-    /// the move landed.
+    /// Best-effort: git cannot atomically require direct HEAD; `Any` starts at `cas_ref`. The
+    /// detached re-check always runs. Failed reads, same-value swaps and empty post-reads abstain.
+    /// Missing logs give empty snapshots; logging on recreates logs for comparison, off leaves
+    /// post-reads empty. Same-commit detached checkouts log nothing; hooks moving HEAD are outside
+    /// these guarantees. Before post-read, expiry dropping either snapshot entry refuses unless
+    /// post is empty; expiry of older entries or after post-read is unseen. Two entries above ours
+    /// force refusal; their failed rollback CAS can report Lost though the move landed.
     fn detached_race(
         snapshot: &[(String, String)],
         post: &[(String, String)],
