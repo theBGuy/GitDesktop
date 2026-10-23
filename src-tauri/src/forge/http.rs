@@ -359,15 +359,19 @@ fn bb_body_read_error(e: reqwest::Error) -> AppError {
 /// here attaches the stored Basic credentials.
 fn resolve_url(path_or_url: &str) -> AppResult<String> {
     if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
-        if path_or_url.starts_with(BB_API_BASE)
-            || (cfg!(test) && path_or_url.starts_with("http://127.0.0.1:"))
-        {
-            Ok(path_or_url.to_string())
-        } else {
-            Err(AppError::Bitbucket(format!(
-                "Bitbucket returned a URL outside {BB_API_BASE}; GitDesktop sends your Bitbucket credentials only to that API."
-            )))
+        if let Ok(url) = reqwest::Url::parse(path_or_url) {
+            let url = url.to_string();
+            if url.starts_with(BB_API_BASE)
+                || (cfg!(test)
+                    && (url.starts_with("http://127.0.0.1:")
+                        || url.starts_with("http://127.0.0.1/")))
+            {
+                return Ok(url);
+            }
         }
+        Err(AppError::Bitbucket(format!(
+            "Bitbucket returned a URL outside {BB_API_BASE}; GitDesktop sends your Bitbucket credentials only to that API."
+        )))
     } else {
         let rel = path_or_url.trim_start_matches('/');
         let rel = rel.strip_prefix("2.0/").unwrap_or(rel);
@@ -873,6 +877,35 @@ mod tests {
                 other => panic!("expected Bitbucket error, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn resolve_url_checks_normalized_absolute_urls() {
+        for url in [
+            "https://api.bitbucket.org/2.0/../x",
+            "https://api.bitbucket.org/2.0/%2e%2e/x",
+            "https://api.bitbucket.org:invalid/2.0/workspaces",
+        ] {
+            match resolve_url(url) {
+                Err(AppError::Bitbucket(message)) => {
+                    assert!(message.contains(BB_API_BASE));
+                    assert!(!message.contains(url));
+                }
+                other => panic!("expected Bitbucket error, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            resolve_url("https://API.BITBUCKET.ORG:443/2.0/repositories/../workspaces").unwrap(),
+            "https://api.bitbucket.org/2.0/workspaces"
+        );
+        assert_eq!(
+            resolve_url("http://127.0.0.1:8080/a/../fixture").unwrap(),
+            "http://127.0.0.1:8080/fixture"
+        );
+        assert_eq!(
+            resolve_url("http://127.0.0.1:80/fixture").unwrap(),
+            "http://127.0.0.1/fixture"
+        );
     }
 
     #[test]
