@@ -3115,6 +3115,9 @@ pub async fn merge_pr(
     }
 }
 
+/// The accepted-merge sentence stays alone on line one: Bitbucket errors are
+/// headlined from their first line, so a transport phrase there would replace
+/// it in the toast.
 fn merge_unconfirmed(err: AppError) -> AppError {
     AppError::Bitbucket(format!(
         "Bitbucket accepted the merge, but GitDesktop couldn't confirm completion.\n{err}"
