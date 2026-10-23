@@ -883,6 +883,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   follow-tracking entry, stays private to `git::remote` so no MCP tool can
   reach it. Refs reaching a compare-endpoint basehead route through
   `forge::validate_compare_branch` (guard: check-rust-invariants check E).
+  Branch names in GitHub REST paths encode via the escaping idiom (the
+  `refuse_braced` + `escape_branch_path` pair in rulesets.rs, and the twin
+  `escape_head_branch_path` in github/pr.rs — `%`/`#` encoded, braces refused
+  before the call); Bitbucket requests resolve through the one choke point
+  `forge::http::resolve_url`, which accepts absolute URLs only on `BB_API_BASE`.
 - **Merges into a checkout check for ignored files first:** git's merge
   default silently replaces an ignored file the incoming side tracks, and
   merge-ort ignores `--no-overwrite-ignore` on 3-way merges (measured, git

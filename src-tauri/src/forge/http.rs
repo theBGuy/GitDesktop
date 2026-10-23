@@ -47,7 +47,7 @@ pub(crate) fn bb_unreadable(what: &str, detail: String) -> AppError {
 }
 
 /// The Bitbucket Cloud REST base. Every relative path the provider passes is
-/// resolved against this; absolute URLs (e.g. a pagination `next`) are used as-is.
+/// resolved against this; absolute URLs are accepted only on this base (see `resolve_url`).
 pub const BB_API_BASE: &str = "https://api.bitbucket.org/2.0/";
 
 /// The host these credentials are namespaced under in the keyring (`forge/<host>/…`).
@@ -354,14 +354,28 @@ fn bb_body_read_error(e: reqwest::Error) -> AppError {
     }
 }
 
-/// Resolve a relative path against the API base, or pass an absolute URL through.
-/// (Bitbucket's pagination `next` is a full URL; single-endpoint calls pass a
-/// relative path like `workspaces` or `repositories/{ws}`.)
-fn resolve_url(path_or_url: &str) -> String {
+/// Relative paths join the API base; a `/2.0/`-rooted path resolves onto it.
+/// An absolute URL is accepted only on `BB_API_BASE` because every request built
+/// here attaches the stored Basic credentials.
+fn resolve_url(path_or_url: &str) -> AppResult<String> {
     if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
-        path_or_url.to_string()
+        if let Ok(url) = reqwest::Url::parse(path_or_url) {
+            let url = url.to_string();
+            if url.starts_with(BB_API_BASE)
+                || (cfg!(test)
+                    && (url.starts_with("http://127.0.0.1:")
+                        || url.starts_with("http://127.0.0.1/")))
+            {
+                return Ok(url);
+            }
+        }
+        Err(AppError::Bitbucket(format!(
+            "Bitbucket returned a URL outside {BB_API_BASE}; GitDesktop sends your Bitbucket credentials only to that API."
+        )))
     } else {
-        format!("{BB_API_BASE}{}", path_or_url.trim_start_matches('/'))
+        let rel = path_or_url.trim_start_matches('/');
+        let rel = rel.strip_prefix("2.0/").unwrap_or(rel);
+        Ok(format!("{BB_API_BASE}{rel}"))
     }
 }
 
@@ -382,7 +396,7 @@ async fn bb_get_status(
     path_or_url: &str,
     json: bool,
 ) -> AppResult<(u16, String)> {
-    let url = resolve_url(path_or_url);
+    let url = resolve_url(path_or_url)?;
     let mut req = client()
         .get(&url)
         .basic_auth(&creds.email, Some(&creds.token));
@@ -465,7 +479,7 @@ pub(super) async fn bb_send_request_split(
     path_or_url: &str,
     body: Option<&serde_json::Value>,
 ) -> AppResult<(u16, Option<String>, AppResult<String>)> {
-    let url = resolve_url(path_or_url);
+    let url = resolve_url(path_or_url)?;
     let mut req = client()
         .request(method, &url)
         .basic_auth(&creds.email, Some(&creds.token))
@@ -830,17 +844,77 @@ mod tests {
     #[test]
     fn resolve_url_joins_relative_and_passes_absolute() {
         assert_eq!(
-            resolve_url("workspaces"),
+            resolve_url("workspaces").unwrap(),
             "https://api.bitbucket.org/2.0/workspaces"
         );
         // A leading slash on the relative path is tolerated (not doubled).
         assert_eq!(
-            resolve_url("/repositories/ws"),
+            resolve_url("/repositories/ws").unwrap(),
             "https://api.bitbucket.org/2.0/repositories/ws"
         );
         // An absolute URL (a pagination `next`) is passed through untouched.
         let next = "https://api.bitbucket.org/2.0/repositories/ws?page=2";
-        assert_eq!(resolve_url(next), next);
+        assert_eq!(resolve_url(next).unwrap(), next);
+        let task = "https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge/task-status/fixture-task";
+        assert_eq!(resolve_url(task).unwrap(), task);
+    }
+
+    #[test]
+    fn resolve_url_refuses_absolute_urls_off_the_api_base() {
+        for url in [
+            "https://example.test/2.0/repositories/ws/repo",
+            "http://api.bitbucket.org/2.0/repositories/ws/repo",
+            "https://api.bitbucket.org:8443/2.0/repositories/ws/repo",
+            "https://api.bitbucket.org.example.test/2.0/repositories/ws/repo",
+            "https://api.bitbucket.org/repositories/ws/repo",
+        ] {
+            match resolve_url(url) {
+                Err(AppError::Bitbucket(message)) => {
+                    assert!(message.contains(BB_API_BASE));
+                    assert!(!message.contains("example.test"));
+                    assert!(!message.contains(url));
+                }
+                other => panic!("expected Bitbucket error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_url_checks_normalized_absolute_urls() {
+        for url in [
+            "https://api.bitbucket.org/2.0/../x",
+            "https://api.bitbucket.org/2.0/%2e%2e/x",
+            "https://api.bitbucket.org:invalid/2.0/workspaces",
+        ] {
+            match resolve_url(url) {
+                Err(AppError::Bitbucket(message)) => {
+                    assert!(message.contains(BB_API_BASE));
+                    assert!(!message.contains(url));
+                }
+                other => panic!("expected Bitbucket error, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            resolve_url("https://API.BITBUCKET.ORG:443/2.0/repositories/../workspaces").unwrap(),
+            "https://api.bitbucket.org/2.0/workspaces"
+        );
+        assert_eq!(
+            resolve_url("http://127.0.0.1:8080/a/../fixture").unwrap(),
+            "http://127.0.0.1:8080/fixture"
+        );
+        assert_eq!(
+            resolve_url("http://127.0.0.1:80/fixture").unwrap(),
+            "http://127.0.0.1/fixture"
+        );
+    }
+
+    #[test]
+    fn resolve_url_roots_a_2_0_path_on_the_api_base() {
+        assert_eq!(
+            resolve_url("/2.0/repositories/ws/repo/pullrequests/7/merge/task-status/fixture-task")
+                .unwrap(),
+            "https://api.bitbucket.org/2.0/repositories/ws/repo/pullrequests/7/merge/task-status/fixture-task"
+        );
     }
 
     #[test]

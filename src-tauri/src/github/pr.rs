@@ -1228,6 +1228,18 @@ struct RawRepoName {
     name: String,
 }
 
+/// Braces are refused because gh expands `{...}` in an endpoint; `%` then `#`
+/// are escaped because gh parses the endpoint as a URL. `/` stays raw because
+/// the endpoint reads the rest of the path as the ref. Twin of
+/// `escape_branch_path` / `refuse_braced` in rulesets.rs.
+fn escape_head_branch_path(branch: &str) -> Option<String> {
+    if branch.contains('{') || branch.contains('}') {
+        return None;
+    }
+    // `%` first: escaping it second would rewrite the `%` of the `%23` just written.
+    Some(branch.replace('%', "%25").replace('#', "%23"))
+}
+
 /// Deletes only the *remote* head branch of a just-merged PR (see `gh_pr_merge`).
 /// Best-effort and disclosing: every failure here becomes a "Merged #N, but …"
 /// message folded into a successful outcome's `cleanup_warning`. An
@@ -1303,11 +1315,17 @@ async fn gh_delete_remote_head_branch(
         }
     };
 
+    let Some(branch_path) = escape_head_branch_path(&branch) else {
+        return Err(AppError::Gh(format!(
+            "Merged #{number}, but the remote branch \"{branch}\" contains a brace. GitDesktop didn't delete it; remove it on GitHub if it's still there."
+        )));
+    };
+
     // INVARIANT — do NOT origin-pin this DELETE. `owner`/`repo` come from the PR's
     // OWN `headRepository[Owner]` (the fork side of a cross-repo PR), which is
     // exactly where the branch to delete lives. Substituting the origin slug here
     // would delete refs on the wrong repo for a cross-repository PR.
-    let endpoint = format!("repos/{owner}/{repo}/git/refs/heads/{branch}");
+    let endpoint = format!("repos/{owner}/{repo}/git/refs/heads/{branch_path}");
     match run_gh(
         Some(repo_path),
         &["api", "--method", "DELETE", &endpoint],
@@ -7209,7 +7227,7 @@ fn scrape_pr_ref(stdout: &str) -> (u64, String) {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_stack_join, classify_gh_merge_refusal, classify_merge_async,
+        apply_stack_join, classify_gh_merge_refusal, classify_merge_async, escape_head_branch_path,
         external_items_from_thread_nodes, external_reviews_truncated, fallback_auth_outcome,
         flatten_slurped_pages, fork_head_identity, gh_api_error_message,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
@@ -11451,6 +11469,32 @@ github.acme.com
                 matches!(err, AppError::InvalidArgument(_)),
                 "expected InvalidArgument, got {err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn escape_head_branch_path_escapes_url_reserved_characters() {
+        for (branch, expected) in [
+            ("feat#2", "feat%232"),
+            ("100%done", "100%25done"),
+            ("v%23", "v%2523"),
+            ("a#b%c", "a%23b%25c"),
+        ] {
+            assert_eq!(escape_head_branch_path(branch), Some(expected.to_string()));
+        }
+    }
+
+    #[test]
+    fn escape_head_branch_path_keeps_slashes_and_plain_names() {
+        for branch in ["release/1.0", "master", "feature/caf\u{e9}"] {
+            assert_eq!(escape_head_branch_path(branch), Some(branch.to_string()));
+        }
+    }
+
+    #[test]
+    fn escape_head_branch_path_refuses_braced_names() {
+        for branch in ["{branch}", "{owner}", "feat{x", "x}"] {
+            assert_eq!(escape_head_branch_path(branch), None);
         }
     }
 
