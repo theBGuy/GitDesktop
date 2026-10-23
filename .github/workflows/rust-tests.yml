@@ -300,9 +300,9 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - windows-latest
+          - windows-2025
           - ubuntu-24.04
-          - macos-latest
+          - macos-26
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
