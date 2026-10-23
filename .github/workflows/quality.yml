@@ -41,7 +41,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24
+          node-version-file: .node-version
 
       # One step per script so a failure names its own check in the UI. The same
       # eleven scripts plus the self-tests below run locally via package.json's
@@ -115,7 +115,7 @@ jobs:
         continue-on-error: true
         uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: pnpm
 
       # continue-on-error here too: an install blip must not fail an advisory
