@@ -57,7 +57,7 @@ fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
 
 /// Rewords a push refused for an upstream name mismatch with this tool's own remedy in
 /// place of the GUI's Push-menu one; every other error passes through untouched.
-/// The remedy names the branch's push remote when configured and different from the tracked one.
+/// The remedy names the branch's push remote when one passes `pick_push_remote`'s gates.
 /// A caller-named remote suppresses push-remote advice: git's explicit repository
 /// argument outranks pushRemote and pushDefault.
 async fn with_mcp_remedy(
@@ -2367,7 +2367,8 @@ mod tests {
                 set_upstream: false,
             }))
             .await
-            .expect_err("a cross-name upstream refuses");
+            .err()
+            .unwrap_or_else(|| panic!("{what}: a cross-name upstream refuses"));
         let message = &*err.message;
         assert!(message.starts_with(TRIANGULAR_REFUSAL), "{what}: {message}");
         assert_eq!(
