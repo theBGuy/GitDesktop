@@ -58,9 +58,12 @@ fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
 /// Rewords a push refused for an upstream name mismatch with this tool's own remedy in
 /// place of the GUI's Push-menu one; every other error passes through untouched.
 /// The remedy names the branch's push remote when configured and different from the tracked one.
+/// A caller-named remote suppresses push-remote advice: git's explicit repository
+/// argument outranks pushRemote and pushDefault.
 async fn with_mcp_remedy(
     repo: &str,
     e: AppError,
+    requested_remote: Option<&str>,
     remedy: fn(&str, &str, Option<&str>) -> String,
 ) -> AppError {
     match e {
@@ -69,7 +72,11 @@ async fn with_mcp_remedy(
             remote,
             remote_branch,
         } => {
-            let push_remote = differing_push_remote(repo, &branch, &remote).await;
+            let push_remote = if requested_remote.is_some() {
+                None
+            } else {
+                differing_push_remote(repo, &branch, &remote).await
+            };
             AppError::Command(format!(
                 "Push blocked — {branch} tracks {remote}/{remote_branch}, which has a different name. {}",
                 remedy(&branch, &remote, push_remote.as_deref())
@@ -915,7 +922,9 @@ impl GitDesktopMcp {
         )
         .await
         {
-            return Err(app_err(with_mcp_remedy(&self.repo, e, push_remedy).await));
+            return Err(app_err(
+                with_mcp_remedy(&self.repo, e, args.remote.as_deref(), push_remedy).await,
+            ));
         }
         ok_text("pushed")
     }
@@ -1371,7 +1380,7 @@ impl GitDesktopMcp {
             Ok(guard) => guard,
             Err(e) => {
                 return Err(app_err(
-                    with_mcp_remedy(&self.repo, e, force_push_remedy).await,
+                    with_mcp_remedy(&self.repo, e, None, force_push_remedy).await,
                 ));
             }
         };
@@ -1562,14 +1571,14 @@ mod tests {
         };
         let missing = dir.path().join("missing").to_string_lossy().into_owned();
         assert_eq!(
-            with_mcp_remedy(&missing, refusal(), push_remedy)
+            with_mcp_remedy(&missing, refusal(), None, push_remedy)
                 .await
                 .to_string(),
             "Push blocked — feat/y tracks origin/feat/x, which has a different name. Retry with \
              branch: \"feat/y\" and set_upstream: true to publish it as origin/feat/y and track \
              that, or push from GitDesktop to choose the destination."
         );
-        let other = with_mcp_remedy(&missing, AppError::Timeout(5), push_remedy).await;
+        let other = with_mcp_remedy(&missing, AppError::Timeout(5), None, push_remedy).await;
         assert!(matches!(other, AppError::Timeout(5)), "{other:?}");
         if !all_push_keys_unset(
             &repo,
@@ -1581,14 +1590,14 @@ mod tests {
             return;
         }
         assert_eq!(
-            with_mcp_remedy(&repo, refusal(), push_remedy)
+            with_mcp_remedy(&repo, refusal(), None, push_remedy)
                 .await
                 .to_string(),
             "Push blocked — feat/y tracks origin/feat/x, which has a different name. Retry with \
              branch: \"feat/y\" and set_upstream: true to publish it as origin/feat/y and track \
              that, or push from GitDesktop to choose the destination."
         );
-        let force = with_mcp_remedy(&repo, refusal(), force_push_remedy)
+        let force = with_mcp_remedy(&repo, refusal(), None, force_push_remedy)
             .await
             .to_string();
         assert_eq!(
@@ -2349,7 +2358,7 @@ mod tests {
     const TRACKED_REMEDY: &str =
         "Retry with branch: \"x\" and set_upstream: true to publish it as parent/x and track that, or push from GitDesktop to choose the destination.";
 
-    async fn assert_triangular_refusal(work: &str, remote: Option<&str>, remedy: &str) {
+    async fn assert_triangular_refusal(work: &str, remote: Option<&str>, remedy: &str, what: &str) {
         let h = GitDesktopMcp::with_options(work.into(), false, false, true, false);
         let err = h
             .push(Parameters(PushArgs {
@@ -2360,29 +2369,59 @@ mod tests {
             .await
             .expect_err("a cross-name upstream refuses");
         let message = &*err.message;
-        assert!(message.starts_with(TRIANGULAR_REFUSAL), "{message}");
+        assert!(message.starts_with(TRIANGULAR_REFUSAL), "{what}: {message}");
         assert_eq!(
             git(work, &["rev-parse", "--symbolic-full-name", "x@{upstream}"])
                 .await
                 .trim(),
-            "refs/remotes/parent/main"
+            "refs/remotes/parent/main",
+            "{what}"
         );
-        assert_eq!(message, format!("{TRIANGULAR_REFUSAL}{remedy}"));
+        assert_eq!(message, format!("{TRIANGULAR_REFUSAL}{remedy}"), "{what}");
         if remedy == TRIANGULAR_REMEDY {
-            assert!(message.contains("remote: \"mine\""));
-            assert!(message.contains("mine/x"));
-            assert!(!message.contains("parent/x"));
-            assert!(!message.contains("set_upstream"));
+            assert!(message.contains("remote: \"mine\""), "{what}: {message}");
+            assert!(message.contains("mine/x"), "{what}: {message}");
+            assert!(!message.contains("parent/x"), "{what}: {message}");
+            assert!(!message.contains("set_upstream"), "{what}: {message}");
         }
     }
 
     #[tokio::test]
     async fn named_push_remedy_names_branch_push_remote() {
-        for remote in [None, Some("parent")] {
-            let (_dir, work) = triangular_push_repo().await;
-            git(&work, &["config", "branch.x.pushRemote", "mine"]).await;
-            assert_triangular_refusal(&work, remote, TRIANGULAR_REMEDY).await;
+        let (_dir, work) = triangular_push_repo().await;
+        git(&work, &["config", "branch.x.pushRemote", "mine"]).await;
+        assert_triangular_refusal(&work, None, TRIANGULAR_REMEDY, "pushRemote only").await;
+    }
+
+    #[tokio::test]
+    async fn named_push_naming_the_tracked_remote_keeps_the_tracked_remedy() {
+        let mut failures = Vec::new();
+        for (what, branch_remote, default) in [
+            ("explicit parent with pushRemote", Some("mine"), None),
+            ("explicit parent with pushDefault", None, Some("mine")),
+            ("explicit parent with both keys", Some("mine"), Some("mine")),
+        ] {
+            // A failed row must not prevent the remaining precedence cases from running.
+            let row = tokio::spawn(async move {
+                let (_dir, work) = triangular_push_repo().await;
+                for (key, value) in [
+                    ("branch.x.pushRemote", branch_remote),
+                    ("remote.pushDefault", default),
+                ] {
+                    if let Some(value) = value {
+                        git(&work, &["config", key, value]).await;
+                    }
+                }
+                assert_triangular_refusal(&work, Some("parent"), TRACKED_REMEDY, what).await;
+            });
+            if row.await.is_err() {
+                failures.push(what);
+            }
         }
+        assert!(
+            failures.is_empty(),
+            "named remote rows failed: {failures:?}"
+        );
     }
 
     #[tokio::test]
@@ -2390,19 +2429,45 @@ mod tests {
         let (_dir, work) = triangular_push_repo().await;
         git(&work, &["config", "branch.x.pushRemote", ""]).await;
         git(&work, &["config", "remote.pushDefault", "mine"]).await;
-        assert_triangular_refusal(&work, None, TRACKED_REMEDY).await;
+        assert_triangular_refusal(
+            &work,
+            None,
+            TRACKED_REMEDY,
+            "empty pushRemote outranks pushDefault",
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn named_push_remedy_config_matrix() {
         for (case, branch_remote, default, remedy) in [
-            ("b", None, Some("mine"), TRIANGULAR_REMEDY),
-            ("c1", Some("mine"), Some("parent"), TRIANGULAR_REMEDY),
-            ("c2", Some("parent"), Some("mine"), TRACKED_REMEDY),
-            ("d", None, None, TRACKED_REMEDY),
-            ("e1", Some("gd-test-absent"), Some("mine"), TRACKED_REMEDY),
-            ("e2", None, Some("gd-test-absent"), TRACKED_REMEDY),
-            ("f", Some("parent"), None, TRACKED_REMEDY),
+            ("pushDefault only", None, Some("mine"), TRIANGULAR_REMEDY),
+            (
+                "pushRemote outranks pushDefault",
+                Some("mine"),
+                Some("parent"),
+                TRIANGULAR_REMEDY,
+            ),
+            (
+                "pushRemote=tracked outranks pushDefault",
+                Some("parent"),
+                Some("mine"),
+                TRACKED_REMEDY,
+            ),
+            ("neither key set", None, None, TRACKED_REMEDY),
+            (
+                "unlisted pushRemote outranks pushDefault",
+                Some("gd-test-absent"),
+                Some("mine"),
+                TRACKED_REMEDY,
+            ),
+            (
+                "unlisted pushDefault only",
+                None,
+                Some("gd-test-absent"),
+                TRACKED_REMEDY,
+            ),
+            ("pushRemote=tracked", Some("parent"), None, TRACKED_REMEDY),
         ] {
             let (_dir, work) = triangular_push_repo().await;
             if branch_remote.is_none() {
@@ -2423,7 +2488,7 @@ mod tests {
                     git(&work, &["config", key, value]).await;
                 }
             }
-            assert_triangular_refusal(&work, None, remedy).await;
+            assert_triangular_refusal(&work, None, remedy, case).await;
         }
     }
 
@@ -2437,17 +2502,32 @@ mod tests {
             remote_branch: "main".into(),
         };
         assert_eq!(
-            with_mcp_remedy(&work, refusal(), push_remedy)
+            with_mcp_remedy(&work, refusal(), None, push_remedy)
                 .await
                 .to_string(),
             format!("{TRIANGULAR_REFUSAL}{TRIANGULAR_REMEDY}")
         );
         assert_eq!(
-            with_mcp_remedy(&work, refusal(), force_push_remedy).await.to_string(),
+            with_mcp_remedy(&work, refusal(), None, force_push_remedy).await.to_string(),
             "Push blocked — x tracks parent/main, which has a different name. \
              Force push isn't available while the names differ. Retry with the push tool \
              (branch: \"x\", remote: \"mine\") to push it to mine/x and leave its upstream as it is, \
              or push from GitDesktop to choose the destination."
+        );
+        assert_eq!(
+            with_mcp_remedy(&work, refusal(), Some("parent"), push_remedy)
+                .await
+                .to_string(),
+            format!("{TRIANGULAR_REFUSAL}{TRACKED_REMEDY}")
+        );
+        assert_eq!(
+            with_mcp_remedy(&work, refusal(), Some("parent"), force_push_remedy)
+                .await
+                .to_string(),
+            format!(
+                "{TRIANGULAR_REFUSAL}{}",
+                force_push_remedy("x", "parent", None)
+            )
         );
     }
 
