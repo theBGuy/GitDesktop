@@ -2515,15 +2515,23 @@ pub(crate) async fn replace_file_lines(
     let raw = tokio::fs::read_to_string(&canon_target)
         .await
         .map_err(AppError::Io)?;
-    // Same BOM/EOL idiom as `git_unignore_rules`: strip a leading BOM and restore
-    // it, and preserve the file's line ending (`lines()` drops both \n and \r\n).
+    // Preserve each line's own terminator and restore any leading BOM.
     let (has_bom, content) = match raw.strip_prefix('\u{feff}') {
         Some(rest) => (true, rest),
         None => (false, raw.as_str()),
     };
-    let ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
-
-    let existing: Vec<&str> = content.lines().collect();
+    let existing: Vec<(&str, &str)> = content
+        .split_inclusive('\n')
+        .map(|piece| {
+            if let Some(text) = piece.strip_suffix("\r\n") {
+                (text, "\r\n")
+            } else if let Some(text) = piece.strip_suffix('\n') {
+                (text, "\n")
+            } else {
+                (piece, "")
+            }
+        })
+        .collect();
     let start = (start_line - 1) as usize;
     let end = start + expected_lines.len();
     // Range beyond EOF, or any line differing, is a mismatch — the file drifted.
@@ -2531,7 +2539,7 @@ pub(crate) async fn replace_file_lines(
         && existing[start..end]
             .iter()
             .zip(expected_lines.iter())
-            .all(|(have, want)| *have == want.as_str());
+            .all(|((have, _), want)| *have == want.as_str());
     if !matches {
         // Drift is a legitimate state, not a caller bug — use `Command` so its
         // bare Display surfaces cleanly in the UI toast (InvalidArgument's
@@ -2541,15 +2549,33 @@ pub(crate) async fn replace_file_lines(
         )));
     }
 
-    let mut next_lines: Vec<&str> = Vec::with_capacity(
-        existing.len() - expected_lines.len() + replacement_lines.len(),
-    );
-    next_lines.extend_from_slice(&existing[..start]);
-    next_lines.extend(replacement_lines.iter().map(String::as_str));
-    next_lines.extend_from_slice(&existing[end..]);
-    let mut next = next_lines.join(ending);
-    // Preserve the file's trailing-newline presence (even if the edit emptied it).
-    if content.ends_with('\n') {
+    let replaced = &existing[start..end];
+    // The last replacement inherits the range's final ending, including unterminated EOF.
+    // Extra lines use its first terminator, falling back to the preceding line's.
+    let fallback = replaced
+        .iter()
+        .map(|(_, ending)| *ending)
+        .find(|ending| !ending.is_empty())
+        .or_else(|| start.checked_sub(1).map(|i| existing[i].1))
+        .unwrap_or("\n");
+    let mut next = String::with_capacity(content.len());
+    for (text, ending) in &existing[..start] {
+        next.push_str(text);
+        next.push_str(ending);
+    }
+    for (j, text) in replacement_lines.iter().enumerate() {
+        let ending = if j == replacement_lines.len() - 1 {
+            replaced[replaced.len() - 1].1
+        } else if j < replaced.len() - 1 {
+            replaced[j].1
+        } else {
+            fallback
+        };
+        next.push_str(text);
+        next.push_str(ending);
+    }
+    for (text, ending) in &existing[end..] {
+        next.push_str(text);
         next.push_str(ending);
     }
     if has_bom {
@@ -3168,12 +3194,13 @@ pub(crate) async fn git_rebase_core(
     branch: String,
 ) -> AppResult<()> {
     validate_branch_arg(&branch)?;
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a rebase").await?;
     let rev = crate::git::branches::branch_first_rev(&repo_path, &branch).await;
     let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted rebase splits its report — `could not apply` plus the
     // resolve hints on stderr, the `CONFLICT (…` file list on stdout.
-    let out = run_git_mutating_raw(
-        state,
+    let out = run_git_raw_index_retry(
         &repo_path,
         &["-c", "core.editor=true", "rebase", &rev],
         DEFAULT_TIMEOUT,
@@ -3206,12 +3233,13 @@ async fn rebase_onto(
 ) -> AppResult<()> {
     validate_branch_arg(new_base)?;
     validate_branch_arg(old_base)?;
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a rebase").await?;
     let new_base = &crate::git::branches::branch_first_rev(repo_path, new_base).await;
     let old_base = &crate::git::branches::branch_first_rev(repo_path, old_base).await;
     let already_unmerged = unmerged_paths(repo_path).await;
     // Raw, for the same split report as `git_rebase_core`.
-    let out = run_git_mutating_raw(
-        state,
+    let out = run_git_raw_index_retry(
         repo_path,
         &[
             "-c",
@@ -12570,6 +12598,91 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebase_reads_unmerged_paths_under_the_lock() {
+        let (dir, repo) = setup_repo("rebase-unmerged-hold").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base\n", "base edit").await;
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.working_tree_lock(&repo).await;
+        let guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+        let rebase = {
+            let state = state.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move { git_rebase_core(&state, repo, "feature".into()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let merge = run_git_raw(Some(&repo), &["merge", "--no-edit", "feature"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(merge.code, 1);
+        assert_eq!(unmerged_paths(&repo).await, vec!["a.txt"]);
+        drop(guard);
+        let err = rebase.await.unwrap().unwrap_err();
+        assert!(matches!(err, AppError::Git { .. }), "{err:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebase_onto_reads_unmerged_paths_under_the_lock() {
+        let (dir, repo) = setup_repo("rebase-onto-unmerged-hold").await;
+        let base = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "feature\n", "feature").await;
+        git(&repo, &["switch", &base]).await;
+        commit_file(&repo, dir.path(), "a.txt", "base\n", "base edit").await;
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.working_tree_lock(&repo).await;
+        let guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+        let rebase = {
+            let state = state.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move { rebase_onto(&state, &repo, "feature", &base).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let merge = run_git_raw(Some(&repo), &["merge", "--no-edit", "feature"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(merge.code, 1);
+        assert_eq!(unmerged_paths(&repo).await, vec!["a.txt"]);
+        drop(guard);
+        let err = rebase.await.unwrap().unwrap_err();
+        assert!(matches!(err, AppError::Git { .. }), "{err:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rebase_resolves_the_target_under_the_lock() {
+        let (dir, repo) = setup_repo("rebase-target-hold").await;
+        git(&repo, &["tag", "target"]).await;
+        git(&repo, &["switch", "-c", "base-work"]).await;
+        commit_file(&repo, dir.path(), "b.txt", "base\n", "base work").await;
+        let branch_tip = rev(&repo, "HEAD").await;
+        git(&repo, &["switch", "-c", "topic", "refs/tags/target"]).await;
+        commit_file(&repo, dir.path(), "topic.txt", "topic\n", "topic work").await;
+        let state = std::sync::Arc::new(AppState::default());
+        let domain = state.working_tree_lock(&repo).await;
+        let guard = acquire_repo_lock_unbounded(&domain, "a commit").await;
+        let rebase = {
+            let state = state.clone();
+            let repo = repo.clone();
+            tokio::spawn(async move { git_rebase_core(&state, repo, "target".into()).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        git(&repo, &["branch", "target", &branch_tip]).await;
+        drop(guard);
+        rebase.await.unwrap().unwrap();
+        let ancestor = run_git_raw(
+            Some(&repo),
+            &["merge-base", "--is-ancestor", &branch_tip, "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ancestor.code, 0, "the new target branch must be an ancestor");
+    }
+
     #[tokio::test]
     async fn rebase_onto_moves_only_its_own_commits() {
         // The "branched off the wrong branch" scenario: `fix` was branched off
@@ -12847,6 +12960,56 @@ mod tests {
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn replace_lines_preserves_each_pieces_ending() {
+        type Case<'a> = (&'a str, u32, &'a [&'a str], &'a [&'a str], &'a str);
+        let cases: &[Case<'_>] = &[
+            ("a\nb\nc\n", 2, &["b"], &["B1", "B2"], "a\nB1\nB2\nc\n"),
+            (
+                "a\r\nb\r\nc\r\n",
+                2,
+                &["b"],
+                &["B1", "B2"],
+                "a\r\nB1\r\nB2\r\nc\r\n",
+            ),
+            ("a\r\nb\nc\r\nd\n", 2, &["b"], &["B"], "a\r\nB\nc\r\nd\n"),
+            (
+                "a\r\nb\nc\r\nd\n",
+                3,
+                &["c"],
+                &["X", "Y"],
+                "a\r\nb\nX\r\nY\r\nd\n",
+            ),
+            ("a\r\nb\nc\r\nd\n", 2, &["b"], &[], "a\r\nc\r\nd\n"),
+            ("a\r\nb\nc", 3, &["c"], &["C"], "a\r\nb\nC"),
+            ("a\nb\r\nc", 3, &["c"], &["C1", "C2"], "a\nb\r\nC1\r\nC2"),
+            ("a\r\nb\nc\r\n", 3, &["c"], &["C"], "a\r\nb\nC\r\n"),
+            ("a\nb\nc", 3, &["c"], &[], "a\nb\n"),
+            ("a\nb\n", 1, &["a", "b"], &[], ""),
+        ];
+        for (seed, start, expected, replacement, result) in cases {
+            let (dir, repo) = setup_repo("replace-piece-endings").await;
+            let state = AppState::default();
+            commit_file(&repo, dir.path(), "mixed.txt", seed, "mixed-endings file").await;
+            replace_file_lines(
+                &state,
+                &repo,
+                "mixed.txt",
+                *start,
+                &lines(expected),
+                &lines(replacement),
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("mixed.txt")).unwrap(),
+                result.as_bytes(),
+                "seed {seed:?}, start {start}, replacement {replacement:?}"
+            );
+        }
     }
 
     #[tokio::test]
