@@ -272,10 +272,10 @@ impl ExpectedRef {
                 crate::git::branches::validate_branch_name(name)?;
                 CasRef::Branch(format!("refs/heads/{name}"))
             }
-            Self::Detached => CasRef::Detached,
+            Self::Detached => CasRef::Detached(std::sync::OnceLock::new()),
             Self::Any => match crate::git::branches::current_branch_ref(repo_path).await? {
                 Some(full) => CasRef::Branch(full),
-                None => CasRef::Detached,
+                None => CasRef::Detached(std::sync::OnceLock::new()),
             },
         })
     }
@@ -287,15 +287,25 @@ impl ExpectedRef {
 pub(crate) enum CasRef {
     /// A branch, by its full ref.
     Branch(String),
-    /// HEAD itself, updated `--no-deref`.
-    Detached,
+    /// HEAD itself, updated `--no-deref`; only this module reads the detection slot.
+    #[allow(private_interfaces)]
+    Detached(std::sync::OnceLock<DetachedRace>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DetachedRace {
+    Clean,
+    Abstain,
+    Raced {
+        interloper: Option<(String, String)>,
+    },
 }
 
 impl CasRef {
     fn name(&self) -> &str {
         match self {
             Self::Branch(full) => full,
-            Self::Detached => "HEAD",
+            Self::Detached(_) => "HEAD",
         }
     }
 
@@ -306,6 +316,7 @@ impl CasRef {
 
     /// Moves the ref to `new` only while it still holds `old` (`None`: only while it doesn't
     /// exist). Moving the branch HEAD is on logs HEAD's reflog too (measured, git 2.51.1).
+    /// For Detached, re-checks that HEAD is detached and records races for `refuse_if_switched`.
     pub(crate) async fn swap(
         &self,
         repo_path: &str,
@@ -313,12 +324,184 @@ impl CasRef {
         new: &str,
         old: Option<&str>,
     ) -> AppResult<GitOutput> {
+        self.swap_inner(repo_path, message, new, old, true).await
+    }
+
+    async fn swap_inner(
+        &self,
+        repo_path: &str,
+        message: &str,
+        new: &str,
+        old: Option<&str>,
+        detect: bool,
+    ) -> AppResult<GitOutput> {
         let mut args = vec!["update-ref"];
-        if *self == Self::Detached {
+        let mut snapshot = None;
+        if matches!(self, Self::Detached(_)) {
+            // Snapshot first: an attach between this read and the re-check is refused
+            // there; one after the re-check must remain outside this snapshot.
+            if detect && Some(new) != old {
+                snapshot = Self::head_reflog(repo_path, 2).await.ok();
+            }
+            let attached = run_git_raw(
+                Some(repo_path),
+                &["symbolic-ref", "-q", "HEAD"],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            match attached.code {
+                1 => {}
+                0 => {
+                    return Ok(GitOutput {
+                        code: 1,
+                        stdout: Vec::new(),
+                        stderr: "HEAD stopped being detached, so it was not moved.".to_string(),
+                    });
+                }
+                code => {
+                    return Err(AppError::Git {
+                        code,
+                        stderr: attached.full_failure_text(),
+                    });
+                }
+            }
+            #[cfg(test)]
+            run_phase_hook(&DETACHED_SWAP_HOOK).await;
             args.push("--no-deref");
         }
         args.extend(["-m", message, self.name(), new, old.unwrap_or("")]);
-        run_git_raw_index_retry(repo_path, &args, DEFAULT_TIMEOUT).await
+        let out = run_git_raw_index_retry(repo_path, &args, DEFAULT_TIMEOUT).await?;
+        if detect && out.code == 0 {
+            if let Self::Detached(slot) = self {
+                let race = match snapshot {
+                    _ if Some(new) == old => DetachedRace::Abstain,
+                    Some(snapshot) => {
+                        match Self::head_reflog(repo_path, snapshot.len() + 2).await {
+                            Ok(post) => Self::detached_race(&snapshot, &post, message, new),
+                            Err(_) => DetachedRace::Abstain,
+                        }
+                    }
+                    None => DetachedRace::Abstain,
+                };
+                let _ = slot.set(race);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn head_reflog(repo_path: &str, count: usize) -> AppResult<Vec<(String, String)>> {
+        let out = run_git(
+            Some(repo_path),
+            &[
+                "reflog",
+                &format!("-{count}"),
+                "--no-show-signature",
+                "--format=%H%x00%gs",
+                "HEAD",
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        Ok(out
+            .stdout_lossy()
+            .lines()
+            .filter_map(|line| line.split_once('\0'))
+            .map(|(oid, subject)| (oid.to_string(), subject.to_string()))
+            .collect())
+    }
+
+    /// Best-effort: git cannot atomically require a direct HEAD; `Any` starts at `cas_ref`.
+    /// Missing/unreadable logs and same-value swaps abstain; the detached re-check still runs.
+    /// Re-attachment needs a checkout from the full `old` oid; its write compares HEAD's oid
+    /// and the branch's oid atomically. A third process can still attach HEAD at the same oid
+    /// between the pre-check and write. Other subjects roll back.
+    /// Another worktree can claim the branch first; hooks moving HEAD are outside these guarantees.
+    /// Same-commit detached checkouts log nothing. Expiry between snapshot and swap forces refusal.
+    /// Two entries above ours force refusal, and their failed rollback CAS can report Lost though
+    /// the move landed. Before the post-read, full expiry abstains and partial expiry refuses.
+    /// Expiry after the post-read is unseen.
+    fn detached_race(
+        snapshot: &[(String, String)],
+        post: &[(String, String)],
+        message: &str,
+        new: &str,
+    ) -> DetachedRace {
+        if post.is_empty() {
+            return DetachedRace::Abstain;
+        }
+        let is_ours = |entry: &(String, String)| entry.0 == new && entry.1 == message;
+        let ours = post.iter().take(2).position(is_ours);
+        if let Some(at) = ours {
+            let below = &post[at + 1..];
+            if (snapshot.is_empty() && below.is_empty())
+                || (!snapshot.is_empty() && below.starts_with(snapshot))
+            {
+                return DetachedRace::Clean;
+            }
+        }
+        DetachedRace::Raced {
+            interloper: ours
+                .and_then(|at| post.get(at + 1))
+                .filter(|entry| Some(*entry) != snapshot.first())
+                .cloned(),
+        }
+    }
+
+    /// The message must never resemble a checkout entry: later detection would read an attach.
+    async fn reattach(
+        repo_path: &str,
+        old: &str,
+        new: &str,
+        interloper: Option<&(String, String)>,
+    ) -> bool {
+        let Some((_, subject)) = interloper else {
+            return false;
+        };
+        let Some((from, to)) = subject
+            .strip_prefix("checkout: moving from ")
+            .and_then(|movement| movement.split_once(" to "))
+        else {
+            return false;
+        };
+        if from != old {
+            return false;
+        }
+        let Ok(Self::Branch(full)) = ExpectedRef::Branch(to.to_string()).cas_ref(repo_path).await
+        else {
+            return false;
+        };
+        if !matches!(ref_oid(repo_path, &full).await, Ok(Some(oid)) if oid == old) {
+            return false;
+        }
+        let Ok(attached) = run_git_raw(
+            Some(repo_path),
+            &["symbolic-ref", "-q", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        else {
+            return false;
+        };
+        if attached.code != 1
+            || !matches!(ref_oid(repo_path, "HEAD").await, Ok(Some(oid)) if oid == new)
+        {
+            return false;
+        }
+        #[cfg(test)]
+        run_phase_hook(&REATTACH_HOOK).await;
+        let message = format!("reset: re-attaching HEAD to {to}");
+        matches!(
+            crate::git::runner::run_git_raw_input(
+                Some(repo_path),
+                &["update-ref", "-m", &message, "--stdin"],
+                Some(&format!(
+                    "verify {full} {old}\nsymref-update HEAD {full} oid {new}\n"
+                )),
+                DEFAULT_TIMEOUT,
+            )
+            .await,
+            Ok(out) if out.code == 0
+        )
     }
 
     /// Puts the ref back from `current` to `old` by the same compare-and-swap, so it never
@@ -334,7 +517,10 @@ impl CasRef {
     ) -> RolledBack {
         let message = "reset: rolling back";
         let restored = match (old, current) {
-            (Some(old), current) => self.swap(repo_path, message, old, current).await,
+            (Some(old), current) => {
+                self.swap_inner(repo_path, message, old, current, false)
+                    .await
+            }
             (None, Some(current)) => {
                 run_git_raw_index_retry(
                     repo_path,
@@ -362,7 +548,7 @@ impl CasRef {
     fn label(&self) -> &str {
         match self {
             Self::Branch(full) => full.strip_prefix("refs/heads/").unwrap_or(full),
-            Self::Detached => "the branch",
+            Self::Detached(_) => "HEAD",
         }
     }
 
@@ -371,7 +557,7 @@ impl CasRef {
         let now = crate::git::branches::current_branch_ref(repo_path).await?;
         Ok(match self {
             Self::Branch(full) => now.as_deref() == Some(full.as_str()),
-            Self::Detached => now.is_none(),
+            Self::Detached(_) => now.is_none(),
         })
     }
 
@@ -383,6 +569,7 @@ impl CasRef {
     /// the switch itself; unreadable, it gets `op`'s own verdict instead, claiming nothing.
     /// `files_pending` says the caller writes files after this check and hasn't yet (a hard
     /// reset's read-tree), which that verdict then states.
+    /// For Detached, a recorded race re-attaches HEAD or rolls it back.
     pub(crate) async fn refuse_if_switched(
         &self,
         repo_path: &str,
@@ -393,9 +580,25 @@ impl CasRef {
         files_pending: bool,
     ) -> AppResult<()> {
         let rolled = match (self, self.still_checked_out(repo_path).await) {
+            (Self::Detached(slot), Ok(true)) => {
+                let Some(DetachedRace::Raced { interloper }) = slot.get() else {
+                    return Ok(());
+                };
+                let reattached = match (old, new) {
+                    (Some(old), Some(new)) => {
+                        Self::reattach(repo_path, old, new, interloper.as_ref()).await
+                    }
+                    _ => false,
+                };
+                if reattached {
+                    RolledBack::Restored
+                } else {
+                    self.roll_back(repo_path, old, new).await
+                }
+            }
             (_, Ok(true)) => return Ok(()),
-            (Self::Detached, Ok(false)) => RolledBack::Restored,
-            (Self::Detached, Err(e)) => {
+            (Self::Detached(_), Ok(false)) => RolledBack::Restored,
+            (Self::Detached(_), Err(e)) => {
                 // The swap's own value, since the read just failed.
                 let files = if files_pending {
                     ", and your files were not updated"
@@ -454,6 +657,13 @@ impl CasRef {
             switched
         } else if self.oid(repo_path).await?.as_deref() != old {
             moved
+        } else if matches!(self, Self::Detached(_))
+            && crate::git::branches::current_branch_ref(repo_path)
+                .await?
+                .is_some()
+        {
+            // Unpinned reset reuses "since you confirmed"; detached reset has no production caller.
+            switched
         } else {
             return Ok(AppError::Git {
                 code: failed.code,
@@ -977,6 +1187,10 @@ pub(crate) type PhaseHook = std::sync::Arc<
 
 #[cfg(test)]
 tokio::task_local! {
+    /// After the detached re-check and before the swap, including rollback swaps.
+    static DETACHED_SWAP_HOOK: PhaseHook;
+    /// After the re-attachment pre-check and before its ref write.
+    static REATTACH_HOOK: PhaseHook;
     /// Awaited by the root undo it is scoped to, after `symbolic-ref` named the branch
     /// and before the delete, so a test can switch HEAD inside that window.
     static UNDO_ROOT_HOOK: PhaseHook;
@@ -1020,6 +1234,19 @@ pub(crate) fn racing_git(repo: &str, steps: &[&[&str]]) -> PhaseHook {
                     .unwrap_or_else(|e| panic!("the racer's git {args:?} failed: {e}"));
             }
         })
+    })
+}
+
+/// A racer fires once even when a rollback reaches the same seam again.
+#[cfg(test)]
+fn once(hook: PhaseHook) -> PhaseHook {
+    let fired = std::sync::atomic::AtomicBool::new(false);
+    std::sync::Arc::new(move || {
+        if fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            Box::pin(async {})
+        } else {
+            hook()
+        }
     })
 }
 
@@ -1933,6 +2160,511 @@ mod tests {
         assert_eq!(run(&repo, &["rev-parse", "HEAD~1"]).await.trim(), b);
         assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
         assert_eq!(porcelain(&repo).await, "", "index and tree are untouched");
+    }
+
+    async fn detached_twin_fixture() -> (tempfile::TempDir, String, String, String) {
+        let (dir, repo) = amend_fixture("gd-detached-swap-", &[]).await;
+        let a = raw_commit(&dir, &repo, "a.txt", "A").await;
+        let b = raw_commit(&dir, &repo, "b.txt", "B").await;
+        run(&repo, &["branch", "twin"]).await;
+        run(&repo, &["checkout", "-q", "--detach"]).await;
+        (dir, repo, a, b)
+    }
+
+    async fn remove_reflogs(repo: &str) {
+        run(repo, &["config", "core.logAllRefUpdates", "false"]).await;
+        let logs = run(repo, &["rev-parse", "--git-path", "logs"]).await;
+        let logs = std::path::Path::new(repo).join(logs.trim());
+        if logs.exists() {
+            std::fs::remove_dir_all(logs).unwrap();
+        }
+        let exists = run_git_raw(Some(repo), &["reflog", "exists", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(exists.code, 0, "fixture: HEAD has no reflog");
+    }
+
+    async fn assert_attach_refused(
+        result: AppResult<()>,
+        repo: &str,
+        old: &str,
+        index: &str,
+        copy: &str,
+    ) {
+        let branch = crate::git::branches::current_branch_ref(repo)
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "expected refusal, got {result:?}; HEAD branch = {branch:?}, oid = {}",
+            head(repo).await
+        );
+        assert_undo_refused(result, copy);
+        assert_eq!(branch.as_deref(), Some("refs/heads/twin"));
+        assert_eq!(head(repo).await, old);
+        assert_eq!(
+            ref_oid(repo, "refs/heads/twin").await.unwrap().as_deref(),
+            Some(old)
+        );
+        assert_eq!(run(repo, &["ls-files", "--stage"]).await, index);
+        assert_eq!(porcelain(repo).await, "");
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(repo).join("a.txt")).unwrap(),
+            "A\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(std::path::Path::new(repo).join("b.txt")).unwrap(),
+            "B\n"
+        );
+        assert_eq!(ref_oid(repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    async fn undo_attach_before_swap(pin: ExpectedRef, without_logs: bool) {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        if without_logs {
+            remove_reflogs(&repo).await;
+        }
+        let index = run(&repo, &["ls-files", "--stage"]).await;
+        let result = UNDO_SOFT_HOOK
+            .scope(
+                racing_git(&repo, &[&["switch", "-q", "twin"]]),
+                undo_on(&repo, Some(b.clone()), pin),
+            )
+            .await;
+        assert_attach_refused(result, &repo, &b, &index, UNDO_BRANCH_SWITCHED).await;
+    }
+
+    #[tokio::test]
+    async fn detached_undo_refuses_an_attach_before_its_swap() {
+        undo_attach_before_swap(ExpectedRef::Detached, false).await;
+    }
+
+    #[tokio::test]
+    async fn detached_any_undo_refuses_an_attach_before_its_swap() {
+        undo_attach_before_swap(ExpectedRef::Any, false).await;
+    }
+
+    #[tokio::test]
+    async fn detached_undo_without_reflogs_refuses_an_attach_before_its_swap() {
+        undo_attach_before_swap(ExpectedRef::Detached, true).await;
+    }
+
+    #[tokio::test]
+    async fn detached_undo_without_reflogs_succeeds() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        remove_reflogs(&repo).await;
+        undo_on(&repo, Some(b.clone()), ExpectedRef::Detached)
+            .await
+            .expect("a clean detached undo needs no reflog");
+        assert_eq!(head(&repo).await, a);
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), Some(b));
+    }
+
+    #[tokio::test]
+    async fn detached_swap_refuses_an_attach_after_resolving_the_cas() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        let pin = ExpectedRef::Detached;
+        assert!(!pin.moved(&repo).await.unwrap());
+        let cas = pin.cas_ref(&repo).await.unwrap();
+        let old = cas.oid(&repo).await.unwrap();
+        let index = run(&repo, &["ls-files", "--stage"]).await;
+        run(&repo, &["switch", "-q", "twin"]).await;
+        let out = cas
+            .swap(&repo, "reset: test", &a, old.as_deref())
+            .await
+            .unwrap();
+        assert_ne!(
+            out.code,
+            0,
+            "swap succeeded; HEAD branch = {:?}, oid = {}",
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            head(&repo).await
+        );
+        let refusal = cas
+            .refusal(
+                &repo,
+                &pin,
+                old.as_deref(),
+                &out,
+                UNDO_HEAD_MOVED,
+                UNDO_BRANCH_SWITCHED,
+            )
+            .await
+            .unwrap();
+        assert_attach_refused(Err(refusal), &repo, &b, &index, UNDO_BRANCH_SWITCHED).await;
+        assert_undo_refused(
+            cas.refuse_if_switched(
+                &repo,
+                Some(&b),
+                Some(&a),
+                UNDO_BRANCH_SWITCHED,
+                "undo",
+                false,
+            )
+            .await,
+            UNDO_BRANCH_SWITCHED,
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_any_undo_keeps_the_moved_verdict_for_a_different_commit() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        run(&repo, &["branch", "side", &a]).await;
+        let result = UNDO_SOFT_HOOK
+            .scope(
+                racing_git(&repo, &[&["switch", "-q", "side"]]),
+                undo_on(&repo, Some(b), ExpectedRef::Any),
+            )
+            .await;
+        assert_undo_refused(result, UNDO_HEAD_MOVED);
+        assert_eq!(head(&repo).await, a);
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("refs/heads/side")
+        );
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_undo_reattaches_after_an_attach_inside_its_swap() {
+        for pin in [ExpectedRef::Detached, ExpectedRef::Any] {
+            let (_dir, repo, _a, b) = detached_twin_fixture().await;
+            let index = run(&repo, &["ls-files", "--stage"]).await;
+            let result = DETACHED_SWAP_HOOK
+                .scope(
+                    once(racing_git(&repo, &[&["switch", "-q", "twin"]])),
+                    undo_on(&repo, Some(b.clone()), pin),
+                )
+                .await;
+            assert_attach_refused(result, &repo, &b, &index, UNDO_BRANCH_SWITCHED).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn detached_reset_reattaches_after_an_attach_inside_its_swap() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        let index = run(&repo, &["ls-files", "--stage"]).await;
+        let state = AppState::default();
+        let result = DETACHED_SWAP_HOOK
+            .scope(
+                once(racing_git(&repo, &[&["switch", "-q", "twin"]])),
+                crate::git::ops::git_reset_core_expecting(
+                    &state,
+                    repo.clone(),
+                    a,
+                    Some("hard".into()),
+                    Some(b.clone()),
+                    ExpectedRef::Detached,
+                ),
+            )
+            .await;
+        assert_attach_refused(
+            result,
+            &repo,
+            &b,
+            &index,
+            "The checked-out branch changed since you confirmed — nothing was reset.",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn detached_swap_rolls_back_when_the_interloper_is_not_an_attach() {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        run(&repo, &["tag", "at-tip"]).await;
+        let index = run(&repo, &["ls-files", "--stage"]).await;
+        let result = DETACHED_SWAP_HOOK
+            .scope(
+                once(racing_git(
+                    &repo,
+                    &[&["switch", "-q", "twin"], &["checkout", "-q", "at-tip"]],
+                )),
+                undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+            )
+            .await;
+        let subjects = run(&repo, &["reflog", "--format=%gs", "HEAD"]).await;
+        assert_eq!(
+            subjects.lines().filter(|s| s.ends_with(" to twin")).count(),
+            1
+        );
+        assert_eq!(
+            subjects
+                .lines()
+                .filter(|s| *s == "checkout: moving from twin to at-tip")
+                .count(),
+            1
+        );
+        assert!(
+            result.is_err(),
+            "expected refusal, got {result:?}; HEAD branch = {:?}, oid = {}",
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            head(&repo).await
+        );
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+        assert_eq!(run(&repo, &["ls-files", "--stage"]).await, index);
+        assert_eq!(porcelain(&repo).await, "");
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_reattach_preserves_a_commit_landing_after_its_precheck() {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        let (commit, landed) = racing_commit(&repo, "racer.txt");
+        let result = REATTACH_HOOK
+            .scope(
+                once(commit),
+                DETACHED_SWAP_HOOK.scope(
+                    once(racing_git(&repo, &[&["switch", "-q", "twin"]])),
+                    undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+                ),
+            )
+            .await;
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None,
+            "re-attachment must preserve the racer's detached HEAD"
+        );
+        assert_eq!(head(&repo).await, racer_landed(&landed));
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+        assert_undo_refused(
+            result,
+            &format!(
+                "The checked-out branch changed, and another Git process moved HEAD before \
+                 it could be moved back. {SWITCH_ROLLBACK_HINT}"
+            ),
+        );
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_reattach_refuses_a_branch_move_after_its_precheck() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        let result = REATTACH_HOOK
+            .scope(
+                once(racing_git(&repo, &[&["branch", "-f", "twin", &a]])),
+                DETACHED_SWAP_HOOK.scope(
+                    once(racing_git(&repo, &[&["switch", "-q", "twin"]])),
+                    undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+                ),
+            )
+            .await;
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None,
+            "re-attachment must refuse a destination branch that moved"
+        );
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(a));
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_reattach_rolls_back_when_the_checkout_target_has_no_branch() {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        assert_eq!(ref_oid(&repo, "refs/heads/tg").await.unwrap(), None);
+        let subject = format!("checkout: moving from {b} to tg");
+        let result = DETACHED_SWAP_HOOK
+            .scope(
+                once(racing_git(
+                    &repo,
+                    &[&["symbolic-ref", "-m", &subject, "HEAD", "refs/heads/twin"]],
+                )),
+                undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+            )
+            .await;
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        let subjects = run(&repo, &["reflog", "-3", "--format=%gs", "HEAD"]).await;
+        assert_eq!(
+            subjects.lines().collect::<Vec<_>>(),
+            [
+                "reset: rolling back",
+                "reset: moving to HEAD~1",
+                subject.as_str(),
+            ]
+        );
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+        assert_eq!(ref_oid(&repo, "refs/heads/tg").await.unwrap(), None);
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_reattach_rolls_back_when_the_checkout_target_is_invalid() {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        let subject = format!("checkout: moving from {b} to bad..name");
+        let result = DETACHED_SWAP_HOOK
+            .scope(
+                once(racing_git(
+                    &repo,
+                    &[&["symbolic-ref", "-m", &subject, "HEAD", "refs/heads/twin"]],
+                )),
+                undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+            )
+            .await;
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        let subjects = run(&repo, &["reflog", "-3", "--format=%gs", "HEAD"]).await;
+        assert_eq!(
+            subjects.lines().collect::<Vec<_>>(),
+            [
+                "reset: rolling back",
+                "reset: moving to HEAD~1",
+                subject.as_str(),
+            ]
+        );
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_reattach_rolls_back_when_the_branch_moved_before_its_precheck() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        let result = UNDO_SWAPPED_HOOK
+            .scope(
+                once(racing_git(&repo, &[&["branch", "-f", "twin", &a]])),
+                DETACHED_SWAP_HOOK.scope(
+                    once(racing_git(&repo, &[&["switch", "-q", "twin"]])),
+                    undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+                ),
+            )
+            .await;
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(a));
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_swap_preserves_a_switch_followed_by_a_detach() {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        let index = run(&repo, &["ls-files", "--stage"]).await;
+        let result = DETACHED_SWAP_HOOK
+            .scope(
+                once(racing_git(
+                    &repo,
+                    &[
+                        &["switch", "-q", "twin"],
+                        &["checkout", "-q", "--detach", "twin"],
+                    ],
+                )),
+                undo_on(&repo, Some(b.clone()), ExpectedRef::Detached),
+            )
+            .await;
+        assert_undo_refused(result, UNDO_BRANCH_SWITCHED);
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None,
+            "the interloper ended detached"
+        );
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(ref_oid(&repo, "refs/heads/twin").await.unwrap(), Some(b));
+        assert_eq!(run(&repo, &["ls-files", "--stage"]).await, index);
+        assert_eq!(porcelain(&repo).await, "");
+        assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn detached_same_value_swap_succeeds_and_abstains() {
+        let (_dir, repo, _a, b) = detached_twin_fixture().await;
+        let cas = ExpectedRef::Detached.cas_ref(&repo).await.unwrap();
+        assert_eq!(
+            cas.swap(&repo, "reset: test", &b, Some(&b))
+                .await
+                .unwrap()
+                .code,
+            0
+        );
+        let CasRef::Detached(slot) = &cas else {
+            panic!("fixture: the CAS is detached");
+        };
+        assert_eq!(slot.get(), Some(&DetachedRace::Abstain));
+        cas.refuse_if_switched(
+            &repo,
+            Some(&b),
+            Some(&b),
+            UNDO_BRANCH_SWITCHED,
+            "undo",
+            false,
+        )
+        .await
+        .expect("a same-value swap has no race verdict");
+        assert_eq!(head(&repo).await, b);
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_rollback_preserves_an_attach_after_the_swap() {
+        let (_dir, repo, a, b) = detached_twin_fixture().await;
+        run(&repo, &["branch", "current", &a]).await;
+        let cas = ExpectedRef::Detached.cas_ref(&repo).await.unwrap();
+        assert_eq!(
+            cas.swap(&repo, "reset: test", &a, Some(&b))
+                .await
+                .unwrap()
+                .code,
+            0
+        );
+        run(&repo, &["switch", "-q", "current"]).await;
+        match cas.roll_back(&repo, Some(&b), Some(&a)).await {
+            RolledBack::Stuck(why) => {
+                assert_eq!(why, "HEAD stopped being detached, so it was not moved.");
+            }
+            _ => panic!("rollback must refuse the attach at current as Stuck"),
+        }
+        assert_eq!(head(&repo).await, a);
+        assert_eq!(ref_oid(&repo, "refs/heads/current").await.unwrap(), Some(a));
+        assert_eq!(
+            crate::git::branches::current_branch_ref(&repo)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("refs/heads/current")
+        );
     }
 
     /// The swap records what `reset --soft` does: ORIG_HEAD at the undone tip, and the move
