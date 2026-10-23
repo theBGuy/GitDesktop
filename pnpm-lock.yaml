@@ -13,10 +13,10 @@ importers:
     dependencies:
       '@ai-sdk/anthropic':
         specifier: ^3.0.127
-        version: 3.0.127(zod@4.6.5)
+        version: 3.0.127(zod@4.6.6)
       '@ai-sdk/openai':
         specifier: ^3.0.124
-        version: 3.0.124(zod@4.6.5)
+        version: 3.0.124(zod@4.6.6)
       '@base-ui/react':
         specifier: ^1.8.0
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -37,7 +37,7 @@ importers:
         version: 0.1.7(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       '@openrouter/ai-sdk-provider':
         specifier: ^2.10.0
-        version: 2.10.0(ai@6.0.292(zod@4.6.5))(zod@4.6.5)
+        version: 2.10.0(ai@6.0.292(zod@4.6.6))(zod@4.6.6)
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -106,7 +106,7 @@ importers:
         version: 6.0.0
       ai:
         specifier: ^6.0.292
-        version: 6.0.292(zod@4.6.5)
+        version: 6.0.292(zod@4.6.6)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -130,7 +130,7 @@ importers:
         version: 0.4.6(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       ollama-ai-provider-v2:
         specifier: ^3.6.0
-        version: 3.6.0(ai@6.0.292(zod@4.6.5))(zod@4.6.5)
+        version: 3.6.0(ai@6.0.292(zod@4.6.6))(zod@4.6.6)
       posthog-js:
         specifier: ^1.435.9
         version: 1.435.9(@types/react@19.3.0)(react@19.3.0)
@@ -162,8 +162,8 @@ importers:
         specifier: ^1.1.2
         version: 1.1.2(@types/react-dom@19.3.0(@types/react@19.3.0))(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
       zod:
-        specifier: ^4.6.5
-        version: 4.6.5
+        specifier: ^4.6.6
+        version: 4.6.6
       zustand:
         specifier: ^5.0.15
         version: 5.0.15(@types/react@19.3.0)(immer@11.1.18)(react@19.3.0)(use-sync-external-store@1.7.0(react@19.3.0))
@@ -4903,6 +4903,9 @@ packages:
   zod@4.6.5:
     resolution: {integrity: sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q==}
 
+  zod@4.6.6:
+    resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
+
   zustand@5.0.15:
     resolution: {integrity: sha512-MpSEjRiBkA9crSYeOUH32rJC7SVqAbm0Fqcqge/bUi2PPoLcBWKOsG+C8mevmpr8TwXHBVkChbbJiyvkE+i/3A==}
     engines: {node: '>=12.20.0'}
@@ -4926,40 +4929,40 @@ packages:
 
 snapshots:
 
-  '@ai-sdk/anthropic@3.0.127(zod@4.6.5)':
+  '@ai-sdk/anthropic@3.0.127(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 3.0.18
-      '@ai-sdk/provider-utils': 4.0.57(zod@4.6.5)
-      zod: 4.6.5
+      '@ai-sdk/provider-utils': 4.0.57(zod@4.6.6)
+      zod: 4.6.6
 
-  '@ai-sdk/gateway@3.0.202(zod@4.6.5)':
+  '@ai-sdk/gateway@3.0.202(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 3.0.17
-      '@ai-sdk/provider-utils': 4.0.54(zod@4.6.5)
+      '@ai-sdk/provider-utils': 4.0.54(zod@4.6.6)
       '@vercel/oidc': 3.2.0
-      zod: 4.6.5
+      zod: 4.6.6
 
-  '@ai-sdk/openai@3.0.124(zod@4.6.5)':
+  '@ai-sdk/openai@3.0.124(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 3.0.18
-      '@ai-sdk/provider-utils': 4.0.57(zod@4.6.5)
-      zod: 4.6.5
+      '@ai-sdk/provider-utils': 4.0.57(zod@4.6.6)
+      zod: 4.6.6
 
-  '@ai-sdk/provider-utils@4.0.54(zod@4.6.5)':
+  '@ai-sdk/provider-utils@4.0.54(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 3.0.17
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.1.1
       undici: 6.29.0
-      zod: 4.6.5
+      zod: 4.6.6
 
-  '@ai-sdk/provider-utils@4.0.57(zod@4.6.5)':
+  '@ai-sdk/provider-utils@4.0.57(zod@4.6.6)':
     dependencies:
       '@ai-sdk/provider': 3.0.18
       '@standard-schema/spec': 1.1.0
       eventsource-parser: 3.1.1
       undici: 6.29.0
-      zod: 4.6.5
+      zod: 4.6.6
 
   '@ai-sdk/provider@3.0.17':
     dependencies:
@@ -5851,10 +5854,10 @@ snapshots:
       '@nodelib/fs.scandir': 2.1.5
       fastq: 1.20.3
 
-  '@openrouter/ai-sdk-provider@2.10.0(ai@6.0.292(zod@4.6.5))(zod@4.6.5)':
+  '@openrouter/ai-sdk-provider@2.10.0(ai@6.0.292(zod@4.6.6))(zod@4.6.6)':
     dependencies:
-      ai: 6.0.292(zod@4.6.5)
-      zod: 4.6.5
+      ai: 6.0.292(zod@4.6.6)
+      zod: 4.6.6
 
   '@opentelemetry/api@1.9.1': {}
 
@@ -6722,13 +6725,13 @@ snapshots:
 
   acorn@8.18.0: {}
 
-  ai@6.0.292(zod@4.6.5):
+  ai@6.0.292(zod@4.6.6):
     dependencies:
-      '@ai-sdk/gateway': 3.0.202(zod@4.6.5)
+      '@ai-sdk/gateway': 3.0.202(zod@4.6.6)
       '@ai-sdk/provider': 3.0.17
-      '@ai-sdk/provider-utils': 4.0.54(zod@4.6.5)
+      '@ai-sdk/provider-utils': 4.0.54(zod@4.6.6)
       '@opentelemetry/api': 1.9.1
-      zod: 4.6.5
+      zod: 4.6.6
 
   ajv-formats@2.1.1(ajv@8.20.0):
     optionalDependencies:
@@ -7898,7 +7901,7 @@ snapshots:
       tinyglobby: 0.2.17
       unbash: 4.0.12
       yaml: 2.9.1
-      zod: 4.6.5
+      zod: 4.6.6
 
   lightningcss-android-arm64@1.32.0:
     optional: true
@@ -8588,12 +8591,12 @@ snapshots:
 
   ohash@2.0.12: {}
 
-  ollama-ai-provider-v2@3.6.0(ai@6.0.292(zod@4.6.5))(zod@4.6.5):
+  ollama-ai-provider-v2@3.6.0(ai@6.0.292(zod@4.6.6))(zod@4.6.6):
     dependencies:
       '@ai-sdk/provider': 3.0.17
-      '@ai-sdk/provider-utils': 4.0.54(zod@4.6.5)
-      ai: 6.0.292(zod@4.6.5)
-      zod: 4.6.5
+      '@ai-sdk/provider-utils': 4.0.54(zod@4.6.6)
+      ai: 6.0.292(zod@4.6.6)
+      zod: 4.6.6
 
   on-finished@2.4.1:
     dependencies:
@@ -9730,6 +9733,8 @@ snapshots:
   zod@3.25.76: {}
 
   zod@4.6.5: {}
+
+  zod@4.6.6: {}
 
   zustand@5.0.15(@types/react@19.3.0)(immer@11.1.18)(react@19.3.0)(use-sync-external-store@1.7.0(react@19.3.0)):
     optionalDependencies:
