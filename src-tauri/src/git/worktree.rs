@@ -300,14 +300,8 @@ pub(crate) async fn git_worktree_add_user_core(
             "path and branch must not start with '-'".into(),
         ));
     }
-    // `gd/session/*` is reserved for agent sessions, which the manager hides — a
-    // user worktree on such a branch would be created and then vanish from view.
-    if branch.starts_with("gd/session/") {
-        return Err(AppError::InvalidArgument(
-            "the gd/session/ prefix is reserved for agent sessions".into(),
-        ));
-    }
-    if std::path::Path::new(path).exists() {
+    crate::git::branches::refuse_session_branch_name(branch)?;
+    if std::path::Path::new(repo_path).join(path).exists() {
         return Err(AppError::InvalidArgument(format!(
             "{path} already exists — choose a new folder"
         )));
@@ -1488,6 +1482,60 @@ prunable gitdir file points to non-existent location
         run(&repo_s, &["add", "-A"]).await;
         run(&repo_s, &["commit", "-qm", "seed"]).await;
         (base, repo_s)
+    }
+
+    #[tokio::test]
+    async fn worktree_add_refuses_session_branch_name_any_case() {
+        for new_branch in [true, false] {
+            let (base, repo) = setup_repo("session-branch-name").await;
+            let name = "GD/Session/x";
+            if !new_branch {
+                run(&repo, &["branch", name]).await;
+            }
+            let before = run(&repo, &["for-each-ref", "refs/heads"]).await;
+            let path = base.path().join("prefixed-branch");
+            let result = git_worktree_add_user_core(
+                &AppState::default(),
+                &repo,
+                &path.to_string_lossy(),
+                name,
+                new_branch,
+                None,
+            )
+            .await;
+            assert!(
+                matches!(&result, Err(AppError::InvalidArgument(message)) if message ==
+                    "\"GD/Session/x\" is in gd/session/, which is reserved for agent sessions — choose another name."),
+                "{result:?}"
+            );
+            assert!(!path.exists());
+            assert_eq!(run(&repo, &["for-each-ref", "refs/heads"]).await, before);
+        }
+    }
+
+    #[tokio::test]
+    async fn worktree_add_resolves_a_relative_path_against_the_repo() {
+        let (_base, repo) = setup_repo("relative-path").await;
+        let taken = std::path::Path::new(&repo).join("taken");
+        std::fs::create_dir(&taken).unwrap();
+        std::fs::write(taken.join("keep.txt"), "keep\n").unwrap();
+        let result = git_worktree_add_user_core(
+            &AppState::default(),
+            &repo,
+            "taken",
+            "fresh",
+            true,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(AppError::InvalidArgument(message)) if
+                message.contains("already exists — choose a new folder")),
+            "{result:?}"
+        );
+        assert!(run(&repo, &["for-each-ref", "refs/heads/fresh"])
+            .await
+            .is_empty());
     }
 
     /// The worktree registry as git reports it, forward-slashed + lower-cased so a

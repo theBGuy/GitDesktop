@@ -59,6 +59,7 @@ import {
   useUnlockUserWorktree,
   useUserWorktrees,
 } from "@/lib/git/queries";
+import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { UserWorktree } from "@/lib/git/worktree";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
@@ -820,7 +821,7 @@ function CreateWorktree({
   // Hide the app-internal agent-session branches — they're never something a
   // user picks as a base or checks out into a manual worktree.
   const branches = (branchesQuery.data ?? []).filter(
-    (b) => !b.name.startsWith("gd/session/"),
+    (b) => !isSessionBranchName(b.name),
   );
   const available = branches.filter((b) => !checkedOut.has(b.name));
   const currentBranch = status.data?.branch.name ?? "";

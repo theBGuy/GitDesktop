@@ -864,22 +864,30 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `parseableDate` for ISO strings, `validEpochMs` for epoch numbers
   (`src/lib/time.ts`); never raw `new Date(x)` on forge/CLI data.
 - **Windows spawning:** never pass multi-line argv to `.cmd` shims
-  (BatBadBut rejection) — feed multi-line input via stdin.
+  (BatBadBut rejection) — feed multi-line input via stdin. Generated launcher
+  scripts build through `agent_sandbox`'s `cmd_script_quoted`/`cmd_script_arg`
+  helpers under `CMD_SCRIPT_PRELUDE` (refusals before any write; `%` escaped;
+  trailing backslashes per the receiving program) — never inline
+  quote-wrapping into a script body.
 - **User input → git refspecs/argv** routes through the existing chokepoints:
   `validate_ref_name` (git/branches.rs), `validate_tag_name` (git/ops.rs),
   pushes via `build_push_args` (git/remote.rs) — never construct an inline
-  refspec or re-derive the validation. MCP tools push only through
-  `git_push_same_name_core` (it refuses a named push onto a differently named
-  branch of a named remote) and the HEAD-only `git_force_push_head_core`
-  (git/remote.rs); `git_push_core`, the GUI's follow-tracking entry, stays
-  private to `git::remote` so no MCP tool can reach it. Refs reaching a
-  compare-endpoint basehead route through `forge::validate_compare_branch`
-  (guard: check-rust-invariants check E). Branch names in GitHub REST paths
-  encode via the escaping idiom (`refuse_braced` + `escape_branch_path` in
-  rulesets.rs, `escape_head_branch_path` in github/pr.rs — `%`/`#` encoded,
-  braces refused before the call); Bitbucket requests resolve through
-  `forge::http::resolve_url`, which accepts absolute URLs only on
-  `BB_API_BASE`.
+  refspec or re-derive the validation. Session-reserved branch names refuse
+  through the shared `refuse_session_branch_name`/`is_session_branch_name`
+  guard (git/branches.rs, case-insensitive) at every branch-minting entry
+  point; the two local-switch routes refuse only guess-creation so existing
+  session-named branches stay reachable — never re-derive the prefix check.
+  MCP tools push only through `git_push_same_name_core` (it refuses a named
+  push onto a differently named branch of a named remote) and the HEAD-only
+  `git_force_push_head_core` (git/remote.rs); `git_push_core`, the GUI's
+  follow-tracking entry, stays private to `git::remote` so no MCP tool can
+  reach it. Refs reaching a compare-endpoint basehead route through
+  `forge::validate_compare_branch` (guard: check-rust-invariants check E).
+  Branch names in GitHub REST paths encode via the escaping idiom (the
+  `refuse_braced` + `escape_branch_path` pair in rulesets.rs, and the twin
+  `escape_head_branch_path` in github/pr.rs — `%`/`#` encoded, braces refused
+  before the call); Bitbucket requests resolve through the one choke point
+  `forge::http::resolve_url`, which accepts absolute URLs only on `BB_API_BASE`.
 - **Merges into a checkout check for ignored files first:** git's merge
   default silently replaces an ignored file the incoming side tracks, and
   merge-ort ignores `--no-overwrite-ignore` on 3-way merges (measured, git

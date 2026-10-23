@@ -1274,23 +1274,60 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Windows: write a temp `.cmd` that runs the (double-quoted) command and pauses,
-/// then `start` it. A temp script avoids cmd's nested-quoting traps, and `start`
-/// gives the `docker run -it` a fresh, fully-wired console (spawning a console
-/// directly leaves stdio bound to ours, so it can't take keyboard input).
+/// `chcp` must precede every non-ASCII data byte in the script.
+/// `DisableDelayedExpansion` overrides the registry-configurable default.
+#[cfg(any(windows, test))]
+pub(crate) const CMD_SCRIPT_PRELUDE: &str =
+    "@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n";
+
+/// Quotes a program path, a `cd /d` operand, or an argv element a cmd-interpreter
+/// script reads via `%~N`.
+/// Double quotes and U+0000..=U+001F are refused; `%` becomes `%%`.
+/// With `CMD_SCRIPT_PRELUDE`, all other characters stay literal inside quotes.
+/// Program-name, builtin, and `%~N` parsing keep trailing backslashes unchanged.
+#[cfg(any(windows, test))]
+pub(crate) fn cmd_script_quoted(value: &str) -> AppResult<String> {
+    if value.chars().any(|c| c == '"' || c <= '\x1f') {
+        return Err(AppError::InvalidArgument(format!("can't open an external terminal: {value:?} contains a double quote or a control character; remove or rename it and try again")));
+    }
+    Ok(format!("\"{}\"", value.replace('%', "%%")))
+}
+
+/// Quotes one argv element under the `cmd_script_quoted` contract.
+/// MSVC parsing requires doubling trailing backslashes before the closing quote;
+/// internal backslashes stay unchanged because embedded double quotes are refused.
+#[cfg(any(windows, test))]
+pub(crate) fn cmd_script_arg(value: &str) -> AppResult<String> {
+    let mut quoted = cmd_script_quoted(value)?;
+    let trailing = value.len() - value.trim_end_matches('\\').len();
+    quoted.insert_str(quoted.len() - 1, &"\\".repeat(trailing));
+    Ok(quoted)
+}
+
+/// `tip` must remain app-built ASCII text.
+#[cfg(any(windows, test))]
+fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<String> {
+    let mut line = cmd_script_quoted(bin)?;
+    for a in args {
+        line.push(' ');
+        line.push_str(&cmd_script_arg(a)?);
+    }
+    Ok(format!(
+        "{CMD_SCRIPT_PRELUDE}title GitDesktop - container test shell\r\necho {tip}\r\necho.\r\n{line}\r\necho.\r\necho (container exited) Press any key to close...\r\npause >nul\r\n"
+    ))
+}
+
+/// Windows: `start` a temp `.cmd` for a fresh, fully-wired console; a direct
+/// spawn leaves stdio bound to ours, so it cannot take keyboard input.
+/// Every program/argv value goes through `cmd_script_quoted` / `cmd_script_arg`
+/// under their documented contract.
 #[cfg(windows)]
 fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()> {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let mut line = format!("\"{bin}\"");
-    for a in args {
-        line.push_str(&format!(" \"{a}\""));
-    }
-    let script = format!(
-        "@echo off\r\ntitle GitDesktop - container test shell\r\necho {tip}\r\necho.\r\n{line}\r\necho.\r\necho (container exited) Press any key to close...\r\npause >nul\r\n"
-    );
+    let script = container_shell_script(bin, args, tip)?;
     let path = std::env::temp_dir()
         .join(format!("gd-container-shell-{}.cmd", std::process::id()));
     std::fs::write(&path, script).map_err(AppError::Io)?;
@@ -1875,5 +1912,117 @@ mod tests {
         let img = a.iter().position(|x| x == tag).expect("custom image present");
         assert_eq!(a[img + 1], "claude");
         assert!(!a.iter().any(|x| x == IMAGE)); // the base tag is not used
+    }
+
+    #[test]
+    fn cmd_script_preserves_path_characters() {
+        for value in [
+            "C:\\repos\\with spaces",
+            "C:\\repos\\(copy)",
+            "C:\\repos\\R&D",
+            "C:\\repos\\caret^",
+            "C:\\repos\\bang!",
+            "C:\\repos\\José",
+            "C:\\repos\\文件",
+        ] {
+            let expected = format!("\"{value}\"");
+            assert_eq!(cmd_script_quoted(value).unwrap(), expected);
+            assert_eq!(cmd_script_arg(value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn cmd_script_escapes_percent() {
+        for (value, expected) in [
+            ("C:\\repos\\rate 100%\\wt", "\"C:\\repos\\rate 100%%\\wt\""),
+            ("C:\\repos\\a%b%c", "\"C:\\repos\\a%%b%%c\""),
+            ("%%", "\"%%%%\""),
+        ] {
+            assert_eq!(cmd_script_quoted(value).unwrap(), expected);
+            assert_eq!(cmd_script_arg(value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn cmd_script_handles_trailing_backslashes() {
+        for (value, expected) in [
+            ("out dir\\", "\"out dir\\\\\""),
+            ("out dir\\\\", "\"out dir\\\\\\\\\""),
+            ("C:\\a\\b", "\"C:\\a\\b\""),
+            ("", "\"\""),
+        ] {
+            assert_eq!(cmd_script_arg(value).unwrap(), expected);
+        }
+        assert_eq!(cmd_script_quoted("C:\\").unwrap(), "\"C:\\\"");
+        assert_eq!(cmd_script_quoted("").unwrap(), "\"\"");
+    }
+
+    #[test]
+    fn cmd_script_refuses_quotes_and_controls() {
+        for value in ["a\"b", "a\nb", "a\rb", "a\0b", "a\tb"] {
+            for result in [cmd_script_quoted(value), cmd_script_arg(value)] {
+                let Err(AppError::InvalidArgument(msg)) = result else {
+                    panic!("expected InvalidArgument for {value:?}");
+                };
+                assert_eq!(
+                    msg,
+                    format!("can't open an external terminal: {value:?} contains a double quote or a control character; remove or rename it and try again")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cmd_script_container_golden() {
+        let bin = "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe";
+        let args: Vec<String> = [
+            "run",
+            "-it",
+            "--rm",
+            "--name",
+            "gd-test-0123456789abcdef",
+            "-v",
+            "//c/Users/José/rate 100%/wt (copy)!:/workspace",
+            "-w",
+            "/workspace",
+            "gd-image:test",
+            "bash",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let tip = "Tip: test tip.";
+        let expected = concat!(
+            "@echo off\r\n",
+            "chcp 65001 >nul\r\n",
+            "setlocal DisableDelayedExpansion\r\n",
+            "title GitDesktop - container test shell\r\n",
+            "echo Tip: test tip.\r\n",
+            "echo.\r\n",
+            "\"C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe\" \"run\" \"-it\" \"--rm\" \"--name\" \"gd-test-0123456789abcdef\" \"-v\" \"//c/Users/José/rate 100%%/wt (copy)!:/workspace\" \"-w\" \"/workspace\" \"gd-image:test\" \"bash\"\r\n",
+            "echo.\r\n",
+            "echo (container exited) Press any key to close...\r\n",
+            "pause >nul\r\n",
+        );
+        assert_eq!(container_shell_script(bin, &args, tip).unwrap(), expected);
+    }
+
+    #[test]
+    fn cmd_script_container_refuses_args() {
+        for value in ["a\"b", "a\nb", "a\rb", "a\0b", "a\tb"] {
+            let args = vec!["run".to_string(), value.to_string()];
+            assert!(matches!(
+                container_shell_script("docker", &args, "Tip: test tip."),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn cmd_script_container_refuses_bin() {
+        assert!(matches!(
+            container_shell_script("a\"b", &[], "Tip: test tip."),
+            Err(AppError::InvalidArgument(_))
+        ));
     }
 }
