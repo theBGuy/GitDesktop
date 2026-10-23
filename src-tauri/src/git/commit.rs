@@ -283,7 +283,7 @@ impl ExpectedRef {
 
 /// The one ref a pinned rewrite moves, compared-and-swapped against the oid its checks read,
 /// so a commit another process lands after those checks refuses the move.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum CasRef {
     /// A branch, by its full ref.
     Branch(String),
@@ -292,11 +292,15 @@ pub(crate) enum CasRef {
     Detached(std::sync::OnceLock<DetachedRace>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum DetachedRace {
+    /// The bounded reflog delta matches the swap with no intervening entry.
     Clean,
+    /// The reflog cannot establish a race, or the swap kept the same oid.
     Abstain,
+    /// The bounded reflog delta does not match the expected swap.
     Raced {
+        /// The entry below ours if it differs from the snapshot's top: (new oid, reflog subject).
         interloper: Option<(String, String)>,
     },
 }
@@ -374,7 +378,6 @@ impl CasRef {
         if detect && out.code == 0 {
             if let Self::Detached(slot) = self {
                 let race = match snapshot {
-                    _ if Some(new) == old => DetachedRace::Abstain,
                     Some(snapshot) => {
                         match Self::head_reflog(repo_path, snapshot.len() + 2).await {
                             Ok(post) => Self::detached_race(&snapshot, &post, message, new),
@@ -389,6 +392,7 @@ impl CasRef {
         Ok(out)
     }
 
+    /// HEAD reflog entries as (new oid, reflog subject), newest first.
     async fn head_reflog(repo_path: &str, count: usize) -> AppResult<Vec<(String, String)>> {
         let out = run_git(
             Some(repo_path),
@@ -412,16 +416,11 @@ impl CasRef {
 
     /// Best-effort: git cannot atomically require a direct HEAD; `Any` starts at `cas_ref`.
     /// Missing/unreadable logs and same-value swaps abstain; the detached re-check still runs.
-    /// Re-attachment needs a checkout from the full `old` oid; its write compares HEAD's oid
-    /// and the branch's oid atomically. A third process can still attach HEAD at the same oid
-    /// between the pre-check and write. Other subjects roll back.
-    /// Git before 2.46 lacks symref-update: the write fails and rollback refuses the operation,
-    /// leaving HEAD detached at `old`.
-    /// Another worktree can claim the branch first; hooks moving HEAD are outside these guarantees.
-    /// Same-commit detached checkouts log nothing. Expiry between snapshot and swap forces refusal.
+    /// Same-commit detached checkouts log nothing; hooks moving HEAD are outside these guarantees.
+    /// Expiry between snapshot and swap forces refusal. Before the post-read, full expiry abstains
+    /// and partial expiry refuses; expiry after the post-read is unseen.
     /// Two entries above ours force refusal, and their failed rollback CAS can report Lost though
-    /// the move landed. Before the post-read, full expiry abstains and partial expiry refuses.
-    /// Expiry after the post-read is unseen.
+    /// the move landed.
     fn detached_race(
         snapshot: &[(String, String)],
         post: &[(String, String)],
@@ -449,6 +448,11 @@ impl CasRef {
         }
     }
 
+    /// Needs a checkout from the full `old` oid; other subjects roll back. The write compares
+    /// HEAD's and the branch's oids atomically, but a third process can still attach HEAD at the
+    /// same oid between the pre-check and write. Another worktree can claim the branch first.
+    /// Git before 2.46 lacks symref-update: the write fails and rollback refuses the operation,
+    /// leaving HEAD detached at `old`.
     /// The message must never resemble a checkout entry: later detection would read an attach.
     async fn reattach(
         repo_path: &str,
@@ -644,8 +648,9 @@ impl CasRef {
     }
 
     /// Why a swap of this ref from `old` failed, read under the caller's hold: HEAD off the
-    /// pin answers `switched`, the ref off `old` answers `moved`, and anything else (a stale
-    /// ref `.lock`) keeps git's own error.
+    /// pin answers `switched`, then the ref off `old` answers `moved`. A detached CAS finding
+    /// HEAD attached also answers `switched`, including an `Any` pin whose `moved` stays false.
+    /// Anything else (a stale ref `.lock`) keeps git's own error.
     pub(crate) async fn refusal(
         &self,
         repo_path: &str,
@@ -2182,6 +2187,96 @@ mod tests {
         assert_eq!(run(&repo, &["rev-parse", "HEAD~1"]).await.trim(), b);
         assert_eq!(ref_oid(&repo, "ORIG_HEAD").await.unwrap(), None);
         assert_eq!(porcelain(&repo).await, "", "index and tree are untouched");
+    }
+
+    #[test]
+    fn detached_race_classifies_bounded_reflog_deltas() {
+        const MSG: &str = "reset: test swap";
+        const NEW: &str = "7777777";
+        let entry = |oid: &str, subject: &str| (oid.to_string(), subject.to_string());
+        let ours = entry(NEW, MSG);
+        let s0 = entry("1111111", "snapshot zero");
+        let s1 = entry("2222222", "snapshot one");
+        let s2 = entry("3333333", "snapshot two");
+        let f1 = entry("4444444", "foreign one");
+        let f2 = entry("5555555", "foreign two");
+        let x = entry("6666666", "intervening entry");
+        let snapshot = vec![s0.clone(), s1.clone()];
+        let cases = [
+            (
+                "a: empty post-read abstains",
+                snapshot.clone(),
+                vec![],
+                DetachedRace::Abstain,
+            ),
+            (
+                "b: ours directly above the snapshot is clean",
+                snapshot.clone(),
+                vec![ours.clone(), s0.clone(), s1.clone()],
+                DetachedRace::Clean,
+            ),
+            (
+                "c: one foreign entry above ours is clean",
+                snapshot.clone(),
+                vec![f1.clone(), ours.clone(), s0.clone(), s1.clone()],
+                DetachedRace::Clean,
+            ),
+            (
+                "d: two foreign entries hide ours",
+                snapshot.clone(),
+                vec![f1.clone(), f2, ours.clone(), s0.clone()],
+                DetachedRace::Raced { interloper: None },
+            ),
+            (
+                "e: an entry between ours and the snapshot is the interloper",
+                snapshot.clone(),
+                vec![ours.clone(), x.clone(), s0.clone(), s1.clone()],
+                DetachedRace::Raced {
+                    interloper: Some(x.clone()),
+                },
+            ),
+            (
+                "f: only ours above an empty snapshot is clean",
+                vec![],
+                vec![ours.clone()],
+                DetachedRace::Clean,
+            ),
+            (
+                "g: an entry below ours with an empty snapshot is the interloper",
+                vec![],
+                vec![ours.clone(), x.clone()],
+                DetachedRace::Raced {
+                    interloper: Some(x.clone()),
+                },
+            ),
+            (
+                "h: partial expiry is a race without an interloper",
+                snapshot.clone(),
+                vec![ours.clone(), s0.clone(), s2],
+                DetachedRace::Raced { interloper: None },
+            ),
+            (
+                "i: the interloper is below ours at index one",
+                snapshot.clone(),
+                vec![f1, ours, x.clone(), s0.clone()],
+                DetachedRace::Raced {
+                    interloper: Some(x),
+                },
+            ),
+            (
+                "j: our oid with another subject is not ours",
+                snapshot,
+                vec![entry(NEW, "another subject"), s0, s1],
+                DetachedRace::Raced { interloper: None },
+            ),
+        ];
+        for (label, snapshot, post, expected) in cases {
+            assert_eq!(
+                CasRef::detached_race(&snapshot, &post, MSG, NEW),
+                expected,
+                "{label}"
+            );
+        }
     }
 
     async fn detached_twin_fixture() -> (tempfile::TempDir, String, String, String) {
