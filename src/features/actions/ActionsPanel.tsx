@@ -126,8 +126,8 @@ export function ActionsPanel({
   const canCancel = canWrite || forgeFeatureReady(forge.data, "ciCancel");
   // Starting a run is a repo write: an explicitly read-only viewer keeps the
   // control (with the reason) rather than losing it. CI is repo-wide, so the
-  // probe takes no lens; an Activity-hidden tab still renders, so it also gates
-  // on `active` to keep a background tab from fetching.
+  // probe takes no lens. It also gates on `active` as a backstop: an
+  // Activity-hidden tab already fetches nothing.
   const writeAccess = useRepoWriteAccess(
     repoPath,
     undefined,

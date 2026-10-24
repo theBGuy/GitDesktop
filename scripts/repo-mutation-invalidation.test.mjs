@@ -249,3 +249,59 @@ test("notifySuccess runs with the data and variables before any invalidation", a
     assert.deepEqual(named(invalidated), ["repo/A/status", "repo/A/history"]);
   }
 });
+
+test("a filter entry invalidates its prefix through its own predicate", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const seen = [];
+  qc.invalidateQueries = (filters) => {
+    seen.push(filters);
+    return Promise.resolve();
+  };
+  const local = () => true;
+  const settle = repoMutationCallbacks(
+    qc,
+    {
+      invalidate: [{ queryKey: ["repo", "C:/a"], predicate: local }],
+      invalidateAfter: [["repo", "C:/a", "actions", "notify"]],
+    },
+    false,
+    () => {},
+  );
+  settle.onSettled("ok", null, undefined, undefined);
+  await sleep(0);
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[0].queryKey, ["repo", "C:/a"]);
+  assert.equal(seen[0].predicate, local);
+  assert.deepEqual(seen[1], {
+    queryKey: ["repo", "C:/a", "actions", "notify"],
+  });
+});
+
+test("the union keeps a filter entry once per key and predicate", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const seen = [];
+  qc.invalidateQueries = (filters) => {
+    seen.push(filters);
+    return Promise.resolve();
+  };
+  const local = () => true;
+  const other = () => false;
+  const keys = (predicate) => ({
+    invalidate: [{ queryKey: ["repo", "C:/a"], predicate }, ["repo", "C:/a"]],
+    invalidateAfter: [],
+  });
+  const settle = repoMutationCallbacks(qc, keys(local), false, () => {});
+  // The captured context names the same predicate (deduped) and another one (kept).
+  settle.onSettled("ok", null, undefined, keys(local));
+  await sleep(0);
+  assert.equal(seen.length, 2);
+  seen.length = 0;
+  settle.onSettled("ok", null, undefined, keys(other));
+  await sleep(0);
+  assert.deepEqual(
+    seen.map((f) => f.predicate ?? "plain"),
+    [other, "plain", local],
+  );
+});

@@ -1,0 +1,1 @@
+- Run notifications also cover runs that start and finish between checks.

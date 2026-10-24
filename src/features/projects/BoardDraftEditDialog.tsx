@@ -192,10 +192,8 @@ export function BoardDraftEditDialog({
                 />
               )}
             </form.AppField>
-            {/* `enabled` on the dialog being open: the panel lives under
-                `<Activity>`, which defers a hidden tab's effects but not its
-                queries, so a closed dialog must not keep the collaborator read
-                alive behind the board. */}
+            {/* `enabled` on the dialog being open, so the collaborator read
+                never runs while the dialog is closed. */}
             <AssigneesPopover
               repoPath={repoPath}
               enabled={open}

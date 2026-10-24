@@ -42,8 +42,9 @@ export function workingLineStatsOptions(repo: string) {
   };
 }
 
-/** `enabled` gates it on the Changes tab being active and the tree being dirty; a
- *  `<TabPanel>`-hidden panel still renders and would otherwise poll. */
+/** `enabled` gates it on the Changes tab being active and the tree being dirty;
+ *  the tab gate is a backstop, since a `<TabPanel>`-hidden panel holds no query
+ *  observers. */
 export function useWorkingLineStats(repo: string, enabled: boolean) {
   return useQuery({
     ...workingLineStatsOptions(repo),

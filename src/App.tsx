@@ -268,8 +268,8 @@ function App() {
   });
 
   // The webview stays "visible" when the window loses focus, so TanStack's
-  // own focus refetch never fires in Tauri; bridge the native focus event.
-  // Board lenses a date-shift chase is reading are held (see the helper).
+  // own focus refetch never fires in Tauri; bridge the native focus event. The
+  // helper refetches only active repo queries that are stale or errored.
   useEffect(() => {
     const unlisten = getCurrentWindow().onFocusChanged(
       ({ payload: focused }) => {

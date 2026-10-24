@@ -219,8 +219,8 @@ export function usePrListMergeability(
  * implemented.reviewGrouping && state === "open" && !list.isPlaceholderData` — the
  * grouping is open-PRs-only; idling this hook while the list serves placeholder rows
  * keeps an intermediate fetch from caching under the incoming key; and the tab gate
- * is load-bearing: a `<TabPanel>`-hidden panel still fetches, and this is a 3-page
- * walk that a repo invalidation would otherwise re-run off-screen.
+ * is a backstop for a 3-page walk: a `<TabPanel>`-hidden panel already connects no
+ * observers and fetches nothing (measured), and the gate holds even outside one.
  *
  * CO-INVALIDATION CONTRACT for mutation authors: any mutation that refreshes the PR
  * list NARROWLY (`[...repoKeys.prList(repo), lens]` rather than the whole
@@ -261,9 +261,9 @@ export function usePrReviewState(
 
 /** The teams the viewer belongs to, for the team-review filter's picker. Membership
  *  changes rarely, so it caches for five minutes and doesn't retry — a token without
- *  the team scope answers `missingScope` rather than failing. `enabled` must carry
- *  the active-tab gate (a `<TabPanel>`-hidden panel still fetches, and this is a
- *  paginated `user/teams` walk); `useRemoteListFilter`'s `tabActive` opt does. */
+ *  the team scope answers `missingScope` rather than failing. `enabled` carries the
+ *  active-tab gate (`useRemoteListFilter`'s `tabActive` opt) as a backstop for a
+ *  paginated walk: a hidden `<TabPanel>` already fetches nothing (measured). */
 export function useMyTeams(repo: string, lens: RemoteLens, enabled: boolean) {
   return useQuery({
     queryKey: ["repo", repo, "my-teams", lens] as const,
@@ -619,8 +619,7 @@ export function usePrCommitDiff(
   });
 }
 
-/** Shared by {@link useCommitComments} and the commit prefetch so the two can't
- *  drift. */
+/** The commit-comments read {@link useCommitComments} spreads. */
 export const commitCommentsOptions = (
   repo: string,
   sha: string,
@@ -673,13 +672,14 @@ export function useCommitOnRemote(repo: string, sha: string | null) {
 /** The forge's own unified diff for a commit, PR-independent. GitHub commit-comment
  *  `position` mapping must walk GitHub's own patch rather than local git's (rename
  *  detection etc. can differ), so this fetches the provider's diff. Pass `sha: null`
- *  to keep it cold when no commit is selected. */
+ *  to keep it cold until the diff is needed. Never stale: a commit's diff is fixed
+ *  by its SHA. */
 export function useRemoteCommitDiff(repo: string, sha: string | null) {
   return useQuery({
     queryKey: ["repo", repo, "commit", sha, "remote-diff"] as const,
     queryFn: () => api.forgeCommitDiff(repo, sha ?? ""),
     enabled: sha !== null,
-    staleTime: 30_000,
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 

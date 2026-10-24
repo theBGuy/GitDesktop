@@ -10,17 +10,11 @@ import {
 } from "@phosphor-icons/react";
 import type { ForgeProvider } from "@/lib/git/types";
 import { isRunActive } from "@/lib/github/actions";
+import { isFailureConclusion } from "@/lib/github/run-status";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
-/** Whether a completed conclusion counts as a failure (drives "Re-run failed"). */
-export function isFailureConclusion(conclusion: string): boolean {
-  return (
-    conclusion === "failure" ||
-    conclusion === "timed_out" ||
-    conclusion === "startup_failure"
-  );
-}
+export { isFailureConclusion } from "@/lib/github/run-status";
 
 /** Whether the provider calls its CI unit a pipeline rather than a workflow
  *  run. An unrecognized host routes through `gh`, so it reads as GitHub. */
