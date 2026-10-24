@@ -227,12 +227,11 @@ export function TaskDialog({
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const swapFocus = useConfirmSwapFocus();
-  // A confirmed delete takes the edited task's row along, so the close lands on
-  // "New task" (never another task row: Enter there runs that task). A failed
-  // delete leaves the row listed, so the close returns to it. One id per
-  // confirmed delete, kept through any later session until it fails; a
-  // success stays, since the row can outlive the settle by a render.
-  const deletedIds = useRef(new Set<string>());
+  // Confirmed deletes per task id; only a failure gives one back. While any
+  // holds, the close lands on "New task" (a row's Enter runs its task), since a
+  // deleted row can outlive the settle by a render; ids are UUIDs, never reused.
+  const deleteCountsRef = useRef<Map<string, number> | null>(null);
+  const deleteCounts = () => (deleteCountsRef.current ??= new Map());
   const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
   const [flipNote, setFlipNote] = useState<FlipNote | null>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
@@ -509,7 +508,7 @@ export function TaskDialog({
     const root = focusRoot.current;
     const newTask = () =>
       root?.querySelector<HTMLElement>('[aria-label="New task"]') ?? null;
-    if (shownEditing === null || deletedIds.current.has(shownEditing.id))
+    if (shownEditing === null || (deleteCounts().get(shownEditing.id) ?? 0) > 0)
       return newTask();
     const id = CSS.escape(shownEditing.id);
     return (
@@ -1011,9 +1010,13 @@ export function TaskDialog({
                 onAct={() => {
                   if (!editing) return;
                   const id = editing.id;
-                  deletedIds.current.add(id);
+                  const counts = deleteCounts();
+                  counts.set(id, (counts.get(id) ?? 0) + 1);
                   void onDelete(id).then((gone) => {
-                    if (!gone) deletedIds.current.delete(id);
+                    if (gone) return;
+                    const left = (counts.get(id) ?? 1) - 1;
+                    if (left > 0) counts.set(id, left);
+                    else counts.delete(id);
                   });
                 }}
               />
