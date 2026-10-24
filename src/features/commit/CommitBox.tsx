@@ -103,7 +103,7 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
           onChange={(e) => setCommitTitle(e.target.value)}
           disabled={generating}
           {...budget.inputProps}
-          className={cn("ph-no-capture", budget.inputProps.className)}
+          className={cn("ph-no-capture", budget.gutterClassName)}
           autoComplete="off"
         />
         <SummaryCounter

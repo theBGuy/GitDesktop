@@ -645,9 +645,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   element carries a literal `data-confirm-swap`, and a leave that takes the
   section itself tries the `data-confirm-host` ancestor's fallbacks before the
   host. A successor never runs, sends or deletes on Enter, since a held Enter
-  repeats; a row whose safe control is a component that takes no DOM props
-  marks it with `markSwapStop(selector)` on the row ref. The act button holds
-  by reason while pending, so it keeps focus through the write.
+  repeats, and one whose fresh Enter still acts (opens an editor, adds) takes
+  `onKeyDown={ignoreHeldEnter}` from the same module; a row whose safe control
+  is a component that takes no DOM props marks it with `markSwapStop(selector)`
+  on the row ref. The act button holds by reason while pending, so it keeps
+  focus through the write.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

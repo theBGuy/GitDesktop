@@ -8,7 +8,7 @@ export const SUMMARY_BUDGET = 72;
 /**
  * The summary input's half of the counter. Past the budget its gutter widens
  * for the glyph, and it references the counter's words only while over. Callers
- * merge `inputProps.className` with their own classes.
+ * merge `gutterClassName` with their own classes.
  */
 export function useSummaryBudget(length: number) {
   const over = length > SUMMARY_BUDGET;
@@ -16,10 +16,8 @@ export function useSummaryBudget(length: number) {
   return {
     over,
     counterId,
-    inputProps: {
-      className: over ? "pr-16" : "pr-12",
-      "aria-describedby": over ? counterId : undefined,
-    },
+    gutterClassName: over ? "pr-16" : "pr-12",
+    inputProps: { "aria-describedby": over ? counterId : undefined },
   };
 }
 

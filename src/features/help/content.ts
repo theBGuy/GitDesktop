@@ -3541,7 +3541,7 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   description, like a CLI's \`--help\` — shown as a reference wherever you set arguments.
 - **Run it.** Click a task, or use **Run a task…** from the command palette. A
   confirm-gated run shows the arguments prefilled and lets you **adjust them for that run**
-  (the saved task is untouched) — press Enter to run. Runs happen in an **interactive**
+  (the saved task is untouched) — press {{key:enter}} to run. Runs happen in an **interactive**
   terminal, so a script that prompts you — the next version to release, a yes/no — works,
   and output keeps its colour. **Stop** ends a run and the processes it started; **Rerun**
   starts a fresh one with the same arguments.
