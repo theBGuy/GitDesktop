@@ -373,8 +373,20 @@ export function ConflictFileView({
     recovering ||
     awaitingRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
-  // can't be text-merged; offer only whole-file resolution + the editor.
+  // can't be text-merged: it offers whole-file resolution + the editor, and a
+  // path-gate refusal leaves only the editor.
   const textResolvable = !file.isError;
+  const pathRefusal: string | null = (() => {
+    if (
+      !file.isError ||
+      !isAppError(file.error) ||
+      file.error.kind !== "invalidArgument"
+    ) {
+      return null;
+    }
+    const summary = presentError(file.error).summary;
+    return summary.startsWith(PATH_REFUSAL_PREFIX) ? summary : null;
+  })();
   // The working file alone: per-region accepts rebuild from it, so a clean
   // working file over a non-UTF-8 stage blob stays lossless for them. The AI
   // button holds on it too, but deliberately leaves that blob-only case to
@@ -599,12 +611,13 @@ export function ConflictFileView({
             Open in editor
           </Button>
           {/* Held on a path git calls merged: Accept all re-checks the file out
-              from the index, over any edits made after an outside `git add`. */}
+              from the index, over any edits made after an outside `git add`.
+              A path-gate refusal disables both: side checkout uses the same gate. */}
           <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy || notConflicted}
-            reason={notConflicted ? NOT_CONFLICTED_COPY : null}
+            disabled={busy || notConflicted || pathRefusal !== null}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : pathRefusal}
             onClick={() => acceptAll("ours")}
           >
             Accept all current
@@ -612,8 +625,8 @@ export function ConflictFileView({
           <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy || notConflicted}
-            reason={notConflicted ? NOT_CONFLICTED_COPY : null}
+            disabled={busy || notConflicted || pathRefusal !== null}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : pathRefusal}
             onClick={() => acceptAll("theirs")}
           >
             Accept all incoming
@@ -648,17 +661,10 @@ export function ConflictFileView({
           </p>
         ) : file.isError ? (
           <p className="p-4 text-xs text-muted-foreground">
-            {(() => {
-              if (!isAppError(file.error)) return READ_ERROR_FALLBACK;
-              const summary = presentError(file.error).summary;
-              if (
-                file.error.kind === "invalidArgument" &&
-                summary.startsWith(PATH_REFUSAL_PREFIX)
-              ) {
-                return `${summary} Resolve it in your editor or a terminal.`;
-              }
-              return READ_ERROR_COPY[file.error.kind] || READ_ERROR_FALLBACK;
-            })()}
+            {pathRefusal
+              ? `${pathRefusal} Resolve it in your editor or a terminal.`
+              : (isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
+                READ_ERROR_FALLBACK}
           </p>
         ) : segments === null ? (
           <ConflictFallback

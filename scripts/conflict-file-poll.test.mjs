@@ -565,8 +565,8 @@ test("the header's whole-file actions hold, with a reason, on a path no longer c
       prop("reason"),
       label === "Resolve with AI"
         ? /^\s*aiHeldReason\s*$/
-        : /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*null\s*$/,
-      `"${label}" must explain its notConflicted hold`,
+        : /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*pathRefusal\s*$/,
+      `"${label}" must explain its notConflicted and path-refusal holds`,
     );
   }
   // The AI reason's first case is the no-longer-conflicted one, so that reason

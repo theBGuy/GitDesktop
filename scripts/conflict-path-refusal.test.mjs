@@ -31,4 +31,8 @@ test("TSX conflict pane keeps the backend's path-refusal prefix", () => {
     /^const PATH_REFUSAL_PREFIX\s*=\s*"Can't resolve the conflict in";/m,
     "TSX ConflictFileView must declare the exact backend PATH_REFUSAL_PREFIX",
   );
+  assert.ok(
+    (view.match(/pathRefusal !== null/g) ?? []).length >= 2,
+    "TSX ConflictFileView must disable both Accept all buttons on a path refusal",
+  );
 });
