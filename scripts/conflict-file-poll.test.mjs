@@ -495,7 +495,7 @@ test("a read with no index stages never reaches the region view", () => {
   );
 });
 
-test("the header's whole-file actions hold, with a reason, on a path no longer conflicted", () => {
+test("the header's whole-file actions explain their notConflicted and path-gate holds", () => {
   const src = load(VIEW);
   assert.match(
     src.masked,
@@ -558,6 +558,12 @@ test("the header's whole-file actions hold, with a reason, on a path no longer c
         /(?<![\w$.])workingUndecodable(?![\w$])/,
         `"${label}" must be disabled while the working file isn't UTF-8 text`,
       );
+    } else {
+      assert.match(
+        prop("disabled"),
+        /(?<![\w$.])pathRefusal\s*!==\s*null/,
+        `"${label}" must be disabled on a path-gate refusal`,
+      );
     }
     // The AI button holds for a second cause too (a non-UTF-8 working file), so
     // its reason comes from `aiHeldReason`, pinned below.
@@ -566,7 +572,9 @@ test("the header's whole-file actions hold, with a reason, on a path no longer c
       label === "Resolve with AI"
         ? /^\s*aiHeldReason\s*$/
         : /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*pathRefusal\s*$/,
-      `"${label}" must explain its notConflicted and path-refusal holds`,
+      label === "Resolve with AI"
+        ? `"${label}" must explain its notConflicted hold`
+        : `"${label}" must explain its notConflicted and path-refusal holds`,
     );
   }
   // The AI reason's first case is the no-longer-conflicted one, so that reason
