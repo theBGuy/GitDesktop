@@ -2,7 +2,7 @@ import { WarningIcon } from "@phosphor-icons/react";
 import { useId } from "react";
 import { cn } from "@/lib/utils";
 
-/** The commit summary's character budget (the guide's "summary budget"). */
+/** The commit summary's character budget (the guide's "72-character budget indicator"). */
 export const SUMMARY_BUDGET = 72;
 
 /**
