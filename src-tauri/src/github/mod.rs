@@ -18,6 +18,7 @@ pub mod project_items;
 pub mod project_status_updates;
 pub mod project_views;
 pub mod release;
+pub(crate) mod repo_meta;
 pub mod repo_settings;
 pub mod rulesets;
 pub mod runner;

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use serde::Serialize;
 
 use crate::error::AppResult;
+use crate::github::repo_meta::repo_object;
 use crate::github::runner::{run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 /// Community-health profile + social counts for the Insights tab. Read-only and
@@ -65,12 +66,7 @@ pub async fn gh_community_insights(repo_path: String) -> AppResult<CommunityInsi
     }
 
     // Repo object: social counts.
-    let repo = run_gh_raw(
-        Some(&repo_path),
-        &["api", &format!("repos/{slug}")],
-        GH_TIMEOUT,
-    )
-    .await?;
+    let repo = repo_object(&repo_path, &slug, GH_TIMEOUT).await?;
     if repo.code == 0 {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&repo.stdout_lossy()) {
             out.forks_count = v["forks_count"].as_u64().unwrap_or(0) as u32;

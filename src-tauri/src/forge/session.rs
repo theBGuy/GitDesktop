@@ -10,22 +10,27 @@
 //! every line it forwards.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::agent::AuthStatus;
 use crate::error::{AppError, AppResult};
 use crate::forge::glab::{run_glab_raw, GLAB_TIMEOUT};
 use crate::forge::model::Provider;
-use crate::github::runner::{run_gh_raw, GH_TIMEOUT};
+use crate::github::runner::{
+    gh_auth_epoch_counter, gh_output_ok, response_header_value, run_gh_raw, split_response,
+    GhOutput, GH_TIMEOUT,
+};
 
 /// How long to wait before the confirming re-probe of a transient `error`/failure
 /// (anti-flap). A single failing probe never yields Broken without this second look.
@@ -189,7 +194,7 @@ pub async fn forge_accounts_health() -> AppResult<Vec<SessionHealth>> {
 // ── GitHub ──────────────────────────────────────────────────────────────────────
 
 /// One host's `hosts` entry from `gh auth status --json hosts`.
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct GhJsonAccount {
     #[serde(default)]
     state: String,
@@ -206,6 +211,7 @@ struct GhJsonAccount {
 /// 0 even on auth issues (per gh's own help), so a non-zero exit is NOT an auth signal:
 /// it's either an old gh that doesn't know `--json` (→ text fallback) or a fatal/
 /// environmental gh error (→ inconclusive, don't misclassify as an auth state).
+#[derive(Clone)]
 enum GhJsonProbe {
     /// Exit 0 with a readable body: the hosts map (`{"hosts":{}}` = logged out everywhere).
     Parsed(HashMap<String, Vec<GhJsonAccount>>),
@@ -229,15 +235,122 @@ fn classify_gh_json_nonzero(_code: i32, stderr: &str) -> GhJsonProbe {
     }
 }
 
-/// Run `gh auth status --json hosts [--hostname <host>]` and classify the outcome into a
-/// `GhJsonProbe`. `Err(GhNotFound)` when gh isn't installed (caller → CliMissing).
-async fn gh_status_json(hostname: Option<&str>) -> AppResult<GhJsonProbe> {
-    let mut args: Vec<&str> = vec!["auth", "status", "--json", "hosts"];
-    if let Some(h) = hostname {
-        args.push("--hostname");
-        args.push(h);
+#[derive(Default)]
+struct ProbeCell {
+    generation: AtomicU64,
+    slot: AsyncMutex<ProbeSlot>,
+}
+
+#[derive(Default)]
+struct ProbeSlot {
+    last: Option<FlightReplay>,
+}
+
+struct FlightReplay {
+    outcome: FlightOutcome,
+    flight_epoch: u64,
+    gen: u64,
+}
+
+#[derive(Clone)]
+enum FlightOutcome {
+    Probe(GhJsonProbe),
+    ErrTimeout(u64),
+    ErrGhNotFound,
+    ErrIo(std::io::ErrorKind, String),
+}
+
+impl FlightOutcome {
+    fn from_result(result: &AppResult<GhJsonProbe>) -> Option<Self> {
+        match result {
+            Ok(probe) => Some(Self::Probe(probe.clone())),
+            Err(AppError::Timeout(seconds)) => Some(Self::ErrTimeout(*seconds)),
+            Err(AppError::GhNotFound) => Some(Self::ErrGhNotFound),
+            Err(AppError::Io(error)) => Some(Self::ErrIo(error.kind(), error.to_string())),
+            Err(_) => None,
+        }
     }
-    let out = run_gh_raw(None, &args, GH_TIMEOUT).await?;
+
+    fn replay(&self) -> AppResult<GhJsonProbe> {
+        match self {
+            Self::Probe(probe) => Ok(probe.clone()),
+            Self::ErrTimeout(seconds) => Err(AppError::Timeout(*seconds)),
+            Self::ErrGhNotFound => Err(AppError::GhNotFound),
+            Self::ErrIo(kind, message) => {
+                Err(AppError::Io(std::io::Error::new(*kind, message.clone())))
+            }
+        }
+    }
+}
+
+/// The leader holds the slot lock across the spawn. Only completion writes `last`
+/// and `generation`, so a dropped leader publishes nothing; replay requires the
+/// flight's epoch to equal the caller's arrival epoch.
+async fn gh_status_json_with(
+    cell: &ProbeCell,
+    epoch: &AtomicU64,
+    resolve: impl Future<Output = AppResult<GhJsonProbe>>,
+) -> AppResult<GhJsonProbe> {
+    let arrival_epoch = epoch.load(Ordering::SeqCst);
+    let arrival_generation = cell.generation.load(Ordering::SeqCst);
+    let mut slot = cell.slot.lock().await;
+    let generation = cell.generation.load(Ordering::SeqCst);
+    if generation > arrival_generation {
+        if let Some(last) = &slot.last {
+            if last.flight_epoch == arrival_epoch && last.gen == generation {
+                return last.outcome.replay();
+            }
+        }
+    }
+    let result = resolve.await;
+    slot.last = FlightOutcome::from_result(&result).map(|outcome| FlightReplay {
+        outcome,
+        flight_epoch: arrival_epoch,
+        gen: generation + 1,
+    });
+    cell.generation.fetch_add(1, Ordering::SeqCst);
+    result
+}
+
+type ProbeKey = (Option<String>, bool);
+
+fn gh_probe_cell(hostname: Option<&str>, active: bool) -> Arc<ProbeCell> {
+    static CELLS: LazyLock<Mutex<HashMap<ProbeKey, Arc<ProbeCell>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    CELLS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .entry((hostname.map(str::to_string), active))
+        .or_default()
+        .clone()
+}
+
+fn gh_status_args(hostname: Option<&str>, active: bool) -> Vec<&str> {
+    let mut args = vec!["auth", "status", "--json", "hosts"];
+    if let Some(host) = hostname {
+        args.extend(["--hostname", host]);
+    }
+    if active {
+        args.push("--active");
+    }
+    args
+}
+
+/// Only queued callers share an outcome. A flight straddling an off-app `gh auth
+/// switch` replays its pre-switch answer; the next focus refetch corrects it.
+async fn gh_status_json(hostname: Option<&str>, active: bool) -> AppResult<GhJsonProbe> {
+    gh_status_json_with(
+        &gh_probe_cell(hostname, active),
+        gh_auth_epoch_counter(),
+        gh_status_json_fresh(hostname, active),
+    )
+    .await
+}
+
+/// Anti-flap retries must reach gh even while another status flight is running.
+/// `Err(GhNotFound)` when gh isn't installed (caller -> CliMissing).
+async fn gh_status_json_fresh(hostname: Option<&str>, active: bool) -> AppResult<GhJsonProbe> {
+    let out = run_gh_raw(None, &gh_status_args(hostname, active), GH_TIMEOUT).await?;
     if out.code != 0 {
         return Ok(classify_gh_json_nonzero(out.code, &out.stderr));
     }
@@ -398,7 +511,7 @@ fn classify_gh_host(accounts: &[GhJsonAccount]) -> SessionHealth {
 /// Per-repo GitHub health for `host`, with the anti-flap re-probe on `error`, plus the
 /// token expiry (Healthy) or rate-limit reset time (RateLimited).
 async fn github_health(host: &str) -> SessionHealth {
-    let json = match gh_status_json(Some(host)).await {
+    let json = match gh_status_json(Some(host), true).await {
         Ok(GhJsonProbe::Parsed(map)) => map,
         Ok(GhJsonProbe::UnknownFlag) => return github_health_text_fallback(Some(host)).await,
         Ok(GhJsonProbe::Inconclusive(detail)) => {
@@ -421,7 +534,7 @@ async fn github_health(host: &str) -> SessionHealth {
     let mut disproved = false;
     if needs_reprobe(health.state) {
         tokio::time::sleep(REPROBE_DELAY).await;
-        if let Ok(GhJsonProbe::Parsed(map2)) = gh_status_json(Some(host)).await {
+        if let Ok(GhJsonProbe::Parsed(map2)) = gh_status_json_fresh(Some(host), true).await {
             let accounts2 = map2.get(host).map(Vec::as_slice).unwrap_or(&[]);
             let mut health2 = classify_gh_host(accounts2);
             health2.host = host.to_string();
@@ -489,7 +602,7 @@ async fn disprove_broken_via_probe(health: SessionHealth, host: &str) -> Session
 /// without `--json`, gh missing, an inconclusive probe, or no host signed in);
 /// callers fall back rather than read it as a verdict.
 pub(crate) async fn github_hosts_health_for_poller() -> HashMap<String, SessionHealth> {
-    match gh_status_json(None).await {
+    match gh_status_json(None, true).await {
         Ok(GhJsonProbe::Parsed(map)) => gh_hosts_health(&map),
         _ => HashMap::new(),
     }
@@ -519,7 +632,7 @@ pub(crate) struct GhHostAuth {
 /// the caller then falls back to the host-less exit-code probe. No anti-flap re-probe:
 /// this backs a hot UI probe, and a transient Broken heals on its next refetch.
 pub(crate) async fn github_auth_on_host(host: &str) -> AppResult<Option<GhHostAuth>> {
-    gh_host_auth_from_result(gh_status_json(Some(host)).await, host)
+    gh_host_auth_from_result(gh_status_json(Some(host), true).await, host)
 }
 
 /// A probe that failed to run at all (timeout, spawn error) is an error, never a
@@ -574,7 +687,7 @@ fn unreachable_forge_error(host: &str, detail: Option<String>) -> AppError {
 /// outage reads `Unreachable`, never signed out; `Unknown` when gh is missing or fails
 /// for a reason that names no outage.
 pub(crate) async fn gh_cli_auth_status() -> AuthStatus {
-    match gh_cli_auth_from_probe(gh_status_json(None).await) {
+    match gh_cli_auth_from_probe(gh_status_json(None, false).await) {
         Some(status) => status,
         None => session_auth_status(github_health_text_fallback(None).await.state),
     }
@@ -825,7 +938,7 @@ fn classify_gh_text_report(code: i32, report: &str, host_str: &str) -> SessionHe
 /// Account-scoped GitHub health — one entry PER account across all hosts. Uses ONE
 /// shared re-probe (not per account) when any account reads Broken.
 async fn github_accounts_health() -> Vec<SessionHealth> {
-    let map = match gh_status_json(None).await {
+    let map = match gh_status_json(None, false).await {
         Ok(GhJsonProbe::Parsed(m)) => m,
         Ok(GhJsonProbe::UnknownFlag) => {
             // Old gh: a single degraded entry (text fallback can't enumerate per-host
@@ -857,7 +970,7 @@ async fn github_accounts_health() -> Vec<SessionHealth> {
     // ONE shared re-probe when anything looked transiently broken.
     let map = if gh_accounts_need_reprobe(&map) {
         tokio::time::sleep(REPROBE_DELAY).await;
-        match gh_status_json(None).await {
+        match gh_status_json_fresh(None, false).await {
             Ok(GhJsonProbe::Parsed(m2)) => m2,
             // A failed re-probe leaves the original reading (the error stands).
             _ => map,
@@ -959,26 +1072,142 @@ fn gh_accounts_need_reprobe(map: &HashMap<String, Vec<GhJsonAccount>>) -> bool {
     })
 }
 
+const GH_EXPIRY_TTL: Duration = Duration::from_secs(30 * 60);
+type ExpiryKey = (String, Option<String>);
+
+struct CachedExpiry {
+    raw: Option<String>,
+    epoch: u64,
+    fetched: Instant,
+}
+
+#[derive(Default)]
+struct ExpiryState {
+    entries: HashMap<ExpiryKey, CachedExpiry>,
+}
+
+#[derive(Default)]
+struct ExpiryMemo {
+    inner: Mutex<ExpiryState>,
+}
+
+// Hosts times logins is a tiny population; epoch refreshes replace entries in place.
+fn expiry_memo() -> &'static ExpiryMemo {
+    static MEMO: LazyLock<ExpiryMemo> = LazyLock::new(ExpiryMemo::default);
+    &MEMO
+}
+
+fn cacheable_expiry_answer(answer: &AppResult<Option<String>>, today: i64) -> bool {
+    match answer {
+        Ok(None) => true,
+        Ok(Some(raw)) => days_left_from_date_prefix(raw, today).is_some_and(|days| days > 14),
+        Err(_) => false,
+    }
+}
+
+fn expiry_get(
+    state: &ExpiryState,
+    key: &ExpiryKey,
+    epoch: u64,
+    ttl: Duration,
+    clock: (Instant, i64),
+) -> Option<Option<String>> {
+    let entry = state.entries.get(key)?;
+    (entry.epoch == epoch
+        && clock.0.duration_since(entry.fetched) < ttl
+        && cacheable_expiry_answer(&Ok(entry.raw.clone()), clock.1))
+    .then(|| entry.raw.clone())
+}
+
+fn expiry_put(
+    state: &mut ExpiryState,
+    key: ExpiryKey,
+    raw: Option<String>,
+    pre_fetch_epoch: u64,
+    epoch: &AtomicU64,
+    fetched: Instant,
+) {
+    if epoch.load(Ordering::SeqCst) != pre_fetch_epoch {
+        return;
+    }
+    state.entries.insert(
+        key,
+        CachedExpiry {
+            raw,
+            epoch: pre_fetch_epoch,
+            fetched,
+        },
+    );
+}
+
+async fn gh_expiry_with(
+    memo: &ExpiryMemo,
+    key: ExpiryKey,
+    epoch: &AtomicU64,
+    ttl: Duration,
+    clock: (Instant, i64),
+    fetch: impl Future<Output = AppResult<GhOutput>>,
+) -> AppResult<Option<String>> {
+    let pre_fetch_epoch = epoch.load(Ordering::SeqCst);
+    {
+        let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(raw) = expiry_get(&state, &key, pre_fetch_epoch, ttl, clock) {
+            return Ok(raw);
+        }
+    }
+    let out = gh_output_ok(fetch.await?)?;
+    let response = out.stdout_lossy();
+    let (_, body) = split_response(&response);
+    let login_matches = key.1.as_deref().is_some_and(|login| {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|user| {
+                user.get("login").and_then(serde_json::Value::as_str) == Some(login)
+            })
+    });
+    let answer = Ok(expiration_header_value(&response));
+    if login_matches && cacheable_expiry_answer(&answer, clock.1) {
+        if let Ok(raw) = &answer {
+            expiry_put(
+                &mut memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
+                key,
+                raw.clone(),
+                pre_fetch_epoch,
+                epoch,
+                clock.0,
+            );
+        }
+    }
+    answer
+}
+
+fn apply_expiry_answer(health: &mut SessionHealth, raw: Option<String>, today: i64) {
+    if let Some(raw) = raw {
+        health.expires_at = Some(raw.clone());
+        health.method = Some("pat".to_string());
+        health.days_left = days_left_from_date_prefix(&raw, today);
+    } else {
+        health.method = Some("oauth".to_string());
+    }
+}
+
 /// Fill `method`/`expires_at`/`days_left` for a Healthy gh session by scanning the
 /// `GitHub-Authentication-Token-Expiration` response header of `gh api -i user`. The
 /// header appears only for PAT-backed sessions (absent for OAuth — the common case),
 /// and is known-buggy for fine-grained PATs, so absence/garbage is tolerated and
 /// never flips the already-decided Healthy state.
 async fn apply_gh_expiry(health: &mut SessionHealth, host: &str) {
-    let Ok(out) = run_gh_raw(None, &gh_api_host_args("user", host), GH_TIMEOUT).await else {
-        return; // network/timeout: don't touch the decided health.
-    };
-    if out.code != 0 {
-        return; // don't flip state on a failed expiry probe.
-    }
-    let body = out.stdout_lossy();
-    if let Some(raw) = expiration_header_value(&body) {
-        health.expires_at = Some(raw.clone());
-        health.method = Some("pat".to_string());
-        health.days_left = days_left_from_date_prefix(&raw, today_civil_days());
-    } else {
-        // No expiration header → an OAuth token (gh's OAuth tokens never expire).
-        health.method = Some("oauth".to_string());
+    let answer = gh_expiry_with(
+        expiry_memo(),
+        (host.to_string(), health.login.clone()),
+        gh_auth_epoch_counter(),
+        GH_EXPIRY_TTL,
+        (Instant::now(), today_civil_days()),
+        run_gh_raw(None, &gh_api_host_args("user", host), GH_TIMEOUT),
+    )
+    .await;
+    if let Ok(raw) = answer {
+        apply_expiry_answer(health, raw, today_civil_days());
     }
 }
 
@@ -986,26 +1215,6 @@ async fn apply_gh_expiry(health: &mut SessionHealth, host: &str) {
 /// `gh api -i` response.
 fn expiration_header_value(body: &str) -> Option<String> {
     response_header_value(body, "github-authentication-token-expiration")
-}
-
-/// A response header's value from `gh api -i` output (headers precede the JSON body,
-/// ending at the first blank line — same idiom as `github::auth::gh_token_scopes`).
-/// The name compare is case-insensitive.
-fn response_header_value(body: &str, header: &str) -> Option<String> {
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            break; // end of headers.
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case(header) {
-                let v = value.trim();
-                if !v.is_empty() {
-                    return Some(v.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 // ── GitLab ──────────────────────────────────────────────────────────────────────
@@ -1568,6 +1777,15 @@ async fn bump_gh_epoch_after<T>(is_github: bool, run: impl std::future::Future<O
     out
 }
 
+// The frontend refetches on this event, so memos must already be invalid when it
+// arrives; the wrapper's after-return bump covers every other exit.
+fn send_reconnect_finished(is_github: bool, epoch: &AtomicU64, send: impl FnOnce()) {
+    if is_github {
+        epoch.fetch_add(1, Ordering::SeqCst);
+    }
+    send();
+}
+
 /// Cancel an in-flight reconnect by its frontend-generated `session_id`. Fires the
 /// registered `Notify`; an id that isn't registered yet gets a tombstone the later
 /// registration adopts (see `cancel_reconnect`).
@@ -1760,10 +1978,12 @@ async fn run_reconnect_child(
             return Ok(());
         }
         let message = if cancelled { "cancelled" } else { "timed out" };
-        let _ = on_event.send(ReconnectEvent::Finished {
-            ok: false,
-            login: None,
-            message: Some(message.to_string()),
+        send_reconnect_finished(is_github, gh_auth_epoch_counter(), || {
+            let _ = on_event.send(ReconnectEvent::Finished {
+                ok: false,
+                login: None,
+                message: Some(message.to_string()),
+            });
         });
         return Ok(());
     }
@@ -1771,10 +1991,12 @@ async fn run_reconnect_child(
     let ok = matches!(status, Some(Ok(s)) if s.success());
     if ok {
         let login = parse_reconnect_login(&collected);
-        let _ = on_event.send(ReconnectEvent::Finished {
-            ok: true,
-            login,
-            message: None,
+        send_reconnect_finished(is_github, gh_auth_epoch_counter(), || {
+            let _ = on_event.send(ReconnectEvent::Finished {
+                ok: true,
+                login,
+                message: None,
+            });
         });
     } else {
         // The last non-empty (already-sanitized) line as the failure message.
@@ -1783,10 +2005,12 @@ async fn run_reconnect_child(
             .rev()
             .find(|l| !l.trim().is_empty())
             .cloned();
-        let _ = on_event.send(ReconnectEvent::Finished {
-            ok: false,
-            login: None,
-            message,
+        send_reconnect_finished(is_github, gh_auth_epoch_counter(), || {
+            let _ = on_event.send(ReconnectEvent::Finished {
+                ok: false,
+                login: None,
+                message,
+            });
         });
     }
     Ok(())
@@ -2355,6 +2579,457 @@ fn today_civil_days() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe_signature(result: &AppResult<GhJsonProbe>) -> String {
+        match result {
+            Ok(GhJsonProbe::Parsed(map)) => serde_json::to_string(
+                &map.iter()
+                    .map(|(host, accounts)| {
+                        (
+                            host,
+                            accounts
+                                .iter()
+                                .map(|a| (&a.state, a.active, &a.login, &a.error))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .unwrap(),
+            Ok(GhJsonProbe::UnknownFlag) => "unknown flag".into(),
+            Ok(GhJsonProbe::Inconclusive(detail)) => format!("inconclusive: {detail:?}"),
+            Err(AppError::Io(error)) => format!(
+                "{:?}: {}",
+                error.kind(),
+                AppError::Io(std::io::Error::new(error.kind(), error.to_string()))
+            ),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_flight_shares_one_timeout_with_four_waiters() {
+        use std::sync::atomic::AtomicUsize;
+        let cell = ProbeCell::default();
+        let epoch = AtomicU64::new(7);
+        let spawns = AtomicUsize::new(0);
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let leader = gh_status_json_with(&cell, &epoch, async {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            gate.await.unwrap();
+            Err(AppError::Timeout(30))
+        });
+        let waiter = || {
+            gh_status_json_with(&cell, &epoch, async {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                Err(AppError::Timeout(30))
+            })
+        };
+        let (a, b, c, d, ()) = tokio::join!(biased; leader, waiter(), waiter(), waiter(), async {
+            release.send(()).unwrap();
+        });
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        for result in [a, b, c, d] {
+            assert!(matches!(result, Err(AppError::Timeout(30))));
+            assert_eq!(probe_signature(&result), AppError::Timeout(30).to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn status_flight_epoch_gate_uses_each_waiters_arrival_epoch() {
+        use std::sync::atomic::AtomicUsize;
+        for bump_before_arrival in [true, false] {
+            let cell = ProbeCell::default();
+            let epoch = AtomicU64::new(7);
+            let spawns = AtomicUsize::new(0);
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let leader = gh_status_json_with(&cell, &epoch, async {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                gate.await.unwrap();
+                Ok(GhJsonProbe::UnknownFlag)
+            });
+            let waiter = async {
+                if bump_before_arrival {
+                    epoch.fetch_add(1, Ordering::SeqCst);
+                }
+                gh_status_json_with(&cell, &epoch, async {
+                    spawns.fetch_add(1, Ordering::SeqCst);
+                    Ok(GhJsonProbe::Inconclusive(None))
+                })
+                .await
+            };
+            let (_, result, ()) = tokio::join!(biased; leader, waiter, async {
+                if !bump_before_arrival {
+                    epoch.fetch_add(1, Ordering::SeqCst);
+                }
+                release.send(()).unwrap();
+            });
+            assert_eq!(
+                spawns.load(Ordering::SeqCst),
+                if bump_before_arrival { 2 } else { 1 }
+            );
+            assert_eq!(
+                matches!(result, Ok(GhJsonProbe::UnknownFlag)),
+                !bump_before_arrival
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_flight_dropped_leader_publishes_nothing() {
+        use std::sync::atomic::AtomicUsize;
+        let cell = ProbeCell::default();
+        let epoch = AtomicU64::new(7);
+        let spawns = AtomicUsize::new(0);
+        let mut leader = Box::pin(gh_status_json_with(&cell, &epoch, async {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }));
+        let mut waiter = Box::pin(gh_status_json_with(&cell, &epoch, async {
+            spawns.fetch_add(1, Ordering::SeqCst);
+            Ok(GhJsonProbe::Inconclusive(Some(
+                "waiter's own outcome".into(),
+            )))
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(leader.as_mut().poll(cx).is_pending());
+            assert!(waiter.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert_eq!(spawns.load(Ordering::SeqCst), 1);
+        drop(leader);
+        let result = waiter.await;
+        assert_eq!(spawns.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            probe_signature(&result),
+            "inconclusive: Some(\"waiter's own outcome\")"
+        );
+        assert_eq!(cell.generation.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn status_flight_replays_all_outcomes_but_never_later_calls() {
+        use std::sync::atomic::AtomicUsize;
+        let success = r#"{"state":"success","active":true,"host":"github.com","login":"viewer","scopes":"repo","tokenSource":"keyring","gitProtocol":"https"}"#;
+        let mut outcomes = Vec::new();
+        for accounts in [
+            success.to_string(),
+            format!(r#"{success},{{"state":"timeout","active":false,"login":"other"}}"#),
+            r#"{"state":"error","active":true,"error":"dial tcp: network is unreachable"}"#.into(),
+            r#"{"state":"error","active":true,"error":"invalid token"}"#.into(),
+        ] {
+            outcomes.push(Ok(classify_gh_json_ok(&format!(
+                r#"{{"hosts":{{"github.com":[{accounts}]}}}}"#
+            ))));
+        }
+        outcomes.extend([
+            Ok(classify_gh_json_ok(r#"{"hosts":{}}"#)),
+            Ok(GhJsonProbe::UnknownFlag),
+            Ok(GhJsonProbe::Inconclusive(Some("offline".into()))),
+            Err(AppError::Timeout(30)),
+            Err(AppError::GhNotFound),
+            Err(AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "probe denied",
+            ))),
+        ]);
+        for outcome in outcomes {
+            let expected = probe_signature(&outcome);
+            let cell = ProbeCell::default();
+            let epoch = AtomicU64::new(7);
+            let spawns = AtomicUsize::new(0);
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let leader = gh_status_json_with(&cell, &epoch, async {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                gate.await.unwrap();
+                outcome
+            });
+            let waiter = gh_status_json_with(&cell, &epoch, async {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                Ok(GhJsonProbe::Inconclusive(None))
+            });
+            let (first, replay, ()) =
+                tokio::join!(biased; leader, waiter, async { release.send(()).unwrap(); });
+            assert_eq!(spawns.load(Ordering::SeqCst), 1, "{expected}");
+            assert_eq!(probe_signature(&first), expected);
+            assert_eq!(probe_signature(&replay), expected);
+            let later = gh_status_json_with(&cell, &epoch, async {
+                spawns.fetch_add(1, Ordering::SeqCst);
+                Ok(GhJsonProbe::Inconclusive(Some("new probe".into())))
+            })
+            .await;
+            assert_eq!(spawns.load(Ordering::SeqCst), 2, "{expected}");
+            assert_eq!(probe_signature(&later), "inconclusive: Some(\"new probe\")");
+        }
+    }
+
+    #[test]
+    fn status_active_argv_and_fresh_reprobes_are_explicit() {
+        for host in [None, Some("github.example")] {
+            for active in [false, true] {
+                let mut expected = vec!["auth", "status", "--json", "hosts"];
+                if let Some(host) = host {
+                    expected.extend(["--hostname", host]);
+                }
+                if active {
+                    expected.push("--active");
+                }
+                assert_eq!(gh_status_args(host, active), expected);
+            }
+        }
+        let source = include_str!("session.rs");
+        for (name, needle, retry) in [
+            (
+                "github_health",
+                "gh_status_json(Some(host), true)",
+                Some("gh_status_json_fresh(Some(host), true)"),
+            ),
+            (
+                "github_auth_on_host",
+                "gh_status_json(Some(host), true)",
+                None,
+            ),
+            (
+                "github_hosts_health_for_poller",
+                "gh_status_json(None, true)",
+                None,
+            ),
+            ("gh_cli_auth_status", "gh_status_json(None, false)", None),
+            (
+                "github_accounts_health",
+                "gh_status_json(None, false)",
+                Some("gh_status_json_fresh(None, false)"),
+            ),
+        ] {
+            let body = crate::github::repo_meta::tests::wiring_body(source, name);
+            assert!(body.contains(needle), "{name}");
+            if let Some(retry) = retry {
+                assert!(body.contains(retry), "{name}: retry must reach gh");
+            }
+        }
+    }
+
+    fn expiry_output(raw: Option<&str>, code: i32) -> GhOutput {
+        let header = raw
+            .map(|raw| format!("GitHub-Authentication-Token-Expiration: {raw}\r\n"))
+            .unwrap_or_default();
+        GhOutput {
+            stdout: format!("HTTP/2.0 200 OK\r\n{header}\r\n{{\"login\":\"viewer\"}}").into_bytes(),
+            stderr: if code == 0 {
+                String::new()
+            } else {
+                "gh: Not Found (HTTP 404)".into()
+            },
+            code,
+        }
+    }
+
+    #[test]
+    fn expiry_cacheable_answers_keep_the_remedy_window_live() {
+        let today = days_from_civil(2026, 1, 1);
+        for (answer, expected) in [
+            (Ok(None), true),
+            (Ok(Some("2026-01-16 12:00:00 +0000".into())), true),
+            (Ok(Some("2026-01-15".into())), false),
+            (Ok(Some("2026-01-01".into())), false),
+            (Ok(Some("2025-12-31".into())), false),
+            (Ok(Some("garbage".into())), false),
+            (Err(AppError::Timeout(1)), false),
+            (gh_output_ok(expiry_output(None, 1)).map(|_| None), false),
+        ] {
+            assert_eq!(
+                cacheable_expiry_answer(&answer, today),
+                expected,
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expiry_memo_answers_but_does_not_store_an_unmatched_login() {
+        let memo = ExpiryMemo::default();
+        let epoch = AtomicU64::new(7);
+        let clock = (Instant::now(), days_from_civil(2026, 1, 1));
+        let raw = "2026-02-01 12:00:00 +0000";
+        for (login, body) in [
+            (Some("viewer"), r#"{"login":"other"}"#),
+            (Some("viewer"), "{}"),
+            (None, "{}"),
+            (Some("viewer"), r#"{"login":null}"#),
+            (Some("viewer"), "not JSON"),
+        ] {
+            let mut out = expiry_output(Some(raw), 0);
+            let mut stdout = out.stdout_lossy();
+            stdout.truncate(stdout.find("\r\n\r\n").unwrap() + 4);
+            stdout.push_str(body);
+            out.stdout = stdout.into_bytes();
+            let answer = gh_expiry_with(
+                &memo,
+                ("github.com".into(), login.map(str::to_string)),
+                &epoch,
+                GH_EXPIRY_TTL,
+                clock,
+                async { Ok(out) },
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer.as_deref(), Some(raw));
+            assert!(
+                memo.inner
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .entries
+                    .is_empty(),
+                "unmatched response login must not be stored: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn expiry_memo_keys_host_login_epoch_and_recomputes_days() {
+        let memo = ExpiryMemo::default();
+        let epoch = AtomicU64::new(7);
+        let key = ("github.com".into(), Some("viewer".into()));
+        let clock = (Instant::now(), days_from_civil(2026, 1, 1));
+        let raw = "2026-02-01 12:00:00 +0000";
+        gh_expiry_with(&memo, key.clone(), &epoch, GH_EXPIRY_TTL, clock, async {
+            Ok(expiry_output(Some(raw), 0))
+        })
+        .await
+        .unwrap();
+        let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let cached = expiry_get(&state, &key, 7, GH_EXPIRY_TTL, clock).unwrap();
+        assert_eq!(cached.as_deref(), Some(raw));
+        for other in [
+            ("github.example".into(), Some("viewer".into())),
+            ("github.com".into(), Some("other".into())),
+        ] {
+            assert!(expiry_get(&state, &other, 7, GH_EXPIRY_TTL, clock).is_none());
+        }
+        assert!(expiry_get(&state, &key, 8, GH_EXPIRY_TTL, clock).is_none());
+        assert!(expiry_get(&state, &key, 7, Duration::ZERO, clock).is_none());
+        for offset in [0, 1] {
+            let mut health = SessionHealth::new("github", "github.com", SessionState::Healthy);
+            apply_expiry_answer(&mut health, cached.clone(), clock.1 + offset);
+            assert_eq!(health.days_left, Some(31 - offset));
+        }
+    }
+
+    #[tokio::test]
+    async fn expiry_memo_caches_oauth_but_not_failures_or_cross_epoch_fills() {
+        let memo = ExpiryMemo::default();
+        let epoch = AtomicU64::new(7);
+        let key = ("github.com".into(), Some("viewer".into()));
+        let clock = (Instant::now(), days_from_civil(2026, 1, 1));
+        for result in [
+            Err(AppError::Timeout(1)),
+            Ok(expiry_output(None, 1)),
+            Ok(expiry_output(Some("2026-01-15"), 0)),
+        ] {
+            let _ = gh_expiry_with(&memo, key.clone(), &epoch, GH_EXPIRY_TTL, clock, async {
+                result
+            })
+            .await;
+            assert!(memo
+                .inner
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .is_empty());
+        }
+        gh_expiry_with(&memo, key.clone(), &epoch, GH_EXPIRY_TTL, clock, async {
+            epoch.fetch_add(1, Ordering::SeqCst);
+            Ok(expiry_output(None, 0))
+        })
+        .await
+        .unwrap();
+        assert!(memo
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .is_empty());
+        gh_expiry_with(&memo, key.clone(), &epoch, GH_EXPIRY_TTL, clock, async {
+            Ok(expiry_output(None, 0))
+        })
+        .await
+        .unwrap();
+        let cached = gh_expiry_with(&memo, key, &epoch, GH_EXPIRY_TTL, clock, async {
+            panic!("OAuth answer should hit")
+        })
+        .await
+        .unwrap();
+        assert_eq!(cached, None);
+    }
+
+    #[tokio::test]
+    async fn expiry_memo_rechecks_when_a_cached_pat_enters_the_remedy_window() {
+        let memo = ExpiryMemo::default();
+        let epoch = AtomicU64::new(7);
+        let key = ("github.com".into(), Some("viewer".into()));
+        let clock = (Instant::now(), days_from_civil(2026, 1, 1));
+        gh_expiry_with(&memo, key.clone(), &epoch, GH_EXPIRY_TTL, clock, async {
+            Ok(expiry_output(Some("2026-01-16"), 0))
+        })
+        .await
+        .unwrap();
+        assert!(expiry_get(
+            &memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
+            &key,
+            7,
+            GH_EXPIRY_TTL,
+            clock
+        )
+        .is_some());
+        let refreshed = gh_expiry_with(
+            &memo,
+            key,
+            &epoch,
+            GH_EXPIRY_TTL,
+            (clock.0, clock.1 + 1),
+            async { Ok(expiry_output(Some("2026-03-01"), 0)) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(refreshed.as_deref(), Some("2026-03-01"));
+    }
+
+    #[test]
+    fn reconnect_finished_bumps_before_send_only_for_github() {
+        let epoch = AtomicU64::new(7);
+        let before = epoch.load(Ordering::SeqCst);
+        send_reconnect_finished(true, &epoch, || {
+            assert!(epoch.load(Ordering::SeqCst) > before);
+        });
+        let before = epoch.load(Ordering::SeqCst);
+        send_reconnect_finished(false, &epoch, || {
+            assert_eq!(epoch.load(Ordering::SeqCst), before)
+        });
+        assert_eq!(epoch.load(Ordering::SeqCst), before);
+    }
+
+    #[test]
+    fn reconnect_finished_constructions_are_inside_the_presend_helper() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("session.rs"),
+            "run_reconnect_child",
+        );
+        assert_eq!(body.matches("ReconnectEvent::Finished {").count(), 3);
+        assert_eq!(body.matches("send_reconnect_finished(").count(), 3);
+        for (prefix, _) in body.match_indices("ReconnectEvent::Finished {") {
+            let before = &body[..prefix];
+            let call = before
+                .rfind("send_reconnect_finished(")
+                .expect("pre-send helper");
+            let closure = &before[call..];
+            assert!(closure.contains("is_github, gh_auth_epoch_counter(), || {"));
+            assert!(
+                !closure.contains("});"),
+                "helper must still enclose the send"
+            );
+        }
+    }
 
     // ── gh JSON parse fixtures ──
     fn parse_hosts(json: &str) -> HashMap<String, Vec<GhJsonAccount>> {

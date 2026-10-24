@@ -10,6 +10,7 @@
 //! the unfiltered lists keep their `gh pr list` / `gh issue list` reads.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -21,7 +22,9 @@ use crate::forge::model::RemoteListFilter;
 use crate::github::gh_unreadable;
 use crate::github::issue::IssueInfo;
 use crate::github::pr::{PrAuthor, PrInfo, PrListLabel};
-use crate::github::runner::{gh_auth_epoch, gh_host_for_repo, run_gh, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{
+    gh_auth_epoch, gh_host_for_repo, run_gh, run_gh_on_host, GH_NETWORK_TIMEOUT,
+};
 
 /// GraphQL caps a `search(first:)` page at 100.
 const SEARCH_PAGE_MAX: u32 = 100;
@@ -750,62 +753,129 @@ struct CachedViewer {
     auth_epoch: u64,
 }
 
-/// Keyed by the host the repo's gh calls pin (`None` = gh's default host).
-type ViewerLoginMemo = Mutex<HashMap<Option<String>, CachedViewer>>;
+#[derive(Default)]
+struct LoginState {
+    // The host is the GH_HOST pin. None (no repo, no readable origin host, or no
+    // stored login for it) pins nothing, so every None key reads gh's default host
+    // and is safe to share across checkouts.
+    entries: HashMap<Option<String>, CachedViewer>,
+}
 
-fn viewer_login_memo() -> &'static ViewerLoginMemo {
-    static MEMO: OnceLock<ViewerLoginMemo> = OnceLock::new();
+#[derive(Default)]
+struct LoginMemo {
+    inner: Mutex<LoginState>,
+}
+
+// Host population is tiny; epoch refreshes replace each host's entry in place.
+fn viewer_login_memo() -> &'static LoginMemo {
+    static MEMO: OnceLock<LoginMemo> = OnceLock::new();
     MEMO.get_or_init(Default::default)
 }
 
-fn viewer_login_get(host: &Option<String>, auth_epoch: u64, ttl: Duration) -> Option<String> {
-    let memo = viewer_login_memo()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
-    let entry = memo.get(host)?;
-    (entry.auth_epoch == auth_epoch && entry.fetched_at.elapsed() < ttl)
+fn viewer_login_get(
+    state: &LoginState,
+    host: &Option<String>,
+    auth_epoch: u64,
+    ttl: Duration,
+    now: Instant,
+) -> Option<String> {
+    let entry = state.entries.get(host)?;
+    (entry.auth_epoch == auth_epoch && now.duration_since(entry.fetched_at) < ttl)
         .then(|| entry.login.clone())
 }
 
-fn viewer_login_put(host: Option<String>, login: &str, auth_epoch: u64) {
-    viewer_login_memo()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(
-            host,
-            CachedViewer {
-                login: login.to_string(),
-                fetched_at: Instant::now(),
-                auth_epoch,
-            },
-        );
+fn viewer_login_put(
+    state: &mut LoginState,
+    host: Option<String>,
+    login: &str,
+    auth_epoch: u64,
+    now: Instant,
+) {
+    if login.is_empty()
+        || state
+            .entries
+            .get(&host)
+            .is_some_and(|entry| entry.auth_epoch > auth_epoch)
+    {
+        return;
+    }
+    state.entries.insert(
+        host,
+        CachedViewer {
+            login: login.to_string(),
+            fetched_at: now,
+            auth_epoch,
+        },
+    );
 }
 
-/// The signed-in login on the host this repo's gh calls target, memoized per host.
-/// The epoch is read BEFORE the fetch, so an account change landing mid-fetch stores
-/// an entry that is already stale. A failed or empty read is never cached.
-async fn viewer_login(repo_path: &str) -> AppResult<String> {
-    let host = gh_host_for_repo(repo_path).await;
-    let auth_epoch = gh_auth_epoch();
-    if let Some(login) = viewer_login_get(&host, auth_epoch, VIEWER_LOGIN_TTL) {
-        return Ok(login);
+async fn viewer_login_with(
+    memo: &LoginMemo,
+    host: Option<String>,
+    epoch: u64,
+    ttl: Duration,
+    fetch: impl Future<Output = AppResult<String>>,
+) -> AppResult<String> {
+    {
+        let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(login) = viewer_login_get(&state, &host, epoch, ttl, Instant::now()) {
+            return Ok(login);
+        }
     }
-    let viewer = run_gh(
-        Some(repo_path),
-        &["api", "user", "-q", ".login"],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy()
-    .trim()
-    .to_string();
+    let login = fetch.await?;
+    viewer_login_put(
+        &mut memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
+        host,
+        &login,
+        epoch,
+        Instant::now(),
+    );
+    Ok(login)
+}
+
+fn require_viewer_login(viewer: String) -> AppResult<String> {
     if viewer.is_empty() {
         return Err(AppError::Gh(
             "could not determine the signed-in GitHub user".into(),
         ));
     }
-    viewer_login_put(host, &viewer, auth_epoch);
     Ok(viewer)
+}
+
+/// Reads the epoch before fetching with the caller's timeout; empty and Err answers
+/// are never cached.
+pub(crate) async fn viewer_login_core(
+    repo_path: Option<&str>,
+    timeout: Duration,
+) -> AppResult<String> {
+    let host = match repo_path {
+        Some(repo) => gh_host_for_repo(repo).await,
+        None => None,
+    };
+    let epoch = gh_auth_epoch();
+    viewer_login_with(
+        viewer_login_memo(),
+        host.clone(),
+        epoch,
+        VIEWER_LOGIN_TTL,
+        async {
+            Ok(run_gh_on_host(
+                repo_path,
+                host.as_deref(),
+                &["api", "user", "-q", ".login"],
+                timeout,
+            )
+            .await?
+            .stdout_lossy()
+            .trim()
+            .to_string())
+        },
+    )
+    .await
+}
+
+async fn viewer_login(repo_path: &str) -> AppResult<String> {
+    require_viewer_login(viewer_login_core(Some(repo_path), GH_NETWORK_TIMEOUT).await?)
 }
 
 /// The viewer's review state for the PRs in `scope_query`'s result set. `scope_query`
@@ -865,44 +935,173 @@ async fn review_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        advance, map_advanced_search_unsupported, review_map_truncated, search_args, search_query,
-        target_rows, viewer_login_get, viewer_login_put, ReviewStateEntry, ReviewStatePage, Step,
-        ISSUE_SEARCH_QUERY, MERGEABILITY_SEARCH_QUERY, PR_SEARCH_QUERY, REVIEW_STATE_QUERY,
-        VIEWER_LOGIN_TTL,
+        advance, map_advanced_search_unsupported, require_viewer_login, review_map_truncated,
+        search_args, search_query, target_rows, viewer_login_get, viewer_login_put,
+        viewer_login_with, LoginMemo, ReviewStateEntry, ReviewStatePage, Step, ISSUE_SEARCH_QUERY,
+        MERGEABILITY_SEARCH_QUERY, PR_SEARCH_QUERY, REVIEW_STATE_QUERY, VIEWER_LOGIN_TTL,
     };
     use crate::error::AppError;
     use crate::forge::model::RemoteListFilter;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    /// The memo is process-wide, so this test owns its host keys. The get/put pair takes
-    /// the epoch as an argument and never reads the global counter, so other tests'
-    /// bumps can't disturb these literal epochs.
+    #[test]
+    fn a_late_viewer_fill_preserves_the_newer_epoch() {
+        let memo = LoginMemo::default();
+        let mut state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        viewer_login_put(&mut state, None, "new", 8, now);
+        viewer_login_put(&mut state, None, "old", 7, now);
+        assert_eq!(
+            viewer_login_get(&state, &None, 8, VIEWER_LOGIN_TTL, now).as_deref(),
+            Some("new")
+        );
+        assert_eq!(state.entries.len(), 1);
+    }
+
     #[test]
     fn the_viewer_memo_serves_one_host_within_its_epoch_and_ttl() {
+        let memo = LoginMemo::default();
+        let mut state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
         let host = Some("memo-a.example".to_string());
-        assert_eq!(viewer_login_get(&host, 7, VIEWER_LOGIN_TTL), None);
-        viewer_login_put(host.clone(), "octocat", 7);
         assert_eq!(
-            viewer_login_get(&host, 7, VIEWER_LOGIN_TTL).as_deref(),
-            Some("octocat")
-        );
-        // An account change through the runner moves the epoch: the login is stale.
-        assert_eq!(viewer_login_get(&host, 8, VIEWER_LOGIN_TTL), None);
-        // One made elsewhere is bounded by the TTL.
-        assert_eq!(viewer_login_get(&host, 7, Duration::ZERO), None);
-        // Another host never borrows this one's login, nor does gh's default host.
-        assert_eq!(
-            viewer_login_get(&Some("memo-b.example".into()), 7, VIEWER_LOGIN_TTL),
+            viewer_login_get(&state, &host, 7, VIEWER_LOGIN_TTL, now),
             None
         );
-        assert_eq!(viewer_login_get(&None, 7, VIEWER_LOGIN_TTL), None);
-        // A refetch under the new epoch replaces the entry in place.
-        viewer_login_put(host.clone(), "hubot", 8);
+        viewer_login_put(&mut state, host.clone(), "octocat", 7, now);
         assert_eq!(
-            viewer_login_get(&host, 8, VIEWER_LOGIN_TTL).as_deref(),
+            viewer_login_get(&state, &host, 7, VIEWER_LOGIN_TTL, now).as_deref(),
+            Some("octocat")
+        );
+        assert_eq!(
+            viewer_login_get(&state, &host, 8, VIEWER_LOGIN_TTL, now),
+            None
+        );
+        assert_eq!(
+            viewer_login_get(&state, &host, 7, Duration::ZERO, now),
+            None
+        );
+        assert_eq!(
+            viewer_login_get(
+                &state,
+                &Some("memo-b.example".into()),
+                7,
+                VIEWER_LOGIN_TTL,
+                now
+            ),
+            None
+        );
+        assert_eq!(
+            viewer_login_get(&state, &None, 7, VIEWER_LOGIN_TTL, now),
+            None
+        );
+        viewer_login_put(&mut state, host.clone(), "hubot", 8, now);
+        assert_eq!(
+            viewer_login_get(&state, &host, 8, VIEWER_LOGIN_TTL, now).as_deref(),
             Some("hubot")
         );
-        assert_eq!(viewer_login_get(&host, 7, VIEWER_LOGIN_TTL), None);
+        assert_eq!(
+            viewer_login_get(&state, &host, 7, VIEWER_LOGIN_TTL, now),
+            None
+        );
+        assert_eq!(state.entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn viewer_login_with_keeps_ambient_and_explicit_hosts_separate() {
+        let memo = LoginMemo::default();
+        for (host, login) in [
+            (None, "ambient"),
+            (Some("ghes.example".into()), "enterprise"),
+        ] {
+            assert_eq!(
+                viewer_login_with(&memo, host, 7, VIEWER_LOGIN_TTL, async { Ok(login.into()) })
+                    .await
+                    .unwrap(),
+                login
+            );
+        }
+        for (host, login) in [
+            (None, "ambient"),
+            (Some("ghes.example".into()), "enterprise"),
+        ] {
+            assert_eq!(
+                viewer_login_with(&memo, host, 7, VIEWER_LOGIN_TTL, async {
+                    panic!("a valid host entry must skip the fetch")
+                })
+                .await
+                .unwrap(),
+                login
+            );
+        }
+        assert_eq!(
+            viewer_login_with(&memo, None, 8, VIEWER_LOGIN_TTL, async {
+                Ok("switched".into())
+            })
+            .await
+            .unwrap(),
+            "switched"
+        );
+        let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(state.entries.len(), 2);
+        assert_eq!(state.entries.get(&None).unwrap().auth_epoch, 8);
+    }
+
+    #[tokio::test]
+    async fn viewer_login_with_keeps_empty_and_failed_fetches_uncached() {
+        let memo = LoginMemo::default();
+        assert_eq!(
+            viewer_login_with(&memo, None, 7, VIEWER_LOGIN_TTL, async {
+                Ok(String::new())
+            })
+            .await
+            .unwrap(),
+            ""
+        );
+        assert!(memo
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .is_empty());
+        assert!(matches!(
+            viewer_login_with(&memo, None, 7, VIEWER_LOGIN_TTL, async {
+                Err(AppError::Timeout(1))
+            })
+            .await,
+            Err(AppError::Timeout(1))
+        ));
+        assert!(memo
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entries
+            .is_empty());
+        assert_eq!(
+            viewer_login_with(&memo, None, 7, VIEWER_LOGIN_TTL, async {
+                Ok("octocat".into())
+            })
+            .await
+            .unwrap(),
+            "octocat"
+        );
+        assert_eq!(
+            viewer_login_with(&memo, None, 7, VIEWER_LOGIN_TTL, async {
+                panic!("a successful non-empty login must be cached")
+            })
+            .await
+            .unwrap(),
+            "octocat"
+        );
+    }
+
+    #[test]
+    fn search_viewer_login_rejects_empty_with_its_existing_error() {
+        assert!(
+            matches!(require_viewer_login(String::new()), Err(AppError::Gh(message))
+            if message == "could not determine the signed-in GitHub user")
+        );
+        assert_eq!(require_viewer_login("octocat".into()).unwrap(), "octocat");
     }
 
     fn filter_of(

@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
+use crate::github::repo_meta::repo_object_ok;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Deserialize)]
@@ -328,12 +329,7 @@ fn check_run_apps(payload: &Value) -> Vec<CheckApp> {
 #[tauri::command]
 pub async fn gh_check_run_apps(repo_path: String) -> AppResult<Vec<CheckApp>> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let out = run_gh(
-        Some(&repo_path),
-        &["api", &format!("repos/{slug}")],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
+    let out = repo_object_ok(&repo_path, &slug, GH_NETWORK_TIMEOUT).await?;
     let repo: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the repository",

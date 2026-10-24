@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use crate::error::AppResult;
-use crate::github::runner::{run_gh_raw, GH_TIMEOUT};
+use crate::github::runner::{response_header_line, run_gh_raw, GH_TIMEOUT};
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -39,28 +39,23 @@ pub async fn gh_token_scopes(host: Option<String>) -> AppResult<GhScopes> {
     if out.code != 0 {
         return Ok(GhScopes::default());
     }
-    let body = out.stdout_lossy();
-    // Response headers precede the JSON body and end at the first blank line.
-    for line in body.lines() {
-        if line.trim().is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("x-oauth-scopes") {
-                let scopes = value
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                return Ok(GhScopes {
-                    scopes,
-                    classic: true,
-                });
-            }
-        }
+    Ok(scopes_from_response(&out.stdout_lossy()))
+}
+
+fn scopes_from_response(body: &str) -> GhScopes {
+    match response_header_line(body, "x-oauth-scopes") {
+        Some(value) => GhScopes {
+            scopes: value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            classic: true,
+        },
+        // No X-OAuth-Scopes header -> a fine-grained PAT / App token (no classic scopes).
+        None => GhScopes::default(),
     }
-    // No X-OAuth-Scopes header → a fine-grained PAT / App token (no classic scopes).
-    Ok(GhScopes::default())
 }
 
 // ── "Is an account configured?" from gh's own config ──────────────────────────
@@ -355,5 +350,21 @@ ghe.example.com:
         for (label, config, expected) in cases {
             assert_eq!(gh_hosts_from_config(config), *expected, "case: {label}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_scopes_header_is_classic_and_first_match_wins() {
+        let scopes = scopes_from_response(
+            "HTTP/2.0 200 OK\r\nX-OAuth-Scopes: \r\nX-OAuth-Scopes: repo\r\n\r\n{}",
+        );
+        assert!(scopes.classic);
+        assert!(scopes.scopes.is_empty());
+        let absent = scopes_from_response("HTTP/2.0 200 OK\r\n\r\nX-OAuth-Scopes: repo");
+        assert!(!absent.classic);
     }
 }

@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
+use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
 
 #[derive(Serialize, Default)]
@@ -185,7 +186,7 @@ async fn apply_feature(repo_path: &str, slug: &str, feature: &str, enabled: bool
             let mut obj = serde_json::Map::new();
             obj.insert(feature.to_string(), json!({ "status": status }));
             let body = json!({ "security_and_analysis": Value::Object(obj) });
-            run_gh_input(
+            let result = run_gh_input(
                 Some(repo_path),
                 &[
                     "api",
@@ -198,7 +199,9 @@ async fn apply_feature(repo_path: &str, slug: &str, feature: &str, enabled: bool
                 &body.to_string(),
                 GH_NETWORK_TIMEOUT,
             )
-            .await?;
+            .await;
+            invalidate_repo_meta_after(slug, &result);
+            result?;
         }
         "dependabot_alerts" => {
             toggle_endpoint(repo_path, slug, "vulnerability-alerts", enabled).await?;

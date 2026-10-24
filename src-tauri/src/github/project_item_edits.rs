@@ -11,6 +11,7 @@ use crate::github::project_items::{
     board_item_selection, parse_board_item, parse_content, BoardItem, BoardItemContent,
     DRAFT_CONTENT_SELECTION,
 };
+use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{
     map_scope_error, run_gh_input, run_gh_input_raw, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT,
     PROJECT_READ_SCOPE,
@@ -753,9 +754,9 @@ pub async fn gh_convert_draft_item(
         &convert_mutation(),
         json!({"itemId": item_id, "repositoryId": repository_id}),
     );
-    let value = request(&repo_path, &input, "the converted draft")
-        .await
-        .map_err(item_edits_scope_error)?;
+    let result = request(&repo_path, &input, "the converted draft").await;
+    invalidate_repo_meta_after(&format!("{owner}/{name}"), &result);
+    let value = result.map_err(item_edits_scope_error)?;
     parse_converted(&value)
 }
 
