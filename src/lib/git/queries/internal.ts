@@ -158,7 +158,7 @@ export function boardWritesOutstanding(
  * its refetch settles. The honest "a write's result is still on its way to the
  * screen" signal: the app's window-focus refetch, a background refetch, a stale
  * mark and a page fetch all bypass this function, so none of them counts. (The
- * focus one holds off a lens a date-shift chase is reading — `invalidateRepoOnFocus`
+ * focus one holds off a lens a date-shift chase is reading — `refreshRepoOnFocus`
  * in projects.ts.)
  * Module-scoped with its own listeners for the reason {@link pendingBoardWrites} is:
  * no query or mutation state carries WHY a fetch started.
@@ -378,16 +378,16 @@ type RepoMutationScope =
     };
 
 /**
- * A mutation that invalidates repo queries on completion. Defaults to the whole repo
- * subtree (correct but broad); pass `opts.invalidate` to narrow it for hot mutations
- * (each key is prefix-matched). Reserve the whole-subtree default for ops that rewrite
- * history or topology (reset/merge/rebase), for push (it moves forge state: PR heads,
- * checks, runs) and for forge writes; a git-only op that changes no forge state
- * (fetch/pull/checkout/stash/discard) passes `localOnly`, and a hot history op
- * (commit) splits — narrow awaited `invalidate` plus deferred
- * `opts.invalidateAfter`. Offline, a forge write here parks until reconnect (see
- * `networkMode`); the offline policy for which of them may park lives in
- * `@/lib/offline-writes`.
+ * A mutation that invalidates repo queries on completion. Defaults to the whole
+ * repo subtree (correct but broad); pass `opts.invalidate` to narrow it for hot
+ * mutations (each key is prefix-matched). Push (it moves forge state: PR heads,
+ * checks, runs) and forge writes need the whole-subtree default. Any local git op
+ * may pass `localOnly`, and fetch, pull, checkout, stash and discard do; the other
+ * local history writes (reset, merge, rebase, revert, cherry-pick, rewrite) still
+ * take the default for now. A hot history op (commit) splits — narrow awaited
+ * `invalidate` plus deferred `opts.invalidateAfter`. Offline, a forge write here
+ * parks until reconnect (see `networkMode`); the offline policy for which of them
+ * may park lives in `@/lib/offline-writes`.
  */
 export function useRepoMutation<TArgs, TData>(
   repo: string,

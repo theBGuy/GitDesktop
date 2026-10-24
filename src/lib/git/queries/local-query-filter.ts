@@ -1,8 +1,11 @@
 /**
- * Which cached repo queries a local git operation can change. A query is LOCAL iff
- * it sets `networkMode: "always"` — every local queryFn must, ratcheted by
+ * Which cached repo queries a local git operation can change. A query is LOCAL
+ * iff it sets `networkMode: "always"` — every local queryFn must, ratcheted by
  * `scripts/networkmode-local-queries.test.mjs` — minus the networked reads that
- * set it too. The same premise `shouldResetOnAccountChange` (account-change.ts)
+ * set it too. That ratchet fails only on networked "always" reads it can
+ * recognize (named callees, the forge/gh/jira families, classified commands); any
+ * other one is listed in its NETWORKED_ALWAYS, and here too when its key is
+ * repo-rooted. The same premise `shouldResetOnAccountChange` (account-change.ts)
  * inverts; `scripts/local-query-filter.test.mjs` pins the two against each other.
  *
  * Import-free at runtime on purpose: internal.ts imports it, and the test loads it
@@ -10,8 +13,9 @@
  */
 
 /** Kind slots (key index 2) that set networkMode "always" yet hit the network: the
- *  repo-rooted entries of that ratchet's networked-"always" roster. A roster entry
- *  added there joins this set with a test row. */
+ *  repo-rooted entries of that ratchet's networked-"always" roster, which the
+ *  ratchet fills for the reads it recognizes and a human for the rest. A roster
+ *  entry added there joins this set with a test row. */
 export const NETWORKED_ALWAYS_OVERRIDES: ReadonlySet<string> = new Set([
   // A forge probe; "always" so a cold offline start settles on its can't-reach arm.
   "forge-status",

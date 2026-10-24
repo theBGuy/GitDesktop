@@ -1,5 +1,5 @@
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
-import { useLatestRun } from "@/lib/github/actions";
+import { latestRunMode, useLatestRun } from "@/lib/github/actions";
 import { useUiStore } from "@/lib/stores/ui";
 import { StatusIcon, statusLabel } from "./status";
 import {
@@ -26,12 +26,7 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   // the reserve below gates on the same two arms.
   const onRemote = useBranchOnRemote(repoPath, branch, ciReady || gh.isPending);
   const notifyEnabled = useRunNotifyEnabled(repoPath);
-  const mode =
-    notifyEnabled === undefined
-      ? undefined
-      : notifyEnabled
-        ? "notify"
-        : "latest";
+  const mode = latestRunMode(notifyEnabled);
   const latest = useLatestRun(repoPath, ciReady && onRemote, branch, mode);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const selectRun = useUiStore((s) => s.selectRun);

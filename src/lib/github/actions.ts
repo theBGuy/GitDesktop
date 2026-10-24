@@ -353,6 +353,15 @@ export function runNotifyOptions(repo: string, branch: string | null) {
  *  its own limit-1 read ("latest", while run notifications are off or muted). */
 export type LatestRunMode = "notify" | "latest";
 
+/** The badge's mode from whether run notifications deliver: undefined while that
+ *  is unresolved, so the badge waits instead of flipping modes on open. */
+export function latestRunMode(
+  notifyEnabled: boolean | undefined,
+): LatestRunMode | undefined {
+  if (notifyEnabled === undefined) return undefined;
+  return notifyEnabled ? "notify" : "latest";
+}
+
 type BadgeRunData = WorkflowRun[] | WorkflowRun | null;
 
 /** The list's newest run, or the limit-1 read's run as it is. */

@@ -1,5 +1,5 @@
 // Pins the window-focus pass (src/lib/git/queries/board-writes.ts
-// `refetchRepoQueriesOnFocus`, which projects.ts `invalidateRepoOnFocus` runs on
+// `refetchRepoQueriesOnFocus`, which projects.ts `refreshRepoOnFocus` runs on
 // every native focus) against a REAL react-query cache: it refetches only ACTIVE
 // repo queries past their own staleTime or in error, holds a chased board lens to a
 // stale mark, and invalidates nothing else, so an inactive query keeps its clock.
@@ -23,13 +23,20 @@ try {
   const rq = await import("@tanstack/react-query");
   deps = {
     ...(await import("../src/lib/git/queries/board-writes.ts")),
+    ...(await import("../src/lib/git/queries/push-writes.ts")),
     QueryClient: rq.QueryClient,
     QueryObserver: rq.QueryObserver,
   };
 } catch (e) {
   if (process.env.GD_EXPECT_DEPS) throw e;
 }
-const { QueryClient, QueryObserver, refetchRepoQueriesOnFocus } = deps ?? {};
+const {
+  QueryClient,
+  QueryObserver,
+  refetchRepoQueriesOnFocus,
+  recheckRunsAfterPush,
+  PUSH_RUN_RECHECK_MS,
+} = deps ?? {};
 
 const NEEDS_DEPS =
   "needs node_modules — an installed run with GD_EXPECT_DEPS enforces this";
@@ -385,4 +392,84 @@ test("source pin: useLatestRun keys its placeholder on the mode segment", () => 
       `${from} -> ${to}`,
     );
   }
+});
+
+// ── Push: the one delayed run-list recheck ──────────────────────────────────
+
+/** A cache seeded with every run-list read of `repo`, plus a recorder of the
+ *  run-list keys each recheck invalidates. Seeded reads have no observers, so an
+ *  invalidation only MARKS them, which is what these rows read. */
+function runListCache(t, repo) {
+  const qc = new QueryClient();
+  t.after(() => qc.clear());
+  const key = (kind, ...rest) => ["repo", repo, "actions", kind, ...rest];
+  qc.setQueryData(key("notify", "main"), [{ id: 1 }]);
+  qc.setQueryData(key("latest", "main"), { id: 1 });
+  qc.setQueryData(key("runs", ""), [{ id: 1 }]);
+  qc.setQueryData(key("runs-paged", "shallow"), {
+    pages: [{ runs: [] }],
+    pageParams: [1],
+  });
+  qc.setQueryData(key("runs-paged", "deep"), {
+    pages: [{ runs: [] }, { runs: [] }],
+    pageParams: [1, 2],
+  });
+  const marked = (kind, ...rest) =>
+    qc.getQueryCache().find({ queryKey: key(kind, ...rest), exact: true }).state
+      .isInvalidated;
+  const calls = [];
+  const invalidate = qc.invalidateQueries.bind(qc);
+  qc.invalidateQueries = (filters, options) => {
+    calls.push(filters.queryKey[3]);
+    return invalidate(filters, options);
+  };
+  return { qc, marked, calls };
+}
+
+test("a push's recheck marks every run list but a deep-paged one, 8 s later", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const c = runListCache(t, "C:/push-a");
+  recheckRunsAfterPush(c.qc, "C:/push-a");
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS - 1);
+  assert.equal(c.marked("notify", "main"), false, "fired early");
+  t.mock.timers.tick(1);
+  assert.equal(c.marked("notify", "main"), true);
+  assert.equal(c.marked("latest", "main"), true);
+  assert.equal(c.marked("runs", ""), true);
+  assert.equal(c.marked("runs-paged", "shallow"), true);
+  // NEGATIVE CONTROL: without the page predicate the deep list is marked too.
+  assert.equal(c.marked("runs-paged", "deep"), false, "a deep list replays");
+});
+
+test("two pushes within 8 s fire ONE recheck, 8 s after the second", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const c = runListCache(t, "C:/push-b");
+  recheckRunsAfterPush(c.qc, "C:/push-b");
+  t.mock.timers.tick(5_000);
+  recheckRunsAfterPush(c.qc, "C:/push-b");
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS - 1);
+  assert.deepEqual(c.calls, [], "the first push's timer still fired");
+  t.mock.timers.tick(1);
+  assert.deepEqual(c.calls, ["notify", "latest", "runs", "runs-paged"]);
+  t.mock.timers.tick(60_000);
+  assert.equal(c.calls.length, 4, "a second recheck fired");
+});
+
+test("two repos each keep their own recheck", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const a = runListCache(t, "C:/push-c");
+  const b = runListCache(t, "C:/push-d");
+  recheckRunsAfterPush(a.qc, "C:/push-c");
+  t.mock.timers.tick(3_000);
+  recheckRunsAfterPush(b.qc, "C:/push-d");
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS - 3_000);
+  assert.equal(a.marked("notify", "main"), true, "repo c's recheck was lost");
+  assert.equal(b.marked("notify", "main"), false);
+  t.mock.timers.tick(3_000);
+  assert.equal(b.marked("notify", "main"), true, "repo d's recheck was lost");
+  assert.equal(a.calls.length, 4);
+  assert.equal(b.calls.length, 4);
 });

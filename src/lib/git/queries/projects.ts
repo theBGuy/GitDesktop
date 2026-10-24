@@ -1000,7 +1000,7 @@ export function useProjectItems(
     staleTime: 60_000,
     retry: false,
     // No mount refetch (a remount, or an Activity re-show) of a lens a date-shift
-    // chase is reading, for the reason {@link invalidateRepoOnFocus} holds its
+    // chase is reading, for the reason {@link refreshRepoOnFocus} holds its
     // focus read. The focus bridge never consults `refetchOnWindowFocus`, but
     // query-core consults this on every observer mount; the chase's own settle
     // brings a lens mounted during the hold current. Named residual: a view
@@ -1017,13 +1017,13 @@ export function useProjectItems(
 }
 
 /**
- * Whether a board re-read that a WRITE asked for is still running on this repo —
- * the tail between a write settling and the board repainting with what GitHub now
- * holds. Counted at the one place a write asks for a re-read
- * ({@link invalidateProjectBoards}), not off query state: `isInvalidated` is also
- * set by the window-focus pass's stale mark on a chased lens, so a mere focus
- * would read as a write's tail. A write that settles through its own payload (a reposition, a
- * restore) asks for no re-read and so has no tail.
+ * Whether a board re-read that a WRITE asked for is still running on this
+ * repo — the tail between a write settling and the board repainting with what
+ * GitHub now holds. Counted at the one place a write asks for a re-read
+ * ({@link invalidateProjectBoards}), not off query state: `isInvalidated` is
+ * also set by the window-focus pass's stale mark on a chased lens, so a mere
+ * focus would read as a write's tail. A write that settles through its own
+ * payload (a reposition, a restore) asks for no re-read and so has no tail.
  */
 export function useBoardRereading(repo: string): boolean {
   return useSyncExternalStore(
@@ -2106,7 +2106,7 @@ const shiftChasedLenses = new Map<string, number>();
  * on their board, which {@link holdBoardsForVerdict} names as a read it can't hold
  * off.
  */
-export function invalidateRepoOnFocus(queryClient: QueryClient): void {
+export function refreshRepoOnFocus(queryClient: QueryClient): void {
   refetchRepoQueriesOnFocus(queryClient, shiftChasedLenses);
 }
 
@@ -2202,7 +2202,7 @@ function shiftUpdates(
  * CALL-TIME read, never a render closure) and writes again until the two agree,
  * so a held key converges on where the bar is drawn; neither a window-focus read
  * nor a mount refetch of that lens runs during the burst
- * ({@link invalidateRepoOnFocus}, {@link useProjectItems}). The write target rides
+ * ({@link refreshRepoOnFocus}, {@link useProjectItems}). The write target rides
  * the variables for the family's reason.
  *
  * The rollback is one card's touched fields wide. The settle is the field

@@ -1138,9 +1138,9 @@ function DateSourceRows({
  *
  * Every read gates on `active` as well as the provider, a backstop: a hidden
  * `<Activity>` already holds no query observers, so a board left on another tab
- * pays nothing for owner-wide project reads. The layout choices
- * stay unwritten: the switcher and the group-by are transient component state on
- * purpose, so a board the user looked at once doesn't become a stored preference.
+ * pays nothing for owner-wide project reads. The layout choices stay unwritten:
+ * the switcher and the group-by are transient component state on purpose, so a
+ * board the user looked at once doesn't become a stored preference.
  */
 export function ProjectsBoardPanel({
   repoPath,

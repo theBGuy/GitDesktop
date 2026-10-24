@@ -659,11 +659,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   filtered by `isLocalRepoQuery` (`queries/local-query-filter.ts`): a query is
   local when it sets `networkMode: "always"` (the split the ratchet test
   `networkmode-local-queries` enforces), minus the overrides it names in
-  `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push, merge and rebase keep the
-  whole-repo default, since a push moves PR heads and starts runs; hot
-  working-tree ops keep their narrow `invalidate`. The window-focus pass
-  refetches only active queries that are stale by their own staleTime or
-  errored, never a blanket invalidation.
+  `NETWORKED_ALWAYS_OVERRIDES`. The ratchet fails only on networked "always"
+  reads it can recognize (named callees, the `forge`/`gh`/`jira` families,
+  classified commands); any other networked read under "always" (a `fetch…`
+  helper, a raw `fetch()`) goes into its `NETWORKED_ALWAYS` by hand, and into
+  `NETWORKED_ALWAYS_OVERRIDES` too when its key is repo-rooted. Push, tag
+  push, merge and rebase keep the whole-repo default, since a push moves PR
+  heads and starts runs; hot working-tree ops keep their narrow `invalidate`.
+  The window-focus pass refetches only active queries that are stale by their
+  own staleTime or errored, never a blanket invalidation.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

@@ -29,7 +29,7 @@ import { WelcomeScreen } from "@/features/welcome/WelcomeScreen";
 import { syncAnalytics, track } from "@/lib/analytics";
 import { useBackgroundPrSync } from "@/lib/automations/useBackgroundPrSync";
 import {
-  invalidateRepoOnFocus,
+  refreshRepoOnFocus,
   useGitInstalled,
   usePrefetchMyWorkSources,
 } from "@/lib/git/queries";
@@ -274,7 +274,7 @@ function App() {
     const unlisten = getCurrentWindow().onFocusChanged(
       ({ payload: focused }) => {
         if (focused) {
-          invalidateRepoOnFocus(queryClient);
+          refreshRepoOnFocus(queryClient);
           // The MCP server (with --allow-write) can mutate these store files on
           // disk while we're unfocused; reload each from disk BEFORE invalidating
           // so the refetch sees the external writes. Each store is independent.
