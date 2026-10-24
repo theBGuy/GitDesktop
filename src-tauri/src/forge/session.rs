@@ -1084,7 +1084,6 @@ struct CachedExpiry {
 #[derive(Default)]
 struct ExpiryState {
     entries: HashMap<ExpiryKey, CachedExpiry>,
-    generation: u64,
 }
 
 #[derive(Default)]
@@ -1124,18 +1123,18 @@ fn expiry_put(
     state: &mut ExpiryState,
     key: ExpiryKey,
     raw: Option<String>,
-    stamp: (u64, u64),
+    pre_fetch_epoch: u64,
     epoch: &AtomicU64,
     fetched: Instant,
 ) {
-    if state.generation != stamp.1 || epoch.load(Ordering::SeqCst) != stamp.0 {
+    if epoch.load(Ordering::SeqCst) != pre_fetch_epoch {
         return;
     }
     state.entries.insert(
         key,
         CachedExpiry {
             raw,
-            epoch: stamp.0,
+            epoch: pre_fetch_epoch,
             fetched,
         },
     );
@@ -1150,13 +1149,12 @@ async fn gh_expiry_with(
     fetch: impl Future<Output = AppResult<GhOutput>>,
 ) -> AppResult<Option<String>> {
     let pre_fetch_epoch = epoch.load(Ordering::SeqCst);
-    let generation = {
+    {
         let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(raw) = expiry_get(&state, &key, pre_fetch_epoch, ttl, clock) {
             return Ok(raw);
         }
-        state.generation
-    };
+    }
     let out = gh_output_ok(fetch.await?)?;
     let response = out.stdout_lossy();
     let (_, body) = split_response(&response);
@@ -1174,7 +1172,7 @@ async fn gh_expiry_with(
                 &mut memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
                 key,
                 raw.clone(),
-                (pre_fetch_epoch, generation),
+                pre_fetch_epoch,
                 epoch,
                 clock.0,
             );
@@ -2780,7 +2778,7 @@ mod tests {
                 assert_eq!(gh_status_args(host, active), expected);
             }
         }
-        let source = include_str!("session.rs").replace("\r\n", "\n");
+        let source = include_str!("session.rs");
         for (name, needle, retry) in [
             (
                 "github_health",
@@ -2804,15 +2802,7 @@ mod tests {
                 Some("gh_status_json_fresh(None, false)"),
             ),
         ] {
-            let start = source.find(&format!("fn {name}(")).unwrap();
-            let body = source[start..]
-                .split("\n}")
-                .next()
-                .unwrap()
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let body = crate::github::repo_meta::tests::wiring_body(source, name);
             assert!(body.contains(needle), "{name}");
             if let Some(retry) = retry {
                 assert!(body.contains(retry), "{name}: retry must reach gh");
@@ -3008,12 +2998,10 @@ mod tests {
     #[test]
     fn reconnect_finished_bumps_before_send_only_for_github() {
         let epoch = AtomicU64::new(7);
-        for _arm in ["cancel-or-timeout", "success", "failure"] {
-            let before = epoch.load(Ordering::SeqCst);
-            send_reconnect_finished(true, &epoch, || {
-                assert!(epoch.load(Ordering::SeqCst) > before);
-            });
-        }
+        let before = epoch.load(Ordering::SeqCst);
+        send_reconnect_finished(true, &epoch, || {
+            assert!(epoch.load(Ordering::SeqCst) > before);
+        });
         let before = epoch.load(Ordering::SeqCst);
         send_reconnect_finished(false, &epoch, || {
             assert_eq!(epoch.load(Ordering::SeqCst), before)
@@ -3023,16 +3011,10 @@ mod tests {
 
     #[test]
     fn reconnect_finished_constructions_are_inside_the_presend_helper() {
-        let source = include_str!("session.rs").replace("\r\n", "\n");
-        let start = source.find("async fn run_reconnect_child(").unwrap();
-        let body = source[start..]
-            .split("\n}")
-            .next()
-            .unwrap()
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("session.rs"),
+            "run_reconnect_child",
+        );
         assert_eq!(body.matches("ReconnectEvent::Finished {").count(), 3);
         assert_eq!(body.matches("send_reconnect_finished(").count(), 3);
         for (prefix, _) in body.match_indices("ReconnectEvent::Finished {") {

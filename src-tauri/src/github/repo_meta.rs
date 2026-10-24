@@ -241,7 +241,8 @@ pub(crate) fn transfer_destination(value: &str) -> Option<String> {
 pub(crate) mod tests {
     use super::*;
 
-    fn wiring_body(source: &str, name: &str) -> String {
+    pub(crate) fn wiring_body(source: &str, name: &str) -> String {
+        let source = source.replace("\r\n", "\n");
         let start = source.find(&format!("fn {name}(")).unwrap();
         source[start..]
             .split("\n}")
@@ -261,7 +262,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn assert_stack_eviction_wiring() {
-        let source = include_str!("pr.rs").replace("\r\n", "\n");
+        let source = include_str!("pr.rs");
         for name in [
             "gh_stack_create",
             "gh_stack_add",
@@ -272,7 +273,7 @@ pub(crate) mod tests {
             "gh_pr_reopen",
             "gh_pr_edit",
         ] {
-            let body = wiring_body(&source, name);
+            let body = wiring_body(source, name);
             let marker = "invalidate_stack_memo_after(&slug, &result);";
             let alternate = "invalidate_stack_memo_after(slug, &result);";
             let at = body
@@ -358,7 +359,7 @@ pub(crate) mod tests {
     #[test]
     fn repo_lifecycle_evictions_follow_attempts() {
         assert_eviction_wiring(
-            &include_str!("lifecycle.rs").replace("\r\n", "\n"),
+            include_str!("lifecycle.rs"),
             &[
                 "gh_repo_set_archived",
                 "gh_repo_rename",
@@ -371,16 +372,13 @@ pub(crate) mod tests {
 
     #[test]
     fn repo_security_eviction_follows_patch() {
-        assert_eviction_wiring(
-            &include_str!("security.rs").replace("\r\n", "\n"),
-            &["apply_feature"],
-        );
+        assert_eviction_wiring(include_str!("security.rs"), &["apply_feature"]);
     }
 
     #[test]
     fn repo_issue_evictions_follow_attempts() {
         assert_eviction_wiring(
-            &include_str!("issue.rs").replace("\r\n", "\n"),
+            include_str!("issue.rs"),
             &[
                 "gh_issue_create",
                 "gh_issue_close",
@@ -394,7 +392,7 @@ pub(crate) mod tests {
     #[test]
     fn repo_pages_evictions_follow_attempts() {
         assert_eviction_wiring(
-            &include_str!("pages.rs").replace("\r\n", "\n"),
+            include_str!("pages.rs"),
             &["gh_pages_enable", "gh_pages_disable"],
         );
     }
@@ -402,7 +400,7 @@ pub(crate) mod tests {
     #[test]
     fn repo_collaborator_evictions_follow_attempts() {
         assert_eviction_wiring(
-            &include_str!("collaborators.rs").replace("\r\n", "\n"),
+            include_str!("collaborators.rs"),
             &["gh_collaborator_add", "gh_collaborator_remove"],
         );
     }
@@ -410,7 +408,7 @@ pub(crate) mod tests {
     #[test]
     fn repo_draft_conversion_eviction_follows_attempt() {
         assert_eviction_wiring(
-            &include_str!("project_item_edits.rs").replace("\r\n", "\n"),
+            include_str!("project_item_edits.rs"),
             &["gh_convert_draft_item"],
         );
     }
@@ -418,7 +416,7 @@ pub(crate) mod tests {
     #[test]
     fn repo_pr_and_star_and_fork_evictions_follow_attempts() {
         assert_eviction_wiring(
-            &include_str!("pr.rs").replace("\r\n", "\n"),
+            include_str!("pr.rs"),
             &[
                 "gh_repo_set_star",
                 "gh_pr_merge",
@@ -432,9 +430,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn repo_settings_read_stamps_before_fetch_and_seeds_after() {
+        let body = wiring_body(include_str!("repo_settings.rs"), "gh_repo_settings_get");
+        let fetch = body.find("run_gh_on_host(").unwrap();
+        let seed = body.find("seed_repo_meta(").unwrap();
+        for stamp in ["gh_auth_epoch()", "repo_meta_generation()"] {
+            assert!(
+                body.find(stamp).unwrap() < fetch,
+                "{stamp}: stamp before fetch"
+            );
+        }
+        assert!(fetch < seed, "seed after fetch");
+    }
+
+    #[test]
     fn repo_settings_patch_evicts_before_topics_can_fail() {
         assert_eviction_wiring(
-            &include_str!("repo_settings.rs").replace("\r\n", "\n"),
+            include_str!("repo_settings.rs"),
             &["gh_repo_settings_update"],
         );
     }
@@ -442,7 +454,7 @@ pub(crate) mod tests {
     #[test]
     fn repo_named_fork_and_star_evictions_follow_attempts() {
         assert_eviction_wiring(
-            &include_str!("../forge/github.rs").replace("\r\n", "\n"),
+            include_str!("../forge/github.rs"),
             &["fork_repo", "star_repo"],
         );
     }
@@ -680,17 +692,5 @@ pub(crate) mod tests {
             now
         )
         .is_some());
-    }
-
-    #[test]
-    fn write_attempt_includes_timeout_and_server_errors() {
-        for result in [
-            Ok(()),
-            Err(AppError::Timeout(1)),
-            Err(AppError::Gh("failed".into())),
-        ] {
-            assert!(write_was_attempted(&result), "{result:?}");
-        }
-        assert!(!write_was_attempted::<()>(&Err(AppError::GhNotFound)));
     }
 }

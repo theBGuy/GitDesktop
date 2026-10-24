@@ -136,8 +136,9 @@ pub async fn gh_repo_transfer(
     let new_owner = new_owner.trim();
     validate_owner(new_owner)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let new_name = new_name.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let mut body = json!({ "new_owner": new_owner });
-    if let Some(name) = new_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(name) = new_name {
         body["new_name"] = json!(name);
     }
     let result = run_gh_input(
@@ -156,11 +157,7 @@ pub async fn gh_repo_transfer(
     .await;
     invalidate_repo_meta_after(&slug, &result);
     if let Some((_, current_name)) = slug.split_once('/') {
-        let name = new_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(current_name);
+        let name = new_name.unwrap_or(current_name);
         if let Some(destination) =
             crate::github::repo_meta::transfer_destination(&format!("{new_owner}/{name}"))
         {

@@ -2384,7 +2384,8 @@ pub async fn forge_issue_timeline(
 
 /// A repo's CI runs, behind the provider abstraction. GitHub delegates to
 /// `gh api repos/{slug}/actions/runs` via `gh_run_page`; GitLab maps `glab` pipelines
-/// onto the same neutral [`WorkflowRun`](crate::github::actions::WorkflowRun).
+/// and Bitbucket maps `bitbucket::list_runs` onto the same neutral
+/// [`WorkflowRun`](crate::github::actions::WorkflowRun).
 /// `limit` caps the count; `branch` optionally scopes to one ref.
 #[tauri::command]
 pub async fn forge_ci_run_list(

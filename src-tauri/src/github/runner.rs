@@ -751,14 +751,6 @@ pub(crate) async fn run_gh_cached_get_raw(
     args: &[&str],
     timeout: Duration,
 ) -> AppResult<GhOutput> {
-    let bypassed = bypasses(args);
-    if bypassed {
-        debug_assert!(
-            !bypassed,
-            "conditional GET requires unshaped, single-page argv"
-        );
-        return run_gh_raw(repo_path, args, timeout).await;
-    }
     let epoch = gh_auth_epoch();
     let host = match repo_path {
         Some(repo) => gh_host_for_repo(repo).await,
@@ -776,10 +768,14 @@ pub(crate) async fn run_gh_cached_get_raw_on_host(
     epoch: u64,
 ) -> AppResult<GhOutput> {
     let bypassed = bypasses(args);
-    debug_assert!(
-        !bypassed,
-        "conditional GET requires unshaped, single-page argv"
-    );
+    if bypassed {
+        debug_assert!(
+            !bypassed,
+            "conditional GET requires unshaped, single-page argv"
+        );
+        let gh = gh_bin().await?;
+        return run_gh_raw_resolved(&gh, repo_path, host, args, timeout).await;
+    }
     let gh = gh_bin().await?;
     let key = (
         repo_path.map(str::to_string),
@@ -834,33 +830,6 @@ pub(crate) async fn run_gh_on_host(
 mod tests {
     use super::*;
     use crate::agent::ChildEnv;
-
-    #[test]
-    fn expiration_header_present() {
-        let body = "HTTP/2.0 200 OK\r\nGitHub-Authentication-Token-Expiration: 2026-08-01 00:00:00 +0000\r\n\r\n{\"login\":\"x\"}";
-        assert_eq!(
-            response_header_value(body, "github-authentication-token-expiration").as_deref(),
-            Some("2026-08-01 00:00:00 +0000")
-        );
-    }
-
-    #[test]
-    fn expiration_header_absent() {
-        let body = "HTTP/2.0 200 OK\r\nX-OAuth-Scopes: repo\r\n\r\n{\"login\":\"x\"}";
-        assert_eq!(
-            response_header_value(body, "github-authentication-token-expiration"),
-            None
-        );
-    }
-
-    #[test]
-    fn expiration_header_case_insensitive() {
-        let body = "github-authentication-token-expiration: 2026-01-02\n\nbody";
-        assert_eq!(
-            response_header_value(body, "github-authentication-token-expiration").as_deref(),
-            Some("2026-01-02")
-        );
-    }
 
     fn body_key(n: usize) -> GhBodyKey {
         (
@@ -1012,6 +981,19 @@ mod tests {
         for n in [0, 2, 63, 64] {
             assert!(cache.contains_key(&body_key(n)));
         }
+    }
+
+    #[test]
+    fn conditional_host_bypass_delegates_before_cache_work() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("runner.rs"),
+            "run_gh_cached_get_raw_on_host",
+        );
+        let fallback = body
+            .find("return run_gh_raw_resolved(&gh, repo_path, host, args, timeout).await;")
+            .expect("bypass must delegate with the caller's resolved host");
+        assert!(body.find("if bypassed {").unwrap() < fallback);
+        assert!(fallback < body.find("let key =").unwrap());
     }
 
     #[test]

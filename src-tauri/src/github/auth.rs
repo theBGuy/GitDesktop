@@ -53,6 +53,7 @@ fn scopes_from_response(body: &str) -> GhScopes {
                 .collect(),
             classic: true,
         },
+        // No X-OAuth-Scopes header -> a fine-grained PAT / App token (no classic scopes).
         None => GhScopes::default(),
     }
 }

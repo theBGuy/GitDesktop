@@ -2313,7 +2313,8 @@ fn flatten_slurped_pages(pages: Vec<Vec<serde_json::Value>>) -> Vec<serde_json::
     pages.into_iter().flatten().collect()
 }
 
-// 30s matches usePrList's staleTime, so a refetch inside that window reuses the last answer; an off-app stack change shows within 30s.
+// 30s matches usePrList's staleTime, so a refetch inside that window reuses the
+// last answer; an off-app stack change shows within 30s.
 const STACK_MEMO_TTL: Duration = Duration::from_secs(30);
 const STACK_MEMO_CAP: usize = 64;
 type StackMemoKey = (String, String);
@@ -7476,18 +7477,9 @@ mod tests {
 
     #[test]
     fn viewer_login_routes_keep_timeouts_and_fork_freshness() {
-        let source = include_str!("pr.rs").replace("\r\n", "\n");
-        let body = |name: &str| {
-            let start = source.find(&format!("fn {name}(")).unwrap();
-            source[start..]
-                .split("\n}")
-                .next()
-                .unwrap()
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
+        use crate::github::repo_meta::tests::wiring_body;
+        let source = include_str!("pr.rs");
+        let body = |name: &str| wiring_body(source, name);
         assert!(body("gh_viewer_login").contains("viewer_login_core(None, GH_TIMEOUT)"));
         assert!(body("current_login")
             .contains("viewer_login_core(Some(repo_path), GH_NETWORK_TIMEOUT)"));
@@ -7496,15 +7488,7 @@ mod tests {
         let fresh = body("gh_viewer_login_fresh");
         assert!(fresh.contains("run_gh(None,"));
         assert!(!fresh.contains("viewer_login_core"));
-        let forge = include_str!("../forge/github.rs").replace("\r\n", "\n");
-        let fork = forge[forge.find("fn fork_repo(").unwrap()..]
-            .split("\n}")
-            .next()
-            .unwrap()
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let fork = wiring_body(include_str!("../forge/github.rs"), "fork_repo");
         assert!(fork.contains("gh_viewer_login_fresh().await?"));
     }
 

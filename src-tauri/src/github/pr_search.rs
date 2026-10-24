@@ -756,7 +756,6 @@ struct CachedViewer {
 #[derive(Default)]
 struct LoginState {
     entries: HashMap<Option<String>, CachedViewer>,
-    generation: u64,
 }
 
 #[derive(Default)]
@@ -787,11 +786,9 @@ fn viewer_login_put(
     host: Option<String>,
     login: &str,
     auth_epoch: u64,
-    generation: u64,
     now: Instant,
 ) {
-    if state.generation != generation
-        || login.is_empty()
+    if login.is_empty()
         || state
             .entries
             .get(&host)
@@ -816,20 +813,18 @@ async fn viewer_login_with(
     ttl: Duration,
     fetch: impl Future<Output = AppResult<String>>,
 ) -> AppResult<String> {
-    let generation = {
+    {
         let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(login) = viewer_login_get(&state, &host, epoch, ttl, Instant::now()) {
             return Ok(login);
         }
-        state.generation
-    };
+    }
     let login = fetch.await?;
     viewer_login_put(
         &mut memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
         host,
         &login,
         epoch,
-        generation,
         Instant::now(),
     );
     Ok(login)
@@ -951,8 +946,8 @@ mod tests {
         let memo = LoginMemo::default();
         let mut state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
-        viewer_login_put(&mut state, None, "new", 8, 0, now);
-        viewer_login_put(&mut state, None, "old", 7, 0, now);
+        viewer_login_put(&mut state, None, "new", 8, now);
+        viewer_login_put(&mut state, None, "old", 7, now);
         assert_eq!(
             viewer_login_get(&state, &None, 8, VIEWER_LOGIN_TTL, now).as_deref(),
             Some("new")
@@ -970,7 +965,7 @@ mod tests {
             viewer_login_get(&state, &host, 7, VIEWER_LOGIN_TTL, now),
             None
         );
-        viewer_login_put(&mut state, host.clone(), "octocat", 7, 0, now);
+        viewer_login_put(&mut state, host.clone(), "octocat", 7, now);
         assert_eq!(
             viewer_login_get(&state, &host, 7, VIEWER_LOGIN_TTL, now).as_deref(),
             Some("octocat")
@@ -997,7 +992,7 @@ mod tests {
             viewer_login_get(&state, &None, 7, VIEWER_LOGIN_TTL, now),
             None
         );
-        viewer_login_put(&mut state, host.clone(), "hubot", 8, 0, now);
+        viewer_login_put(&mut state, host.clone(), "hubot", 8, now);
         assert_eq!(
             viewer_login_get(&state, &host, 8, VIEWER_LOGIN_TTL, now).as_deref(),
             Some("hubot")
