@@ -1,1 +1,0 @@
-- The pull request list's merge status refreshes after Update branch.

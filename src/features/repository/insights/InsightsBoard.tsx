@@ -166,9 +166,8 @@ export function InsightsBoard({
   const forgeDetecting = active && gh.isPending;
 
   // These are heavy (full-history git scans + gh calls); gate them on the
-  // Insights tab being visible. <Activity> keeps this mounted while hidden but
-  // does NOT defer React Query fetches, so without this gate they'd run on
-  // every repo open even if the user never opens Insights.
+  // Insights tab being visible, as a backstop: a hidden <Activity> panel holds
+  // no query observers, so it already fetches nothing until Insights opens.
   const commitActivity = useCommitActivity(repoPath, weeks, active);
   const codeFreq = useCodeFrequency(repoPath, weeks, active);
   const punchCard = usePunchCard(repoPath, weeks, active);

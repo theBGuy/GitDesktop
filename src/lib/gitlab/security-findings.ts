@@ -142,8 +142,8 @@ export const glPipelineFindings = (repoPath: string, limit: number) =>
  * One query for all three GitLab categories: they come from a single pipeline's
  * artifacts, so splitting them would re-resolve that pipeline three times. No
  * refetchInterval — findings change per pipeline, so this fetches on tab open and
- * manual refresh only. `active` (the Findings tab being visible) gates the fetch;
- * <Activity> defers a hidden panel's effects but not its queries. `limit` is part
+ * manual refresh only. `active` (the Findings tab being visible) gates the fetch
+ * as a backstop: a hidden <Activity> panel already fetches nothing. `limit` is part
  * of the key so a Load-more is a distinct entry; keepPreviousDataForRepo keeps the
  * loaded rows painted while it refetches.
  */

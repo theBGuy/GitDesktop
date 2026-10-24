@@ -1,8 +1,8 @@
 /**
  * Which runs of a branch's latest poll the run notifier announces, as a pure diff
- * against the previous poll (the prime). Its one import is the run-status module,
- * by a relative `.ts` specifier, so `scripts/run-notify-diff.test.mjs` loads it
- * under Node's type stripping.
+ * against the previous poll (the prime), and the poll's own interval. Its one
+ * import is the run-status module, by a relative `.ts` specifier, so
+ * `scripts/run-notify-diff.test.mjs` loads it under Node's type stripping.
  */
 import {
   isFailureConclusion,
@@ -41,8 +41,9 @@ export const BETWEEN_POLLS_MAX_MS = 135_000;
 
 /** The poll's interval: 8 s while the NEWEST run (the list's first) is active, or
  *  while a run of the same push (a non-empty `headSha`) is executing, since one
- *  push's runs list in arbitrary order; 45 s otherwise. A run left waiting or
- *  queued (an environment approval, an offline runner) never holds the fast rate. */
+ *  push's runs list in arbitrary order; 45 s otherwise. A sibling left waiting or
+ *  queued (an environment approval, an offline runner) never holds the fast rate;
+ *  only the newest run's own active status does. */
 export function notifyPollInterval(
   runs: readonly NotifyRun[] | undefined,
 ): number {

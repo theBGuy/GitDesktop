@@ -443,8 +443,10 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - **`gd/session/*` branches are filtered from every branch surface** (lists,
   pickers, bulk actions) — the user dogfoods agent sessions on them; deleting
   one breaks Resume. Hard invariant.
-- `<Activity>`-hidden subtrees still render and fetch — gate query `enabled`
-  on the active tab; gate agent-surface notifications on the tab being watched.
+- `<Activity>`-hidden subtrees still render but hold no query observers, so
+  they fetch nothing while hidden; the re-show refetches anything past its
+  staleTime. Keep a heavy query's `enabled` gated on the active tab as a
+  backstop; gate agent-surface notifications on the tab being watched.
 - Open-TRANSITION resets ride `useSeedOnOpen` (`src/lib/use-seed-on-open.ts`) —
   a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires when a hidden
   `<Activity>` tab re-mounts its effects on show, wiping the user's draft. The

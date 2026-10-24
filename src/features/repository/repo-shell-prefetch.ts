@@ -85,9 +85,10 @@ export function warmRepoShell(
     ...userWorktreesOptions(root),
     staleTime: USER_WORKTREES_STALE_TIME,
   });
-  // Warmed but never held: nothing on the first paint reads it, and its cost
-  // scales with the remote-ref count, so holding would spend the budget on a
-  // closed menu. The cache lets the branch menu open with its Remote group.
+  // Warmed but never held: its cost scales with the remote-ref count, and its one
+  // first-paint reader (the header's CI run gate, for a branch with no upstream)
+  // only waits on it to show the badge. The cache lets the branch menu open with
+  // its Remote group.
   warm(
     {
       ...remoteBranchesOptions(root),

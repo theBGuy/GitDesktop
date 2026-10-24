@@ -290,8 +290,8 @@ export function ChangesPanel({
   active,
 }: {
   repoPath: string;
-  /** The Changes tab is the visible one. A `<TabPanel>`-hidden panel still
-   *  renders, so the line-count poll is gated on this rather than on mounting. */
+  /** The Changes tab is the visible one. The line-count poll gates on this, not
+   *  on mounting, as a backstop: a `<TabPanel>`-hidden panel holds no observers. */
   active: boolean;
 }) {
   const status = useRepoStatus(repoPath);

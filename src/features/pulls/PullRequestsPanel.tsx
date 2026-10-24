@@ -548,12 +548,13 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // PR arrives selected on a tab that will never list it. The target comes from the PR's
   // own state, which the event can't name — a review posted on a PR that merged
   // afterwards is the reported case. One-shot, retired as soon as it's answered.
-  // Every term gates the ARMING, so no doomed or wrong read is ever issued: off-tab an
-  // armed intent would refetch on each window focus; under a provisional "origin" lens
-  // this would fetch a fork's ORIGIN pull request #N, a different PR; and a not-ready
-  // forge can only answer errors. Readiness also supplies the disabled→enabled
-  // transition the observer needs to fetch at all. The id is untrusted — a
-  // hand-editable store feeds one route — so only a positive integer arms.
+  // Every term gates the ARMING, so no doomed or wrong read is ever issued: the tab
+  // term is a backstop (off-tab, the hidden panel holds no observer); under a
+  // provisional "origin" lens this would fetch a fork's ORIGIN pull request #N, a
+  // different PR; and a not-ready forge can only answer errors. Readiness also
+  // supplies the disabled→enabled transition the observer needs to fetch at all.
+  // The id is untrusted — a hand-editable store feeds one route — so only a
+  // positive integer arms.
   const alignSelectedNumber =
     selectedPr?.kind === "remote" ? Number(selectedPr.id) : Number.NaN;
   const alignRemoteNumber =
@@ -824,9 +825,9 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   const listUpdatedAt = prList.dataUpdatedAt;
   const listFailedAt = prList.errorUpdatedAt;
   const listFetching = prList.isFetching;
-  // Tab-gated on top of `refetchIntervalInBackground: false`: that covers a
-  // hidden WINDOW, but an <Activity>-hidden panel keeps active observers and
-  // would poll behind the Issues tab.
+  // Tab-gated on top of `refetchIntervalInBackground: false` (which covers a
+  // hidden WINDOW) as a backstop: an <Activity>-hidden panel already holds no
+  // observers to poll with.
   const canPollHold = onPullsTab && ghReady && listFilter.scopeReady;
   useEffect(() => {
     if (holdLadderFor.current !== heldKey) {

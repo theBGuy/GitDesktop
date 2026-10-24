@@ -1,7 +1,8 @@
 // Pins src/features/actions/run-notify-diff.ts: which runs of a branch's latest
-// poll the run notifier announces against the previous poll (the prime), and which
-// poll may become the first prime. A wrong answer never errors: it either floods a
-// backlog of old runs or stays silent on a run that finished, so each arm is a case.
+// poll the run notifier announces against the previous poll (the prime), which
+// poll may become the first prime, and the poll's interval. A wrong answer never
+// errors: it floods a backlog of old runs, stays silent on a run that finished, or
+// polls at the wrong rate, so each arm is a case.
 //
 // The import reaches straight into `src/` under Node's type stripping; the module's
 // one import is the import-free run-status module, so this suite needs no install.
@@ -213,7 +214,7 @@ test("only a poll fetched at or after the notifier enabled may prime", () => {
   assert.equal(acceptsAsPrime(null, T0 + 3_000), false);
 });
 
-test("the fast rate follows the NEWEST run only", () => {
+test("the newest run's own status sets the fast rate", () => {
   assert.equal(
     notifyPollInterval([run(9, "in_progress"), run(8, "completed")]),
     8_000,
