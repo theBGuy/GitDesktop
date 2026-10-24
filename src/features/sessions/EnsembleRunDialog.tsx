@@ -1,5 +1,10 @@
 import { PlusIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
+import {
+  ignoreHeldEnter,
+  markSwapStop,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -60,7 +65,7 @@ export function EnsembleRunDialog({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent data-confirm-section className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>Run this task several ways</DialogTitle>
           <DialogDescription>
@@ -107,6 +112,9 @@ function EnsembleArms({
     { ...seed, key: crypto.randomUUID() },
     { ...seed, key: crypto.randomUUID() },
   ]);
+  // A removed arm hands focus to the next arm's agent picker (never another
+  // arm's X), else the previous one's, else Add arm.
+  const swapFocus = useConfirmSwapFocus();
 
   const patchArm = (i: number, patch: Partial<EnsembleArm>) =>
     setArms((a) => a.map((arm, j) => (j === i ? { ...arm, ...patch } : arm)));
@@ -152,6 +160,8 @@ function EnsembleArms({
         {arms.map((arm, i) => (
           <div
             key={arm.key}
+            ref={markSwapStop('[aria-label="Agent"]')}
+            data-confirm-row
             className="flex flex-wrap items-center gap-1.5 border bg-muted/30 px-2 py-1.5"
           >
             <span className="w-4 shrink-0 text-center text-[11px] text-muted-foreground tabular-nums">
@@ -159,7 +169,11 @@ function EnsembleArms({
             </span>
             <AgentPicker
               value={arm.agent}
-              onChange={(agent) => patchArm(i, { agent, model: "" })}
+              // Re-picking the same agent (a held Enter landing here after a
+              // removal) keeps the arm's model.
+              onChange={(agent) => {
+                if (agent !== arm.agent) patchArm(i, { agent, model: "" });
+              }}
             />
             <ModelPicker
               value={arm.model}
@@ -171,6 +185,7 @@ function EnsembleArms({
               onChange={(effort) => patchArm(i, { effort })}
             />
             <Button
+              ref={swapFocus(arm.key)}
               size="icon-xs"
               variant="ghost"
               className="ml-auto text-muted-foreground"
@@ -198,10 +213,12 @@ function EnsembleArms({
 
       <div className="flex items-center justify-between gap-2">
         <Button
+          data-confirm-fallback
           size="sm"
           variant="ghost"
           disabled={arms.length >= MAX_ARMS}
           onClick={addArm}
+          onKeyDown={ignoreHeldEnter}
         >
           <PlusIcon data-icon="inline-start" />
           Add arm

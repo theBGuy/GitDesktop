@@ -8,6 +8,10 @@ import { useSelector } from "@tanstack/react-store";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useState } from "react";
 import { toast } from "sonner";
+import {
+  markSwapStop,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { Button } from "@/components/ui/button";
 import {
@@ -377,6 +381,9 @@ export const SyntaxSection = withForm({
     const [newExt, setNewExt] = useState("");
     const [newLang, setNewLang] = useState("");
     const [editing, setEditing] = useState<CustomLanguage | "new" | null>(null);
+    // A removed mapping hands focus to the next row's language picker, else
+    // the previous row's (never another Remove), else the new-extension field.
+    const swapFocus = useConfirmSwapFocus();
 
     const config: SyntaxConfig =
       activeScope === "repo"
@@ -519,7 +526,7 @@ export const SyntaxSection = withForm({
           </div>
         )}
 
-        <div className="space-y-3">
+        <div data-confirm-section className="space-y-3">
           <h3 className="text-xs font-medium text-muted-foreground">
             Extension mappings
           </h3>
@@ -530,7 +537,12 @@ export const SyntaxSection = withForm({
           )}
           <div className="space-y-2">
             {entries.map(([ext, lang]) => (
-              <div key={ext} className="flex items-center gap-2">
+              <div
+                key={ext}
+                ref={markSwapStop("button")}
+                data-confirm-row
+                className="flex items-center gap-2"
+              >
                 <code className="w-24 shrink-0 rounded bg-muted px-2 py-1 font-mono text-xs">
                   .{ext}
                 </code>
@@ -542,6 +554,7 @@ export const SyntaxSection = withForm({
                   triggerClassName="w-44"
                 />
                 <Button
+                  ref={swapFocus(ext)}
                   variant="ghost"
                   size="icon-sm"
                   aria-label={`Remove .${ext} mapping`}
@@ -556,12 +569,15 @@ export const SyntaxSection = withForm({
 
           <div className="flex items-center gap-2 border-t pt-3">
             <Input
+              data-confirm-fallback
               value={newExt}
               onChange={(e) => setNewExt(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  addMapping();
+                  // A held Enter can land here after a removal; only a fresh
+                  // press adds (under repo scope, that writes the shared file).
+                  if (!e.repeat) addMapping();
                 }
               }}
               placeholder="dbj"

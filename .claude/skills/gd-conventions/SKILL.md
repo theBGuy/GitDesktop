@@ -636,14 +636,24 @@ one grep away on the named symbol. Grows via Conventions-sync.
   menu popup (keyboard navigation is unaffected). The override keeps the row
   hit-testable; Base UI's `useButton` still gates clicks on disabled rows.
 - **Confirm-swap focus** — a control that swaps with an inline confirm hands
-  focus across the swap via `useConfirmSwapFocus` (repo-settings/parts): the
+  focus across the swap via `useConfirmSwapFocus` from
+  `@/components/confirm-swap-focus` (re-exported by repo-settings/parts): the
   same ref on the trigger and on `InlineConfirm`'s `swapFocusRef`, keyed per
   row in lists; without it the dialog's focus fallback sends focus to the
   popup when the focused node unmounts. A confirm that removes its own row or
   container lands on a successor: mark the row `data-confirm-row`, the section
   root `data-confirm-section`, and its first input or add control
-  `data-confirm-fallback`. The act button holds by reason while pending, so it
-  keeps focus through the write.
+  `data-confirm-fallback`. A roving-stop row is its own successor when the row
+  element carries a literal `data-confirm-swap`, and a leave that takes the
+  section itself tries the `data-confirm-host` ancestor's fallbacks before the
+  host. A successor never runs, sends or deletes on Enter, since a held Enter
+  repeats. One whose fresh Enter still acts ignores a repeat: a button takes
+  `onKeyDown={ignoreHeldEnter}` from the same module (preventing the keydown
+  cancels its click), while an editor-opening row or an add input checks
+  `!e.repeat` in its own Enter handler. A row whose safe control is a
+  component that takes no DOM props marks it with `markSwapStop(selector)` on
+  the row ref. The act button holds by reason while pending, so it keeps
+  focus through the write.
 - **Invalidation keys** — cache invalidation goes through the shared key
   builders in `src/lib/git/queries/`; a hand-built key or raw-path key
   silently fails to co-invalidate siblings.

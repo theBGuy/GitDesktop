@@ -199,7 +199,10 @@ export function CollaboratorsSection({
             autoComplete="off"
             spellCheck={false}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && canAdd) void addCollaborator();
+              // A held Enter can land here after a removal; only a fresh press
+              // sends the invite.
+              if (e.key === "Enter" && canAdd && !e.repeat)
+                void addCollaborator();
             }}
           />
           <RoleSlot personal={personal} value={inviteRole} onRole={setRole} />

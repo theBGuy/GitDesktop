@@ -19,6 +19,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { AmendHoldSentence } from "./AmendHoldSentence";
 import { CoAuthorPicker } from "./CoAuthorPicker";
+import { SummaryCounter, useSummaryBudget } from "./summary-counter";
 import { useCommitSubmit } from "./useCommitSubmit";
 
 // The registry entry owns this action's wording; deriving it keeps the trigger's
@@ -62,6 +63,7 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
   const commitBinding = bindings.get("commit") ?? null;
   const popOutBinding = bindings.get("open-commit-dialog") ?? null;
   const generateHint = useGenerateChordHint();
+  const budget = useSummaryBudget(title.length);
 
   return (
     <div className="space-y-2 border-t p-3">
@@ -100,17 +102,15 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
           value={title}
           onChange={(e) => setCommitTitle(e.target.value)}
           disabled={generating}
-          className="ph-no-capture pr-12"
+          {...budget.inputProps}
+          className={cn("ph-no-capture", budget.gutterClassName)}
           autoComplete="off"
         />
-        <span
-          className={cn(
-            "pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-[10px] tabular-nums",
-            title.length > 72 ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {title.length > 0 && `${title.length}/72`}
-        </span>
+        <SummaryCounter
+          length={title.length}
+          over={budget.over}
+          counterId={budget.counterId}
+        />
       </div>
       <Textarea
         placeholder="Description (optional)"

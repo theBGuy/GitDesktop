@@ -5,7 +5,18 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  type RefObject,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  InlineConfirm,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
@@ -173,13 +184,20 @@ export function TaskDialog({
   onOpenChange,
   onSave,
   onDelete,
+  deletePending,
+  focusRoot,
 }: {
   /** An existing task to edit, `"new"` to create, or null when closed. */
   task: TaskDef | "new" | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSave: (task: TaskDef) => void;
-  onDelete: (id: string) => void;
+  /** Resolves true once the task is gone, false when the delete failed. */
+  onDelete: (id: string) => Promise<boolean>;
+  /** The delete write is in flight; holds the confirm so it can't fire twice. */
+  deletePending: boolean;
+  /** The task list behind this dialog, where its close lands focus. */
+  focusRoot: RefObject<HTMLElement | null>;
 }) {
   const editing = task !== "new" && task !== null ? task : null;
   const shownTask = useRetained(task);
@@ -208,6 +226,12 @@ export function TaskDialog({
   const [describe, setDescribe] = useState("");
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
+  // Confirmed deletes per task id; only a failure gives one back. While any
+  // holds, the close lands on "New task" (a row's Enter runs its task), since a
+  // deleted row can outlive the settle by a render; ids are UUIDs, never reused.
+  const deleteCountsRef = useRef<Map<string, number> | null>(null);
+  const deleteCounts = () => (deleteCountsRef.current ??= new Map());
   const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
   const [flipNote, setFlipNote] = useState<FlipNote | null>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
@@ -478,11 +502,28 @@ export function TaskDialog({
     });
   }
 
+  // Resolved at close against the panel behind the dialog: the edited task's
+  // own row while it is listed, else "New task"; null leaves Base UI's default.
+  function closeFocusTarget(): HTMLElement | null {
+    const root = focusRoot.current;
+    const newTask = () =>
+      root?.querySelector<HTMLElement>('[aria-label="New task"]') ?? null;
+    if (shownEditing === null || (deleteCounts().get(shownEditing.id) ?? 0) > 0)
+      return newTask();
+    const id = CSS.escape(shownEditing.id);
+    return (
+      root?.querySelector<HTMLElement>(`[data-row="${id}"]`) ??
+      root?.querySelector<HTMLElement>(`[data-row="other-${id}"]`) ??
+      newTask()
+    );
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
         onKeyDown={generateChord.onKeyDown}
+        finalFocus={closeFocusTarget}
       >
         <DialogHeader>
           <DialogTitle>{shownEditing ? "Edit task" : "New task"}</DialogTitle>
@@ -958,27 +999,30 @@ export function TaskDialog({
           <span className="flex-1" />
           {shownEditing &&
             (confirmDelete ? (
-              <>
-                <span className="text-xs text-muted-foreground">Delete?</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setConfirmDelete(false)}
-                >
-                  Keep
-                </Button>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  onClick={() => {
-                    if (editing) onDelete(editing.id);
-                  }}
-                >
-                  Delete
-                </Button>
-              </>
+              <InlineConfirm
+                prompt="Delete?"
+                promptClassName="text-xs"
+                cancelLabel="Keep"
+                actLabel="Delete"
+                pending={deletePending}
+                swapFocusRef={swapFocus()}
+                onCancel={() => setConfirmDelete(false)}
+                onAct={() => {
+                  if (!editing) return;
+                  const id = editing.id;
+                  const counts = deleteCounts();
+                  counts.set(id, (counts.get(id) ?? 0) + 1);
+                  void onDelete(id).then((gone) => {
+                    if (gone) return;
+                    const left = (counts.get(id) ?? 1) - 1;
+                    if (left > 0) counts.set(id, left);
+                    else counts.delete(id);
+                  });
+                }}
+              />
             ) : (
               <Button
+                ref={swapFocus()}
                 size="sm"
                 variant="ghost"
                 onClick={() => setConfirmDelete(true)}

@@ -79,6 +79,7 @@ export function McpServerDialog({
   onAllowHost,
   onSave,
   onClose,
+  finalFocus,
 }: {
   initial: McpServer | null;
   /** The other servers in the registry, for duplicate-name detection. */
@@ -97,6 +98,9 @@ export function McpServerDialog({
     secretWrites: { key: string; value: string }[],
   ) => void;
   onClose: () => void;
+  /** Where focus lands on close; null keeps Base UI's own return, false skips
+   *  it (the caller lands focus itself). */
+  finalFocus?: () => HTMLElement | null | false;
 }) {
   // Per-mount base for the field ids (label↔control association).
   const idBase = useId();
@@ -206,7 +210,7 @@ export function McpServerDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="sm:max-w-2xl" finalFocus={finalFocus}>
         <DialogHeader>
           <DialogTitle>
             {editing ? "Edit MCP server" : "Add MCP server"}

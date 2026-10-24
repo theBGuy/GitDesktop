@@ -26,6 +26,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { AmendHoldSentence } from "./AmendHoldSentence";
 import { CoAuthorPicker } from "./CoAuthorPicker";
+import { SummaryCounter, useSummaryBudget } from "./summary-counter";
 import { useCommitSubmit } from "./useCommitSubmit";
 
 /**
@@ -84,6 +85,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
   const lineStats = useWorkingLineStats(repoPath, open && stagedCount > 0);
   const commitBinding = useEffectiveBindings().get("commit") ?? null;
   const generateHint = useGenerateChordHint();
+  const budget = useSummaryBudget(title.length);
 
   const stagedStats = new Map(
     (lineStats.data?.staged ?? []).map((e) => [e.path, e]),
@@ -155,19 +157,15 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
               value={title}
               onChange={(e) => setCommitTitle(e.target.value)}
               disabled={generating}
-              className="ph-no-capture pr-12"
+              {...budget.inputProps}
+              className={cn("ph-no-capture", budget.gutterClassName)}
               autoComplete="off"
             />
-            <span
-              className={cn(
-                "pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-[10px] tabular-nums",
-                title.length > 72
-                  ? "text-destructive"
-                  : "text-muted-foreground",
-              )}
-            >
-              {title.length > 0 && `${title.length}/72`}
-            </span>
+            <SummaryCounter
+              length={title.length}
+              over={budget.over}
+              counterId={budget.counterId}
+            />
           </div>
           <Textarea
             placeholder="Description (optional)"

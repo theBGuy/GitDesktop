@@ -1,6 +1,10 @@
 import { PencilSimpleIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import {
+  ignoreHeldEnter,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -46,12 +50,15 @@ function CommandDialog({
   takenNames,
   onSave,
   onClose,
+  finalFocus,
 }: {
   initial: CustomCommand | null;
   /** Lowercased names already used by OTHER custom commands. */
   takenNames: Set<string>;
   onSave: (cmd: CustomCommand) => void;
   onClose: () => void;
+  /** Where focus lands on close; null keeps Base UI's own return. */
+  finalFocus?: () => HTMLElement | null;
 }) {
   const [draft, setDraft] = useState<Omit<CustomCommand, "id">>(
     initial ?? EMPTY_COMMAND,
@@ -80,7 +87,7 @@ function CommandDialog({
         if (!o) onClose();
       }}
     >
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="sm:max-w-2xl" finalFocus={finalFocus}>
         <DialogHeader>
           <DialogTitle>
             {initial ? "Edit command" : "New slash command"}
@@ -173,6 +180,11 @@ export const CommandsSection = withForm({
     const commands = useSelector(form.store, (s) => s.values.customCommands);
     const [editing, setEditing] = useState<CustomCommand | "new" | null>(null);
     const [activeIndex, setActiveIndex] = useState(-1);
+    const listRef = useRef<HTMLDivElement>(null);
+    const addRef = useRef<HTMLButtonElement>(null);
+    // A removed row hands focus to the next row itself (Enter there edits),
+    // else the previous one, else Add command; never to another Remove.
+    const swapFocus = useConfirmSwapFocus();
 
     const list = commands ?? [];
 
@@ -205,6 +217,24 @@ export const CommandsSection = withForm({
       setCommands(list.filter((c) => c.id !== id));
     }
 
+    // The edit dialog unmounts outright, so this runs with the props of its last
+    // render. Only a row that is the tab stop: Base UI sends a non-tabbable
+    // target on to its first tabbable child, an arbitrary control in the row.
+    function closeFocusTarget(
+      target: CustomCommand | "new",
+    ): HTMLElement | null {
+      if (target === "new") return addRef.current;
+      const listEl = listRef.current;
+      const row = listEl?.querySelector<HTMLElement>(
+        `[data-cc-row="${CSS.escape(target.id)}"]`,
+      );
+      if (row?.tabIndex === 0) return row;
+      const stop = listEl?.querySelector<HTMLElement>(
+        '[data-cc-row][tabindex="0"]',
+      );
+      return stop ?? null;
+    }
+
     const takenNames = (excludeId?: string) =>
       new Set(
         list
@@ -214,7 +244,7 @@ export const CommandsSection = withForm({
       );
 
     return (
-      <section className="space-y-4">
+      <section data-confirm-section className="space-y-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-sm font-medium">Slash commands</h2>
@@ -231,10 +261,13 @@ export const CommandsSection = withForm({
             </p>
           </div>
           <Button
+            ref={addRef}
+            data-confirm-fallback
             variant="outline"
             size="sm"
             className="shrink-0"
             onClick={() => setEditing("new")}
+            onKeyDown={ignoreHeldEnter}
           >
             <PlusIcon data-icon="inline-start" /> Add command
           </Button>
@@ -250,11 +283,13 @@ export const CommandsSection = withForm({
           </p>
         ) : (
           // A roving-focus list — arrow keys move between rows, Enter edits.
-          <div className="space-y-2" onKeyDown={onKeyDown}>
+          <div ref={listRef} className="space-y-2" onKeyDown={onKeyDown}>
             {list.map((cmd, i) => (
               <div
                 key={cmd.id}
                 data-cc-row={cmd.id}
+                data-confirm-row
+                data-confirm-swap
                 aria-label={`/${cmd.name}${cmd.description ? `, ${cmd.description}` : ""}. Press Enter to edit.`}
                 tabIndex={
                   i === safeActive || (safeActive === -1 && i === 0) ? 0 : -1
@@ -262,10 +297,11 @@ export const CommandsSection = withForm({
                 onFocus={() => setActiveIndex(i)}
                 onKeyDown={(e) => {
                   // Only the row itself edits on Enter — not when a child
-                  // control (the Edit/Remove buttons) is focused.
+                  // control (the Edit/Remove buttons) is focused. An
+                  // auto-repeated Enter is still held from elsewhere.
                   if (e.key === "Enter" && e.target === e.currentTarget) {
                     e.preventDefault();
-                    setEditing(cmd);
+                    if (!e.repeat) setEditing(cmd);
                   }
                 }}
                 className="flex items-center gap-2 rounded border px-3 py-2 outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -288,6 +324,7 @@ export const CommandsSection = withForm({
                     <PencilSimpleIcon />
                   </Button>
                   <Button
+                    ref={swapFocus(cmd.id)}
                     variant="ghost"
                     size="icon-sm"
                     aria-label={`Remove /${cmd.name}`}
@@ -308,6 +345,7 @@ export const CommandsSection = withForm({
             takenNames={takenNames(editing === "new" ? undefined : editing.id)}
             onSave={saveCommand}
             onClose={() => setEditing(null)}
+            finalFocus={() => closeFocusTarget(editing)}
           />
         )}
       </section>
