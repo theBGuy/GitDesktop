@@ -229,8 +229,9 @@ export function TaskDialog({
   const swapFocus = useConfirmSwapFocus();
   // A confirmed delete takes the edited task's row along, so the close lands on
   // "New task" (never another task row: Enter there runs that task). A failed
-  // delete leaves the row listed, so the close returns to it.
-  const deletedRef = useRef(false);
+  // delete leaves the row listed, so the close returns to it. Holds the id of
+  // the task whose delete was confirmed, so a settle only touches its own.
+  const deletedRef = useRef<string | null>(null);
   const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
   const [flipNote, setFlipNote] = useState<FlipNote | null>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
@@ -340,7 +341,7 @@ export function TaskDialog({
     setDescribe("");
     setConfirmBeforeRun(editing?.confirmBeforeRun ?? true);
     setConfirmDelete(false);
-    deletedRef.current = false;
+    deletedRef.current = null;
     // The task's stored scope verbatim; a new task belongs to the open repo.
     // Whether that value is the canonical "this repository" key is decided at
     // render (`selectedScope`), so a scope seeded before the identity resolved
@@ -508,7 +509,8 @@ export function TaskDialog({
     const root = focusRoot.current;
     const newTask = () =>
       root?.querySelector<HTMLElement>('[aria-label="New task"]') ?? null;
-    if (deletedRef.current || shownEditing === null) return newTask();
+    if (shownEditing === null || deletedRef.current === shownEditing.id)
+      return newTask();
     const id = CSS.escape(shownEditing.id);
     return (
       root?.querySelector<HTMLElement>(`[data-row="${id}"]`) ??
@@ -1008,9 +1010,13 @@ export function TaskDialog({
                 onCancel={() => setConfirmDelete(false)}
                 onAct={() => {
                   if (!editing) return;
-                  deletedRef.current = true;
-                  void onDelete(editing.id).then((gone) => {
-                    if (!gone) deletedRef.current = false;
+                  const id = editing.id;
+                  deletedRef.current = id;
+                  void onDelete(id).then((gone) => {
+                    // Clears only its own mark: a later session may hold
+                    // another task's delete.
+                    if (!gone && deletedRef.current === id)
+                      deletedRef.current = null;
                   });
                 }}
               />
