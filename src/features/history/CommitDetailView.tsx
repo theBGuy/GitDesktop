@@ -181,9 +181,29 @@ export function CommitDetailView({
   // GitHub commit-comment `position` mapping must walk GitHub's OWN patch (local
   // git's diff can differ — rename detection, context), so we fetch the forge's
   // diff only for GitHub. GitLab/Bitbucket anchor by plain line and need none.
+  // Fetched only when needed: a comment anchored by position alone, or pointer or
+  // focus entering this commit's diff (the line composer's prerequisite).
+  const needsPatchWalk =
+    comments.data?.some(
+      (c) => c.path != null && c.line == null && c.position != null,
+    ) ?? false;
+  const [diffIntentHash, setDiffIntentHash] = useState<string | null>(null);
+  const diffIntent = diffIntentHash === renderedHash;
+  const armDiff = () => {
+    if (!diffIntent) setDiffIntentHash(renderedHash);
+  };
+  // Keyboard parity with a resting pointer's move: focus already inside the diff
+  // when the commit changes re-arms the new one, since no focus event fires.
+  const diffRegion = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (diffRegion.current?.contains(document.activeElement))
+      setDiffIntentHash(renderedHash);
+  }, [renderedHash]);
   const remoteDiff = useRemoteCommitDiff(
     repoPath,
-    providerKey === "github" && commentsReady ? renderedHash : null,
+    providerKey === "github" && commentsReady && (needsPatchWalk || diffIntent)
+      ? renderedHash
+      : null,
   );
   const remoteSections = useMemo(
     () => splitUnifiedDiff(remoteDiff.data ?? ""),
@@ -683,8 +703,14 @@ export function CommitDetailView({
           </ScrollArea>
         </DetailRail>
         <main
+          ref={diffRegion}
           aria-busy={Boolean(diffDim)}
           className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
+          // Move as well as enter: a pointer resting here while the commit
+          // changes must still arm the new one before it reaches a line.
+          onPointerEnter={armDiff}
+          onPointerMove={armDiff}
+          onFocusCapture={armDiff}
         >
           {deferredPath ? (
             <DiffSurface

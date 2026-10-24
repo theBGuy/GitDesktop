@@ -220,9 +220,9 @@ export function AddExistingItemsDialog({
   });
 
   // Gated on the panel being the VISIBLE tab as well as the dialog being open:
-  // `<Activity>` defers a hidden panel's effects but NOT its queries, so a dialog
-  // left open while the user works another repo tab would keep re-searching behind
-  // it. The board's own reads take the same gate; this one reads it from the
+  // a hidden `<Activity>` already holds no query observers, so the tab gate is a
+  // backstop against a dialog left open behind another repo tab re-searching.
+  // The board's own reads take the same gate; this one reads it from the
   // panel's context rather than a prop, which holds through the dialog's portal
   // because context follows the React tree, not the DOM.
   //

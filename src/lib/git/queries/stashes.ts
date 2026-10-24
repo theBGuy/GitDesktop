@@ -23,6 +23,7 @@ export function useDiscardAll(repo: string) {
   return useRepoMutation(repo, () => api.gitDiscardAll(repo), {
     // Local working-tree write — never park it offline.
     networkMode: "always",
+    localOnly: true,
   });
 }
 
@@ -34,6 +35,7 @@ export function useDiscardPaths(repo: string) {
     {
       // Local working-tree write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -42,6 +44,7 @@ export function useStashAll(repo: string) {
   return useRepoMutation(repo, () => api.gitStashAll(repo), {
     // Local stash write — never park it offline.
     networkMode: "always",
+    localOnly: true,
   });
 }
 
@@ -52,6 +55,7 @@ export function useStashPaths(repo: string) {
     {
       // Local stash write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -60,6 +64,7 @@ export function useStashPop(repo: string) {
   return useRepoMutation(repo, () => api.gitStashPop(repo), {
     // Local stash write — never park it offline.
     networkMode: "always",
+    localOnly: true,
   });
 }
 
@@ -110,6 +115,7 @@ export function useStashApply(repo: string) {
     {
       // Local stash write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -121,11 +127,12 @@ export function useStashDrop(repo: string) {
     {
       // Local stash write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
 
-/** SHA-verified drop of the autostash backup. Default whole-repo invalidation
+/** SHA-verified drop of the autostash backup. The local-only invalidation
  *  refreshes status and stash-count, which the banner's freshness gate reads. */
 export function useDropStashBySha(repo: string) {
   return useRepoMutation(
@@ -134,6 +141,7 @@ export function useDropStashBySha(repo: string) {
     {
       // Local stash write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -187,7 +195,7 @@ export function useOrphanedStashFileDiff(
 }
 
 /** Restore an orphaned stash to the working tree (`git stash apply <sha>` — never
- *  drops). Default whole-repo invalidation refreshes the status and stash lists. */
+ *  drops). The local-only invalidation refreshes the status and stash lists. */
 export function useRestoreOrphaned(repo: string) {
   return useRepoMutation(
     repo,
@@ -195,6 +203,7 @@ export function useRestoreOrphaned(repo: string) {
     {
       // Local stash write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }

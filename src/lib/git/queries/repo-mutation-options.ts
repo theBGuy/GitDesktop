@@ -1,9 +1,17 @@
 // Import-free on purpose: `scripts/repo-mutation-invalidation.test.mjs` loads this
 // module directly under Node's type stripping, which resolves no path aliases and
 // no extensionless specifiers. Type-only imports are erased, so they may stay.
-import type { QueryClient } from "@tanstack/react-query";
+import type { Query, QueryClient } from "@tanstack/react-query";
 
-type QueryKeys = readonly (readonly unknown[])[];
+/** A prefix-matched key, or a prefix narrowed by a predicate over each match. */
+export type InvalidationEntry =
+  | readonly unknown[]
+  | {
+      queryKey: readonly unknown[];
+      predicate: (query: Query) => boolean;
+    };
+
+type QueryKeys = readonly InvalidationEntry[];
 
 /** A `useRepoMutation` render's invalidation lists; `onMutate` returns the
  *  ones in effect when the write started as its context. */
@@ -12,13 +20,27 @@ export interface RepoMutationKeys {
   invalidateAfter: QueryKeys;
 }
 
-/** Both lists in order, each key once (compared by its JSON form). */
+function filtersOf(entry: InvalidationEntry): {
+  queryKey: readonly unknown[];
+  predicate?: (query: Query) => boolean;
+} {
+  // `Array.isArray` doesn't narrow a readonly array out of a union.
+  return Array.isArray(entry)
+    ? { queryKey: entry }
+    : (entry as Exclude<InvalidationEntry, readonly unknown[]>);
+}
+
+/** Both lists in order, each entry once: keys compare by their JSON form, a filter
+ *  entry by its key's JSON form AND its predicate's identity. */
 function union(captured: QueryKeys, current: QueryKeys): QueryKeys {
-  const seen = new Set<string>();
-  return [...captured, ...current].filter((queryKey) => {
+  const seen = new Map<string, Set<unknown>>();
+  return [...captured, ...current].filter((entry) => {
+    const { queryKey, predicate } = filtersOf(entry);
     const hash = JSON.stringify(queryKey);
-    if (seen.has(hash)) return false;
-    seen.add(hash);
+    const predicates = seen.get(hash) ?? new Set<unknown>();
+    if (predicates.has(predicate)) return false;
+    predicates.add(predicate);
+    seen.set(hash, predicates);
     return true;
   });
 }
@@ -44,7 +66,7 @@ export function repoMutationCallbacks<TData, TArgs>(
 ) {
   const run = (list: QueryKeys) =>
     Promise.all(
-      list.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+      list.map((entry) => queryClient.invalidateQueries(filtersOf(entry))),
     );
   const onMutate = (): RepoMutationKeys => keys;
   const settleKeys = (context: RepoMutationKeys | undefined) =>

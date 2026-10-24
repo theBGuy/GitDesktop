@@ -134,9 +134,9 @@ export function useRemoteListFilter(opts: {
     canGroupByReview && isPulls && prefs.pulls.groupByReview;
   const chosenTeams = isPulls && canFilterTeam ? prefs.pulls.teams : [];
 
-  // `tabActive` mirrors the review-state gate in the PR panel: a hidden <Activity>
-  // panel still fetches, and this is a paginated walk of the viewer's `user/teams`
-  // that a repo invalidation can re-run — so it waits until its panel is on screen.
+  // `tabActive` mirrors the review-state gate in the PR panel: a backstop for a
+  // paginated walk of the viewer's `user/teams`, so it waits until its panel is on
+  // screen (a hidden <Activity> panel already fetches nothing).
   // The prefs and identity reads above stay ungated: those are local, and gating
   // them would strand the panel on default filters until its tab is opened.
   const teamsEnabled = isPulls && canFilterTeam && tabActive;

@@ -18,6 +18,7 @@ import {
   projectItemsRepoKey,
 } from "./board-writes";
 import { repoKeys } from "./core";
+import { isLocalRepoQuery } from "./local-query-filter";
 import { repoMutationCallbacks } from "./repo-mutation-options";
 
 /**
@@ -155,10 +156,10 @@ export function boardWritesOutstanding(
  * Board RE-READS a write asked for and that are still running, per repo — the
  * refetching branch of {@link invalidateProjectBoards}, counted from the call until
  * its refetch settles. The honest "a write's result is still on its way to the
- * screen" signal: the app's window-focus invalidation, a background refetch, a
- * stale mark and a page fetch all bypass this function, so none of them counts.
- * (The focus one holds off only a lens a date-shift chase is reading —
- * `invalidateRepoOnFocus` in projects.ts.)
+ * screen" signal: the app's window-focus refetch, a background refetch, a stale
+ * mark and a page fetch all bypass this function, so none of them counts. (The
+ * focus one holds off a lens a date-shift chase is reading — `invalidateRepoOnFocus`
+ * in projects.ts.)
  * Module-scoped with its own listeners for the reason {@link pendingBoardWrites} is:
  * no query or mutation state carries WHY a fetch started.
  */
@@ -360,22 +361,37 @@ export function invalidateProjectBoards(
     });
 }
 
+/** A repo mutation's awaited invalidation: explicit keys, or `localOnly` — never
+ *  both. */
+type RepoMutationScope =
+  | {
+      /** Query keys to invalidate on completion (prefix-matched). Defaults to the
+       *  whole repo subtree. */
+      invalidate?: readonly (readonly unknown[])[];
+      localOnly?: never;
+    }
+  | {
+      invalidate?: never;
+      /** Invalidate only this repo's LOCAL queries (`isLocalRepoQuery`): no local
+       *  git operation changes forge state, so forge reads keep their own clocks. */
+      localOnly: true;
+    };
+
 /**
  * A mutation that invalidates repo queries on completion. Defaults to the whole repo
  * subtree (correct but broad); pass `opts.invalidate` to narrow it for hot mutations
- * (each key is prefix-matched). Reserve the whole-subtree default for ops that touch
- * history or branch topology (checkout/pull/reset/merge); a hot history op (commit)
- * splits instead — narrow awaited `invalidate` plus deferred `opts.invalidateAfter`.
- * Offline, a forge write here parks until reconnect (see `networkMode`); the offline
- * policy for which of them may park lives in `@/lib/offline-writes`.
+ * (each key is prefix-matched). Reserve the whole-subtree default for ops that rewrite
+ * history or topology (reset/merge/rebase) and for forge writes; a git-only op that
+ * changes no forge state (fetch/pull/push/checkout/stash/discard) passes `localOnly`,
+ * and a hot history op (commit) splits — narrow awaited `invalidate` plus deferred
+ * `opts.invalidateAfter`. Offline, a forge write here parks until reconnect (see
+ * `networkMode`); the offline policy for which of them may park lives in
+ * `@/lib/offline-writes`.
  */
 export function useRepoMutation<TArgs, TData>(
   repo: string,
   mutationFn: (args: TArgs) => Promise<TData>,
-  opts: {
-    /** Query keys to invalidate on completion (prefix-matched). Defaults to the
-     *  whole repo subtree. */
-    invalidate?: readonly (readonly unknown[])[];
+  opts: RepoMutationScope & {
     /** Keys invalidated fire-and-forget on top of `invalidate` — NEVER awaited, so
      *  callers can refresh heavy/slow families without holding the mutation's
      *  isPending. Sequenced after the awaited set only under `refetchBeforeSuccess`;
@@ -429,7 +445,9 @@ export function useRepoMutation<TArgs, TData>(
     ...repoMutationCallbacks(
       queryClient,
       {
-        invalidate: opts.invalidate ?? [repoKeys.all(repo)],
+        invalidate: opts.localOnly
+          ? [{ queryKey: repoKeys.all(repo), predicate: isLocalRepoQuery }]
+          : (opts.invalidate ?? [repoKeys.all(repo)]),
         invalidateAfter: opts.invalidateAfter ?? [],
       },
       opts.refetchBeforeSuccess ?? false,

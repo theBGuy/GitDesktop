@@ -40,6 +40,7 @@ export function useCheckoutCommit(repo: string) {
     {
       // Local history write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }

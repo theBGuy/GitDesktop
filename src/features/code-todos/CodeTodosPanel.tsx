@@ -79,9 +79,9 @@ export function CodeTodosPanel({
   );
   const noMarkers = markers.length === 0;
 
-  // Heavy git-grep scan; gate on the tab being active (<Activity> keeps this
-  // mounted but doesn't defer fetches — same as InsightsPanel) AND on at least
-  // one marker being selected (an empty vec errors server-side).
+  // Heavy git-grep scan; the tab-active gate is a backstop (a hidden <Activity>
+  // already holds no query observers, same as InsightsPanel), and at least one
+  // marker must be selected (an empty vec errors server-side).
   const scan = useTodoScan(
     repoPath,
     markers,

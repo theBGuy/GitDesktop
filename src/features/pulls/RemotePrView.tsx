@@ -779,8 +779,8 @@ export function RemotePrView({
   const unrequestChangesPr = useUnrequestChangesPr(repoPath);
   // Auto-merge state (GitLab-only): a null number disables the read (GitHub / closed
   // MRs) and stops its refetchInterval — it polls so the view notices the pipeline
-  // completing and the auto-merge firing. The repoTab gate is load-bearing: an
-  // <Activity>-hidden subtree still renders; staleTime (5s) refetches on return.
+  // completing and the auto-merge firing. The repoTab gate is a backstop (a hidden
+  // <Activity> subtree already fetches nothing); staleTime (5s) refetches on return.
   const mergeState = useGlMrMergeState(
     repoPath,
     repoTab === "pulls" && canAutoMerge && details.data?.state === "OPEN"
@@ -791,8 +791,8 @@ export function RemotePrView({
   const cancelAutoMerge = useGlCancelAutoMerge(repoPath);
   const isOpenPr = details.data?.state === "OPEN";
   // Mergeability against the base — the conflict banner's server truth. Same repoTab
-  // gate as the auto-merge poll above and for the same reason: it polls, and an
-  // <Activity>-hidden subtree still fetches. Non-open PRs have no answer to give.
+  // gate as the auto-merge poll above and for the same reason: it polls (a hidden
+  // <Activity> subtree already fetches nothing). Non-open PRs have no answer.
   const mergeability = usePrMergeability(
     repoPath,
     shownNumber,
@@ -903,8 +903,8 @@ export function RemotePrView({
   // Activity-timeline events (force-pushes, labels, state changes, review requests,
   // approvals) interleaved into the Conversation feed; provider-neutral via the
   // backend's `forge_pr_timeline`. Fetch only while Conversation is showing AND a
-  // provider resolved — the <Activity>-hidden subtree still renders, so the
-  // composite gate is load-bearing.
+  // provider resolved (the section gate is a backstop: a hidden <Activity> subtree
+  // already fetches nothing).
   const timeline = usePrTimeline(
     repoPath,
     shownNumber,

@@ -1136,9 +1136,9 @@ function DateSourceRows({
  * single-select or iteration fields, with one write — a card's context menu moves it
  * between the columns of that grouping.
  *
- * Every read gates on `active` as well as the provider — `<Activity>` defers a
- * hidden panel's effects but NOT its queries, so a board left on another tab
- * would otherwise keep paying for owner-wide project reads. The layout choices
+ * Every read gates on `active` as well as the provider, a backstop: a hidden
+ * `<Activity>` already holds no query observers, so a board left on another tab
+ * pays nothing for owner-wide project reads. The layout choices
  * stay unwritten: the switcher and the group-by are transient component state on
  * purpose, so a board the user looked at once doesn't become a stored preference.
  */

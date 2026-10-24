@@ -89,8 +89,8 @@ import {
   pendingProjectWritesFor,
   projectItemsRepoKey,
   refetchOnMountUnlessHeld,
+  refetchRepoQueriesOnFocus,
   releaseLens,
-  repoFocusInvalidations,
   statusWriteKind,
 } from "./board-writes";
 import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
@@ -1001,9 +1001,9 @@ export function useProjectItems(
     retry: false,
     // No mount refetch (a remount, or an Activity re-show) of a lens a date-shift
     // chase is reading, for the reason {@link invalidateRepoOnFocus} holds its
-    // focus read. Unlike `refetchOnWindowFocus`, which the app's focus bridge
-    // bypasses, query-core consults this on every observer mount; the chase's own
-    // settle brings a lens mounted during the hold current. Named residual: a view
+    // focus read. The focus bridge never consults `refetchOnWindowFocus`, but
+    // query-core consults this on every observer mount; the chase's own settle
+    // brings a lens mounted during the hold current. Named residual: a view
     // switched away and back mid-chase refetches a stale lens anyway — query-core's
     // key-change fetch reads staleness alone.
     refetchOnMount: refetchOnMountUnlessHeld(shiftChasedLenses),
@@ -2091,13 +2091,15 @@ const shiftingItems = new Map<
 const shiftChasedLenses = new Map<string, number>();
 
 /**
- * The app's window-focus invalidation (the native-focus bridge in App.tsx), which
- * query-core's own `refetchOnWindowFocus` never sees. Every repo query is
- * invalidated as before, except that a lens a shift chase is reading is only
- * marked stale: its chase compares the cache against what it last sent, so a read
- * landing mid-chase would have it write the server's older dates back. The chase's
- * own settle re-reads that lens ({@link useShiftItemDates}). A mount of that lens
- * is held the same way, through {@link useProjectItems}' `refetchOnMount`.
+ * The app's window-focus refresh (the native-focus bridge in App.tsx), which
+ * query-core's own `refetchOnWindowFocus` never sees. It refetches only ACTIVE repo
+ * queries past their own staleTime or in error, and invalidates nothing else, so an
+ * inactive query keeps its clock and the next show doesn't replay it. A lens a shift
+ * chase is reading is only marked stale: its chase compares the cache against what
+ * it last sent, so a read landing mid-chase would have it write the server's older
+ * dates back. The chase's own settle re-reads that lens ({@link useShiftItemDates});
+ * a mount of it is held the same way, through {@link useProjectItems}'
+ * `refetchOnMount`.
  *
  * Repositions need no hold: their chase steers by
  * {@link desiredRepositionTargets}, never a lens's cache. Focus reads still land
@@ -2105,8 +2107,7 @@ const shiftChasedLenses = new Map<string, number>();
  * off.
  */
 export function invalidateRepoOnFocus(queryClient: QueryClient): void {
-  for (const filters of repoFocusInvalidations(shiftChasedLenses))
-    void queryClient.invalidateQueries(filters);
+  refetchRepoQueriesOnFocus(queryClient, shiftChasedLenses);
 }
 
 /** How many FOLLOW-UP writes one shift burst may spend catching up with the

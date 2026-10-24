@@ -54,6 +54,7 @@ export function useCheckoutBranch(repo: string) {
     {
       // Local branch write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -66,6 +67,7 @@ export function useCheckoutRemoteBranch(repo: string) {
     {
       // Local branch write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
