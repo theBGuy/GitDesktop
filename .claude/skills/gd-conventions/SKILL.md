@@ -664,9 +664,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   classified commands); any other networked read under "always" (a `fetch…`
   helper, a raw `fetch()`) can't be listed as-is, since an entry matching no
   recognized read fails as stale. Route its callee through a recognized name
-  first (a `NETWORK_CALLEES` entry, or a `forge`/`gh`/`jira` name), then
-  list it in `NETWORKED_ALWAYS` (with `refetchOnReconnect`) and, for a
-  repo-rooted key, in `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push, merge
+  first (a `NETWORK_CALLEES` entry or a `forge`/`gh`/`jira` name; a misfiled
+  command moves to `NETWORK_COMMANDS` or `MIXED_COMMANDS`), then list it in
+  `NETWORKED_ALWAYS`, state `refetchOnReconnect` on the query itself, and add
+  a repo-rooted key to `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push, merge
   and rebase keep the whole-repo default, since a push moves PR heads and
   starts runs; hot working-tree ops keep their narrow `invalidate`. The
   window-focus pass refetches only active queries that are stale by their

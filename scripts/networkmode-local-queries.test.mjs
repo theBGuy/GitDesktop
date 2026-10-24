@@ -25,9 +25,10 @@
 // networked helper named in a local family goes unseen, and NETWORKED_ALWAYS
 // can't hold such a read (an entry matching no recognized read fails as stale).
 // Route its callee through a name the scan recognizes first (a NETWORK_CALLEES
-// entry, or a forge/gh/jira name), then list it. This rule's blind spot mirrors
-// the first's: a spread placed AFTER a stated `refetchOnReconnect` reads as
-// present here but can override it at runtime.
+// entry or a forge/gh/jira name; a misfiled command moves to NETWORK_COMMANDS or
+// MIXED_COMMANDS), then list it. This rule's blind spot mirrors the first's: a
+// spread placed AFTER a stated `refetchOnReconnect` reads as present here but can
+// override it at runtime.
 //
 // Runs in CI's installless `guards` job, so node built-ins ONLY.
 import assert from "node:assert/strict";

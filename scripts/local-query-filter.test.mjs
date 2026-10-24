@@ -29,7 +29,7 @@ test("the override set is exactly the ratchet's repo-rooted networked-always ros
   // families, the classified commands) and doesn't list. Any other networked read
   // under "always" is routed through a name the scan recognizes before it can be
   // listed there. Every repo-rooted entry must land here too, or a fetch would
-  // treat that forge read as local.
+  // treat that networked read as local.
   const source = readFileSync(
     new URL("./networkmode-local-queries.test.mjs", import.meta.url),
     "utf8",
