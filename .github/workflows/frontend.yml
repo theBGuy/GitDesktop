@@ -77,8 +77,10 @@ jobs:
       # server-renders @git-diff-view/react's DiffView through react-dom/server,
       # repo-mutation-invalidation retargets a real react-query MutationObserver,
       # started-mutation drives one through the app's mutation helper, which
-      # imports react plus @tanstack/react-query, and the palette-dialog suite
-      # merges the palette's classes over the dialog's through tailwind-merge.
+      # imports react plus @tanstack/react-query, the palette-dialog suite
+      # merges the palette's classes over the dialog's through tailwind-merge,
+      # and focus-refetch drives the window-focus pass over a real react-query
+      # cache.
       # check-enforced-node-suites.mjs fails any suite reading
       # process.env.GD_EXPECT_DEPS that this list leaves out.
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an
@@ -86,4 +88,4 @@ jobs:
       - name: Node suites needing node_modules (enforced)
         env:
           GD_EXPECT_DEPS: "1"
-        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs"
+        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs" "scripts/focus-refetch.test.mjs"

@@ -16,12 +16,19 @@
 // failing fast instead of parking, sanctioned only where the queryFn absorbs that
 // failure (CreatePrDialog's upstream fetch).
 //
-// Second rule: an "always" object whose queryFn crosses the network (NETWORK_CALLEES,
+// Second rule: an "always" object whose queryFn crosses the network in a way this
+// scan recognizes (NETWORK_CALLEES, the NETWORK_CALLEE_FAMILIES,
 // NETWORK_COMMANDS, MIXED_COMMANDS) must be listed in NETWORKED_ALWAYS and state
-// `refetchOnReconnect` at its own top level. query-core defaults that option to false
-// under "always", so an unset one silently loses recovery when the connection returns.
-// Its blind spot mirrors the first rule's: a spread placed AFTER a stated
-// `refetchOnReconnect` reads as present here but can override it at runtime.
+// `refetchOnReconnect` at its own top level. query-core defaults that option to
+// false under "always", so an unset one silently loses recovery when the
+// connection returns. Not exhaustive: a `fetch…` helper, a raw `fetch()`, or a
+// networked helper named in a local family goes unseen, and NETWORKED_ALWAYS
+// can't hold such a read (an entry matching no recognized read fails as stale).
+// Route its callee through a name the scan recognizes first (a NETWORK_CALLEES
+// entry or a forge/gh/jira name; a misfiled command moves to NETWORK_COMMANDS or
+// MIXED_COMMANDS), then list it. This rule's blind spot mirrors the first's: a
+// spread placed AFTER a stated `refetchOnReconnect` reads as present here but can
+// override it at runtime.
 //
 // Runs in CI's installless `guards` job, so node built-ins ONLY.
 import assert from "node:assert/strict";
@@ -77,6 +84,12 @@ const NETWORK_CALLEES = [
   "forgeStatus",
 ];
 
+/** camelCase name families that cross the network: the `forgeX`, `ghX` and `jiraX`
+ *  wrappers. Matched like LOCAL_CALLEE_FAMILIES (`ghRunList`, never `ghost…` or
+ *  `forget…`), and a LOCAL_CALLEES name (`forgeBbAccount`, `jiraAccount`) is never
+ *  one of them. */
+const NETWORK_CALLEE_FAMILIES = ["forge", "gh", "jira"];
+
 /** Tauri commands a queryFn may `invoke` directly, classified. An unlisted command
  *  fails the guard: a raw invoke carries no name for the families to match. A MIXED
  *  command reads local state AND crosses the network, so both rules apply to it. */
@@ -87,8 +100,8 @@ const MIXED_COMMANDS = ["system_health"];
 
 /** The sanctioned networked reads under "always", each absorbing its transport
  *  failure rather than parking offline. Matched like EXEMPT; an entry matching no
- *  networked "always" object fails, and so does a networked "always" object missing
- *  from this list. */
+ *  networked "always" object this scan recognizes fails, and so does a recognized
+ *  one missing from this list. */
 const NETWORKED_ALWAYS = [
   {
     file: "src/features/pulls/CreatePrDialog.tsx",
@@ -141,8 +154,9 @@ const LOCAL_CALL_RE = new RegExp(
   String.raw`(?:\bapi\.|(?<![\w$.]))${CALLEE_NAME}(?=\s*(?:[(<]|$))`,
   "g",
 );
+const NETWORK_NAME = String.raw`(?:(?:${NETWORK_CALLEES.map(escapeRe).join("|")})(?![\w$])|(?!(?:${LOCAL_CALLEES.map(escapeRe).join("|")})(?![\w$]))(?:${NETWORK_CALLEE_FAMILIES.join("|")})(?=[A-Z])[\w$]*)`;
 const NETWORK_CALL_RE = new RegExp(
-  String.raw`(?:\bapi\.|(?<![\w$.]))(?:${NETWORK_CALLEES.map(escapeRe).join("|")})(?![\w$])(?=\s*(?:[(<]|$))`,
+  String.raw`(?:\bapi\.|(?<![\w$.]))${NETWORK_NAME}(?=\s*(?:[(<]|$))`,
   "g",
 );
 const NAMED_LOCAL_RE = new RegExp(`^${CALLEE_NAME}$`);
@@ -496,6 +510,41 @@ test('a networked read under "always" is seen, with its refetchOnReconnect', () 
     );
     assert.equal(r.networked.length, 1, `"${command}" no longer counts`);
   }
+  for (const family of NETWORK_CALLEE_FAMILIES) {
+    const r = scanSource(
+      `useQuery({ queryFn: () => ${family}Thing(r), networkMode: "always" });`,
+      "f.ts",
+    );
+    assert.equal(r.networked.length, 1, `the ${family}X family went inert`);
+  }
+  for (const [name, call] of [
+    ["a forge list read", "api.forgePrList(r)"],
+    ["a gh read", "ghRunList(r)"],
+    ["a jira list read", "api.jiraIssueList(site, project)"],
+  ]) {
+    const r = scanSource(
+      `useQuery({ queryFn: () => ${call}, networkMode: "always" });`,
+      "f.ts",
+    );
+    assert.equal(r.networked.length, 1, `${name} under "always" went unseen`);
+  }
+  // A local name inside a networked family stays local.
+  for (const callee of LOCAL_CALLEES.filter((c) =>
+    NETWORK_CALLEE_FAMILIES.some((f) => new RegExp(`^${f}[A-Z]`).test(c)),
+  )) {
+    const r = scanSource(
+      `useQuery({ queryFn: () => api.${callee}(r), networkMode: "always" });`,
+      "f.ts",
+    );
+    assert.deepEqual(r.networked, [], `${callee} read as networked`);
+  }
+  for (const callee of ["forgeBbAccount", "forgeMyWorkSources"]) {
+    const r = scanSource(
+      `useQuery({ queryFn: () => api.${callee}(r), networkMode: "always" });`,
+      "f.ts",
+    );
+    assert.deepEqual(r.networked, [], `${callee} read as networked`);
+  }
 
   const stated = scanSource(
     'useQuery({ queryFn: () => api.gitFetchRemote(r, "u"), networkMode: "always", refetchOnReconnect: true });',
@@ -563,7 +612,7 @@ test('every local query in src/ sets networkMode: "always", and every networked 
     ambiguities.push(...r.ambiguities);
   }
   t.diagnostic(
-    `${files.length} files, ${keys} queryFn keys, ${sites} local sites`,
+    `${files.length} files, ${keys} queryFn keys, ${sites} local sites, ${networked.length} networked "always" reads`,
   );
   assert.ok(
     keys >= QUERYFN_KEY_FLOOR,

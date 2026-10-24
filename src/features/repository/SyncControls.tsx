@@ -77,7 +77,10 @@ import {
   originNoteFor,
   refuseIfSwitched,
 } from "@/lib/stores/notifications";
-import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
+import {
+  promotionBlocksCheckout,
+  useWorktreeRemovals,
+} from "@/lib/stores/worktree-removal";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
@@ -118,6 +121,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const remotes = useRemotes(repoPath);
   const settings = useSettings();
   const fetchRemote = useFetchRemote(repoPath);
+  // Auto-fetch runs on its own instance, so it never holds the manual controls:
+  // a push pressed during one queues behind it on the backend's network lock.
+  const autoFetch = useFetchRemote(repoPath);
+  const removals = useWorktreeRemovals(repoPath);
   const pull = usePull(repoPath);
   const push = usePush(repoPath);
   const queryClient = useQueryClient();
@@ -347,21 +354,21 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // a push through `busy` without a word.
     if (!silent && (refuseWhileOffline() || refuseWhilePushing())) return;
     try {
-      await fetchRemote.mutateAsync(undefined);
+      await (silent ? autoFetch : fetchRemote).mutateAsync(undefined);
       markFetched(repoPath);
     } catch (e) {
       if (!silent) onError(e);
     }
   }
 
-  // Opt-out periodic background fetch (Settings → General). Shares the fetch
-  // mutation above, so the Fetch spinner covers it too.
+  // Opt-out periodic background fetch (Settings → General), on its own mutation;
+  // the Fetch spinner still covers it. Ticks skip while a worktree removal runs.
   useAutoFetch({
     repoPath,
     enabled: settings.data?.autoFetch ?? false,
     intervalMs: Number(settings.data?.autoFetchInterval ?? "10") * 60_000,
     hasOrigin,
-    busy,
+    busy: busy || autoFetch.isPending || removals.length > 0,
     fetch: () => void doFetch(true),
   });
 
@@ -895,7 +902,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         >
           {/* Every spinner here takes the sm icon box (size-3.5): the Spinner's
               own size-4 would shift the cluster 2px each time a sync starts. */}
-          {fetchRemote.isPending ? (
+          {fetchRemote.isPending || autoFetch.isPending ? (
             <Spinner data-icon="inline-start" className="size-3.5" />
           ) : (
             <ArrowsClockwiseIcon data-icon="inline-start" />

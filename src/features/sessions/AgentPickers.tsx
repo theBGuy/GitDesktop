@@ -72,8 +72,8 @@ export function ModelPicker({
   // Listing a CLI's catalog spawns it, so the probe waits for intent to pick a
   // model — sticky, so the list stays put for the rest of the picker's life.
   const [wanted, setWanted] = useState(false);
-  // Agent-tab-scoped by design: every call site renders under the agent tab's
-  // <Activity>, and a hidden subtree still fetches.
+  // Agent-tab-scoped by design, a backstop: every call site renders under the agent
+  // tab's <Activity>, whose hidden subtree already fetches nothing.
   const agentTabShowing = useUiStore((s) => s.repoTab === "agent");
   const available = useAgentModels(agent, {
     enabled: wanted && agentTabShowing,

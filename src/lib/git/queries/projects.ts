@@ -89,8 +89,8 @@ import {
   pendingProjectWritesFor,
   projectItemsRepoKey,
   refetchOnMountUnlessHeld,
+  refetchRepoQueriesOnFocus,
   releaseLens,
-  repoFocusInvalidations,
   statusWriteKind,
 } from "./board-writes";
 import { keepPreviousDataForKeyAxes, repoKeys } from "./core";
@@ -1000,10 +1000,10 @@ export function useProjectItems(
     staleTime: 60_000,
     retry: false,
     // No mount refetch (a remount, or an Activity re-show) of a lens a date-shift
-    // chase is reading, for the reason {@link invalidateRepoOnFocus} holds its
-    // focus read. Unlike `refetchOnWindowFocus`, which the app's focus bridge
-    // bypasses, query-core consults this on every observer mount; the chase's own
-    // settle brings a lens mounted during the hold current. Named residual: a view
+    // chase is reading, for the reason {@link refreshRepoOnFocus} holds its
+    // focus read. The focus bridge never consults `refetchOnWindowFocus`, but
+    // query-core consults this on every observer mount; the chase's own settle
+    // brings a lens mounted during the hold current. Named residual: a view
     // switched away and back mid-chase refetches a stale lens anyway — query-core's
     // key-change fetch reads staleness alone.
     refetchOnMount: refetchOnMountUnlessHeld(shiftChasedLenses),
@@ -1017,13 +1017,13 @@ export function useProjectItems(
 }
 
 /**
- * Whether a board re-read that a WRITE asked for is still running on this repo —
- * the tail between a write settling and the board repainting with what GitHub now
- * holds. Counted at the one place a write asks for a re-read
- * ({@link invalidateProjectBoards}), not off query state: `isInvalidated` is also
- * set by the app's window-focus invalidation, so a mere focus would read as a
- * write's tail. A write that settles through its own payload (a reposition, a
- * restore) asks for no re-read and so has no tail.
+ * Whether a board re-read that a WRITE asked for is still running on this
+ * repo — the tail between a write settling and the board repainting with what
+ * GitHub now holds. Counted at the one place a write asks for a re-read
+ * ({@link invalidateProjectBoards}), not off query state: `isInvalidated` is
+ * also set by the window-focus pass's stale mark on a chased lens, so a mere
+ * focus would read as a write's tail. A write that settles through its own
+ * payload (a reposition, a restore) asks for no re-read and so has no tail.
  */
 export function useBoardRereading(repo: string): boolean {
   return useSyncExternalStore(
@@ -2091,22 +2091,23 @@ const shiftingItems = new Map<
 const shiftChasedLenses = new Map<string, number>();
 
 /**
- * The app's window-focus invalidation (the native-focus bridge in App.tsx), which
- * query-core's own `refetchOnWindowFocus` never sees. Every repo query is
- * invalidated as before, except that a lens a shift chase is reading is only
- * marked stale: its chase compares the cache against what it last sent, so a read
- * landing mid-chase would have it write the server's older dates back. The chase's
- * own settle re-reads that lens ({@link useShiftItemDates}). A mount of that lens
- * is held the same way, through {@link useProjectItems}' `refetchOnMount`.
+ * The app's window-focus refresh (the native-focus bridge in App.tsx), which
+ * query-core's own `refetchOnWindowFocus` never sees. It refetches only ACTIVE repo
+ * queries past their own staleTime or in error, and invalidates nothing else, so an
+ * inactive query keeps its clock and the next show doesn't replay it. A lens a shift
+ * chase is reading is only marked stale: its chase compares the cache against what
+ * it last sent, so a read landing mid-chase would have it write the server's older
+ * dates back. The chase's own settle re-reads that lens ({@link useShiftItemDates});
+ * a mount of it is held the same way, through {@link useProjectItems}'
+ * `refetchOnMount`.
  *
  * Repositions need no hold: their chase steers by
  * {@link desiredRepositionTargets}, never a lens's cache. Focus reads still land
  * on their board, which {@link holdBoardsForVerdict} names as a read it can't hold
  * off.
  */
-export function invalidateRepoOnFocus(queryClient: QueryClient): void {
-  for (const filters of repoFocusInvalidations(shiftChasedLenses))
-    void queryClient.invalidateQueries(filters);
+export function refreshRepoOnFocus(queryClient: QueryClient): void {
+  refetchRepoQueriesOnFocus(queryClient, shiftChasedLenses);
 }
 
 /** How many FOLLOW-UP writes one shift burst may spend catching up with the
@@ -2201,7 +2202,7 @@ function shiftUpdates(
  * CALL-TIME read, never a render closure) and writes again until the two agree,
  * so a held key converges on where the bar is drawn; neither a window-focus read
  * nor a mount refetch of that lens runs during the burst
- * ({@link invalidateRepoOnFocus}, {@link useProjectItems}). The write target rides
+ * ({@link refreshRepoOnFocus}, {@link useProjectItems}). The write target rides
  * the variables for the family's reason.
  *
  * The rollback is one card's touched fields wide. The settle is the field

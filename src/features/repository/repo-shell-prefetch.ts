@@ -70,23 +70,25 @@ export function warmRepoShell(
   // Only the personal rules hold on an invalidated read. They are stored by repo
   // identity, so a save from another worktree reaches this checkout as an
   // invalidation alone, and the cached rules would paint a CommitBox notice that
-  // flips a moment later. Every `["repo", …]` key is invalidated on each window
-  // focus, so holding on those would cost every warm switch the budget.
+  // flips a moment later. A whole-repo mutation marks every `["repo", …]` key
+  // invalidated, inactive ones included, so holding on those would cost the
+  // budget on every warm switch after one.
   warm(branchRulesOptions(root), { holdInvalidated: true });
   warm(sharedBranchRulesOptions(root));
   warm(jiraLinkOptions(root));
   // With the hook's staleTime, so a switch back within 30 s of the last read,
-  // with no window focus in between (each focus invalidates every `["repo", …]`
-  // key, forcing a refetch), reuses the cached list instead of respawning `git
-  // worktree list`. Still held when cold: the header's switcher reads it ungated
-  // for the worktree subtitle the moment the switch lands.
+  // with no whole-repo or local-only git invalidation in between (a fetch, pull or
+  // checkout marks this local key too, forcing a refetch), reuses the cached list
+  // instead of respawning `git worktree list`. Still held when cold: the header's
+  // switcher reads it ungated for the worktree subtitle the moment the switch lands.
   warm({
     ...userWorktreesOptions(root),
     staleTime: USER_WORKTREES_STALE_TIME,
   });
-  // Warmed but never held: nothing on the first paint reads it, and its cost
-  // scales with the remote-ref count, so holding would spend the budget on a
-  // closed menu. The cache lets the branch menu open with its Remote group.
+  // Warmed but never held: its cost scales with the remote-ref count, and its one
+  // first-paint reader (the header's CI run gate, for a branch with no upstream)
+  // only waits on it to show the badge. The cache lets the branch menu open with
+  // its Remote group.
   warm(
     {
       ...remoteBranchesOptions(root),

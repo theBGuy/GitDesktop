@@ -417,8 +417,8 @@ export function SessionComposer({
   const isContainer = effectiveIsolation === "container";
   // Container readiness, probed lazily and shared with Settings → AI (same query
   // key, so one Docker/Podman check serves both). Only while a new session is
-  // actually set to run in a container AND the Agent tab is showing — an
-  // <Activity>-hidden subtree still fetches.
+  // actually set to run in a container AND the Agent tab is showing (a backstop:
+  // an <Activity>-hidden subtree already fetches nothing).
   const agentTabShowing = useUiStore((s) => s.repoTab === "agent");
   const openSettings = useUiStore((s) => s.openSettings);
   const containerStatus = useContainerStatus({

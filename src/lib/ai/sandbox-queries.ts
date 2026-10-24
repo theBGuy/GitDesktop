@@ -10,7 +10,7 @@ import { detectContainerSandbox } from "./sandbox";
  *
  * `enabled` is the caller's gate: Settings probes only while the container option
  * is on, the composer only while a NEW session is actually set to run in one (and
- * its tab is showing — an `<Activity>`-hidden subtree still fetches).
+ * its tab is showing — a backstop: an `<Activity>`-hidden subtree fetches nothing).
  *
  * While the answer is "not usable" it re-probes on an interval, so starting the
  * Docker/Podman daemon clears the warning (and the composer's Start block) on its

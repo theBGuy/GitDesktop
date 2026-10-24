@@ -40,8 +40,8 @@ export function InsightsPanel({
   repoPath: string;
   active: boolean;
 }) {
-  // useRepoStats/useBranchStats are heavy scans; gate them on the Insights tab
-  // being visible (<Activity> keeps this mounted but doesn't defer fetches).
+  // useRepoStats/useBranchStats are heavy scans; the visible-tab gate is a
+  // backstop (a hidden <Activity> already holds no query observers).
   const stats = useRepoStats(repoPath, active);
   const status = useRepoStatus(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);

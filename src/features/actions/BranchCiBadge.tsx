@@ -1,30 +1,33 @@
-import {
-  forgeFeatureReady,
-  useForgeStatus,
-  useRemoteBranches,
-  useRepoStatus,
-} from "@/lib/git/queries";
-import { useLatestRun } from "@/lib/github/actions";
+import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
+import { latestRunMode, useLatestRun } from "@/lib/github/actions";
 import { useUiStore } from "@/lib/stores/ui";
 import { StatusIcon, statusLabel } from "./status";
+import {
+  useBranchOnRemote,
+  useRunNotifyBranch,
+  useRunNotifyEnabled,
+} from "./useRunNotifications";
 
 /**
  * Glanceable CI status for the current branch's latest run, in the repo header.
  * Renders no badge until gh is ready and a run exists; clicking jumps to the
  * Actions tab with that run selected. While this branch's answer loads, a repo
  * whose last check found runs keeps an empty icon-wide slot, so the badge's
- * arrival doesn't squeeze the branch name.
+ * arrival doesn't squeeze the branch name. While run notifications are on it
+ * renders from the notifier's poll and polls nothing itself.
  */
 export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
   // Renders for any provider with CI read implemented — GitHub Actions or GitLab
   // pipelines; useLatestRun routes through the provider-neutral forge_ci_run_list.
   const ciReady = forgeFeatureReady(gh.data, "ci");
-  const status = useRepoStatus(repoPath);
-  const branch = status.data?.branch.name ?? null;
-  const latest = useLatestRun(repoPath, ciReady, branch);
-  // Disabled observer: reads the list the shell warm-up cached, never fetches.
-  const remoteBranches = useRemoteBranches(repoPath, false);
+  const branch = useRunNotifyBranch(repoPath);
+  // The remote list is only worth reading while CI is ready or still resolving:
+  // the reserve below gates on the same two arms.
+  const onRemote = useBranchOnRemote(repoPath, branch, ciReady || gh.isPending);
+  const notifyEnabled = useRunNotifyEnabled(repoPath);
+  const mode = latestRunMode(notifyEnabled);
+  const latest = useLatestRun(repoPath, ciReady && onRemote, branch, mode);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const selectRun = useUiStore((s) => s.selectRun);
 
@@ -34,9 +37,6 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   // a same-named branch in the cached remote list), while the fetch will still
   // run (forge ready or resolving); it holds while the read is parked offline.
   if (latest.isPlaceholderData) {
-    const onRemote =
-      Boolean(status.data?.branch.upstream) ||
-      (remoteBranches.data?.some((b) => b.name === branch) ?? false);
     const reserve =
       latest.data != null &&
       branch !== null &&

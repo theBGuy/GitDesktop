@@ -38,10 +38,9 @@ export function useLastFetchedAt(repo: string): number | undefined {
  * right away without burning network while you're away.
  *
  * Every attempt is gated on: enabled + an `origin` remote + `navigator.onLine`
- * + no sync op already in flight (`busy` — fetch/pull/push), so a background
- * fetch never races a user-initiated pull or push on the same remote refs. It
- * shares the caller's fetch mutation, so the existing Fetch-button spinner and
- * busy state cover auto-fetches too.
+ * + not `busy` (the caller's own hold: its sync ops and its auto-fetch in flight),
+ * so a background fetch never starts over a user-initiated pull or push. The
+ * caller runs it on its own mutation, so it never holds the manual controls.
  */
 export function useAutoFetch(opts: {
   repoPath: string;

@@ -3,7 +3,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { keepPreviousDataForRepo, repoKeys } from "@/lib/git/queries";
+import { keepPreviousDataForKeyAxes, repoKeys } from "@/lib/git/queries";
 import {
   type CancelRunVars,
   type DispatchVars,
@@ -17,6 +17,7 @@ import type { RemoteLens } from "@/lib/git/types";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
 import { invoke } from "@/lib/tauri/invoke";
+import { isRunActive } from "./run-status";
 
 // ── Types (mirror the Rust structs in github/actions.rs) ─────────────────────
 
@@ -101,16 +102,7 @@ export interface CiRunPage {
 
 // ── Status helpers ───────────────────────────────────────────────────────────
 
-const ACTIVE_STATUSES = new Set([
-  "queued",
-  "in_progress",
-  "waiting",
-  "requested",
-  "pending",
-]);
-
-/** A run/job still executing (so the UI keeps polling and offers Cancel). */
-export const isRunActive = (status: string) => ACTIVE_STATUSES.has(status);
+export { isRunActive } from "./run-status";
 
 // ── API wrappers ─────────────────────────────────────────────────────────────
 //
@@ -343,24 +335,71 @@ export function latestRunOptions(repo: string, branch: string | null) {
   };
 }
 
+/** A branch's recent runs, the run-notification poll's read. The ONE spelling of
+ *  this query: the notifier owns its interval, and the header badge reads the same
+ *  entry through `select` while notifications are on. Cached as a shell read: the
+ *  notifier never primes from a snapshot fetched before it enabled. */
+export function runNotifyOptions(repo: string, branch: string | null) {
+  return {
+    queryKey: ["repo", repo, "actions", "notify", branch ?? ""] as const,
+    queryFn: () => forgeCiRunList(repo, 20, branch ?? undefined),
+    staleTime: 40_000,
+    retry: false,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** Which read the header badge rides: the notifier's shared list ("notify") or
+ *  its own limit-1 read ("latest", while run notifications are off or muted). */
+export type LatestRunMode = "notify" | "latest";
+
+/** The badge's mode from whether run notifications deliver: undefined while that
+ *  is unresolved, so the badge waits instead of flipping modes on open. */
+export function latestRunMode(
+  notifyEnabled: boolean | undefined,
+): LatestRunMode | undefined {
+  if (notifyEnabled === undefined) return undefined;
+  return notifyEnabled ? "notify" : "latest";
+}
+
+type BadgeRunData = WorkflowRun[] | WorkflowRun | null;
+
+/** The list's newest run, or the limit-1 read's run as it is. */
+const firstRun = (data: BadgeRunData): WorkflowRun | null =>
+  Array.isArray(data) ? (data[0] ?? null) : data;
+
 /**
- * The single most recent run on a branch, for the header CI badge. Polls fast
- * while it's active, slowly otherwise so a freshly-pushed run still shows up.
+ * The single most recent run on a branch, for the header CI badge. In "notify"
+ * mode it reads the notifier's entry and polls nothing itself; in "latest" mode it
+ * polls fast while the run is active, slowly otherwise so a freshly-pushed run
+ * still shows up. An undefined mode (its inputs unresolved) stays disabled, so a
+ * muted repo never flips modes on open.
  */
 export function useLatestRun(
   repo: string,
   enabled: boolean,
   branch: string | null,
+  mode: LatestRunMode | undefined,
 ) {
-  return useQuery({
-    ...latestRunOptions(repo, branch),
-    enabled: enabled && Boolean(branch),
+  const notify = mode === "notify";
+  return useQuery<BadgeRunData, Error, WorkflowRun | null, readonly unknown[]>({
+    ...(notify
+      ? runNotifyOptions(repo, branch)
+      : latestRunOptions(repo, branch)),
+    enabled: enabled && Boolean(branch) && mode !== undefined,
     // The same repo's last run, across branches, is the badge's "this repo has
     // runs" signal for reserving its slot; callers gate run data on
-    // `!isPlaceholderData` so another branch's run never renders.
-    placeholderData: keepPreviousDataForRepo(repo),
-    refetchInterval: (query) =>
-      query.state.data && isRunActive(query.state.data.status) ? 8000 : 30_000,
+    // `!isPlaceholderData` so another branch's run never renders. The mode is a
+    // placeholder axis (the key's index 3): a flip never hands one read's shape
+    // to the other's.
+    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, mode ?? "latest"]]),
+    select: firstRun,
+    refetchInterval: notify
+      ? undefined
+      : (query) => {
+          const run = query.state.data ? firstRun(query.state.data) : null;
+          return run && isRunActive(run.status) ? 8000 : 30_000;
+        },
   });
 }
 

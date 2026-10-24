@@ -36,9 +36,9 @@ export function remoteBranchesOptions(repo: string) {
 export const REMOTE_BRANCHES_STALE_TIME = 30_000;
 
 /** Branches that exist on a remote (reflecting the last fetch), for the switcher's
- *  "Remote" group. `enabled` gates the fetch so it only runs while the menu is
- *  open: an enabled observer would re-run an O(remote refs) `for-each-ref` on
- *  every window focus and repo mutation. */
+ *  "Remote" group. Callers gate `enabled` on need (the menu while it is open, the
+ *  run gate while the branch has no upstream): an enabled observer re-runs an
+ *  O(remote refs) `for-each-ref` on each stale focus and repo mutation. */
 export function useRemoteBranches(repo: string, enabled = true) {
   return useQuery({
     ...remoteBranchesOptions(repo),
@@ -54,6 +54,7 @@ export function useCheckoutBranch(repo: string) {
     {
       // Local branch write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -66,6 +67,7 @@ export function useCheckoutRemoteBranch(repo: string) {
     {
       // Local branch write — never park it offline.
       networkMode: "always",
+      localOnly: true,
     },
   );
 }
@@ -303,10 +305,10 @@ export function useUpdateBranchFrom(repo: string) {
  *
  * LAZY on purpose: `enabled` must stay false unless a surface is actually facing
  * a diverged branch, so the ordinary in-sync path spawns no git. Keyed under the
- * repo, so the whole-subtree invalidation every fetch/pull/push mutation already
- * runs refreshes it. Local rev-list reads only — `networkMode: "always"` keeps
- * an offline OS from parking the query into a permanent pending state, matching
- * {@link useBranchDivergence}.
+ * repo, so a push's whole-subtree invalidation and a fetch or pull's local-only
+ * one (this read is local) both refresh it. Local rev-list reads only —
+ * `networkMode: "always"` keeps an offline OS from parking the query into a
+ * permanent pending state, matching {@link useBranchDivergence}.
  */
 export function useBranchRewriteStatus(
   repo: string,

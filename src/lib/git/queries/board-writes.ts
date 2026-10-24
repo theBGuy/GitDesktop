@@ -1,14 +1,18 @@
 /**
- * The pure pieces of the board-write bookkeeping: the keys a board write and a
- * board read are filed under, how a write's variables name its repo, and the
- * predicates the settle, window-focus and mount paths decide by.
+ * The import-free pieces of the board-write bookkeeping: the keys a board write
+ * and a board read are filed under, how a write's variables name its repo, the
+ * predicates the settle, window-focus and mount paths decide by, and the
+ * window-focus pass over a client handed in.
  *
  * Import-free at runtime on purpose (types only, erased): internal.ts, core.ts and
  * projects.ts all import this file, so it can sit under each of them without a
  * cycle, and `scripts/board-writes.test.mjs` loads it straight from `src/` under
  * Node's type stripping. A runtime import added here fails that test.
  */
-import type { InvalidateQueryFilters } from "@tanstack/react-query";
+import type {
+  InvalidateQueryFilters,
+  QueryClient,
+} from "@tanstack/react-query";
 import type { PendingMutationEntry } from "./pr-writes";
 import type {
   BoardWriteKind,
@@ -241,30 +245,86 @@ export function refetchOnMountUnlessHeld(held: ReadonlyMap<string, number>) {
   return (query: { queryHash: string }): boolean => !held.has(query.queryHash);
 }
 
+/** The slice of a react-query `Query` the focus refetch reads. Options are read
+ *  per observer at CALL time, never an observer's cached `isStale`: its stale timer
+ *  can lag in an occluded webview, reading fresh long past the staleTime. */
+export type FocusCandidate = {
+  queryHash: string;
+  state: { status: string; data?: unknown };
+  isStaleByTime(staleTime: StaleTime): boolean;
+  observers: ReadonlyArray<{
+    options: { enabled?: unknown; staleTime?: unknown };
+  }>;
+};
+
+type StaleTime = number | "static";
+
+/** An option given as a value or as a function of the query, resolved the way
+ *  query-core resolves `enabled` and `staleTime`. */
+function resolveOption(value: unknown, query: FocusCandidate): unknown {
+  return typeof value === "function" ? value(query) : value;
+}
+
 /**
- * The window-focus bridge's invalidation of every repo query, as the filter sets
- * to run. A lens in `held` (a date-shift chase is reading it) is marked stale but
- * NOT refetched: an answer landing mid-chase replaces the patched dates the chase
- * compares against, and it would write the server's older ones back. The chase's
- * own settle reconciles the lens through `invalidateProjectBoards` whatever became
- * of this mark, which a later press's patch clears. With nothing held this is the
- * one plain invalidation, unchanged.
+ * Which ACTIVE repo queries a window focus refetches: those an enabled observer
+ * holds past its own staleTime, and those in error with no data or a finite
+ * staleTime (forge-status keeps its last good data beside the error, so within its
+ * staleTime only this arm retries an outage; an Infinity read, like deep Actions
+ * pages, never replays). A lens in `chased` is never refetched: see
+ * {@link focusStaleMarkFilter}.
  */
-export function repoFocusInvalidations(
+export function focusRefetchPredicate(chased: ReadonlySet<string>) {
+  return (query: FocusCandidate): boolean => {
+    if (chased.has(query.queryHash)) return false;
+    const staleTimes = query.observers.flatMap((observer): StaleTime[] => {
+      if (resolveOption(observer.options.enabled, query) === false) return [];
+      const staleTime = resolveOption(observer.options.staleTime, query);
+      return [
+        typeof staleTime === "number" || staleTime === "static" ? staleTime : 0,
+      ];
+    });
+    if (query.state.status === "error")
+      return (
+        query.state.data === undefined ||
+        staleTimes.some((t) => typeof t === "number" && Number.isFinite(t))
+      );
+    return staleTimes.some((t) => query.isStaleByTime(t));
+  };
+}
+
+/**
+ * The focus pass's stale mark for lenses a date-shift chase is reading: marked
+ * stale but NOT refetched, since an answer landing mid-chase replaces the patched
+ * dates the chase compares against and it would write the server's older ones
+ * back. The chase's own settle reconciles the lens through `invalidateProjectBoards`.
+ */
+export function focusStaleMarkFilter(
+  chased: ReadonlySet<string>,
+): InvalidateQueryFilters {
+  return {
+    queryKey: ["repo"],
+    predicate: (query) => chased.has(query.queryHash),
+    refetchType: "none",
+  };
+}
+
+/** The focus pass itself, over the lenses `held` names now: the active refetch,
+ *  plus the stale mark when a chase is live. Nothing else is invalidated, so an
+ *  inactive query keeps its own clock. Here rather than in projects.ts so
+ *  `scripts/focus-refetch.test.mjs` drives the composition the app runs. */
+export function refetchRepoQueriesOnFocus(
+  queryClient: Pick<QueryClient, "refetchQueries" | "invalidateQueries">,
   held: ReadonlyMap<string, number>,
-): InvalidateQueryFilters[] {
-  if (held.size === 0) return [{ queryKey: ["repo"] }];
-  // A snapshot: the filters run synchronously, but nothing should read a map a
-  // chase settling in between could change.
+): void {
+  // A snapshot: nothing should read a map a chase settling in between could change.
   const chased = new Set(held.keys());
-  return [
-    { queryKey: ["repo"], predicate: (query) => !chased.has(query.queryHash) },
-    {
-      queryKey: ["repo"],
-      predicate: (query) => chased.has(query.queryHash),
-      refetchType: "none",
-    },
-  ];
+  void queryClient.refetchQueries({
+    queryKey: ["repo"],
+    type: "active",
+    predicate: focusRefetchPredicate(chased),
+  });
+  if (chased.size > 0)
+    void queryClient.invalidateQueries(focusStaleMarkFilter(chased));
 }
 
 /** The kind a project status write files itself under, its mutation key being

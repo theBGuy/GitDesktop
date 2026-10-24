@@ -3,100 +3,160 @@ import { useEffect, useEffectEvent, useRef } from "react";
 import {
   forgeFeatureReady,
   useForgeStatus,
+  useRemoteBranches,
+  useRepoIdentity,
   useRepoStatus,
 } from "@/lib/git/queries";
-import {
-  forgeCiRunList,
-  isRunActive,
-  type WorkflowRun,
-} from "@/lib/github/actions";
+import { runNotifyOptions, type WorkflowRun } from "@/lib/github/actions";
 import { emitNotification } from "@/lib/notifications/emit";
 import { anyChannelOn } from "@/lib/notifications/overrides";
-import { useRepoNotificationOverride } from "@/lib/notifications/queries";
+import {
+  useNotificationOverrides,
+  useRepoNotificationOverride,
+} from "@/lib/notifications/queries";
 import { useSettings } from "@/lib/settings/queries";
 import { repoNameFromPath } from "@/lib/stores/notifications";
-import { isFailureConclusion, statusLabel } from "./status";
+import {
+  acceptsAsPrime,
+  notifyPollInterval,
+  primeFrom,
+  type RunNotifyPrime,
+  runsToNotify,
+} from "./run-notify-diff";
+import { statusLabel } from "./status";
+
+/** The branch the run poll and the header badge key on: the checked-out one. */
+export function useRunNotifyBranch(repoPath: string): string | null {
+  return useRepoStatus(repoPath).data?.branch.name ?? null;
+}
+
+/**
+ * Whether run notifications deliver for this repo on any channel — undefined while
+ * settings, the override store or the repo's identity (which keys its override)
+ * are unresolved. A failed override read counts as resolved with no override; a
+ * failed identity read counts as resolved too, falling back to the raw-path
+ * override (`identity ?? repoPath`).
+ */
+export function useRunNotifyEnabled(repoPath: string): boolean | undefined {
+  const settings = useSettings();
+  const overrides = useNotificationOverrides();
+  const identity = useRepoIdentity(repoPath);
+  const override = useRepoNotificationOverride(repoPath);
+  if (
+    settings.data === undefined ||
+    (overrides.data === undefined && !overrides.isError) ||
+    (identity.data === undefined && !identity.isError)
+  )
+    return undefined;
+  return anyChannelOn(settings.data.notifications, override, ["actionRuns"]);
+}
+
+/**
+ * Whether `branch` exists on a remote — an upstream, or a same-named branch in the
+ * remote list. Runs are listed by branch name, so neither the run poll nor the
+ * badge fetches without it. The list is read through an ENABLED observer only
+ * while the branch has no upstream and the caller `needed` it (CI ready, or the
+ * forge status still resolving); otherwise it serves whatever list is cached. A
+ * branch pushed without tracking opens the gate as soon as the app's own push,
+ * fetch or pull refreshes the list; a push from a terminal, on the first window
+ * focus at least 30 s (`REMOTE_BRANCHES_STALE_TIME`) after the list's last read.
+ */
+export function useBranchOnRemote(
+  repoPath: string,
+  branch: string | null,
+  needed: boolean,
+): boolean {
+  const status = useRepoStatus(repoPath);
+  const upstream = Boolean(status.data?.branch.upstream);
+  const remoteBranches = useRemoteBranches(
+    repoPath,
+    needed && branch !== null && status.data !== undefined && !upstream,
+  );
+  return (
+    branch !== null &&
+    (upstream || (remoteBranches.data?.some((b) => b.name === branch) ?? false))
+  );
+}
 
 /**
  * Background poller for OS notifications on the current branch's workflow runs:
- * roughly every 45s (also while unfocused) it snapshots recent runs and
- * notifies when one transitions from active to completed. The first poll after
- * opening a repo (or switching branch) only primes the snapshot.
+ * every 45s (8s while the newest run is active or a run of its push is in
+ * progress; also while unfocused) it snapshots recent runs and notifies on each run
+ * that finished with success or failure since the last poll; a run it never saw
+ * active only when the two polls are adjacent. The first poll fetched after it
+ * enables for a repo and branch only primes the snapshot. It is the one interval
+ * owner of the shared runs read the header badge also renders.
  */
 export function useRunNotifications(repoPath: string) {
-  const settings = useSettings();
   const gh = useForgeStatus(repoPath);
-  const status = useRepoStatus(repoPath);
-  const branch = status.data?.branch.name ?? null;
-  const override = useRepoNotificationOverride(repoPath);
+  const branch = useRunNotifyBranch(repoPath);
+  const ciReady = forgeFeatureReady(gh.data, "ci");
+  const onRemote = useBranchOnRemote(repoPath, branch, ciReady || gh.isPending);
+  const notifyEnabled = useRunNotifyEnabled(repoPath);
   // Polled for any provider whose CI read is built — GitHub Actions and GitLab
-  // pipelines both map onto the same neutral run shape the diff below reads.
-  // Shares the emit gate's resolution once the override is in hand: it reads undefined
-  // until the overrides query resolves, so a muted repo can still fire its first poll.
-  // Delivery stays correct regardless — emit re-reads the override itself.
+  // pipelines both map onto the same neutral run shape the diff reads. Delivery
+  // stays correct regardless — emit re-reads the override itself.
   const enabled =
-    repoPath !== "" &&
-    forgeFeatureReady(gh.data, "ci") &&
-    Boolean(branch) &&
-    settings.data !== undefined &&
-    anyChannelOn(settings.data.notifications, override, ["actionRuns"]);
+    repoPath !== "" && ciReady && onRemote && notifyEnabled === true;
 
   const poll = useQuery({
-    queryKey: ["repo", repoPath, "actions", "notify", branch ?? ""] as const,
-    queryFn: () => forgeCiRunList(repoPath, 20, branch ?? undefined),
+    ...runNotifyOptions(repoPath, branch),
     enabled,
-    refetchInterval: 45_000,
+    refetchInterval: (query) => notifyPollInterval(query.state.data),
     refetchIntervalInBackground: true,
-    staleTime: 40_000,
-    retry: false,
   });
 
-  // Reset the snapshot when the repo or branch changes, so we don't fire a
-  // backlog of "finished" notifications after a context switch. The check lives
-  // inside the effect event (reading the latest key off the render path) so it
-  // primes fresh on the first diff after a switch.
-  const prev = useRef<Map<number, WorkflowRun> | null>(null);
-  const prevKey = useRef(`${repoPath}:${branch}`);
-
-  const diff = useEffectEvent((runs: WorkflowRun[]) => {
-    const key = `${repoPath}:${branch}`;
-    if (prevKey.current !== key) {
-      prevKey.current = key;
-      prev.current = null;
-    }
-    const snapshot = new Map(runs.map((r) => [r.id, r]));
-    const before = prev.current;
-    prev.current = snapshot;
-    if (!before) return;
-
-    for (const run of snapshot.values()) {
-      const old = before.get(run.id);
-      // Notify only on the active → completed edge we actually witnessed.
-      if (old && isRunActive(old.status) && run.status === "completed") {
-        const ok = run.conclusion === "success";
-        const bad = isFailureConclusion(run.conclusion);
-        if (!ok && !bad) continue; // skipped/cancelled/neutral: stay quiet
-        const title = `${run.workflowName} ${statusLabel(run.status, run.conclusion).toLowerCase()} on ${run.headBranch}`;
-        emitNotification({
-          source: "actionRuns",
-          outcome: ok ? "success" : "failure",
-          row: {
-            kind: "ci-run",
-            tone: ok ? "success" : "danger",
-            title,
-            subtitle: run.displayTitle,
-            repoPath,
-            repoName: repoNameFromPath(repoPath),
-            target: { type: "run", runId: run.id },
-            dedupeKey: `run:${run.id}:${run.conclusion}`,
-          },
-          os: { title, body: run.displayTitle, focus: "unfocused" },
-        });
-      }
-    }
+  // The prime resets when the repo or branch changes, so a switch never fires a
+  // backlog of "finished" runs, and survives a disable, so a witnessed edge still
+  // announces after a mute. `enabledAt` is captured when the notifier enables
+  // with no prime: only a poll fetched after it may prime (`acceptsAsPrime`).
+  const key = `${repoPath}:${branch}`;
+  const prime = useRef<RunNotifyPrime<WorkflowRun> | null>(null);
+  const watch = useRef<{ key: string; enabledAt: number | null }>({
+    key,
+    enabledAt: null,
   });
-
+  // Declared before the data effect, so a cached snapshot arriving in the same
+  // commit is already judged against this enable.
   useEffect(() => {
-    if (poll.data) diff(poll.data);
-  }, [poll.data]);
+    if (watch.current.key !== key) {
+      watch.current = { key, enabledAt: null };
+      prime.current = null;
+    }
+    if (prime.current !== null) return;
+    watch.current.enabledAt = enabled ? Date.now() : null;
+  }, [enabled, key]);
+
+  const diff = useEffectEvent((runs: WorkflowRun[], fetchedAt: number) => {
+    if (watch.current.key !== key) return;
+    const before = prime.current;
+    if (before === null && !acceptsAsPrime(watch.current.enabledAt, fetchedAt))
+      return;
+    prime.current = primeFrom(runs, fetchedAt);
+    for (const run of runsToNotify(before, runs, fetchedAt)) {
+      const ok = run.conclusion === "success";
+      const title = `${run.workflowName} ${statusLabel(run.status, run.conclusion).toLowerCase()} on ${run.headBranch}`;
+      emitNotification({
+        source: "actionRuns",
+        outcome: ok ? "success" : "failure",
+        row: {
+          kind: "ci-run",
+          tone: ok ? "success" : "danger",
+          title,
+          subtitle: run.displayTitle,
+          repoPath,
+          repoName: repoNameFromPath(repoPath),
+          target: { type: "run", runId: run.id },
+          dedupeKey: `run:${run.id}:${run.conclusion}`,
+        },
+        os: { title, body: run.displayTitle, focus: "unfocused" },
+      });
+    }
+  });
+
+  // Keyed on the result time too: structural sharing keeps an unchanged list's
+  // reference, and the prime must still advance on every poll.
+  useEffect(() => {
+    if (poll.data) diff(poll.data, poll.dataUpdatedAt);
+  }, [poll.data, poll.dataUpdatedAt]);
 }

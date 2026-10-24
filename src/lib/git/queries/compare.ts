@@ -122,9 +122,9 @@ export function useMergeBase(
 /** Whether every SHA is a local commit object. Deliberately no
  *  `keepPreviousData`: a verdict belongs to the exact set it was measured on, and
  *  one PR's "present" must never stand in for the next one's. The key sits under
- *  the repo subtree so checkout/fetch's whole-repo invalidation re-measures it,
- *  and `refetchOnMount: "always"` covers any narrower writer — the probe is a
- *  millisecond-class `git rev-parse`. */
+ *  the repo subtree so checkout/fetch's local-only invalidation (this read is
+ *  local) re-measures it, and `refetchOnMount: "always"` covers any narrower
+ *  writer — the probe is a millisecond-class `git rev-parse`. */
 export function useObjectsPresent(repo: string | null, oids: string[]) {
   const joined = oids.join(",");
   return useQuery({

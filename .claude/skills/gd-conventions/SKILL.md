@@ -443,8 +443,10 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - **`gd/session/*` branches are filtered from every branch surface** (lists,
   pickers, bulk actions) — the user dogfoods agent sessions on them; deleting
   one breaks Resume. Hard invariant.
-- `<Activity>`-hidden subtrees still render and fetch — gate query `enabled`
-  on the active tab; gate agent-surface notifications on the tab being watched.
+- `<Activity>`-hidden subtrees still render but hold no query observers, so
+  they fetch nothing while hidden; the re-show refetches anything past its
+  staleTime. Keep a heavy query's `enabled` gated on the active tab as a
+  backstop; gate agent-surface notifications on the tab being watched.
 - Open-TRANSITION resets ride `useSeedOnOpen` (`src/lib/use-seed-on-open.ts`) —
   a bare `useEffect(() => { if (open) seed(); }, [open])` re-fires when a hidden
   `<Activity>` tab re-mounts its effects on show, wiping the user's draft. The
@@ -651,6 +653,26 @@ one grep away on the named symbol. Grows via Conventions-sync.
   chains would republish it through the barrel. Guards: `queries-internal-import`
   (callers outside), `queries-internal-reexport` (re-exports anywhere inside),
   `queries-barrel-internal-reference` (the barrel may not name it at all).
+- **Git-only invalidation** — a git mutation that can't change forge state
+  (fetch, pull, checkout, switch, stash, whole-file discard) passes
+  `localOnly: true` to `useRepoMutation`, which invalidates the repo subtree
+  filtered by `isLocalRepoQuery` (`queries/local-query-filter.ts`): a query
+  is local when it sets `networkMode: "always"` (the split the ratchet test
+  `networkmode-local-queries` enforces), minus the overrides it names in
+  `NETWORKED_ALWAYS_OVERRIDES`. The ratchet fails only on networked "always"
+  reads it can recognize (named callees, the `forge`/`gh`/`jira` families,
+  classified commands); any other networked read under "always" (a `fetch…`
+  helper, a raw `fetch()`) can't be listed as-is, since an entry matching no
+  recognized read fails as stale. Route its callee through a recognized name
+  first (a `NETWORK_CALLEES` entry or a `forge`/`gh`/`jira` name; a misfiled
+  command moves to `NETWORK_COMMANDS` or `MIXED_COMMANDS`), then list it in
+  `NETWORKED_ALWAYS`, state `refetchOnReconnect` on the query itself, and add
+  a repo-rooted key to `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push and forge
+  writes keep the whole-repo default, since a push moves PR heads and starts
+  runs; reset, merge, rebase, revert and cherry-pick still take it for now,
+  and hot working-tree ops keep their narrow `invalidate`. The window-focus
+  pass refetches only active queries that are stale by their own staleTime
+  or errored, never a blanket invalidation.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

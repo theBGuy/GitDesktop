@@ -281,7 +281,7 @@ export function useForgeStatus(repo: string) {
     // A mount-retry with no cached data resets the query to pending, so the panel
     // that mounted ForgeNotReady on the error swaps back to its skeleton and the
     // remount retries again: ~6 fetches/s until the network returns. The window-focus
-    // bridge's invalidation (App.tsx) stays the retry path.
+    // pass's error arm (refetchRepoQueriesOnFocus) stays the retry path.
     retryOnMount: false,
   });
 }

@@ -196,13 +196,15 @@ function findingKey(f: SelectedFinding): string {
   return (FINDING_KEY[f.type] as (finding: SelectedFinding) => string)(f);
 }
 
-// Every repo tab panel goes through this: the <Activity> + boundary pairing is
-// the invariant, and wrapping <Activity> alone re-mints the stranded-popup bug.
-// Module scope is required — declared inside RepositoryView it would be a new
-// component type each render, remounting every panel and losing the state
-// <Activity> exists to preserve (filters, selections, scroll). <Activity>
-// defers hidden panels' *effects* but NOT React Query fetches, so a heavy tab
-// like Insights gates its queries on the panel's own `active`-style props.
+// Every repo tab panel goes through this: the <Activity> + boundary pairing
+// is the invariant, and wrapping <Activity> alone re-mints the stranded-popup
+// bug. Module scope is required — declared inside RepositoryView it would be
+// a new component type each render, remounting every panel and losing the
+// state <Activity> exists to preserve (filters, selections, scroll). A hidden
+// <Activity> connects no effects, so hidden panels hold no live query
+// observers and fetch nothing while hidden; the real cost is the RE-SHOW
+// refetch of anything past its staleTime. Heavy tabs keep their
+// `active`-style query gates as a backstop.
 function TabPanel({
   active,
   children,
@@ -779,8 +781,8 @@ export function RepositoryView() {
       </button>
     );
   }
-  // Panel activity for the ASIDE's tabs: a collapsed sidebar draws none of them,
-  // and Activity defers a hidden panel's effects but not its queries — so the
+  // Panel activity for the ASIDE's tabs: a collapsed sidebar draws none of them
+  // (and a hidden <Activity> already holds no query observers), so the
   // polls and scans (line counts, runs, findings, the TODO git-grep) stand down
   // with the panel that would show them. The main pane keeps its own condition:
   // its detail view is what the user is looking at while the sidebar is closed.
@@ -1063,8 +1065,8 @@ export function RepositoryView() {
           {/* The board IS the surface — it needs the content pane's width for a
               row of 300px columns, so unlike the list/detail tabs it has no
               sidebar half (the aside says so). Gated on the tab being the
-              visible one: <Activity> defers a hidden panel's effects but NOT its
-              React Query fetches, and these are owner-wide reads. */}
+              visible one as a backstop for owner-wide reads (a hidden
+              <Activity> panel already holds no query observers). */}
           <TabPanel active={repoTab === "projects"}>
             <ProjectsBoardPanel
               repoPath={repoPath}
