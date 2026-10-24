@@ -5,7 +5,7 @@
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
-use crate::github::repo_meta::invalidate_repo_meta_after;
+use crate::github::repo_meta::{invalidate_all_repo_meta_after, invalidate_repo_meta_after};
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 /// A GitHub user/org login: alphanumerics + single hyphens, ≤39 chars.
@@ -184,7 +184,7 @@ pub async fn gh_repo_delete(repo_path: String) -> AppResult<()> {
         GH_NETWORK_TIMEOUT,
     )
     .await;
-    invalidate_repo_meta_after(&slug, &result);
+    invalidate_all_repo_meta_after(&result);
     result?;
     Ok(())
 }

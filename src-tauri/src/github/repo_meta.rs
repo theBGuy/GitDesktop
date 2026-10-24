@@ -195,11 +195,13 @@ pub(crate) fn invalidate_all_repo_meta() {
     memo_invalidate(&mut cache().lock().unwrap_or_else(|p| p.into_inner()), None);
 }
 
+/// `GhNotFound` precedes any request (missing gh or working directory).
+/// Every other error, including a timeout, may follow a server write, so it evicts.
+/// A pre-spawn Io error may over-evict, which is harmless.
 pub(crate) fn write_was_attempted<T>(result: &AppResult<T>) -> bool {
     !matches!(result, Err(AppError::GhNotFound))
 }
 
-/// Even a timeout can follow a successful server write; only a missing binary is pre-spawn.
 pub(crate) fn invalidate_repo_meta_after<T>(slug: &str, result: &AppResult<T>) {
     if write_was_attempted(result) {
         invalidate_repo_meta(slug);
@@ -318,6 +320,12 @@ pub(crate) mod tests {
                     || body[eviction..].contains("result.map_err("),
                 "{name}: propagate only after eviction"
             );
+            if *name == "gh_repo_delete" {
+                assert!(
+                    body.contains("invalidate_all_repo_meta_after(&result);"),
+                    "gh_repo_delete: fork deletion must also evict parent metadata"
+                );
+            }
             if matches!(*name, "gh_pr_create_core" | "gh_repo_settings_update") {
                 assert_eq!(
                     body.matches("invalidate_repo_meta_after(").count(),

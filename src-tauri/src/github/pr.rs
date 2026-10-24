@@ -261,8 +261,10 @@ pub struct GhRepoList {
     pub repos: Vec<GhRepo>,
 }
 
-/// The ambient viewer read, memoized for 60s plus auth epoch, is shared by the repo
-/// list and owned-namespace read; fork lookup uses `gh_viewer_login_fresh`.
+/// Memoized 60s per auth epoch and shared by the repo list and the owned-namespace read;
+/// fork lookup reads fresh through `gh_viewer_login_fresh`.
+/// Errors when `gh` can't answer; an empty-but-successful answer passes through uncached,
+/// so callers decide the fallout.
 pub async fn gh_viewer_login() -> AppResult<String> {
     viewer_login_core(None, GH_TIMEOUT).await
 }
@@ -2311,7 +2313,7 @@ fn flatten_slurped_pages(pages: Vec<Vec<serde_json::Value>>) -> Vec<serde_json::
     pages.into_iter().flatten().collect()
 }
 
-// 30s ensures one read never serves two 45s poll ticks.
+// 30s matches usePrList's staleTime, so a refetch inside that window reuses the last answer; an off-app stack change shows within 30s.
 const STACK_MEMO_TTL: Duration = Duration::from_secs(30);
 const STACK_MEMO_CAP: usize = 64;
 type StackMemoKey = (String, String);
@@ -2455,6 +2457,7 @@ async fn stack_memberships_with(
 /// Paginated because merge-dissolved stacks PERSIST in this list as `open: false`:
 /// on a long-lived repo the residue fills the early pages and the live stacks the
 /// join actually needs sit past them.
+///
 /// Answered maps, empty included, are memoized 30s per (repo_path, folded slug);
 /// a failed probe never is.
 async fn gh_open_stack_memberships(

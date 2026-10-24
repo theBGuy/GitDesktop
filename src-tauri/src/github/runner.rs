@@ -591,36 +591,59 @@ pub(crate) fn bypasses(args: &[&str]) -> bool {
     let mut fields = false;
     let mut args = args.iter().copied();
     while let Some(arg) = args.next() {
-        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
-        if matches!(
-            flag,
-            "--paginate"
-                | "--jq"
-                | "-q"
-                | "--template"
-                | "-t"
-                | "-F"
-                | "--field"
-                | "--input"
-                | "-i"
-                | "--include"
-                | "--cache"
-        ) {
-            return true;
-        }
-        let method = if matches!(arg, "--method" | "-X") {
-            Some(args.next().unwrap_or(""))
-        } else {
-            arg.strip_prefix("--method=")
-                .or_else(|| arg.strip_prefix("-X"))
-        };
-        if let Some(method) = method {
-            if !method.eq_ignore_ascii_case("GET") {
+        if arg.starts_with("--") {
+            let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+            if matches!(
+                flag,
+                "--paginate"
+                    | "--jq"
+                    | "--template"
+                    | "--field"
+                    | "--input"
+                    | "--include"
+                    | "--cache"
+            ) {
                 return true;
             }
-            explicit_get = true;
+            let method = if arg == "--method" {
+                Some(args.next().unwrap_or(""))
+            } else {
+                arg.strip_prefix("--method=")
+            };
+            if let Some(method) = method {
+                if !method.eq_ignore_ascii_case("GET") {
+                    return true;
+                }
+                explicit_get = true;
+            }
+            fields |= flag == "--raw-field";
+        } else if let Some(shorts) = arg.strip_prefix('-') {
+            for (index, flag) in shorts.char_indices() {
+                match flag {
+                    'F' | 'q' | 't' | 'i' => return true,
+                    'X' | 'f' | 'H' | 'p' => {
+                        let rest = &shorts[index + 1..];
+                        let value = if let Some(value) = rest.strip_prefix('=') {
+                            value
+                        } else if rest.is_empty() {
+                            args.next().unwrap_or("")
+                        } else {
+                            rest
+                        };
+                        if flag == 'X' {
+                            if !value.eq_ignore_ascii_case("GET") {
+                                return true;
+                            }
+                            explicit_get = true;
+                        }
+                        fields |= flag == 'f';
+                        break;
+                    }
+                    '=' => break,
+                    _ => {}
+                }
+            }
         }
-        fields |= flag == "--raw-field" || arg.starts_with("-f");
     }
     fields && !explicit_get
 }
@@ -1004,6 +1027,10 @@ mod tests {
             "--template={{.id}}",
             "-F",
             "-F=k=v",
+            "-Fk=v",
+            "-q.login",
+            "-t{{.id}}",
+            "-iXPOST",
             "--input",
             "--input=body",
             "-t",
@@ -1019,6 +1046,19 @@ mod tests {
         let cases: &[(&[&str], bool)] = &[
             (&[], false),
             (&["api", "repos/o/r"], false),
+            (&["api", "repos/o/r", "-iF", "k=v"], true),
+            (&["api", "repos/o/r", "-XGET"], false),
+            (&["api", "--method", "GET", "repos/o/r", "-fk=v"], false),
+            (&["api", "repos/o/r", "-X=GET"], false),
+            (&["api", "repos/o/r", "-hXgEt", "-fk=v"], false),
+            (&["api", "repos/o/r", "-hfkey=i", "-XGET"], false),
+            (&["api", "repos/o/r", "-f", "-XGET"], true),
+            (&["api", "repos/o/r", "-H", "-XGET", "-fk=v"], true),
+            (&["api", "repos/o/r", "-HIf-Match:abc"], false),
+            (&["api", "repos/o/r", "-pgraphql"], false),
+            (&["api", "repos/o/r", "-h=false"], false),
+            (&["api", "repos/o/r", "-XGETi"], true),
+            (&["api", "repos/o/r", "-XGET", "-fkey=-q.login"], false),
             (&["api", "--method", "POST", "repos/o/r"], true),
             (&["api", "-X", "PATCH", "repos/o/r"], true),
             (&["api", "--method=DELETE", "repos/o/r"], true),
