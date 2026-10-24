@@ -767,16 +767,15 @@ pub(crate) async fn run_gh_cached_get_raw_on_host(
     timeout: Duration,
     epoch: u64,
 ) -> AppResult<GhOutput> {
+    let gh = gh_bin().await?;
     let bypassed = bypasses(args);
     if bypassed {
         debug_assert!(
             !bypassed,
             "conditional GET requires unshaped, single-page argv"
         );
-        let gh = gh_bin().await?;
         return run_gh_raw_resolved(&gh, repo_path, host, args, timeout).await;
     }
-    let gh = gh_bin().await?;
     let key = (
         repo_path.map(str::to_string),
         host.map(str::to_string),
