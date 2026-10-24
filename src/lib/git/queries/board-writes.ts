@@ -1,6 +1,6 @@
 /**
- * The pure pieces of the board-write bookkeeping: the keys a board write and a
- * board read are filed under, how a write's variables name its repo, the
+ * The import-free pieces of the board-write bookkeeping: the keys a board write
+ * and a board read are filed under, how a write's variables name its repo, the
  * predicates the settle, window-focus and mount paths decide by, and the
  * window-focus pass over a client handed in.
  *

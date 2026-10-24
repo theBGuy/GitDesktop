@@ -85,8 +85,9 @@ const NETWORK_CALLEES = [
 ];
 
 /** camelCase name families that cross the network: the `forgeX`, `ghX` and `jiraX`
- *  wrappers. Matched like LOCAL_CALLEE_FAMILIES (`ghRunList`, never `github…`), and
- *  a LOCAL_CALLEES name (`forgeBbAccount`, `jiraAccount`) is never one of them. */
+ *  wrappers. Matched like LOCAL_CALLEE_FAMILIES (`ghRunList`, never `ghost…` or
+ *  `forget…`), and a LOCAL_CALLEES name (`forgeBbAccount`, `jiraAccount`) is never
+ *  one of them. */
 const NETWORK_CALLEE_FAMILIES = ["forge", "gh", "jira"];
 
 /** Tauri commands a queryFn may `invoke` directly, classified. An unlisted command

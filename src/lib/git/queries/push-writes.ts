@@ -1,8 +1,8 @@
 /**
- * The pure pieces of the branch-push bookkeeping: the key every push is filed
- * under, the variables it carries, how a pending push reads back out of the
- * mutation cache, the label a branch row's spinner shows for it, the reasons a
- * push puts on the other controls it holds, the HEAD-push latch, and the one
+ * The import-free pieces of the branch-push bookkeeping: the key every push is
+ * filed under, the variables it carries, how a pending push reads back out of
+ * the mutation cache, the label a branch row's spinner shows for it, the reasons
+ * a push puts on the other controls it holds, the HEAD-push latch, and the one
  * delayed run-list recheck a successful push schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this

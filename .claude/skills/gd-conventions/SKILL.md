@@ -667,11 +667,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   first (a `NETWORK_CALLEES` entry or a `forge`/`gh`/`jira` name; a misfiled
   command moves to `NETWORK_COMMANDS` or `MIXED_COMMANDS`), then list it in
   `NETWORKED_ALWAYS`, state `refetchOnReconnect` on the query itself, and add
-  a repo-rooted key to `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push, merge
-  and rebase keep the whole-repo default, since a push moves PR heads and
-  starts runs; hot working-tree ops keep their narrow `invalidate`. The
-  window-focus pass refetches only active queries that are stale by their
-  own staleTime or errored, never a blanket invalidation.
+  a repo-rooted key to `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push and forge
+  writes keep the whole-repo default, since a push moves PR heads and starts
+  runs; reset, merge, rebase, revert and cherry-pick still take it for now,
+  and hot working-tree ops keep their narrow `invalidate`. The window-focus
+  pass refetches only active queries that are stale by their own staleTime
+  or errored, never a blanket invalidation.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

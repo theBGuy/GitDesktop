@@ -10,6 +10,9 @@
 // flips between the run-notify list and the limit-1 latest read must never hand one
 // read's cached shape to the other's `select`.
 //
+// Also pins push-writes.ts `recheckRunsAfterPush`: one run-list recheck per repo,
+// 8 s after the last push, skipping a list paged past page 1.
+//
 // The imports are DYNAMIC because this file pulls @tanstack/react-query, which the
 // CI `guards` job (no install step) can't resolve: unresolved deps skip every test
 // here but the source pin, and GD_EXPECT_DEPS turns a skip into a failure on an
