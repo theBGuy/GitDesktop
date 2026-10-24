@@ -5,6 +5,7 @@
 use serde_json::json;
 
 use crate::error::{AppError, AppResult};
+use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 /// A GitHub user/org login: alphanumerics + single hyphens, ≤39 chars.
@@ -45,7 +46,7 @@ fn validate_repo_name(name: &str) -> AppResult<()> {
 pub async fn gh_repo_set_archived(repo_path: String, archived: bool) -> AppResult<()> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let body = json!({ "archived": archived });
-    run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -58,7 +59,9 @@ pub async fn gh_repo_set_archived(repo_path: String, archived: bool) -> AppResul
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -71,7 +74,7 @@ pub async fn gh_repo_rename(repo_path: String, new_name: String) -> AppResult<()
     validate_repo_name(new_name)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let body = json!({ "name": new_name });
-    run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -84,7 +87,9 @@ pub async fn gh_repo_rename(repo_path: String, new_name: String) -> AppResult<()
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -99,7 +104,7 @@ pub async fn gh_repo_set_visibility(repo_path: String, visibility: String) -> Ap
     }
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let body = json!({ "visibility": visibility });
-    run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -112,7 +117,9 @@ pub async fn gh_repo_set_visibility(repo_path: String, visibility: String) -> Ap
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -133,7 +140,7 @@ pub async fn gh_repo_transfer(
     if let Some(name) = new_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         body["new_name"] = json!(name);
     }
-    run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -146,7 +153,21 @@ pub async fn gh_repo_transfer(
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    if let Some((_, current_name)) = slug.split_once('/') {
+        let name = new_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(current_name);
+        if let Some(destination) =
+            crate::github::repo_meta::transfer_destination(&format!("{new_owner}/{name}"))
+        {
+            invalidate_repo_meta_after(&destination, &result);
+        }
+    }
+    result?;
     Ok(())
 }
 
@@ -157,11 +178,13 @@ pub async fn gh_repo_transfer(
 /// would resolve to — and delete — the PARENT repo (see `gh_repo_set_archived`).
 pub async fn gh_repo_delete(repo_path: String) -> AppResult<()> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["api", "--method", "DELETE", &format!("repos/{slug}")],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }

@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
+use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT};
 
 /// One collaborator. Serializes camelCase for the frontend; deserializes from
@@ -133,7 +134,7 @@ pub async fn gh_collaborator_add(
     let permission = collaborator_permission(&role)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let body = json!({ "permission": permission });
-    let out = run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -146,7 +147,9 @@ pub async fn gh_collaborator_add(
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    let out = result?;
     // 201 returns the invitation object; 204 (immediate grant) returns nothing.
     Ok(!out.stdout_lossy().trim().is_empty())
 }
@@ -156,7 +159,7 @@ pub async fn gh_collaborator_remove(repo_path: String, username: String) -> AppR
     let username = username.trim();
     validate_username(username)?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &[
             "api",
@@ -166,7 +169,9 @@ pub async fn gh_collaborator_remove(repo_path: String, username: String) -> AppR
         ],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 

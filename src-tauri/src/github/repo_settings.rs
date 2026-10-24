@@ -8,8 +8,12 @@ use serde_json::json;
 
 use crate::error::{AppError, AppResult};
 use crate::forge::session::{classify_gh_failure, GhFailure};
+use crate::github::repo_meta::{
+    invalidate_repo_meta_after, repo_meta_generation, repo_object, seed_repo_meta,
+};
 use crate::github::runner::{
-    run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+    gh_auth_epoch, gh_host_for_repo, run_gh, run_gh_input, run_gh_on_host, GhOutput,
+    GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
 use crate::github::{gh_failure_reason, gh_unreadable};
 
@@ -20,12 +24,7 @@ pub async fn gh_repo_admin(repo_path: String) -> AppResult<bool> {
     // to the PARENT on a fork with an `upstream` remote, which would probe the
     // upstream's admin bit instead of the user's own fork.
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let result = run_gh_raw(
-        Some(&repo_path),
-        &["api", &format!("repos/{slug}"), "-q", ".permissions.admin"],
-        GH_TIMEOUT,
-    )
-    .await;
+    let result = repo_object(&repo_path, &slug, GH_TIMEOUT).await;
     repo_admin_outcome(result)
 }
 
@@ -39,7 +38,17 @@ fn repo_admin_outcome(result: AppResult<GhOutput>) -> AppResult<bool> {
             GhFailure::NotFound | GhFailure::Answered => Ok(false),
         };
     }
-    Ok(out.stdout_lossy().trim() == "true")
+    Ok(repo_admin_from_body(&out.stdout_lossy()))
+}
+
+fn repo_admin_from_body(body: &str) -> bool {
+    let Ok(repo) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    repo.get("permissions")
+        .and_then(|permissions| permissions.get("admin"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// The viewer's permission bits on `GET repos/{slug}`. Every flag is optional:
@@ -116,12 +125,7 @@ pub async fn gh_repo_write_access(
     lens: Option<String>,
 ) -> AppResult<crate::forge::ForgeRepoWriteAccess> {
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let out = run_gh_raw(
-        Some(&repo_path),
-        &["api", &format!("repos/{slug}")],
-        GH_TIMEOUT,
-    )
-    .await?;
+    let out = repo_object(&repo_path, &slug, GH_TIMEOUT).await?;
     let unknown = |reason: String| crate::forge::ForgeRepoWriteAccess {
         can_push: None,
         can_triage: None,
@@ -742,13 +746,18 @@ pub async fn gh_repo_settings_get(repo_path: String) -> AppResult<RepoSettings> 
     // Pin the origin slug so a fork reads its OWN settings, not the parent's
     // (see `gh_hooks_list`).
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let out = run_gh(
+    let epoch = gh_auth_epoch();
+    let generation = repo_meta_generation();
+    let host = gh_host_for_repo(&repo_path).await;
+    let out = run_gh_on_host(
         Some(&repo_path),
+        host.as_deref(),
         &["api", &format!("repos/{slug}")],
         GH_NETWORK_TIMEOUT,
     )
     .await?;
     let text = out.stdout_lossy();
+    seed_repo_meta(host, &slug, text.clone(), epoch, generation);
     let mut settings: RepoSettings = serde_json::from_str(&text).map_err(|e| {
         gh_unreadable(
             "the repository settings",
@@ -800,7 +809,7 @@ pub async fn gh_repo_settings_update(
     if let Some(allow_forking) = input.allow_forking {
         body["allow_forking"] = json!(allow_forking);
     }
-    let out = run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -813,7 +822,9 @@ pub async fn gh_repo_settings_update(
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    let out = result?;
     let text = out.stdout_lossy();
     let mut settings: RepoSettings = serde_json::from_str(&text).map_err(|e| {
         gh_unreadable(
@@ -841,7 +852,7 @@ pub async fn gh_repo_settings_update(
         })
         .filter(|t| !t.is_empty())
         .collect();
-    let topics_out = run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -854,7 +865,9 @@ pub async fn gh_repo_settings_update(
         &json!({ "names": names }).to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    let topics_out = result?;
     #[derive(Deserialize)]
     struct TopicsResp {
         #[serde(default)]
@@ -869,6 +882,19 @@ pub async fn gh_repo_settings_update(
 #[cfg(test)]
 mod tests {
     use super::{write_access_from_repo_json, GhOutput};
+
+    #[test]
+    fn repo_admin_full_body_verdicts_are_explicit() {
+        for (body, expected) in [
+            (r#"{"permissions":{"admin":true}}"#, true),
+            (r#"{"permissions":{"admin":false}}"#, false),
+            (r#"{"permissions":{}}"#, false),
+            ("{}", false),
+            ("not json", false),
+        ] {
+            assert_eq!(super::repo_admin_from_body(body), expected, "{body}");
+        }
+    }
 
     #[test]
     fn repo_admin_transport_failures_reject() {
@@ -927,8 +953,11 @@ mod tests {
                 false,
             ),
             (1, "", "", false),
-            (0, "true\n", "", true),
-            (0, "false\n", "", false),
+            (0, r#"{"permissions":{"admin":true}}"#, "", true),
+            (0, r#"{"permissions":{"admin":false}}"#, "", false),
+            (0, r#"{"permissions":{}}"#, "", false),
+            (0, "{}", "", false),
+            (0, "not json", "", false),
         ] {
             let result = super::repo_admin_outcome(Ok(GhOutput {
                 stdout: stdout.as_bytes().to_vec(),

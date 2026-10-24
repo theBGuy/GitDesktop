@@ -17,7 +17,10 @@ use crate::forge::{
     validate_owner, validate_repo_name, Forge, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
 };
 use crate::github::gh_unreadable;
-use crate::github::pr::{gh_list_repos, gh_status, gh_viewer_login, GhRepo, GhStatus};
+use crate::github::pr::{
+    gh_list_repos, gh_status, gh_viewer_login, gh_viewer_login_fresh, GhRepo, GhStatus,
+};
+use crate::github::repo_meta::{invalidate_repo_meta_after, repo_object_ok};
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 /// GitHub via the `gh` CLI. Unit struct — `gh` carries all the state (auth, host).
@@ -1097,9 +1100,11 @@ pub async fn fork_repo(owner: &str, name: &str) -> AppResult<ForgeForkResult> {
     validate_owner(owner)?;
     validate_repo_name(name)?;
     let source = format!("{owner}/{name}");
-    run_gh(None, &fork_args(&source), GH_NETWORK_TIMEOUT).await?;
+    let result = run_gh(None, &fork_args(&source), GH_NETWORK_TIMEOUT).await;
+    invalidate_repo_meta_after(&source, &result);
+    result?;
     // The fork owner is the signed-in user.
-    let login = gh_viewer_login().await?;
+    let login = gh_viewer_login_fresh().await?;
     if login.is_empty() {
         return Err(AppError::Gh("could not resolve your GitHub login".into()));
     }
@@ -1215,7 +1220,9 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     validate_repo_name(name)?;
     let endpoint = format!("user/starred/{owner}/{name}");
     let method = if star { "PUT" } else { "DELETE" };
-    run_gh(None, &["api", "--method", method, &endpoint], GH_NETWORK_TIMEOUT).await?;
+    let result = run_gh(None, &["api", "--method", method, &endpoint], GH_NETWORK_TIMEOUT).await;
+    invalidate_repo_meta_after(&format!("{owner}/{name}"), &result);
+    result?;
     Ok(())
 }
 
@@ -1328,12 +1335,10 @@ pub async fn fork_activity(repo_path: &str) -> AppResult<ForgeForkActivity> {
     // Pin the origin slug: `gh api`'s `{owner}/{repo}` placeholders resolve to the
     // PARENT on a fork, which would list the wrong repo's forks.
     let slug = crate::github::gh_origin_slug(repo_path).await?;
-    let repo_endpoint = format!("repos/{slug}");
     let forks_endpoint = format!("repos/{slug}/forks?per_page={FORKS_PER_PAGE}&sort=stargazers");
-    let repo_args = ["api", repo_endpoint.as_str()];
     let forks_args = ["api", forks_endpoint.as_str()];
     let (repo, forks) = tokio::join!(
-        run_gh(Some(repo_path), &repo_args, GH_TIMEOUT),
+        repo_object_ok(repo_path, &slug, GH_TIMEOUT),
         run_gh(Some(repo_path), &forks_args, GH_TIMEOUT),
     );
     let list: Value = serde_json::from_str(&forks?.stdout_lossy()).map_err(|e| {

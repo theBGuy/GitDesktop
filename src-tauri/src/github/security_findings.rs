@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::error::{AppError, AppResult};
 use crate::forge::session::{gh_error_is_network, gh_error_is_rate_limit, mask_host_tokens};
 use crate::github::gh_unreadable;
-use crate::github::runner::{run_gh_raw, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{parse_status, run_gh_raw, split_response, GH_NETWORK_TIMEOUT};
 
 /// Why a findings list may be empty. Serialized camelCase; the frontend branches
 /// on these exact strings to pick between "no findings" and an explanation.
@@ -793,23 +793,6 @@ fn secret_scanning_alert_out(raw: RawSecretScanningAlert) -> SecretScanningAlert
 
 // ── Transport ────────────────────────────────────────────────────────────────
 
-/// Splits `gh api -i` output into (header block, body). gh prints the status line
-/// and response headers ahead of the body on success AND failure, ended by a blank
-/// line; output with no status line is all body.
-fn split_response(out: &str) -> (&str, &str) {
-    if !out.starts_with("HTTP/") {
-        return ("", out);
-    }
-    let mut offset = 0usize;
-    for line in out.split_inclusive('\n') {
-        offset += line.len();
-        if line.trim().is_empty() {
-            return (&out[..offset], &out[offset..]);
-        }
-    }
-    (out, "")
-}
-
 /// What a response's `Link` header says about a further page.
 #[derive(Debug, PartialEq, Eq)]
 enum NextPage {
@@ -930,18 +913,6 @@ enum Fetched {
         /// rules need it to tell a bare 404 from a same-worded failure.
         status: Option<u16>,
     },
-}
-
-/// The status code off gh's echoed status line (`HTTP/2.0 404 Not Found`).
-fn parse_status(headers: &str) -> Option<u16> {
-    headers
-        .lines()
-        .next()?
-        .strip_prefix("HTTP/")?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
 }
 
 /// The page-walk ceiling. gh's `--paginate` is unbounded, so the walk follows the

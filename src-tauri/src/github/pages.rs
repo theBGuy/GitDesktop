@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::forge::session::{classify_gh_failure, GhFailure};
+use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT};
 use crate::github::{gh_failure_reason, gh_unreadable};
 
@@ -104,7 +105,7 @@ pub async fn gh_pages_enable(
             }
         })
     };
-    run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &[
             "api",
@@ -117,7 +118,9 @@ pub async fn gh_pages_enable(
         &body.to_string(),
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -172,12 +175,14 @@ pub async fn gh_pages_update(
 #[tauri::command]
 pub async fn gh_pages_disable(repo_path: String) -> AppResult<()> {
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["api", "--method", "DELETE", &format!("repos/{slug}/pages")],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 

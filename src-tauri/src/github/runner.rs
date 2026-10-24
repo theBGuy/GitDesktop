@@ -264,6 +264,10 @@ pub(crate) fn gh_auth_epoch() -> u64 {
     GH_AUTH_EPOCH.load(Ordering::SeqCst)
 }
 
+pub(crate) fn gh_auth_epoch_counter() -> &'static AtomicU64 {
+    &GH_AUTH_EPOCH
+}
+
 /// For account changes that spawn gh outside this runner.
 pub(crate) fn bump_gh_auth_epoch() {
     GH_AUTH_EPOCH.fetch_add(1, Ordering::SeqCst);
@@ -306,8 +310,18 @@ pub async fn run_gh_raw(
         Some(repo) => gh_host_for_repo(repo).await,
         None => None,
     };
-    let mut cmd = Command::new(&gh);
-    apply_gh_env(&mut cmd, gh_host.as_deref());
+    run_gh_raw_resolved(&gh, repo_path, gh_host.as_deref(), args, timeout).await
+}
+
+async fn run_gh_raw_resolved(
+    gh: &std::path::Path,
+    repo_path: Option<&str>,
+    gh_host: Option<&str>,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    let mut cmd = Command::new(gh);
+    apply_gh_env(&mut cmd, gh_host);
     cmd.args(args);
     if let Some(repo) = repo_path {
         cmd.current_dir(repo);
@@ -344,6 +358,10 @@ pub async fn run_gh(
     timeout: Duration,
 ) -> AppResult<GhOutput> {
     let out = run_gh_raw(repo_path, args, timeout).await?;
+    gh_output_ok(out)
+}
+
+pub(crate) fn gh_output_ok(out: GhOutput) -> AppResult<GhOutput> {
     if out.code != 0 {
         let msg = out.stderr.trim();
         return Err(AppError::Gh(if msg.is_empty() {
@@ -455,10 +473,703 @@ pub async fn run_gh_input_raw(
     })
 }
 
+/// Splits `gh api -i` output into headers and body, including failed responses.
+pub(crate) fn split_response(out: &str) -> (&str, &str) {
+    if !out.starts_with("HTTP/") {
+        return ("", out);
+    }
+    let mut offset = 0usize;
+    for line in out.split_inclusive('\n') {
+        offset += line.len();
+        if line.trim().is_empty() {
+            return (&out[..offset], &out[offset..]);
+        }
+    }
+    (out, "")
+}
+
+/// Only the HTTP status line determines the response status.
+pub(crate) fn parse_status(headers: &str) -> Option<u16> {
+    headers
+        .lines()
+        .next()?
+        .strip_prefix("HTTP/")?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// The first matching header wins, including a present but empty value.
+pub(crate) fn response_header_line(body: &str, header: &str) -> Option<String> {
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case(header) {
+                return Some(value.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Empty matches keep scanning for a non-empty value, unlike `response_header_line`.
+pub(crate) fn response_header_value(body: &str, header: &str) -> Option<String> {
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            break; // end of headers.
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case(header) {
+                let v = value.trim();
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+const GH_BODY_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
+const GH_BODY_CACHE_CAP: usize = 64;
+type GhBodyKey = (Option<String>, Option<String>, Vec<String>);
+
+#[derive(Clone)]
+struct CachedGhBody {
+    etag: String,
+    body: Vec<u8>,
+    epoch: u64,
+    touched: Instant,
+}
+
+enum BodyUpdate {
+    None,
+    Touch,
+    Store(String),
+}
+
+struct CachedFetchOutcome {
+    out: GhOutput,
+    update: BodyUpdate,
+}
+
+fn body_cache_get(
+    cache: &HashMap<GhBodyKey, CachedGhBody>,
+    key: &GhBodyKey,
+    epoch: u64,
+    max_age: Duration,
+    now: Instant,
+) -> Option<CachedGhBody> {
+    cache
+        .get(key)
+        .filter(|entry| entry.epoch == epoch && now.duration_since(entry.touched) < max_age)
+        .cloned()
+}
+
+fn body_cache_put(
+    cache: &mut HashMap<GhBodyKey, CachedGhBody>,
+    key: GhBodyKey,
+    entry: CachedGhBody,
+) {
+    if !cache.contains_key(&key) && cache.len() >= GH_BODY_CACHE_CAP {
+        if let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.touched)
+            .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, entry);
+}
+
+pub(crate) fn bypasses(args: &[&str]) -> bool {
+    let mut explicit_get = false;
+    let mut fields = false;
+    let mut args = args.iter().copied();
+    while let Some(arg) = args.next() {
+        let flag = arg.split_once('=').map_or(arg, |(flag, _)| flag);
+        if matches!(
+            flag,
+            "--paginate"
+                | "--jq"
+                | "-q"
+                | "--template"
+                | "-t"
+                | "-F"
+                | "--field"
+                | "--input"
+                | "-i"
+                | "--include"
+                | "--cache"
+        ) {
+            return true;
+        }
+        let method = if matches!(arg, "--method" | "-X") {
+            Some(args.next().unwrap_or(""))
+        } else {
+            arg.strip_prefix("--method=")
+                .or_else(|| arg.strip_prefix("-X"))
+        };
+        if let Some(method) = method {
+            if !method.eq_ignore_ascii_case("GET") {
+                return true;
+            }
+            explicit_get = true;
+        }
+        fields |= flag == "--raw-field" || arg.starts_with("-f");
+    }
+    fields && !explicit_get
+}
+
+fn conditional_args(args: &[&str], entry: Option<&CachedGhBody>) -> Vec<String> {
+    let mut args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+    args.push("-i".into());
+    if let Some(entry) = entry {
+        args.push("-H".into());
+        args.push(format!("If-None-Match: {}", entry.etag));
+    }
+    args
+}
+
+fn valid_etag(etag: &str) -> bool {
+    let tag = etag.strip_prefix("W/").unwrap_or(etag);
+    let Some(opaque) = tag.strip_prefix('"').and_then(|tag| tag.strip_suffix('"')) else {
+        return false;
+    };
+    opaque
+        .bytes()
+        .all(|byte| byte == b'!' || (b'#'..=b'~').contains(&byte))
+}
+
+fn conditional_outcome(entry: Option<&CachedGhBody>, out: &GhOutput) -> CachedFetchOutcome {
+    let Ok(text) = std::str::from_utf8(&out.stdout) else {
+        return CachedFetchOutcome {
+            out: GhOutput {
+                stdout: out.stdout.clone(),
+                stderr: out.stderr.clone(),
+                code: out.code,
+            },
+            update: BodyUpdate::None,
+        };
+    };
+    let (headers, _) = split_response(text);
+    let status = parse_status(headers);
+    if let (Some(304), Some(entry)) = (status, entry) {
+        return CachedFetchOutcome {
+            out: GhOutput {
+                stdout: entry.body.clone(),
+                stderr: String::new(),
+                code: 0,
+            },
+            update: BodyUpdate::Touch,
+        };
+    }
+    let update = if status == Some(200) && out.code == 0 {
+        response_header_value(headers, "etag")
+            .filter(|etag| valid_etag(etag))
+            .map(BodyUpdate::Store)
+            .unwrap_or(BodyUpdate::None)
+    } else {
+        BodyUpdate::None
+    };
+    CachedFetchOutcome {
+        out: GhOutput {
+            stdout: out.stdout[headers.len()..].to_vec(),
+            stderr: out.stderr.clone(),
+            code: out.code,
+        },
+        update,
+    }
+}
+
+fn apply_body_update(
+    cache: &mut HashMap<GhBodyKey, CachedGhBody>,
+    key: GhBodyKey,
+    entry: Option<&CachedGhBody>,
+    result: &CachedFetchOutcome,
+    epoch: u64,
+    current_epoch: u64,
+    now: Instant,
+) {
+    match &result.update {
+        BodyUpdate::Store(etag) if epoch == current_epoch => body_cache_put(
+            cache,
+            key,
+            CachedGhBody {
+                etag: etag.clone(),
+                body: result.out.stdout.clone(),
+                epoch,
+                touched: now,
+            },
+        ),
+        BodyUpdate::Touch => {
+            if let (Some(current), Some(fetched)) = (cache.get_mut(&key), entry) {
+                if current.epoch == fetched.epoch && current.etag == fetched.etag {
+                    current.touched = now;
+                }
+            }
+        }
+        BodyUpdate::None | BodyUpdate::Store(_) => {}
+    }
+}
+
+static GH_BODY_CACHE: OnceLock<Mutex<HashMap<GhBodyKey, CachedGhBody>>> = OnceLock::new();
+
+fn body_cache() -> &'static Mutex<HashMap<GhBodyKey, CachedGhBody>> {
+    GH_BODY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) async fn run_gh_cached_get_raw(
+    repo_path: Option<&str>,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    let bypassed = bypasses(args);
+    if bypassed {
+        debug_assert!(
+            !bypassed,
+            "conditional GET requires unshaped, single-page argv"
+        );
+        return run_gh_raw(repo_path, args, timeout).await;
+    }
+    let epoch = gh_auth_epoch();
+    let host = match repo_path {
+        Some(repo) => gh_host_for_repo(repo).await,
+        None => None,
+    };
+    run_gh_cached_get_raw_on_host(repo_path, host.as_deref(), args, timeout, epoch).await
+}
+
+/// Key and request share one resolved host; a changed pre-fetch epoch discards a fill.
+pub(crate) async fn run_gh_cached_get_raw_on_host(
+    repo_path: Option<&str>,
+    host: Option<&str>,
+    args: &[&str],
+    timeout: Duration,
+    epoch: u64,
+) -> AppResult<GhOutput> {
+    let bypassed = bypasses(args);
+    debug_assert!(
+        !bypassed,
+        "conditional GET requires unshaped, single-page argv"
+    );
+    let gh = gh_bin().await?;
+    let key = (
+        repo_path.map(str::to_string),
+        host.map(str::to_string),
+        args.iter().map(|arg| (*arg).to_string()).collect(),
+    );
+    let entry = body_cache_get(
+        &body_cache().lock().unwrap_or_else(|p| p.into_inner()),
+        &key,
+        gh_auth_epoch(),
+        GH_BODY_CACHE_MAX_AGE,
+        Instant::now(),
+    );
+    let args = conditional_args(args, entry.as_ref());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gh_raw_resolved(&gh, repo_path, host, &refs, timeout).await?;
+    let result = conditional_outcome(entry.as_ref(), &out);
+    let mut cache = body_cache().lock().unwrap_or_else(|p| p.into_inner());
+    apply_body_update(
+        &mut cache,
+        key,
+        entry.as_ref(),
+        &result,
+        epoch,
+        gh_auth_epoch(),
+        Instant::now(),
+    );
+    Ok(result.out)
+}
+
+pub(crate) async fn run_gh_cached_get(
+    repo_path: Option<&str>,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    gh_output_ok(run_gh_cached_get_raw(repo_path, args, timeout).await?)
+}
+
+/// Fresh form reads share their resolved host with the memo they seed.
+pub(crate) async fn run_gh_on_host(
+    repo_path: Option<&str>,
+    host: Option<&str>,
+    args: &[&str],
+    timeout: Duration,
+) -> AppResult<GhOutput> {
+    let _epoch_bump = auth_epoch_guard(&GH_AUTH_EPOCH, args);
+    let gh = gh_bin().await?;
+    gh_output_ok(run_gh_raw_resolved(&gh, repo_path, host, args, timeout).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::ChildEnv;
+
+    #[test]
+    fn expiration_header_present() {
+        let body = "HTTP/2.0 200 OK\r\nGitHub-Authentication-Token-Expiration: 2026-08-01 00:00:00 +0000\r\n\r\n{\"login\":\"x\"}";
+        assert_eq!(
+            response_header_value(body, "github-authentication-token-expiration").as_deref(),
+            Some("2026-08-01 00:00:00 +0000")
+        );
+    }
+
+    #[test]
+    fn expiration_header_absent() {
+        let body = "HTTP/2.0 200 OK\r\nX-OAuth-Scopes: repo\r\n\r\n{\"login\":\"x\"}";
+        assert_eq!(
+            response_header_value(body, "github-authentication-token-expiration"),
+            None
+        );
+    }
+
+    #[test]
+    fn expiration_header_case_insensitive() {
+        let body = "github-authentication-token-expiration: 2026-01-02\n\nbody";
+        assert_eq!(
+            response_header_value(body, "github-authentication-token-expiration").as_deref(),
+            Some("2026-01-02")
+        );
+    }
+
+    fn body_key(n: usize) -> GhBodyKey {
+        (
+            Some("repo".into()),
+            Some("github.com".into()),
+            vec!["api".into(), format!("repos/o/r/actions/runs?page={n}")],
+        )
+    }
+
+    fn cached_body(now: Instant) -> CachedGhBody {
+        CachedGhBody {
+            etag: "W/\"abc\"".into(),
+            body: b"{\"runs\":[]}".to_vec(),
+            epoch: 7,
+            touched: now,
+        }
+    }
+
+    #[test]
+    fn conditional_304_uses_status_and_keeps_weak_etag() {
+        let entry = cached_body(Instant::now());
+        for stderr in ["gh: HTTP 304", "unexpected end of JSON input"] {
+            let out = GhOutput {
+                stdout: b"HTTP/2.0 304 Not Modified\r\nEtag: \"abc\"\r\n\r\n".to_vec(),
+                stderr: stderr.into(),
+                code: 1,
+            };
+            let result = conditional_outcome(Some(&entry), &out);
+            assert_eq!(result.out.code, 0);
+            assert_eq!(result.out.stdout, entry.body);
+            assert!(result.out.stderr.is_empty());
+            assert!(matches!(result.update, BodyUpdate::Touch));
+        }
+    }
+
+    #[test]
+    fn conditional_200_strips_headers_and_stores_verbatim_etag() {
+        let etag = format!("W/\"{}\"", "a".repeat(64));
+        let out = GhOutput {
+            stdout: format!("HTTP/2.0 200 OK\r\nEtag: {etag}\r\nCache-Control: private, max-age=60\r\n\r\n{{\"changed\":true}}").into_bytes(),
+            stderr: "note".into(),
+            code: 0,
+        };
+        let result = conditional_outcome(None, &out);
+        assert_eq!(result.out.stdout, b"{\"changed\":true}");
+        assert_eq!(result.out.stderr, "note");
+        assert!(matches!(result.update, BodyUpdate::Store(token) if token == etag));
+    }
+
+    #[test]
+    fn conditional_failures_and_missing_etags_never_store() {
+        let mut cache = HashMap::new();
+        for (stdout, code, body) in [
+            (
+                "HTTP/2.0 404 Not Found\r\nEtag: abc\r\n\r\n{\"message\":\"Not Found\"}",
+                1,
+                "{\"message\":\"Not Found\"}",
+            ),
+            ("HTTP/2.0 403 Forbidden\r\n\r\n{}", 1, "{}"),
+            ("HTTP/2.0 500 Error\r\n\r\n{}", 1, "{}"),
+            ("HTTP/2.0 304 Not Modified\r\n\r\n", 1, ""),
+            ("HTTP/2.0 200 OK\r\n\r\n{}", 0, "{}"),
+            ("HTTP/2.0 200 OK\r\nEtag: abc\r\n\r\n{}", 1, "{}"),
+            ("plain body", 1, "plain body"),
+        ] {
+            let out = GhOutput {
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: "gh: Not Found (HTTP 404)".into(),
+                code,
+            };
+            let result = conditional_outcome(None, &out);
+            assert_eq!(result.out.stdout, body.as_bytes());
+            assert_eq!(result.out.code, code);
+            assert_eq!(result.out.stderr, out.stderr);
+            apply_body_update(&mut cache, body_key(0), None, &result, 7, 7, Instant::now());
+            assert!(body_cache_get(
+                &cache,
+                &body_key(0),
+                7,
+                GH_BODY_CACHE_MAX_AGE,
+                Instant::now(),
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn conditional_epoch_key_and_retention_gate_the_header() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        body_cache_put(&mut cache, body_key(0), cached_body(now));
+        let entry = body_cache_get(&cache, &body_key(0), 8, GH_BODY_CACHE_MAX_AGE, now);
+        assert!(entry.is_none());
+        assert_eq!(
+            conditional_args(&["api", "repos/o/r"], entry.as_ref()),
+            ["api", "repos/o/r", "-i"],
+        );
+        let mut next = cached_body(now);
+        next.epoch = 8;
+        body_cache_put(&mut cache, body_key(0), next);
+        let entry = body_cache_get(&cache, &body_key(0), 8, GH_BODY_CACHE_MAX_AGE, now).unwrap();
+        assert_eq!(entry.epoch, 8);
+        assert_eq!(
+            conditional_args(&["api", "repos/o/r"], Some(&entry)),
+            ["api", "repos/o/r", "-i", "-H", "If-None-Match: W/\"abc\""],
+        );
+        for key in [
+            (None, body_key(0).1, body_key(0).2),
+            (body_key(0).0, None, body_key(0).2),
+            body_key(1),
+        ] {
+            assert!(body_cache_get(&cache, &key, 8, GH_BODY_CACHE_MAX_AGE, now).is_none());
+        }
+        assert!(body_cache_get(
+            &cache,
+            &body_key(0),
+            8,
+            GH_BODY_CACHE_MAX_AGE,
+            now + GH_BODY_CACHE_MAX_AGE,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn conditional_cap_evicts_only_oldest_and_refresh_keeps_neighbors() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        for n in 0..GH_BODY_CACHE_CAP {
+            body_cache_put(
+                &mut cache,
+                body_key(n),
+                cached_body(now + Duration::from_secs(n as u64)),
+            );
+        }
+        body_cache_put(
+            &mut cache,
+            body_key(0),
+            cached_body(now + Duration::from_secs(100)),
+        );
+        assert_eq!(cache.len(), GH_BODY_CACHE_CAP);
+        assert!(cache.contains_key(&body_key(1)));
+        body_cache_put(
+            &mut cache,
+            body_key(64),
+            cached_body(now + Duration::from_secs(101)),
+        );
+        assert_eq!(cache.len(), GH_BODY_CACHE_CAP);
+        assert!(!cache.contains_key(&body_key(1)));
+        for n in [0, 2, 63, 64] {
+            assert!(cache.contains_key(&body_key(n)));
+        }
+    }
+
+    #[test]
+    fn conditional_bypass_flags_are_explicit() {
+        for flag in [
+            "--paginate",
+            "--paginate=true",
+            "--jq",
+            "--jq=.id",
+            "-q",
+            "-q=.id",
+            "--template",
+            "--template={{.id}}",
+            "-F",
+            "-F=k=v",
+            "--input",
+            "--input=body",
+            "-t",
+            "--field",
+            "--field=k=v",
+            "-i",
+            "--include",
+            "--cache",
+            "--cache=1m",
+        ] {
+            assert!(bypasses(&["api", "repos/o/r", flag]), "{flag}");
+        }
+        let cases: &[(&[&str], bool)] = &[
+            (&[], false),
+            (&["api", "repos/o/r"], false),
+            (&["api", "--method", "POST", "repos/o/r"], true),
+            (&["api", "-X", "PATCH", "repos/o/r"], true),
+            (&["api", "--method=DELETE", "repos/o/r"], true),
+            (&["api", "-XPOST", "repos/o/r"], true),
+            (&["api", "--method", "GET", "repos/o/r", "-f", "k=v"], false),
+            (&["api", "-X", "get", "repos/o/r", "-f", "k=v"], false),
+            (
+                &["api", "--method=gEt", "repos/o/r", "--raw-field", "k=v"],
+                false,
+            ),
+            (&["api", "-XGET", "repos/o/r", "-f", "k=v"], false),
+            (&["api", "repos/o/r", "-f", "k=v"], true),
+            (&["api", "repos/o/r", "--raw-field", "k=v"], true),
+            (&["api", "repos/o/r", "--raw-field=k=v"], true),
+            (&["api", "repos/o/r", "-fk=v"], true),
+            (&["api", "-XGET", "repos/o/r", "-fk=v"], false),
+            (&["api", "-XGET", "repos/o/r", "--raw-field=k=v"], false),
+            (&["api", "-XGET", "repos/o/r", "-F", "k=v"], true),
+            (&["api", "-XGET", "repos/o/r", "--field=k=v"], true),
+        ];
+        for (args, expected) in cases {
+            assert_eq!(bypasses(args), *expected, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn conditional_etags_accept_only_quoted_ascii_tokens() {
+        for (etag, valid) in [
+            ("\"abc\"", true),
+            ("W/\"abc\"", true),
+            ("\"\"", true),
+            ("\"!#~\"", true),
+            ("abc", false),
+            ("\"ab\"c\"", false),
+            ("\"a b\"", false),
+            ("\"a\u{1}b\"", false),
+            ("\"a\u{e9}b\"", false),
+        ] {
+            assert_eq!(valid_etag(etag), valid, "{etag:?}");
+            let out = GhOutput {
+                stdout: format!("HTTP/2.0 200 OK\r\nEtag: {etag}\r\n\r\nbody").into_bytes(),
+                stderr: String::new(),
+                code: 0,
+            };
+            let result = conditional_outcome(None, &out);
+            assert_eq!(
+                matches!(result.update, BodyUpdate::Store(_)),
+                valid,
+                "{etag:?}"
+            );
+            assert_eq!(result.out.stdout, b"body");
+        }
+    }
+
+    #[test]
+    fn conditional_invalid_utf8_headers_pass_through_without_caching() {
+        let out = GhOutput {
+            stdout: b"HTTP/2.0 200 OK\r\nEtag: \"abc\"\r\nX-Bad: \xff".to_vec(),
+            stderr: "original stderr".into(),
+            code: 1,
+        };
+        let result = conditional_outcome(None, &out);
+        assert_eq!(result.out.stdout, out.stdout);
+        assert_eq!(result.out.stderr, out.stderr);
+        assert_eq!(result.out.code, out.code);
+        assert!(matches!(result.update, BodyUpdate::None));
+    }
+
+    #[test]
+    fn conditional_late_epoch_fill_preserves_current_entry() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        let mut current = cached_body(now);
+        current.epoch = 8;
+        body_cache_put(&mut cache, body_key(0), current.clone());
+        let late = conditional_outcome(
+            None,
+            &GhOutput {
+                stdout: b"HTTP/2.0 200 OK\r\nEtag: \"old\"\r\n\r\nold account".to_vec(),
+                stderr: String::new(),
+                code: 0,
+            },
+        );
+        apply_body_update(&mut cache, body_key(0), None, &late, 7, 8, now);
+        let hit = body_cache_get(&cache, &body_key(0), 8, GH_BODY_CACHE_MAX_AGE, now)
+            .expect("late fill must preserve the current epoch entry");
+        assert_eq!(hit.body, current.body);
+        assert_eq!(hit.etag, current.etag);
+    }
+
+    #[test]
+    fn shared_headers_preserve_both_empty_match_contracts() {
+        let headers = "X-Test:\r\nX-Test: value\r\n\r\n";
+        assert_eq!(
+            response_header_value(headers, "x-test"),
+            Some("value".into())
+        );
+        assert_eq!(response_header_line(headers, "x-test"), Some(String::new()));
+        assert_eq!(
+            response_header_value("X-Test:\r\n\r\nX-Test: body", "x-test"),
+            None
+        );
+        assert_eq!(split_response("plain"), ("", "plain"));
+        assert_eq!(
+            split_response("HTTP/2.0 200 OK\r\nEtag: x"),
+            ("HTTP/2.0 200 OK\r\nEtag: x", ""),
+        );
+    }
+
+    #[test]
+    fn conditional_cache_revalidates_and_replaces_bodies() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        let entry = cached_body(now);
+        body_cache_put(&mut cache, body_key(0), entry.clone());
+        let revalidated = conditional_outcome(
+            Some(&entry),
+            &GhOutput {
+                stdout: b"HTTP/2.0 304 Not Modified\r\nEtag: \"abc\"\r\n\r\n".to_vec(),
+                stderr: "gh: HTTP 304".into(),
+                code: 1,
+            },
+        );
+        let touched = now + Duration::from_secs(1);
+        apply_body_update(
+            &mut cache,
+            body_key(0),
+            Some(&entry),
+            &revalidated,
+            7,
+            7,
+            touched,
+        );
+        let hit = body_cache_get(&cache, &body_key(0), 7, GH_BODY_CACHE_MAX_AGE, touched).unwrap();
+        assert_eq!(hit.etag, entry.etag);
+        assert_eq!(hit.body, entry.body);
+        assert_eq!(hit.touched, touched);
+        let changed = conditional_outcome(
+            Some(&hit),
+            &GhOutput {
+                stdout: b"HTTP/2.0 200 OK\r\nEtag: W/\"new\"\r\n\r\nchanged".to_vec(),
+                stderr: String::new(),
+                code: 0,
+            },
+        );
+        apply_body_update(&mut cache, body_key(0), Some(&hit), &changed, 8, 8, touched);
+        let hit = body_cache_get(&cache, &body_key(0), 8, GH_BODY_CACHE_MAX_AGE, touched).unwrap();
+        assert_eq!(hit.body, b"changed");
+        assert_eq!(hit.etag, "W/\"new\"");
+        assert_eq!(hit.epoch, 8);
+    }
 
     /// Records what [`apply_gh_env`] did to a child's environment, so the pin is
     /// assertable without spawning gh.

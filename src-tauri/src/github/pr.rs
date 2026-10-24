@@ -1,3 +1,9 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
@@ -8,7 +14,13 @@ use crate::forge::{c_quote_label, c_quote_path, validate_compare_branch};
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
 use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
-use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::pr_search::viewer_login_core;
+use crate::github::repo_meta::{
+    invalidate_all_repo_meta_after, invalidate_repo_meta_after, write_was_attempted,
+};
+use crate::github::runner::{
+    gh_auth_epoch_counter, run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+};
 use crate::state::AppState;
 
 fn validate_branch(name: &str) -> AppResult<()> {
@@ -249,11 +261,14 @@ pub struct GhRepoList {
     pub repos: Vec<GhRepo>,
 }
 
-/// The signed-in user's login. The one source of the ambient (default-host) probe: the
-/// repo list and the forge layer's owned-namespace read must resolve the viewer
-/// identically, or their namespace answers drift. Errors when `gh` can't answer; an
-/// empty-but-successful answer passes through — callers decide the fallout.
+/// The ambient viewer read, memoized for 60s plus auth epoch, is shared by the repo
+/// list and owned-namespace read; fork lookup uses `gh_viewer_login_fresh`.
 pub async fn gh_viewer_login() -> AppResult<String> {
+    viewer_login_core(None, GH_TIMEOUT).await
+}
+
+/// A just-created fork must be located under the currently active account.
+pub(crate) async fn gh_viewer_login_fresh() -> AppResult<String> {
     Ok(run_gh(None, &["api", "user", "-q", ".login"], GH_TIMEOUT)
         .await?
         .stdout_lossy()
@@ -729,12 +744,14 @@ pub async fn gh_repo_set_star(repo_path: String, starred: bool) -> AppResult<()>
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let endpoint = format!("user/starred/{slug}");
     let method = if starred { "PUT" } else { "DELETE" };
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["api", "--method", method, &endpoint],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -1010,53 +1027,63 @@ pub async fn gh_pr_merge(
         }
     };
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    // A stack member rejects BOTH `gh pr merge` and the plain REST merge endpoint;
-    // GitHub requires its asynchronous merge API there. The probe is best-effort —
-    // when it can't tell, the legacy path runs and GitHub's own refusal is the
-    // backstop. Merging a member also merges every unmerged layer below it.
-    let queued = if gh_pr_is_stacked(&repo_path, &slug, number).await {
-        gh_pr_merge_async(&repo_path, &slug, number, &strategy).await? == StackedMergeResult::Queued
-    } else {
-        let out = run_gh_raw(
-            Some(&repo_path),
-            &["pr", "merge", &n, method, "--repo", &slug],
-            GH_NETWORK_TIMEOUT,
-        )
-        .await?;
-        if out.code != 0 {
-            // Raw rather than `run_gh` only so the refusal can be reworded: gh's own
-            // blob advises `--auto`/`--admin`/`gh pr checkout`, none of which this app
-            // offers. Every unrecognized failure keeps `run_gh`'s exact fallback.
-            let raw = out.stderr.trim();
-            return Err(AppError::Gh(match classify_gh_merge_refusal(&out.stderr) {
-                Some(message) => message,
-                None if raw.is_empty() => format!("gh exited with code {}", out.code),
-                None => raw.to_string(),
-            }));
-        }
-        false
-    };
-    // Merge accepted: from here a cleanup failure is a warning on success, never an error.
-    let cleanup_warning = if queued {
-        // A queued merge has NOT landed — deleting the head branch now would break
-        // the merge the queue is still holding. Skip cleanup and disclose it.
-        Some(if delete_branch {
-            format!("Merging #{number} was queued on GitHub and will land when the queue completes. The remote branch was left in place for the queue.")
+    let outcome = async {
+        // A stack member rejects BOTH `gh pr merge` and the plain REST merge endpoint;
+        // GitHub requires its asynchronous merge API there. The probe is best-effort —
+        // when it can't tell, the legacy path runs and GitHub's own refusal is the
+        // backstop. Merging a member also merges every unmerged layer below it.
+        let queued = if gh_pr_is_stacked(&repo_path, &slug, number).await {
+            gh_pr_merge_async(&repo_path, &slug, number, &strategy).await?
+                == StackedMergeResult::Queued
         } else {
-            format!("Merging #{number} was queued on GitHub and will land when the queue completes.")
+            let result = run_gh_raw(
+                Some(&repo_path),
+                &["pr", "merge", &n, method, "--repo", &slug],
+                GH_NETWORK_TIMEOUT,
+            )
+            .await;
+            invalidate_repo_meta_after(&slug, &result);
+            invalidate_stack_memo_after(&slug, &result);
+            let out = result?;
+            if out.code != 0 {
+                // Raw rather than `run_gh` only so the refusal can be reworded: gh's own
+                // blob advises `--auto`/`--admin`/`gh pr checkout`, none of which this app
+                // offers. Every unrecognized failure keeps `run_gh`'s exact fallback.
+                let raw = out.stderr.trim();
+                return Err(AppError::Gh(match classify_gh_merge_refusal(&out.stderr) {
+                    Some(message) => message,
+                    None if raw.is_empty() => format!("gh exited with code {}", out.code),
+                    None => raw.to_string(),
+                }));
+            }
+            false
+        };
+        // Merge accepted: from here a cleanup failure is a warning on success, never an error.
+        let cleanup_warning = if queued {
+            // A queued merge has NOT landed — deleting the head branch now would break
+            // the merge the queue is still holding. Skip cleanup and disclose it.
+            Some(if delete_branch {
+                format!("Merging #{number} was queued on GitHub and will land when the queue completes. The remote branch was left in place for the queue.")
+            } else {
+                format!("Merging #{number} was queued on GitHub and will land when the queue completes.")
+            })
+        } else if delete_branch {
+            gh_delete_remote_head_branch(&repo_path, number, lens.as_deref())
+                .await
+                .err()
+                .map(|e| e.to_string())
+        } else {
+            None
+        };
+        Ok(PrMergeOutcome {
+            cleanup_warning,
+            queued,
         })
-    } else if delete_branch {
-        gh_delete_remote_head_branch(&repo_path, number, lens.as_deref())
-            .await
-            .err()
-            .map(|e| e.to_string())
-    } else {
-        None
-    };
-    Ok(PrMergeOutcome {
-        cleanup_warning,
-        queued,
-    })
+    }
+    .await;
+    invalidate_repo_meta_after(&slug, &outcome);
+    invalidate_stack_memo_after(&slug, &outcome);
+    outcome
 }
 
 /// Whether the PR is a stack member — the same `pull_stack_ref` reading the detail
@@ -1146,12 +1173,15 @@ async fn gh_pr_merge_async(
 ) -> AppResult<StackedMergeResult> {
     let endpoint = format!("repos/{slug}/pulls/{number}/merge-async");
     let method_arg = format!("merge_method={strategy}");
-    let out = run_gh(
+    let result = run_gh(
         Some(repo_path),
         &["api", "--method", "PUT", &endpoint, "-f", &method_arg],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(slug, &result);
+    invalidate_stack_memo_after(slug, &result);
+    let out = result?;
     // The PUT already succeeded, so the merge may be running — an unreadable
     // acknowledgement is uncertainty, not a failed merge, and must read that way.
     let mut current: MergeAsyncStatus =
@@ -1363,12 +1393,15 @@ async fn gh_delete_remote_head_branch(
 pub async fn gh_pr_close(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["pr", "close", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    invalidate_stack_memo_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -1810,12 +1843,15 @@ pub(crate) async fn detect_fork_pr_for_branch(
 pub async fn gh_pr_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["pr", "reopen", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    invalidate_stack_memo_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -2082,12 +2118,14 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
     .trim()
     .to_string();
 
-    let out = run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["repo", "fork", "--remote"],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_all_repo_meta_after(&result);
+    let out = result?;
     // gh prints progress to stderr; stdout carries the fork's URL when
     // creation succeeds (empty if the fork already existed).
     let fork_url = out.stdout_lossy().trim().to_string();
@@ -2273,6 +2311,141 @@ fn flatten_slurped_pages(pages: Vec<Vec<serde_json::Value>>) -> Vec<serde_json::
     pages.into_iter().flatten().collect()
 }
 
+// 30s ensures one read never serves two 45s poll ticks.
+const STACK_MEMO_TTL: Duration = Duration::from_secs(30);
+const STACK_MEMO_CAP: usize = 64;
+type StackMemoKey = (String, String);
+type StackMemberships = HashMap<u64, PrStackInfo>;
+
+struct CachedStackMemberships {
+    memberships: StackMemberships,
+    epoch: u64,
+    fetched: Instant,
+}
+
+#[derive(Default)]
+struct StackState {
+    entries: HashMap<StackMemoKey, CachedStackMemberships>,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct StackMemo {
+    inner: Mutex<StackState>,
+}
+
+#[derive(Clone, Copy)]
+struct StackFetchStamp {
+    epoch: u64,
+    generation: u64,
+}
+
+fn stack_memo() -> &'static StackMemo {
+    static MEMO: OnceLock<StackMemo> = OnceLock::new();
+    MEMO.get_or_init(Default::default)
+}
+
+fn stack_memo_key(repo_path: &str, slug: &str) -> StackMemoKey {
+    (repo_path.to_string(), slug.to_lowercase())
+}
+
+fn stack_memo_get(
+    state: &StackState,
+    key: &StackMemoKey,
+    epoch: u64,
+    ttl: Duration,
+    now: Instant,
+) -> Option<StackMemberships> {
+    state
+        .entries
+        .get(key)
+        .filter(|entry| entry.epoch == epoch && now.duration_since(entry.fetched) < ttl)
+        .map(|entry| entry.memberships.clone())
+}
+
+fn stack_memo_put(
+    state: &mut StackState,
+    key: StackMemoKey,
+    memberships: Option<&StackMemberships>,
+    before: StackFetchStamp,
+    current_epoch: u64,
+    now: Instant,
+) {
+    let Some(memberships) = memberships else {
+        return;
+    };
+    if state.generation != before.generation || current_epoch != before.epoch {
+        return;
+    }
+    if !state.entries.contains_key(&key) && state.entries.len() >= STACK_MEMO_CAP {
+        if let Some(oldest) = state
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.fetched)
+            .map(|(key, _)| key.clone())
+        {
+            state.entries.remove(&oldest);
+        }
+    }
+    state.entries.insert(
+        key,
+        CachedStackMemberships {
+            memberships: memberships.clone(),
+            epoch: before.epoch,
+            fetched: now,
+        },
+    );
+}
+
+fn stack_memo_invalidate(state: &mut StackState, slug: &str) {
+    state.generation += 1;
+    let slug = slug.to_lowercase();
+    state.entries.retain(|(_, key_slug), _| *key_slug != slug);
+}
+
+fn invalidate_stack_memo(slug: &str) {
+    stack_memo_invalidate(
+        &mut stack_memo().inner.lock().unwrap_or_else(|p| p.into_inner()),
+        slug,
+    );
+}
+
+fn invalidate_stack_memo_after<T>(slug: &str, result: &AppResult<T>) {
+    if write_was_attempted(result) {
+        invalidate_stack_memo(slug);
+    }
+}
+
+async fn stack_memberships_with(
+    memo: &StackMemo,
+    key: StackMemoKey,
+    epoch: &AtomicU64,
+    ttl: Duration,
+    fetch: impl Future<Output = Option<StackMemberships>>,
+) -> Option<StackMemberships> {
+    let before = {
+        let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let epoch = epoch.load(Ordering::SeqCst);
+        if let Some(memberships) = stack_memo_get(&state, &key, epoch, ttl, Instant::now()) {
+            return Some(memberships);
+        }
+        StackFetchStamp {
+            epoch,
+            generation: state.generation,
+        }
+    };
+    let memberships = fetch.await;
+    stack_memo_put(
+        &mut memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
+        key,
+        memberships.as_ref(),
+        before,
+        epoch.load(Ordering::SeqCst),
+        Instant::now(),
+    );
+    memberships
+}
+
 /// The repo's OPEN stacks as a PR-number → membership map, for the list join.
 /// `None` is the tri-state the list needs: the probe FAILED (no such endpoint on
 /// GHES, spawn error, non-zero exit, unparseable body — a caller-side
@@ -2282,24 +2455,35 @@ fn flatten_slurped_pages(pages: Vec<Vec<serde_json::Value>>) -> Vec<serde_json::
 /// Paginated because merge-dissolved stacks PERSIST in this list as `open: false`:
 /// on a long-lived repo the residue fills the early pages and the live stacks the
 /// join actually needs sit past them.
+/// Answered maps, empty included, are memoized 30s per (repo_path, folded slug);
+/// a failed probe never is.
 async fn gh_open_stack_memberships(
     repo_path: &str,
     slug: &str,
 ) -> Option<std::collections::HashMap<u64, PrStackInfo>> {
-    let endpoint = format!("repos/{slug}/stacks?per_page=100");
-    let out = run_gh_raw(
-        Some(repo_path),
-        &["api", "--paginate", "--slurp", &endpoint],
-        GH_TIMEOUT,
+    stack_memberships_with(
+        stack_memo(),
+        stack_memo_key(repo_path, slug),
+        gh_auth_epoch_counter(),
+        STACK_MEMO_TTL,
+        async {
+            let endpoint = format!("repos/{slug}/stacks?per_page=100");
+            let out = run_gh_raw(
+                Some(repo_path),
+                &["api", "--paginate", "--slurp", &endpoint],
+                GH_TIMEOUT,
+            )
+            .await
+            .ok()?;
+            if out.code != 0 {
+                return None;
+            }
+            let pages =
+                serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&out.stdout_lossy()).ok()?;
+            Some(stack_memberships_from(flatten_slurped_pages(pages)))
+        },
     )
     .await
-    .ok()?;
-    if out.code != 0 {
-        return None;
-    }
-    let pages =
-        serde_json::from_str::<Vec<Vec<serde_json::Value>>>(&out.stdout_lossy()).ok()?;
-    Some(stack_memberships_from(flatten_slurped_pages(pages)))
 }
 
 /// Decorate list rows with their stack membership. `stacks` is `None` when the
@@ -2494,7 +2678,9 @@ pub async fn gh_stack_create(
     let endpoint = format!("repos/{slug}/stacks");
     let args = stack_write_args(&endpoint, &pull_requests);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let body = run_gh_api_write(&repo_path, &arg_refs).await?;
+    let result = run_gh_api_write(&repo_path, &arg_refs).await;
+    invalidate_stack_memo_after(&slug, &result);
+    let body = result?;
     stack_write_outcome_from(&body, "stack create")
 }
 
@@ -2511,7 +2697,9 @@ pub async fn gh_stack_add(
     let endpoint = format!("repos/{slug}/stacks/{stack_number}/add");
     let args = stack_write_args(&endpoint, &pull_requests);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let body = run_gh_api_write(&repo_path, &arg_refs).await?;
+    let result = run_gh_api_write(&repo_path, &arg_refs).await;
+    invalidate_stack_memo_after(&slug, &result);
+    let body = result?;
     stack_write_outcome_from(&body, "stack add")
 }
 
@@ -2526,7 +2714,9 @@ pub async fn gh_stack_dissolve(
 ) -> AppResult<()> {
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/stacks/{stack_number}/unstack");
-    run_gh_api_write(&repo_path, &["api", "--method", "POST", &endpoint]).await?;
+    let result = run_gh_api_write(&repo_path, &["api", "--method", "POST", &endpoint]).await;
+    invalidate_stack_memo_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -3259,7 +3449,9 @@ pub async fn gh_pr_edit(
     let endpoint = format!("repos/{slug}/pulls/{number}");
     let args = pr_edit_args(&endpoint, title, &body, base.as_deref());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_gh_api_write(&repo_path, &arg_refs).await?;
+    let result = run_gh_api_write(&repo_path, &arg_refs).await;
+    invalidate_stack_memo_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -5548,16 +5740,19 @@ pub async fn commit_diff(repo_path: &str, oid: &str) -> AppResult<String> {
     Ok(text)
 }
 
+fn optional_viewer_login(result: AppResult<String>) -> Option<String> {
+    result
+        .ok()
+        .map(|login| login.trim().to_string())
+        .filter(|login| !login.is_empty())
+}
+
 /// The signed-in user's login, resolved TOLERANTLY (`gh api user -q .login`) — any
 /// failure yields `None`, so a commit comment's `viewer_did_author` falls back to
 /// `false` (edit/delete hidden) rather than wrongly claiming authorship. Never
 /// returns an empty string. Mirrors gitlab.rs's `current_user_login`.
 async fn current_login(repo_path: &str) -> Option<String> {
-    run_gh(Some(repo_path), &["api", "user", "-q", ".login"], GH_NETWORK_TIMEOUT)
-        .await
-        .ok()
-        .map(|o| o.stdout_lossy().trim().to_string())
-        .filter(|s| !s.is_empty())
+    optional_viewer_login(viewer_login_core(Some(repo_path), GH_NETWORK_TIMEOUT).await)
 }
 
 /// One commit comment as the REST list returns it. Every field tolerant/defaulted
@@ -6214,15 +6409,7 @@ async fn gh_pr_comments_paginated(
         })?;
     // Resolve the viewer login once, only now that this top-up fired. Best-effort:
     // a failed probe leaves `viewer_did_author` false (no edit affordance).
-    let viewer_login = run_gh(
-        Some(repo_path),
-        &["api", "user", "-q", ".login"],
-        GH_TIMEOUT,
-    )
-    .await
-    .ok()
-    .map(|o| o.stdout_lossy().trim().to_string())
-    .filter(|s| !s.is_empty());
+    let viewer_login = optional_viewer_login(viewer_login_core(Some(repo_path), GH_TIMEOUT).await);
     Ok(pages
         .into_iter()
         .flatten()
@@ -7110,7 +7297,9 @@ pub(crate) async fn gh_pr_create_core(
         if draft {
             args.push("--draft");
         }
-        let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+        let result = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await;
+        invalidate_repo_meta_after(&parent_slug, &result);
+        let out = result?;
         let (number, url) = scrape_pr_ref(&out.stdout_lossy());
         return Ok(PrRef { number, url });
     }
@@ -7151,7 +7340,9 @@ pub(crate) async fn gh_pr_create_core(
     // --label/--assignee`: gh 2.94 records each value TWICE on the activity timeline
     // when passed at create time (create mutation + follow-up re-apply), so the feed
     // shows doubled "added the X label" rows. `gh pr edit --add-*` applies once.
-    let out = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await?;
+    let result = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await;
+    invalidate_repo_meta_after(&origin_slug, &result);
+    let out = result?;
 
     let (number, url) = scrape_pr_ref(&out.stdout_lossy());
 
@@ -7260,6 +7451,255 @@ mod tests {
             stderr: stderr.to_string(),
             code,
         }
+    }
+
+    #[test]
+    fn viewer_login_callers_preserve_optional_verdicts() {
+        assert_eq!(super::optional_viewer_login(Ok(String::new())), None);
+        assert_eq!(super::optional_viewer_login(Ok("  ".into())), None);
+        assert_eq!(
+            super::optional_viewer_login(Ok(" octocat\n".into())),
+            Some("octocat".into())
+        );
+        assert_eq!(
+            super::optional_viewer_login(Err(AppError::Timeout(1))),
+            None
+        );
+        assert_eq!(
+            super::optional_viewer_login(Err(AppError::Gh("failed".into()))),
+            None
+        );
+    }
+
+    #[test]
+    fn viewer_login_routes_keep_timeouts_and_fork_freshness() {
+        let source = include_str!("pr.rs").replace("\r\n", "\n");
+        let body = |name: &str| {
+            let start = source.find(&format!("fn {name}(")).unwrap();
+            source[start..]
+                .split("\n}")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(body("gh_viewer_login").contains("viewer_login_core(None, GH_TIMEOUT)"));
+        assert!(body("current_login")
+            .contains("viewer_login_core(Some(repo_path), GH_NETWORK_TIMEOUT)"));
+        assert!(body("gh_pr_comments_paginated")
+            .contains("viewer_login_core(Some(repo_path), GH_TIMEOUT)"));
+        let fresh = body("gh_viewer_login_fresh");
+        assert!(fresh.contains("run_gh(None,"));
+        assert!(!fresh.contains("viewer_login_core"));
+        let forge = include_str!("../forge/github.rs").replace("\r\n", "\n");
+        let fork = forge[forge.find("fn fork_repo(").unwrap()..]
+            .split("\n}")
+            .next()
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(fork.contains("gh_viewer_login_fresh().await?"));
+    }
+
+    #[test]
+    fn stack_evictions_follow_every_write_attempt() {
+        crate::github::repo_meta::tests::assert_stack_eviction_wiring();
+    }
+
+    fn stack_fixture() -> super::StackMemberships {
+        std::collections::HashMap::from([(
+            21,
+            PrStackInfo {
+                id: "22".into(),
+                position: 1,
+                size: 2,
+            },
+        )])
+    }
+
+    #[tokio::test]
+    async fn stack_memo_caches_answered_empty_but_never_failed_probes() {
+        use super::{stack_memberships_with, stack_memo_key, StackMemo, STACK_MEMO_TTL};
+        let memo = StackMemo::default();
+        let epoch = std::sync::atomic::AtomicU64::new(7);
+        let key = stack_memo_key("repo", "Owner/Repo");
+        assert!(
+            stack_memberships_with(&memo, key.clone(), &epoch, STACK_MEMO_TTL, async { None })
+                .await
+                .is_none()
+        );
+        assert!(
+            memo.inner
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .is_empty(),
+            "a failed probe must not become Some(empty)"
+        );
+        assert!(
+            stack_memberships_with(&memo, key.clone(), &epoch, STACK_MEMO_TTL, async {
+                Some(std::collections::HashMap::new())
+            })
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            stack_memberships_with(&memo, key, &epoch, STACK_MEMO_TTL, async {
+                panic!("an answered empty map must be cached")
+            })
+            .await
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn stack_memo_keys_ttl_and_epoch_gate_memberships() {
+        use super::{
+            stack_memo_get, stack_memo_key, stack_memo_put, StackFetchStamp, StackMemo,
+            STACK_MEMO_TTL,
+        };
+        let memo = StackMemo::default();
+        let mut state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        let key = stack_memo_key("repo", "Owner/Repo");
+        let before = StackFetchStamp {
+            epoch: 7,
+            generation: 0,
+        };
+        stack_memo_put(
+            &mut state,
+            key.clone(),
+            Some(&stack_fixture()),
+            before,
+            7,
+            now,
+        );
+        let folded = stack_memo_key("repo", "OWNER/REPO");
+        let hit = stack_memo_get(&state, &folded, 7, STACK_MEMO_TTL, now).unwrap();
+        assert_eq!(hit[&21].id, "22");
+        assert!(
+            stack_memo_get(&state, &key, 8, STACK_MEMO_TTL, now).is_none(),
+            "a moved epoch must miss"
+        );
+        assert!(
+            stack_memo_get(&state, &key, 7, STACK_MEMO_TTL, now + STACK_MEMO_TTL).is_none(),
+            "the TTL boundary must miss"
+        );
+        for key in [
+            stack_memo_key("other", "owner/repo"),
+            stack_memo_key("repo", "owner/other"),
+        ] {
+            assert!(stack_memo_get(&state, &key, 7, STACK_MEMO_TTL, now).is_none());
+        }
+    }
+
+    #[test]
+    fn stack_memo_cap_keeps_all_but_the_oldest_entry() {
+        use super::{
+            stack_memo_get, stack_memo_key, stack_memo_put, StackFetchStamp, StackMemo,
+            STACK_MEMO_TTL,
+        };
+        let memo = StackMemo::default();
+        let mut state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        let before = StackFetchStamp {
+            epoch: 7,
+            generation: 0,
+        };
+        for n in 0..65 {
+            let key = stack_memo_key("repo", &format!("owner/repo{n}"));
+            let fetched = now + std::time::Duration::from_millis(n);
+            stack_memo_put(&mut state, key, Some(&stack_fixture()), before, 7, fetched);
+        }
+        let read_at = now + std::time::Duration::from_millis(65);
+        let oldest = stack_memo_key("repo", "owner/repo0");
+        assert!(stack_memo_get(&state, &oldest, 7, STACK_MEMO_TTL, read_at).is_none());
+        for n in 1..65 {
+            let key = stack_memo_key("repo", &format!("owner/repo{n}"));
+            assert!(
+                stack_memo_get(&state, &key, 7, STACK_MEMO_TTL, read_at).is_some(),
+                "remaining key {n} must serve"
+            );
+        }
+        let key = stack_memo_key("repo", "owner/repo1");
+        let before = StackFetchStamp {
+            epoch: 8,
+            generation: 0,
+        };
+        stack_memo_put(
+            &mut state,
+            key.clone(),
+            Some(&stack_fixture()),
+            before,
+            8,
+            read_at,
+        );
+        assert_eq!(state.entries.len(), 64);
+        assert!(stack_memo_get(&state, &key, 8, STACK_MEMO_TTL, read_at).is_some());
+        assert!(state
+            .entries
+            .contains_key(&stack_memo_key("repo", "owner/repo2")));
+    }
+
+    #[tokio::test]
+    async fn stack_memo_eviction_beats_an_in_flight_fill() {
+        use super::{
+            stack_memberships_with, stack_memo_invalidate, stack_memo_key, StackMemo,
+            STACK_MEMO_TTL,
+        };
+        let memo = StackMemo::default();
+        let epoch = std::sync::atomic::AtomicU64::new(7);
+        let result = stack_memberships_with(
+            &memo,
+            stack_memo_key("repo", "owner/repo"),
+            &epoch,
+            STACK_MEMO_TTL,
+            async {
+                stack_memo_invalidate(
+                    &mut memo.inner.lock().unwrap_or_else(|p| p.into_inner()),
+                    "OWNER/REPO",
+                );
+                Some(stack_fixture())
+            },
+        )
+        .await;
+        assert!(result.is_some());
+        let state = memo.inner.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(state.entries.is_empty(), "eviction must beat the late fill");
+        assert_eq!(state.generation, 1);
+    }
+
+    #[tokio::test]
+    async fn stack_memo_account_change_drops_the_old_epoch_fill() {
+        use super::{stack_memberships_with, stack_memo_key, StackMemo, STACK_MEMO_TTL};
+        let memo = StackMemo::default();
+        let epoch = std::sync::atomic::AtomicU64::new(7);
+        let result = stack_memberships_with(
+            &memo,
+            stack_memo_key("repo", "owner/repo"),
+            &epoch,
+            STACK_MEMO_TTL,
+            async {
+                epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(stack_fixture())
+            },
+        )
+        .await;
+        assert!(result.is_some());
+        assert!(
+            memo.inner
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .entries
+                .is_empty(),
+            "an account change must discard the fill"
+        );
     }
 
     #[test]
@@ -8328,8 +8768,8 @@ mod tests {
     /// The list join's tri-state. A FAILED probe must mark every row unknown: an
     /// absent badge would otherwise read as a firm "not stacked" and let a caller
     /// stack rows that already are.
-    #[test]
-    fn stack_join_marks_every_row_unknown_only_when_the_probe_failed() {
+    #[tokio::test]
+    async fn stack_join_marks_every_row_unknown_only_when_the_probe_failed() {
         fn rows() -> Vec<PrInfo> {
             vec![pr_row(21), pr_row(23)]
         }
@@ -8362,6 +8802,26 @@ mod tests {
         assert_eq!(joined[0].stack.as_ref().unwrap().id, "22");
         assert!(joined[1].stack.is_none());
         assert!(joined.iter().all(|p| !p.stack_unknown));
+
+        let memo = super::StackMemo::default();
+        let epoch = std::sync::atomic::AtomicU64::new(7);
+        let key = super::stack_memo_key("repo", "owner/repo");
+        super::stack_memberships_with(&memo, key.clone(), &epoch, super::STACK_MEMO_TTL, async {
+            Some(stack_fixture())
+        })
+        .await
+        .unwrap();
+        let failed_refresh =
+            super::stack_memberships_with(&memo, key, &epoch, std::time::Duration::ZERO, async {
+                None
+            })
+            .await;
+        let mut expired = rows();
+        apply_stack_join(&mut expired, failed_refresh.as_ref());
+        assert!(
+            expired.iter().all(|pr| pr.stack_unknown),
+            "an expired entry followed by failure stays unknown"
+        );
     }
 
     /// The detail probe's hop-2 tri-state. A FAILED member fetch must flag the

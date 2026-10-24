@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::pr::{PrAuthor, PrListLabel, PrRef, PrThreadOut, RepoLabel};
+use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
 
 #[derive(Serialize, Deserialize)]
@@ -458,14 +459,15 @@ pub async fn gh_issue_create(
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
     let endpoint = format!("repos/{slug}/issues");
     // Same disabled-issues remap as `gh_issue_list`.
-    let out = run_gh_input(
+    let result = run_gh_input(
         Some(&repo_path),
         &["api", "--method", "POST", &endpoint, "--input", "-"],
         &input,
         GH_NETWORK_TIMEOUT,
     )
-    .await
-    .map_err(map_issues_disabled)?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    let out = result.map_err(map_issues_disabled)?;
     let created: CreatedIssue = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
         gh_unreadable(
             "the new issue",
@@ -685,12 +687,14 @@ pub async fn gh_issue_close(
         }
     };
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["issue", "close", &n, "--repo", &slug, "--reason", reason],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -698,12 +702,14 @@ pub async fn gh_issue_close(
 pub async fn gh_issue_reopen(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["issue", "reopen", &n, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 
@@ -956,12 +962,17 @@ pub async fn gh_issue_transfer(
     // Resolve the lens slug so the SOURCE issue resolves against the chosen repo (the
     // `destination` arg is explicit and unaffected).
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let out = run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["issue", "transfer", &n, destination, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    if let Some(destination_slug) = crate::github::repo_meta::transfer_destination(destination) {
+        invalidate_repo_meta_after(&destination_slug, &result);
+    }
+    let out = result?;
     // gh prints the transferred issue's URL on success.
     Ok(out.stdout_lossy().trim().to_string())
 }
@@ -971,12 +982,14 @@ pub async fn gh_issue_transfer(
 pub async fn gh_issue_delete(repo_path: String, number: u64, lens: Option<String>) -> AppResult<()> {
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    run_gh(
+    let result = run_gh(
         Some(&repo_path),
         &["issue", "delete", &n, "--repo", &slug, "--yes"],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await;
+    invalidate_repo_meta_after(&slug, &result);
+    result?;
     Ok(())
 }
 

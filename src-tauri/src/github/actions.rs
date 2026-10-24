@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
-use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT};
+use crate::github::runner::{run_gh, run_gh_cached_get, run_gh_raw, GH_NETWORK_TIMEOUT};
 
 // Job ids can exceed JS's safe integer range, so the frontend handles them as
 // strings — serialize the u64 as a string here.
@@ -458,7 +458,7 @@ pub async fn gh_run_page(
     let args = run_page_args(&endpoint, limit, page, branch);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (out, workflow_names) = tokio::join!(
-        run_gh(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
+        run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
         workflow_name_index(&repo_path, &slug),
     );
     let parsed: RestRunPage = serde_json::from_str(&out?.stdout_lossy()).map_err(|e| {
