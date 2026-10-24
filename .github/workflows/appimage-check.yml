@@ -14,6 +14,7 @@ on:
       - ".github/actions/pin-linuxdeploy/**"
       - ".github/scripts/appimage-guard.sh"
       - ".github/scripts/appimage-smoke.sh"
+      - ".node-version" # setup-node reads the Node version from it
       # The Tauri CLI (resolved in the lockfile) embeds the GTK hook and names
       # the AppRun and linuxdeploy builds; bundle config picks which hooks run.
       - "src-tauri/tauri.conf.json"
@@ -44,7 +45,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v7.1.0
         with:
-          node-version: 24
+          node-version-file: .node-version
           cache: pnpm
 
       - name: Install Rust
