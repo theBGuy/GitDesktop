@@ -24,9 +24,10 @@ export interface SuccessorView<T> {
 }
 
 /** Marks a confirm-swap stop, so a successor search finds a row's confirm
- *  controls from the DOM alone, whichever hook instance owns the row: every
- *  node a swap ref holds, and a row root carrying it literally (a roving-stop
- *  row). */
+ *  controls from the DOM alone, whichever hook instance owns the row. Three
+ *  carriers: every node a swap ref holds; a row root carrying it literally (a
+ *  roving-stop row); and a row's primary control, marked literally or by
+ *  `markSwapStop` when its component takes no DOM props. */
 export const SWAP_NODE_ATTR = "data-confirm-swap";
 const SWAP_NODE_SELECTOR = `[${SWAP_NODE_ATTR}]`;
 

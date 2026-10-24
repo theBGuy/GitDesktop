@@ -341,7 +341,8 @@ export function TaskDialog({
     setDescribe("");
     setConfirmBeforeRun(editing?.confirmBeforeRun ?? true);
     setConfirmDelete(false);
-    deletedRef.current = null;
+    // A reopen of the task whose delete is still in flight keeps its mark.
+    if (deletedRef.current !== editing?.id) deletedRef.current = null;
     // The task's stored scope verbatim; a new task belongs to the open repo.
     // Whether that value is the canonical "this repository" key is decided at
     // render (`selectedScope`), so a scope seeded before the identity resolved

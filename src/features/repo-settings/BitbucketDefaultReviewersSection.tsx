@@ -261,8 +261,9 @@ function AddReviewerPopover({
       setActiveIndex(stepHighlight(activeIndex, optionCount, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
+      // A held Enter that reopened this from the fallback trigger adds nothing.
       const match = suggestions[active];
-      if (match) add(match);
+      if (match && !e.repeat) add(match);
     }
   }
 
