@@ -66,14 +66,13 @@ pub struct AiIgnoreVerdict {
     pub unreadable: bool,
 }
 
-/// Rejects paths that could be read as a git flag or escape the repo root. The
+/// Rejects empty paths and paths that could escape the repo root. The
 /// path comes from git status (trusted-ish), but the write paths
 /// (`git_resolve_conflict_core`, `git_checkout_conflict_side_core`) make traversal
 /// worth refusing defensively.
 fn validate_rel_path(path: &str) -> AppResult<()> {
     let p = Path::new(path);
     if path.is_empty()
-        || path.starts_with('-')
         || p.is_absolute()
         || p.components().any(|c| matches!(c, Component::ParentDir))
     {
@@ -82,16 +81,23 @@ fn validate_rel_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Keep four `invalid path:` refusals first; the shared gate then refuses or returns git's spelling.
-/// The pane keys on the opening sentence via ConflictFileView.tsx's PATH_REFUSAL_PREFIX.
+/// Every conflict-gate refusal shares this sentence: the pane keys on its opening via
+/// ConflictFileView.tsx's PATH_REFUSAL_PREFIX.
+fn conflict_path_refusal(path: &str, why: &str) -> AppError {
+    let shown = crate::git::ops::discard_shown(path);
+    AppError::InvalidArgument(format!(
+        "Can't resolve the conflict in {shown} — {why}. Nothing was changed."
+    ))
+}
+
+/// Refuse leading-dash paths with a sentence before the three `invalid path:` refusals;
+/// the shared gate then refuses or returns git's spelling.
 fn conflict_rel_path(path: &str) -> AppResult<String> {
+    if path.starts_with('-') {
+        return Err(conflict_path_refusal(path, "its path starts with \"-\""));
+    }
     validate_rel_path(path)?;
-    crate::git::ops::discard_rel_path(path).map_err(|why| {
-        let shown = crate::git::ops::discard_shown(path);
-        AppError::InvalidArgument(format!(
-            "Can't resolve the conflict in {shown} — {why}. Nothing was changed."
-        ))
-    })
+    crate::git::ops::discard_rel_path(path).map_err(|why| conflict_path_refusal(path, why))
 }
 
 /// Reads a blob from an unmerged index stage (1 = base, 2 = ours, 3 = theirs).
@@ -485,7 +491,7 @@ mod tests {
         let absolute = "C:\\x";
         #[cfg(not(windows))]
         let absolute = "/x";
-        for path in ["", "-x", absolute, "../x"] {
+        for path in ["", absolute, "../x"] {
             let expected = format!("invalid argument: invalid path: {path}");
             assert_eq!(
                 git_conflict_sides(repo.clone(), path.into(), vec![])
@@ -510,6 +516,43 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn conflict_commands_refuse_leading_dash_paths() {
+        let (dir, repo) = conflicted_repo("dash-path-gate", "file.txt", &[]).await;
+        let state = AppState::default();
+        for path in ["-x", "-dir/x"] {
+            let shown = crate::git::ops::discard_shown(path);
+            let expected = format!(
+                "invalid argument: Can't resolve the conflict in {shown} — its path starts with \"-\". Nothing was changed."
+            );
+            assert_eq!(
+                git_conflict_sides(repo.clone(), path.into(), vec![])
+                    .await
+                    .err()
+                    .expect("conflict path must refuse")
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_resolve_conflict_core(&state, repo.clone(), path.into(), "x".into(), false)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_checkout_conflict_side_core(&state, repo.clone(), path.into(), "ours".into())
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+        assert!(!dir.path().join("-x").exists());
+        assert!(!dir.path().join("-dir").exists());
+        assert_eq!(conflict_rel_path("dir/-x").unwrap(), "dir/-x");
     }
 
     #[cfg(windows)]
