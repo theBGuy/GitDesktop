@@ -9,6 +9,7 @@ import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
+import { presentError } from "@/lib/error-summary";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
 import {
@@ -105,10 +106,14 @@ const DELETION_COPY = {
   },
 } as const;
 
-/** The error pane's copy per failed-read kind: the backend refuses a binary or
- *  oversized file as invalidArgument; `io` covers a lock, a permission change,
- *  or a directory at the path (a conflicted submodule), none promised to pass.
- *  Other kinds take the fallback. */
+// src-tauri/src/git/conflict.rs's conflict_rel_path opens refusals with this.
+// scripts/conflict-path-refusal.test.mjs pins both sides.
+const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
+
+/** The backend refuses binary or oversized files as invalidArgument; a path-gate
+ *  refusal shares that kind but renders its own sentence instead. `io` covers a
+ *  lock, a permission change, or a directory at the path (a conflicted submodule),
+ *  none promised to pass. Other kinds take the fallback. */
 const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
   invalidArgument: (
     <>
@@ -368,8 +373,20 @@ export function ConflictFileView({
     recovering ||
     awaitingRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
-  // can't be text-merged; offer only whole-file resolution + the editor.
+  // can't be text-merged: it offers whole-file resolution + the editor, and a
+  // path-gate refusal leaves only the editor.
   const textResolvable = !file.isError;
+  const pathRefusal: string | null = (() => {
+    if (
+      !file.isError ||
+      !isAppError(file.error) ||
+      file.error.kind !== "invalidArgument"
+    ) {
+      return null;
+    }
+    const summary = presentError(file.error).summary;
+    return summary.startsWith(PATH_REFUSAL_PREFIX) ? summary : null;
+  })();
   // The working file alone: per-region accepts rebuild from it, so a clean
   // working file over a non-UTF-8 stage blob stays lossless for them. The AI
   // button holds on it too, but deliberately leaves that blob-only case to
@@ -474,8 +491,8 @@ export function ConflictFileView({
 
   // Which fallback state is on screen, and so whether Mark resolved is offered.
   // Gated on !isError as well as data: a refetch that errors (the file became
-  // unreadable, binary or oversized) keeps the last data while the pane shows
-  // the error copy.
+  // unreadable, binary, oversized, or refused by the path gate) keeps the last
+  // data while the pane shows the error copy.
   const arm =
     file.data && !file.isError && segments === null
       ? fallbackArm(file.data)
@@ -594,12 +611,13 @@ export function ConflictFileView({
             Open in editor
           </Button>
           {/* Held on a path git calls merged: Accept all re-checks the file out
-              from the index, over any edits made after an outside `git add`. */}
+              from the index, over any edits made after an outside `git add`.
+              A path-gate refusal disables both: side checkout uses the same gate. */}
           <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy || notConflicted}
-            reason={notConflicted ? NOT_CONFLICTED_COPY : null}
+            disabled={busy || notConflicted || pathRefusal !== null}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : pathRefusal}
             onClick={() => acceptAll("ours")}
           >
             Accept all current
@@ -607,8 +625,8 @@ export function ConflictFileView({
           <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy || notConflicted}
-            reason={notConflicted ? NOT_CONFLICTED_COPY : null}
+            disabled={busy || notConflicted || pathRefusal !== null}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : pathRefusal}
             onClick={() => acceptAll("theirs")}
           >
             Accept all incoming
@@ -643,8 +661,10 @@ export function ConflictFileView({
           </p>
         ) : file.isError ? (
           <p className="p-4 text-xs text-muted-foreground">
-            {(isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
-              READ_ERROR_FALLBACK}
+            {pathRefusal
+              ? `${pathRefusal} Resolve it in your editor or a terminal.`
+              : (isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
+                READ_ERROR_FALLBACK}
           </p>
         ) : segments === null ? (
           <ConflictFallback

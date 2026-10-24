@@ -387,9 +387,9 @@ fn archive_config_busy(name: &str, archived: bool) -> AppError {
     ))
 }
 
-/// Agent-session prefix; [`refuse_session_branch_name`] guards case-insensitively.
-/// `mcp_server::write_git::ensure_not_session_branch` is a separate, case-sensitive
-/// wrapper check with different refusal text.
+/// Agent-session prefix; [`refuse_session_branch_name`] guards case-insensitively, and
+/// `mcp_server::write_git::ensure_not_session_branch` delegates to it, so the MCP tools
+/// refuse with the same text.
 pub(crate) const SESSION_BRANCH_PREFIX: &str = "gd/session/";
 
 /// What a completed rename reports beyond success.
