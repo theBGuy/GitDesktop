@@ -3,8 +3,9 @@
 //! These commands feed a conflicted file's three sides to the frontend (which
 //! asks the configured review model to propose a merge) and apply the user's
 //! accepted result. Nothing here calls a model — the AI round-trip lives in the
-//! webview, reusing the same streaming engine as PR review. The only write path
-//! is `git_resolve_conflict`, gated behind an explicit user accept in the UI.
+//! webview, reusing the same streaming engine as PR review. The write paths are
+//! `git_resolve_conflict_core` and `git_checkout_conflict_side_core`, both reached
+//! only through an explicit user action in the UI.
 
 use std::path::{Component, Path};
 
@@ -67,7 +68,7 @@ pub struct AiIgnoreVerdict {
 
 /// Rejects paths that could be read as a git flag or escape the repo root. The
 /// path comes from git status (trusted-ish), but the write path
-/// (`git_resolve_conflict`) makes traversal worth refusing defensively.
+/// (`git_resolve_conflict_core`) makes traversal worth refusing defensively.
 fn validate_rel_path(path: &str) -> AppResult<()> {
     let p = Path::new(path);
     if path.is_empty()
@@ -78,6 +79,17 @@ fn validate_rel_path(path: &str) -> AppResult<()> {
         return Err(AppError::InvalidArgument(format!("invalid path: {path}")));
     }
     Ok(())
+}
+
+/// Keep four `invalid path:` refusals first; the shared gate then refuses or returns git's spelling.
+fn conflict_rel_path(path: &str) -> AppResult<String> {
+    validate_rel_path(path)?;
+    crate::git::ops::discard_rel_path(path).map_err(|why| {
+        let shown = crate::git::ops::discard_shown(path);
+        AppError::InvalidArgument(format!(
+            "Can't resolve the conflict in {shown} — {why}. Nothing was changed."
+        ))
+    })
 }
 
 /// Reads a blob from an unmerged index stage (1 = base, 2 = ours, 3 = theirs).
@@ -98,7 +110,7 @@ async fn stage_blob(
         return Ok(None);
     }
     // `:N:path` is a single rev-spec arg; a leading `-` in the path can't be read
-    // as a flag because the `:N:` prefix comes first. validate_rel_path already
+    // as a flag because the `:N:` prefix comes first. conflict_rel_path already
     // refused absolute/traversal paths.
     let spec = format!(":{stage}:{path}");
     let out = run_git_raw(Some(repo), &["show", &spec], DEFAULT_TIMEOUT).await?;
@@ -179,7 +191,7 @@ pub async fn git_conflict_sides(
     path: String,
     exclude: Vec<String>,
 ) -> AppResult<ConflictSides> {
-    validate_rel_path(&path)?;
+    let path = conflict_rel_path(&path)?;
 
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
 
@@ -255,14 +267,24 @@ pub async fn git_resolve_conflict(
     content: String,
     stage: bool,
 ) -> AppResult<()> {
-    validate_rel_path(&path)?;
+    git_resolve_conflict_core(&state, repo_path, path, content, stage).await
+}
+
+async fn git_resolve_conflict_core(
+    state: &AppState,
+    repo_path: String,
+    path: String,
+    content: String,
+    stage: bool,
+) -> AppResult<()> {
+    let path = conflict_rel_path(&path)?;
     let full = Path::new(&repo_path).join(&path);
     tokio::fs::write(&full, content)
         .await
         .map_err(AppError::Io)?;
     if stage {
         let spec = crate::git::pathspec::literal(&path);
-        run_git_mutating(&state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
+        run_git_mutating(state, &repo_path, &["add", "--", &spec], DEFAULT_TIMEOUT).await?;
     }
     Ok(())
 }
@@ -289,7 +311,7 @@ pub(crate) async fn git_checkout_conflict_side_core(
     path: String,
     side: String,
 ) -> AppResult<()> {
-    validate_rel_path(&path)?;
+    let path = conflict_rel_path(&path)?;
     let (flag, stage) = match side.as_str() {
         "ours" => ("--ours", 2u8),
         "theirs" => ("--theirs", 3u8),
@@ -398,9 +420,9 @@ pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
     result
 }
 
-/// Test-only helper: the body of `git_resolve_conflict` without the Tauri
-/// `State` (the repo lock the command takes isn't needed in a single-threaded
-/// test), so the resolve path is exercised end-to-end against a real repo.
+/// `git_resolve_conflict_core`'s write-then-add without the path gate or `State`.
+/// The core's write takes no lock; only `run_git_mutating` locks the add, which
+/// a single-threaded test can skip.
 #[cfg(test)]
 pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
     use crate::git::runner::run_git;
@@ -416,6 +438,132 @@ pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
 mod tests {
     use super::*;
     use crate::git::runner::run_git;
+
+    #[tokio::test]
+    async fn conflict_commands_refuse_git_dir_paths() {
+        let (dir, repo) = conflicted_repo("path-gate", "file.txt", &[]).await;
+        let state = AppState::default();
+        let probe = dir.path().join(".git/gd-probe.txt");
+        std::fs::write(&probe, "keep\n").unwrap();
+        let config = std::fs::read(dir.path().join(".git/config")).unwrap();
+        for path in [".git/config", "sub/.git/x", ".git/gd-probe.txt"] {
+            let expected = format!(
+                "invalid argument: Can't resolve the conflict in {path} — it's inside the repository's .git folder. Nothing was changed."
+            );
+            assert_eq!(
+                git_conflict_sides(repo.clone(), path.into(), vec![])
+                    .await
+                    .err()
+                    .expect("conflict path must refuse")
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_resolve_conflict_core(&state, repo.clone(), path.into(), "x".into(), false)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_checkout_conflict_side_core(&state, repo.clone(), path.into(), "ours".into())
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+        assert_eq!(std::fs::read(&probe).unwrap(), b"keep\n");
+        assert_eq!(
+            std::fs::read(dir.path().join(".git/config")).unwrap(),
+            config
+        );
+        assert!(!dir.path().join("sub/.git/x").exists());
+        #[cfg(windows)]
+        let absolute = "C:\\x";
+        #[cfg(not(windows))]
+        let absolute = "/x";
+        for path in ["", "-x", absolute, "../x"] {
+            let expected = format!("invalid argument: invalid path: {path}");
+            assert_eq!(
+                git_conflict_sides(repo.clone(), path.into(), vec![])
+                    .await
+                    .err()
+                    .expect("conflict path must refuse")
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_resolve_conflict_core(&state, repo.clone(), path.into(), "x".into(), false)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(
+                git_checkout_conflict_side_core(&state, repo.clone(), path.into(), "ours".into())
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn conflict_rel_path_refuses_windows_alias_spellings() {
+        for path in ["C:x", "\\x", "/x"] {
+            assert_eq!(conflict_rel_path(path).unwrap_err().to_string(), format!(
+                "invalid argument: Can't resolve the conflict in {path} — it isn't inside this repository's working tree. Nothing was changed."
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn resolve_refuses_windows_alias_spellings() {
+        let (dir, repo) = conflicted_repo("resolve-alias", "file.txt", &[]).await;
+        std::fs::create_dir(dir.path().join("a")).unwrap();
+        let probe = dir.path().join(".git/gd-probe.txt");
+        std::fs::write(&probe, "keep\n").unwrap();
+        let shell = "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}";
+        std::fs::create_dir(dir.path().join(shell)).unwrap();
+        for (path, why) in [
+            (
+                "a./b.txt",
+                "Windows reads a name ending in a dot or space as a different path",
+            ),
+            (
+                "a /b.txt",
+                "Windows reads a name ending in a dot or space as a different path",
+            ),
+            (
+                ".GIT/gd-probe.txt",
+                "it's inside the repository's .git folder",
+            ),
+            (
+                "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}/y",
+                "Windows treats a name ending in .{GUID} as a shell link",
+            ),
+        ] {
+            let err = git_resolve_conflict_core(
+                &AppState::default(),
+                repo.clone(),
+                path.into(),
+                "x".into(),
+                false,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.to_string(), format!(
+                "invalid argument: Can't resolve the conflict in {path} — {why}. Nothing was changed."
+            ));
+            assert!(!dir.path().join("a/b.txt").exists());
+            assert_eq!(std::fs::read(&probe).unwrap(), b"keep\n");
+            assert!(!dir.path().join(shell).join("y").exists());
+        }
+    }
 
     fn temp_repo(tag: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::Builder::new()

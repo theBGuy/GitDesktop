@@ -839,6 +839,17 @@ one grep away on the named symbol. Grows via Conventions-sync.
   reflog miss AND patch-twins present — strong evidence, not proof; the
   failure direction stays inaction), and the destructive action targets the
   measured sha, never a re-resolved ref.
+- **Cached GitHub reads stay true:** gh REST GETs that adopt runner.rs's
+  conditional layer (`run_gh_cached_get`/`run_gh_cached_get_raw`) key on
+  (repo_path, host, argv) with the auth epoch in the value, detect a 304
+  from the `-i` status line only, and never cache a failure; `bypasses()`
+  sends paginated, jq/template, include/cache, non-GET and field-without-GET
+  argv straight through. An in-app write that moves a cached repos/{slug} or
+  stack field evicts after the attempt (`invalidate_repo_meta_after` /
+  `invalidate_stack_memo_after` on the spawn's result), and form-feeding
+  reads stay fresh. Account-derived memos read the epoch before the fetch,
+  keep it in the value, and always carry a TTL (a terminal `gh auth` is
+  invisible to the app).
 - **GraphQL nullability:** fields without `!` deserialize into `Option<T>`;
   never `unwrap_or_default()` a `from_value`; confirm a field exists before
   querying it.
@@ -888,6 +899,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `escape_head_branch_path` in github/pr.rs — `%`/`#` encoded, braces refused
   before the call); Bitbucket requests resolve through the one choke point
   `forge::http::resolve_url`, which accepts absolute URLs only on `BB_API_BASE`.
+  A caller-supplied repo-relative path that a git/ write command joins onto
+  the working tree passes `discard_rel_path` (git/ops.rs) before the join (in
+  conflict.rs through its wrapper `conflict_rel_path`), with the site's own
+  operation sentence around its reason, and git receives the spelling it
+  returns; git-reported paths such as an ignore rule's `source` are exempt.
+  MCP git write tools that take paths pass `GitDesktopMcp::toplevel()` to
+  their cores, or call a core that anchors itself as the discard cores do, so
+  paths resolve from the root `repo_status` reports.
 - **Merges into a checkout check for ignored files first:** git's merge
   default silently replaces an ignored file the incoming side tracks, and
   merge-ort ignores `--no-overwrite-ignore` on 3-way merges (measured, git

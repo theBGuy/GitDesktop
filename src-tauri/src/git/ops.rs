@@ -1557,13 +1557,7 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let status = crate::git::status::parse_status_v2(&status_out.stdout_lossy());
-    let untracked: Vec<String> = status
-        .entries
-        .iter()
-        .filter(|e| e.unstaged == Some(crate::git::types::ChangeKind::Untracked))
-        .map(|e| e.path.clone())
-        .collect();
+    let untracked = discard_all_untracked(&status_out.stdout)?;
 
     if !untracked.is_empty() {
         let top = top.clone();
@@ -1689,9 +1683,13 @@ const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try ag
 const DISCARD_WIN_TRAILING: &str =
     "Windows reads a name ending in a dot or space as a different path";
 const DISCARD_WIN_SHELL_FOLDER: &str = "Windows treats a name ending in .{GUID} as a shell link";
+const DISCARD_UNDECODABLE: &str =
+    "its name isn't valid UTF-8, so it can't be discarded safely; rename it and try again";
 
-/// Pure lexical gate; returns git's spelling without resolving filesystem names.
-fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
+/// Shared lexical gate for caller-supplied repo-relative paths that writes join
+/// onto the working tree; returns git's spelling without resolving filesystem
+/// names. Each caller wraps the reason in its own operation sentence.
+pub(crate) fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
     let s = if cfg!(windows) {
         raw.replace('\\', "/")
     } else {
@@ -1745,7 +1743,7 @@ fn discard_rel_path(raw: &str) -> Result<String, &'static str> {
 
 /// The path as refusal text: strips the bidi and zero-width format characters
 /// below and masks controls, so they can't reorder or hide part of the name.
-fn discard_shown(raw: &str) -> String {
+pub(crate) fn discard_shown(raw: &str) -> String {
     let shown: String = raw
         .chars()
         .filter(|&c| {
@@ -1796,18 +1794,34 @@ async fn untracked_paths(top: &str) -> AppResult<std::collections::HashSet<Strin
 }
 
 fn untracked_from_status(stdout: &[u8]) -> std::collections::HashSet<String> {
-    let mut paths = std::collections::HashSet::new();
+    untracked_records(stdout)
+        .into_iter()
+        .filter_map(|name| std::str::from_utf8(name).ok().map(str::to_string))
+        .collect()
+}
+
+fn untracked_records(stdout: &[u8]) -> Vec<&[u8]> {
+    let mut paths = Vec::new();
     let mut records = stdout.split(|&b| b == 0);
     while let Some(record) = records.next() {
         if let Some(path) = record.strip_prefix(b"? ") {
-            if let Ok(path) = std::str::from_utf8(path) {
-                paths.insert(path.to_string());
-            }
+            paths.push(path);
         } else if record.starts_with(b"2 ") {
             records.next();
         }
     }
     paths
+}
+
+fn discard_all_untracked(stdout: &[u8]) -> AppResult<Vec<String>> {
+    untracked_records(stdout)
+        .into_iter()
+        .map(|name| {
+            std::str::from_utf8(name)
+                .map(str::to_string)
+                .map_err(|_| discard_refusal(&String::from_utf8_lossy(name), DISCARD_UNDECODABLE))
+        })
+        .collect()
 }
 
 /// Probe below the root without following links; line rewrites also probe the leaf.
@@ -2360,27 +2374,26 @@ pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> 
         };
         // Strip a leading UTF-8 BOM for processing (it is not whitespace, so it
         // rides on the first line and breaks the pattern match), and restore it
-        // on write. Preserve the file's existing line-ending convention — `lines()`
-        // drops both \n and \r\n, so a naive `join("\n")` would silently rewrite a
-        // Windows CRLF .gitignore to LF.
+        // on write. Kept lines retain their own terminators; an emptied file
+        // keeps its final line's terminator.
         let (has_bom, content) = match raw.strip_prefix('\u{feff}') {
             Some(rest) => (true, rest),
             None => (false, raw.as_str()),
         };
-        let ending = if content.contains("\r\n") { "\r\n" } else { "\n" };
-        let kept: Vec<&str> = content
-            .lines()
-            .filter(|l| {
-                !patterns
-                    .iter()
-                    .any(|p| crate::fsops::trim_ignore_pattern(l) == p)
-            })
-            .collect();
-        let mut next = kept.join(ending);
-        // Keep the trailing newline if the original had one, even when every
-        // line was removed (so the file's convention is preserved, not truncated).
-        if content.ends_with('\n') {
-            next.push_str(ending);
+        let mut next = String::with_capacity(content.len());
+        let mut final_ending = "";
+        for (text, ending) in content.split_inclusive('\n').map(split_line_ending) {
+            final_ending = ending;
+            if !patterns
+                .iter()
+                .any(|p| crate::fsops::trim_ignore_pattern(text) == p)
+            {
+                next.push_str(text);
+                next.push_str(ending);
+            }
+        }
+        if next.is_empty() {
+            next.push_str(final_ending);
         }
         if has_bom {
             next.insert(0, '\u{feff}');
@@ -2388,6 +2401,16 @@ pub async fn git_unignore_rules(repo_path: String, rules: Vec<UnignoreRule>) -> 
         tokio::fs::write(&path, next).await.map_err(AppError::Io)?;
     }
     Ok(())
+}
+
+fn split_line_ending(piece: &str) -> (&str, &str) {
+    if let Some(text) = piece.strip_suffix("\r\n") {
+        (text, "\r\n")
+    } else if let Some(text) = piece.strip_suffix('\n') {
+        (text, "\n")
+    } else {
+        (piece, "")
+    }
 }
 
 /// Outcome of an applied suggestion — what actually happened, for honest toasts.
@@ -2468,6 +2491,14 @@ pub(crate) async fn replace_file_lines(
         )));
     }
 
+    let git_spelling = discard_rel_path(file_path).map_err(|why| {
+        let shown = discard_shown(file_path);
+        AppError::InvalidArgument(format!(
+            "Can't apply the suggestion to {shown} — {why}. Nothing was changed."
+        ))
+    })?;
+    let rel = Path::new(&git_spelling);
+
     // Hold the repo's mutating lock across the WHOLE dirty-check → read → verify →
     // write → stage sequence, not just the final `git add`: otherwise two concurrent
     // Apply calls on different ranges of one file interleave and the second silently
@@ -2502,7 +2533,7 @@ pub(crate) async fn replace_file_lines(
     // Dirty check BEFORE the edit: any porcelain output for this path means the
     // file already had staged/unstaged changes, so we must not auto-stage. Literal
     // pathspec — a glob-sibling's dirtiness must not decide this file's fate.
-    let spec = crate::git::pathspec::literal(file_path);
+    let spec = crate::git::pathspec::literal(&git_spelling);
     let status = run_git(
         Some(repo_path),
         &["status", "--porcelain", "--", &spec],
@@ -2522,15 +2553,7 @@ pub(crate) async fn replace_file_lines(
     };
     let existing: Vec<(&str, &str)> = content
         .split_inclusive('\n')
-        .map(|piece| {
-            if let Some(text) = piece.strip_suffix("\r\n") {
-                (text, "\r\n")
-            } else if let Some(text) = piece.strip_suffix('\n') {
-                (text, "\n")
-            } else {
-                (piece, "")
-            }
-        })
+        .map(split_line_ending)
         .collect();
     let start = (start_line - 1) as usize;
     let end = start + expected_lines.len();
@@ -12908,6 +12931,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unignore_keeps_each_kept_lines_own_ending() {
+        let cases: &[(&str, &[&str], &str)] = &[
+            ("a\r\nb\nc\n", &["c"], "a\r\nb\n"),
+            ("a\r\nb\n", &["zzz"], "a\r\nb\n"),
+            ("a\rb\nc\n", &["c"], "a\rb\n"),
+            ("\u{feff}a\r\nb\n", &["a"], "\u{feff}b\n"),
+            ("a\nb", &["a"], "b"),
+            ("a\nb", &["b"], "a\n"),
+            ("a\n*.log", &["*.log"], "a\n"),
+            ("*.log\r\n", &["*.log"], "\r\n"),
+            ("a\r\nb\n", &["a", "b"], "\n"),
+            ("*.log", &["*.log"], ""),
+            ("\u{feff}*.log\n", &["*.log"], "\u{feff}\n"),
+            ("", &["*.log"], ""),
+            ("\u{feff}", &["*.log"], "\u{feff}"),
+            ("a\r", &["a"], ""),
+        ];
+        for (i, (input, patterns, expected)) in cases.iter().enumerate() {
+            let (dir, repo) = gitignore_dir("per-line", input);
+            git_unignore_rules(repo, patterns.iter().map(|p| rule(p)).collect())
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join(".gitignore")).unwrap(),
+                expected.as_bytes(),
+                "case {}",
+                i + 1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn replace_lines_refuses_git_dir_and_windows_spellings() {
+        let (dir, repo) = setup_repo("replace-gate").await;
+        commit_file(&repo, dir.path(), "a.txt", "a\n", "seed").await;
+        let probe = dir.path().join(".git/gd-probe.txt");
+        std::fs::write(&probe, "a\n").unwrap();
+        let state = AppState::default();
+        let mut cases = vec![(".git/gd-probe.txt", DISCARD_GIT_DIR)];
+        #[cfg(windows)]
+        cases.push(("a.txt.", DISCARD_WIN_TRAILING));
+        for (path, why) in cases.drain(..) {
+            let err = replace_file_lines(
+                &state,
+                &repo,
+                path,
+                1,
+                &lines(&["a"]),
+                &lines(&["b"]),
+                false,
+            )
+            .await
+            .err()
+            .expect("suggestion path must refuse");
+            assert_eq!(err.to_string(), format!(
+                "invalid argument: Can't apply the suggestion to {path} — {why}. Nothing was changed."
+            ));
+        }
+        assert_eq!(std::fs::read(&probe).unwrap(), b"a\n");
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"a\n");
+        let mut missing = vec!["missing.txt"];
+        #[cfg(windows)]
+        missing.push("sub\\missing.txt");
+        for path in missing.drain(..) {
+            let err = replace_file_lines(
+                &state,
+                &repo,
+                path,
+                1,
+                &lines(&["a"]),
+                &lines(&["b"]),
+                false,
+            )
+            .await
+            .err()
+            .expect("missing file must refuse");
+            assert_eq!(
+                err.to_string(),
+                format!("invalid argument: file does not exist: {path}")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn unignore_preserves_crlf_and_comments() {
         // A Windows .gitignore (CRLF) with a comment and two rules.
         let (dir, repo) = gitignore_dir("crlf", "# build artifacts\r\n*.log\r\nbuild/\r\n");
@@ -15934,6 +16041,100 @@ detached
             ],
         )
         .await;
+    }
+
+    #[test]
+    fn discard_all_untracked_refuses_undecodable_names() {
+        let stdout = b"2 R. N... 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 R100 renamed.txt\0\
+            ? phantom.txt\0? real.txt\0\
+            1 .M N... 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 tracked.txt\0\
+            u UU N... 100644 100644 100644 100644 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 0000000000000000000000000000000000000000 conflict.txt\0";
+        assert_eq!(discard_all_untracked(stdout).unwrap(), ["real.txt"]);
+        let mut invalid = stdout.to_vec();
+        invalid.extend_from_slice(b"? invalid-\xff.txt\0");
+        for (input, name) in [
+            (invalid.as_slice(), "invalid-\u{FFFD}.txt"),
+            (
+                b"? b.txt\0? a.txt\0? x-\xff.txt\0? y-\xfe.txt\0".as_slice(),
+                "x-\u{FFFD}.txt",
+            ),
+        ] {
+            assert_eq!(
+                discard_message(discard_all_untracked(input).unwrap_err()),
+                format!("Can't discard {name} — its name isn't valid UTF-8, so it can't be discarded safely; rename it and try again. Nothing was discarded.")
+            );
+        }
+        assert_eq!(
+            discard_all_untracked(b"? b.txt\0? a.txt\0").unwrap(),
+            ["b.txt", "a.txt"]
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test]
+    async fn discard_all_refuses_undecodable_untracked_names_before_changing_anything() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let (dir, repo) = setup_repo("discard-undecodable").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        commit_file(&repo, dir.path(), "a.txt", "a\n", "seed").await;
+        std::fs::write(dir.path().join("a.txt"), "modified\n").unwrap();
+        std::fs::write(dir.path().join("ok.txt"), "keep\n").unwrap();
+        let bad = dir.path().join(std::ffi::OsStr::from_bytes(b"zz-\xff.txt"));
+        std::fs::write(&bad, "keep too\n").unwrap();
+        let err = git_discard_all_core(&AppState::default(), repo)
+            .await
+            .unwrap_err();
+        assert_eq!(discard_message(err),
+            "Can't discard zz-\u{FFFD}.txt — its name isn't valid UTF-8, so it can't be discarded safely; rename it and try again. Nothing was discarded.");
+        assert_eq!(std::fs::read(dir.path().join("ok.txt")).unwrap(), b"keep\n");
+        assert_eq!(
+            std::fs::read(dir.path().join("a.txt")).unwrap(),
+            b"modified\n"
+        );
+        assert_eq!(std::fs::read(bad).unwrap(), b"keep too\n");
+    }
+
+    #[test]
+    fn discard_gate_is_called_by_every_caller_path_core() {
+        fn body(source: &str, name: &str) -> String {
+            let start = source.find(&format!("fn {name}(")).expect(name);
+            let rest = &source[start..];
+            let end = rest.find("\n}").expect(name);
+            rest[..end]
+                .lines()
+                .map(|line| line.split("//").next().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        let ops = include_str!("ops.rs");
+        for name in [
+            "replace_file_lines",
+            "git_discard_paths_core",
+            "git_discard_untracked_lines_core",
+            "git_discard_all_core",
+        ] {
+            assert!(body(ops, name).contains("discard_rel_path("), "{name}");
+        }
+        let conflict = include_str!("conflict.rs");
+        for name in [
+            "git_resolve_conflict_core",
+            "git_conflict_sides",
+            "git_checkout_conflict_side_core",
+        ] {
+            assert!(
+                body(conflict, name).contains("conflict_rel_path("),
+                "{name}"
+            );
+        }
+        let gate = body(conflict, "conflict_rel_path");
+        let validate = gate
+            .find("validate_rel_path(")
+            .expect("conflict_rel_path: validate_rel_path");
+        let discard = gate
+            .find("discard_rel_path(")
+            .expect("conflict_rel_path: discard_rel_path");
+        assert!(validate < discard, "conflict_rel_path");
     }
 
     fn discard_arg(path: &str, untracked: bool) -> DiscardPath {
