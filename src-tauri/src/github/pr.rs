@@ -5055,8 +5055,7 @@ async fn comments_with_top_up(
     gh_top_up_or_unknown(graphql_comments_to_out(raw), top_up, None)
 }
 
-/// The MCP comments read shares gh_pr_view's mapping and top-ups so the
-/// conversation has the same shape and completeness on both read paths.
+/// A PR's conversation (comments and review summaries) with their completeness flags.
 pub struct PrConversation {
     pub comments: Vec<PrThreadOut>,
     pub comments_unknown: bool,
@@ -5073,6 +5072,8 @@ struct RawPrConversation {
     reviews: Vec<RawReview>,
 }
 
+/// The MCP comments read shares gh_pr_view's mapping and top-ups so the
+/// conversation has the same shape and completeness on both read paths.
 pub async fn gh_pr_comments_view(
     repo_path: String,
     number: u64,

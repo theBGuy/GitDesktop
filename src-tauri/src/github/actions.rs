@@ -495,22 +495,22 @@ pub async fn gh_run_list(
     Ok(gh_run_page(repo_path, limit, 1, branch).await?.runs)
 }
 
-const COMPLETED_CACHE_MAX_AGE: Duration = Duration::from_secs(3600);
+const COMPLETED_RUN_CACHE_MAX_AGE: Duration = Duration::from_secs(3600);
 const COMPLETED_RUN_CACHE_MAX: usize = 16;
 
 /// The update timestamp rides a second parse of stdout so RunDetail's shared
 /// wire shape and the other forge providers' struct literals stay unchanged.
 #[derive(Deserialize, Default)]
 struct GhRunUpdatedAt {
-    #[serde(default, rename = "updatedAt")]
+    #[serde(default, rename = "updatedAt", deserialize_with = "de_null_string")]
     updated_at: String,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct RestRunProbe {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_string")]
     status: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_string")]
     updated_at: String,
 }
 
@@ -552,7 +552,7 @@ fn completed_cache_verdict(
     if probe.status == "completed"
         && parse_run_updated_at(&probe.updated_at) == Some(entry_updated_at)
         && entry_epoch == current_epoch
-        && age_since_fill <= COMPLETED_CACHE_MAX_AGE
+        && age_since_fill <= COMPLETED_RUN_CACHE_MAX_AGE
     {
         CacheVerdict::Serve
     } else {
@@ -566,6 +566,45 @@ fn run_detail_fill_ok(detail: &RunDetail, updated_at: Option<DateTime<Utc>>) -> 
     detail.status == "completed"
         && updated_at.is_some()
         && detail.jobs.iter().all(|job| job.status == "completed")
+}
+
+// A concurrent refill owns its own touch and eviction decisions.
+fn settle_checked_entry(
+    cache: &mut HashMap<CompletedRunKey, CachedRunDetail>,
+    key: &CompletedRunKey,
+    checked: &CachedRunDetail,
+    verdict: &CacheVerdict,
+    now: Instant,
+) {
+    let same_entry = cache.get(key).is_some_and(|current| {
+        current.updated_at == checked.updated_at && current.filled_at == checked.filled_at
+    });
+    if same_entry {
+        match verdict {
+            CacheVerdict::Serve => {
+                if let Some(current) = cache.get_mut(key) {
+                    current.touched = now;
+                }
+            }
+            CacheVerdict::EvictAndRefetch => {
+                cache.remove(key);
+            }
+        }
+    }
+}
+
+// No refill after a failed check: while the check keeps failing, a refill makes each read
+// pay that check plus the full read, where an empty cache pays only the read.
+fn fill_timestamp(
+    probe_failed: bool,
+    detail: &RunDetail,
+    updated_at: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    if !probe_failed && run_detail_fill_ok(detail, updated_at) {
+        updated_at
+    } else {
+        None
+    }
 }
 
 fn completed_cache_put(
@@ -627,7 +666,7 @@ pub async fn gh_run_view(repo_path: String, run_id: u64) -> AppResult<RunDetail>
         // Every serve revalidates updated_at under the live token: approvals,
         // reruns, and lost access must remain visible without an app auth change.
         let verdict = if entry.epoch != gh_auth_epoch()
-            || entry.filled_at.elapsed() > COMPLETED_CACHE_MAX_AGE
+            || entry.filled_at.elapsed() > COMPLETED_RUN_CACHE_MAX_AGE
         {
             CacheVerdict::EvictAndRefetch
         } else {
@@ -647,22 +686,7 @@ pub async fn gh_run_view(repo_path: String, run_id: u64) -> AppResult<RunDetail>
         };
         {
             let mut cache = cache.lock().unwrap_or_else(|p| p.into_inner());
-            // A concurrent refill owns its own touch and eviction decisions.
-            let same_entry = cache.get(&key).is_some_and(|current| {
-                current.updated_at == entry.updated_at && current.filled_at == entry.filled_at
-            });
-            if same_entry {
-                match verdict {
-                    CacheVerdict::Serve => {
-                        if let Some(current) = cache.get_mut(&key) {
-                            current.touched = Instant::now();
-                        }
-                    }
-                    CacheVerdict::EvictAndRefetch => {
-                        cache.remove(&key);
-                    }
-                }
-            }
+            settle_checked_entry(&mut cache, &key, &entry, &verdict, Instant::now());
         }
         if verdict == CacheVerdict::Serve {
             return Ok(entry.detail);
@@ -687,8 +711,7 @@ pub async fn gh_run_view(repo_path: String, run_id: u64) -> AppResult<RunDetail>
         .unwrap_or_default()
         .updated_at;
     let updated_at = parse_run_updated_at(&updated_at);
-    let fill = !probe_failed && run_detail_fill_ok(&detail, updated_at);
-    if let (true, Some(updated_at)) = (fill, updated_at) {
+    if let Some(updated_at) = fill_timestamp(probe_failed, &detail, updated_at) {
         let now = Instant::now();
         completed_cache_put(
             &mut cache.lock().unwrap_or_else(|p| p.into_inner()),
@@ -1240,6 +1263,192 @@ mod tests {
         ("repo".into(), Some("github.com".into()), "o/r".into(), id)
     }
 
+    fn assert_cached_entry_eq(actual: &CachedRunDetail, expected: &CachedRunDetail) {
+        assert_eq!(actual.updated_at, expected.updated_at);
+        assert_eq!(actual.epoch, expected.epoch);
+        assert_eq!(actual.filled_at, expected.filled_at);
+        assert_eq!(actual.touched, expected.touched);
+        assert_eq!(
+            serde_json::to_value(&actual.detail).unwrap(),
+            serde_json::to_value(&expected.detail).unwrap()
+        );
+    }
+
+    #[test]
+    fn settle_checked_entry_serves_by_touching_only_the_checked_entry() {
+        let now = Instant::now();
+        let checked = cache_entry(now);
+        let other = cache_entry(now);
+        let mut cache = HashMap::from([
+            (cache_key(1), checked.clone()),
+            (cache_key(2), other.clone()),
+        ]);
+        let later = now + Duration::from_secs(1);
+        settle_checked_entry(
+            &mut cache,
+            &cache_key(1),
+            &checked,
+            &CacheVerdict::Serve,
+            later,
+        );
+        let mut expected = checked;
+        expected.touched = later;
+        assert_eq!(cache.len(), 2);
+        assert_cached_entry_eq(&cache[&cache_key(1)], &expected);
+        assert_cached_entry_eq(&cache[&cache_key(2)], &other);
+    }
+
+    #[test]
+    fn settle_checked_entry_evicts_only_the_checked_entry() {
+        let now = Instant::now();
+        let checked = cache_entry(now);
+        let other = cache_entry(now);
+        let mut cache = HashMap::from([
+            (cache_key(1), checked.clone()),
+            (cache_key(2), other.clone()),
+        ]);
+        settle_checked_entry(
+            &mut cache,
+            &cache_key(1),
+            &checked,
+            &CacheVerdict::EvictAndRefetch,
+            now + Duration::from_secs(1),
+        );
+        assert_eq!(cache.len(), 1);
+        assert!(!cache.contains_key(&cache_key(1)));
+        assert_cached_entry_eq(&cache[&cache_key(2)], &other);
+    }
+
+    fn assert_refill_survives(checked: &CachedRunDetail, replacement: &CachedRunDetail) {
+        for verdict in [CacheVerdict::Serve, CacheVerdict::EvictAndRefetch] {
+            let mut cache = HashMap::from([(cache_key(1), replacement.clone())]);
+            settle_checked_entry(
+                &mut cache,
+                &cache_key(1),
+                checked,
+                &verdict,
+                replacement.touched + Duration::from_secs(1),
+            );
+            assert_eq!(cache.len(), 1);
+            assert_cached_entry_eq(&cache[&cache_key(1)], replacement);
+        }
+    }
+
+    #[test]
+    fn settle_checked_entry_preserves_a_concurrent_fill_timestamp() {
+        let checked = cache_entry(Instant::now());
+        let mut replacement = checked.clone();
+        replacement.filled_at += Duration::from_secs(1);
+        assert_refill_survives(&checked, &replacement);
+    }
+
+    #[test]
+    fn settle_checked_entry_preserves_a_changed_update_timestamp() {
+        let checked = cache_entry(Instant::now());
+        let mut replacement = checked.clone();
+        replacement.updated_at += chrono::Duration::seconds(1);
+        assert_refill_survives(&checked, &replacement);
+    }
+
+    #[test]
+    fn fill_timestamp_refuses_probe_errors_and_unfillable_details() {
+        let mut detail = cache_detail();
+        let timestamp = Some(cache_updated_at());
+        assert_eq!(fill_timestamp(false, &detail, timestamp), timestamp);
+        assert_eq!(fill_timestamp(true, &detail, timestamp), None);
+        assert_eq!(fill_timestamp(false, &detail, None), None);
+        detail.jobs[0].status = "in_progress".into();
+        assert_eq!(fill_timestamp(false, &detail, timestamp), None);
+    }
+
+    #[test]
+    fn run_view_fields_request_updated_at_as_a_whole_field() {
+        assert!(RUN_VIEW_FIELDS.split(',').any(|field| field == "updatedAt"));
+    }
+
+    const RUN_VIEW_FIXTURE: &str = r#"{
+        "databaseId": 40112384090,
+        "number": 42,
+        "displayTitle": "Test workflow",
+        "status": "completed",
+        "conclusion": "success",
+        "workflowName": "CI",
+        "headBranch": "main",
+        "event": "pull_request",
+        "createdAt": "2026-10-24T16:36:00Z",
+        "url": "https://github.com/o/r/actions/runs/40112384090",
+        "headSha": "0123456789012345678901234567890123456789",
+        "jobs": [{
+            "databaseId": 70000000001,
+            "name": "test",
+            "status": "completed",
+            "conclusion": "success",
+            "startedAt": "2026-10-24T16:36:01Z",
+            "completedAt": "2026-10-24T16:37:09Z",
+            "url": "https://github.com/o/r/actions/runs/40112384090/job/70000000001",
+            "steps": [{
+                "name": "Run tests",
+                "status": "completed",
+                "conclusion": "success",
+                "number": 1,
+                "startedAt": "2026-10-24T16:36:02Z",
+                "completedAt": "2026-10-24T16:37:08Z"
+            }]
+        }],
+        "updatedAt": "2026-10-24T16:37:10Z"
+    }"#;
+
+    #[test]
+    fn run_view_fixture_parses_detail_and_fill_timestamp() {
+        let value: serde_json::Value = serde_json::from_str(RUN_VIEW_FIXTURE).unwrap();
+        let mut keys: Vec<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let mut requested: Vec<_> = RUN_VIEW_FIELDS.split(',').collect();
+        keys.sort_unstable();
+        requested.sort_unstable();
+        assert_eq!(keys, requested);
+        let detail: RunDetail = serde_json::from_str(RUN_VIEW_FIXTURE).unwrap();
+        let twin: GhRunUpdatedAt = serde_json::from_str(RUN_VIEW_FIXTURE).unwrap();
+        assert_eq!(detail.id, 40_112_384_090);
+        assert_eq!(detail.jobs.len(), 1);
+        assert_eq!(detail.jobs[0].steps.len(), 1);
+        assert_eq!(detail.jobs[0].steps[0].name, "Run tests");
+        let timestamp = parse_run_updated_at(&twin.updated_at);
+        assert_eq!(timestamp, Some(cache_updated_at()));
+        assert_eq!(fill_timestamp(false, &detail, timestamp), timestamp);
+    }
+
+    #[test]
+    fn run_probe_null_strings_parse_as_empty() {
+        let valid: RestRunProbe =
+            serde_json::from_str(r#"{"status":"completed","updated_at":"2026-10-24T16:37:10Z"}"#)
+                .unwrap();
+        assert_eq!(valid.status, "completed");
+        assert_eq!(
+            parse_run_updated_at(&valid.updated_at),
+            Some(cache_updated_at())
+        );
+        let probe: RestRunProbe =
+            serde_json::from_str(r#"{"status":null,"updated_at":null}"#).unwrap();
+        assert_eq!(probe.status, "");
+        assert_eq!(probe.updated_at, "");
+    }
+
+    #[test]
+    fn run_view_null_update_timestamp_parses_as_empty() {
+        let valid: GhRunUpdatedAt = serde_json::from_str(RUN_VIEW_FIXTURE).unwrap();
+        assert_eq!(
+            parse_run_updated_at(&valid.updated_at),
+            Some(cache_updated_at())
+        );
+        let twin: GhRunUpdatedAt = serde_json::from_str(r#"{"updatedAt":null}"#).unwrap();
+        assert_eq!(twin.updated_at, "");
+    }
+
     #[test]
     fn completed_cache_requires_completed_probe() {
         let mut probe = completed_probe();
@@ -1319,7 +1528,7 @@ mod tests {
                 cache_updated_at(),
                 3,
                 3,
-                COMPLETED_CACHE_MAX_AGE,
+                COMPLETED_RUN_CACHE_MAX_AGE,
             ),
             CacheVerdict::Serve
         );
@@ -1329,7 +1538,7 @@ mod tests {
                 cache_updated_at(),
                 3,
                 3,
-                COMPLETED_CACHE_MAX_AGE + Duration::from_nanos(1),
+                COMPLETED_RUN_CACHE_MAX_AGE + Duration::from_nanos(1),
             ),
             CacheVerdict::EvictAndRefetch
         );
