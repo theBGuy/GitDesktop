@@ -9,7 +9,6 @@ import {
   CloudSlashIcon,
   CloudXIcon,
   GitBranchIcon,
-  GitPullRequestIcon,
   TreeStructureIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
@@ -121,6 +120,7 @@ import {
   type PrAuditState,
   REMOTE_AUDIT_STATE,
 } from "@/lib/pulls/audit";
+import { PR_AUDIT_ICON, PR_NOUN } from "@/lib/pulls/pr-state";
 import { useLocalPrs } from "@/lib/pulls/queries";
 import { useSetRepoLens } from "@/lib/repo-lens/queries";
 import {
@@ -613,6 +613,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
     return map;
   }, [prByBranch, defaultName]);
+
+  const prNoun = PR_NOUN[gh.data?.provider ?? "github"];
+  /** A row's PR in words: its state, the forge's noun, and the PR's label. */
+  const prChipLabel = (pr: BranchPr) =>
+    pr.select.kind === "local"
+      ? `${PR_STATE_LABEL[pr.state]} local pull request`
+      : `${PR_STATE_LABEL[pr.state]} ${prNoun} ${pr.label}`;
 
   const openPrChip = (select: SelectedPr) => {
     // Through the store's navigator rather than a bare select + tab switch: these
@@ -2679,6 +2686,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       rowRewrite?.remoteRewritten === true &&
       rowRewrite.localOnly > 0 &&
       rowRewrite.patchEqual > 0;
+    const pr = prByBranch.get(branch.name);
     return (
       <ContextMenu
         key={branch.name}
@@ -2698,7 +2706,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               data-row={branch.name}
               className="flex w-full flex-col gap-y-0.5 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
               onFocus={() => focusRow(branch.name)}
-              onClick={() => {
+              onClick={(e) => {
+                // The PR chip is part of this button (no nested control), so a
+                // click on it is routed here; Enter on the row still switches.
+                if (
+                  pr &&
+                  e.target instanceof Element &&
+                  e.target.closest("[data-pr-chip]")
+                ) {
+                  openPrChip(pr.select);
+                  return;
+                }
                 if (!branch.isCurrent) void switchTo(branch.name);
               }}
             >
@@ -2719,40 +2737,29 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 )}
               </span>
               <span className="flex w-full items-center gap-2">
-                {(() => {
-                  const pr = prByBranch.get(branch.name);
-                  if (!pr) return null;
-                  const isLocal = pr.select.kind === "local";
-                  return (
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      title={
-                        isLocal
-                          ? `${PR_STATE_LABEL[pr.state]} local pull request — open in Pull Requests`
-                          : `${PR_STATE_LABEL[pr.state]} pull request ${pr.label} — open in Pull Requests`
-                      }
-                      className={cn(
-                        "flex shrink-0 cursor-pointer items-center gap-0.5 text-[11px] tabular-nums hover:underline",
-                        PR_AUDIT_TONE[pr.state],
-                      )}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openPrChip(pr.select);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          openPrChip(pr.select);
-                        }
-                      }}
-                    >
-                      <GitPullRequestIcon className="size-3" weight="bold" />
-                      {pr.label}
-                    </span>
-                  );
-                })()}
+                {pr &&
+                  (() => {
+                    const Icon = PR_AUDIT_ICON[pr.state];
+                    const label = prChipLabel(pr);
+                    // Not a control of its own: the row's click routing opens
+                    // it, the row menu reaches it by keyboard, and its words
+                    // join the row's accessible name.
+                    return (
+                      <span
+                        role="img"
+                        data-pr-chip
+                        aria-label={label}
+                        title={`${label} — open in the PRs tab`}
+                        className={cn(
+                          "flex shrink-0 cursor-pointer items-center gap-0.5 text-[11px] tabular-nums hover:underline",
+                          PR_AUDIT_TONE[pr.state],
+                        )}
+                      >
+                        <Icon className="size-3" weight="bold" />
+                        {pr.label}
+                      </span>
+                    );
+                  })()}
                 {rowWorktree && (
                   <span
                     className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
@@ -3066,6 +3073,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               )}
               <ContextMenuSeparator />
             </>
+          )}
+          {pr && (
+            <ContextMenuItem onClick={() => openPrChip(pr.select)}>
+              {pr.select.kind === "local"
+                ? "View local pull request"
+                : `View ${prNoun} ${pr.label}`}
+            </ContextMenuItem>
           )}
           <ContextMenuItem
             className={MENU_HELD_ROW_CLASS}

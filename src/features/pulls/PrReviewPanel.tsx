@@ -424,8 +424,15 @@ export function PrReviewPanel({
     <div className="flex min-h-0 flex-1 flex-col">
       {/* shrink-0: the header holds growable content (banners, the history disclosure),
           and a flex child that may shrink would squeeze the output ScrollArea below to
-          nothing instead of scrolling itself. */}
-      <div className="shrink-0 space-y-2 border-b p-3">
+          nothing instead of scrolling itself. Also ReviewHistory's confirm-swap
+          host: a clear or last delete takes the whole disclosure along, so
+          focus lands on the provider picker (its Enter only opens a menu,
+          never a run), else here. */}
+      <div
+        data-confirm-host
+        tabIndex={-1}
+        className="shrink-0 space-y-2 border-b p-3 outline-none"
+      >
         {/* DOM capture, not Base UI event props. Pointer-down is load-bearing:
             WebKit doesn't focus buttons on click, and the Select moves focus into
             a portalled popup outside this container. */}
@@ -448,7 +455,7 @@ export function PrReviewPanel({
               });
             }}
           >
-            <SelectTrigger className="w-full">
+            <SelectTrigger data-confirm-fallback className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

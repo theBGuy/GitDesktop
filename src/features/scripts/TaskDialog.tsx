@@ -6,6 +6,10 @@ import {
 } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import {
+  InlineConfirm,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
@@ -173,6 +177,7 @@ export function TaskDialog({
   onOpenChange,
   onSave,
   onDelete,
+  deletePending,
 }: {
   /** An existing task to edit, `"new"` to create, or null when closed. */
   task: TaskDef | "new" | null;
@@ -180,6 +185,8 @@ export function TaskDialog({
   onOpenChange: (open: boolean) => void;
   onSave: (task: TaskDef) => void;
   onDelete: (id: string) => void;
+  /** The delete write is in flight; holds the confirm so it can't fire twice. */
+  deletePending: boolean;
 }) {
   const editing = task !== "new" && task !== null ? task : null;
   const shownTask = useRetained(task);
@@ -208,6 +215,10 @@ export function TaskDialog({
   const [describe, setDescribe] = useState("");
   const [confirmBeforeRun, setConfirmBeforeRun] = useState(true);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
+  // A confirmed delete takes the edited task's row along, so the close lands on
+  // "New task" (never another task row: Enter there runs that task).
+  const deletedRef = useRef(false);
   const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
   const [flipNote, setFlipNote] = useState<FlipNote | null>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
@@ -317,6 +328,7 @@ export function TaskDialog({
     setDescribe("");
     setConfirmBeforeRun(editing?.confirmBeforeRun ?? true);
     setConfirmDelete(false);
+    deletedRef.current = false;
     // The task's stored scope verbatim; a new task belongs to the open repo.
     // Whether that value is the canonical "this repository" key is decided at
     // render (`selectedScope`), so a scope seeded before the identity resolved
@@ -478,11 +490,26 @@ export function TaskDialog({
     });
   }
 
+  // Resolved at close against the panel behind the dialog: the edited task's
+  // own row while it is listed, else "New task"; null leaves Base UI's default.
+  function closeFocusTarget(): HTMLElement | null {
+    const newTask = () =>
+      document.querySelector<HTMLElement>('[aria-label="New task"]');
+    if (deletedRef.current || shownEditing === null) return newTask();
+    const id = CSS.escape(shownEditing.id);
+    return (
+      document.querySelector<HTMLElement>(`[data-row="${id}"]`) ??
+      document.querySelector<HTMLElement>(`[data-row="other-${id}"]`) ??
+      newTask()
+    );
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="max-h-[85vh] overflow-y-auto sm:max-w-2xl"
         onKeyDown={generateChord.onKeyDown}
+        finalFocus={closeFocusTarget}
       >
         <DialogHeader>
           <DialogTitle>{shownEditing ? "Edit task" : "New task"}</DialogTitle>
@@ -958,27 +985,23 @@ export function TaskDialog({
           <span className="flex-1" />
           {shownEditing &&
             (confirmDelete ? (
-              <>
-                <span className="text-xs text-muted-foreground">Delete?</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => setConfirmDelete(false)}
-                >
-                  Keep
-                </Button>
-                <Button
-                  size="sm"
-                  variant="destructive"
-                  onClick={() => {
-                    if (editing) onDelete(editing.id);
-                  }}
-                >
-                  Delete
-                </Button>
-              </>
+              <InlineConfirm
+                prompt="Delete?"
+                promptClassName="text-xs"
+                cancelLabel="Keep"
+                actLabel="Delete"
+                pending={deletePending}
+                swapFocusRef={swapFocus()}
+                onCancel={() => setConfirmDelete(false)}
+                onAct={() => {
+                  if (!editing) return;
+                  deletedRef.current = true;
+                  onDelete(editing.id);
+                }}
+              />
             ) : (
               <Button
+                ref={swapFocus()}
                 size="sm"
                 variant="ghost"
                 onClick={() => setConfirmDelete(true)}

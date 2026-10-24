@@ -6,6 +6,10 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useRef, useState } from "react";
+import {
+  InlineConfirm,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
@@ -75,6 +79,10 @@ export function ReviewHistory({
   const editSessionRef = useRef<object | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
+  // A deleted row hands focus to the next row's toggle (never another Trash);
+  // a clear or last delete unmounts all of this, landing on the panel's
+  // provider picker (never Review, whose Enter starts a run).
+  const swapFocus = useConfirmSwapFocus();
   // The PR views swap pull requests without remounting this disclosure, so its
   // armed Clear confirm belongs to one review scope: it resets on a switch (a
   // render-time adjustment), and a clear settling after one leaves the next
@@ -161,7 +169,7 @@ export function ReviewHistory({
   });
 
   return (
-    <div className="text-xs">
+    <div data-confirm-section className="text-xs">
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -181,31 +189,24 @@ export function ReviewHistory({
             <span className="ml-auto flex items-center gap-1">
               {/* Clearing takes the kept partials with it (the store's filter carries no
                   phase test), so say so whenever there is one to lose. */}
-              <span className="text-muted-foreground">
-                {partialRecords.length > 0
-                  ? "Clear this PR's history, including the kept partial output?"
-                  : "Clear this PR's history?"}
-              </span>
-              <DisabledReasonButton
-                variant="ghost"
+              <InlineConfirm
                 size="xs"
-                className="text-destructive"
-                disabled={clearing}
-                reason={ACT_PENDING_REASON}
-                onClick={() => void clearHistory()}
-              >
-                Yes
-              </DisabledReasonButton>
-              <Button
-                variant="ghost"
-                size="xs"
-                onClick={() => setConfirmingClear(false)}
-              >
-                No
-              </Button>
+                actLabel="Clear"
+                prompt={
+                  partialRecords.length > 0
+                    ? "Clear this PR's history, including the kept partial output?"
+                    : "Clear this PR's history?"
+                }
+                pending={clearing}
+                swapFocusRef={swapFocus("clear")}
+                onCancel={() => setConfirmingClear(false)}
+                onAct={() => void clearHistory()}
+              />
             </span>
           ) : (
             <Button
+              ref={swapFocus("clear")}
+              data-confirm-fallback
               variant="ghost"
               size="xs"
               className="ml-auto text-muted-foreground"
@@ -237,11 +238,17 @@ export function ReviewHistory({
                 : null;
             const partial = isPartialReview(r);
             return (
-              <div key={r.id} role="listitem" className="border">
+              <div
+                key={r.id}
+                role="listitem"
+                data-confirm-row
+                className="border"
+              >
                 <div className="flex items-center gap-2 px-2 py-1">
                   <button
                     type="button"
                     data-row={r.id}
+                    data-confirm-swap
                     className="flex min-w-0 flex-1 items-center gap-2 text-left"
                     aria-expanded={expanded}
                     onFocus={() =>
@@ -288,6 +295,7 @@ export function ReviewHistory({
                     </span>
                   </button>
                   <button
+                    ref={swapFocus(r.id)}
                     type="button"
                     aria-label={
                       partial

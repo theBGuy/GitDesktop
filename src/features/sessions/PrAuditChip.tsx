@@ -1,5 +1,5 @@
-import { GitMergeIcon, GitPullRequestIcon } from "@phosphor-icons/react";
 import { PR_AUDIT_LABEL, PR_AUDIT_TONE, type PrAudit } from "@/lib/pulls/audit";
+import { PR_AUDIT_ICON } from "@/lib/pulls/pr-state";
 import { cn } from "@/lib/utils";
 
 /**
@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
  * visible wherever you act on the session.
  */
 export function PrAuditChip({ audit }: { audit: PrAudit }) {
-  const Icon = audit.state === "merged" ? GitMergeIcon : GitPullRequestIcon;
+  const Icon = PR_AUDIT_ICON[audit.state];
   return (
     <span
       className={cn(

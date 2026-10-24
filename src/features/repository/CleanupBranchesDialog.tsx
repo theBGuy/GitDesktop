@@ -1,6 +1,6 @@
-import { CheckIcon, MinusIcon } from "@phosphor-icons/react";
+import { CheckIcon, MinusIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime, useRelativeNow } from "@/components/relative-time";
@@ -14,6 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import * as api from "@/lib/git/api";
 import { repoKeys, useBranchDivergence } from "@/lib/git/queries";
@@ -199,7 +200,8 @@ function RowBadge({
 }) {
   if (error)
     return (
-      <span className="text-destructive" title={error}>
+      <span className="flex items-center gap-1 text-destructive">
+        <WarningCircleIcon weight="fill" className="size-3" aria-hidden />
         failed
       </span>
     );
@@ -293,6 +295,8 @@ export function CleanupBranchesDialog({
   prCheckPaused: boolean;
 }) {
   const queryClient = useQueryClient();
+  // Prefix for each failed row's reason id (hooks stay out of the row map).
+  const baseId = useId();
   // Shared 30s clock: the idle-past-the-window classification below must
   // re-evaluate as time passes, and a render-position `Date.now()` is invisible
   // to the React Compiler, so a branch crossing the window never becomes stale.
@@ -801,38 +805,52 @@ export function CleanupBranchesDialog({
                 className="-mx-1 max-h-[45vh] space-y-0.5 overflow-x-hidden overflow-y-auto px-1 py-2"
                 onKeyDown={nav.onRowKeyDown}
               >
-                {candidates.map((c) => {
+                {candidates.map((c, index) => {
                   const name = c.branch.name;
                   const checked = selected.has(name);
                   const err = failed.get(name);
+                  const errId = `${baseId}-${index}`;
                   return (
-                    <label
-                      key={name}
-                      className={cn(
-                        "flex cursor-pointer items-center gap-2 rounded-none px-1.5 py-1.5 text-xs transition-colors hover:bg-accent",
-                        nav.isActive(c) && "bg-accent",
-                      )}
-                    >
-                      <Checkbox
-                        {...nav.rowProps(c)}
-                        checked={checked}
-                        disabled={running}
-                        onCheckedChange={() => toggle(name)}
-                      />
-                      <span className="min-w-0 flex-1 truncate font-mono">
-                        {name}
-                      </span>
-                      <span className="flex shrink-0 items-center gap-2">
-                        <RowBadge
-                          error={err}
-                          merged={c.merged}
-                          prMerged={c.prMerged}
+                    // The reason sits outside the label: text inside it would
+                    // join the Checkbox's accessible name.
+                    <div key={name}>
+                      <label
+                        className={cn(
+                          "flex cursor-pointer items-center gap-2 rounded-none px-1.5 py-1.5 text-xs transition-colors hover:bg-accent",
+                          nav.isActive(c) && "bg-accent",
+                        )}
+                      >
+                        <Checkbox
+                          {...nav.rowProps(c)}
+                          checked={checked}
+                          disabled={running}
+                          onCheckedChange={() => toggle(name)}
+                          aria-describedby={err ? errId : undefined}
                         />
-                        <span className="tabular-nums text-muted-foreground">
-                          <RelativeTime date={c.branch.lastCommitDate} />
+                        <span className="min-w-0 flex-1 truncate font-mono">
+                          {name}
                         </span>
-                      </span>
-                    </label>
+                        <span className="flex shrink-0 items-center gap-2">
+                          <RowBadge
+                            error={err}
+                            merged={c.merged}
+                            prMerged={c.prMerged}
+                          />
+                          <span className="tabular-nums text-muted-foreground">
+                            <RelativeTime date={c.branch.lastCommitDate} />
+                          </span>
+                        </span>
+                      </label>
+                      {err && (
+                        <div
+                          id={errId}
+                          className="truncate pl-6 text-[11px] text-destructive"
+                          onMouseEnter={clipTitleFromText}
+                        >
+                          {`Couldn't ${mode === "archive" ? "archive" : "delete"}: ${err}`}
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>

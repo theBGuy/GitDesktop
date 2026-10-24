@@ -1,6 +1,17 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
+import {
+  InlineConfirm,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 import { Button } from "@/components/ui/button";
 import {
@@ -64,6 +75,24 @@ export function HooksDialog({
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const swapFocus = useConfirmSwapFocus();
+  const listRef = useRef<HTMLDivElement>(null);
+  // The row that last held focus, which the roving tab stop follows so focus
+  // and the stop never part (a delete leaves focus on an unselected row).
+  const [focusedHook, setFocusedHook] = useState<string | null>(null);
+  // A delete clears the selection, unmounting the pane that held focus; the
+  // deleted hook stays listed (inactive), so its row takes focus at that commit.
+  const selectedRef = useRef(selected);
+  const pendingFocusRow = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    selectedRef.current = selected;
+    const name = pendingFocusRow.current;
+    pendingFocusRow.current = null;
+    if (selected !== null || name === null) return;
+    listRef.current
+      ?.querySelector<HTMLElement>(`[data-hook="${CSS.escape(name)}"]`)
+      ?.focus();
+  }, [selected]);
   const [managerOutput, setManagerOutput] = useState<string | null>(null);
   const content = useHookContent(repoPath, selected);
 
@@ -139,7 +168,10 @@ export function HooksDialog({
       return;
     }
     toast.success(`Deleted ${name}`);
-    if (stillIn(firedIn)) setSelected((cur) => (cur === name ? null : cur));
+    if (stillIn(firedIn)) {
+      if (selectedRef.current === name) pendingFocusRow.current = name;
+      setSelected((cur) => (cur === name ? null : cur));
+    }
   }
 
   async function runManager(action: "install" | "update") {
@@ -162,9 +194,16 @@ export function HooksDialog({
   }
 
   // Arrow keys walk the hook list, mirroring the app's other lists.
+  const selectedIndex = entries.findIndex((e) => e.name === selected);
+  // Roving tab stop: the row that last held focus while it is listed, else the
+  // selected hook, else the first, so the list is one Tab.
+  const focusedIndex = entries.findIndex((e) => e.name === focusedHook);
+  const tabStop = focusedIndex >= 0 ? focusedIndex : Math.max(selectedIndex, 0);
+  // Arrows step from that same row: keys only arrive while a row holds focus,
+  // and a delete clears the selection without moving it.
   const onHooksKeyDown = listKeyboardNav({
     items: entries,
-    activeIndex: entries.findIndex((e) => e.name === selected),
+    activeIndex: focusedIndex >= 0 ? focusedIndex : selectedIndex,
     onActivate: (e) => setSelected(e.name),
     rowKey: (e) => e.name,
     rowAttr: "data-hook",
@@ -252,12 +291,22 @@ export function HooksDialog({
         ) : (
           <div className="flex h-112 gap-3">
             <ScrollArea className="w-52 shrink-0 border-r pr-2">
-              <div className="space-y-0.5" onKeyDown={onHooksKeyDown}>
-                {entries.map((e) => (
+              <div
+                ref={listRef}
+                role="listbox"
+                aria-label="Git hooks"
+                className="space-y-0.5"
+                onKeyDown={onHooksKeyDown}
+              >
+                {entries.map((e, i) => (
                   <button
                     key={e.name}
                     type="button"
                     data-hook={e.name}
+                    role="option"
+                    aria-selected={selected === e.name}
+                    tabIndex={i === tabStop ? 0 : -1}
+                    onFocus={() => setFocusedHook(e.name)}
                     onClick={() => setSelected(e.name)}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs",
@@ -373,28 +422,18 @@ export function HooksDialog({
                     <span className="flex-1" />
                     {entry.state !== "inactive" &&
                       (confirmDelete ? (
-                        <>
-                          <span className="text-xs text-muted-foreground">
-                            Recycle bin?
-                          </span>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => setConfirmDelete(false)}
-                          >
-                            Cancel
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            onClick={() => void doDelete()}
-                            disabled={deleteHook.isPending}
-                          >
-                            Delete
-                          </Button>
-                        </>
+                        <InlineConfirm
+                          prompt="Recycle bin?"
+                          promptClassName="text-xs"
+                          actLabel="Delete"
+                          pending={deleteHook.isPending}
+                          swapFocusRef={swapFocus()}
+                          onCancel={() => setConfirmDelete(false)}
+                          onAct={() => void doDelete()}
+                        />
                       ) : (
                         <Button
+                          ref={swapFocus()}
                           variant="ghost"
                           size="sm"
                           onClick={() => setConfirmDelete(true)}
