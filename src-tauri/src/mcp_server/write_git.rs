@@ -16,10 +16,11 @@
 //! `.git/index.lock`. User-supplied branch/rev/path strings go through
 //! [`ensure_not_flag`] before reaching git argv, and the branch-TARGETING tools —
 //! create_branch (name), checkout_branch, rename_branch (from AND to), push (branch),
-//! delete_branch, delete_remote_branch — additionally refuse `gd/session/*`: mutating or
-//! publishing one breaks session Resume, and creating or renaming INTO that namespace
-//! yields an invisible (UI-filtered) branch. (merge_branch / rebase_branch take a branch
-//! name but only READ it, so they carry no such guard.)
+//! delete_branch, delete_remote_branch — refuse `gd/session/*` in any letter case
+//! to protect Resume. Lowercase `gd/session/` names are hidden from every branch
+//! list; other casing shares real session branches' loose-ref folder on
+//! case-insensitive filesystems. merge_branch / rebase_branch only READ branch
+//! names, so they carry no such guard.
 //!
 //! The tools that move HEAD, a branch, or the stash list also take the promote gate
 //! (`git::promote_marker`), mirroring the set the GUI's `promotionBlocksCheckout`
@@ -35,24 +36,15 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
-use super::{app_err, ensure_not_flag, json_result, GitDesktopMcp, SESSION_BRANCH_PREFIX};
+use super::{app_err, ensure_not_flag, json_result, GitDesktopMcp};
 use crate::error::AppError;
 use crate::git::pull_guard::{DroppedCommit, WouldDrop};
 use crate::git::remote::PushGuard;
 
-/// Refuses a branch name that names a GitDesktop agent-session branch, with an
-/// actionable error. Pure string logic (no repo access) so it's unit-testable.
+/// Delegates to the shared case-insensitive session-branch guard before repo access.
 fn ensure_not_session_branch(name: &str) -> Result<(), McpError> {
-    if name.starts_with(SESSION_BRANCH_PREFIX) {
-        return Err(McpError::invalid_params(
-            format!(
-                "\"{name}\" is a GitDesktop agent-session branch; refusing to operate on it \
-                 (breaks session Resume)."
-            ),
-            None,
-        ));
-    }
-    Ok(())
+    crate::git::branches::refuse_session_branch_name(name)
+        .map_err(|e| McpError::invalid_params(e.to_string(), None))
 }
 
 /// Rewords a push refused for an upstream name mismatch with this tool's own remedy in
@@ -206,6 +198,8 @@ fn ok_text(msg: impl Into<String>) -> Result<CallToolResult, McpError> {
 struct StagePathsArgs {
     /// Repo-relative paths to stage (or unstage). Files and directories are
     /// matched exactly. Set `literal: false` to pass git pathspecs/globs instead.
+    /// Both resolve from the repository root, as `repo_status` lists them, even
+    /// when the server was started in a subfolder.
     paths: Vec<String>,
     /// Whether each entry names one exact file or directory (the default). Set
     /// false only to pass a git pathspec or glob such as `*.log`.
@@ -536,6 +530,8 @@ struct StashPushArgs {
     /// (including untracked). With `paths`, only those files are stashed; every other
     /// file's staged and unstaged changes are left exactly as they were. Files and
     /// directories are matched exactly; set `literal: false` to pass a pathspec/glob.
+    /// Both resolve from the repository root, as `repo_status` lists them, even
+    /// when the server was started in a subfolder.
     #[serde(default)]
     paths: Vec<String>,
     /// Whether each entry names one exact file or directory (the default). Set
@@ -671,6 +667,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Stage files (git add) in the bound repository. Repo-relative paths and \
                        directories match exactly; set literal=false to pass a pathspec or glob. \
+                       Paths and literal=false patterns resolve from the repository root, as \
+                       repo_status lists them, even when the server was started in a subfolder. \
                        Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -682,8 +680,9 @@ impl GitDesktopMcp {
         for p in &args.paths {
             ensure_not_flag(p, "path")?;
         }
+        let top = self.toplevel().await.map_err(app_err)?.to_string();
         let paths = literal_pathspecs(args.paths, args.literal);
-        crate::git::stage::git_stage_core(&self.state, self.repo.clone(), paths)
+        crate::git::stage::git_stage_core(&self.state, top, paths)
             .await
             .map_err(app_err)?;
         ok_text("staged")
@@ -692,8 +691,10 @@ impl GitDesktopMcp {
     #[tool(
         description = "Unstage files (restore from the index; drop from the index in an empty \
                        repo) in the bound repository. Repo-relative paths and directories match \
-                       exactly; set literal=false to pass a pathspec or glob. Requires \
-                       --allow-git-write.",
+                       exactly; set literal=false to pass a pathspec or glob. \
+                       Paths and literal=false patterns resolve from the repository root, as \
+                       repo_status lists them, even when the server was started in a subfolder. \
+                       Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn unstage_files(
@@ -704,8 +705,9 @@ impl GitDesktopMcp {
         for p in &args.paths {
             ensure_not_flag(p, "path")?;
         }
+        let top = self.toplevel().await.map_err(app_err)?.to_string();
         let paths = literal_pathspecs(args.paths, args.literal);
-        crate::git::stage::git_unstage_core(&self.state, self.repo.clone(), paths)
+        crate::git::stage::git_unstage_core(&self.state, top, paths)
             .await
             .map_err(app_err)?;
         ok_text("unstaged")
@@ -801,7 +803,7 @@ impl GitDesktopMcp {
                        starting from a given branch/tag/commit (defaults to HEAD), optionally with \
                        no upstream (noTrack — recommended when starting a new branch from a \
                        remote-tracking ref). Refuses to create a GitDesktop agent-session branch \
-                       (gd/session/*). Requires --allow-git-write.",
+                       (gd/session/*, in any letter case). Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_branch(
@@ -836,7 +838,7 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Check out (switch to) an existing local branch in the bound repository. \
-                       Refuses GitDesktop agent-session branches (gd/session/*). \
+                       Refuses GitDesktop agent-session branches (gd/session/*, in any letter case). \
                        Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
@@ -860,8 +862,8 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "Rename a branch in the bound repository. Refuses to rename a GitDesktop \
-                       agent-session branch (gd/session/*), or to rename INTO that namespace. \
-                       Requires --allow-git-write.",
+                       agent-session branch (gd/session/*, in any letter case), or to rename INTO \
+                       that namespace. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn rename_branch(
@@ -897,7 +899,9 @@ impl GitDesktopMcp {
                        on that remote has a different name is refused; \
                        set_upstream: true publishes it under its own \
                        name instead. Uses git's native credential flow. Never force-pushes — use \
-                       force_push (destructive) for that. Requires --allow-git-write.",
+                       force_push (destructive) for that. When `branch` is given, refuses a \
+                       GitDesktop agent-session branch (gd/session/*, in any letter case). \
+                       Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn push(
@@ -1035,7 +1039,9 @@ impl GitDesktopMcp {
                        directories match exactly, set literal=false to pass a pathspec or glob. \
                        Refused while conflicts are unresolved, or while a merge, rebase, \
                        cherry-pick or revert is in progress (finish or abort it first — \
-                       retrying won't help). Requires --allow-git-write.",
+                       retrying won't help). Paths and literal=false patterns resolve from the \
+                       repository root, as repo_status lists them, even when the server was \
+                       started in a subfolder. Requires --allow-git-write.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn stash_push(
@@ -1047,20 +1053,17 @@ impl GitDesktopMcp {
             ensure_not_flag(p, "path")?;
         }
         let _promote = self.promote_gate().await?;
+        let top = self.toplevel().await.map_err(app_err)?.to_string();
         if args.paths.is_empty() {
-            crate::git::ops::git_stash_all_core(&self.state, self.repo.clone())
+            crate::git::ops::git_stash_all_core(&self.state, top)
                 .await
                 .map_err(app_err)?;
             ok_text("stashed all changes")
         } else {
             let paths = literal_pathspecs(args.paths, args.literal);
-            let stashed = crate::git::ops::git_stash_paths_core(
-                &self.state,
-                self.repo.clone(),
-                paths,
-            )
-            .await
-            .map_err(app_err)?;
+            let stashed = crate::git::ops::git_stash_paths_core(&self.state, top, paths)
+                .await
+                .map_err(app_err)?;
             if stashed {
                 ok_text("stashed selected paths")
             } else {
@@ -1077,7 +1080,8 @@ impl GitDesktopMcp {
     async fn stash_pop(&self) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         let _promote = self.promote_gate().await?;
-        crate::git::ops::git_stash_pop_core(&self.state, self.repo.clone())
+        let top = self.toplevel().await.map_err(app_err)?.to_string();
+        crate::git::ops::git_stash_pop_core(&self.state, top)
             .await
             .map_err(app_err)?;
         ok_text("stash popped")
@@ -1094,7 +1098,8 @@ impl GitDesktopMcp {
     ) -> Result<CallToolResult, McpError> {
         self.ensure_git_write()?;
         let _promote = self.promote_gate().await?;
-        crate::git::ops::git_stash_apply_core(&self.state, self.repo.clone(), args.index, false)
+        let top = self.toplevel().await.map_err(app_err)?.to_string();
+        crate::git::ops::git_stash_apply_core(&self.state, top, args.index, false)
             .await
             .map_err(app_err)?;
         ok_text(format!("stash@{{{}}} applied", args.index))
@@ -1275,8 +1280,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Force-delete a local branch (git branch -D) in the bound repository — \
                        UNMERGED commits on it are irrecoverably lost. Refuses to delete a \
-                       GitDesktop agent-session branch (gd/session/*). Requires --allow-git-write \
-                       AND --allow-destructive.",
+                       GitDesktop agent-session branch (gd/session/*, in any letter case). \
+                       Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn delete_branch(
@@ -1401,8 +1406,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Delete a branch on a remote (git push <remote> --delete) in the bound \
                        repository. The remote branch is removed. Refuses a GitDesktop \
-                       agent-session branch (gd/session/*). Requires --allow-git-write AND \
-                       --allow-destructive.",
+                       agent-session branch (gd/session/*, in any letter case). \
+                       Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn delete_remote_branch(
@@ -1855,6 +1860,8 @@ mod tests {
     fn session_branch_guard_refuses_reserved_prefix() {
         assert!(ensure_not_session_branch("gd/session/abc123").is_err());
         assert!(ensure_not_session_branch("gd/session/").is_err());
+        assert!(ensure_not_session_branch("GD/Session/x").is_err());
+        assert!(ensure_not_session_branch("Gd/SESSION/").is_err());
         assert!(ensure_not_session_branch("feature/x").is_ok());
         assert!(ensure_not_session_branch("main").is_ok());
         // A branch that merely CONTAINS the token but doesn't start with it is fine.
@@ -1878,9 +1885,10 @@ mod tests {
             .await
             .expect_err("create_branch into gd/session/* must be refused");
         assert!(
-            err.to_string().contains("agent-session branch"),
+            err.to_string().contains("reserved for agent sessions"),
             "expected the session-branch refusal, got: {err}"
         );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
         let err = h
             .rename_branch(Parameters(RenameBranchArgs {
@@ -1890,9 +1898,10 @@ mod tests {
             .await
             .expect_err("rename_branch into gd/session/* must be refused");
         assert!(
-            err.to_string().contains("agent-session branch"),
+            err.to_string().contains("reserved for agent sessions"),
             "expected the session-branch refusal, got: {err}"
         );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
     }
 
     /// `noTrack` is optional on the wire (#[serde(default)]): absent → false so
@@ -2143,6 +2152,76 @@ mod tests {
         git(repo, &["config", "core.autocrlf", "false"]).await;
         git(repo, &["config", "user.email", "t@t.local"]).await;
         git(repo, &["config", "user.name", "T"]).await;
+    }
+
+    #[tokio::test]
+    async fn stage_unstage_and_stash_resolve_paths_from_the_repository_root() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-root-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().to_str().unwrap();
+        git(repo, &["init", "-q", "-b", "main"]).await;
+        configure(repo).await;
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.path().join("sub/keep.txt"), "keep\n").unwrap();
+        git(repo, &["add", "-A"]).await;
+        git(repo, &["commit", "-qm", "seed"]).await;
+        std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+        let h = GitDesktopMcp::with_options(
+            dir.path().join("sub").to_string_lossy().into_owned(),
+            false,
+            false,
+            true,
+            false,
+        );
+        h.stage_files(Parameters(StagePathsArgs {
+            paths: vec!["a.txt".into()],
+            literal: true,
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            git(repo, &["diff", "--cached", "--name-only"]).await.trim(),
+            "a.txt"
+        );
+        h.unstage_files(Parameters(StagePathsArgs {
+            paths: vec!["a.txt".into()],
+            literal: true,
+        }))
+        .await
+        .unwrap();
+        assert!(git(repo, &["diff", "--cached", "--name-only"])
+            .await
+            .trim()
+            .is_empty());
+        let result = h
+            .stash_push(Parameters(StashPushArgs {
+                paths: vec!["a.txt".into()],
+                literal: true,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(text_of(&result), "stashed selected paths");
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), b"a\n");
+    }
+
+    #[test]
+    fn stash_tools_pass_the_toplevel_to_their_cores() {
+        let source = include_str!("write_git.rs").replace("\r\n", "\n");
+        for name in ["stash_pop", "stash_apply", "stash_push"] {
+            let start = source.find(&format!("async fn {name}(")).expect(name);
+            let rest = &source[start..];
+            let end = rest.find("\n    }\n").expect(name);
+            let body = rest[..end]
+                .lines()
+                .map(|line| line.split("//").next().unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(body.contains("self.toplevel()"), "{name}");
+            assert!(!body.contains("self.repo.clone()"), "{name}");
+        }
     }
 
     /// The one text block a tool result carries.
@@ -3069,9 +3148,10 @@ mod tests {
             .await
             .expect_err("session branch delete should be refused");
         assert!(
-            err.to_string().contains("agent-session branch"),
+            err.to_string().contains("reserved for agent sessions"),
             "got: {err}"
         );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
         let err = h
             .rename_branch(Parameters(RenameBranchArgs {
@@ -3081,9 +3161,10 @@ mod tests {
             .await
             .expect_err("session branch rename should be refused");
         assert!(
-            err.to_string().contains("agent-session branch"),
+            err.to_string().contains("reserved for agent sessions"),
             "got: {err}"
         );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
         let err = h
             .delete_remote_branch(Parameters(DeleteRemoteBranchArgs {
@@ -3093,9 +3174,10 @@ mod tests {
             .await
             .expect_err("session remote branch delete should be refused");
         assert!(
-            err.to_string().contains("agent-session branch"),
+            err.to_string().contains("reserved for agent sessions"),
             "got: {err}"
         );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
         let err = h
             .checkout_branch(Parameters(BranchNameArgs {
@@ -3104,9 +3186,69 @@ mod tests {
             .await
             .expect_err("session branch checkout should be refused");
         assert!(
-            err.to_string().contains("agent-session branch"),
+            err.to_string().contains("reserved for agent sessions"),
             "got: {err}"
         );
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        for name in ["GD/Session/xyz", "gd/session/xyz"] {
+            let refusals = [
+                h.delete_branch(Parameters(BranchNameArgs { name: name.into() }))
+                    .await,
+                h.rename_branch(Parameters(RenameBranchArgs {
+                    from: name.into(),
+                    to: "renamed".into(),
+                }))
+                .await,
+                h.rename_branch(Parameters(RenameBranchArgs {
+                    from: "feature/x".into(),
+                    to: name.into(),
+                }))
+                .await,
+                h.delete_remote_branch(Parameters(DeleteRemoteBranchArgs {
+                    remote: "origin".into(),
+                    name: name.into(),
+                }))
+                .await,
+                h.checkout_branch(Parameters(BranchNameArgs { name: name.into() }))
+                    .await,
+                h.create_branch(Parameters(CreateBranchArgs {
+                    name: name.into(),
+                    checkout: false,
+                    from: None,
+                    no_track: false,
+                }))
+                .await,
+                h.push(Parameters(PushArgs {
+                    branch: Some(name.into()),
+                    remote: None,
+                    set_upstream: false,
+                }))
+                .await,
+            ];
+            for (tool, result) in [
+                "delete_branch",
+                "rename_branch from",
+                "rename_branch to",
+                "delete_remote_branch",
+                "checkout_branch",
+                "create_branch",
+                "push",
+            ]
+            .into_iter()
+            .zip(refusals)
+            {
+                let err = result.expect_err(tool);
+                assert!(
+                    err.to_string().contains("reserved for agent sessions"),
+                    "{tool} {name}: {err}"
+                );
+                assert_eq!(
+                    err.code,
+                    rmcp::model::ErrorCode::INVALID_PARAMS,
+                    "{tool} {name}: {err}"
+                );
+            }
+        }
     }
 
     /// While a GitDesktop promote holds its window, the branch, stash and history tools

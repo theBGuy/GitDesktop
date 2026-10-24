@@ -163,8 +163,9 @@ const CONFLICT_FILE_RETRY_MS = 300;
  * does. An `io` failure (a read colliding with an editor's save) retries once
  * quickly, since any error swaps the pane to the read-error copy. A failed read
  * also re-runs on the next tick (retry limits only one fetch), so that pane
- * heals without a Retry, except `invalidArgument` (binary or oversized): it
- * can't clear by itself, and each tick would re-read the whole file.
+ * heals without a Retry, except `invalidArgument` (binary, oversized, or refused
+ * by the path gate): it can't clear by itself, and each tick would re-read the
+ * whole file.
  */
 export function useConflictFile(repo: string, path: string) {
   const panelActive = usePanelActive();
