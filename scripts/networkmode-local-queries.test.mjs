@@ -17,14 +17,17 @@
 // failure (CreatePrDialog's upstream fetch).
 //
 // Second rule: an "always" object whose queryFn crosses the network in a way this
-// scan recognizes (NETWORK_CALLEES, the NETWORK_CALLEE_FAMILIES, NETWORK_COMMANDS,
-// MIXED_COMMANDS) must be listed in NETWORKED_ALWAYS and state `refetchOnReconnect`
-// at its own top level. Not exhaustive: a `fetch…` helper, a raw `fetch()`, or a
-// networked helper named in a local family goes unseen, so such a read under
-// "always" is added to NETWORKED_ALWAYS by hand. query-core defaults that option to false
-// under "always", so an unset one silently loses recovery when the connection returns.
-// Its blind spot mirrors the first rule's: a spread placed AFTER a stated
-// `refetchOnReconnect` reads as present here but can override it at runtime.
+// scan recognizes (NETWORK_CALLEES, the NETWORK_CALLEE_FAMILIES,
+// NETWORK_COMMANDS, MIXED_COMMANDS) must be listed in NETWORKED_ALWAYS and state
+// `refetchOnReconnect` at its own top level. query-core defaults that option to
+// false under "always", so an unset one silently loses recovery when the
+// connection returns. Not exhaustive: a `fetch…` helper, a raw `fetch()`, or a
+// networked helper named in a local family goes unseen, and NETWORKED_ALWAYS
+// can't hold such a read (an entry matching no recognized read fails as stale).
+// Route its callee through a name the scan recognizes first (a NETWORK_CALLEES
+// entry, or a forge/gh/jira name), then list it. This rule's blind spot mirrors
+// the first's: a spread placed AFTER a stated `refetchOnReconnect` reads as
+// present here but can override it at runtime.
 //
 // Runs in CI's installless `guards` job, so node built-ins ONLY.
 import assert from "node:assert/strict";
@@ -95,8 +98,8 @@ const MIXED_COMMANDS = ["system_health"];
 
 /** The sanctioned networked reads under "always", each absorbing its transport
  *  failure rather than parking offline. Matched like EXEMPT; an entry matching no
- *  networked "always" object fails, and so does a networked "always" object missing
- *  from this list. */
+ *  networked "always" object this scan recognizes fails, and so does a recognized
+ *  one missing from this list. */
 const NETWORKED_ALWAYS = [
   {
     file: "src/features/pulls/CreatePrDialog.tsx",

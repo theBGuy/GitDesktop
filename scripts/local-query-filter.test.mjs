@@ -27,8 +27,9 @@ test("the override set is exactly the ratchet's repo-rooted networked-always ros
   // The roster lives in scripts/networkmode-local-queries.test.mjs, which fails on a
   // networked "always" read it can recognize (named callees, the forge/gh/jira
   // families, the classified commands) and doesn't list. Any other networked read
-  // under "always" is added there by hand. Every repo-rooted entry must land here
-  // too, or a fetch would treat that forge read as local.
+  // under "always" is routed through a name the scan recognizes before it can be
+  // listed there. Every repo-rooted entry must land here too, or a fetch would
+  // treat that forge read as local.
   const source = readFileSync(
     new URL("./networkmode-local-queries.test.mjs", import.meta.url),
     "utf8",

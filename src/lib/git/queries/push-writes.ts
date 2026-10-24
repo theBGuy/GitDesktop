@@ -3,7 +3,7 @@
  * under, the variables it carries, how a pending push reads back out of the
  * mutation cache, the label a branch row's spinner shows for it, the reasons a
  * push puts on the other controls it holds, the HEAD-push latch, and the one
- * delayed run-list recheck a settled push schedules.
+ * delayed run-list recheck a successful push schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
  * file, and `scripts/push-writes.test.mjs` loads it straight from `src/` under
@@ -148,8 +148,9 @@ export function nextPushLatch(
   return { ...Object.fromEntries(kept), ...Object.fromEntries(added) };
 }
 
-/** How long after a push settles its runs are read once more: the forge creates a
- *  push's runs a few seconds after it lands, so the settle's own read can miss them. */
+/** How long after a push succeeds its runs are read once more: the forge creates
+ *  a push's runs a few seconds after it lands, so the settle's own read can miss
+ *  them. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
 /** The one pending recheck per repo: a later push re-arms it, so repeat pushes
