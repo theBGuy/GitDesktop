@@ -651,16 +651,17 @@ one grep away on the named symbol. Grows via Conventions-sync.
   chains would republish it through the barrel. Guards: `queries-internal-import`
   (callers outside), `queries-internal-reexport` (re-exports anywhere inside),
   `queries-barrel-internal-reference` (the barrel may not name it at all).
-- **Git-only invalidation** — a git mutation (fetch, pull, push, checkout,
-  stash, discard) passes `localOnly: true` to `useRepoMutation`, which
-  invalidates the repo subtree filtered by `isLocalRepoQuery`
-  (`queries/local-query-filter.ts`): a query is local when it sets
-  `networkMode: "always"`, the split the `networkmode-local-queries` test
-  already enforces, minus the `NETWORKED_ALWAYS_OVERRIDES` it names. Forge
-  reads a local op can't change stay cached; a push adds the forge keys it
-  does change through `invalidateAfter`. The window-focus pass refetches only
-  active queries that are stale by their own staleTime or errored, never a
-  blanket invalidation.
+- **Git-only invalidation** — a git mutation that can't change forge state
+  (fetch, pull, checkout, switch, stash, whole-file discard) passes
+  `localOnly: true` to `useRepoMutation`, which invalidates the repo subtree
+  filtered by `isLocalRepoQuery` (`queries/local-query-filter.ts`): a query is
+  local when it sets `networkMode: "always"` (the split the ratchet test
+  `networkmode-local-queries` enforces), minus the overrides it names in
+  `NETWORKED_ALWAYS_OVERRIDES`. Push, tag push, merge and rebase keep the
+  whole-repo default, since a push moves PR heads and starts runs; hot
+  working-tree ops keep their narrow `invalidate`. The window-focus pass
+  refetches only active queries that are stale by their own staleTime or
+  errored, never a blanket invalidation.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

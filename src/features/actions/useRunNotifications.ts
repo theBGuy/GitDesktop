@@ -7,11 +7,7 @@ import {
   useRepoIdentity,
   useRepoStatus,
 } from "@/lib/git/queries";
-import {
-  isRunActive,
-  runNotifyOptions,
-  type WorkflowRun,
-} from "@/lib/github/actions";
+import { runNotifyOptions, type WorkflowRun } from "@/lib/github/actions";
 import { emitNotification } from "@/lib/notifications/emit";
 import { anyChannelOn } from "@/lib/notifications/overrides";
 import {
@@ -22,6 +18,7 @@ import { useSettings } from "@/lib/settings/queries";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import {
   acceptsAsPrime,
+  notifyPollInterval,
   primeFrom,
   type RunNotifyPrime,
   runsToNotify,
@@ -56,30 +53,37 @@ export function useRunNotifyEnabled(repoPath: string): boolean | undefined {
 
 /**
  * Whether `branch` exists on a remote — an upstream, or a same-named branch in the
- * remote list the shell warm-up cached. Runs are listed by branch name, so neither
- * the run poll nor the badge fetches without it. A branch pushed without tracking
- * whose remote list isn't cached yet reads false until the list lands.
+ * remote list. Runs are listed by branch name, so neither the run poll nor the
+ * badge fetches without it. The list is read through an ENABLED observer while the
+ * branch has no upstream. A branch pushed without tracking opens the gate as soon
+ * as the app's own push, fetch or pull refreshes the list; a push from a terminal,
+ * on the first window focus at least 30 s (`REMOTE_BRANCHES_STALE_TIME`) after the
+ * list's last read.
  */
 export function useBranchOnRemote(
   repoPath: string,
   branch: string | null,
 ): boolean {
   const status = useRepoStatus(repoPath);
-  // Disabled observer: reads the list the shell warm-up cached, never fetches.
-  const remoteBranches = useRemoteBranches(repoPath, false);
+  const upstream = Boolean(status.data?.branch.upstream);
+  const remoteBranches = useRemoteBranches(
+    repoPath,
+    branch !== null && status.data !== undefined && !upstream,
+  );
   return (
     branch !== null &&
-    (Boolean(status.data?.branch.upstream) ||
-      (remoteBranches.data?.some((b) => b.name === branch) ?? false))
+    (upstream || (remoteBranches.data?.some((b) => b.name === branch) ?? false))
   );
 }
 
 /**
  * Background poller for OS notifications on the current branch's workflow runs:
- * every 45s (8s while a run is active, also while unfocused) it snapshots recent
- * runs and notifies on each run that completed since the last poll. The first
- * poll fetched after it enables for a repo and branch only primes the snapshot. It
- * is the one interval owner of the shared runs read the header badge also renders.
+ * every 45s (8s while the newest run is active, also while unfocused) it snapshots
+ * recent runs and notifies on each run that finished with success or failure since
+ * the last poll; a run it never saw active only when the two polls are adjacent.
+ * The first poll fetched after it enables for a repo and branch only primes the
+ * snapshot. It is the one interval owner of the shared runs read the header badge
+ * also renders.
  */
 export function useRunNotifications(repoPath: string) {
   const gh = useForgeStatus(repoPath);
@@ -98,10 +102,7 @@ export function useRunNotifications(repoPath: string) {
   const poll = useQuery({
     ...runNotifyOptions(repoPath, branch),
     enabled,
-    refetchInterval: (query) =>
-      (query.state.data ?? []).some((r) => isRunActive(r.status))
-        ? 8_000
-        : 45_000,
+    refetchInterval: (query) => notifyPollInterval(query.state.data),
     refetchIntervalInBackground: true,
   });
 

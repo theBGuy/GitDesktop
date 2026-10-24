@@ -38,6 +38,16 @@ export const PRIME_SKEW_MS = 120_000;
  *  announce. */
 export const BETWEEN_POLLS_MAX_MS = 135_000;
 
+/** The poll's interval: 8 s while the NEWEST run (the list's first) is active,
+ *  45 s otherwise. An older run left waiting or queued (an environment approval,
+ *  an offline runner) must not pin the fast rate for hours. */
+export function notifyPollInterval(
+  runs: readonly NotifyRun[] | undefined,
+): number {
+  const newest = runs?.[0];
+  return newest !== undefined && isRunActive(newest.status) ? 8_000 : 45_000;
+}
+
 /** Whether a poll may become the first prime: only one fetched at or after the
  *  notifier enabled for this repo and branch, so a cached snapshot (a revisit, an
  *  unmute) never primes into alerts, whatever its age. `enabledAt` is the time the

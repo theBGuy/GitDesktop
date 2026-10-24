@@ -381,9 +381,10 @@ type RepoMutationScope =
  * A mutation that invalidates repo queries on completion. Defaults to the whole repo
  * subtree (correct but broad); pass `opts.invalidate` to narrow it for hot mutations
  * (each key is prefix-matched). Reserve the whole-subtree default for ops that rewrite
- * history or topology (reset/merge/rebase) and for forge writes; a git-only op that
- * changes no forge state (fetch/pull/push/checkout/stash/discard) passes `localOnly`,
- * and a hot history op (commit) splits — narrow awaited `invalidate` plus deferred
+ * history or topology (reset/merge/rebase), for push (it moves forge state: PR heads,
+ * checks, runs) and for forge writes; a git-only op that changes no forge state
+ * (fetch/pull/checkout/stash/discard) passes `localOnly`, and a hot history op
+ * (commit) splits — narrow awaited `invalidate` plus deferred
  * `opts.invalidateAfter`. Offline, a forge write here parks until reconnect (see
  * `networkMode`); the offline policy for which of them may park lives in
  * `@/lib/offline-writes`.

@@ -1640,8 +1640,8 @@ export function RemotePrView({
   const blockedDetailsReady =
     bannerArm === "blocked" && blockedByRules && !detailsPlaceholder;
   // The base branch's required checks, read only for the arm that names them. The
-  // repoTab term is the <Activity> gate every sibling read here carries: a hidden
-  // subtree still refetches, and this one would respawn `gh` on every focus regain.
+  // repoTab term is the <Activity> gate every sibling read here carries, a
+  // backstop: a hidden subtree already holds no query observers.
   const requiredChecks = useBranchRequiredChecks(
     repoPath,
     details.data?.baseRefName ?? "",

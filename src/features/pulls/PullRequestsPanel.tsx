@@ -284,8 +284,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // The viewer's review timestamps, only while the grouping is actually on (the
   // caller contract on the hook). `groupByReview` already carries the provider
   // gate, but the contract names it, so it stays visible at the call site.
-  // `repoTab` mirrors the mergeability gate above: a hidden <Activity> panel
-  // still refetches, and this query is a multi-page search walk.
+  // `repoTab` mirrors the mergeability gate above as a backstop for a multi-page
+  // search walk (a hidden <Activity> panel already holds no query observers).
   const reviewState = usePrReviewState(
     repoPath,
     ghReady &&

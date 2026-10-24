@@ -11,6 +11,7 @@ import { test } from "node:test";
 import {
   acceptsAsPrime,
   BETWEEN_POLLS_MAX_MS,
+  notifyPollInterval,
   PRIME_SKEW_MS,
   primeFrom,
   runsToNotify,
@@ -210,4 +211,19 @@ test("only a poll fetched at or after the notifier enabled may prime", () => {
   assert.equal(acceptsAsPrime(enabledAt, T0 + 3_000), true);
   // Not enabled yet (or disabled with no prime): nothing primes.
   assert.equal(acceptsAsPrime(null, T0 + 3_000), false);
+});
+
+test("the fast rate follows the NEWEST run only", () => {
+  assert.equal(
+    notifyPollInterval([run(9, "in_progress"), run(8, "completed")]),
+    8_000,
+  );
+  assert.equal(notifyPollInterval([run(9, "queued")]), 8_000);
+  // NEGATIVE CONTROL: keyed on any listed run, an old waiting run pins 8 s.
+  assert.equal(
+    notifyPollInterval([run(9, "completed", "success"), run(3, "waiting")]),
+    45_000,
+  );
+  assert.equal(notifyPollInterval([]), 45_000);
+  assert.equal(notifyPollInterval(undefined), 45_000);
 });

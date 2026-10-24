@@ -1021,8 +1021,8 @@ export function useProjectItems(
  * the tail between a write settling and the board repainting with what GitHub now
  * holds. Counted at the one place a write asks for a re-read
  * ({@link invalidateProjectBoards}), not off query state: `isInvalidated` is also
- * set by the app's window-focus invalidation, so a mere focus would read as a
- * write's tail. A write that settles through its own payload (a reposition, a
+ * set by the window-focus pass's stale mark on a chased lens, so a mere focus
+ * would read as a write's tail. A write that settles through its own payload (a reposition, a
  * restore) asks for no re-read and so has no tail.
  */
 export function useBoardRereading(repo: string): boolean {

@@ -8,9 +8,9 @@ import { isOutstanding } from "./check-presentation";
  * approving-review count — read from GitHub's active rules for that branch. Never
  * polls, and it is enabled only where the answer is about to be shown: the read
  * exists to name what a blocked merge is waiting on. It can still refetch on the
- * usual triggers (focus, reconnect, remount) once stale, so the caller's gate
- * carries the <Activity> term too. An empty answer is the honest one for a branch
- * with no rules this viewer can see.
+ * usual triggers (focus, reconnect, remount) once stale while its view is shown;
+ * the caller's <Activity> term is a backstop. An empty answer is the honest one
+ * for a branch with no rules this viewer can see.
  */
 export function useBranchRequiredChecks(
   repo: string,

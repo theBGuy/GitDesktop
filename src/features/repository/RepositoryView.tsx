@@ -781,8 +781,8 @@ export function RepositoryView() {
       </button>
     );
   }
-  // Panel activity for the ASIDE's tabs: a collapsed sidebar draws none of them,
-  // and Activity defers a hidden panel's effects but not its queries — so the
+  // Panel activity for the ASIDE's tabs: a collapsed sidebar draws none of them
+  // (and a hidden <Activity> already holds no query observers), so the
   // polls and scans (line counts, runs, findings, the TODO git-grep) stand down
   // with the panel that would show them. The main pane keeps its own condition:
   // its detail view is what the user is looking at while the sidebar is closed.
@@ -1065,8 +1065,8 @@ export function RepositoryView() {
           {/* The board IS the surface — it needs the content pane's width for a
               row of 300px columns, so unlike the list/detail tabs it has no
               sidebar half (the aside says so). Gated on the tab being the
-              visible one: <Activity> defers a hidden panel's effects but NOT its
-              React Query fetches, and these are owner-wide reads. */}
+              visible one as a backstop for owner-wide reads (a hidden
+              <Activity> panel already holds no query observers). */}
           <TabPanel active={repoTab === "projects"}>
             <ProjectsBoardPanel
               repoPath={repoPath}

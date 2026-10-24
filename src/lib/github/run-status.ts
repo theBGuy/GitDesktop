@@ -1,6 +1,7 @@
 /**
- * The one spelling of the CI run-status predicates. `@/lib/github/actions` and
- * `@/features/actions/status` re-export them, so every caller keeps its import.
+ * The one spelling of the CI run-status predicates. `@/lib/github/actions`
+ * re-exports `isRunActive` and `@/features/actions/status` re-exports
+ * `isFailureConclusion`, so every caller keeps its import.
  *
  * Import-free on purpose: `src/features/actions/run-notify-diff.ts` imports it by a
  * relative `.ts` specifier, and `scripts/run-notify-diff.test.mjs` loads both under

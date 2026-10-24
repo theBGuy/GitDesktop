@@ -36,9 +36,9 @@ export function remoteBranchesOptions(repo: string) {
 export const REMOTE_BRANCHES_STALE_TIME = 30_000;
 
 /** Branches that exist on a remote (reflecting the last fetch), for the switcher's
- *  "Remote" group. `enabled` gates the fetch so it only runs while the menu is
- *  open: an enabled observer would re-run an O(remote refs) `for-each-ref` on
- *  every window focus and repo mutation. */
+ *  "Remote" group. Callers gate `enabled` on need (the menu while it is open, the
+ *  run gate while the branch has no upstream): an enabled observer re-runs an
+ *  O(remote refs) `for-each-ref` on each stale focus and repo mutation. */
 export function useRemoteBranches(repo: string, enabled = true) {
   return useQuery({
     ...remoteBranchesOptions(repo),

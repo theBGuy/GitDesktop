@@ -230,6 +230,8 @@ export function usePrListMergeability(
  * A mutation that changes CI STATE (approve, re-run, cancel, dispatch) owes
  * {@link usePrListCi}'s `repoKeys.prCi(repo)` the same: it hydrates the list's check
  * badges from its own key, and neither the PR-detail nor the PR-list prefix matches it.
+ * A mutation that moves a PR head (a push, an update-branch) owes
+ * `repoKeys.prMergeability(repo)` too: neither prefix matches it either.
  */
 export function usePrReviewState(
   repo: string,

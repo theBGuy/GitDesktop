@@ -131,6 +131,48 @@ test("an errored active query refetches inside its staleTime", async (t) => {
   assert.equal(h.count("forge-status"), 3);
 });
 
+test("errored, no data, Infinity staleTime: focus refetches", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const clock = fakeClock(t);
+  const h = harness(t);
+  h.observe("runs-paged-cold", { staleTime: Number.POSITIVE_INFINITY }, () =>
+    Promise.reject(new Error("unreachable")),
+  );
+  await sleep(5);
+  const q = h.query("runs-paged-cold");
+  assert.equal(q.state.status, "error");
+  assert.equal(q.state.data, undefined);
+  clock.advance(1_000);
+  refetchRepoQueriesOnFocus(h.qc, new Map());
+  await sleep(5);
+  // NEGATIVE CONTROL: an error arm reading only finite staleTimes skips this read.
+  assert.equal(h.count("runs-paged-cold"), 2);
+});
+
+test("errored, has data, Infinity staleTime: focus takes no fetch", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const clock = fakeClock(t);
+  const h = harness(t);
+  let fail = false;
+  const observer = h.observe(
+    "runs-paged-deep-errored",
+    { staleTime: Number.POSITIVE_INFINITY },
+    () =>
+      fail ? Promise.reject(new Error("unreachable")) : Promise.resolve("deep"),
+  );
+  await sleep(5);
+  fail = true;
+  await observer.refetch();
+  const q = h.query("runs-paged-deep-errored");
+  assert.equal(q.state.status, "error");
+  assert.equal(q.state.data, "deep");
+  clock.advance(10 ** 7);
+  refetchRepoQueriesOnFocus(h.qc, new Map());
+  await sleep(5);
+  // NEGATIVE CONTROL: an error arm refetching every errored query replays it.
+  assert.equal(h.count("runs-paged-deep-errored"), 2);
+});
+
 test("inactive queries are never fetched and never invalidated", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const clock = fakeClock(t);

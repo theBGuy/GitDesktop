@@ -8,7 +8,6 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import * as api from "../api";
-import { repoKeys } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { pendingMutationEntries } from "./pr-writes";
 import {
@@ -31,9 +30,9 @@ export {
   type PushVars,
 } from "./push-writes";
 
-/** Fetch, pull, switch and push here are `localOnly`: they move HEAD, refs or the
- *  working tree but change no forge state, so forge reads keep their own clocks.
- *  Merge and rebase keep the whole-repo default. */
+/** Fetch, pull and switch here are `localOnly`: they move HEAD, refs or the working
+ *  tree but change no forge state, so forge reads keep their own clocks. Push,
+ *  merge and rebase keep the whole-repo default. */
 export function useFetchRemote(repo: string) {
   return useRepoMutation(repo, () => api.gitFetch(repo), { localOnly: true });
 }
@@ -156,8 +155,8 @@ export type UpstreamUpdateOutcome =
  * report "already up to date" instead of a no-op merge. Never auto-pushes —
  * the Push affordance lights up on its own afterward.
  *
- * Default (whole-repo) invalidation, matching the pull/merge flows, so
- * branches, status, and history all refresh.
+ * Default (whole-repo) invalidation, matching the merge flow, so branches,
+ * status, and history all refresh.
  */
 export function useUpdateFromUpstream(repo: string) {
   return useRepoMutation<void, UpstreamUpdateOutcome>(repo, async () => {
@@ -259,20 +258,13 @@ export function useSetSubmoduleBranch(repo: string) {
  *  push's runs a few seconds after it lands, so the settle's own read can miss them. */
 const PUSH_RUN_RECHECK_MS = 8_000;
 
-/** One delayed re-read of the pushed branch's run keys, keyed to the push's own
- *  repo and branch (every branch of the repo for a HEAD push, which names none). */
-function recheckRunsAfterPush(
-  queryClient: QueryClient,
-  repo: string,
-  branch: string | undefined,
-): void {
+/** One delayed re-read of every run-list read of the push's own repo; only the
+ *  observers active then refetch. */
+function recheckRunsAfterPush(queryClient: QueryClient, repo: string): void {
   setTimeout(() => {
-    for (const kind of ["notify", "latest"])
+    for (const kind of ["notify", "latest", "runs", "runs-paged"])
       void queryClient.invalidateQueries({
-        queryKey:
-          branch === undefined
-            ? ["repo", repo, "actions", kind]
-            : ["repo", repo, "actions", kind, branch],
+        queryKey: ["repo", repo, "actions", kind],
       });
   }, PUSH_RUN_RECHECK_MS);
 }
@@ -295,20 +287,9 @@ export function usePush(repo: string) {
       ),
     {
       identity: branchPushKey(repo),
-      localOnly: true,
-      // A push moves the pushed branch's PR head and starts its runs: refresh the
-      // runs poll and this repo's PR surfaces too, where an observer is active.
-      invalidateAfter: [
-        ["repo", repo, "actions", "notify"],
-        ["repo", repo, "actions", "latest"],
-        repoKeys.prList(repo),
-        repoKeys.prCi(repo),
-        repoKeys.prReviewState(repo),
-        ["repo", repo, "pr"],
-        ["repo", repo, "pr-base-divergence"],
-      ],
-      onSuccess: (_data, args) =>
-        recheckRunsAfterPush(queryClient, repo, args.branch),
+      // The whole-repo default: a push moves the pushed branch's PR head, checks,
+      // mergeability and runs, and only active observers refetch.
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     },
   );
 }
