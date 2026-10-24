@@ -67,8 +67,9 @@ pub struct AiIgnoreVerdict {
 }
 
 /// Rejects paths that could be read as a git flag or escape the repo root. The
-/// path comes from git status (trusted-ish), but the write path
-/// (`git_resolve_conflict_core`) makes traversal worth refusing defensively.
+/// path comes from git status (trusted-ish), but the write paths
+/// (`git_resolve_conflict_core`, `git_checkout_conflict_side_core`) make traversal
+/// worth refusing defensively.
 fn validate_rel_path(path: &str) -> AppResult<()> {
     let p = Path::new(path);
     if path.is_empty()
@@ -420,9 +421,9 @@ pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
     result
 }
 
-/// `git_resolve_conflict_core`'s write-then-add without the path gate or `State`.
-/// The core's write takes no lock; only `run_git_mutating` locks the add, which
-/// a single-threaded test can skip.
+/// `git_resolve_conflict_core`'s write-then-add without the path gate, the literal
+/// pathspec, or `State`. The core's write takes no lock; only `run_git_mutating`
+/// locks the add, which a single-threaded test can skip.
 #[cfg(test)]
 pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
     use crate::git::runner::run_git;

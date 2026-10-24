@@ -16,10 +16,11 @@
 //! `.git/index.lock`. User-supplied branch/rev/path strings go through
 //! [`ensure_not_flag`] before reaching git argv, and the branch-TARGETING tools —
 //! create_branch (name), checkout_branch, rename_branch (from AND to), push (branch),
-//! delete_branch, delete_remote_branch — additionally refuse `gd/session/*` in any letter
-//! case: mutating or publishing one breaks session Resume, and creating or renaming INTO
-//! that namespace yields an invisible (UI-filtered) branch. (merge_branch / rebase_branch
-//! take a branch name but only READ it, so they carry no such guard.)
+//! delete_branch, delete_remote_branch — refuse `gd/session/*` in any letter case
+//! to protect Resume. Lowercase `gd/session/` names are hidden from every branch
+//! list; other casing shares real session branches' loose-ref folder on
+//! case-insensitive filesystems. merge_branch / rebase_branch only READ branch
+//! names, so they carry no such guard.
 //!
 //! The tools that move HEAD, a branch, or the stash list also take the promote gate
 //! (`git::promote_marker`), mirroring the set the GUI's `promotionBlocksCheckout`

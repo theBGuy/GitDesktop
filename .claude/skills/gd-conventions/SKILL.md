@@ -899,11 +899,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `escape_head_branch_path` in github/pr.rs — `%`/`#` encoded, braces refused
   before the call); Bitbucket requests resolve through the one choke point
   `forge::http::resolve_url`, which accepts absolute URLs only on `BB_API_BASE`.
-  A caller-supplied repo-relative path that a git/ write command joins onto
-  the working tree passes `discard_rel_path` (git/ops.rs) before the join (in
-  conflict.rs through its wrapper `conflict_rel_path`), with the site's own
-  operation sentence around its reason, and git receives the spelling it
-  returns; git-reported paths such as an ignore rule's `source` are exempt.
+  A repo-relative path that a git/ write command receives over IPC and joins
+  onto the working tree passes `discard_rel_path` (git/ops.rs) before the join
+  (in conflict.rs through its wrapper `conflict_rel_path`), even when git
+  listed it first, with the site's own operation sentence around its reason,
+  and git receives the spelling it returns. The one exemption is an ignore
+  rule's `source`, which may legitimately be absolute or inside `.git`.
   MCP git write tools that take paths pass `GitDesktopMcp::toplevel()` to
   their cores, or call a core that anchors itself as the discard cores do, so
   paths resolve from the root `repo_status` reports.
