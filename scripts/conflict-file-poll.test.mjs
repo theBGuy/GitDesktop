@@ -1,13 +1,13 @@
 // Pins the conflict editor's disk poll and its flicker-free busy hold. The open
 // conflict file re-reads every CONFLICT_FILE_POLL_MS while its panel shows and
-// the window is visible, except while the read sits in `invalidArgument` (binary
-// or oversized: it can't heal, and each tick re-reads the whole file). The
-// three conflict mutations await only the conflict-file re-read before their
-// isPending drops, with the working tree refreshing behind it, so the view's
-// `busy` needs no fetch state, and a poll tick never toggles the buttons. A
-// mount or panel show holds `busy` until a read joined or started then lands,
-// since a cached entry can be as old as the time off-screen. Only an `io` read
-// failure retries, once, so a transient io failure never flashes the
+// the window is visible, except while the read sits in `invalidArgument` (binary,
+// oversized, or refused by the path gate: it can't heal, and each tick re-reads
+// the whole file). The three conflict mutations await only the conflict-file
+// re-read before their isPending drops, with the working tree refreshing behind
+// it, so the view's `busy` needs no fetch state, and a poll tick never toggles
+// the buttons. A mount or panel show holds `busy` until a read joined or started
+// then lands, since a cached entry can be as old as the time off-screen. Only an
+// `io` read failure retries, once, so a transient io failure never flashes the
 // read-error pane. Each write handler holds a synchronous in-flight ref, since
 // a second click before the disabling render would write from stale segments,
 // and re-reads the file when its write fails. Mark resolved asks its marker
@@ -183,7 +183,7 @@ test("the conflict file polls on an interval gated on the panel and the error ki
   );
   assert.ok(
     hasStringLiteral(src, interval, "invalidArgument"),
-    'refetchInterval lost its "invalidArgument" arm: a binary or oversized read would re-read every tick',
+    'refetchInterval lost its "invalidArgument" arm: binary, oversized, or path-gate refusals would re-read every tick',
   );
   assert.match(
     interval.masked,

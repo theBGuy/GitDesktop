@@ -9,6 +9,7 @@ import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
+import { presentError } from "@/lib/error-summary";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
 import {
@@ -105,10 +106,14 @@ const DELETION_COPY = {
   },
 } as const;
 
-/** The error pane's copy per failed-read kind: the backend refuses a binary or
- *  oversized file as invalidArgument; `io` covers a lock, a permission change,
- *  or a directory at the path (a conflicted submodule), none promised to pass.
- *  Other kinds take the fallback. */
+// src-tauri/src/git/conflict.rs's conflict_rel_path opens refusals with this.
+// scripts/conflict-path-refusal.test.mjs pins both sides.
+const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
+
+/** The backend refuses binary or oversized files as invalidArgument; a path-gate
+ *  refusal shares that kind but renders its own sentence instead. `io` covers a
+ *  lock, a permission change, or a directory at the path (a conflicted submodule),
+ *  none promised to pass. Other kinds take the fallback. */
 const READ_ERROR_COPY: Partial<Record<AppError["kind"], ReactNode>> = {
   invalidArgument: (
     <>
@@ -474,8 +479,8 @@ export function ConflictFileView({
 
   // Which fallback state is on screen, and so whether Mark resolved is offered.
   // Gated on !isError as well as data: a refetch that errors (the file became
-  // unreadable, binary or oversized) keeps the last data while the pane shows
-  // the error copy.
+  // unreadable, binary, oversized, or refused by the path gate) keeps the last
+  // data while the pane shows the error copy.
   const arm =
     file.data && !file.isError && segments === null
       ? fallbackArm(file.data)
@@ -643,8 +648,17 @@ export function ConflictFileView({
           </p>
         ) : file.isError ? (
           <p className="p-4 text-xs text-muted-foreground">
-            {(isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
-              READ_ERROR_FALLBACK}
+            {(() => {
+              if (!isAppError(file.error)) return READ_ERROR_FALLBACK;
+              const summary = presentError(file.error).summary;
+              if (
+                file.error.kind === "invalidArgument" &&
+                summary.startsWith(PATH_REFUSAL_PREFIX)
+              ) {
+                return `${summary} Resolve it in your editor or a terminal.`;
+              }
+              return READ_ERROR_COPY[file.error.kind] || READ_ERROR_FALLBACK;
+            })()}
           </p>
         ) : segments === null ? (
           <ConflictFallback

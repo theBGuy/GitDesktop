@@ -83,6 +83,7 @@ fn validate_rel_path(path: &str) -> AppResult<()> {
 }
 
 /// Keep four `invalid path:` refusals first; the shared gate then refuses or returns git's spelling.
+/// The pane keys on the opening sentence via ConflictFileView.tsx's PATH_REFUSAL_PREFIX.
 fn conflict_rel_path(path: &str) -> AppResult<String> {
     validate_rel_path(path)?;
     crate::git::ops::discard_rel_path(path).map_err(|why| {

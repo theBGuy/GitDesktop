@@ -1683,8 +1683,7 @@ const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try ag
 const DISCARD_WIN_TRAILING: &str =
     "Windows reads a name ending in a dot or space as a different path";
 const DISCARD_WIN_SHELL_FOLDER: &str = "Windows treats a name ending in .{GUID} as a shell link";
-const DISCARD_UNDECODABLE: &str =
-    "its name isn't valid UTF-8, so it can't be discarded safely; rename it and try again";
+const DISCARD_UNDECODABLE: &str = "its name isn't valid UTF-8; rename it and try again";
 
 /// Shared lexical gate for caller-supplied repo-relative paths that writes join
 /// onto the working tree; returns git's spelling without resolving filesystem
@@ -16061,7 +16060,7 @@ detached
         ] {
             assert_eq!(
                 discard_message(discard_all_untracked(input).unwrap_err()),
-                format!("Can't discard {name} — its name isn't valid UTF-8, so it can't be discarded safely; rename it and try again. Nothing was discarded.")
+                format!("Can't discard {name} — its name isn't valid UTF-8; rename it and try again. Nothing was discarded.")
             );
         }
         assert_eq!(
@@ -16086,7 +16085,7 @@ detached
             .await
             .unwrap_err();
         assert_eq!(discard_message(err),
-            "Can't discard zz-\u{FFFD}.txt — its name isn't valid UTF-8, so it can't be discarded safely; rename it and try again. Nothing was discarded.");
+            "Can't discard zz-\u{FFFD}.txt — its name isn't valid UTF-8; rename it and try again. Nothing was discarded.");
         assert_eq!(std::fs::read(dir.path().join("ok.txt")).unwrap(), b"keep\n");
         assert_eq!(
             std::fs::read(dir.path().join("a.txt")).unwrap(),
