@@ -312,7 +312,12 @@ export function HooksDialog({
                     aria-selected={selected === e.name}
                     tabIndex={i === tabStop ? 0 : -1}
                     onFocus={() => setFocusedHook(e.name)}
-                    onClick={() => setSelected(e.name)}
+                    onClick={(ev) => {
+                      // WebKit doesn't focus a clicked button; the tab stop
+                      // follows focus, so the click takes it explicitly.
+                      ev.currentTarget.focus();
+                      setSelected(e.name);
+                    }}
                     className={cn(
                       "flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs",
                       selected === e.name

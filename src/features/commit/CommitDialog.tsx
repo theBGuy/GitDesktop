@@ -1,5 +1,4 @@
-import { InfoIcon, SparkleIcon, WarningIcon } from "@phosphor-icons/react";
-import { useId } from "react";
+import { InfoIcon, SparkleIcon } from "@phosphor-icons/react";
 import { DiffStatSlot } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
@@ -27,6 +26,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { cn } from "@/lib/utils";
 import { AmendHoldSentence } from "./AmendHoldSentence";
 import { CoAuthorPicker } from "./CoAuthorPicker";
+import { SummaryCounter, useSummaryBudget } from "./summary-counter";
 import { useCommitSubmit } from "./useCommitSubmit";
 
 /**
@@ -85,10 +85,7 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
   const lineStats = useWorkingLineStats(repoPath, open && stagedCount > 0);
   const commitBinding = useEffectiveBindings().get("commit") ?? null;
   const generateHint = useGenerateChordHint();
-  // Past the summary budget the counter says so in a glyph and, for assistive
-  // tech, in words the field references only while over.
-  const over = title.length > 72;
-  const counterId = useId();
+  const budget = useSummaryBudget(title.length);
 
   const stagedStats = new Map(
     (lineStats.data?.staged ?? []).map((e) => [e.path, e]),
@@ -160,27 +157,15 @@ export function CommitDialog({ repoPath }: { repoPath: string }) {
               value={title}
               onChange={(e) => setCommitTitle(e.target.value)}
               disabled={generating}
-              // The glyph widens the counter; the gutter grows with it.
-              className={cn("ph-no-capture", over ? "pr-16" : "pr-12")}
+              {...budget.inputProps}
+              className={cn("ph-no-capture", budget.inputProps.className)}
               autoComplete="off"
-              aria-describedby={over ? counterId : undefined}
             />
-            <span
-              className={cn(
-                "pointer-events-none absolute top-1/2 right-2 inline-flex -translate-y-1/2 items-center gap-0.5 text-[10px] tabular-nums",
-                over ? "text-warning" : "text-muted-foreground",
-              )}
-            >
-              {over && (
-                <WarningIcon weight="fill" className="size-2.5" aria-hidden />
-              )}
-              {title.length > 0 && `${title.length}/72`}
-            </span>
-            {over && (
-              <span id={counterId} className="sr-only">
-                {`${title.length} characters, ${title.length - 72} over the 72-character summary budget`}
-              </span>
-            )}
+            <SummaryCounter
+              length={title.length}
+              over={budget.over}
+              counterId={budget.counterId}
+            />
           </div>
           <Textarea
             placeholder="Description (optional)"

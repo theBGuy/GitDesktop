@@ -1,4 +1,4 @@
-import { type ReactNode, type Ref, useState } from "react";
+import { type KeyboardEvent, type ReactNode, type Ref, useState } from "react";
 import {
   SWAP_NODE_ATTR,
   successorCandidates,
@@ -98,7 +98,7 @@ function focusSuccessor({ row, before, section, host }: Successors) {
         : Array.from(section.querySelectorAll("[data-confirm-row]")),
     before,
     connected: (el) => el.isConnected,
-    stopsOf: (row) => swapStopsOf<Element>(row),
+    stopsOf: swapStopsOf<Element>,
     sectionConnected,
     sectionFallbacks:
       section === null
@@ -112,6 +112,13 @@ function focusSuccessor({ row, before, section, host }: Successors) {
         : Array.from(host.querySelectorAll(FALLBACK_SELECTOR)),
     host,
   }).some(focusLanded);
+}
+
+/** A landing control's `onKeyDown`: an auto-repeated Enter is one still held
+ *  from the press that removed the previous focus, so it must not activate
+ *  this control (preventing the keydown cancels a button's Enter click). */
+export function ignoreHeldEnter(e: KeyboardEvent) {
+  if (e.key === "Enter" && e.repeat) e.preventDefault();
 }
 
 function createConfirmSwapFocus() {

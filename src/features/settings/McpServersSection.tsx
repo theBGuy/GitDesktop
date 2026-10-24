@@ -8,7 +8,10 @@ import {
 import { useSelector } from "@tanstack/react-store";
 import { useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { useConfirmSwapFocus } from "@/components/confirm-swap-focus";
+import {
+  ignoreHeldEnter,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { StatusDetailChip } from "@/components/status-detail-chip";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -371,6 +374,7 @@ export const McpServersSection = withForm({
               variant="outline"
               size="sm"
               onClick={() => setEditing("new")}
+              onKeyDown={ignoreHeldEnter}
             >
               <PlusIcon data-icon="inline-start" /> Add server
             </Button>

@@ -1,7 +1,10 @@
 import { PencilSimpleIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
 import { useRef, useState } from "react";
-import { useConfirmSwapFocus } from "@/components/confirm-swap-focus";
+import {
+  ignoreHeldEnter,
+  useConfirmSwapFocus,
+} from "@/components/confirm-swap-focus";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -264,6 +267,7 @@ export const CommandsSection = withForm({
             size="sm"
             className="shrink-0"
             onClick={() => setEditing("new")}
+            onKeyDown={ignoreHeldEnter}
           >
             <PlusIcon data-icon="inline-start" /> Add command
           </Button>

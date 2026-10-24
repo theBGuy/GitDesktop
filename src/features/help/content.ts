@@ -3552,7 +3552,9 @@ tab menu, or from the command palette ({{kbd:command-palette}}).
   turn it off per task once you trust it (it then always runs its saved arguments). Even
   then, a task pointed at a script in the repo confirms its **first** run in each
   repository, so a path that resolves differently from repo to repo gets a look first.
-  Starting a task while another is still running asks before it replaces it.`,
+  Starting a task while another is still running asks before it replaces it: the prompt
+  starts on **Cancel**, and {{key:enter}} in its arguments field won't stop the running
+  task, so choose **Stop & run** to replace it.`,
   },
   {
     id: "keyboard",

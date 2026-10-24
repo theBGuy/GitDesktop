@@ -1,6 +1,7 @@
 import { PlusIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import {
+  ignoreHeldEnter,
   markSwapStop,
   useConfirmSwapFocus,
 } from "@/components/confirm-swap-focus";
@@ -217,10 +218,7 @@ function EnsembleArms({
           variant="ghost"
           disabled={arms.length >= MAX_ARMS}
           onClick={addArm}
-          onKeyDown={(e) => {
-            // A held Enter landing here after a removal adds no arms.
-            if (e.key === "Enter" && e.repeat) e.preventDefault();
-          }}
+          onKeyDown={ignoreHeldEnter}
         >
           <PlusIcon data-icon="inline-start" />
           Add arm

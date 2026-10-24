@@ -847,7 +847,7 @@ export function CleanupBranchesDialog({
                           className="truncate pl-6 text-[11px] text-destructive"
                           onMouseEnter={clipTitleFromText}
                         >
-                          {`Couldn't ${mode === "archive" ? "archive" : "delete"}: ${err}`}
+                          {`Couldn't ${mode}: ${err}`}
                         </div>
                       )}
                     </div>

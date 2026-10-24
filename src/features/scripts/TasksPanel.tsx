@@ -12,6 +12,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useId, useRef, useState } from "react";
 import { toast } from "sonner";
+import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -225,6 +226,7 @@ export function TasksPanel() {
             size="icon-xs"
             variant="ghost"
             onClick={() => openEditor("new")}
+            onKeyDown={ignoreHeldEnter}
             title="New task"
             aria-label="New task"
           >
@@ -311,11 +313,9 @@ export function TasksPanel() {
                     tabIndex={index === tabStop ? 0 : -1}
                     onFocus={() => setActiveIndex(index)}
                     onClick={() => void request(task)}
-                    onKeyDown={(e) => {
-                      // An auto-repeated Enter is one still held from elsewhere
-                      // (an editor closing back onto this row): never a run.
-                      if (e.key === "Enter" && e.repeat) e.preventDefault();
-                    }}
+                    // A held Enter (an editor closing back onto this row) never
+                    // runs the task.
+                    onKeyDown={ignoreHeldEnter}
                     className={cn(
                       "flex min-w-0 flex-1 items-start gap-2 rounded px-2 py-1.5 text-left text-xs",
                       index === clamped

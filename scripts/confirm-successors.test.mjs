@@ -71,9 +71,11 @@ function domEl(name, attrs = [], children = []) {
   return node;
 }
 
-/** The walk as it stood inside repo-settings/parts.tsx before it moved, for
- *  inputs without the new markers: same order, tried one by one. */
-function legacyOrder({ rows, before, sectionFallbacks, host }) {
+/** The order unmarked rows in a connected section must yield: the rows after
+ *  the nearest surviving earlier row, then the earlier rows nearest first, each
+ *  expanded to its marked descendants, then the section's fallbacks, then the
+ *  host. Host fallbacks never appear while the section is connected. */
+function unmarkedOrder({ rows, before, sectionFallbacks, host }) {
   const out = [];
   if (rows.length > 0) {
     const anchor = before.find((r) => r.connected);
@@ -182,7 +184,7 @@ test("the host is always the last candidate", () => {
   }
 });
 
-test("unmarked inputs order exactly as the walk did before it moved", () => {
+test("unmarked rows in a connected section keep the documented order", () => {
   // Every row count up to 4, every removed position, every subset of earlier
   // rows gone, with and without a host and section fallbacks.
   for (let n = 0; n <= 4; n++) {
@@ -205,7 +207,7 @@ test("unmarked inputs order exactly as the walk did before it moved", () => {
           });
           assert.deepEqual(
             names(successorCandidates(v)),
-            names(legacyOrder(v)),
+            names(unmarkedOrder(v)),
             `n=${n} removed=${removed} gone=${goneMask} host=${withHost}`,
           );
         }
