@@ -28,6 +28,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install Node
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version-file: .node-version
       # Validate the FORMAT of every pending fragment (finished "- " bullet,
       # 2-space wrapped-line indent, consumable filename), not just presence —
       # a malformed fragment otherwise only surfaces when `pnpm release` trips
