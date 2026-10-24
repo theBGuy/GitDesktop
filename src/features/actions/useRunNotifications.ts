@@ -54,21 +54,23 @@ export function useRunNotifyEnabled(repoPath: string): boolean | undefined {
 /**
  * Whether `branch` exists on a remote — an upstream, or a same-named branch in the
  * remote list. Runs are listed by branch name, so neither the run poll nor the
- * badge fetches without it. The list is read through an ENABLED observer while the
- * branch has no upstream. A branch pushed without tracking opens the gate as soon
- * as the app's own push, fetch or pull refreshes the list; a push from a terminal,
- * on the first window focus at least 30 s (`REMOTE_BRANCHES_STALE_TIME`) after the
- * list's last read.
+ * badge fetches without it. The list is read through an ENABLED observer only
+ * while the branch has no upstream and the caller `needed` it (CI ready, or the
+ * forge status still resolving); otherwise it serves whatever list is cached. A
+ * branch pushed without tracking opens the gate as soon as the app's own push,
+ * fetch or pull refreshes the list; a push from a terminal, on the first window
+ * focus at least 30 s (`REMOTE_BRANCHES_STALE_TIME`) after the list's last read.
  */
 export function useBranchOnRemote(
   repoPath: string,
   branch: string | null,
+  needed: boolean,
 ): boolean {
   const status = useRepoStatus(repoPath);
   const upstream = Boolean(status.data?.branch.upstream);
   const remoteBranches = useRemoteBranches(
     repoPath,
-    branch !== null && status.data !== undefined && !upstream,
+    needed && branch !== null && status.data !== undefined && !upstream,
   );
   return (
     branch !== null &&
@@ -78,26 +80,24 @@ export function useBranchOnRemote(
 
 /**
  * Background poller for OS notifications on the current branch's workflow runs:
- * every 45s (8s while the newest run is active, also while unfocused) it snapshots
- * recent runs and notifies on each run that finished with success or failure since
- * the last poll; a run it never saw active only when the two polls are adjacent.
- * The first poll fetched after it enables for a repo and branch only primes the
- * snapshot. It is the one interval owner of the shared runs read the header badge
- * also renders.
+ * every 45s (8s while the newest run is active or a run of its push is in
+ * progress; also while unfocused) it snapshots recent runs and notifies on each run
+ * that finished with success or failure since the last poll; a run it never saw
+ * active only when the two polls are adjacent. The first poll fetched after it
+ * enables for a repo and branch only primes the snapshot. It is the one interval
+ * owner of the shared runs read the header badge also renders.
  */
 export function useRunNotifications(repoPath: string) {
   const gh = useForgeStatus(repoPath);
   const branch = useRunNotifyBranch(repoPath);
-  const onRemote = useBranchOnRemote(repoPath, branch);
+  const ciReady = forgeFeatureReady(gh.data, "ci");
+  const onRemote = useBranchOnRemote(repoPath, branch, ciReady || gh.isPending);
   const notifyEnabled = useRunNotifyEnabled(repoPath);
   // Polled for any provider whose CI read is built — GitHub Actions and GitLab
   // pipelines both map onto the same neutral run shape the diff reads. Delivery
   // stays correct regardless — emit re-reads the override itself.
   const enabled =
-    repoPath !== "" &&
-    forgeFeatureReady(gh.data, "ci") &&
-    onRemote &&
-    notifyEnabled === true;
+    repoPath !== "" && ciReady && onRemote && notifyEnabled === true;
 
   const poll = useQuery({
     ...runNotifyOptions(repoPath, branch),

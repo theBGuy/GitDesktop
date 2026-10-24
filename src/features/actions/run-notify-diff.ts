@@ -15,6 +15,7 @@ export type NotifyRun = {
   status: string;
   conclusion: string;
   createdAt: string;
+  headSha: string;
 };
 
 /** The previous poll: its runs by id, its highest run id (null when it saw none),
@@ -38,14 +39,22 @@ export const PRIME_SKEW_MS = 120_000;
  *  announce. */
 export const BETWEEN_POLLS_MAX_MS = 135_000;
 
-/** The poll's interval: 8 s while the NEWEST run (the list's first) is active,
- *  45 s otherwise. An older run left waiting or queued (an environment approval,
- *  an offline runner) must not pin the fast rate for hours. */
+/** The poll's interval: 8 s while the NEWEST run (the list's first) is active, or
+ *  while a run of the same push (a non-empty `headSha`) is executing, since one
+ *  push's runs list in arbitrary order; 45 s otherwise. A run left waiting or
+ *  queued (an environment approval, an offline runner) never holds the fast rate. */
 export function notifyPollInterval(
   runs: readonly NotifyRun[] | undefined,
 ): number {
   const newest = runs?.[0];
-  return newest !== undefined && isRunActive(newest.status) ? 8_000 : 45_000;
+  if (newest === undefined) return 45_000;
+  if (isRunActive(newest.status)) return 8_000;
+  const sha = newest.headSha;
+  return typeof sha === "string" &&
+    sha !== "" &&
+    runs?.some((r) => r.headSha === sha && r.status === "in_progress")
+    ? 8_000
+    : 45_000;
 }
 
 /** Whether a poll may become the first prime: only one fetched at or after the

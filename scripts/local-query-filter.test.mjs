@@ -1,5 +1,5 @@
 // Pins src/lib/git/queries/local-query-filter.ts: which cached repo queries a local
-// git operation (fetch, pull, push, checkout, stash, discard) invalidates. LOCAL iff
+// git operation (fetch, pull, checkout, stash, discard) invalidates. LOCAL iff
 // networkMode "always" minus the networked-"always" overrides; everything else is a
 // forge read that keeps its own clock. A wrong answer never errors — a fetch either
 // replays every GitHub read on screen or leaves a local read stale — so each row is a

@@ -305,10 +305,10 @@ export function useUpdateBranchFrom(repo: string) {
  *
  * LAZY on purpose: `enabled` must stay false unless a surface is actually facing
  * a diverged branch, so the ordinary in-sync path spawns no git. Keyed under the
- * repo, so the whole-subtree invalidation every fetch/pull/push mutation already
- * runs refreshes it. Local rev-list reads only — `networkMode: "always"` keeps
- * an offline OS from parking the query into a permanent pending state, matching
- * {@link useBranchDivergence}.
+ * repo, so a push's whole-subtree invalidation and a fetch or pull's local-only
+ * one (this read is local) both refresh it. Local rev-list reads only —
+ * `networkMode: "always"` keeps an offline OS from parking the query into a
+ * permanent pending state, matching {@link useBranchDivergence}.
  */
 export function useBranchRewriteStatus(
   repo: string,

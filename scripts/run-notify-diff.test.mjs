@@ -227,3 +227,35 @@ test("the fast rate follows the NEWEST run only", () => {
   assert.equal(notifyPollInterval([]), 45_000);
   assert.equal(notifyPollInterval(undefined), 45_000);
 });
+
+test("an EXECUTING sibling of the newest run's push holds the fast rate", () => {
+  const onSha = (headSha, r) => ({ ...r, headSha });
+  const done = onSha("abc", run(9, "completed", "success"));
+  // NEGATIVE CONTROL: keyed on the newest run alone, this row reads 45 s.
+  assert.equal(
+    notifyPollInterval([done, onSha("abc", run(8, "in_progress"))]),
+    8_000,
+  );
+  // Waiting or queued siblings (an approval, an offline runner) never hold it.
+  assert.equal(
+    notifyPollInterval([done, onSha("abc", run(8, "waiting"))]),
+    45_000,
+  );
+  assert.equal(
+    notifyPollInterval([done, onSha("abc", run(8, "queued"))]),
+    45_000,
+  );
+  // Another push's run executing doesn't count.
+  assert.equal(
+    notifyPollInterval([done, onSha("old", run(3, "in_progress"))]),
+    45_000,
+  );
+  // An empty headSha groups nothing.
+  assert.equal(
+    notifyPollInterval([
+      onSha("", run(9, "completed", "success")),
+      onSha("", run(8, "in_progress")),
+    ]),
+    45_000,
+  );
+});

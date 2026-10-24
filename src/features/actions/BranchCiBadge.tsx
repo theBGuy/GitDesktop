@@ -22,7 +22,9 @@ export function BranchCiBadge({ repoPath }: { repoPath: string }) {
   // pipelines; useLatestRun routes through the provider-neutral forge_ci_run_list.
   const ciReady = forgeFeatureReady(gh.data, "ci");
   const branch = useRunNotifyBranch(repoPath);
-  const onRemote = useBranchOnRemote(repoPath, branch);
+  // The remote list is only worth reading while CI is ready or still resolving:
+  // the reserve below gates on the same two arms.
+  const onRemote = useBranchOnRemote(repoPath, branch, ciReady || gh.isPending);
   const notifyEnabled = useRunNotifyEnabled(repoPath);
   const mode =
     notifyEnabled === undefined

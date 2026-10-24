@@ -520,10 +520,11 @@ export function useMergePr(repo: string) {
 
 /** What an update-branch makes stale on the PR side: the PR subtree (details and its
  *  commits/files/checks rollup, mergeability, diff, review threads), the rows that
- *  carry PR state, and the review-state map those rows group by (the new commit moves
- *  this PR's `updatedAt`). Exported because the set has to run TWICE — once when the
- *  forge accepts the job, and again once the poll sees the head actually move, since
- *  the first pass reads a head that has not shifted yet. */
+ *  carry PR state, the list's merge-status chips (its own mergeability map, which
+ *  neither prefix matches), and the review-state map those rows group by (the new
+ *  commit moves this PR's `updatedAt`). Exported because the set has to run TWICE:
+ *  once when the forge accepts the job, and again once the poll sees the head
+ *  actually move, since the first pass reads a head that has not shifted yet. */
 export const prUpdateBranchKeys = (
   repo: string,
   number: number,
@@ -532,6 +533,7 @@ export const prUpdateBranchKeys = (
   [
     ["repo", repo, "pr", lens, number],
     [...repoKeys.prList(repo), lens],
+    [...repoKeys.prMergeability(repo), lens],
     [...repoKeys.prReviewState(repo), lens],
     ["repo", repo, "prs", lens],
   ] as const;

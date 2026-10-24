@@ -77,10 +77,10 @@ export function warmRepoShell(
   warm(sharedBranchRulesOptions(root));
   warm(jiraLinkOptions(root));
   // With the hook's staleTime, so a switch back within 30 s of the last read,
-  // with no whole-repo invalidation in between (it marks every `["repo", …]` key,
-  // forcing a refetch), reuses the cached list instead of respawning `git
-  // worktree list`. Still held when cold: the header's switcher reads it ungated
-  // for the worktree subtitle the moment the switch lands.
+  // with no whole-repo or local-only git invalidation in between (a fetch, pull or
+  // checkout marks this local key too, forcing a refetch), reuses the cached list
+  // instead of respawning `git worktree list`. Still held when cold: the header's
+  // switcher reads it ungated for the worktree subtitle the moment the switch lands.
   warm({
     ...userWorktreesOptions(root),
     staleTime: USER_WORKTREES_STALE_TIME,

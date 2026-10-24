@@ -258,15 +258,32 @@ export function useSetSubmoduleBranch(repo: string) {
  *  push's runs a few seconds after it lands, so the settle's own read can miss them. */
 const PUSH_RUN_RECHECK_MS = 8_000;
 
-/** One delayed re-read of every run-list read of the push's own repo; only the
- *  observers active then refetch. */
+/** The one pending recheck per repo: a later push re-arms it, so repeat pushes
+ *  never stack timers. */
+const pendingRunRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** One delayed re-read of the push's own repo's run lists; only the observers
+ *  active then refetch. A paged list past its first page is skipped: no automatic
+ *  refetch replays deep pages (actions.ts `useWorkflowRunPages`), and the settle's
+ *  own invalidation already refreshed it. */
 function recheckRunsAfterPush(queryClient: QueryClient, repo: string): void {
-  setTimeout(() => {
-    for (const kind of ["notify", "latest", "runs", "runs-paged"])
+  clearTimeout(pendingRunRechecks.get(repo));
+  pendingRunRechecks.set(
+    repo,
+    setTimeout(() => {
+      pendingRunRechecks.delete(repo);
+      for (const kind of ["notify", "latest", "runs"])
+        void queryClient.invalidateQueries({
+          queryKey: ["repo", repo, "actions", kind],
+        });
       void queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "actions", kind],
+        queryKey: ["repo", repo, "actions", "runs-paged"],
+        predicate: (query) =>
+          ((query.state.data as { pages?: unknown[] } | undefined)?.pages
+            ?.length ?? 0) <= 1,
       });
-  }, PUSH_RUN_RECHECK_MS);
+    }, PUSH_RUN_RECHECK_MS),
+  );
 }
 
 /** Keyed per repo with the branch in the variables: {@link usePendingBranchPushes}
