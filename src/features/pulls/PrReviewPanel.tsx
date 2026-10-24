@@ -445,7 +445,9 @@ export function PrReviewPanel({
             items={PROVIDER_LABELS}
             value={provider}
             onValueChange={(v) => {
-              if (!v || !reviewAi) return;
+              // Re-picking the current provider (a held Enter landing here)
+              // must not mint a per-review override.
+              if (!v || !reviewAi || v === provider) return;
               const next = v as AiProviderId;
               modelMemory.current[provider] = reviewAi.model;
               updateReview({

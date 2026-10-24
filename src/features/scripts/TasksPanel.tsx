@@ -110,6 +110,9 @@ export function TasksPanel() {
   const [activeIndex, setActiveIndex] = useState(-1);
   const [othersOpen, setOthersOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  // The editor's close lands focus inside this panel only (data-row is shared
+  // by many lists).
+  const rootRef = useRef<HTMLDivElement>(null);
   const othersId = useId();
 
   const enabled = scripts.data?.enabled ?? false;
@@ -137,7 +140,8 @@ export function TasksPanel() {
     toast.success(isNew ? `Added "${task.name}"` : `Saved "${task.name}"`);
   }
 
-  async function deleteTask(id: string) {
+  /** Resolves true once the task is gone, false when the delete failed. */
+  async function deleteTask(id: string): Promise<boolean> {
     // All tasks, not just the in-scope ones: the other-repositories group deletes
     // through here too.
     const name = tasks.find((t) => t.id === id)?.name ?? "task";
@@ -146,10 +150,11 @@ export function TasksPanel() {
       await removeTask.mutateAsync(id);
     } catch (e) {
       toastError(e);
-      return;
+      return false;
     }
     closeEditorIf(submitted);
     toast.success(`Deleted "${name}"`);
+    return true;
   }
 
   // The row menus' delete is one click from gone, so it asks first. The editor's
@@ -205,7 +210,7 @@ export function TasksPanel() {
   }, [repoPath]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <LightningIcon className="size-4 text-muted-foreground" />
         <span className="text-xs font-medium">Tasks</span>
@@ -453,7 +458,8 @@ export function TasksPanel() {
           if (!o) setSession(null);
         }}
         onSave={(task) => void saveTask(task)}
-        onDelete={(id) => void deleteTask(id)}
+        onDelete={deleteTask}
+        focusRoot={rootRef}
         // This task's own delete only: the one mutation serves every row.
         deletePending={
           removeTask.isPending &&

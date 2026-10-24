@@ -381,8 +381,8 @@ export const SyntaxSection = withForm({
     const [newExt, setNewExt] = useState("");
     const [newLang, setNewLang] = useState("");
     const [editing, setEditing] = useState<CustomLanguage | "new" | null>(null);
-    // A removed mapping hands focus to the next row's language picker (never
-    // another Remove), else the new-extension field.
+    // A removed mapping hands focus to the next row's language picker, else
+    // the previous row's (never another Remove), else the new-extension field.
     const swapFocus = useConfirmSwapFocus();
 
     const config: SyntaxConfig =
@@ -575,7 +575,9 @@ export const SyntaxSection = withForm({
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
-                  addMapping();
+                  // A held Enter can land here after a removal; only a fresh
+                  // press adds (under repo scope, that writes the shared file).
+                  if (!e.repeat) addMapping();
                 }
               }}
               placeholder="dbj"

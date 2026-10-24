@@ -82,6 +82,8 @@ export function HooksDialog({
   const [focusedHook, setFocusedHook] = useState<string | null>(null);
   // A delete clears the selection, unmounting the pane that held focus; the
   // deleted hook stays listed (inactive), so its row takes focus at that commit.
+  // Every selection change spends the pending row, landed or not, and it lands
+  // only on unclaimed focus: a Tab away during the write keeps its target.
   const selectedRef = useRef(selected);
   const pendingFocusRow = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -89,6 +91,8 @@ export function HooksDialog({
     const name = pendingFocusRow.current;
     pendingFocusRow.current = null;
     if (selected !== null || name === null) return;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
     listRef.current
       ?.querySelector<HTMLElement>(`[data-hook="${CSS.escape(name)}"]`)
       ?.focus();
@@ -164,6 +168,7 @@ export function HooksDialog({
     try {
       await deleteHook.mutateAsync(name);
     } catch (e) {
+      pendingFocusRow.current = null;
       toastError(e);
       return;
     }

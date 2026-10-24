@@ -79,9 +79,9 @@ export function ReviewHistory({
   const editSessionRef = useRef<object | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
-  // A deleted row hands focus to the next row's toggle (never another Trash);
-  // a clear or last delete unmounts all of this, landing on the panel's
-  // provider picker (never Review, whose Enter starts a run).
+  // A deleted row hands focus to the next row's toggle, else the previous
+  // row's (never another Trash); a clear or last delete unmounts all of this,
+  // landing on the panel's provider picker (never Review, whose Enter runs).
   const swapFocus = useConfirmSwapFocus();
   // The PR views swap pull requests without remounting this disclosure, so its
   // armed Clear confirm belongs to one review scope: it resets on a switch (a

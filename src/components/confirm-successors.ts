@@ -23,10 +23,32 @@ export interface SuccessorView<T> {
   host: T | null;
 }
 
+/** Marks a confirm-swap stop, so a successor search finds a row's confirm
+ *  controls from the DOM alone, whichever hook instance owns the row: every
+ *  node a swap ref holds, and a row root carrying it literally (a roving-stop
+ *  row). */
+export const SWAP_NODE_ATTR = "data-confirm-swap";
+const SWAP_NODE_SELECTOR = `[${SWAP_NODE_ATTR}]`;
+
 /** A row's swap stops for {@link SuccessorView.stopsOf}: the row itself only
  *  when it carries the marker literally (opt-in), then its marked descendants. */
 export function rowSwapStops<T>(row: T, rowIsStop: boolean, marked: T[]): T[] {
   return rowIsStop ? [row, ...marked] : marked;
+}
+
+/** The DOM half the walk reads a row through; an Element satisfies it. */
+export interface SwapStopRow<T> {
+  matches(selector: string): boolean;
+  querySelectorAll(selector: string): Iterable<T>;
+}
+
+/** {@link rowSwapStops} read from a row element by the stop marker alone. */
+export function swapStopsOf<T>(row: T & SwapStopRow<T>): T[] {
+  return rowSwapStops<T>(
+    row,
+    row.matches(SWAP_NODE_SELECTOR),
+    Array.from(row.querySelectorAll(SWAP_NODE_SELECTOR)),
+  );
 }
 
 /**

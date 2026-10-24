@@ -5,7 +5,14 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  type RefObject,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   InlineConfirm,
   useConfirmSwapFocus,
@@ -178,15 +185,19 @@ export function TaskDialog({
   onSave,
   onDelete,
   deletePending,
+  focusRoot,
 }: {
   /** An existing task to edit, `"new"` to create, or null when closed. */
   task: TaskDef | "new" | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSave: (task: TaskDef) => void;
-  onDelete: (id: string) => void;
+  /** Resolves true once the task is gone, false when the delete failed. */
+  onDelete: (id: string) => Promise<boolean>;
   /** The delete write is in flight; holds the confirm so it can't fire twice. */
   deletePending: boolean;
+  /** The task list behind this dialog, where its close lands focus. */
+  focusRoot: RefObject<HTMLElement | null>;
 }) {
   const editing = task !== "new" && task !== null ? task : null;
   const shownTask = useRetained(task);
@@ -217,7 +228,8 @@ export function TaskDialog({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const swapFocus = useConfirmSwapFocus();
   // A confirmed delete takes the edited task's row along, so the close lands on
-  // "New task" (never another task row: Enter there runs that task).
+  // "New task" (never another task row: Enter there runs that task). A failed
+  // delete leaves the row listed, so the close returns to it.
   const deletedRef = useRef(false);
   const [scope, setScope] = useState<string>(TASK_SCOPE_GLOBAL);
   const [flipNote, setFlipNote] = useState<FlipNote | null>(null);
@@ -493,13 +505,14 @@ export function TaskDialog({
   // Resolved at close against the panel behind the dialog: the edited task's
   // own row while it is listed, else "New task"; null leaves Base UI's default.
   function closeFocusTarget(): HTMLElement | null {
+    const root = focusRoot.current;
     const newTask = () =>
-      document.querySelector<HTMLElement>('[aria-label="New task"]');
+      root?.querySelector<HTMLElement>('[aria-label="New task"]') ?? null;
     if (deletedRef.current || shownEditing === null) return newTask();
     const id = CSS.escape(shownEditing.id);
     return (
-      document.querySelector<HTMLElement>(`[data-row="${id}"]`) ??
-      document.querySelector<HTMLElement>(`[data-row="other-${id}"]`) ??
+      root?.querySelector<HTMLElement>(`[data-row="${id}"]`) ??
+      root?.querySelector<HTMLElement>(`[data-row="other-${id}"]`) ??
       newTask()
     );
   }
@@ -996,7 +1009,9 @@ export function TaskDialog({
                 onAct={() => {
                   if (!editing) return;
                   deletedRef.current = true;
-                  onDelete(editing.id);
+                  void onDelete(editing.id).then((gone) => {
+                    if (!gone) deletedRef.current = false;
+                  });
                 }}
               />
             ) : (

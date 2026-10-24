@@ -168,7 +168,11 @@ function EnsembleArms({
             </span>
             <AgentPicker
               value={arm.agent}
-              onChange={(agent) => patchArm(i, { agent, model: "" })}
+              // Re-picking the same agent (a held Enter landing here after a
+              // removal) keeps the arm's model.
+              onChange={(agent) => {
+                if (agent !== arm.agent) patchArm(i, { agent, model: "" });
+              }}
             />
             <ModelPicker
               value={arm.model}
@@ -213,6 +217,10 @@ function EnsembleArms({
           variant="ghost"
           disabled={arms.length >= MAX_ARMS}
           onClick={addArm}
+          onKeyDown={(e) => {
+            // A held Enter landing here after a removal adds no arms.
+            if (e.key === "Enter" && e.repeat) e.preventDefault();
+          }}
         >
           <PlusIcon data-icon="inline-start" />
           Add arm

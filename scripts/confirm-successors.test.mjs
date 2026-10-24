@@ -11,7 +11,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   rowSwapStops,
+  SWAP_NODE_ATTR,
   successorCandidates,
+  swapStopsOf,
 } from "../src/components/confirm-successors.ts";
 
 /** A fake element: a name, whether it is still in the document, whether the
@@ -35,6 +37,39 @@ function view(overrides) {
 }
 
 const names = (list) => list.map((e) => e.name);
+
+/** A fake DOM element with attributes and descendants, answering only the
+ *  plain `[attr]` selectors the walk uses. `hasAttribute` is there so a
+ *  predicate reading a different attribute fails the pins, not the fake. */
+function domEl(name, attrs = [], children = []) {
+  const has = new Set(attrs);
+  const attrOf = (selector) => {
+    const attr = selector.slice(1, -1);
+    const plain = selector.startsWith("[") && selector.endsWith("]");
+    if (!plain || attr === "" || /[^a-z-]/.test(attr))
+      throw new Error(`unsupported selector ${selector}`);
+    return attr;
+  };
+  const node = {
+    name,
+    hasAttribute: (a) => has.has(a),
+    matches: (selector) => has.has(attrOf(selector)),
+    querySelectorAll: (selector) => {
+      const want = attrOf(selector);
+      const out = [];
+      const walk = (n) => {
+        for (const c of n.children) {
+          if (c.hasAttribute(want)) out.push(c);
+          walk(c);
+        }
+      };
+      walk(node);
+      return out;
+    },
+    children,
+  };
+  return node;
+}
 
 /** The walk as it stood inside repo-settings/parts.tsx before it moved, for
  *  inputs without the new markers: same order, tried one by one. */
@@ -177,4 +212,34 @@ test("unmarked inputs order exactly as the walk did before it moved", () => {
       }
     }
   }
+});
+
+test("a row element literally carrying the marker is its own first stop", () => {
+  const row = domEl(
+    "row",
+    ["data-confirm-row", SWAP_NODE_ATTR],
+    [domEl("edit"), domEl("remove", [SWAP_NODE_ATTR])],
+  );
+  assert.deepEqual(names(swapStopsOf(row)), ["row", "remove"]);
+});
+
+test("NEGATIVE: a confirm row without the marker is never its own stop", () => {
+  const row = domEl(
+    "row",
+    ["data-confirm-row"],
+    [domEl("picker", [SWAP_NODE_ATTR]), domEl("remove", [SWAP_NODE_ATTR])],
+  );
+  assert.deepEqual(names(swapStopsOf(row)), ["picker", "remove"]);
+});
+
+test("marked descendants come in DOM order, nested ones included", () => {
+  const row = domEl(
+    "row",
+    ["data-confirm-row"],
+    [
+      domEl("wrap", [], [domEl("deep", [SWAP_NODE_ATTR])]),
+      domEl("x", [SWAP_NODE_ATTR]),
+    ],
+  );
+  assert.deepEqual(names(swapStopsOf(row)), ["deep", "x"]);
 });

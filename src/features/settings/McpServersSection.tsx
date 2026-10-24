@@ -74,7 +74,7 @@ export const McpServersSection = withForm({
     const listRef = useRef<HTMLDivElement>(null);
     const addRef = useRef<HTMLButtonElement>(null);
     // A removed row hands focus to the next row itself (Enter there edits),
-    // never to another Remove.
+    // else the previous one, else Add server; never to another Remove.
     const swapFocus = useConfirmSwapFocus();
     // An edit's Save lands focus on the saved row itself, after its write: a
     // scope change remounts the row in another group, so the dialog's own
@@ -87,14 +87,18 @@ export const McpServersSection = withForm({
       if (id === null) return;
       savedRowFocus.current = null;
       const listEl = listRef.current;
+      // Claims only unclaimed focus: anything the user focused during the
+      // write (another row, a switch) keeps it. The roving stop is index-keyed
+      // and the write may have regrouped rows under it, so it re-syncs to the
+      // row holding focus.
       const active = document.activeElement;
-      // Never pulls focus from wherever the user went during the write.
-      if (
-        active !== null &&
-        active !== document.body &&
-        !listEl?.contains(active)
-      )
+      if (active !== null && active !== document.body) {
+        const row = active.closest("[data-mcp-row]");
+        if (listEl === null || row === null || !listEl.contains(row)) return;
+        const rows = Array.from(listEl.querySelectorAll("[data-mcp-row]"));
+        setActiveIndex(rows.indexOf(row));
         return;
+      }
       // Its onFocus makes it the roving tab stop.
       listEl
         ?.querySelector<HTMLElement>(`[data-mcp-row="${CSS.escape(id)}"]`)

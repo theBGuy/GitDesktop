@@ -180,7 +180,7 @@ export const CommandsSection = withForm({
     const listRef = useRef<HTMLDivElement>(null);
     const addRef = useRef<HTMLButtonElement>(null);
     // A removed row hands focus to the next row itself (Enter there edits),
-    // never to another Remove.
+    // else the previous one, else Add command; never to another Remove.
     const swapFocus = useConfirmSwapFocus();
 
     const list = commands ?? [];

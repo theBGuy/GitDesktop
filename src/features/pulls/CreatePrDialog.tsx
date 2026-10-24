@@ -708,13 +708,18 @@ export function CreatePrDialog({
     },
   });
 
-  // Each open lands on Title only while it is empty: Enter there submits the
-  // whole create, so a kept draft (a settled AI draft, a create in flight, a
-  // failed create) keeps the dialog's default first focus. The seed decides
-  // once it knows what the title holds; the popup usually mounts after it, so
-  // the Title input takes a pending focus as it attaches, ahead of Base UI's
-  // initial focus, which defers to a focus already inside the popup.
+  // Each open lands on Title only while it is empty, since Enter there submits
+  // the whole create: a kept draft (a settled AI draft, a create in flight, a
+  // failed create) whose Title is filled keeps the dialog's default first
+  // focus, and one still empty lands on Title. The seed decides once it knows
+  // what the title holds; the popup usually mounts after it, so the Title input
+  // takes a pending focus as it attaches, ahead of Base UI's initial focus,
+  // which defers to a focus already inside the popup. A close drops a pending
+  // focus the input never took.
   const titleFocusPending = useRef(false);
+  useEffect(() => {
+    if (!open) titleFocusPending.current = false;
+  }, [open]);
   const focusTitleIfEmpty = () => {
     const input =
       form.state.values.title === "" ? document.getElementById(titleId) : null;

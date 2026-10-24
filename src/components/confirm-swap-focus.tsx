@@ -1,7 +1,8 @@
 import { type ReactNode, type Ref, useState } from "react";
 import {
-  rowSwapStops,
+  SWAP_NODE_ATTR,
   successorCandidates,
+  swapStopsOf,
 } from "@/components/confirm-successors";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -41,11 +42,6 @@ function onBody(): boolean {
   return active === null || active === document.body;
 }
 
-/** Marks every node a swap ref holds, so a successor search finds a row's
- *  confirm controls from the DOM alone, whichever hook instance owns the row.
- *  A row root carrying it literally is its own stop (a roving-stop row). */
-const SWAP_NODE_ATTR = "data-confirm-swap";
-const SWAP_NODE_SELECTOR = `[${SWAP_NODE_ATTR}]`;
 const FALLBACK_SELECTOR = "[data-confirm-fallback]";
 
 /**
@@ -93,14 +89,6 @@ function focusLanded(el: Element | null | undefined): boolean {
   return document.activeElement === el;
 }
 
-function swapStopsOf(row: Element): Element[] {
-  return rowSwapStops(
-    row,
-    row.matches(SWAP_NODE_SELECTOR),
-    Array.from(row.querySelectorAll(SWAP_NODE_SELECTOR)),
-  );
-}
-
 function focusSuccessor({ row, before, section, host }: Successors) {
   const sectionConnected = section?.isConnected ?? false;
   successorCandidates<Element>({
@@ -110,7 +98,7 @@ function focusSuccessor({ row, before, section, host }: Successors) {
         : Array.from(section.querySelectorAll("[data-confirm-row]")),
     before,
     connected: (el) => el.isConnected,
-    stopsOf: swapStopsOf,
+    stopsOf: (row) => swapStopsOf<Element>(row),
     sectionConnected,
     sectionFallbacks:
       section === null
