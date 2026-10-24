@@ -49,7 +49,8 @@ const MISSING_SCRIPT_COPY: Record<MissingScriptCase, string> = {
  * level so any run trigger (panel, palette picker) shares one instance. Beyond
  * confirming, it's where a run's **arguments** are adjusted: the field seeds from
  * the task's saved args (the saved task is never changed here), with the task's
- * documented arguments as reference below — Enter runs immediately.
+ * documented arguments as reference below — Enter runs immediately, except
+ * over a still-running task.
  * `reason: "replace"` additionally warns that the still-running task stops.
  *
  * A file task names the resolved file this run will execute: its stored path can
@@ -83,6 +84,9 @@ export function TaskRunConfirm() {
   const shownPending = useRetained(pending);
 
   const replacing = shownPending?.reason === "replace";
+  // Opening over a running task starts on Cancel, not on the field whose Enter
+  // would stop that task.
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const firstRun = shownPending?.firstRun === true;
   const task = shownPending?.task ?? null;
   const interpreter = task
@@ -160,7 +164,10 @@ export function TaskRunConfirm() {
     >
       {/* Tall-content guard: a task may document many arguments; the footer must
           stay reachable, so the dialog caps and scrolls (same as the editor). */}
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-md">
+      <DialogContent
+        className="max-h-[85vh] overflow-y-auto sm:max-w-md"
+        initialFocus={replacing ? () => cancelRef.current : undefined}
+      >
         <DialogHeader>
           <DialogTitle>
             {replacing ? "A task is already running" : `Run “${task?.name}”?`}
@@ -221,14 +228,16 @@ export function TaskRunConfirm() {
           <Label htmlFor="run-args">Arguments</Label>
           <Input
             id="run-args"
-            autoFocus
+            autoFocus={!replacing}
             className="font-mono"
             value={args}
             onChange={(e) => setArgs(e.target.value)}
             onKeyDown={(e) => {
+              // Read live: a replace arriving while open disarms Enter
+              // without moving focus, so it never stops the running task.
               if (e.key === "Enter") {
                 e.preventDefault();
-                run();
+                if (!replacing) run();
               }
             }}
             placeholder="none"
@@ -253,7 +262,7 @@ export function TaskRunConfirm() {
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={cancelPending}>
+          <Button ref={cancelRef} variant="outline" onClick={cancelPending}>
             Cancel
           </Button>
           <Button variant={replacing ? "destructive" : "default"} onClick={run}>

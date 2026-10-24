@@ -65,3 +65,16 @@ export function prPill(
     };
   return { Icon: known.Icon, tone: known.tone, word: `${known.label} ${noun}` };
 }
+
+/** The glyph per pull-request audit state (the branch switcher's and the
+ *  session strip's chips), derived from `prPill` so the two vocabularies can't
+ *  drift. Its own union: this module imports nothing from the audit layer. */
+export const PR_AUDIT_ICON: Record<
+  "open" | "draft" | "merged" | "closed",
+  Icon
+> = {
+  open: prPill("OPEN", false).Icon,
+  draft: prPill("OPEN", true).Icon,
+  merged: prPill("MERGED", false).Icon,
+  closed: prPill("CLOSED", false).Icon,
+};

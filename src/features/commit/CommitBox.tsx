@@ -2,9 +2,11 @@ import {
   ArrowsOutSimpleIcon,
   InfoIcon,
   SparkleIcon,
+  WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { AnimatePresence, m } from "motion/react";
+import { useId } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -62,6 +64,10 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
   const commitBinding = bindings.get("commit") ?? null;
   const popOutBinding = bindings.get("open-commit-dialog") ?? null;
   const generateHint = useGenerateChordHint();
+  // Past the summary budget the counter says so in a glyph and, for assistive
+  // tech, in words the field references only while over.
+  const over = title.length > 72;
+  const counterId = useId();
 
   return (
     <div className="space-y-2 border-t p-3">
@@ -100,17 +106,27 @@ export function CommitBox({ repoPath }: { repoPath: string }) {
           value={title}
           onChange={(e) => setCommitTitle(e.target.value)}
           disabled={generating}
-          className="ph-no-capture pr-12"
+          // The glyph widens the counter; the gutter grows with it.
+          className={cn("ph-no-capture", over ? "pr-16" : "pr-12")}
           autoComplete="off"
+          aria-describedby={over ? counterId : undefined}
         />
         <span
           className={cn(
-            "pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 text-[10px] tabular-nums",
-            title.length > 72 ? "text-destructive" : "text-muted-foreground",
+            "pointer-events-none absolute top-1/2 right-2 inline-flex -translate-y-1/2 items-center gap-0.5 text-[10px] tabular-nums",
+            over ? "text-warning" : "text-muted-foreground",
           )}
         >
+          {over && (
+            <WarningIcon weight="fill" className="size-2.5" aria-hidden />
+          )}
           {title.length > 0 && `${title.length}/72`}
         </span>
+        {over && (
+          <span id={counterId} className="sr-only">
+            {`${title.length} characters, ${title.length - 72} over the 72-character summary budget`}
+          </span>
+        )}
       </div>
       <Textarea
         placeholder="Description (optional)"

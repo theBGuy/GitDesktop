@@ -735,7 +735,8 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   the list, then **archive** them (reversible) or **delete** them together. The current
   branch, the default branch, and branches checked out in another folder are never
   included (archiving still offers one whose worktree you're already deleting); deleting
-  also skips protected branches.
+  also skips protected branches. A branch that couldn't be archived or deleted stays in the
+  list with the reason under its name, ready to retry.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -956,8 +957,11 @@ actions away until it finishes.
 
 The branch's own items read **Rename branch…** and **Delete branch…**, so the two pairs
 can't be confused; a deleted worktree leaves its branch behind, and **Delete branch…**
-un-disables once the worktree is gone. The dropdown's own action rows say why when one of
-them is unavailable. When you're in a linked worktree the switcher reminds you that a
+un-disables once the worktree is gone. A branch with a pull request shows a chip under its
+name whose icon marks the pull request's state, and its context menu adds
+**View pull request #…** (**View merge request #…** on GitLab; **View local pull request**
+for a local one) to jump straight to it. The dropdown's own action rows say why when one
+of them is unavailable. When you're in a linked worktree the switcher reminds you that a
 branch checkout lands *there* (not the main workspace) and offers a one-click
 **Open main workspace**. That action and **Promote this worktree to main workspace** are in
 the command palette too.
