@@ -755,8 +755,9 @@ struct CachedViewer {
 
 #[derive(Default)]
 struct LoginState {
-    // The host is gh's pin; None (no stored login) leaves gh's default host unpinned,
-    // so None keys share that default across checkouts.
+    // The host is the GH_HOST pin. None (no repo, no readable origin host, or no
+    // stored login for it) pins nothing, so every None key reads gh's default host
+    // and is safe to share across checkouts.
     entries: HashMap<Option<String>, CachedViewer>,
 }
 

@@ -9,8 +9,9 @@ use crate::github::runner::{
 
 const REPO_META_TTL: Duration = Duration::from_secs(60);
 const REPO_META_CAP: usize = 64;
-// The host is gh's pin; None (no stored login) leaves gh's default host unpinned,
-// so None keys share that default across checkouts.
+// The host is the GH_HOST pin. None (no readable origin host, or no stored login
+// for it) pins nothing, so every None key reads gh's default host and is safe to
+// share across checkouts.
 type RepoMetaKey = (Option<String>, String);
 
 struct RepoMetaBody {
