@@ -36,7 +36,7 @@ export interface GenerateAction {
  * cleared it, and the chord stays fully inert.
  *
  * Swallowing follows the generator, not its enabled state: while this surface
- * HAS a generator the chord is swallowed before `enabled` is consulted, so a
+ * HAS a generator the chord is swallowed whatever `enabled` says, so a
  * disabled Generate can't let the chord reach the global listener. Bare Space
  * is the listener's carve-out ({@link consumeRequiresDispatch}): a disabled
  * Generate leaves it to the focused button, checkbox or scroller, and only

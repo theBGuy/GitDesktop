@@ -228,7 +228,7 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 - The AI-generate chord in a dialog goes through `useGenerateChord`
   (`src/lib/hotkeys/useGenerateChord.ts`) — never a hand-rolled handler. Its
   invariants: effective-binding read (null = fully inert), `eventToBinding`
-  match, `preventDefault` before `enabled` on any surface WITH a generator
+  match, `preventDefault` whatever `enabled` says on any surface WITH a generator
   (bare Space excepted: consumed only when Generate runs, otherwise it only
   stops propagation, so the focused control's native press still happens),
   run only under the visible button's gate, swallow-don't-cancel while
