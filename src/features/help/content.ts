@@ -484,7 +484,16 @@ the last list up, with a line above it saying it couldn't refresh.
 ## Staging
 
 - Click a file to see its diff. Toggle **unified / split** at the top of the diff.
-- Stage or unstage a file with the **+ / −** button on its row, or **Stage all**.
+- Stage or unstage a file with the **+ / −** button on its row, or press
+  {{key:space}} on the focused row; {{key:enter}} on a row opens its diff.
+  **Stage all** and **Unstage all** do the whole list.
+- When the file you're viewing has nothing left to stage, the next file in
+  **Changes** opens in its place, whether you staged it whole or line by line.
+  Files the filter hides, files in a folded folder and conflicted files are
+  skipped. If the staged file's row had focus, focus moves to the next row too.
+  Unstaging works the same way in **Staged**. When no file is left in the
+  section, the diff pane goes back to *Select a file to see its changes* and
+  focus moves to the file's new row.
 - File rows show their own **+added -deleted** line counts, left of that button. They
   count per side, so a file you staged and then edited again shows what's staged on
   its Staged row and what's still outside it on its Changes row. Binary files read
@@ -510,12 +519,12 @@ the last list up, with a line above it saying it couldn't refresh.
   excluded) with the funnel button.
 - The **Directory tree view** button in the filter row swaps the flat list for a
   compacted directory tree: single-child folder chains merge into one row, and shared
-  prefixes roll up. Click a folder to collapse or expand it (Enter or Space does the
-  same); from the keyboard ↑ and ↓ walk folders and files alike, ← folds the folder
-  you're on or jumps to its parent, and → unfolds a folder or steps inside it.
-  Collapsing a folder drops its hidden files from a multi-selection, and the diff you
-  have open stays open. Selection, staging, and filtering behave the same in both
-  views; file rows keep their {{secondaryclick}} menu, while a folder row opens the
+  prefixes roll up. Click a folder to collapse or expand it ({{key:enter}} or
+  {{key:space}} does the same); from the keyboard ↑ and ↓ walk folders and files
+  alike, ← folds the folder you're on or jumps to its parent, and → unfolds a
+  folder or steps inside it. Collapsing a folder drops its hidden files from a
+  multi-selection, and the diff you have open stays open. Selection, staging,
+  and filtering behave the same in both views; file rows keep their {{secondaryclick}} menu, while a folder row opens the
   whole-list menu. Your choice is remembered for every repository. *Toggle
   directory tree view* in the command palette ({{kbd:command-palette}}) flips it
   too (palette-only by default — bind a key in **Settings → Keyboard**).
@@ -3620,11 +3629,15 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
 combination, and if it clashes with another action the app moves it for you. A shortcut can
 be a single key: a bare character key stays quiet while you're typing or in a menu or
-picker, and fires everywhere else. The list there is filterable by action name, category,
-or key — {{kbd:focus-filter}} jumps to the filter while the section is open. Many actions
-(creating issues/releases, repository settings, stash views{{ai}}, most agent
-commands{{/ai}}) are palette-only until you bind a key. Defaults match GitHub Desktop
-where there's an equivalent.`,
+picker, and fires everywhere else, with two exceptions for {{key:space}}: it stays
+quiet on rows and cards that use {{key:space}} themselves (a file in **Changes**
+stages, a board card peeks), and when its shortcut has nothing to act on,
+{{key:space}} presses the focused button or scrolls as usual. The list there is
+filterable by action name, category, or key — {{kbd:focus-filter}} jumps to the
+filter while the section is open. Many actions (creating issues/releases,
+repository settings, stash views{{ai}}, most agent commands{{/ai}}) are
+palette-only until you bind a key. Defaults match GitHub Desktop where there's
+an equivalent.`,
   },
   {
     id: "settings",

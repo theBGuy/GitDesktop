@@ -14,6 +14,8 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -34,6 +36,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import { restingDiffMessage } from "@/features/diff/diff-resting-message";
 import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
@@ -61,8 +64,8 @@ import {
   useWorkingLineStats,
 } from "@/lib/git/queries";
 import { reservedDeviceName } from "@/lib/git/reserved-device-name";
-import type { ChangeKind, FileEntry } from "@/lib/git/types";
-import { formatBinding } from "@/lib/hotkeys/binding";
+import type { ChangeKind, FileEntry, RepoStatus } from "@/lib/git/types";
+import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { flattenPathTree, pathBasename } from "@/lib/path-tree";
@@ -86,7 +89,14 @@ import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { collapseDiscardEntries } from "./discard-targets";
-import { FileRow } from "./FileRow";
+import { FileRow, MARKER_CHECK_PENDING } from "./FileRow";
+import {
+  dialogClaimStep,
+  nextFileKey,
+  pruneDecision,
+  selectionAfterAdvance,
+  type WaitingFocus,
+} from "./next-file-after-stage";
 import { StashesDialog } from "./StashesDialog";
 import {
   openStatusErrorDetails,
@@ -275,6 +285,71 @@ function rowKeyOf(row: FlatRow): string {
   return keyOf(row.entry.path, row.staged);
 }
 
+const DIALOG_SELECTOR = '[role="dialog"],[role="alertdialog"]';
+
+/** Where focus sits for an advance that wants to land it (see
+ *  {@link dialogClaimStep}). */
+function waitingFocus(): WaitingFocus {
+  if (focusIsOrphaned()) return "orphaned";
+  return document.activeElement?.closest(DIALOG_SELECTOR) ? "dialog" : "other";
+}
+
+/** How long an advance waits for a closing dialog to hand focus back: a time
+ *  bound (frame rates vary), well past the confirm's 100 ms exit animation. */
+const DIALOG_CLAIM_MS = 500;
+
+/** Whether `path` has a record on the given side of `entries` — side-aware,
+ *  since Git can list one path as two records (a staged `D.` beside a `?`). */
+function hasSide(entries: FileEntry[], path: string, staged: boolean): boolean {
+  return entries.some(
+    (e) =>
+      e.path === path && (staged ? e.staged !== null : e.unstaged !== null),
+  );
+}
+
+/** Splits a file row key (`"<section>:<path>"`) back into its parts. */
+function splitFileKey(key: string): { staged: boolean; path: string } {
+  return {
+    staged: key.startsWith("staged:"),
+    path: key.slice(key.indexOf(":") + 1),
+  };
+}
+
+function isFileKey(key: string): boolean {
+  return key.startsWith("staged:") || key.startsWith("unstaged:");
+}
+
+/** Zero-width space, built from its code point so no invisible byte sits in
+ *  source. Toggled into the live region so a repeated message re-announces. */
+const ZWSP = String.fromCharCode(0x200b);
+
+/** What left its section in an advance announcement: a file row, or a focused
+ *  header control whose whole section emptied. */
+type AdvanceLead = "unstaged" | "staged" | "header:unstaged" | "header:staged";
+
+const ADVANCE_LEADS: Record<AdvanceLead, (path: string) => string> = {
+  unstaged: (path) => `${path} has no unstaged changes left.`,
+  staged: (path) => `${path} has no staged changes left.`,
+  "header:unstaged": () => "Nothing left in Changes.",
+  "header:staged": () => "Nothing left in Staged.",
+};
+
+/** The advance's outcome: the selection moved (focus did not), focus moved
+ *  (the focused row announces its own name), the selection stayed on a file
+ *  that didn't move (its diff is still on screen), or nothing is selected. */
+type AdvanceTail = "shown" | "focused" | "kept" | "none";
+
+const ADVANCE_TAILS: Record<
+  AdvanceTail,
+  (nextPath: string, entryCount: number) => string
+> = {
+  shown: (nextPath) => ` Showing ${nextPath}.`,
+  focused: () => "",
+  kept: () => "",
+  // The pane's own resting copy, so it stays true whatever stopped the advance.
+  none: (_, entryCount) => ` ${restingDiffMessage(false, entryCount, false)}.`,
+};
+
 /** Splits a folder row key back into its section and directory path. */
 const FOLDER_ROW_KEY_RE = /^folder:(staged|unstaged):(.+)$/;
 
@@ -307,6 +382,7 @@ export function ChangesPanel({
   const selectedFile = useUiStore((s) => s.selectedFile);
   const selectFile = useUiStore((s) => s.selectFile);
   const clearSelectedFile = useUiStore((s) => s.clearSelectedFile);
+  const advanceSelectedFile = useUiStore((s) => s.advanceSelectedFile);
   const startResolveOne = useConflictResolve((s) => s.startOne);
   const startResolveAll = useConflictResolve((s) => s.startAll);
   const aiEnabled = useAiEnabled();
@@ -372,6 +448,40 @@ export function ChangesPanel({
   // The row focus sat in when that claim was armed; null = focus was not on a
   // row (a background arm, with the caret in the filter or outside the list).
   const pendingFocusSource = useRef<string | null>(null);
+  // Set for a claim whose row is NOT the cursor (an advance landing focus on a
+  // row it does not select): the cursor when it was armed, so only a NEWER
+  // cursor move makes it stale. Null = an ordinary cursor claim.
+  const pendingFocusCursorAtArm = useRef<{ cursor: string | null } | null>(
+    null,
+  );
+  // That non-cursor claim's row, as state: the virtualized child must scroll to
+  // it, and only a render reaches the child.
+  const [focusTargetKey, setFocusTargetKey] = useState<string | null>(null);
+  // Where focus inside the list last sat — a row key, or `"header:<section>"`
+  // for a section header's control. Kept through an unmount or a window blur,
+  // and while a dialog (the marker confirm) holds focus; cleared when focus
+  // moves anywhere else, so an advance never takes focus it did not own.
+  const listFocusRef = useRef<string | null>(null);
+  // Single-file toggles that settled but whose row the status read has not
+  // moved yet: a second press in that window would act on the stale row.
+  // Cleared whenever a status fetch completes, changed or not (a no-op stage
+  // moves no row), and on a repo switch.
+  const pendingLeaveKeys = useRef<Set<string>>(new Set());
+  // Bumped per status transition and repo switch: a deferred focus claim or
+  // announcement from an older one finds it moved and does nothing.
+  const transitionGen = useRef(0);
+  // The conflict-resolve walk was active for this repo at, or since, the last
+  // status read: the walk closes before its last file's stage lands.
+  const walkSeen = useRef(false);
+  // The last advance's announcement, with the status read it describes: shown
+  // only while that read is current (a failed read recovering never hands the
+  // region a stale line), and cleared on a repo switch, since switching back
+  // restores the cached read's identity.
+  const [advanceNote, setAdvanceNote] = useState<{
+    text: string;
+    seq: number;
+    read: RepoStatus | undefined;
+  }>({ text: "", seq: 0, read: undefined });
 
   const readFailed = statusReadFailed(status);
   // query-core keeps `error` through a refetch while data is held, so this
@@ -559,6 +669,17 @@ export function ChangesPanel({
   const navIndex = cursorKey
     ? navRows.findIndex((r) => rowKeyOf(r) === cursorKey)
     : -1;
+  // The advance's inputs: the file rows on screen in nav order (filter-hidden
+  // rows and collapsed folders' children are already out), and the subset a
+  // successor may be — a conflicted file never is.
+  const navFileKeys: string[] = [];
+  const advanceEligible = new Set<string>();
+  for (const r of navRows) {
+    if (r.type !== "file") continue;
+    const key = rowKeyOf(r);
+    navFileKeys.push(key);
+    if (!isConflicted(r.entry)) advanceEligible.add(key);
+  }
 
   /** Moves the cursor to `row` (at `to` in `navRows`); `shift` extends the
    *  selection from the anchor. Folder rows take the cursor alone. */
@@ -613,10 +734,20 @@ export function ChangesPanel({
    *  pending key. For a row mounted NOW that the coming re-render may carry out
    *  of the virtualized window: `focusRow` would find it, re-focus the node that
    *  already has focus, and arm nothing for the window exit. `untilMode` holds
-   *  the claim until that view mode is on screen (see {@link claimPendingFocus}). */
-  function deferFocusRow(key: string, untilMode?: "list" | "tree") {
+   *  the claim until that view mode is on screen (see {@link claimPendingFocus}).
+   *  `cursorAtArm` arms a NON-cursor claim: a row focus belongs on that the
+   *  cursor does not name, which the child scrolls to on its own. */
+  function deferFocusRow(
+    key: string,
+    untilMode?: "list" | "tree",
+    opts?: { cursorAtArm: string | null },
+  ) {
     pendingFocusKey.current = key;
     pendingFocusMode.current = untilMode ?? null;
+    pendingFocusCursorAtArm.current = opts
+      ? { cursor: opts.cursorAtArm }
+      : null;
+    setFocusTargetKey(opts ? key : null);
     // Where the gesture started, so the claim can tell focus that never moved
     // from focus that belongs to somebody else. Null for the arms that fire
     // while the caret is outside the list — they stay orphan-only.
@@ -629,6 +760,16 @@ export function ChangesPanel({
   function clearPendingFocus() {
     pendingFocusKey.current = null;
     pendingFocusSource.current = null;
+    pendingFocusCursorAtArm.current = null;
+    // A settled claim must not re-scroll the list on an <Activity> re-show.
+    setFocusTargetKey(null);
+  }
+
+  /** Retires a non-cursor claim whose row never mounted in time — only that
+   *  claim: a newer one armed meanwhile stays. */
+  function dropFocusTarget(key: string) {
+    if (pendingFocusKey.current === key && pendingFocusCursorAtArm.current)
+      clearPendingFocus();
   }
 
   /** Claims focus for a deferred row once the list has scrolled to it. Returns
@@ -647,8 +788,10 @@ export function ChangesPanel({
     )
       return false;
     pendingFocusMode.current = null;
-    // A newer cursor move owns focus now, so this claim is stale.
-    if (key !== cursorKey) {
+    // A newer cursor move owns focus now, so this claim is stale. A non-cursor
+    // claim never names the cursor, so it goes stale only once the cursor moves.
+    const arm = pendingFocusCursorAtArm.current;
+    if (arm ? cursorKey !== arm.cursor : key !== cursorKey) {
       clearPendingFocus();
       return true;
     }
@@ -765,28 +908,353 @@ export function ChangesPanel({
     listRef.current = el;
   }, []);
 
-  // Drop the selection when the selected file leaves its section
-  // (e.g. it was staged, committed, or reverted externally). A REACTIVE prune keyed on
-  // polled status, so it takes the non-bumping route: the user chose nothing here, and
-  // advancing the interaction epoch would strand an in-flight click's continuation.
-  useEffect(() => {
-    if (!selectedFile || !status.data) return;
-    const stillThere = status.data.entries.some(
-      (e) =>
-        e.path === selectedFile.path &&
-        (selectedFile.staged ? e.staged !== null : e.unstaged !== null),
+  /** Records which row or header control focus entered, for the advance's
+   *  "the list owned focus last" test. */
+  function trackListFocusIn(e: FocusEvent) {
+    if (!(e.target instanceof Element)) return;
+    const row = e.target.closest("[data-row]")?.getAttribute("data-row");
+    if (row) {
+      listFocusRef.current = row;
+      return;
+    }
+    const header = e.target
+      .closest("[data-section-header]")
+      ?.getAttribute("data-section-header");
+    listFocusRef.current = header ? `header:${header}` : null;
+  }
+
+  /** Drops the claim when focus moves to a live control outside the list. A
+   *  null `relatedTarget` (an unmount, a window blur) keeps it, and so does a
+   *  dialog: the marker confirm must not cost the row its successor. */
+  function trackListFocusOut(e: FocusEvent) {
+    const next = e.relatedTarget;
+    if (!(next instanceof Element) || !next.isConnected) return;
+    if (e.currentTarget.contains(next)) return;
+    if (next.closest(DIALOG_SELECTOR)) return;
+    listFocusRef.current = null;
+  }
+
+  /** Focuses a row an advance landed on. The new cursor takes the ordinary
+   *  route; any other row arms a non-cursor claim when it isn't mounted. */
+  function focusAdvancedRow(key: string, cursorAfter: string | null) {
+    if (key === cursorAfter) {
+      focusRow(key);
+      return;
+    }
+    const el = listRef.current?.querySelector<HTMLElement>(
+      `[data-row="${CSS.escape(key)}"]`,
     );
-    if (!stillThere) clearSelectedFile();
-  }, [status.data, selectedFile, clearSelectedFile]);
-  // Prune multi-selection keys for files that have left the working tree
-  // (committed, discarded, etc.) so counts and highlights stay accurate.
+    if (el) {
+      el.focus();
+      el.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    deferFocusRow(key, undefined, { cursorAtArm: cursorAfter });
+  }
+
+  /** The same, for a target the filter or a folded folder hides: the silent
+   *  landing above the list takes focus instead. True when a ROW takes focus
+   *  (it announces itself), false for the landing. */
+  function focusAdvanceTarget(
+    key: string | null,
+    cursorAfter: string | null,
+  ): boolean {
+    if (key !== null && navFileKeys.includes(key)) {
+      focusAdvancedRow(key, cursorAfter);
+      return true;
+    }
+    landingRef.current?.focus();
+    return false;
+  }
+
+  // The status transition: a tracked row (the selection, and independently the
+  // row focus sits on) that left its section opens the next file in its place —
+  // a REACTIVE pick, so it writes through the non-bumping store routes. A layout
+  // effect: the successor lands in the same pass, so neither a cursor-less list
+  // nor the resting copy paints between the two files. Keyed on the read's
+  // IDENTITY, so a no-change poll and an <Activity> replay write nothing; a
+  // selection naming an absent row against an unchanged read still clears.
+  const prevStatus = useRef<{
+    data: RepoStatus | undefined;
+    oid: string | null;
+    updatedAt: number;
+    repoPath: string;
+  }>({
+    data: status.data,
+    oid: status.data?.branch.oid ?? null,
+    updatedAt: status.dataUpdatedAt,
+    repoPath,
+  });
+  // The previous commit's on-screen file order and section headers, refreshed by
+  // the no-deps layout effect declared AFTER this one: declaration order is what
+  // lets this effect read the order the user last saw.
+  const prevNav = useRef<{
+    keys: string[];
+    hadStaged: boolean;
+    hadUnstaged: boolean;
+  }>({ keys: [], hadStaged: false, hadUnstaged: false });
+  const onStatusTransition = useEffectEvent(
+    (
+      data: RepoStatus | undefined,
+      updatedAt: number,
+      selected: typeof selectedFile,
+      repo: string,
+    ) => {
+      const prev = prevStatus.current;
+      const walk = useConflictResolve.getState();
+      const walkActive = walk.activePath !== null && walk.scopePath === repo;
+      // The cross-repo reset owns a repo switch; only resync. Switching back
+      // restores the cached read's identity, so the old note must not return.
+      if (prev.repoPath !== repo) {
+        transitionGen.current += 1;
+        prevStatus.current = {
+          data,
+          oid: data?.branch.oid ?? null,
+          updatedAt,
+          repoPath: repo,
+        };
+        pendingLeaveKeys.current.clear();
+        clearPendingFocus();
+        walkSeen.current = walkActive;
+        setAdvanceNote({ text: "", seq: 0, read: undefined });
+        return;
+      }
+      // A read gone missing keeps the last one, which the next read compares
+      // against (prevNav holds the order the user last saw meanwhile).
+      if (data === undefined) return;
+      // Any completed fetch settles the toggles that were waiting on one.
+      if (updatedAt !== prev.updatedAt) pendingLeaveKeys.current.clear();
+      if (data === prev.data || prev.data === undefined) {
+        prevStatus.current = {
+          data,
+          oid: data.branch.oid,
+          updatedAt,
+          repoPath: repo,
+        };
+        if (selected && !hasSide(data.entries, selected.path, selected.staged))
+          clearSelectedFile();
+        return;
+      }
+      const prevEntries = prev.data.entries;
+      const nowEntries = data.entries;
+      prevStatus.current = {
+        data,
+        oid: data.branch.oid,
+        updatedAt,
+        repoPath: repo,
+      };
+      transitionGen.current += 1;
+      const gen = transitionGen.current;
+      const headMoved = prev.oid !== data.branch.oid;
+      const walkWasActive = walkSeen.current;
+      walkSeen.current = walkActive;
+      const prevKeys = prevNav.current.keys;
+      // A key that wasn't in its section before didn't LEAVE it: plain clear.
+      const decide = (key: string) => {
+        const { staged, path } = splitFileKey(key);
+        const stillInSection = hasSide(nowEntries, path, staged);
+        if (!stillInSection && !hasSide(prevEntries, path, staged))
+          return "clear";
+        return pruneDecision({
+          stillInSection,
+          presentInOther: hasSide(nowEntries, path, !staged),
+          headMoved,
+          walkActive,
+          walkWasActive,
+        });
+      };
+      const focusNow = waitingFocus();
+      // A live control outside the list holds focus (reached through <body> or
+      // a dialog, so no focusout cleared the claim): the list no longer owns it.
+      if (
+        focusNow === "other" &&
+        !listRef.current?.contains(document.activeElement)
+      )
+        listFocusRef.current = null;
+      const focusKey = listFocusRef.current;
+      // Focus will land on the list's pick: it is on the row that left, on
+      // nobody, or in a dialog whose focus return is about to orphan it.
+      const landable = (key: string) =>
+        focusNow === "dialog" || focusLeavingRow(key);
+      let lead: { key: AdvanceLead; path: string } | null = null;
+      let shownPath: string | null = null;
+      let focusPlan: (() => boolean) | null = null;
+      let selectionCleared = false;
+      let cursorAfter = cursorKey;
+
+      if (selected) {
+        const key = keyOf(selected.path, selected.staged);
+        const outcome = decide(key);
+        if (outcome === "clear") {
+          clearSelectedFile();
+          selectionCleared = true;
+          cursorAfter = activeFolderKey;
+        } else if (outcome === "advance") {
+          const next = nextFileKey(prevKeys, key, advanceEligible);
+          const nextSide = next === null ? null : splitFileKey(next);
+          const nextEntry =
+            nextSide &&
+            nowEntries.find(
+              (e) =>
+                e.path === nextSide.path &&
+                (nextSide.staged ? e.staged !== null : e.unstaged !== null),
+            );
+          if (next !== null && nextSide && nextEntry) {
+            // ONE write from file A to file B, never through null.
+            advanceSelectedFile({
+              path: nextEntry.path,
+              staged: nextSide.staged,
+              untracked: nextEntry.unstaged === "untracked",
+            });
+            setSelectedKeys((keys) => selectionAfterAdvance(keys, key, next));
+            setAnchorKey(next);
+            setActiveFolderKey(null);
+            cursorAfter = next;
+            shownPath = nextEntry.path;
+          } else {
+            clearSelectedFile();
+            selectionCleared = true;
+            cursorAfter = activeFolderKey;
+          }
+          lead = {
+            key: selected.staged ? "staged" : "unstaged",
+            path: selected.path,
+          };
+          if (focusKey === key && landable(key)) {
+            // The last file follows itself into the other section, focused but
+            // not selected.
+            const target = next ?? keyOf(selected.path, !selected.staged);
+            focusPlan = () => focusAdvanceTarget(target, cursorAfter);
+          }
+        }
+      }
+
+      if (
+        focusKey !== null &&
+        isFileKey(focusKey) &&
+        focusKey !== activeKey &&
+        landable(focusKey)
+      ) {
+        if (decide(focusKey) === "advance") {
+          const { staged, path } = splitFileKey(focusKey);
+          lead = { key: staged ? "staged" : "unstaged", path };
+          const target =
+            nextFileKey(prevKeys, focusKey, advanceEligible) ??
+            keyOf(path, !staged);
+          focusPlan = () => focusAdvanceTarget(target, cursorAfter);
+        }
+      } else if (
+        focusKey?.startsWith("header:") &&
+        !headMoved &&
+        !walkActive &&
+        focusNow !== "other"
+      ) {
+        // A focused Stage all / Unstage all whose section emptied by moving its
+        // files across: focus takes the other section's first row.
+        const staged = focusKey === "header:staged";
+        const had = staged
+          ? prevNav.current.hadStaged
+          : prevNav.current.hadUnstaged;
+        const has = (staged ? stagedEntries : unstagedEntries).length > 0;
+        const movedAcross = prevEntries.some(
+          (e) =>
+            (staged ? e.staged !== null : e.unstaged !== null) &&
+            hasSide(nowEntries, e.path, !staged),
+        );
+        if (had && !has && movedAcross) {
+          lead = {
+            key: staged ? "header:staged" : "header:unstaged",
+            path: "",
+          };
+          const otherPrefix = staged ? "unstaged:" : "staged:";
+          const target =
+            navFileKeys.find(
+              (k) => k.startsWith(otherPrefix) && advanceEligible.has(k),
+            ) ?? null;
+          focusPlan = () => focusAdvanceTarget(target, cursorAfter);
+        }
+      }
+
+      // Without a focused row to announce itself: the file now shown, the file
+      // the selection kept, or the resting pane only when nothing is selected.
+      let restTail: AdvanceTail = "none";
+      if (shownPath !== null) restTail = "shown";
+      else if (selected !== null && !selectionCleared) restTail = "kept";
+      const announce = (tail: AdvanceTail) => {
+        if (lead === null || transitionGen.current !== gen) return;
+        const text =
+          ADVANCE_LEADS[lead.key](lead.path) +
+          ADVANCE_TAILS[tail](shownPath ?? "", nowEntries.length);
+        setAdvanceNote((n) => ({ text, seq: n.seq + 1, read: data }));
+      };
+      // Focus lands first; the announcement follows a frame later so the
+      // focused control's own utterance can't cut the polite one off.
+      const land = (plan: () => boolean) => {
+        const onRow = plan();
+        requestAnimationFrame(() => announce(onRow ? "focused" : restTail));
+      };
+      if (focusPlan === null) announce(restTail);
+      else if (focusNow !== "dialog") land(focusPlan);
+      else {
+        // A dialog's exit still holds focus and is about to hand it back to the
+        // row that left: claim once that return has orphaned it.
+        const plan = focusPlan;
+        const deadline = performance.now() + DIALOG_CLAIM_MS;
+        const step = () => {
+          if (transitionGen.current !== gen) return;
+          const verdict = dialogClaimStep(
+            waitingFocus(),
+            performance.now(),
+            deadline,
+          );
+          if (verdict === "wait") requestAnimationFrame(step);
+          else if (verdict === "claim") land(plan);
+          else announce(restTail);
+        };
+        requestAnimationFrame(step);
+      }
+    },
+  );
+  useLayoutEffect(() => {
+    onStatusTransition(
+      status.data,
+      status.dataUpdatedAt,
+      selectedFile,
+      repoPath,
+    );
+  }, [status.data, status.dataUpdatedAt, selectedFile, repoPath]);
+  // Every commit, after the transition effect above has read the previous one.
+  // A missing read leaves the last on-screen order in place for the next one.
+  useLayoutEffect(() => {
+    if (status.data === undefined) return;
+    prevNav.current = {
+      keys: navFileKeys,
+      hadStaged: stagedEntries.length > 0,
+      hadUnstaged: unstagedEntries.length > 0,
+    };
+  });
+  // Marks a walk seen between status reads, since one can open and close (its
+  // last file staged) without a read landing while it was open.
+  useEffect(
+    () =>
+      useConflictResolve.subscribe((s) => {
+        if (s.activePath !== null && s.scopePath === repoPath)
+          walkSeen.current = true;
+      }),
+    [repoPath],
+  );
+  // Prune multi-selection keys whose OWN side has left the working tree
+  // (staged, committed, discarded, etc.), so counts and highlights stay
+  // accurate and the rest of a multi-selection survives a single row's move.
   useEffect(() => {
     if (!status.data) return;
-    const paths = new Set(status.data.entries.map((e) => e.path));
+    const live = new Set<string>();
+    for (const e of status.data.entries) {
+      if (e.staged !== null) live.add(keyOf(e.path, true));
+      if (e.unstaged !== null) live.add(keyOf(e.path, false));
+    }
     setSelectedKeys((prev) => {
-      const next = new Set(
-        [...prev].filter((k) => paths.has(k.slice(k.indexOf(":") + 1))),
-      );
+      const next = new Set([...prev].filter((k) => live.has(k)));
       return next.size === prev.size ? prev : next;
     });
   }, [status.data]);
@@ -922,7 +1390,7 @@ export function ChangesPanel({
     // `mutating`, so they skip the disables and get the toast instead. Refused
     // before the try, so the first check's flags survive.
     if (checkingRef.current) {
-      toast.info("Still checking files for conflict markers");
+      toast.info(MARKER_CHECK_PENDING);
       return false;
     }
     const firedOn = repoPath;
@@ -955,16 +1423,32 @@ export function ChangesPanel({
     return true;
   }
 
-  // Toggle one file's staged state — the row's +/- button and the single menu.
+  // Toggle one file's staged state — the row's +/- button and Space, and the
+  // single menu.
   function handleToggle(entry: FileEntry, staged: boolean) {
+    const key = keyOf(entry.path, staged);
+    // A toggle that already landed, on a row the status read hasn't moved yet:
+    // a second press would act on the stale row. Silent, like the disabled
+    // button. Added only on success, so a declined marker confirm (which moves
+    // no row, and so would never clear it) leaves the row live.
+    if (pendingLeaveKeys.current.has(key)) return;
     if (staged) {
-      void unstage.mutateAsync(unstagePaths(entry)).catch(onError);
+      void unstage
+        .mutateAsync(unstagePaths(entry))
+        .then(() => {
+          pendingLeaveKeys.current.add(key);
+        })
+        .catch(onError);
       return;
     }
     // Fire-time guard: the affordances are already disabled, but a later call
     // site must not reach a `git add` that dies reading the device.
     if (!canStage(entry)) return;
-    void stageGuarded([entry]).catch(onError);
+    void stageGuarded([entry])
+      .then((ok) => {
+        if (ok) pendingLeaveKeys.current.add(key);
+      })
+      .catch(onError);
   }
 
   /** The key of the first folder row whose path satisfies `match` in `section`'s
@@ -1421,6 +1905,10 @@ export function ChangesPanel({
   let statusAnnouncement: string | null = null;
   if (readFailed) statusAnnouncement = STATUS_READ_FAILED_REASON;
   else if (status.isPending) statusAnnouncement = "Loading changes…";
+  // Lowest priority: what the last advance did, written only by the transition
+  // effect. The seq's zero-width space makes a repeated message re-announce.
+  else if (advanceNote.text && advanceNote.read === status.data)
+    statusAnnouncement = advanceNote.text + ZWSP.repeat(advanceNote.seq % 2);
   const statusLiveRegion = (
     <span role="status" className="sr-only">
       {statusAnnouncement}
@@ -1536,7 +2024,7 @@ export function ChangesPanel({
     if (row.type === "header")
       return (
         <div
-          data-section-header
+          data-section-header={row.section}
           className={cn(
             "flex items-center justify-between pr-1 pl-2",
             // Gap only between the staged and unstaged sections, never at the
@@ -1588,7 +2076,8 @@ export function ChangesPanel({
           style={{ paddingLeft: 8 + row.depth * 12 }}
           onClick={() => handleFolderActivate(row)}
           onKeyDown={(e) => {
-            if (e.target !== e.currentTarget) return;
+            // Chords pass to the window listener (the commit shortcut).
+            if (e.target !== e.currentTarget || hasChordModifier(e)) return;
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
               handleFolderActivate(row);
@@ -1616,6 +2105,7 @@ export function ChangesPanel({
         }
         staged={row.staged}
         disabled={mutating}
+        checking={checking}
         stat={statFor(row.entry, row.staged)}
         selected={selectedKeys.has(keyOf(row.entry.path, row.staged))}
         active={
@@ -1806,9 +2296,13 @@ export function ChangesPanel({
                 }}
                 onListKeyDown={handleListKeyDown}
                 onListFocus={handleRowFocus}
+                onListFocusIn={trackListFocusIn}
+                onListFocusOut={trackListFocusOut}
                 onListEl={handleListEl}
                 onContextMenuCapture={handleContextMenu}
+                focusTargetKey={focusTargetKey}
                 onCursorScrolled={claimPendingFocus}
+                onFocusTargetLost={dropFocusTarget}
                 renderRow={renderRow}
               />
               <ContextMenuContent className="min-w-64">
@@ -1956,9 +2450,13 @@ function VirtualizedChangeList({
   onClearFilter,
   onListKeyDown,
   onListFocus,
+  onListFocusIn,
+  onListFocusOut,
   onListEl,
   onContextMenuCapture,
+  focusTargetKey,
   onCursorScrolled,
+  onFocusTargetLost,
   renderRow,
 }: {
   flatRows: FlatRow[];
@@ -1979,13 +2477,23 @@ function VirtualizedChangeList({
   /** Every focus inside the list, delegated: the panel keeps its folder cursor
    *  in step with the row focus landed in. */
   onListFocus: (e: FocusEvent) => void;
+  /** Capture-phase focusin/focusout over the list (headers included): the
+   *  panel tracks whether the list owned focus last. */
+  onListFocusIn: (e: FocusEvent) => void;
+  onListFocusOut: (e: FocusEvent) => void;
   /** Hands the mounted scroll container up to the panel, which queries rows
    *  through it. Must be referentially stable — it rides the element's ref. */
   onListEl: (el: HTMLDivElement | null) => void;
   onContextMenuCapture: (e: MouseEvent) => void;
-  /** Called a frame after the cursor row is scrolled to, so the panel can focus
-   *  a row it could not reach while unmounted. False = still unmounted, retry. */
+  /** A pending focus claim's row that is NOT the cursor, scrolled to like the
+   *  cursor row; null once the claim settles. */
+  focusTargetKey: string | null;
+  /** Called a frame after the cursor row (or the focus target) is scrolled to,
+   *  so the panel can focus a row it could not reach while unmounted. False =
+   *  still unmounted, retry. */
   onCursorScrolled: () => boolean;
+  /** The focus target's claim never settled within its tries. */
+  onFocusTargetLost: (key: string) => void;
   renderRow: (row: FlatRow) => ReactNode;
 }) {
   // State-backed (not a plain ref) so the virtualizer observes the scroll
@@ -2064,6 +2572,41 @@ function VirtualizedChangeList({
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
   }, [activeFlatIndex, activeRowKey, viewMode]);
+  // The same reveal for a non-cursor focus claim. Its own effect, declared after
+  // the cursor's so it wins a shared pass: folded into the cursor effect, the
+  // claim settling would re-key that effect and scroll back to the cursor.
+  const focusTargetIndex = focusTargetKey
+    ? flatRows.findIndex((r) => rowKeyOf(r) === focusTargetKey)
+    : -1;
+  // Returns the effect's cleanup. A claim still unsettled after its tries gives
+  // up outright, so it can't re-scroll the list on some later pass.
+  const revealFocusTarget = useEffectEvent((index: number, key: string) => {
+    const giveUp = onFocusTargetLost;
+    // A row no longer listed can never mount: give up now.
+    if (index < 0) {
+      giveUp(key);
+      return;
+    }
+    rowVirtualizer.scrollToIndex(index, { align: "auto" });
+    const claimNow = onCursorScrolled;
+    let frame = 0;
+    let tries = 3;
+    const claim = () => {
+      tries -= 1;
+      if (claimNow()) return;
+      if (tries === 0) {
+        giveUp(key);
+        return;
+      }
+      frame = requestAnimationFrame(claim);
+    };
+    frame = requestAnimationFrame(claim);
+    return () => cancelAnimationFrame(frame);
+  });
+  useEffect(() => {
+    if (focusTargetKey === null) return;
+    return revealFocusTarget(focusTargetIndex, focusTargetKey);
+  }, [focusTargetIndex, focusTargetKey]);
   // Jump back to the top whenever the filter changes the visible set. Gated on
   // the filter actually changing: <Activity> replays effects on every tab show,
   // and an unguarded reset would drop the scroll position it preserves.
@@ -2088,6 +2631,8 @@ function VirtualizedChangeList({
           className="min-h-0 flex-1 overflow-y-auto"
           onKeyDown={onListKeyDown}
           onFocus={onListFocus}
+          onFocusCapture={onListFocusIn}
+          onBlurCapture={onListFocusOut}
           onContextMenuCapture={onContextMenuCapture}
           role="listbox"
           aria-label="Changed files"

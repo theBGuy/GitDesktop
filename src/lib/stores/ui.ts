@@ -582,6 +582,11 @@ interface UiState {
    *  status), not because the user chose to. The non-bumping route: a background poll
    *  must not advance {@link UiState.interactionEpoch} and strand a click's continuation. */
   clearSelectedFile: () => void;
+  /** Replace the selection because the selected file LEFT its section and a
+   *  successor should show (the Changes advance) — a reactive pick against fresh
+   *  status, not a user action, so like {@link clearSelectedFile} it never bumps
+   *  {@link UiState.interactionEpoch}. */
+  advanceSelectedFile: (file: SelectedFile) => void;
   /** Advance {@link UiState.interactionEpoch} for a USER action whose state lives in a
    *  component rather than this store — a panel-local tab pick is still "where the user
    *  is". Call it BEFORE the local set, so a continuation strands before it can land.
@@ -1089,6 +1094,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         interactionEpoch: s.interactionEpoch + 1,
       })),
     clearSelectedFile: () => set({ selectedFile: null }),
+    advanceSelectedFile: (file) => set({ selectedFile: file }),
     noteUserInteraction: () => {
       if (!inBeforeSelect) bumpEpochNow();
     },

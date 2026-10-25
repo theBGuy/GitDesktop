@@ -26,7 +26,7 @@ import type {
   ForgeProvider,
   ReviewThreadOut,
 } from "@/lib/git/types";
-import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { hasChordModifier, SUBMIT_HINT } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
@@ -1004,7 +1004,7 @@ export function ReviewThreadList({
 
   const onKeyDown = (e: KeyboardEvent) => {
     // Enter/Space on a focused header toggles that thread's collapse.
-    if (e.key === "Enter" || e.key === " ") {
+    if ((e.key === "Enter" || e.key === " ") && !hasChordModifier(e)) {
       const el = document.activeElement as HTMLElement | null;
       const id = el?.getAttribute("data-thread-id");
       if (id) {

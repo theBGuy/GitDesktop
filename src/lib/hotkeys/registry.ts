@@ -1229,6 +1229,7 @@ export const BUILT_IN_KEYS: {
   },
   { keys: "Shift+↑ / Shift+↓", what: "Extend the selection in History" },
   { keys: "Enter", what: "Open or select the highlighted item" },
+  { keys: "Space", what: "Stage or unstage the focused file in Changes" },
   { keys: "Esc", what: "Close dialogs, menus, and settings" },
   {
     keys: "Ctrl+Enter",

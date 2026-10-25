@@ -19,6 +19,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { BUILTIN_COMMANDS } from "@/lib/ai/slash";
 import { withForm } from "@/lib/form";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { CustomCommand } from "@/lib/settings/api";
 import { settingsFormOpts } from "./settings-form";
@@ -296,6 +297,7 @@ export const CommandsSection = withForm({
                 }
                 onFocus={() => setActiveIndex(i)}
                 onKeyDown={(e) => {
+                  if (hasChordModifier(e)) return;
                   // Only the row itself edits on Enter — not when a child
                   // control (the Edit/Remove buttons) is focused. An
                   // auto-repeated Enter is still held from elsewhere.

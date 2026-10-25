@@ -20,6 +20,7 @@ import type {
   ProjectFieldDef,
   ProjectFieldValue,
 } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -628,12 +629,11 @@ export const BoardCard = memo(function BoardCard({
         // Space peeks where Enter opens. These cards are `role="option"` in a roving
         // listbox, where Space previews and Enter activates, and `preventDefault` on
         // the KEYDOWN is what stops the click the browser would otherwise fire on
-        // keyup — the native activation this has to get in front of. Bare `e.key`,
-        // no modifier read, the shape every list handler here keeps
-        // (`listKeyboardNav`): no action binds a modified Space, and the global
-        // listener still sees the event either way.
+        // keyup — the native activation this has to get in front of. A chord
+        // returns before the preventDefault, so a bound Ctrl/⌘/Alt+Space still
+        // reaches the global listener, which skips defaultPrevented events.
         onKeyDown={(e) => {
-          if (e.key !== " ") return;
+          if (e.key !== " " || hasChordModifier(e)) return;
           e.preventDefault();
           onPeekChange(item.itemId);
         }}

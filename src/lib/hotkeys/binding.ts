@@ -195,6 +195,31 @@ export function hasModifier(binding: string): boolean {
   return binding.includes("mod+") || binding.includes("alt+");
 }
 
+/** Whether a LIVE keyboard event carries a chord modifier an app binding may
+ *  own — Ctrl/Meta/Alt, NOT Shift (Shift+Space must stay swallowed on rows or
+ *  it scrolls). AltGraph composes characters while reporting ctrl+alt, so it is
+ *  NOT a chord — mirrors eventToBinding. Split of duties: this reads a live
+ *  EVENT; hasModifier reads a canonical binding STRING. */
+export function hasChordModifier(e: {
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  // The literal, not `string`: React types its parameter as a ModifierKey union.
+  getModifierState?: (key: "AltGraph") => boolean;
+}): boolean {
+  if (e.getModifierState?.("AltGraph")) return false;
+  return e.ctrlKey || e.metaKey || e.altKey;
+}
+
+/** Bindings that only preventDefault when a dispatch actually RAN. Space is the
+ *  one bindable key whose native job is pressing the focused control, so
+ *  consuming it for a registered-but-disabled handler would eat button presses,
+ *  checkbox toggles and scroll; every other binding keeps consume-on-registered,
+ *  the browser-accelerator guard (F5/Ctrl+R reload, Ctrl+P print). */
+export function consumeRequiresDispatch(binding: string): boolean {
+  return binding === "space";
+}
+
 /** The key token of a canonical binding — whatever follows the fixed
  *  mod → alt → shift prefix, so the `+` key survives (`shift++` → `+`). */
 export function bindingKey(binding: string): string {

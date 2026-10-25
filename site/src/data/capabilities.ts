@@ -48,6 +48,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
+    label:
+      "Space on a focused file stages or unstages it — staging the last change in the file you're viewing opens the next file",
+  },
+  {
+    group: "Diffs & staging",
     label: "Stage or discard part of a brand-new, untracked file",
   },
   {

@@ -29,6 +29,7 @@ import {
   useSetPrTaskState,
 } from "@/lib/git/queries";
 import type { PrTask } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { pendingWriteReason } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
@@ -98,6 +99,7 @@ function TaskRow({
         // Keys from the nested action buttons pass through untouched, or the
         // preventDefault below would cancel their native Enter/Space activation.
         if (e.target !== e.currentTarget) return;
+        if (hasChordModifier(e)) return;
         if (!editable) return;
         if (e.key === " " || e.key === "Enter") {
           e.preventDefault();

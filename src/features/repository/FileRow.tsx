@@ -1,13 +1,25 @@
 import { MinusIcon, PlusIcon } from "@phosphor-icons/react";
 import { memo } from "react";
+import { toast } from "sonner";
 import { DiffStatSlot } from "@/components/diff-stat";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { KIND_BADGE } from "@/lib/git/change-kind-badge";
 import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { ChangeKind, DiffStatEntry, FileEntry } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { pathBasename } from "@/lib/path-tree";
 import { cn } from "@/lib/utils";
+
+/** Why a reserved-device-name row can't stage — shared by the row's disabled
+ *  toggle button and its Space key so the two can't drift. */
+export function reservedStageReason(name: string): string {
+  return `"${name}" resolves to a Windows device name — git can't stage it`;
+}
+
+/** Said when a stage is refused while a conflicted stage's marker check is
+ *  still running — by the row's Space and the panel's other stage routes. */
+export const MARKER_CHECK_PENDING = "Still checking files for conflict markers";
 
 /**
  * A single changed-file row. Deliberately light: it carries no context menu or
@@ -23,6 +35,7 @@ export const FileRow = memo(function FileRow({
   selected,
   active,
   disabled,
+  checking,
   stat,
   treeDisplay,
   indentPx,
@@ -37,6 +50,9 @@ export const FileRow = memo(function FileRow({
   /** The active row whose diff is shown (keeps its toggle button visible). */
   active: boolean;
   disabled: boolean;
+  /** A conflicted stage's marker check is running (part of `disabled`): Space
+   *  says so rather than failing silently. */
+  checking: boolean;
   /** This row's OWN side of the diff (staged rows: index vs HEAD; unstaged:
    *  working tree vs index). Absent = a blank, still-reserved counts cell. */
   stat?: DiffStatEntry;
@@ -108,13 +124,25 @@ export const FileRow = memo(function FileRow({
         })
       }
       onKeyDown={(e) => {
-        // Keys from the nested toggle button pass through untouched, or the
-        // preventDefault below would cancel its native Enter/Space activation.
-        if (e.target !== e.currentTarget) return;
-        // Space on the row itself must be swallowed or it scrolls the list.
-        if (e.key === "Enter" || e.key === " ") {
+        // Keys from the nested toggle button pass through untouched (its native
+        // Enter/Space activation), and chords pass to the window listener.
+        if (e.target !== e.currentTarget || hasChordModifier(e)) return;
+        if (e.key === "Enter") {
           e.preventDefault();
           onSelect(entry, staged, { ctrlOrMeta: false, shift: false });
+        } else if (e.key === " ") {
+          e.preventDefault(); // every Space variant below: no list scroll
+          if (e.repeat || e.shiftKey) return; // held key acts once; Shift+Space reserved
+          if (reservedName !== null) {
+            toast.info(reservedStageReason(reservedName));
+            return;
+          }
+          if (checking) {
+            toast.info(MARKER_CHECK_PENDING);
+            return;
+          }
+          if (disabled) return; // silent no-op, matching the disabled +/- button
+          onToggle(entry, staged);
         }
       }}
       role="option"
@@ -151,10 +179,7 @@ export const FileRow = memo(function FileRow({
         )}
         aria-label={staged ? `Unstage ${entry.path}` : `Stage ${entry.path}`}
         disabled={disabled || reservedName !== null}
-        reason={
-          reservedName &&
-          `"${reservedName}" resolves to a Windows device name — git can't stage it`
-        }
+        reason={reservedName && reservedStageReason(reservedName)}
         onClick={(e) => {
           e.stopPropagation();
           onToggle(entry, staged);

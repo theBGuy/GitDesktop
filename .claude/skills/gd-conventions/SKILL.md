@@ -139,6 +139,12 @@ to a single key, a dispatcher missing any of them either steals keystrokes from
 a text field or typeahead list, or withholds a named key that should still fire.
 Inner-clause drift between two dispatchers is the regression this prevents; the
 `unguarded-binding-dispatcher` guard in `pnpm run checks` is the ratchet.
+A focusable non-text element's Enter/Space handler returns on
+`hasChordModifier(e)` (binding.ts) before any preventDefault, so bound
+chords reach the window listener, except inside a modal that owns no chord of
+its own, where letting one through would fire app bindings behind the dialog
+(those sites stay unguarded under an `OWNS_CHORD` entry); the
+`scripts/activation-key-chords.test.mjs` scan is the ratchet.
 
 **Patterns the user has ruled on:**
 - No hover-revealed per-row buttons — contextual actions are always-visible,

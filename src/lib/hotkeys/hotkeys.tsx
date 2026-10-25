@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useSettings } from "@/lib/settings/queries";
 import {
+  consumeRequiresDispatch,
   eventToBinding,
   firesInEditable,
   hasModifier,
@@ -94,8 +95,8 @@ export function useHotkeysListener() {
     if (!binding) return;
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
     // Typeahead surfaces only ever swallow modifier-less bindings, and only
-    // character keys, which is all typeahead consumes: a mod/alt chord and a
-    // named key alike keep firing everywhere.
+    // character keys and Space, which is all typeahead consumes: a mod/alt
+    // chord and a named key alike keep firing everywhere.
     if (
       !hasModifier(binding) &&
       isTypeaheadKey(binding) &&
@@ -106,16 +107,18 @@ export function useHotkeysListener() {
     // Registered-vs-unregistered rule. A chord OWNED by an on-screen surface —
     // an action with at least one live handler, even a disabled one — must
     // never leak to the webview's browser accelerators (Ctrl+P → print,
-    // F5/Ctrl+R → reload) —
-    // so we preventDefault whenever the action is registered, dispatching only
-    // if an enabled handler exists. But a chord that NOTHING on screen owns
+    // F5/Ctrl+R → reload), so we preventDefault whenever the action is
+    // registered, dispatching only if an enabled handler exists. The one
+    // carve-out is bare Space ({@link consumeRequiresDispatch}): it is consumed
+    // only when a dispatch ran, so a disabled action leaves the press to the
+    // focused button, checkbox or scroller. A chord that NOTHING on screen owns
     // (the action exists in the registry but no component registered it — e.g.
     // Ctrl+W / Ctrl+F on the repositories list, where RepositoryView is
     // unmounted) keeps its native meaning: we leave it alone. (The
     // editable-target guard above already exits for typing contexts.)
     if (id && hasLiveHandler(id)) {
-      dispatchAction(id);
-      e.preventDefault();
+      const ran = dispatchAction(id);
+      if (ran || !consumeRequiresDispatch(binding)) e.preventDefault();
     }
   });
 

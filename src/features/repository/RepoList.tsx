@@ -37,6 +37,7 @@ import {
 } from "@/lib/git/api";
 import { useRepoOwners } from "@/lib/git/queries";
 import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   persistRepoVisibility,
@@ -324,6 +325,7 @@ export function RepoList({
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
+    if (hasChordModifier(e)) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlight(

@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { Markdown } from "@/components/markdown/markdown";
 import { hljsUpgradeStore } from "@/components/markdown/markdown-hljs";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { useOpenFile } from "./useOpenFile";
 
 // Extensions we treat as file references when they appear in an inline-code
@@ -178,6 +179,7 @@ export function AgentNarration({
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    if (hasChordModifier(e)) return;
     if (e.key !== "Enter" && e.key !== " ") return;
     if (activate(e.target)) e.preventDefault();
   };

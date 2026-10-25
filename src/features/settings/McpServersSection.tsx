@@ -19,6 +19,7 @@ import { isHostAllowed, normalizeHost } from "@/lib/ai/allowed-hosts";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { withForm } from "@/lib/form";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { asMcpServerArray, type McpServer } from "@/lib/settings/api";
 import {
@@ -442,6 +443,7 @@ export const McpServersSection = withForm({
                       }
                       onFocus={() => setActiveIndex(i)}
                       onKeyDown={(e) => {
+                        if (hasChordModifier(e)) return;
                         // Only the row itself edits on Enter — not when a child
                         // control (the state picker / switch / buttons) is focused.
                         // An auto-repeated Enter is still held from elsewhere.
