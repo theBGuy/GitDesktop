@@ -861,6 +861,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
 
 - **Large ints over IPC:** snowflake/`u64` ids lose precision as JS numbers —
   serialize as strings end-to-end.
+- **Lean forge reads:** an MCP tool that needs one or two forge fields reads
+  them with a narrow `--json` view on the GitHub arm (`gh_pr_title_body`,
+  `gh_issue_node_id`, `gh_issue_summary`), never the full view, and non-GitHub
+  arms keep their `forge_*_view` until they get a lean read of their own. A read
+  that should revalidate through the conditional GET layer drops `--jq`, since
+  `--jq` is a bypass flag.
 - **Advisory probes fail SAFE toward inaction:** a probe whose verdict can
   unlock a destructive offer (`BranchRewriteStatus` is the model) keeps its
   VERDICT "unknown" on any failed sub-probe, and never ships a defaulted

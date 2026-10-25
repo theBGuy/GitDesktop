@@ -1000,7 +1000,7 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
         "PR"
     };
 
-    // Real candidate issues (defensive cap 8, mirrored TS-side). Empty ⇒ the ban
+    // Real candidate issues (defensive cap, mirrored TS-side). Empty ⇒ the ban
     // stands, no `## Related issues` section, unchanged note.
     let candidates: Vec<&IssueCandidate> =
         p.candidate_issues.iter().filter(|c| c.number > 0).take(RELATED_ISSUE_CAP).collect();
