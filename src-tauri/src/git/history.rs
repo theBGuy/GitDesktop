@@ -14,9 +14,12 @@ pub fn validate_hash(hash: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Whether HEAD is unborn. `rev-parse --verify --quiet` exits 1 exactly when
-/// HEAD doesn't resolve; any other failure (not a repository, a corrupt ref) is
-/// a failed read and carries git's own report, never an empty answer.
+/// Whether HEAD is unborn: a symbolic HEAD naming a branch ref that doesn't
+/// exist. `rev-parse --verify --quiet HEAD` exits 1 both for that and for a
+/// branch ref that exists but holds garbage (measured, git 2.51.1), so exit 1
+/// is confirmed with `show-ref --exists`. Anything else (not a repository, a
+/// detached HEAD that doesn't resolve, a broken ref) is a failed read carrying
+/// git's report, never an empty answer. The healthy path is one spawn.
 pub(crate) async fn unborn_head(repo_path: &str) -> AppResult<bool> {
     let head = run_git_raw(
         Some(repo_path),
@@ -24,11 +27,42 @@ pub(crate) async fn unborn_head(repo_path: &str) -> AppResult<bool> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    if head.code == 1 {
-        return Ok(true);
+    match head.code {
+        0 => return Ok(false),
+        1 => {}
+        _ => return head.exit_verdict().map(|_| false),
     }
-    head.exit_verdict()?;
-    Ok(false)
+    let target = run_git_raw(
+        Some(repo_path),
+        &["symbolic-ref", "-q", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if target.code != 0 {
+        return Err(crate::error::AppError::Command(
+            "HEAD doesn't resolve to a commit.".into(),
+        ));
+    }
+    let name = target.stdout_lossy().trim().to_string();
+    let exists = run_git_raw(
+        Some(repo_path),
+        &["show-ref", "--exists", &name],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match exists.code {
+        // 2 is `--exists`'s "missing"; 129 is a git older than 2.43, which has
+        // no `--exists` and so can't tell a missing ref from a broken one.
+        2 | 129 => Ok(true),
+        _ => Err(crate::error::AppError::Command(
+            format!(
+                "{name} doesn't resolve to a commit.\n{}",
+                exists.full_failure_text()
+            )
+            .trim_end()
+            .to_string(),
+        )),
+    }
 }
 
 /// Paged commit history. When `search` is set, searches the whole history by
@@ -158,7 +192,8 @@ pub async fn git_blame(
     validate_path(&path)?;
 
     // Resolve the optional rev to a concrete 40-hex sha, or guard the unborn-HEAD
-    // case, so `git blame` never surfaces raw stderr for either.
+    // case: an unknown rev (exit 1) and an unborn HEAD get friendly errors, and
+    // any other probe failure carries git's own report.
     let resolved_rev = match rev.as_deref().map(str::trim) {
         None => {
             // No rev: blame the working tree, but a zero-commit repo has no HEAD to
@@ -682,6 +717,48 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// A branch ref that exists but holds garbage is a damaged repository, not an
+    /// unborn HEAD: every read through it must fail, never answer empty.
+    #[tokio::test]
+    async fn unborn_head_errs_on_a_corrupt_branch_ref() {
+        let (dir, repo, _first, _second) = two_commit_repo("corrupt-ref").await;
+        let branch = run_git(Some(&repo), &["symbolic-ref", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string();
+        // Loose, so the corrupt file is the ref git reads.
+        let ref_file = dir.path().join(".git").join(&branch);
+        assert!(ref_file.is_file(), "{branch} is not a loose ref");
+        std::fs::write(&ref_file, "not-a-sha\n").unwrap();
+        let probe = run_git_raw(
+            Some(&repo),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        // The premise: the probe alone reads this exactly like an unborn HEAD.
+        assert_eq!(probe.code, 1, "{:?}", probe.stderr);
+        let unborn = unborn_head(&repo).await;
+        assert!(unborn.is_err(), "unborn_head: {unborn:?}");
+        assert!(git_log(repo.clone(), 10, 0, None).await.is_err());
+    }
+
+    /// The Code TODOs detail view reads this exact phrase as "untracked"; any
+    /// other blame failure is a failed read.
+    #[tokio::test]
+    async fn blame_untracked_file_says_no_such_path_in_head() {
+        let (dir, repo, _first, _second) = two_commit_repo("untracked").await;
+        std::fs::write(dir.path().join("new.txt"), "fresh\n").unwrap();
+        let err = git_blame(repo, "new.txt".into(), None).await.unwrap_err();
+        assert!(
+            matches!(&err, crate::error::AppError::Git { stderr, .. } if stderr.contains("no such path 'new.txt' in HEAD")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

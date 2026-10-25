@@ -283,7 +283,9 @@ export function CodeTodosPanel({
         noun="TODOs"
         degraded={rescanFailed && !noMarkers}
         message={
-          flatRows.length > 0
+          // Loaded TODOs, not filtered ones: a filter matching nothing still
+          // sits over the last loaded results.
+          allItems.length > 0
             ? "Couldn't rescan for TODOs — showing the last loaded results."
             : "Couldn't rescan for TODOs."
         }

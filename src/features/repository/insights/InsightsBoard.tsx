@@ -22,6 +22,7 @@ import {
 } from "@/lib/git/queries";
 import type { ContributorChurn } from "@/lib/git/types";
 import { useWorkflowRuns } from "@/lib/github/actions";
+import { type BoardCardRead, boardNotice } from "./board-notice";
 import { CommunityCard } from "./CommunityCard";
 import {
   ActionsDurationChart,
@@ -125,8 +126,8 @@ function ContributorsList({ data }: { data: ContributorChurn[] }) {
   );
 }
 
-/** Every card that reads data of its own, in board order: the board notice
- *  names the first failure in this order. */
+/** Every card that reads data of its own; the board notice lists them in
+ *  board order and quotes the first failure's reason. */
 type CardId =
   | "commitActivity"
   | "codeFrequency"
@@ -152,11 +153,7 @@ const CARD_NOUN: Record<CardId, string> = {
   dependencies: "dependencies",
 };
 
-type CardRead = {
-  data: unknown;
-  error: unknown;
-  isError: boolean;
-  isPaused: boolean;
+type CardRead = BoardCardRead & {
   isFetching: boolean;
   refetch: () => Promise<unknown>;
 };
@@ -169,22 +166,6 @@ function unloadedCard(q: CardRead, noun: string, skeleton: ReactNode) {
   if (q.isPaused) return <Empty>{offlinePendingMessage(noun)}</Empty>;
   if (refreshFailed(q)) return <Empty>Couldn't load {noun}.</Empty>;
   return skeleton;
-}
-
-/** The board's one failure line and the reads its Retry refetches, or null.
- *  Silent only while a user's Retry is settling (`retrying`), so the sentence
- *  never swaps mid-retry; a background refetch, a polling run list's
- *  included, never blanks it. */
-function boardNotice(
-  cards: readonly (readonly [CardId, CardRead])[],
-  retrying: boolean,
-) {
-  const failed = cards.filter(([, q]) => refreshFailed(q));
-  if (retrying || failed.length === 0) return null;
-  const message = failed.every(([, q]) => q.data !== undefined)
-    ? "Couldn't refresh some insights — showing the last loaded ones."
-    : `Couldn't load some insights. ${presentError(failed[0][1].error).summary}`;
-  return { message, failed: failed.map(([, q]) => q) };
 }
 
 function durationMinutes(start: string, end: string): number {
@@ -276,25 +257,19 @@ export function InsightsBoard({
     runs: isGitLab || isBitbucket ? "pipelines" : CARD_NOUN.runs,
   };
   // The cards on screen with a read of their own, in board order.
+  const cardReads: CardRead[] = [
+    commitActivity,
+    codeFreq,
+    contributors,
+    punchCard,
+    ...(canGh ? [runs] : []),
+    ...(canForks && forkProvider ? [forkActivity] : []),
+    ...(canGhOnly ? [community, traffic, dependencies] : []),
+  ];
   const notice = boardNotice(
-    [
-      ["commitActivity", commitActivity],
-      ["codeFrequency", codeFreq],
-      ["contributors", contributors],
-      ["commitTimes", punchCard],
-      ...(canGh ? ([["runs", runs]] as const) : []),
-      ...(canForks && forkProvider
-        ? ([["forkActivity", forkActivity]] as const)
-        : []),
-      ...(canGhOnly
-        ? ([
-            ["community", community],
-            ["traffic", traffic],
-            ["dependencies", dependencies],
-          ] as const)
-        : []),
-    ],
+    cardReads,
     retrying !== null,
+    (e) => presentError(e).summary,
   );
   const retryFailed = notice
     ? () => {

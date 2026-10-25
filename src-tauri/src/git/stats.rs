@@ -724,6 +724,42 @@ mod tests {
         }
     }
 
+    /// HEAD resolves but its commit object is gone, so the unborn probe passes
+    /// and only each read's own failed run can say so: a revert to "nonzero
+    /// exit = empty" fails here even with the probe intact.
+    #[tokio::test]
+    async fn reads_err_when_the_head_commit_is_missing() {
+        let (dir, repo) = temp_repo("missing-head-commit");
+        git(&repo, &["init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "seed"]).await;
+        let sha = git(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let object = dir
+            .path()
+            .join(".git/objects")
+            .join(&sha[..2])
+            .join(&sha[2..]);
+        std::fs::remove_file(&object).expect("the HEAD commit is a loose object");
+        let probe = run_git_raw(
+            Some(&repo),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe.code, 0, "the premise: HEAD still resolves");
+        for read in insights_reads(&repo, 0).await {
+            assert!(read.is_err(), "{read:?}");
+        }
+        let log = crate::git::history::git_log(repo.clone(), 10, 0, None).await;
+        assert!(log.is_err(), "{log:?}");
+        let blame = crate::git::history::git_blame(repo, "a.txt".into(), Some(sha)).await;
+        assert!(blame.is_err(), "{blame:?}");
+    }
+
     #[test]
     fn language_of_maps_names_and_extensions() {
         assert_eq!(language_of("src/main.rs"), Some("Rust"));

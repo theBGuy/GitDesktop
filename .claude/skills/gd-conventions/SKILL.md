@@ -599,14 +599,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Fail toward unknown** — empty, negative or advisory copy ("no X", "not
   pushed", "unavailable") renders only from a SUCCESSFUL read that answered so,
   gated on the read's data, never on its absence: a failed read keeps loaded
-  content under a notice or says it couldn't load, with Retry. An infinite
-  query splits a failed Load more from a failed refresh through
-  `splitInfiniteFailure` (remote-section-state) before `listNotice`. The Rust
-  twin of "Advisory probes fail SAFE toward inaction": a probe returns Err for a
-  failed git run, never a defaulted verdict, and reads its negative answer only
-  from a run that gave it (exit 0 with nothing matched, or `rev-parse --verify
-  --quiet`'s exit 1 for a ref that doesn't resolve); `commit_on_remote` and
-  `git_unpushed_count` in git/branches.rs are the models.
+  content under a notice or says it couldn't load, with Retry. An infinite query
+  splits a failed Load more from a failed refresh through `splitInfiniteFailure`
+  (remote-section-state) before `listNotice`. The Rust twin of "Advisory probes
+  fail SAFE toward inaction": a probe returns Err for a failed git run, never a
+  defaulted verdict, and reads its negative answer only from a run that gave it
+  (exit 0 with nothing matched, or an unborn HEAD). The shared unborn probe is
+  `unborn_head` (git/history.rs), which tells a missing branch ref from a broken
+  one; `commit_on_remote` and `git_unpushed_count` in git/branches.rs are the
+  models.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.
@@ -856,7 +857,8 @@ one grep away on the named symbol. Grows via Conventions-sync.
   API) misroutes. A REV use keeps git's form or the full ref, never a stripped
   bare name, which resolves to a same-named tag first. `symbolic-ref` also
   answers on an unborn branch — a site that must refuse before the first commit
-  checks `head_is_unborn`.
+  checks `git::history::unborn_head`, which errs on a broken HEAD
+  (`branches::head_is_unborn` still reads any failed probe as unborn).
 - **Branch names as revs** — a branch name never reaches a REV position (a
   range, a `^{commit}` peel, a rev-taking argv, a `fetch` refspec source) bare:
   gitrevisions resolves a same-named tag first. Resolve it via

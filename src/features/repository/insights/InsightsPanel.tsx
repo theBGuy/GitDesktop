@@ -214,10 +214,11 @@ export function InsightsPanel({
 }
 
 /** The current branch against the default branch. Hidden when there is no
- *  current branch (a failed status read is surfaced app-wide) or a successful
- *  read found no default branch; a failed read of either says so with Retry.
- *  The root always mounts, so its status line announces a failure that arises
- *  while shown and it hosts focus when an arm's Retry unmounts. */
+ *  current branch (a failed status read is surfaced app-wide), while the
+ *  default-branch read loads, and when it found no default branch; a failed
+ *  default-branch or comparison read says so with Retry. The root always
+ *  mounts, so its status line announces a failure that arises while shown and
+ *  it hosts focus when an arm's Retry unmounts. */
 function BranchComparisonSection({
   currentBranch,
   defaultBranch,

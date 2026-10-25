@@ -151,13 +151,12 @@ const UNDO_DETACHED_ROOT_HINT =
 
 /** Squash's menu-row reason per hold. The filter arm names the easy-to-miss
  *  case: a range that looks adjacent in the filtered view isn't adjacent in
- *  history. */
-const SQUASH_HOLD_HINT: Record<SquashHold, string> = {
+ *  history. "refreshing" is built at render: it depends on the count read. */
+const SQUASH_HOLD_HINT: Record<Exclude<SquashHold, "refreshing">, string> = {
   op: OP_IN_PROGRESS_HINT,
   "filter-hides-range":
     " (clear the filter — a squash range must be adjacent in history)",
   "not-adjacent-unpushed": " (must be adjacent and unpushed)",
-  refreshing: HISTORY_REFRESHING_HINT,
 };
 
 // Keeps the log and its side reads in step with status's HEAD: refetches the
@@ -930,18 +929,23 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     agreed,
     opInProgress,
   });
-  // A no-upstream count read that settled in error won't agree by waiting, so
-  // the hold names it rather than "refreshing" indefinitely.
-  const countUnchecked = noUpstream && refreshFailed(unpushedVsRemotes);
+  // A no-upstream count read that failed won't agree by waiting, so the hold
+  // names it rather than "refreshing" indefinitely. Sticky through the retry
+  // each status poll fires: a never-loaded read's refetch resets it to pending,
+  // so its last settle being the error counts too.
+  const countUnchecked =
+    noUpstream &&
+    (unpushedVsRemotes.isError ||
+      unpushedVsRemotes.errorUpdatedAt > unpushedVsRemotes.dataUpdatedAt) &&
+    !unpushedVsRemotes.isPaused;
   const refreshingHint = countUnchecked
     ? UNPUSHED_UNCHECKED_HINT
     : HISTORY_REFRESHING_HINT;
-  const squashDisabledHint =
-    squashHold === "refreshing"
+  const squashDisabledHint = !squashHold
+    ? ""
+    : squashHold === "refreshing"
       ? refreshingHint
-      : squashHold
-        ? SQUASH_HOLD_HINT[squashHold]
-        : "";
+      : SQUASH_HOLD_HINT[squashHold];
   const squashMax = selectedIndices.at(-1) ?? -1;
 
   function openSquash() {

@@ -2829,18 +2829,12 @@ pub async fn git_unpushed_count(repo_path: String) -> AppResult<u32> {
             .parse()
             .map_err(|_| failed(format!("unexpected rev-list output: {}", stdout.trim())));
     }
-    // `--verify --quiet` exits 1 exactly when HEAD doesn't resolve; anything else
-    // (not a repository, a corrupt ref) is a failed read.
-    let head = run_git_raw(
-        Some(&repo_path),
-        &["rev-parse", "--verify", "--quiet", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    if head.code == 1 {
-        return Ok(0);
+    // Only an unborn HEAD answers 0; a failed probe reports rev-list's failure,
+    // which names what the count couldn't read.
+    match crate::git::history::unborn_head(&repo_path).await {
+        Ok(true) => Ok(0),
+        Ok(false) | Err(_) => Err(failed(out.full_failure_text())),
     }
-    Err(failed(out.full_failure_text()))
 }
 
 /// A process-unique suffix for the throwaway worktree directory name.

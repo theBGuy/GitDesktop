@@ -14,6 +14,7 @@ import {
   useRetryFocusRescue,
 } from "@/features/conversations/ConversationListPanel";
 import {
+  DEGRADED_ACTION_CLASS,
   detailNoticeMessage,
   refreshFailed,
   resolveDetailPane,
@@ -54,6 +55,12 @@ export function CodeTodoDetailView({
   text: string;
 }) {
   const blame = useBlame(repoPath, path);
+  // "Not tracked yet" only on git's own word for it; any other blame failure
+  // (a damaged repository, say) is a failed read that says why. Read above the
+  // ladder: these describe the failure, they never swap content.
+  const notTracked = isNotInHead(blame.error);
+  const blameReason =
+    blame.error == null ? null : presentError(blame.error).summary;
   // A failed blame refresh keeps the loaded excerpt and attribution under a
   // notice; only a blame with nothing loaded falls back to the disk read below.
   const pane = resolveDetailPane({
@@ -67,7 +74,9 @@ export function CodeTodoDetailView({
   // Fallback content source: `git blame` refuses untracked files, but we scan
   // `--untracked`, so a brand-new file's content is read straight off disk.
   // Only a blame that errored with nothing loaded counts: a tracked file's
-  // failed refresh keeps its blame, never pays the read, never reads untracked.
+  // failed refresh keeps its blame, never pays the read. Any such failure takes
+  // the disk read, so the excerpt still shows; `notTracked` decides what the
+  // header says about it.
   const untracked = blame.isError && blame.data === undefined;
   const fileText = useFileText(repoPath, path, untracked);
   const openFile = useOpenFile();
@@ -213,7 +222,21 @@ export function CodeTodoDetailView({
         )}
         {untracked && (
           <p className="mt-2 text-xs text-muted-foreground">
-            Not tracked yet — no history.
+            {notTracked ? (
+              "Not tracked yet — no history."
+            ) : (
+              <>
+                Couldn't read this file's history. {blameReason}{" "}
+                <button
+                  type="button"
+                  aria-label="Retry reading this file's history"
+                  onClick={() => void blame.refetch()}
+                  className={DEGRADED_ACTION_CLASS}
+                >
+                  Retry
+                </button>
+              </>
+            )}
           </p>
         )}
 
@@ -355,6 +378,18 @@ export function CodeTodoDetailView({
       })}
     </div>,
   );
+}
+
+/** Whether a blame failure is git refusing a path HEAD doesn't have, the one
+ *  failure that means "untracked" (pinned by history.rs's
+ *  `blame_untracked_file_says_no_such_path_in_head`). Structural, since the
+ *  error is a plain object off the IPC boundary. */
+function isNotInHead(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const e = error as { kind?: unknown; stderr?: unknown; message?: unknown };
+  if (e.kind !== "git") return false;
+  const text = typeof e.stderr === "string" ? e.stderr : e.message;
+  return typeof text === "string" && /no such path '.*' in HEAD/.test(text);
 }
 
 /** `git blame --porcelain` reports uncommitted lines with an all-zero sha —
