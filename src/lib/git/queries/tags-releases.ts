@@ -220,12 +220,18 @@ export function useGithubReleaseNotes(repo: string) {
   });
 }
 
+/** Deleting a published release fires GitHub's `release` event, so it arms the
+ *  recheck; the variables don't say whether it was a draft, so every delete does. */
 export function useDeleteRelease(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: ReleaseWriteVars["delete-release"]) =>
       api.forgeReleaseDelete(repo, args.tag, args.cleanupTag),
-    { identity: releaseWriteKey("delete-release", repo) },
+    {
+      identity: releaseWriteKey("delete-release", repo),
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+    },
   );
 }
 

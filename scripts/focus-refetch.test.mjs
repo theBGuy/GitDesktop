@@ -14,16 +14,18 @@
 // 8 s after the last push-like write, skipping a list paged past page 1, and
 // covering the union of every coalesced arm's PR checks reads; and its sibling
 // `recheckPrListAfterRemoteDelete`: one PR-list re-read per repo, re-armed by a
-// later delete rather than stacked.
+// later delete rather than stacked. And pins `recheckFilterMatches`' exact,
+// numbered-child and prefix modes against the key shapes `prChecksRecheck` builds,
+// with source pins tying those shapes to the real PR-details and CI-map keys.
 //
-// The imports are DYNAMIC because this file pulls @tanstack/react-query, which the
-// CI `guards` job (no install step) can't resolve: unresolved deps skip every test
-// here but the source pins and the filter-matcher table, and GD_EXPECT_DEPS turns
-// a skip into a failure on an installed run.
+// The react-query-backed imports are DYNAMIC because the CI `guards` job (no
+// install step) can't resolve @tanstack/react-query: unresolved deps skip every
+// test here but the source pins and the matcher table, and GD_EXPECT_DEPS turns a
+// skip into a failure on an installed run.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-// Import-free (types only), so it loads without node_modules like the source pin.
+// Import-free (types only), so it loads without node_modules like the source pins.
 import { recheckFilterMatches } from "../src/lib/git/queries/push-writes.ts";
 
 let deps = null;
@@ -628,8 +630,9 @@ test("a plain arm re-reads no PR reads", (t) => {
 
 // ── Push: prChecksRecheck's key shapes against the reads they must reach ─────
 
-/** The three filters `prChecksRecheck` (queries/pr-actions.ts) builds, spelled as
- *  the source pin below requires them, instantiated for repo `r`, lens `origin`,
+/** The three filter shapes `prChecksRecheck` (queries/pr-actions.ts) builds (a
+ *  call hands two: exact or lens-wide, plus the CI map), spelled as the source
+ *  pin below requires them, for repo `r`, lens `origin` and, for the exact shape,
  *  PR 7. */
 const PR_CHECKS_SHAPES = {
   exact: { queryKey: ["repo", "r", "pr", "origin", 7], exact: true },
@@ -652,10 +655,19 @@ test("source pin: prChecksRecheck builds the exact, lens-wide and CI-map shapes"
   const prs = readFileSync(
     new URL("../src/lib/git/queries/prs.ts", import.meta.url),
     "utf8",
-  );
+  ).replace(/\r\n/g, "\n");
   assert.ok(
     prs.includes('queryKey: ["repo", repo, "pr", lens, number] as const'),
   );
+  // The CI-map key the CI shape prefixes: usePrListCi's lens follows the prCi
+  // family, and core.ts spells that family ["repo", repo, "pr-ci"].
+  const ci = prs.slice(prs.indexOf("export function usePrListCi("));
+  assert.ok(/queryKey: \[\s*\.\.\.repoKeys\.prCi\(repo\),\s*lens,/.test(ci));
+  const core = readFileSync(
+    new URL("../src/lib/git/queries/core.ts", import.meta.url),
+    "utf8",
+  );
+  assert.ok(core.includes('prCi: (repo: string) => ["repo", repo, "pr-ci"]'));
 });
 
 test("recheckFilterMatches: exact, numbered-child and prefix modes", () => {

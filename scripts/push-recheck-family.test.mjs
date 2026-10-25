@@ -1,11 +1,8 @@
 // Pins the push-like run-recheck family: every hook whose write's own default
-// trigger starts CI for the code it touches (pushing commits or tags; opening,
-// reopening, landing or updating a pull request; publishing a release or
-// repository; creating a branch; dispatching a workflow; re-running, playing or
-// approving a run) arms `recheckRunsAfterPush` (push-writes.ts), because the run
-// can appear, or flip status, after the settle-time read. Workflows keyed on other
-// events (labels, comments, reviews, ready-for-review, release deletion, Pages
-// builds) are out of scope; deletion pushes and cancel are reasoned exclusions.
+// trigger starts CI for the code it touches arms `recheckRunsAfterPush`
+// (push-writes.ts), because the run can appear, or flip status, after the
+// settle-time read. The writes and the out-of-scope triggers are listed at
+// `PUSH_RUN_RECHECK_MS`; deletion pushes and cancel are reasoned exclusions.
 // The arms flagged `prChecks` also hand the recheck PR checks reads
 // (`prChecksRecheck`) as one of its arguments. Keyed on the CALLEE, not the hook:
 // a new unit naming one of these api functions must arm the recheck or join the
@@ -33,6 +30,7 @@ const ROSTER = [
   "forgePublishRepo",
   "forgeReleaseCreate",
   "forgeReleaseEdit",
+  "forgeReleaseDelete",
   "ghIssueCreateLinkedBranch",
   "forgeCiDispatch",
   "forgeGlMrAutoMerge",
@@ -55,7 +53,7 @@ const DRAFT_GATE = "if (!args.draft)";
 /** The hooks that must arm the recheck: the condition that must guard every arm
  *  call in it (null = armed on every success), whether its arm calls hand the PR's
  *  checks reads along, and whether they hand them for BOTH lenses (an arm that
- *  names no PR or lens covers origin and upstream). */
+ *  can't name the PR's lens covers origin and upstream). */
 const ARMED = {
   usePush: {
     file: `${Q}sync.ts`,
@@ -81,7 +79,7 @@ const ARMED = {
   },
   usePrUpdateBranch: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
   useReopenPr: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
-  useGlArmAutoMerge: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
+  useGlArmAutoMerge: { file: `${Q}pr-actions.ts`, gate: null, prChecks: false },
   useCreatePr: { file: `${Q}pr-write.ts`, gate: null, prChecks: true },
   usePublishRepo: { file: `${Q}remotes.ts`, gate: null, prChecks: false },
   useCreateRelease: {
@@ -92,6 +90,11 @@ const ARMED = {
   useEditRelease: {
     file: `${Q}tags-releases.ts`,
     gate: DRAFT_GATE,
+    prChecks: false,
+  },
+  useDeleteRelease: {
+    file: `${Q}tags-releases.ts`,
+    gate: null,
     prChecks: false,
   },
   useCreateLinkedBranch: {

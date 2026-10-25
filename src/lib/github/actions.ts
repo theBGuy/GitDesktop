@@ -523,17 +523,16 @@ function useActionsMutation<TArgs>(
   });
 }
 
-/** Re-run, re-run job, play job and approve run (`useApproveWorkflowRun` in
- *  queries/pr-actions.ts) each arm the delayed run recheck: GitHub's attempt
- *  transition and GitLab's status flip can land after the settle-time read.
- *  Bitbucket's re-run creates its pipeline within the call, so there the recheck
- *  costs extra reads. These arms hand PR checks reads for both lenses because
- *  `useActionsMutation`'s `onSuccess` sees no variables and none names a PR.
- *  RunDetailView (`RUN_REPAIR_DELAY_MS`) and ChecksRollup
- *  (`CHECKS_REPAIR_DELAY_MS`) already repair at 4.5 s, re-reading the Actions
- *  subtree or that view's PR keys; this arm also covers the press they don't (the
- *  Actions panel's re-run) and the run lists and PR checks at 8 s. The overlap
- *  costs one extra read. */
+/** Re-run, re-run job and play job arm the delayed run recheck: the forge's
+ *  attempt transition can land after the settle-time read. Bitbucket's re-run
+ *  creates its pipeline within the call, so there the recheck only adds reads.
+ *  They hand both lenses' PR checks reads because `useActionsMutation`'s
+ *  `onSuccess` takes no variables. RunDetailView's re-run, job and play presses
+ *  (`RUN_REPAIR_DELAY_MS`: the Actions subtree) and ChecksRollup's re-runs
+ *  (`CHECKS_REPAIR_DELAY_MS`: the PR subtree, the CI map and each re-run's run
+ *  detail) already repair at 4.5 s; the Actions panel's re-run and every
+ *  approval have no repair. After a repair, the arm costs one more read of each
+ *  active run list plus the PR reads it hands. */
 export function useRerunRun(repo: string) {
   const queryClient = useQueryClient();
   return useActionsMutation(
