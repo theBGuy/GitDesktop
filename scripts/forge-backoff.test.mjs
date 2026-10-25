@@ -25,9 +25,9 @@ import {
 
 // The held-call texts runner.rs returns in place of a spawn (its HELD_* constants).
 const HELD_TEXTS = [
-  "GitHub's REST API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts.",
-  "GitHub's GraphQL API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts.",
-  "GitHub's search API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  "GitHub's GraphQL API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  "GitHub's search API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
 ];
 
 const gh = (message) => ({ kind: "gh", message });

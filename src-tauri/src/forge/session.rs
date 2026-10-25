@@ -381,8 +381,16 @@ fn classify_gh_json_ok(stdout: &str) -> GhJsonProbe {
 pub(crate) fn gh_error_is_rate_limit(error: Option<&str>) -> bool {
     error.is_some_and(|e| {
         let e = e.to_lowercase();
-        e.contains("rate limit") || e.contains("abuse detection") || e.contains("http 429:")
+        e.contains("rate limit") || e.contains("abuse detection") || gh_error_has_429_signal(&e)
     })
+}
+
+/// Shared 429 signals keep rate-limit evidence and secondary backoff in agreement.
+pub(crate) fn gh_error_has_429_signal(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("http 429:")
+        || lower.contains("(http 429)")
+        || lower.contains("too many requests")
 }
 
 /// Transport-failure vocabulary shared by the gh and glab classifiers. "deadline
@@ -4324,6 +4332,37 @@ check your internet connection or https://githubstatus.com";
         for token in ["index[401]", "gitlab-429"] {
             assert_eq!(mask_host_tokens(token), token);
         }
+    }
+
+    #[test]
+    fn gh_bodyless_429_uses_the_shared_rate_limit_verdict() {
+        for stderr in [
+            "gh: Too Many Requests (HTTP 429)",
+            "gh: rejected (HTTP 429)",
+            "TOO MANY REQUESTS",
+            "too many requests; connection throttled",
+        ] {
+            assert!(gh_error_is_rate_limit(Some(stderr)), "{stderr}");
+            assert!(
+                matches!(classify_gh_failure(stderr), GhFailure::RateLimited),
+                "{stderr}"
+            );
+            for (health, _) in classify_both(&one_account("error", Some(stderr))) {
+                assert_eq!(health.state, SessionState::RateLimited, "{stderr}");
+            }
+        }
+        for stderr in [
+            "gh: rejected (HTTP 4290)",
+            "429 too many",
+            "HTTP 403: Forbidden (https://api.github.com/repos/o/r)",
+        ] {
+            assert!(!gh_error_is_rate_limit(Some(stderr)), "{stderr}");
+            assert!(
+                matches!(classify_gh_failure(stderr), GhFailure::Answered),
+                "{stderr}"
+            );
+        }
+        assert!(!gh_error_is_rate_limit(None));
     }
 
     #[test]

@@ -573,10 +573,10 @@ function RateLimitedNotice({
   // Re-read this repo's forge status and session health, plus the accounts list
   // behind Settings' "rate limited" badge, so no surface stays stuck without a
   // restart. The timer fires just past a known future reset, at most
-  // RATE_LIMIT_KNOWN_RESET_RECHECK_MS after the driving read; with no known
-  // reset, RATE_LIMIT_RECHECK_MS after it. A stale `checkedAt` fires at once,
-  // which stays bounded: each re-arm needs a fresh successful read to move
-  // `checkedAt`, never a tight loop.
+  // RATE_LIMIT_KNOWN_RESET_RECHECK_MS (plus the grace) after the driving
+  // read; with no known reset, RATE_LIMIT_RECHECK_MS after it. A stale
+  // `checkedAt` fires at once, which stays bounded: each re-arm needs a fresh
+  // successful read to move `checkedAt`, never a tight loop.
   useEffect(() => {
     const delay = rateLimitRecheckDelayMs(Date.now(), checkedAt, resetAt);
     const timer = setTimeout(() => {

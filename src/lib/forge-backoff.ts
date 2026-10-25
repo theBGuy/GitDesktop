@@ -30,7 +30,8 @@ export const RESET_GRACE_MS = 5_000;
  *  checking again when no future reset is known (null or past). */
 export const RATE_LIMIT_RECHECK_MS = 2 * 60_000;
 /** The longest a rate-limited panel waits after the driving read even with a
- *  known reset, so a terminal account switch or an early lift is noticed. */
+ *  known reset (plus at most the grace), so a terminal account switch or an
+ *  early lift is noticed. */
 export const RATE_LIMIT_KNOWN_RESET_RECHECK_MS = 10 * 60_000;
 
 function isAsciiAlphanumeric(c: string | undefined): boolean {

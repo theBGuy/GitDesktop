@@ -1,3 +1,3 @@
-- When one of GitHub's API rate limits runs out, GitDesktop waits for it to
-  reset instead of sending requests GitHub would refuse, and the rate-limit
-  notice checks back as soon as GitHub says access resumes.
+- When one of GitHub's API rate limits runs out, GitDesktop stops sending the
+  requests it covers until the limit lifts, and the rate-limit notice checks
+  back as soon as GitHub says access resumes.

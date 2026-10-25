@@ -333,11 +333,12 @@ async fn run_gh_raw_resolved_with(
     gate: &'static Mutex<RateGate>,
     epoch: u64,
 ) -> AppResult<GhOutput> {
+    let generation = gate.lock().unwrap_or_else(|p| p.into_inner()).generation;
     if let Some(held) = gate_before(gate, gh, gh_host, args, epoch) {
         return Ok(held);
     }
     let out = spawn_gh_resolved(gh, repo_path, gh_host, args, timeout).await?;
-    gate_after(gate, gh, gh_host, args, &out, epoch);
+    gate_after(gate, gh, gh_host, args, &out, epoch, generation);
     Ok(out)
 }
 
@@ -458,6 +459,10 @@ pub async fn run_gh_input_raw(
         None => None,
     };
     let epoch = gh_auth_epoch();
+    let generation = rate_gate()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .generation;
     if let Some(held) = gate_before(rate_gate(), &gh, gh_host.as_deref(), args, epoch) {
         return Ok(held);
     }
@@ -503,7 +508,15 @@ pub async fn run_gh_input_raw(
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code().unwrap_or(-1),
     };
-    gate_after(rate_gate(), &gh, gh_host.as_deref(), args, &out, epoch);
+    gate_after(
+        rate_gate(),
+        &gh,
+        gh_host.as_deref(),
+        args,
+        &out,
+        epoch,
+        generation,
+    );
     Ok(out)
 }
 
@@ -874,9 +887,9 @@ const CLOCK_SLACK_SECS: i64 = 60;
 // GitHub's advisory rate_limit read must settle even when the network stalls.
 const RATE_LIMIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-const HELD_CORE: &str = "GitHub's REST API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts.";
-const HELD_GRAPHQL: &str = "GitHub's GraphQL API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts.";
-const HELD_SEARCH: &str = "GitHub's search API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts.";
+const HELD_CORE: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+const HELD_GRAPHQL: &str = "GitHub's GraphQL API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+const HELD_SEARCH: &str = "GitHub's search API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Bucket {
@@ -920,6 +933,7 @@ struct HoldEntry {
     until: i64,
     recheck_at: i64,
     epoch: u64,
+    generation: u64,
     strikes: u32,
     kind: LimitKind,
     probe_pending: bool,
@@ -928,6 +942,7 @@ struct HoldEntry {
 #[derive(Default)]
 struct RateGate {
     entries: HashMap<RateKey, HoldEntry>,
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1062,15 +1077,20 @@ fn failure_bucket(class: CallClass, headers: &str, stderr: &str) -> Option<Bucke
     }
 }
 
+fn is_rate_limit_response(stderr: &str, headers: &str) -> bool {
+    crate::forge::session::gh_error_is_rate_limit(Some(stderr))
+        || parse_status(headers) == Some(429)
+}
+
 fn limit_evidence(class: CallClass, out: &GhOutput, now: i64) -> Option<LimitEvidence> {
-    if class == CallClass::Exempt
-        || out.code == 0
-        || !crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr))
-    {
+    if class == CallClass::Exempt || out.code == 0 {
         return None;
     }
     let stdout = out.stdout_lossy();
     let (headers, _) = split_response(&stdout);
+    if !is_rate_limit_response(&out.stderr, headers) {
+        return None;
+    }
     let lower = out.stderr.to_lowercase();
     let bucket = failure_bucket(class, headers, &lower)?;
     let empty = response_header_value(headers, "x-ratelimit-remaining").as_deref() == Some("0");
@@ -1078,7 +1098,10 @@ fn limit_evidence(class: CallClass, out: &GhOutput, now: i64) -> Option<LimitEvi
         LimitKind::Secondary
     } else if lower.contains("api rate limit exceeded") || lower.contains("already exceeded") {
         LimitKind::Primary
-    } else if (lower.contains("http 429:") || lower.contains("(http 429)")) && !empty {
+    } else if (crate::forge::session::gh_error_has_429_signal(&lower)
+        || parse_status(headers) == Some(429))
+        && !empty
+    {
         LimitKind::Secondary
     } else {
         LimitKind::Primary
@@ -1115,7 +1138,8 @@ fn is_bucket_success(out: &GhOutput) -> bool {
 }
 
 fn is_answered_non_limit(out: &GhOutput) -> bool {
-    if out.code == 0 || crate::forge::session::gh_error_is_rate_limit(Some(&out.stderr)) {
+    let stdout = out.stdout_lossy();
+    if out.code == 0 || is_rate_limit_response(&out.stderr, split_response(&stdout).0) {
         return false;
     }
     let lower = out.stderr.to_lowercase();
@@ -1158,7 +1182,7 @@ impl RateGate {
         let Some(entry) = self.entries.get_mut(key) else {
             return Verdict::Pass;
         };
-        // Only Primary uses the recheck bound; Secondary's recheck_at equals its until.
+        // Only Primary uses recheck_at; a Secondary hold ignores it and runs to its until.
         if entry.epoch != epoch
             || entry.until > now.saturating_add(MAX_HOLD_SECS + CLOCK_SLACK_SECS)
             || (entry.kind == LimitKind::Primary
@@ -1178,7 +1202,14 @@ impl RateGate {
         Verdict::Hold
     }
 
-    fn record(&mut self, key: RateKey, ev: LimitEvidence, now: i64, epoch: u64) -> bool {
+    fn record(
+        &mut self,
+        key: RateKey,
+        ev: LimitEvidence,
+        now: i64,
+        epoch: u64,
+        generation: u64,
+    ) -> bool {
         if self
             .entries
             .get(&key)
@@ -1186,14 +1217,19 @@ impl RateGate {
         {
             return false;
         }
+        self.generation = self.generation.saturating_add(1);
         let mut prior = self
             .entries
             .get_mut(&key)
             .filter(|entry| entry.epoch == epoch);
         if let Some(entry) = prior.as_mut().filter(|entry| now < entry.until) {
             if let Some(until) = ev.until_hint {
-                entry.until = until.min(now.saturating_add(MAX_HOLD_SECS));
+                let until = until.min(now.saturating_add(MAX_HOLD_SECS));
+                if generation >= entry.generation || until > entry.until {
+                    entry.until = until;
+                }
             }
+            entry.generation = self.generation;
             return false;
         }
         let strikes = if ev.kind == LimitKind::Secondary {
@@ -1222,6 +1258,7 @@ impl RateGate {
                     until
                 },
                 epoch,
+                generation: self.generation,
                 strikes,
                 kind: ev.kind,
                 probe_pending,
@@ -1237,6 +1274,7 @@ impl RateGate {
         at_record: bool,
         now: i64,
         epoch: u64,
+        generation: u64,
     ) -> bool {
         let Some(entry) = self
             .entries
@@ -1246,6 +1284,17 @@ impl RateGate {
             return false;
         };
         entry.probe_pending = false;
+        // A probe predating a newer refusal may lengthen its hold, but never weaken it.
+        if generation < entry.generation {
+            if let Some((0, reset)) = reading.filter(|(_, reset)| *reset > now) {
+                let until = reset.min(now.saturating_add(MAX_HOLD_SECS));
+                if until > entry.until {
+                    entry.until = until;
+                    entry.recheck_at = entry.recheck_at.min(until);
+                }
+            }
+            return false;
+        }
         match reading {
             Some((0, reset)) if reset > now => {
                 entry.until = reset.min(now.saturating_add(MAX_HOLD_SECS));
@@ -1331,13 +1380,14 @@ fn gate_after(
     args: &[&str],
     out: &GhOutput,
     epoch: u64,
+    generation: u64,
 ) {
     gate_after_inner(
         gate,
         gh_host,
         args,
         out,
-        (epoch, gh_auth_epoch()),
+        (epoch, gh_auth_epoch(), generation),
         now_epoch_secs(),
         |key, at_record| {
             spawn_probe(gate, gh.to_path_buf(), key, at_record, epoch);
@@ -1350,7 +1400,7 @@ fn gate_after_inner(
     gh_host: Option<&str>,
     args: &[&str],
     out: &GhOutput,
-    (epoch, current_epoch): (u64, u64),
+    (epoch, current_epoch, generation): (u64, u64, u64),
     now: i64,
     probe: impl FnOnce(RateKey, bool),
 ) {
@@ -1368,18 +1418,29 @@ fn gate_after_inner(
     {
         // An Ungated success clears nothing because its bucket is unknown.
         if let CallClass::Gated(bucket) = class {
-            gate.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clear(&(host, bucket));
+            let mut gate = gate.lock().unwrap_or_else(|p| p.into_inner());
+            let key = (host, bucket);
+            if gate
+                .entries
+                .get(&key)
+                .is_some_and(|entry| generation >= entry.generation)
+            {
+                gate.clear(&key);
+            }
         }
         return;
     }
+    // Late refusals still record after a newer success because over-holding is safer.
+    // Generation checks permit extending a newer hold, but prevent shortening it.
     if let Some(ev) = limit_evidence(class, out, now) {
         let key = (host, ev.bucket);
-        let should_probe =
-            gate.lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .record(key.clone(), ev, now, epoch);
+        let should_probe = gate.lock().unwrap_or_else(|p| p.into_inner()).record(
+            key.clone(),
+            ev,
+            now,
+            epoch,
+            generation,
+        );
         if should_probe {
             probe(key, true);
         }
@@ -1406,6 +1467,7 @@ fn spawn_probe_with(
     epoch: u64,
     fut: impl std::future::Future<Output = Option<String>> + Send + 'static,
 ) {
+    let generation = gate.lock().unwrap_or_else(|p| p.into_inner()).generation;
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         gate.lock().unwrap_or_else(|p| p.into_inner()).apply_probe(
             &key,
@@ -1413,6 +1475,7 @@ fn spawn_probe_with(
             at_record,
             now_epoch_secs(),
             epoch,
+            generation,
         );
         return;
     };
@@ -1424,6 +1487,7 @@ fn spawn_probe_with(
             at_record,
             now_epoch_secs(),
             epoch,
+            generation,
         );
     });
 }
@@ -1581,7 +1645,8 @@ mod tests {
             (&["issue", "view", "1"], "HTTP 429: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)", Some((Graphql, Primary))),
             (&["api", "repos/o/r"], "gh: API rate limit exceeded for user ID 1. (HTTP 429)", Some((Core, Primary))),
             (&["api", "repos/o/r"], "HTTP 429: Too Many Requests (https://api.github.com/repos/o/r)", Some((Core, Secondary))),
-            (&["api", "repos/o/r"], "gh: Too Many Requests (HTTP 429)", None),
+            (&["api", "repos/o/r"], "gh: Too Many Requests (HTTP 429)", Some((Core, Secondary))),
+            (&["api", "repos/o/r"], "HTTP 403: Forbidden (https://api.github.com/repos/o/r)", None),
             (&["api", "user"], "gh: Resource not accessible by integration (HTTP 403)", None),
             (&["auth", "status"], "GraphQL: API rate limit exceeded", None),
             (&["api", "rate_limit"], "API rate limit exceeded", None),
@@ -1660,22 +1725,48 @@ mod tests {
     fn rate_primary_probes_and_rechecks() {
         let mut gate = RateGate::default();
         let key = rate_key();
-        assert!(gate.record(key.clone(), rate_ev(LimitKind::Primary, None), RATE_NOW, 7));
+        assert!(gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0
+        ));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
         assert!(gate.entries[&key].probe_pending);
-        assert!(!gate.apply_probe(&key, Some((0, RATE_NOW + 1800)), true, RATE_NOW, 7));
+        assert!(!gate.apply_probe(
+            &key,
+            Some((0, RATE_NOW + 1800)),
+            true,
+            RATE_NOW,
+            7,
+            gate.generation
+        ));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 1800);
         assert_eq!(gate.entries[&key].recheck_at, RATE_NOW + 300);
         assert_eq!(gate.verdict(&key, RATE_NOW + 10, 7), Verdict::Hold);
         assert_eq!(gate.verdict(&key, RATE_NOW + 300, 7), Verdict::Recheck);
         assert_eq!(gate.verdict(&key, RATE_NOW + 300, 7), Verdict::Hold);
-        assert!(gate.apply_probe(&key, Some((4000, 0)), false, RATE_NOW + 300, 7));
+        assert!(gate.apply_probe(
+            &key,
+            Some((4000, 0)),
+            false,
+            RATE_NOW + 300,
+            7,
+            gate.generation
+        ));
         assert!(!gate.entries.contains_key(&key));
-        gate.record(key.clone(), rate_ev(LimitKind::Primary, None), RATE_NOW, 7);
-        assert!(!gate.apply_probe(&key, Some((4000, 0)), true, RATE_NOW, 7));
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0,
+        );
+        assert!(!gate.apply_probe(&key, Some((4000, 0)), true, RATE_NOW, 7, gate.generation));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
         for at_record in [true, false] {
-            assert!(!gate.apply_probe(&key, None, at_record, RATE_NOW, 7));
+            assert!(!gate.apply_probe(&key, None, at_record, RATE_NOW, 7, gate.generation));
             assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
         }
         assert_eq!(gate.verdict(&key, RATE_NOW + 60, 7), Verdict::Pass);
@@ -1684,9 +1775,9 @@ mod tests {
     #[test]
     fn rate_held_copy_keeps_existing_failure_class() {
         for (bucket, expected) in [
-            (Bucket::Core, "GitHub's REST API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts."),
-            (Bucket::Graphql, "GitHub's GraphQL API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts."),
-            (Bucket::Search, "GitHub's search API rate limit is used up, so GitDesktop didn't send this request. Try again once the limit lifts."),
+            (Bucket::Core, "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts."),
+            (Bucket::Graphql, "GitHub's GraphQL API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts."),
+            (Bucket::Search, "GitHub's search API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts."),
         ] {
             let out = held_output(bucket);
             assert_eq!(out.code, 1);
@@ -1715,7 +1806,7 @@ mod tests {
         let key = rate_key();
         let mut now = RATE_NOW;
         for (index, wait) in [60, 120, 240, 480, 900, 900].into_iter().enumerate() {
-            assert!(!gate.record(key.clone(), rate_ev(LimitKind::Secondary, None), now, 7));
+            assert!(!gate.record(key.clone(), rate_ev(LimitKind::Secondary, None), now, 7, 0));
             assert_eq!(gate.entries[&key].until, now + wait);
             assert_eq!(gate.entries[&key].strikes, index as u32 + 1);
             assert_eq!(gate.verdict(&key, now, 7), Verdict::Hold);
@@ -1723,7 +1814,7 @@ mod tests {
             assert_eq!(gate.verdict(&key, now, 7), Verdict::Pass);
         }
         gate.clear(&key);
-        gate.record(key.clone(), rate_ev(LimitKind::Secondary, None), now, 7);
+        gate.record(key.clone(), rate_ev(LimitKind::Secondary, None), now, 7, 0);
         assert_eq!(gate.entries[&key].until, now + 60);
     }
 
@@ -1731,12 +1822,38 @@ mod tests {
     fn rate_epoch_invalidates_and_ignores_old_probe() {
         let mut gate = RateGate::default();
         let key = rate_key();
-        gate.record(key.clone(), rate_ev(LimitKind::Primary, None), RATE_NOW, 7);
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0,
+        );
         assert_eq!(gate.verdict(&key, RATE_NOW, 8), Verdict::Pass);
         assert!(!gate.entries.contains_key(&key));
-        assert!(!gate.apply_probe(&key, Some((0, RATE_NOW + 900)), true, RATE_NOW, 7));
-        gate.record(key.clone(), rate_ev(LimitKind::Primary, None), RATE_NOW, 8);
-        assert!(!gate.apply_probe(&key, Some((0, RATE_NOW + 900)), true, RATE_NOW, 7));
+        assert!(!gate.apply_probe(
+            &key,
+            Some((0, RATE_NOW + 900)),
+            true,
+            RATE_NOW,
+            7,
+            gate.generation
+        ));
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            8,
+            0,
+        );
+        assert!(!gate.apply_probe(
+            &key,
+            Some((0, RATE_NOW + 900)),
+            true,
+            RATE_NOW,
+            7,
+            gate.generation
+        ));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
     }
 
@@ -1751,17 +1868,31 @@ mod tests {
                 rate_ev(kind, Some(RATE_NOW + 86400)),
                 RATE_NOW,
                 7,
+                0,
             );
             assert_eq!(gate.entries[&key].until, RATE_NOW + 3660);
         }
-        gate.apply_probe(&key, Some((0, RATE_NOW + 86400)), true, RATE_NOW, 7);
+        gate.apply_probe(
+            &key,
+            Some((0, RATE_NOW + 86400)),
+            true,
+            RATE_NOW,
+            7,
+            gate.generation,
+        );
         assert_eq!(gate.entries[&key].until, RATE_NOW + 3660);
     }
 
     #[test]
     fn rate_buckets_and_hosts_are_independent() {
         let mut gate = RateGate::default();
-        gate.record(rate_key(), rate_ev(LimitKind::Primary, None), RATE_NOW, 7);
+        gate.record(
+            rate_key(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0,
+        );
         for key in [
             (Some("github.com".into()), Bucket::Graphql),
             (Some("github.com".into()), Bucket::Search),
@@ -1781,12 +1912,14 @@ mod tests {
             rate_ev(LimitKind::Secondary, None),
             RATE_NOW,
             7,
+            0,
         );
         assert!(!gate.record(
             key.clone(),
             rate_ev(LimitKind::Secondary, None),
             RATE_NOW + 1,
-            7
+            7,
+            0
         ));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
         assert_eq!(gate.entries[&key].strikes, 1);
@@ -1794,7 +1927,8 @@ mod tests {
             key.clone(),
             rate_ev(LimitKind::Secondary, Some(RATE_NOW + 900)),
             RATE_NOW + 1,
-            7
+            7,
+            0
         ));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 900);
         assert_eq!(gate.entries[&key].strikes, 1);
@@ -1840,6 +1974,7 @@ mod tests {
             rate_ev(LimitKind::Primary, Some(now + 3600)),
             now,
             7,
+            0,
         );
     }
 
@@ -1894,6 +2029,7 @@ mod tests {
             rate_ev(LimitKind::Primary, None),
             now,
             7,
+            0,
         );
         let notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = notify.clone();
@@ -1942,6 +2078,7 @@ mod tests {
                 rate_ev(LimitKind::Primary, Some(RATE_NOW + 1800)),
                 RATE_NOW,
                 7,
+                0,
             );
             assert_eq!(gate.verdict(&key, RATE_NOW - rollback, 7), expected);
             assert_eq!(gate.entries.contains_key(&key), expected != Verdict::Pass);
@@ -1952,6 +2089,7 @@ mod tests {
             rate_ev(LimitKind::Secondary, Some(RATE_NOW + 900)),
             RATE_NOW,
             7,
+            0,
         );
         assert_eq!(gate.verdict(&key, RATE_NOW, 7), Verdict::Hold);
         assert_eq!(gate.verdict(&key, RATE_NOW - 4000, 7), Verdict::Pass);
@@ -1982,12 +2120,14 @@ mod tests {
                 rate_ev(LimitKind::Secondary, None),
                 RATE_NOW,
                 7,
+                0,
             );
             gate.record(
                 key.clone(),
                 rate_ev(LimitKind::Secondary, None),
                 RATE_NOW + 60,
                 7,
+                0,
             );
             assert_eq!(gate.entries[&key].strikes, 2);
             let out = rate_out(stderr, "");
@@ -1998,7 +2138,7 @@ mod tests {
                 Some("github.com"),
                 &["api", "user"],
                 &out,
-                (7, 7),
+                (7, 7, 2),
                 RATE_NOW + 61,
                 |_, _| panic!("an active secondary hold must not start a probe"),
             );
@@ -2014,6 +2154,7 @@ mod tests {
                     rate_ev(LimitKind::Secondary, None),
                     RATE_NOW + 61,
                     7,
+                    0,
                 );
                 assert_eq!(gate.entries[&key].until, RATE_NOW + 121);
             }
@@ -2032,7 +2173,7 @@ mod tests {
             Some("github.com"),
             &["issue", "view", "1"],
             &rate_out("GraphQL: API rate limit exceeded", ""),
-            (7, 8),
+            (7, 8, 0),
             RATE_NOW,
             |_, _| {
                 probes += 1;
@@ -2082,6 +2223,7 @@ mod tests {
                     },
                     now,
                     8,
+                    0,
                 );
             }
             let gate = Mutex::new(gate);
@@ -2091,7 +2233,7 @@ mod tests {
                 Some("github.com"),
                 args,
                 &out,
-                (7, 8),
+                (7, 8, 2),
                 RATE_NOW + 61,
                 |_, _| {
                     probes += 1;
@@ -2127,6 +2269,7 @@ mod tests {
                 },
                 now,
                 8,
+                0,
             );
         }
         for now in [RATE_NOW + 61, RATE_NOW + 181] {
@@ -2143,7 +2286,8 @@ mod tests {
                             until_hint,
                         },
                         now,
-                        7
+                        7,
+                        0
                     ),
                     "an older epoch must not request a probe"
                 );
@@ -2175,6 +2319,7 @@ mod tests {
                     },
                     RATE_NOW,
                     7,
+                    0,
                 );
             }
             let mut out = rate_out("", "");
@@ -2184,7 +2329,7 @@ mod tests {
                 Some("github.com"),
                 args,
                 &out,
-                (7, 7),
+                (7, 7, 2),
                 RATE_NOW,
                 |_, _| panic!("success must not start a probe"),
             );
@@ -2209,7 +2354,7 @@ mod tests {
                 Some("github.com"),
                 args,
                 &out,
-                (7, 7),
+                (7, 7, 0),
                 RATE_NOW,
                 |_, _| panic!("exempt calls must not start a probe"),
             );
@@ -2230,6 +2375,7 @@ mod tests {
             rate_ev(LimitKind::Primary, Some(RATE_NOW + 1800)),
             RATE_NOW,
             7,
+            0,
         );
         let mut probes = 0;
         for _ in 0..2 {
@@ -2268,6 +2414,462 @@ mod tests {
                 |_, _| panic!("ungated and exempt calls must not start a recheck")
             )
             .is_none());
+        }
+    }
+
+    #[test]
+    fn rate_bodyless_429_records_secondary_hold() {
+        for (headers, wait) in [
+            ("", 60),
+            (
+                "HTTP/2.0 429 Too Many Requests\r\nRetry-After: 120\r\n\r\n",
+                120,
+            ),
+        ] {
+            let gate = Mutex::new(RateGate::default());
+            let mut probes = 0;
+            gate_after_inner(
+                &gate,
+                Some("github.com"),
+                &["api", "-i", "user"],
+                &rate_out("gh: Too Many Requests (HTTP 429)", headers),
+                (7, 7, 0),
+                RATE_NOW,
+                |_, _| {
+                    probes += 1;
+                },
+            );
+            let gate = gate.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = gate
+                .entries
+                .get(&rate_key())
+                .expect("a body-less 429 must record a hold");
+            assert_eq!(entry.kind, LimitKind::Secondary);
+            assert_eq!(entry.until, RATE_NOW + wait);
+            assert_eq!(entry.strikes, 1);
+            assert_eq!(probes, 0);
+        }
+    }
+
+    #[test]
+    fn rate_status_or_phrase_is_evidence_but_bare_403_is_not() {
+        let class = classify_call(&["api", "-i", "user"]);
+        for out in [
+            rate_out(
+                "",
+                "HTTP/2.0 429 Too Many Requests\r\nRetry-After: 120\r\n\r\n",
+            ),
+            rate_out("gh: TOO MANY REQUESTS (HTTP 403)", ""),
+            rate_out("gh: rejected (HTTP 429)", ""),
+        ] {
+            assert!(limit_evidence(class, &out, RATE_NOW).is_some());
+            assert!(!is_answered_non_limit(&out));
+        }
+        let permission = rate_out(
+            "HTTP 403: Forbidden (https://api.github.com/repos/o/r)",
+            "HTTP/2.0 403 Forbidden\r\n\r\n",
+        );
+        assert!(limit_evidence(class, &permission, RATE_NOW).is_none());
+        assert!(is_answered_non_limit(&permission));
+        let not_status = rate_out("gh: rejected (HTTP 4290)", "");
+        assert!(limit_evidence(class, &not_status, RATE_NOW).is_none());
+    }
+
+    fn generation_five_hold() -> Mutex<RateGate> {
+        let mut gate = RateGate {
+            generation: 5,
+            ..RateGate::default()
+        };
+        gate.entries.insert(
+            rate_key(),
+            HoldEntry {
+                until: RATE_NOW + 180,
+                recheck_at: RATE_NOW + 180,
+                epoch: 7,
+                generation: 5,
+                strikes: 2,
+                kind: LimitKind::Secondary,
+                probe_pending: false,
+            },
+        );
+        Mutex::new(gate)
+    }
+
+    #[test]
+    fn rate_success_cannot_clear_a_newer_generation() {
+        for status in [200, 304] {
+            for generation in [4, 5, 6] {
+                let gate = generation_five_hold();
+                let mut out = rate_out("", &format!("HTTP/2.0 {status} Response\r\n\r\n"));
+                out.code = if status == 200 { 0 } else { 1 };
+                gate_after_inner(
+                    &gate,
+                    Some("github.com"),
+                    &["api", "user"],
+                    &out,
+                    (7, 7, generation),
+                    RATE_NOW + 61,
+                    |_, _| panic!("success must not start a probe"),
+                );
+                let gate = gate.lock().unwrap_or_else(|p| p.into_inner());
+                assert_eq!(
+                    gate.entries.contains_key(&rate_key()),
+                    generation < 5,
+                    "a success may only clear a hold that predates its call"
+                );
+                if generation < 5 {
+                    let entry = &gate.entries[&rate_key()];
+                    assert_eq!(entry.generation, 5);
+                    assert_eq!(entry.strikes, 2);
+                    assert_eq!(entry.until, RATE_NOW + 180);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rate_answered_404_cannot_clear_a_newer_generation() {
+        for generation in [4, 5, 6] {
+            let gate = generation_five_hold();
+            gate_after_inner(
+                &gate,
+                Some("github.com"),
+                &["api", "user"],
+                &rate_out("gh: Not Found (HTTP 404)", ""),
+                (7, 7, generation),
+                RATE_NOW + 61,
+                |_, _| panic!("an answered 404 must not start a probe"),
+            );
+            let gate = gate.lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(
+                gate.entries.contains_key(&rate_key()),
+                generation < 5,
+                "an answered 404 may only clear a hold that predates its call"
+            );
+            if generation < 5 {
+                let entry = &gate.entries[&rate_key()];
+                assert_eq!(entry.generation, 5);
+                assert_eq!(entry.strikes, 2);
+                assert_eq!(entry.until, RATE_NOW + 180);
+            }
+        }
+    }
+
+    #[test]
+    fn rate_old_generation_failures_still_record_and_extend() {
+        let gate = generation_five_hold();
+        let key = rate_key();
+        for (headers, expected_generation) in [
+            ("HTTP/2.0 403 Forbidden\r\nRetry-After: 900\r\n\r\n", 6),
+            ("", 7),
+        ] {
+            gate_after_inner(
+                &gate,
+                Some("github.com"),
+                &["api", "user"],
+                &rate_out("secondary rate limit", headers),
+                (7, 7, 4),
+                RATE_NOW + 61,
+                |_, _| panic!("secondary limits must not start a probe"),
+            );
+            let guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(
+                guard.generation, expected_generation,
+                "each refusal must advance the generation"
+            );
+            assert_eq!(guard.entries[&key].generation, expected_generation);
+            assert_eq!(guard.entries[&key].until, RATE_NOW + 961);
+            assert_eq!(guard.entries[&key].strikes, 2);
+        }
+        gate.lock().unwrap_or_else(|p| p.into_inner()).clear(&key);
+        let mut probes = 0;
+        gate_after_inner(
+            &gate,
+            Some("github.com"),
+            &["api", "user"],
+            &rate_out("API rate limit exceeded", ""),
+            (7, 7, 4),
+            RATE_NOW + 62,
+            |_, at_record| {
+                assert!(at_record);
+                probes += 1;
+            },
+        );
+        let guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+        assert_eq!(guard.generation, 8);
+        assert_eq!(guard.entries[&key].generation, 8);
+        assert_eq!(guard.entries[&key].until, RATE_NOW + 122);
+        assert_eq!(probes, 1);
+    }
+
+    #[test]
+    fn rate_stale_probe_can_lengthen_a_repeated_refusal() {
+        for at_record in [true, false] {
+            for reset in [RATE_NOW + 3000, RATE_NOW + 86400] {
+                let mut gate = RateGate::default();
+                let key = rate_key();
+                gate.record(
+                    key.clone(),
+                    rate_ev(LimitKind::Primary, None),
+                    RATE_NOW,
+                    7,
+                    0,
+                );
+                let generation = gate.generation;
+                gate.record(
+                    key.clone(),
+                    rate_ev(LimitKind::Primary, None),
+                    RATE_NOW + 1,
+                    7,
+                    0,
+                );
+                assert!(!gate.apply_probe(
+                    &key,
+                    Some((0, reset)),
+                    at_record,
+                    RATE_NOW + 2,
+                    7,
+                    generation,
+                ));
+                let entry = &gate.entries[&key];
+                assert_eq!(
+                    entry.until,
+                    reset.min(RATE_NOW + 2 + MAX_HOLD_SECS),
+                    "a stale probe must retain a later exhausted-bucket reset"
+                );
+                assert_eq!(entry.recheck_at, RATE_NOW + 60);
+                assert_eq!(entry.generation, generation + 1);
+                assert_eq!(entry.strikes, 0);
+                assert!(!entry.probe_pending);
+            }
+        }
+    }
+
+    #[test]
+    fn rate_probe_results_respect_generation() {
+        let key = rate_key();
+        for at_record in [false, true] {
+            for reading in [Some((4000, 0)), Some((0, RATE_NOW + 120)), None] {
+                let gate = generation_five_hold();
+                let mut gate = gate.lock().unwrap_or_else(|p| p.into_inner());
+                gate.entries.get_mut(&key).unwrap().probe_pending = true;
+                let generation = gate.generation;
+                gate.record(
+                    key.clone(),
+                    rate_ev(LimitKind::Secondary, Some(RATE_NOW + 900)),
+                    RATE_NOW + 1,
+                    7,
+                    generation,
+                );
+                assert!(
+                    !gate.apply_probe(&key, reading, at_record, RATE_NOW + 2, 7, generation,),
+                    "a stale probe must not remove a newer hold"
+                );
+                let entry = &gate.entries[&key];
+                assert_eq!(
+                    entry.until,
+                    RATE_NOW + 900,
+                    "a stale probe must not shorten a newer hold"
+                );
+                assert_eq!(entry.recheck_at, RATE_NOW + 180);
+                assert_eq!(entry.strikes, 2);
+                assert_eq!(entry.kind, LimitKind::Secondary);
+                assert_eq!(entry.epoch, 7);
+                assert_eq!(entry.generation, 6);
+                assert!(!entry.probe_pending);
+            }
+        }
+
+        let mut gate = RateGate::default();
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0,
+        );
+        let generation = gate.generation;
+        assert!(!gate.apply_probe(
+            &key,
+            Some((0, RATE_NOW + 1800)),
+            true,
+            RATE_NOW,
+            7,
+            generation,
+        ));
+        assert_eq!(gate.entries[&key].until, RATE_NOW + 1800);
+        assert_eq!(gate.entries[&key].recheck_at, RATE_NOW + 300);
+        assert_eq!(gate.verdict(&key, RATE_NOW + 300, 7), Verdict::Recheck);
+        assert!(gate.apply_probe(&key, Some((4000, 0)), false, RATE_NOW + 300, 7, generation,));
+        assert!(!gate.entries.contains_key(&key));
+    }
+
+    #[tokio::test]
+    async fn rate_probe_captures_generation_before_await() {
+        static GATE: OnceLock<Mutex<RateGate>> = OnceLock::new();
+        let gate = GATE.get_or_init(|| Mutex::new(RateGate::default()));
+        let key = rate_key();
+        for at_record in [true, false] {
+            let now = now_epoch_secs();
+            {
+                let mut guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+                guard.clear(&key);
+                guard.record(key.clone(), rate_ev(LimitKind::Primary, None), now, 7, 0);
+            }
+            let (sent, received) = tokio::sync::oneshot::channel();
+            spawn_probe_with(gate, key.clone(), at_record, 7, async move {
+                received.await.unwrap();
+                Some(format!(
+                    r#"{{"resources":{{"core":{{"remaining":4000,"reset":{now}}}}}}}"#
+                ))
+            });
+            gate.lock().unwrap_or_else(|p| p.into_inner()).record(
+                key.clone(),
+                rate_ev(LimitKind::Primary, Some(now + 900)),
+                now,
+                7,
+                0,
+            );
+            sent.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let settled = gate
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .entries
+                        .get(&key)
+                        .is_none_or(|entry| !entry.probe_pending);
+                    if settled {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the detached probe must finish within the test deadline");
+            let guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = guard
+                .entries
+                .get(&key)
+                .expect("a detached stale probe must keep the newer hold");
+            assert_eq!(entry.until, now + 900);
+            assert!(!entry.probe_pending);
+        }
+    }
+
+    #[test]
+    fn rate_old_generation_header_cannot_shorten_hold() {
+        for generation in [4, 5, 6] {
+            let gate = generation_five_hold();
+            gate_after_inner(
+                &gate,
+                Some("github.com"),
+                &["api", "user"],
+                &rate_out(
+                    "secondary rate limit",
+                    "HTTP/2.0 429 Too Many Requests\r\nRetry-After: 60\r\n\r\n",
+                ),
+                (7, 7, generation),
+                RATE_NOW + 60,
+                |_, _| panic!("a secondary refusal must not start a probe"),
+            );
+            let guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = &guard.entries[&rate_key()];
+            assert_eq!(
+                entry.until,
+                RATE_NOW + if generation < 5 { 180 } else { 120 },
+                "a stale refusal may extend a newer hold but must not shorten it"
+            );
+            assert_eq!(entry.strikes, 2);
+            assert_eq!(entry.generation, 6);
+        }
+    }
+
+    #[test]
+    fn rate_429_signal_forms_agree_on_evidence_and_kind() {
+        for (stderr, headers, stderr_signal, evidence) in [
+            ("http 429:", "", true, true),
+            ("(http 429)", "", true, true),
+            ("too many requests", "", true, true),
+            ("gh: Too Many Requests (HTTP 429)", "", true, true),
+            ("", "HTTP/2.0 429 Too Many Requests\r\n\r\n", false, true),
+            ("(http 4290)", "", false, false),
+            ("429 too many", "", false, false),
+        ] {
+            assert_eq!(
+                crate::forge::session::gh_error_has_429_signal(stderr),
+                stderr_signal,
+                "{stderr}"
+            );
+            assert_eq!(
+                crate::forge::session::gh_error_is_rate_limit(Some(stderr)),
+                stderr_signal,
+                "{stderr}"
+            );
+            assert_eq!(
+                is_rate_limit_response(stderr, headers),
+                evidence,
+                "{stderr}"
+            );
+            assert_eq!(
+                limit_evidence(
+                    CallClass::Gated(Bucket::Core),
+                    &rate_out(stderr, headers),
+                    RATE_NOW,
+                )
+                .map(|ev| ev.kind),
+                evidence.then_some(LimitKind::Secondary),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn rate_new_429_signals_use_secondary_backoff() {
+        for (stderr, headers, kind) in [
+            (
+                "",
+                "HTTP/2.0 429 Too Many Requests\r\n\r\n",
+                LimitKind::Secondary,
+            ),
+            ("too many requests", "", LimitKind::Secondary),
+            (
+                "API rate limit exceeded",
+                "HTTP/2.0 429 Too Many Requests\r\n\r\n",
+                LimitKind::Primary,
+            ),
+            (
+                "",
+                "HTTP/2.0 429 Too Many Requests\r\nX-Ratelimit-Remaining: 0\r\n\r\n",
+                LimitKind::Primary,
+            ),
+            (
+                "too many requests",
+                "HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\n\r\n",
+                LimitKind::Primary,
+            ),
+        ] {
+            let gate = Mutex::new(RateGate::default());
+            let mut probes = 0;
+            gate_after_inner(
+                &gate,
+                Some("github.com"),
+                &["api", "-i", "user"],
+                &rate_out(stderr, headers),
+                (7, 7, 0),
+                RATE_NOW,
+                |_, _| {
+                    probes += 1;
+                },
+            );
+            let guard = gate.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = &guard.entries[&rate_key()];
+            assert_eq!(
+                entry.kind, kind,
+                "429 evidence without primary signals must be secondary"
+            );
+            assert_eq!(probes, usize::from(kind == LimitKind::Primary));
+            assert_eq!(entry.until, RATE_NOW + 60);
         }
     }
 
