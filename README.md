@@ -985,11 +985,13 @@ GitDesktop tells an **expired-or-revoked session** apart from
 never-signed-in, network blips, and a **GitHub API rate limit** (GitLab's
 too, when its CLI names the limit). An expired session gets a badge with
 one-click **Reconnect**; a rate limit gets its own badge, with the time
-access resumes when GitHub reports it and nothing to reconnect. It also
-**warns before a token lapses**: GitLab and GitHub PAT expiry, plus an
-optional Bitbucket **expiry date** you supply. For GitLab it nudges the
-**browser (OAuth)** option, whose sessions renew themselves instead of
-expiring.
+access resumes when GitHub reports it and nothing to reconnect. While a
+GitHub rate limit is in effect, GitDesktop doesn't send most of the requests
+the limit covers until it lifts, and most actions that need one say so.
+GitDesktop also **warns before a token lapses**: GitLab and GitHub PAT
+expiry, plus an optional Bitbucket **expiry date** you supply. For GitLab
+it nudges the **browser (OAuth)** option, whose sessions renew themselves
+instead of expiring.
 
 ### Coding agent sessions
 

@@ -461,8 +461,7 @@ fn classify_or_reject(
 ) -> AppResult<(GlFindingAvailability, Option<String>)> {
     let (availability, detail) = classify_call_failure(stdout, stderr);
     let transport_residue = mask_host_tokens(stderr);
-    let rate_limited = gh_error_is_rate_limit(Some(stderr))
-        || stderr.to_ascii_lowercase().contains("too many requests");
+    let rate_limited = gh_error_is_rate_limit(Some(stderr));
     if availability == GlFindingAvailability::Indeterminate
         && !rate_limited
         && gh_error_is_network(Some(&transport_residue))

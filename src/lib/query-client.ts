@@ -1,5 +1,6 @@
 import { onlineManager, QueryClient } from "@tanstack/react-query";
 import { installAccountChangeReset } from "./account-change";
+import { shouldRetryQuery } from "./forge-backoff";
 import { shouldParkOnOffline } from "./offline-park";
 
 // Module-level so non-React code (e.g. the automations runner) can
@@ -7,7 +8,9 @@ import { shouldParkOnOffline } from "./offline-park";
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 1,
+      // One retry, but none for rate limits or credential verdicts: neither
+      // clears in the second it takes to retry.
+      retry: shouldRetryQuery,
       refetchOnWindowFocus: true,
     },
   },

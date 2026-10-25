@@ -301,7 +301,7 @@ export const capabilities: Capability[] = [
   {
     group: "Forges & trackers",
     label:
-      "Sign in & reconnect in-app — session-expired detection & token-expiry warnings, rate limits told apart (with GitHub's reset time), plus scope hints that reconnect with the needed scope",
+      "Sign in & reconnect in-app — session-expired detection & token-expiry warnings, rate limits told apart (with GitHub's reset time, and most GitHub requests a limit covers held back until it lifts), plus scope hints that reconnect with the needed scope",
   },
   {
     group: "Forges & trackers",
