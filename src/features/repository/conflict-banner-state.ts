@@ -79,6 +79,17 @@ export function opStoppedText(
     : REBASE_STOPPED;
 }
 
+/** The banner's status line while `op` is active, outside an edit pause. */
+export function opStatusText(
+  op: RepoOp,
+  conflictedCount: number,
+  rebaseStop: RepoOpState["rebaseStop"] | undefined,
+): string {
+  if (conflictedCount === 0) return opStoppedText(op, rebaseStop);
+  const n = conflictedCount;
+  return `${OP_VERBS[op]} · ${n} conflict${n === 1 ? "" : "s"}`;
+}
+
 const RESOLVED_TAIL =
   "Drop the backup stash if your changes look right, or keep it in View stashes.";
 

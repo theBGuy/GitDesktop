@@ -16,6 +16,7 @@ import {
   deriveStashBannerState,
   OP_VERBS,
   opPhrase,
+  opStatusText,
   opStoppedText,
 } from "../src/features/repository/conflict-banner-state.ts";
 
@@ -331,6 +332,20 @@ test("the op the banner names decides the line", () => {
   );
   assert.equal(
     line({ ...ops, cherryPicking: true }),
+    "Cherry-picking · no conflicts left",
+  );
+});
+
+test("opStatusText counts conflicts, then defers to the stop line", () => {
+  assert.equal(opStatusText("merge", 1, null), "Merging · 1 conflict");
+  assert.equal(opStatusText("rebase", 3, "break"), "Rebasing · 3 conflicts");
+  assert.equal(opStatusText("revert", 2, undefined), "Reverting · 2 conflicts");
+  assert.equal(
+    opStatusText("rebase", 0, "break"),
+    "Rebase paused at a break — Continue when you're ready.",
+  );
+  assert.equal(
+    opStatusText("cherry-pick", 0, null),
     "Cherry-picking · no conflicts left",
   );
 });

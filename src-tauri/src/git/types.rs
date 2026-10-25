@@ -308,6 +308,23 @@ pub struct SubmoduleRemoveOutcome {
     pub module_data_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RebaseStop {
+    /// A completed edit pick with an `amend` marker, ready for amendment.
+    Edit,
+    /// Pick/reword/squash/fixup or an edit without an `amend` marker, e.g. a
+    /// conflict stop, an emptied commit, or a rescheduled pick.
+    Pick,
+    /// An exec instruction.
+    Exec,
+    /// A break instruction.
+    Break,
+    /// The apply backend (`rebase --apply` or `git am`, no done file), or
+    /// unreadable or unrecognized state, never a guessed kind.
+    Other,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoOpState {
@@ -319,15 +336,9 @@ pub struct RepoOpState {
     /// should amend the commit, then continue.
     pub edit_paused: bool,
     /// Why an in-progress rebase is stopped, from the last line of
-    /// `rebase-merge/done` (git appends the in-flight item before running it):
-    /// "edit" | "pick" | "exec" | "break" | "other". `None` when `rebasing`
-    /// is false. "pick" covers pick/reword/squash/fixup and an edit without an
-    /// `amend` marker, e.g. a conflict stop, an emptied commit, or a rescheduled
-    /// pick. "edit" requires the `amend` marker. The apply backend
-    /// (`rebase-apply`: `rebase --apply` or `git am`, no done file) and any
-    /// unreadable or unrecognized state read as "other", never as a guessed
-    /// kind.
-    pub rebase_stop: Option<String>,
+    /// `rebase-merge/done` (git appends the in-flight item before running it).
+    /// `None` when `rebasing` is false.
+    pub rebase_stop: Option<RebaseStop>,
 }
 
 impl RepoOpState {

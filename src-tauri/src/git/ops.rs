@@ -14,7 +14,7 @@ use crate::git::runner::{
     subcommand_of, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
     WORKTREE_OP_TIMEOUT,
 };
-use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
+use crate::git::types::{FileDiff, RebaseStop, RepoOpState, RewriteStep, StashEntry, TagInfo};
 use crate::state::AppState;
 
 /// Refuses when the working tree has **tracked** changes (staged or unstaged).
@@ -249,7 +249,7 @@ pub(crate) fn rebase_marker_present(repo: &str) -> bool {
 
 /// Whether a rebase reached an amendable edit pause, rather than a failed edit pick.
 fn rebase_stopped_for_edit(git_dir: &Path) -> bool {
-    rebase_stop_kind(git_dir) == Some("edit")
+    rebase_stop_kind(git_dir) == Some(RebaseStop::Edit)
 }
 
 /// Git records the in-flight instruction last; trailing blank lines carry no state.
@@ -265,18 +265,18 @@ fn last_rebase_instruction(done: &str) -> Option<(&str, Option<&str>)> {
 /// For an edit line, git writes `rebase-merge/amend` only once its pick succeeds;
 /// a failed edit pick is in `done` but lacks it. Failed folds also write `amend`,
 /// which `empty_fold_stop` relies on.
-fn rebase_stop_kind(git_dir: &Path) -> Option<&'static str> {
+fn rebase_stop_kind(git_dir: &Path) -> Option<RebaseStop> {
     if !rebase_in_progress(git_dir) {
         return None;
     }
     let done = std::fs::read_to_string(git_dir.join("rebase-merge/done")).unwrap_or_default();
     Some(match last_rebase_instruction(&done).map(|(verb, _)| verb) {
-        Some("edit" | "e") if git_dir.join("rebase-merge/amend").exists() => "edit",
-        Some("edit" | "e") => "pick",
-        Some(v) if is_fold(v) || matches!(v, "pick" | "p" | "reword" | "r") => "pick",
-        Some("exec" | "x") => "exec",
-        Some("break" | "b") => "break",
-        _ => "other",
+        Some("edit" | "e") if git_dir.join("rebase-merge/amend").exists() => RebaseStop::Edit,
+        Some("edit" | "e") => RebaseStop::Pick,
+        Some(v) if is_fold(v) || matches!(v, "pick" | "p" | "reword" | "r") => RebaseStop::Pick,
+        Some("exec" | "x") => RebaseStop::Exec,
+        Some("break" | "b") => RebaseStop::Break,
+        _ => RebaseStop::Other,
     })
 }
 
@@ -334,7 +334,7 @@ pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
     } else {
         None
     };
-    let edit_paused = rebase_stop == Some("edit");
+    let edit_paused = rebase_stop == Some(RebaseStop::Edit);
     let cherry_head = exists("CHERRY_PICK_HEAD");
     let revert_head = exists("REVERT_HEAD");
     // The sequencer only decides the verb when neither head marker names it —
@@ -351,7 +351,7 @@ pub(crate) async fn op_state(repo_path: &str) -> AppResult<RepoOpState> {
         cherry_picking: cherry_head || sequencer == Some(false),
         reverting: revert_head || sequencer == Some(true),
         edit_paused,
-        rebase_stop: rebase_stop.map(str::to_string),
+        rebase_stop,
     })
 }
 
@@ -372,6 +372,8 @@ const EMPTY_FOLD_REFUSAL: &str =
 
 /// A consumed intermediate fold needs a remaining chain fold non-empty against its own parent.
 /// Unreadable state or failed probes leave git's original refusal untouched.
+/// Returns git's own message file for the recovery amend and the remaining todo-line
+/// count, which `recover_empty_folds` requires to shrink on every pass.
 async fn empty_fold_stop(git_dir: &Path, repo: &str, failure: &str) -> Option<(String, usize)> {
     if !rebase_in_progress(git_dir)
         || !failure.contains(EMPTY_FOLD_REFUSAL)
@@ -435,7 +437,10 @@ async fn empty_fold_stop(git_dir: &Path, repo: &str, failure: &str) -> Option<(S
         .ok()?;
         match diff.code {
             0 => {}
-            1 => non_empty = true,
+            1 => {
+                non_empty = true;
+                break;
+            }
             _ => return None,
         }
     }
@@ -10985,24 +10990,24 @@ mod tests {
         assert_eq!(rebase_stop_kind(git_dir), None);
         let merge = git_dir.join("rebase-merge");
         std::fs::create_dir(&merge).unwrap();
-        assert_eq!(rebase_stop_kind(git_dir), Some("other"));
+        assert_eq!(rebase_stop_kind(git_dir), Some(RebaseStop::Other));
         for (verb, expected) in [
-            ("pick", "pick"),
-            ("p", "pick"),
-            ("reword", "pick"),
-            ("r", "pick"),
-            ("squash", "pick"),
-            ("s", "pick"),
-            ("fixup", "pick"),
-            ("f", "pick"),
-            ("exec", "exec"),
-            ("x", "exec"),
-            ("break", "break"),
-            ("b", "break"),
-            ("edit", "pick"),
-            ("e", "pick"),
-            ("label", "other"),
-            ("", "other"),
+            ("pick", RebaseStop::Pick),
+            ("p", RebaseStop::Pick),
+            ("reword", RebaseStop::Pick),
+            ("r", RebaseStop::Pick),
+            ("squash", RebaseStop::Pick),
+            ("s", RebaseStop::Pick),
+            ("fixup", RebaseStop::Pick),
+            ("f", RebaseStop::Pick),
+            ("exec", RebaseStop::Exec),
+            ("x", RebaseStop::Exec),
+            ("break", RebaseStop::Break),
+            ("b", RebaseStop::Break),
+            ("edit", RebaseStop::Pick),
+            ("e", RebaseStop::Pick),
+            ("label", RebaseStop::Other),
+            ("", RebaseStop::Other),
         ] {
             std::fs::write(merge.join("done"), format!("{verb} \n\n")).unwrap();
             assert_eq!(rebase_stop_kind(git_dir), Some(expected), "{verb}");
@@ -11010,40 +11015,40 @@ mod tests {
         std::fs::write(merge.join("amend"), "oid\n").unwrap();
         for verb in ["edit", "e"] {
             std::fs::write(merge.join("done"), format!("pick earlier\n{verb} oid\n\n")).unwrap();
-            assert_eq!(rebase_stop_kind(git_dir), Some("edit"));
+            assert_eq!(rebase_stop_kind(git_dir), Some(RebaseStop::Edit));
             assert!(rebase_stopped_for_edit(git_dir));
         }
         std::fs::write(merge.join("done"), [0xff]).unwrap();
-        assert_eq!(rebase_stop_kind(git_dir), Some("other"));
+        assert_eq!(rebase_stop_kind(git_dir), Some(RebaseStop::Other));
         std::fs::remove_file(merge.join("done")).unwrap();
         std::fs::create_dir(merge.join("done")).unwrap();
-        assert_eq!(rebase_stop_kind(git_dir), Some("other"));
+        assert_eq!(rebase_stop_kind(git_dir), Some(RebaseStop::Other));
         std::fs::remove_dir_all(&merge).unwrap();
         std::fs::create_dir(git_dir.join("rebase-apply")).unwrap();
-        assert_eq!(rebase_stop_kind(git_dir), Some("other"));
+        assert_eq!(rebase_stop_kind(git_dir), Some(RebaseStop::Other));
     }
 
     #[test]
     fn repo_op_state_serializes_rebase_stop() {
-        for kind in [
-            None,
-            Some("edit"),
-            Some("pick"),
-            Some("exec"),
-            Some("break"),
-            Some("other"),
+        for (kind, wire) in [
+            (None, None),
+            (Some(RebaseStop::Edit), Some("edit")),
+            (Some(RebaseStop::Pick), Some("pick")),
+            (Some(RebaseStop::Exec), Some("exec")),
+            (Some(RebaseStop::Break), Some("break")),
+            (Some(RebaseStop::Other), Some("other")),
         ] {
             let value = serde_json::to_value(RepoOpState {
                 merging: false,
                 rebasing: kind.is_some(),
                 cherry_picking: false,
                 reverting: false,
-                edit_paused: kind == Some("edit"),
-                rebase_stop: kind.map(str::to_string),
+                edit_paused: kind == Some(RebaseStop::Edit),
+                rebase_stop: kind,
             })
             .unwrap();
             assert!(value.get("rebaseStop").is_some());
-            assert_eq!(value["rebaseStop"], serde_json::to_value(kind).unwrap());
+            assert_eq!(value["rebaseStop"], serde_json::to_value(wire).unwrap());
             assert!(value.get("rebase_stop").is_none());
         }
     }

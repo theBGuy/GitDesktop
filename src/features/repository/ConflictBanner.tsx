@@ -39,33 +39,15 @@ import {
   deriveStashBannerState,
   OP_VERBS,
   opPhrase,
-  opStoppedText,
+  opStatusText,
 } from "./conflict-banner-state";
 
-const OP_LABELS: Record<
-  RepoOp,
-  { banner: string; cont: string; verb: string }
-> = {
-  merge: {
-    banner: "Merge in progress",
-    cont: "Finish merge",
-    verb: OP_VERBS.merge,
-  },
-  rebase: {
-    banner: "Rebase in progress",
-    cont: "Continue rebase",
-    verb: OP_VERBS.rebase,
-  },
-  "cherry-pick": {
-    banner: "Cherry-pick in progress",
-    cont: "Continue cherry-pick",
-    verb: OP_VERBS["cherry-pick"],
-  },
-  revert: {
-    banner: "Revert in progress",
-    cont: "Continue revert",
-    verb: OP_VERBS.revert,
-  },
+/** The finish control's label, per op. */
+const OP_LABELS: Record<RepoOp, string> = {
+  merge: "Finish merge",
+  rebase: "Continue rebase",
+  "cherry-pick": "Continue cherry-pick",
+  revert: "Continue revert",
 };
 
 /** What Abort undoes, per op. A cherry-pick can be reached from "Cherry-pick to
@@ -247,19 +229,22 @@ export function ConflictBanner({
 
   const busy = abortOp.isPending || continueOp.isPending;
   const onError = (e: unknown) => toastError(e);
-  const opVerb = op ? OP_LABELS[op].verb : null;
-  // Read only under conflictedCount > 0; a stop with none left reads opStoppedText below.
+  const opVerb = op ? OP_VERBS[op] : null;
+  // The no-op arm's count: a stash pop's unmerged paths with nothing to continue.
   const conflictText = `${conflictedCount} conflict${conflictedCount === 1 ? "" : "s"}`;
   const opText =
     op === null
       ? null
-      : conflictedCount > 0
-        ? `${opVerb} · ${conflictText}`
-        : opStoppedText(op, opState.data?.rebaseStop);
+      : opStatusText(op, conflictedCount, opState.data?.rebaseStop);
   // A rebase deliberately paused at an `edit` (not a conflict): the user amends
   // the commit via the Changes tab, then continues.
   const editPaused = Boolean(opState.data?.editPaused) && conflictedCount === 0;
-  const infoTone = editPaused || resolvedShown;
+  // A planned pause like the edit one, so it takes the same info tone and icon.
+  const breakPaused =
+    op === "rebase" &&
+    conflictedCount === 0 &&
+    opState.data?.rebaseStop === "break";
+  const infoTone = editPaused || breakPaused || resolvedShown;
 
   // Awaited rather than per-call callbacks: this banner unmounts the moment the
   // op ends (and rides an <Activity>-hidden tab), and react-query drops per-call
@@ -508,7 +493,7 @@ export function ConflictBanner({
                   onClick={() => void doContinue(op)}
                 >
                   {continueOp.isPending && <Spinner data-icon="inline-start" />}
-                  {OP_LABELS[op].cont}
+                  {OP_LABELS[op]}
                 </DisabledReasonButton>
 
                 <Dialog open={confirmAbort} onOpenChange={setConfirmAbort}>
