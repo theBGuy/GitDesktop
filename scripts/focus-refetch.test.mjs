@@ -11,7 +11,8 @@
 // read's cached shape to the other's `select`.
 //
 // Also pins push-writes.ts `recheckRunsAfterPush`: one run-list recheck per repo,
-// 8 s after the last push, skipping a list paged past page 1; and its sibling
+// 8 s after the last push-like write, skipping a list paged past page 1, and
+// covering the union of every coalesced arm's PR checks reads; and its sibling
 // `recheckPrListAfterRemoteDelete`: one PR-list re-read per repo, re-armed by a
 // later delete rather than stacked.
 //
@@ -479,6 +480,100 @@ test("two repos each keep their own recheck", (t) => {
   assert.equal(b.marked("notify", "main"), true, "repo d's recheck was lost");
   assert.equal(a.calls.length, 4);
   assert.equal(b.calls.length, 4);
+});
+
+// ── Push: the PR checks reads an arm hands the recheck ──────────────────────
+
+/** A cache seeded with a run list and the PR reads an arm can hand the recheck:
+ *  two PRs' details in origin, one's diff under it, one in upstream, and the
+ *  list's CI map. */
+function prChecksCache(t, repo) {
+  const qc = new QueryClient();
+  t.after(() => qc.clear());
+  const keys = {
+    runs: ["repo", repo, "actions", "runs", ""],
+    details7: ["repo", repo, "pr", "origin", 7],
+    diff7: ["repo", repo, "pr", "origin", 7, "diff"],
+    details8: ["repo", repo, "pr", "origin", 8],
+    upstream7: ["repo", repo, "pr", "upstream", 7],
+    ci: ["repo", repo, "pr-ci", "origin", "open", null, "7:"],
+  };
+  for (const key of Object.values(keys)) qc.setQueryData(key, { seeded: true });
+  const marked = (name) =>
+    qc.getQueryCache().find({ queryKey: keys[name], exact: true }).state
+      .isInvalidated;
+  return { qc, keys, marked };
+}
+
+/** Two arms 5 s apart, each handing different PR reads, must fire ONE pass 8 s
+ *  after the second that covers both arms' reads and nothing else. */
+function assertUnionFires(t, recheck, repo) {
+  const c = prChecksCache(t, repo);
+  recheck(c.qc, repo, [{ queryKey: c.keys.details7, exact: true }]);
+  t.mock.timers.tick(5_000);
+  recheck(c.qc, repo, [{ queryKey: ["repo", repo, "pr-ci", "origin"] }]);
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS - 1);
+  assert.equal(c.marked("runs"), false, "the first arm's timer still fired");
+  t.mock.timers.tick(1);
+  assert.equal(c.marked("runs"), true);
+  assert.equal(c.marked("details7"), true, "the first arm's read was dropped");
+  assert.equal(c.marked("ci"), true, "the second arm's read was dropped");
+  assert.equal(c.marked("diff7"), false, "an exact read reached its subtree");
+  assert.equal(c.marked("details8"), false);
+}
+
+test("coalesced arms fire ONE recheck covering every arm's PR reads", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  assertUnionFires(t, recheckRunsAfterPush, "C:/push-e");
+});
+
+test("NEGATIVE CONTROL: a recheck that keeps only the latest arm's reads fails the union pin", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // The helper with its union reverted: a re-arm replaces what was owed.
+  const timers = new Map();
+  const latestOnly = (qc, repo, extra = []) => {
+    clearTimeout(timers.get(repo));
+    timers.set(
+      repo,
+      setTimeout(() => {
+        void qc.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
+        for (const f of extra)
+          void qc.invalidateQueries({ queryKey: f.queryKey, exact: f.exact });
+      }, PUSH_RUN_RECHECK_MS),
+    );
+  };
+  assert.throws(
+    () => assertUnionFires(t, latestOnly, "C:/push-f"),
+    assert.AssertionError,
+  );
+});
+
+test("a numbered-child read re-reads every PR's details in the lens, nothing under them", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const c = prChecksCache(t, "C:/push-g");
+  recheckRunsAfterPush(c.qc, "C:/push-g", [
+    { queryKey: ["repo", "C:/push-g", "pr", "origin"], numberedChild: true },
+  ]);
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS);
+  assert.equal(c.marked("details7"), true);
+  assert.equal(c.marked("details8"), true);
+  assert.equal(c.marked("diff7"), false);
+  assert.equal(c.marked("upstream7"), false);
+  assert.equal(c.marked("ci"), false);
+});
+
+test("a plain arm re-reads no PR reads", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const c = prChecksCache(t, "C:/push-h");
+  recheckRunsAfterPush(c.qc, "C:/push-h");
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS);
+  assert.equal(c.marked("runs"), true);
+  for (const name of ["details7", "diff7", "details8", "upstream7", "ci"])
+    assert.equal(c.marked(name), false, name);
 });
 
 // ── Remote-branch delete: the one delayed PR-list re-read ──────────────────

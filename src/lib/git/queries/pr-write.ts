@@ -10,6 +10,7 @@ import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { repoKeys } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
+import { prChecksRecheck } from "./pr-actions";
 import {
   type EditLabelsVars,
   pendingLabelEditFor,
@@ -201,7 +202,14 @@ export function useCreatePr(repo: string) {
       // controls would read the pending create as busy. `args.lens` is per-call,
       // already frozen in the vars.
       identity: ["create-pr", repo],
-      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+      // The new PR's number comes back from the forge; its lens is the one it
+      // opened against.
+      onSuccess: (pr, args) =>
+        recheckRunsAfterPush(
+          queryClient,
+          repo,
+          prChecksRecheck(repo, args.lens ?? "origin", pr.number),
+        ),
     },
   );
 }

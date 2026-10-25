@@ -1,8 +1,10 @@
-// Pins the push-like run-recheck family: every query hook whose mutation makes the
-// forge receive a push of commits arms `recheckRunsAfterPush` (push-writes.ts),
-// because the forge creates a push's runs a few seconds after the settle-time
-// invalidation already read. Keyed on the CALLEE, not the hook: a new hook calling
-// one of these api functions must arm the recheck or join the reasoned exclusions.
+// Pins the push-like run-recheck family: every hook whose mutation makes the forge
+// start runs (a push of commits, a merge, a workflow dispatch) arms
+// `recheckRunsAfterPush` (push-writes.ts), because the forge creates the runs a few
+// seconds after the write lands, after any settle-time read. The arms that move a
+// PR's head or land it also hand the recheck that PR's checks reads
+// (`prChecksRecheck`). Keyed on the CALLEE, not the hook: a new unit naming one of
+// these api functions must arm the recheck or join the reasoned exclusions.
 //
 // The checker is a pure function over source text, so the suite feeds it the real
 // files (must pass) and in-memory mutants (must fail) without touching disk. It
@@ -12,7 +14,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
-/** The api functions whose backend command pushes commits to the forge. */
+/** The api functions whose backend command makes the forge start runs. */
 const ROSTER = [
   "gitPush",
   "gitPushTag",
@@ -22,58 +24,77 @@ const ROSTER = [
   "ghPrUpdateBranch",
   "forgePrCreate",
   "forgePublishRepo",
+  "forgeCiDispatch",
+  "forgeGlMrAutoMerge",
 ];
 
-/** The hooks that must arm the recheck, each with the condition that must guard
- *  every arm call in it (null = armed on every success). */
+const Q = "lib/git/queries/";
+/** Corpus paths, relative to `src/`. */
+const CORPUS_FILES = ["lib/github/actions.ts"];
+
+/** The hooks that must arm the recheck: the condition that must guard every arm
+ *  call in it (null = armed on every success), and whether its arm hands the PR's
+ *  checks reads along. */
 const ARMED = {
-  usePush: { file: "sync.ts", gate: null },
-  usePushTag: { file: "tags-releases.ts", gate: null },
+  usePush: { file: `${Q}sync.ts`, gate: null, prChecks: false },
+  usePushTag: { file: `${Q}tags-releases.ts`, gate: null, prChecks: false },
   useMergeRemotePr: {
-    file: "pr-resolve.ts",
+    file: `${Q}pr-resolve.ts`,
     gate: 'if (data.status === "pushed")',
+    prChecks: true,
   },
   useFinishRemotePrResolve: {
-    file: "pr-resolve.ts",
+    file: `${Q}pr-resolve.ts`,
     gate: 'if (data.status === "pushed")',
+    prChecks: true,
   },
   useMergePr: {
-    file: "pr-actions.ts",
+    file: `${Q}pr-actions.ts`,
     gate: 'if (args.lens === "origin" && !data.queued)',
+    prChecks: true,
   },
-  usePrUpdateBranch: { file: "pr-actions.ts", gate: null },
-  useCreatePr: { file: "pr-write.ts", gate: null },
-  usePublishRepo: { file: "remotes.ts", gate: null },
+  usePrUpdateBranch: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
+  useGlArmAutoMerge: { file: `${Q}pr-actions.ts`, gate: null, prChecks: false },
+  useCreatePr: { file: `${Q}pr-write.ts`, gate: null, prChecks: true },
+  usePublishRepo: { file: `${Q}remotes.ts`, gate: null, prChecks: false },
+  useRunWorkflow: {
+    file: "lib/github/actions.ts",
+    gate: null,
+    prChecks: false,
+  },
 };
 
 /** Push-adjacent writes that deliberately arm nothing, each with its reason. */
 const EXCLUDED = {
   useDeleteRemoteBranch: {
-    file: "branches.ts",
+    file: `${Q}branches.ts`,
     reason:
       "pushes a deletion, which starts runs only for rare on-delete workflows; it schedules the PR-list re-read instead",
     mustCall: "recheckPrListAfterRemoteDelete(",
   },
   useDeleteTagOnOrigin: {
-    file: "tags-releases.ts",
+    file: `${Q}tags-releases.ts`,
     reason:
       "pushes a deletion, which starts runs only for rare on-delete workflows",
     mustCall: null,
   },
   useCreateLinkedBranch: {
-    file: "issues.ts",
+    file: `${Q}issues.ts`,
     reason:
-      "creates a server-side ref at an existing commit: nothing is pushed, no runs start",
+      "creates a server-side ref at an existing commit: no commits are pushed; starts runs only for rare on-create workflows",
     mustCall: null,
   },
 };
 
-/** The second update-branch arm, which fires on the observed head move. */
+/** The second update-branch arm, which fires on the observed head move and hands
+ *  the PR's checks reads along like the hook's own. */
 const SETTLE_ARM = {
   file: "features/pulls/RemotePrView.tsx",
   start: "const settleUpdate = useEffectEvent(",
-  call: "recheckRunsAfterPush(queryClient, repoPath)",
+  call: /recheckRunsAfterPush\(\s*queryClient,\s*repoPath,\s*prChecksRecheck\(repoPath, lens, number\),?\s*\)/,
 };
+
+const PR_CHECKS = /\bprChecksRecheck\(/;
 
 const RECHECK_CALL = /\brecheckRunsAfterPush\(/g;
 const armCalls = (body) => body.match(RECHECK_CALL)?.length ?? 0;
@@ -148,9 +169,10 @@ function guardedArmCalls(body, gate) {
   return body.match(guarded)?.length ?? 0;
 }
 
-/** Problems found in `raw` (queries file name → text, plus SETTLE_ARM.file); empty
- *  means the family holds. Line endings are normalized and comments blanked first:
- *  a Windows checkout is CRLF, and a commented-out arm is no arm. */
+/** Problems found in `raw` (src-relative path → text: the queries package, the
+ *  CORPUS_FILES, and SETTLE_ARM.file); empty means the family holds. Line endings
+ *  are normalized and comments blanked first: a Windows checkout is CRLF, and a
+ *  commented-out arm is no arm. */
 function checkPushRecheckFamily(raw) {
   const problems = [];
   const sources = {};
@@ -162,9 +184,11 @@ function checkPushRecheckFamily(raw) {
   // apostrophes this string-skipping scan would read as quotes.
   for (const file of Object.keys(sources))
     if (file !== SETTLE_ARM.file) sources[file] = stripComments(sources[file]);
-  const queryFiles = Object.keys(sources).filter((f) => !f.includes("/"));
-  if (queryFiles.length === 0)
+  const queryFiles = Object.keys(sources).filter((f) => f !== SETTLE_ARM.file);
+  if (!queryFiles.some((f) => f.startsWith(Q)))
     return [...problems, "no queries sources to scan"];
+  for (const f of CORPUS_FILES)
+    if (!(f in sources)) problems.push(`${f}: missing from the corpus`);
 
   // Keyed by file and name, so a same-named unit elsewhere can't stand in.
   const hooks = new Map();
@@ -175,7 +199,8 @@ function checkPushRecheckFamily(raw) {
 
   const calledCallees = new Set();
   for (const { file, name, body } of hooks.values()) {
-    const callees = ROSTER.filter((c) => namesCallee(body, c));
+    // A callee's own definition (`export const forgeCiDispatch = …`) names it.
+    const callees = ROSTER.filter((c) => c !== name && namesCallee(body, c));
     for (const c of callees) calledCallees.add(c);
     const armed = listed(ARMED, file, name);
     if (callees.length > 0 && !armed && !listed(EXCLUDED, file, name))
@@ -183,7 +208,7 @@ function checkPushRecheckFamily(raw) {
         `${file} ${name}: calls ${callees.join(", ")} but neither arms recheckRunsAfterPush nor is a reasoned exclusion`,
       );
     const isDefinition =
-      file === "push-writes.ts" && name === "recheckRunsAfterPush";
+      file === `${Q}push-writes.ts` && name === "recheckRunsAfterPush";
     if (armCalls(body) > 0 && !armed && !isDefinition)
       problems.push(
         `${file} ${name}: arms recheckRunsAfterPush outside the family`,
@@ -192,7 +217,7 @@ function checkPushRecheckFamily(raw) {
   for (const c of ROSTER)
     if (!calledCallees.has(c)) problems.push(`roster callee ${c} not found`);
 
-  for (const [name, { file, gate }] of Object.entries(ARMED)) {
+  for (const [name, { file, gate, prChecks }] of Object.entries(ARMED)) {
     const hook = hooks.get(`${file}#${name}`);
     if (!hook) {
       problems.push(`${file} ${name}: hook not found`);
@@ -206,6 +231,10 @@ function checkPushRecheckFamily(raw) {
     else if (gate !== null && guardedArmCalls(hook.body, gate) !== arms)
       problems.push(
         `${file} ${name}: an arm call is not guarded by \`${gate}\``,
+      );
+    if (PR_CHECKS.test(hook.body) !== prChecks)
+      problems.push(
+        `${file} ${name}: ${prChecks ? "does not hand" : "hands"} the recheck the PR's checks reads`,
       );
   }
 
@@ -226,7 +255,7 @@ function checkPushRecheckFamily(raw) {
   else {
     const end = view.indexOf("\n  });", at);
     const body = stripComments(view.slice(at, end < 0 ? undefined : end));
-    if (!body.includes(SETTLE_ARM.call) || armCalls(body) === 0)
+    if (!SETTLE_ARM.call.test(body) || armCalls(body) === 0)
       problems.push(
         `${SETTLE_ARM.file}: settleUpdate does not arm the recheck`,
       );
@@ -235,15 +264,18 @@ function checkPushRecheckFamily(raw) {
 }
 
 const SRC = new URL("../src/", import.meta.url);
-const QUERIES = new URL("lib/git/queries/", SRC);
 
 /** LF-normalized, so the mutants below match the same lines the checker reads. */
 function realSources() {
-  const read = (url) => readFileSync(url, "utf8").replace(/\r\n/g, "\n");
+  const read = (path) =>
+    readFileSync(new URL(path, SRC), "utf8").replace(/\r\n/g, "\n");
   const sources = {};
-  for (const file of readdirSync(QUERIES).filter((f) => f.endsWith(".ts")))
-    sources[file] = read(new URL(file, QUERIES));
-  sources[SETTLE_ARM.file] = read(new URL(SETTLE_ARM.file, SRC));
+  for (const file of readdirSync(new URL(Q, SRC)).filter((f) =>
+    f.endsWith(".ts"),
+  ))
+    sources[`${Q}${file}`] = read(`${Q}${file}`);
+  for (const path of [...CORPUS_FILES, SETTLE_ARM.file])
+    sources[path] = read(path);
   return sources;
 }
 
@@ -291,7 +323,7 @@ test("removing the settleUpdate arm fails the check", () => {
 });
 
 test("dropping a gate fails the check", () => {
-  const sources = mutate(realSources(), "pr-actions.ts", (text) =>
+  const sources = mutate(realSources(), `${Q}pr-actions.ts`, (text) =>
     text.replace(" && !data.queued", ""),
   );
   assert.ok(
@@ -299,20 +331,73 @@ test("dropping a gate fails the check", () => {
   );
 });
 
-test("a new hook calling a roster callee without arming fails the check", () => {
-  const sources = mutate(
-    realSources(),
-    "sync.ts",
-    (text) =>
-      `${text}\nexport function useSneakyPush(repo: string) {\n  return useRepoMutation(repo, () => api.gitPush(repo, false, false));\n}\n`,
+test("an arm that stops handing the PR's checks reads fails the check", () => {
+  const sources = realSources();
+  const handing = Object.entries(ARMED).filter(([, a]) => a.prChecks);
+  assert.ok(handing.length > 0);
+  for (const [name, { file }] of handing) {
+    const mutant = mutate(sources, file, (text) => {
+      const body = topLevelUnits(text).get(name);
+      assert.ok(body, `${name} not found in ${file}`);
+      return text.replace(
+        body,
+        body.replace(/prChecksRecheck\([^)]*\)/g, "[]"),
+      );
+    });
+    assert.ok(
+      checkPushRecheckFamily(mutant).some(
+        (p) => p.includes(name) && p.includes("does not hand"),
+      ),
+      name,
+    );
+  }
+  const view = mutate(sources, SETTLE_ARM.file, (text) =>
+    text.replace("prChecksRecheck(repoPath, lens, number)", "[]"),
   );
   assert.ok(
-    checkPushRecheckFamily(sources).some((p) => p.includes("useSneakyPush")),
+    checkPushRecheckFamily(view).some((p) => p.includes("settleUpdate")),
   );
 });
 
+test("a plain arm that hands PR checks reads fails the check", () => {
+  const sources = mutate(realSources(), `${Q}tags-releases.ts`, (text) =>
+    text.replace(
+      "onSuccess: () => recheckRunsAfterPush(queryClient, repo),",
+      'onSuccess: () => recheckRunsAfterPush(queryClient, repo, prChecksRecheck(repo, "origin")),',
+    ),
+  );
+  assert.ok(
+    checkPushRecheckFamily(sources).some(
+      (p) => p.includes("usePushTag") && p.includes("hands"),
+    ),
+  );
+});
+
+test("a new hook calling a roster callee without arming fails the check", () => {
+  for (const [file, name, call] of [
+    [`${Q}sync.ts`, "useSneakyPush", "api.gitPush(repo, false, false)"],
+    [
+      "lib/github/actions.ts",
+      "useSneakyDispatch",
+      'forgeCiDispatch(repo, "ci.yml", "main", {})',
+    ],
+    [`${Q}pr-actions.ts`, "useSneakyArm", "api.forgeGlMrAutoMerge(repo, 1)"],
+  ]) {
+    const sources = mutate(
+      realSources(),
+      file,
+      (text) =>
+        `${text}\nexport function ${name}(repo: string) {\n  return useRepoMutation(repo, () => ${call});\n}\n`,
+    );
+    assert.ok(
+      checkPushRecheckFamily(sources).some((p) => p.includes(name)),
+      name,
+    );
+  }
+});
+
 test("an exclusion that arms the recheck, or a renamed hook, fails the check", () => {
-  const armed = mutate(realSources(), "tags-releases.ts", (text) =>
+  const armed = mutate(realSources(), `${Q}tags-releases.ts`, (text) =>
     text.replace(
       '{ identity: releaseWriteKey("delete-origin-tag", repo) }',
       '{ identity: releaseWriteKey("delete-origin-tag", repo), onSuccess: () => recheckRunsAfterPush(queryClient, repo) }',
@@ -323,19 +408,32 @@ test("an exclusion that arms the recheck, or a renamed hook, fails the check", (
       p.includes("useDeleteTagOnOrigin"),
     ),
   );
-  const renamed = mutate(realSources(), "remotes.ts", (text) =>
-    text.replace(
+  for (const [file, from, to, name] of [
+    [
+      `${Q}remotes.ts`,
       "export function usePublishRepo(",
       "export function usePublish(",
-    ),
-  );
-  assert.ok(
-    checkPushRecheckFamily(renamed).some((p) => p.includes("usePublishRepo")),
-  );
+      "usePublishRepo",
+    ],
+    [
+      "lib/github/actions.ts",
+      "export function useRunWorkflow(",
+      "export function useDispatch(",
+      "useRunWorkflow",
+    ],
+  ]) {
+    const renamed = mutate(realSources(), file, (text) =>
+      text.replace(from, to),
+    );
+    assert.ok(
+      checkPushRecheckFamily(renamed).some((p) => p.includes(name)),
+      name,
+    );
+  }
 });
 
 test("the remote-branch delete must schedule the PR-list re-read", () => {
-  const sources = mutate(realSources(), "branches.ts", (text) =>
+  const sources = mutate(realSources(), `${Q}branches.ts`, (text) =>
     text.replace(
       "recheckPrListAfterRemoteDelete(queryClient",
       "noop(queryClient",
@@ -355,7 +453,7 @@ test("a commented-out arm is no arm", () => {
     (text) => text.replace(line, `    /* ${line.trim()} */`),
   ]) {
     const problems = checkPushRecheckFamily(
-      mutate(realSources(), "tags-releases.ts", edit),
+      mutate(realSources(), `${Q}tags-releases.ts`, edit),
     );
     assert.ok(
       problems.some((p) => p.includes("usePushTag")),
@@ -363,7 +461,7 @@ test("a commented-out arm is no arm", () => {
     );
   }
   const view = mutate(realSources(), SETTLE_ARM.file, (text) =>
-    text.replace(`${SETTLE_ARM.call};`, `// ${SETTLE_ARM.call};`),
+    text.replace(SETTLE_ARM.call, (call) => `/* ${call} */`),
   );
   assert.ok(
     checkPushRecheckFamily(view).some((p) => p.includes("settleUpdate")),
@@ -373,7 +471,7 @@ test("a commented-out arm is no arm", () => {
 test("a roster callee passed by reference counts as a call", () => {
   const sources = mutate(
     realSources(),
-    "sync.ts",
+    `${Q}sync.ts`,
     (text) =>
       `${text}\nexport function useRefPush(repo: string) {\n  return useRepoMutation(repo, api.gitPush);\n}\n`,
   );
@@ -394,7 +492,11 @@ test("a non-exported helper or const arrow calling a roster callee must arm", ()
     ],
   ];
   for (const [name, code] of helpers) {
-    const sources = mutate(realSources(), "remotes.ts", (text) => text + code);
+    const sources = mutate(
+      realSources(),
+      `${Q}remotes.ts`,
+      (text) => text + code,
+    );
     assert.ok(
       checkPushRecheckFamily(sources).some((p) => p.includes(name)),
       name,
@@ -403,11 +505,9 @@ test("a non-exported helper or const arrow calling a roster callee must arm", ()
 });
 
 test("a gate that is present but does not guard the arm fails the check", () => {
-  const sources = mutate(realSources(), "pr-actions.ts", (text) =>
-    text.replace(
-      /if \(args\.lens === "origin" && !data\.queued\)\s*recheckRunsAfterPush\(queryClient, repo\);/,
-      'if (args.lens === "origin" && !data.queued) void 0;\n        recheckRunsAfterPush(queryClient, repo);',
-    ),
+  const gate = 'if (args.lens === "origin" && !data.queued)';
+  const sources = mutate(realSources(), `${Q}pr-actions.ts`, (text) =>
+    text.replace(gate, `${gate} void 0;`),
   );
   const problems = checkPushRecheckFamily(sources);
   assert.ok(
@@ -416,10 +516,16 @@ test("a gate that is present but does not guard the arm fails the check", () => 
   );
 });
 
-test("an empty corpus or a missing view fails closed", () => {
+test("an empty corpus, a missing corpus file or a missing view fails closed", () => {
   assert.notDeepEqual(checkPushRecheckFamily({}), []);
   const { [SETTLE_ARM.file]: _view, ...noView } = realSources();
   assert.ok(
     checkPushRecheckFamily(noView).some((p) => p.includes("settleUpdate")),
+  );
+  const { "lib/github/actions.ts": _actions, ...noActions } = realSources();
+  assert.ok(
+    checkPushRecheckFamily(noActions).some((p) =>
+      p.includes("lib/github/actions.ts"),
+    ),
   );
 });

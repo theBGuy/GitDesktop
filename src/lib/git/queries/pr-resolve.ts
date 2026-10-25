@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { useRepoMutation } from "./internal";
+import { prChecksRecheck } from "./pr-actions";
 import { localPrWriteKey, prWriteKey } from "./pr-writes";
 import { recheckRunsAfterPush } from "./push-writes";
 
@@ -96,15 +97,22 @@ export function useMergeRemotePr(repo: string, lens: RemoteLens) {
       ),
     {
       identity: prWriteKey("resolve-merge", repo),
-      onSuccess: (data) => {
-        if (data.status === "pushed") recheckRunsAfterPush(queryClient, repo);
+      onSuccess: (data, args) => {
+        if (data.status === "pushed")
+          recheckRunsAfterPush(
+            queryClient,
+            repo,
+            prChecksRecheck(repo, lens, args.number),
+          );
       },
     },
   );
 }
 
 /** Commits a paused remote-PR resolution and pushes the head branch; the run
- *  recheck gates on the outcome like {@link useMergeRemotePr}'s. */
+ *  recheck gates on the outcome like {@link useMergeRemotePr}'s. Neither the
+ *  variables nor the outcome name the PR, so the checks re-read covers every PR's
+ *  details in the lens (only an open one refetches). */
 export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -125,7 +133,8 @@ export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
       ),
     {
       onSuccess: (data) => {
-        if (data.status === "pushed") recheckRunsAfterPush(queryClient, repo);
+        if (data.status === "pushed")
+          recheckRunsAfterPush(queryClient, repo, prChecksRecheck(repo, lens));
       },
     },
   );

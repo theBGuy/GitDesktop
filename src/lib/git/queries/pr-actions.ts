@@ -37,7 +37,7 @@ import {
   readPendingPrWrite,
 } from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
-import { recheckRunsAfterPush } from "./push-writes";
+import { type RecheckFilter, recheckRunsAfterPush } from "./push-writes";
 import {
   type ApproveRunVars,
   NO_PENDING_RUN_WRITES,
@@ -522,7 +522,11 @@ export function useMergePr(repo: string) {
       // outside them; a queued merge has landed nothing yet.
       onSuccess: (data, args) => {
         if (args.lens === "origin" && !data.queued)
-          recheckRunsAfterPush(queryClient, repo);
+          recheckRunsAfterPush(
+            queryClient,
+            repo,
+            prChecksRecheck(repo, args.lens, args.number),
+          );
       },
     },
   );
@@ -531,8 +535,9 @@ export function useMergePr(repo: string) {
 /** What an update-branch makes stale on the PR side: the PR subtree (details and its
  *  commits/files/checks rollup, mergeability, diff, review threads), the rows that
  *  carry PR state, the list's CI badges and merge-status chips (their own `pr-ci` and
- *  mergeability maps: siblings of `pr`, which no prefix here matches), and the
- *  review-state map those rows group by (the new commit moves this PR's `updatedAt`).
+ *  mergeability maps: siblings of `pr` that neither the PR-subtree nor the PR-list
+ *  prefix reaches, so each is listed by name), and the review-state map those rows
+ *  group by (the new commit moves this PR's `updatedAt`).
  *  Exported because the set has to run TWICE: once when the forge accepts the job,
  *  and again once the poll sees the head actually move, since the first pass reads a
  *  head that has not shifted yet. */
@@ -550,6 +555,23 @@ export const prUpdateBranchKeys = (
     ["repo", repo, "prs", lens],
   ] as const;
 
+/** The PR reads a push-like write's new runs change, handed to
+ *  `recheckRunsAfterPush` so they are re-read with the run lists: the PR's details
+ *  (its checks rollup rides them, and nothing polls them) matched exactly, so the
+ *  diff and threads under it are not re-read, and the list's CI-badge map, whose
+ *  row digest doesn't move with a run. No `number` re-reads every PR's details in
+ *  the lens, for an arm whose result names no PR. */
+export const prChecksRecheck = (
+  repo: string,
+  lens: RemoteLens,
+  number?: number,
+): RecheckFilter[] => [
+  number === undefined
+    ? { queryKey: ["repo", repo, "pr", lens], numberedChild: true }
+    : { queryKey: ["repo", repo, "pr", lens, number], exact: true },
+  { queryKey: [...repoKeys.prCi(repo), lens] },
+];
+
 /** Merge (or rebase) the base branch into a PR's head — GitHub's "Update branch".
  *  GitHub QUEUES the work and answers 202, so resolving means accepted, not done —
  *  `usePrBaseDivergence.awaitUpdate` is what waits for the head to move, and the caller
@@ -566,7 +588,12 @@ export function usePrUpdateBranch(repo: string) {
     mutationKey: prWriteKey("update-branch", repo),
     mutationFn: (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
       api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
-    onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+    onSuccess: (_d, args) =>
+      recheckRunsAfterPush(
+        queryClient,
+        repo,
+        prChecksRecheck(repo, args.lens, args.number),
+      ),
     onSettled: (_d, _e, args) => {
       const keys: QueryKey[] = [
         ...prUpdateBranchKeys(repo, args.number, args.lens),
@@ -643,9 +670,12 @@ export const glMrMergeStateOptions = (repo: string, number: number) =>
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the
- *  pipeline just passed, so the whole MR view must refresh. `lens` rides the
- *  variables only to name the target PR (GitLab has no upstream lens). */
+ *  pipeline just passed, so the whole MR view must refresh, and that merge's
+ *  pipeline starts after the settle's read, so the arm also schedules the run
+ *  recheck. `lens` rides the variables only to name the target PR (GitLab has no
+ *  upstream lens). */
 export function useGlArmAutoMerge(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -663,7 +693,10 @@ export function useGlArmAutoMerge(repo: string) {
         args.deleteBranch,
         args.sha,
       ),
-    { identity: prWriteKey("gl-arm-auto-merge", repo) },
+    {
+      identity: prWriteKey("gl-arm-auto-merge", repo),
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+    },
   );
 }
 

@@ -3,7 +3,11 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { keepPreviousDataForKeyAxes, repoKeys } from "@/lib/git/queries";
+import {
+  keepPreviousDataForKeyAxes,
+  recheckRunsAfterPush,
+  repoKeys,
+} from "@/lib/git/queries";
 import {
   type CancelRunVars,
   type DispatchVars,
@@ -497,11 +501,13 @@ function useActionsMutation<TArgs>(
   repo: string,
   mutationFn: (args: TArgs) => Promise<void>,
   kind: RunWriteKind,
+  onSuccess?: () => void,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: runWriteKey(kind, repo),
     mutationFn,
+    onSuccess,
     // The awaited refresh is Actions' own; re-run/cancel/dispatch don't touch git
     // state. The two CI surfaces the `actions` prefix can't reach (a PR's own
     // checks, the list's `pr-ci` badges) ride along UNAWAITED — neither should
@@ -555,11 +561,15 @@ export function usePlayCiJob(repo: string) {
   );
 }
 
+/** The forge creates a dispatched run after it accepts the dispatch, after the
+ *  settle's own read, so a dispatch arms the delayed run recheck like a push. */
 export function useRunWorkflow(repo: string) {
+  const queryClient = useQueryClient();
   return useActionsMutation(
     repo,
     (args: DispatchVars) =>
       forgeCiDispatch(repo, args.workflow, args.gitRef, args.inputs),
     "dispatch",
+    () => recheckRunsAfterPush(queryClient, repo),
   );
 }

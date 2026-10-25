@@ -683,20 +683,24 @@ one grep away on the named symbol. Grows via Conventions-sync.
   and hot working-tree ops keep their narrow `invalidate`. The window-focus
   pass refetches only active queries that are stale by their own staleTime
   or errored, never a blanket invalidation.
-- **Push-like run recheck** — any mutation that makes the forge receive a push
-  of commits (push, tag push, PR create, resolve push, origin-lens forge merge,
-  update-branch, repo publish) arms `recheckRunsAfterPush`
-  (`queries/push-writes.ts`) on success: the forge creates a push's runs a few
-  seconds after the settle-time invalidation has already read. Deletion pushes
-  and server-side refs at existing commits are exempt; a remote-branch delete
-  instead schedules `recheckPrListAfterRemoteDelete` with keys its call site
-  builds (GitHub closes a head-deleted PR asynchronously). Guard:
-  `scripts/push-recheck-family.test.mjs`, keyed on the push-family api callees.
-- **Run-scoped forge reads** — an automation or review run shares its
-  identical forge reads through `createRunReads`
-  (`src/lib/automations/run-reads.ts`): single-flight, rejection-evicting, and
-  entries the run's own delivery can change are evicted after each action that
-  ran. Consumers never mutate a shared result.
+- **Push-like run recheck** — any mutation that makes the forge start runs
+  (push, tag push, PR create, resolve push, origin-lens forge merge,
+  update-branch, repo publish, run-workflow, GitLab arm-auto-merge) arms
+  `recheckRunsAfterPush` (`queries/push-writes.ts`) on success: the forge
+  creates a push's runs a few seconds after it lands, after any settle-time
+  read. The arms that move or land a PR (create, resolve, merge, update-branch)
+  also hand it `prChecksRecheck` (`queries/pr-actions.ts`), so that PR's checks
+  rollup and the list's CI badges are re-read with the run lists; a later arm
+  re-arms the per-repo timer and its fire covers every coalesced arm's reads.
+  Deletion pushes and server-side refs at existing commits are exempt; a
+  remote-branch delete instead schedules `recheckPrListAfterRemoteDelete` with
+  keys its call site builds (GitHub closes a head-deleted PR asynchronously).
+  Guard: `scripts/push-recheck-family.test.mjs`, keyed on the api callees.
+- **Run-scoped forge reads** — an automation or review run shares the reads
+  its harvests repeat (the pass's diff, each action's review activity) through
+  `createRunReads` (`src/lib/automations/run-reads.ts`): single-flight,
+  rejection-evicting, and entries the run's own delivery can change are evicted
+  after each action that ran. Consumers never mutate a shared result.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

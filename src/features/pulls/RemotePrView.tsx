@@ -135,6 +135,7 @@ import {
   pendingWriteMatching,
   pendingWriteOfKind,
   prApprovalsOptions,
+  prChecksRecheck,
   prDiffOptions,
   prUpdateBranchKeys,
   recheckRunsAfterPush,
@@ -1532,7 +1533,11 @@ export function RemotePrView({
       );
       // A job slower than the accept-time run recheck starts the head's runs after
       // that recheck fired, so the observed move arms it again (one timer per repo).
-      recheckRunsAfterPush(queryClient, repoPath);
+      recheckRunsAfterPush(
+        queryClient,
+        repoPath,
+        prChecksRecheck(repoPath, lens, number),
+      );
       // A long update spends the mergeability ladder against the UNKNOWN that GitHub
       // reports throughout, so the refetch above would land on a gave-up arm. The head
       // just moved: the question is new again, and the ladder has to start over with it.
