@@ -154,12 +154,13 @@ export function nextPushLatch(
 /** How long after an armed write the runs are read once more: the forge can
  *  surface the run, or flip its status, after the settle-time read. Armed writes
  *  are those whose own default trigger starts CI for the code they touch: pushing
- *  commits or tags; opening, reopening or landing a pull request or updating its
- *  branch; publishing or deleting a release; publishing a repository; creating a
- *  linked branch on the origin lens; dispatching a workflow; and re-running,
- *  playing or approving a run. Out of scope: non-default activity types
- *  (ready-for-review) and other events (labels, comments, reviews, Pages builds).
- *  Deletion pushes and cancel are reasoned exclusions. */
+ *  commits or tags; opening or reopening a pull request, landing it on the origin
+ *  lens, or updating its branch; publishing or deleting a release; publishing a
+ *  repository; creating a linked branch on the origin lens; dispatching a
+ *  workflow; and re-running, playing or approving a run. Out of scope:
+ *  non-default activity types (ready-for-review) and other events (labels,
+ *  comments, reviews, Pages builds). Deletion pushes and cancel are reasoned
+ *  exclusions. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
 /** A read such a write owes the same delayed re-read as the run lists (a PR's

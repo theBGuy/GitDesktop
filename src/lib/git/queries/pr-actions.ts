@@ -518,11 +518,12 @@ export function useMergePr(repo: string) {
     {
       identity: prWriteKey("merge", repo),
       // A landed merge pushes the base branch, whose runs can start after the
-      // settle-time read. Bitbucket's checks read the head sha's statuses, which
-      // a fast-forward merge puts on the base, so the PR's checks are re-read
-      // too; this hook can't tell the provider, so on GitHub and GitLab that is a
-      // precaution of up to two reads. The run lists read origin, so an
-      // upstream-lens merge arms nothing; a queued merge has not landed yet.
+      // settle-time read. A fast-forward merge puts the PR's head sha on the
+      // base, and Bitbucket's checks read that sha's statuses, so the PR's checks
+      // are re-read too. This hook can't tell the provider, so for any other
+      // merge that is a precaution of up to two reads. The run lists read
+      // origin, so an upstream-lens merge arms nothing; a queued merge has not
+      // landed yet.
       onSuccess: (data, args) => {
         if (args.lens === "origin" && !data.queued)
           recheckRunsAfterPush(

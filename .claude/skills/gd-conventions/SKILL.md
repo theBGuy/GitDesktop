@@ -694,14 +694,16 @@ one grep away on the named symbol. Grows via Conventions-sync.
   types (ready-for-review) and other events (labels, comments, reviews, Pages
   builds). Deletion pushes and cancel are reasoned exclusions. Some arms also
   hand it `prChecksRecheck` (`queries/pr-actions.ts`), so the PR's checks
-  rollup and the list's CI badges are re-read with the run lists. Create,
-  resolve push, update-branch (on accept and on the head move), reopen and
-  merge name their PR; finish-resolve's filter covers every PR in its lens. A
-  plain push and the four run writes name no PR and cover both lenses. Merge
-  hands them for Bitbucket, whose checks read the head sha's statuses that a
-  fast-forward puts on the base; on GitHub and GitLab it is a precaution. A
-  later arm re-arms the per-repo timer, and its one fire covers every
-  coalesced arm's reads. A remote-branch delete instead schedules
+  rollup and the list's CI badges are re-read with the run lists. Create, the
+  merge-resolve push (`useMergeRemotePr`), update-branch (on accept and on the
+  head move), reopen and merge name their PR; the finish-resolve push
+  (`useFinishRemotePrResolve`) covers every PR in its lens. A plain push,
+  re-run, re-run job, play job and approve name no PR and cover both lenses.
+  Merge hands them because a Bitbucket fast-forward puts the PR's head sha on
+  the base, and Bitbucket's checks read that sha's statuses; for any other
+  merge it is a precaution. A later arm re-arms the per-repo timer, and its
+  one fire covers every coalesced arm's reads. A remote-branch delete instead
+  schedules
   `recheckPrListAfterRemoteDelete` with keys its call site builds (GitHub
   closes a head-deleted PR asynchronously). Guard:
   `scripts/push-recheck-family.test.mjs`, keyed on the api callees.
