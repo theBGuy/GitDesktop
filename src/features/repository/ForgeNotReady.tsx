@@ -12,6 +12,7 @@ import { PathText } from "@/components/path-text";
 import { useRelativeNow } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
+import { rateLimitRecheckDelayMs } from "@/lib/forge-backoff";
 import { openInTerminal } from "@/lib/git/api";
 import {
   useForgeSessionHealth,
@@ -546,12 +547,6 @@ export function ForgeNotReady({
   );
 }
 
-/** Slack past the reset second, so the re-read doesn't land a hair early. */
-const RESET_GRACE_MS = 5_000;
-/** The longest a rate-limited panel waits after the driving read before
- *  checking again, whatever the reset says (null, past, or far out). */
-const RATE_LIMIT_RECHECK_MS = 2 * 60_000;
-
 /** The rate-limited arm. Deliberately no Reconnect: the credential is fine, and a
  *  fresh sign-in draws on the same exhausted quota. */
 function RateLimitedNotice({
@@ -577,18 +572,13 @@ function RateLimitedNotice({
   const resumesAt = rateLimitResetTime(resetAt, now);
   // Re-read this repo's forge status and session health, plus the accounts list
   // behind Settings' "rate limited" badge, so no surface stays stuck without a
-  // restart. The timer fires at whichever comes first: just past a known future
-  // reset, or RATE_LIMIT_RECHECK_MS after the driving read. A stale
-  // `checkedAt` fires at once, which stays bounded: each re-arm needs a fresh
-  // successful read to move `checkedAt`, never a tight loop.
+  // restart. The timer fires just past a known future reset, at most
+  // RATE_LIMIT_KNOWN_RESET_RECHECK_MS after the driving read; with no known
+  // reset, RATE_LIMIT_RECHECK_MS after it. A stale `checkedAt` fires at once,
+  // which stays bounded: each re-arm needs a fresh successful read to move
+  // `checkedAt`, never a tight loop.
   useEffect(() => {
-    const nowMs = Date.now();
-    const recheck = Math.max(0, checkedAt + RATE_LIMIT_RECHECK_MS - nowMs);
-    const resetMs = typeof resetAt === "number" ? resetAt * 1000 : null;
-    const delay =
-      resetMs !== null && resetMs > nowMs
-        ? Math.min(resetMs - nowMs + RESET_GRACE_MS, recheck)
-        : recheck;
+    const delay = rateLimitRecheckDelayMs(Date.now(), checkedAt, resetAt);
     const timer = setTimeout(() => {
       queryClient.invalidateQueries({
         queryKey: ["repo", repoPath, "forge-status"],
