@@ -1,8 +1,8 @@
-// Pins the conflict banner's stash-reapply states
-// (src/features/repository/conflict-banner-state.ts): which copy shows, when
-// the freshness gate lets a marker-derived state through, when the marker
-// clears, the banner's op precedence, and the status line `opStoppedText` gives
-// an op stopped with no unmerged paths (every op verb and rebase stop kind).
+// Pins the conflict banner's pure state
+// (src/features/repository/conflict-banner-state.ts): the stash-reapply copy,
+// its freshness gate and marker clearing, the op precedence, and the status
+// line and tone `bannerStatus` / `opInfoTone` pick for every arm (each op verb,
+// conflict count and rebase stop kind).
 //
 // Not testable here: the banner's rendering, the confirm flow, and the focus
 // rescues. Those need the live app.
@@ -13,8 +13,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   activeRepoOp,
+  bannerStatus,
+  conflictCount,
   deriveStashBannerState,
   OP_VERBS,
+  opInfoTone,
   opPhrase,
   opStatusText,
   opStoppedText,
@@ -347,6 +350,86 @@ test("opStatusText counts conflicts, then defers to the stop line", () => {
   assert.equal(
     opStatusText("cherry-pick", 0, null),
     "Cherry-picking · no conflicts left",
+  );
+});
+
+test("conflictCount, singular and plural", () => {
+  assert.equal(conflictCount(1), "1 conflict");
+  assert.equal(conflictCount(2), "2 conflicts");
+});
+
+const banner = (over = {}) => ({
+  op: null,
+  conflictedCount: 0,
+  editPaused: false,
+  rebaseStop: null,
+  stash: { kind: "none" },
+  ...over,
+});
+const RESOLVED = {
+  kind: "resolved",
+  lead: "L",
+  tail: "T",
+  announcement: "A",
+};
+
+test("bannerStatus picks each arm's line", () => {
+  const text = (t) => ({ kind: "text", text: t });
+  assert.deepEqual(
+    bannerStatus(
+      banner({ op: "rebase", editPaused: true, rebaseStop: "edit" }),
+    ),
+    text(
+      "Rebase paused — amend this commit's changes in Changes, then Continue",
+    ),
+  );
+  assert.deepEqual(
+    bannerStatus(banner({ op: "merge", conflictedCount: 2 })),
+    text("Merging · 2 conflicts"),
+  );
+  assert.deepEqual(
+    bannerStatus(banner({ op: "rebase", rebaseStop: "break" })),
+    text("Rebase paused at a break — Continue when you're ready."),
+  );
+  assert.deepEqual(bannerStatus(banner({ stash: RESOLVED })), {
+    kind: "reapply",
+    lead: "L",
+    tail: "T",
+  });
+  assert.deepEqual(
+    bannerStatus(banner({ conflictedCount: 1 })),
+    text("1 conflict — resolve it in the changes list."),
+  );
+  assert.deepEqual(
+    bannerStatus(banner({ conflictedCount: 3 })),
+    text("3 conflicts — resolve them in the changes list."),
+  );
+});
+
+test("opInfoTone: planned pauses and a resolved reapply are info", () => {
+  assert.equal(
+    opInfoTone(banner({ op: "rebase", editPaused: true, rebaseStop: "edit" })),
+    true,
+  );
+  assert.equal(opInfoTone(banner({ op: "rebase", rebaseStop: "break" })), true);
+  assert.equal(opInfoTone(banner({ stash: RESOLVED })), true);
+  // A break line is only shown with nothing unmerged.
+  assert.equal(
+    opInfoTone(
+      banner({ op: "rebase", conflictedCount: 1, rebaseStop: "break" }),
+    ),
+    false,
+  );
+  assert.equal(opInfoTone(banner({ op: "merge", conflictedCount: 1 })), false);
+  assert.equal(opInfoTone(banner({ op: "rebase", rebaseStop: "exec" })), false);
+  assert.equal(
+    opInfoTone(
+      banner({
+        conflictedCount: 1,
+        stash: { kind: "conflicted", lead: "L", tail: "T" },
+      }),
+    ),
+    false,
   );
 });
 

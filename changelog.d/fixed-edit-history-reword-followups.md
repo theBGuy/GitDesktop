@@ -1,2 +1,3 @@
-- Edit history: when a plan that pauses to edit rewords a commit, its notes
-  and post-rewrite hooks now carry over to the reworded commit.
+- Edit history: when a plan that pauses to edit rewords a commit, notes that
+  git copies on rewrite now land on the reworded commit, and post-rewrite
+  hooks are given the reworded commit.

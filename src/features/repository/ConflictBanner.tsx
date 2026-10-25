@@ -36,10 +36,11 @@ import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
   activeRepoOp,
+  bannerStatus,
   deriveStashBannerState,
   OP_VERBS,
+  opInfoTone,
   opPhrase,
-  opStatusText,
 } from "./conflict-banner-state";
 
 /** The finish control's label, per op. */
@@ -230,21 +231,18 @@ export function ConflictBanner({
   const busy = abortOp.isPending || continueOp.isPending;
   const onError = (e: unknown) => toastError(e);
   const opVerb = op ? OP_VERBS[op] : null;
-  // The no-op arm's count: a stash pop's unmerged paths with nothing to continue.
-  const conflictText = `${conflictedCount} conflict${conflictedCount === 1 ? "" : "s"}`;
-  const opText =
-    op === null
-      ? null
-      : opStatusText(op, conflictedCount, opState.data?.rebaseStop);
   // A rebase deliberately paused at an `edit` (not a conflict): the user amends
   // the commit via the Changes tab, then continues.
   const editPaused = Boolean(opState.data?.editPaused) && conflictedCount === 0;
-  // A planned pause like the edit one, so it takes the same info tone and icon.
-  const breakPaused =
-    op === "rebase" &&
-    conflictedCount === 0 &&
-    opState.data?.rebaseStop === "break";
-  const infoTone = editPaused || breakPaused || resolvedShown;
+  const bannerArgs = {
+    op,
+    conflictedCount,
+    editPaused,
+    rebaseStop: opState.data?.rebaseStop,
+    stash: state,
+  };
+  const status = bannerStatus(bannerArgs);
+  const infoTone = opInfoTone(bannerArgs);
 
   // Awaited rather than per-call callbacks: this banner unmounts the moment the
   // op ends (and rides an <Activity>-hidden tab), and react-query drops per-call
@@ -404,22 +402,15 @@ export function ConflictBanner({
               <WarningIcon className="mt-0.5 size-3.5 shrink-0" />
             )}
             <span className="min-w-0 text-pretty">
-              {editPaused ? (
-                "Rebase paused — amend this commit's changes in Changes, then Continue"
-              ) : opText ? (
-                opText
-              ) : markerRows ? (
+              {status.kind === "text" ? (
+                status.text
+              ) : (
                 <>
-                  {state.lead}
+                  {status.lead}
                   <span id={tailId} className="block text-muted-foreground">
-                    <ReapplyTail text={state.tail} detail={marker?.detail} />
+                    <ReapplyTail text={status.tail} detail={marker?.detail} />
                   </span>
                 </>
-              ) : (
-                // No operation to continue or abort (a conflicted stash pop
-                // leaves unmerged paths and nothing else), so the banner has to
-                // say where the resolution happens.
-                `${conflictText} — resolve ${conflictedCount === 1 ? "it" : "them"} in the changes list.`
               )}
             </span>
           </span>

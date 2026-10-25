@@ -66,9 +66,12 @@ const REBASE_STOP_TEXT: Record<RebaseStop, string> = {
   other: REBASE_STOPPED,
 };
 
-/** The banner's status line while `op` is active with no unmerged paths; the
- *  caller renders its own arms first (conflicts, an edit pause). A rebase stop
- *  this build doesn't know, or none yet, reads as plainly stopped. */
+export function conflictCount(n: number): string {
+  return `${n} conflict${n === 1 ? "" : "s"}`;
+}
+
+/** `opStatusText`'s line once no unmerged paths are left. A rebase stop this
+ *  build doesn't know, or none yet, reads as plainly stopped. */
 export function opStoppedText(
   op: RepoOp,
   rebaseStop: RepoOpState["rebaseStop"] | undefined,
@@ -86,8 +89,56 @@ export function opStatusText(
   rebaseStop: RepoOpState["rebaseStop"] | undefined,
 ): string {
   if (conflictedCount === 0) return opStoppedText(op, rebaseStop);
-  const n = conflictedCount;
-  return `${OP_VERBS[op]} · ${n} conflict${n === 1 ? "" : "s"}`;
+  return `${OP_VERBS[op]} · ${conflictCount(conflictedCount)}`;
+}
+
+export type BannerArgs = {
+  op: RepoOp | null;
+  conflictedCount: number;
+  /** A rebase paused at an `edit` with nothing unmerged. */
+  editPaused: boolean;
+  rebaseStop: RepoOpState["rebaseStop"] | undefined;
+  stash: StashBannerState;
+};
+
+/** Planned pauses and a resolved reapply read as info; the rest as warnings. */
+export function opInfoTone(a: BannerArgs): boolean {
+  const breakPaused =
+    a.op === "rebase" && a.conflictedCount === 0 && a.rebaseStop === "break";
+  return (
+    a.editPaused ||
+    breakPaused ||
+    (a.op === null && a.stash.kind === "resolved")
+  );
+}
+
+export type BannerStatus =
+  | { kind: "text"; text: string }
+  | { kind: "reapply"; lead: string; tail: string };
+
+export function bannerStatus(a: BannerArgs): BannerStatus {
+  if (a.editPaused) {
+    return {
+      kind: "text",
+      text: "Rebase paused — amend this commit's changes in Changes, then Continue",
+    };
+  }
+  if (a.op) {
+    return {
+      kind: "text",
+      text: opStatusText(a.op, a.conflictedCount, a.rebaseStop),
+    };
+  }
+  if (a.stash.kind !== "none") {
+    return { kind: "reapply", lead: a.stash.lead, tail: a.stash.tail };
+  }
+  // Unmerged paths with no op to continue (a stash pop or apply, `switch -m`),
+  // so the line says where they get resolved.
+  const n = a.conflictedCount;
+  return {
+    kind: "text",
+    text: `${conflictCount(n)} — resolve ${n === 1 ? "it" : "them"} in the changes list.`,
+  };
 }
 
 const RESOLVED_TAIL =
@@ -125,7 +176,7 @@ export function deriveStashBannerState(args: {
     return {
       state: {
         kind: "conflicted",
-        lead: `Reapplying your stashed changes · ${n} conflict${n === 1 ? "" : "s"}`,
+        lead: `Reapplying your stashed changes · ${conflictCount(n)}`,
         tail: `The ${opPhrase(marker)} finished. Resolve ${n === 1 ? "it" : "them"} in the changes list; your changes are also kept in a backup stash.`,
       },
       clearMarker: false,

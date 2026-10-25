@@ -253,6 +253,7 @@ fn rebase_stopped_for_edit(git_dir: &Path) -> bool {
 }
 
 /// Git records the in-flight instruction last; trailing blank lines carry no state.
+/// Returns the verb and optional first operand of the last non-blank done line.
 fn last_rebase_instruction(done: &str) -> Option<(&str, Option<&str>)> {
     let mut tokens = done
         .lines()
@@ -261,7 +262,7 @@ fn last_rebase_instruction(done: &str) -> Option<(&str, Option<&str>)> {
     Some((tokens.next()?, tokens.next()))
 }
 
-/// Unreadable or unrecognized rebase state yields "other", never a guessed stop kind.
+/// Unreadable or unrecognized rebase state yields `RebaseStop::Other`, never a guessed kind.
 /// For an edit line, git writes `rebase-merge/amend` only once its pick succeeds;
 /// a failed edit pick is in `done` but lacks it. Failed folds also write `amend`,
 /// which `empty_fold_stop` relies on.
@@ -11185,6 +11186,11 @@ mod tests {
         assert!(
             empty_fold_stop(&git_dir, &repo, &failure).await.is_none(),
             "the remaining-fold loop must reject a non-hash operand"
+        );
+        std::fs::write(&todo, format!("fixup {c}\nfixup HEAD\n")).unwrap();
+        assert!(
+            empty_fold_stop(&git_dir, &repo, &failure).await.is_some(),
+            "after a non-empty fold, later operands are left for git to parse on continue"
         );
         std::fs::write(&todo, format!("fixup {c}\n")).unwrap();
         let stopped = git_dir.join("rebase-merge/stopped-sha");
