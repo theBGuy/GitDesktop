@@ -939,6 +939,7 @@ type RateKey = (Option<String>, Bucket);
 struct HoldEntry {
     until: i64,
     // Quota reads say nothing about Secondary limits and cannot lift their active waits.
+    // The hold never ends before this floor.
     clear_floor: i64,
     recheck_at: i64,
     epoch: u64,
@@ -1256,6 +1257,7 @@ impl RateGate {
                     entry.probe_pending = false;
                 }
             }
+            entry.until = entry.until.max(entry.clear_floor);
             entry.generation = self.generation;
             return false;
         }
@@ -1959,7 +1961,7 @@ mod tests {
             7,
             0
         ));
-        assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
+        assert_eq!(gate.entries[&key].until, RATE_NOW + 61);
         assert_eq!(gate.entries[&key].strikes, 1);
         assert!(!gate.record(
             key.clone(),
@@ -1997,6 +1999,110 @@ mod tests {
                 !is_bucket_success(&limited),
                 "rate-limit evidence outranks HTTP success"
             );
+        }
+    }
+
+    #[test]
+    fn rate_stale_secondary_without_headers_holds_for_its_full_wait() {
+        let mut gate = RateGate::default();
+        let key = rate_key();
+        assert!(gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0
+        ));
+        assert!(!gate.apply_probe(&key, None, true, RATE_NOW + 1, 7, gate.generation));
+        assert!(!gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Secondary, None),
+            RATE_NOW + 45,
+            7,
+            0,
+        ));
+        assert_eq!(gate.entries[&key].until, RATE_NOW + 105);
+        assert_eq!(gate.entries[&key].kind, LimitKind::Primary);
+        assert_eq!(gate.entries[&key].recheck_at, RATE_NOW + 60);
+        assert_eq!(gate.verdict(&key, RATE_NOW + 60, 7), Verdict::Recheck);
+        assert_eq!(gate.verdict(&key, RATE_NOW + 105, 7), Verdict::Pass);
+    }
+
+    #[test]
+    fn rate_secondary_demotion_preserves_all_recorded_secondary_waits() {
+        let mut gate = RateGate::default();
+        let key = rate_key();
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Primary, None),
+            RATE_NOW,
+            7,
+            0,
+        );
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Secondary, Some(RATE_NOW + 900)),
+            RATE_NOW + 1,
+            7,
+            0,
+        );
+        gate.record(
+            key.clone(),
+            rate_ev(LimitKind::Secondary, None),
+            RATE_NOW + 2,
+            7,
+            gate.generation,
+        );
+        assert_eq!(gate.entries[&key].kind, LimitKind::Secondary);
+        assert_eq!(gate.entries[&key].clear_floor, RATE_NOW + 900);
+        assert!(gate.entries[&key].until >= RATE_NOW + 900);
+        assert_eq!(gate.entries[&key].recheck_at, RATE_NOW + 62);
+        assert_eq!(gate.verdict(&key, RATE_NOW + 899, 7), Verdict::Hold);
+    }
+
+    #[test]
+    fn rate_record_sequences_preserve_the_clear_floor() {
+        let steps = [
+            (LimitKind::Primary, None, true, 0),
+            (LimitKind::Primary, Some(15), true, 15),
+            (LimitKind::Primary, Some(86_400), false, 60),
+            (LimitKind::Primary, None, false, 0),
+            (LimitKind::Secondary, None, false, 45),
+            (LimitKind::Secondary, None, true, 60),
+            (LimitKind::Secondary, Some(15), true, 0),
+            (LimitKind::Secondary, Some(900), false, 1),
+        ];
+        for length in 1..=4 {
+            for sequence in 0..steps.len().pow(length) {
+                let mut gate = RateGate::default();
+                let key = rate_key();
+                let mut now = RATE_NOW;
+                let mut choices = sequence;
+                for step in 0..length {
+                    let (kind, hint, current, elapsed) = steps[choices % steps.len()];
+                    choices /= steps.len();
+                    now += elapsed;
+                    let generation = if current { gate.generation } else { 0 };
+                    gate.record(
+                        key.clone(),
+                        rate_ev(kind, hint.map(|wait| now + wait)),
+                        now,
+                        7,
+                        generation,
+                    );
+                    let entry = &gate.entries[&key];
+                    assert!(
+                        entry.until >= entry.clear_floor,
+                        "length {length}, sequence {sequence}, step {step}: until {} < floor {}",
+                        entry.until,
+                        entry.clear_floor
+                    );
+                    assert!(entry.until <= now + MAX_HOLD_SECS + CLOCK_SLACK_SECS);
+                    if entry.kind == LimitKind::Primary {
+                        assert!(entry.recheck_at <= now + RECHECK_SECS + CLOCK_SLACK_SECS);
+                    }
+                }
+            }
         }
     }
 
@@ -2378,7 +2484,7 @@ mod tests {
             assert_eq!(gate.entries.contains_key(&key), !clears);
             if !clears {
                 assert_eq!(gate.entries[&key].strikes, 2);
-                assert_eq!(gate.entries[&key].until, RATE_NOW + 180);
+                assert_eq!(gate.entries[&key].until, gate.entries[&key].clear_floor);
             }
             if clears {
                 gate.record(
@@ -3010,8 +3116,8 @@ mod tests {
             let entry = &guard.entries[&rate_key()];
             assert_eq!(
                 entry.until,
-                RATE_NOW + if generation < 5 { 180 } else { 120 },
-                "a stale refusal may extend a newer hold but must not shorten it"
+                RATE_NOW + 180,
+                "no refusal may shorten the hold below its recorded secondary wait"
             );
             assert_eq!(entry.strikes, 2);
             assert_eq!(entry.generation, 6);

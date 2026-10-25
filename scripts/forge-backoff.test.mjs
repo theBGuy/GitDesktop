@@ -1,5 +1,6 @@
-// Pins the app-wide retry predicate (src/lib/query-client.ts) and the
-// rate-limited panel's recheck delay (src/features/repository/ForgeNotReady.tsx).
+// Pins the app-wide retry predicate (src/lib/query-client.ts), the PR and issue
+// list predicates that compose it (src/lib/git/queries/prs.ts, issues.ts), and
+// the rate-limited panel's recheck delay (src/features/repository/ForgeNotReady.tsx).
 // The contracts under test: a rate-limit or credential error is never retried,
 // status digits count only as status tokens (a URL path or an issue ref is not
 // a status), and a known reset times the recheck within a 10-minute cap.
