@@ -4,9 +4,9 @@
  * the mutation cache, the label a branch row's spinner shows for it, the reasons
  * a push puts on the other controls it holds, the HEAD-push latch, the one
  * delayed run-list recheck (plus any PR checks reads its arms hand it) armed by a
- * successful write that creates a run or starts one again, which the forge can
- * surface after the call returns, or by the observed head move, and the delayed
- * PR-list re-read a remote-branch delete schedules.
+ * successful write whose own default trigger starts CI for the code it touches
+ * (the boundary at {@link PUSH_RUN_RECHECK_MS}), or by the observed head move, and
+ * the delayed PR-list re-read a remote-branch delete schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
  * file, and `scripts/push-writes.test.mjs` loads it straight from `src/` under
@@ -151,9 +151,14 @@ export function nextPushLatch(
   return { ...Object.fromEntries(kept), ...Object.fromEntries(added) };
 }
 
-/** How long after a write that creates a run or starts one again (a push, a
- *  dispatch, a publish, a re-run, an approval) the runs are read once more: the
- *  forge can surface the run, or flip its status, after the settle-time read. */
+/** How long after an armed write the runs are read once more: the forge can
+ *  surface the run, or flip its status, after the settle-time read. Armed writes
+ *  are those whose own default trigger starts CI for the code they touch: pushing
+ *  commits or tags, opening, reopening, landing or updating a pull request,
+ *  publishing a release or repository, creating a branch, dispatching a workflow,
+ *  and re-running, playing or approving a run. Workflows keyed on other events
+ *  (labels, comments, reviews, ready-for-review, release deletion, Pages builds)
+ *  are out of scope; deletion pushes and cancel are reasoned exclusions. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
 /** A read such a write owes the same delayed re-read as the run lists (a PR's

@@ -1126,7 +1126,7 @@ export function useIssueDevelopment(
 
 /** The new branch is a server-side ref at an existing commit, but the forge may
  *  still start create or push workflows for it after the call returns, so it arms
- *  the delayed run recheck. */
+ *  the delayed run recheck; only in origin, since the run lists read origin. */
 export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -1138,7 +1138,9 @@ export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
       // `repo`, and the issue panel survives a repo switch — without the key the
       // newly-live repo's controls would read the pending create as busy.
       identity: ["create-linked-branch", repo, lens],
-      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+      onSuccess: () => {
+        if (lens === "origin") recheckRunsAfterPush(queryClient, repo);
+      },
     },
   );
 }

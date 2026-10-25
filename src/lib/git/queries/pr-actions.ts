@@ -518,12 +518,18 @@ export function useMergePr(repo: string) {
     {
       identity: prWriteKey("merge", repo),
       // A landed merge pushes the base branch, whose runs can start after the
-      // settle-time read. They run on the base, so the merged PR's checks and the
-      // list's badges don't move: the run lists alone are re-read. Those read
-      // origin, so an upstream-lens merge arms nothing; nor does a queued one.
+      // settle-time read. A fast-forward merge (Bitbucket, GitLab `ff`) leaves the
+      // base on the PR's head sha, whose statuses the PR's checks and the list's
+      // badges read, so those are re-read too. The run lists read origin, so an
+      // upstream-lens merge arms nothing; a queued merge lands later than the 8 s
+      // recheck could see.
       onSuccess: (data, args) => {
         if (args.lens === "origin" && !data.queued)
-          recheckRunsAfterPush(queryClient, repo);
+          recheckRunsAfterPush(
+            queryClient,
+            repo,
+            prChecksRecheck(repo, args.lens, args.number),
+          );
       },
     },
   );
@@ -677,8 +683,9 @@ export const glMrMergeStateOptions = (repo: string, number: number) =>
  *  invalidation is deliberate: an arm can race into an immediate merge when the
  *  pipeline just passed, so the whole MR view must refresh, and that merge's
  *  pipeline can start after the settle-time read, so the arm also schedules the
- *  run recheck. `lens` rides the variables only to name the target PR (GitLab has
- *  no upstream lens). */
+ *  run recheck with the MR's checks reads (an `ff` merge keeps its head sha).
+ *  `lens` rides the variables only to name the target PR (GitLab has no upstream
+ *  lens). */
 export function useGlArmAutoMerge(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -700,7 +707,12 @@ export function useGlArmAutoMerge(repo: string) {
       ),
     {
       identity: prWriteKey("gl-arm-auto-merge", repo),
-      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+      onSuccess: (_d, args) =>
+        recheckRunsAfterPush(
+          queryClient,
+          repo,
+          prChecksRecheck(repo, args.lens, args.number),
+        ),
     },
   );
 }

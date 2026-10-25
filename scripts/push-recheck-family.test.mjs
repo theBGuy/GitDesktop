@@ -1,11 +1,15 @@
-// Pins the push-like run-recheck family: every hook whose write creates a run or
-// starts one again (a push, a publish, a dispatch, a merge, a reopen, a re-run, a
-// play, an approval) arms `recheckRunsAfterPush` (push-writes.ts), because the
-// forge can surface that run after the settle-time read. The PR-scoped arms (push,
-// create, resolve push, update-branch, reopen, re-run, re-run job, play job,
-// approve run) also hand the recheck PR checks reads (`prChecksRecheck`) as one of
-// its arguments. Keyed on the CALLEE, not the hook: a new unit naming one of these
-// api functions must arm the recheck or join the reasoned exclusions.
+// Pins the push-like run-recheck family: every hook whose write's own default
+// trigger starts CI for the code it touches (pushing commits or tags; opening,
+// reopening, landing or updating a pull request; publishing a release or
+// repository; creating a branch; dispatching a workflow; re-running, playing or
+// approving a run) arms `recheckRunsAfterPush` (push-writes.ts), because the run
+// can appear, or flip status, after the settle-time read. Workflows keyed on other
+// events (labels, comments, reviews, ready-for-review, release deletion, Pages
+// builds) are out of scope; deletion pushes and cancel are reasoned exclusions.
+// The arms flagged `prChecks` also hand the recheck PR checks reads
+// (`prChecksRecheck`) as one of its arguments. Keyed on the CALLEE, not the hook:
+// a new unit naming one of these api functions must arm the recheck or join the
+// reasoned exclusions.
 //
 // The checker is a pure function over source text, so the suite feeds it the real
 // files (must pass) and in-memory mutants (must fail) without touching disk. It
@@ -15,8 +19,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
-/** The api functions of writes that create a run or start one again, which the
- *  forge can surface after the call returns. */
+/** The api functions of writes whose own default trigger starts CI for the code
+ *  they touch (the boundary in the header). */
 const ROSTER = [
   "gitPush",
   "gitPushTag",
@@ -46,13 +50,19 @@ const Q = "lib/git/queries/";
 /** Corpus paths, relative to `src/`. */
 const CORPUS_FILES = ["lib/github/actions.ts"];
 
-const RELEASE_GATE = "if (releasePublishes(args))";
+const DRAFT_GATE = "if (!args.draft)";
 
 /** The hooks that must arm the recheck: the condition that must guard every arm
- *  call in it (null = armed on every success), and whether its arm calls hand the
- *  PR's checks reads along. */
+ *  call in it (null = armed on every success), whether its arm calls hand the PR's
+ *  checks reads along, and whether they hand them for BOTH lenses (an arm that
+ *  names no PR or lens covers origin and upstream). */
 const ARMED = {
-  usePush: { file: `${Q}sync.ts`, gate: null, prChecks: true },
+  usePush: {
+    file: `${Q}sync.ts`,
+    gate: null,
+    prChecks: true,
+    bothLenses: true,
+  },
   usePushTag: { file: `${Q}tags-releases.ts`, gate: null, prChecks: false },
   useMergeRemotePr: {
     file: `${Q}pr-resolve.ts`,
@@ -67,38 +77,63 @@ const ARMED = {
   useMergePr: {
     file: `${Q}pr-actions.ts`,
     gate: 'if (args.lens === "origin" && !data.queued)',
-    prChecks: false,
+    prChecks: true,
   },
   usePrUpdateBranch: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
   useReopenPr: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
-  useGlArmAutoMerge: { file: `${Q}pr-actions.ts`, gate: null, prChecks: false },
+  useGlArmAutoMerge: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
   useCreatePr: { file: `${Q}pr-write.ts`, gate: null, prChecks: true },
   usePublishRepo: { file: `${Q}remotes.ts`, gate: null, prChecks: false },
   useCreateRelease: {
     file: `${Q}tags-releases.ts`,
-    gate: RELEASE_GATE,
+    gate: DRAFT_GATE,
     prChecks: false,
   },
   useEditRelease: {
     file: `${Q}tags-releases.ts`,
-    gate: RELEASE_GATE,
+    gate: DRAFT_GATE,
     prChecks: false,
   },
-  useCreateLinkedBranch: { file: `${Q}issues.ts`, gate: null, prChecks: false },
+  useCreateLinkedBranch: {
+    file: `${Q}issues.ts`,
+    gate: 'if (lens === "origin")',
+    prChecks: false,
+  },
   useRunWorkflow: {
     file: "lib/github/actions.ts",
     gate: null,
     prChecks: false,
   },
-  useRerunRun: { file: "lib/github/actions.ts", gate: null, prChecks: true },
-  useRerunJob: { file: "lib/github/actions.ts", gate: null, prChecks: true },
-  usePlayCiJob: { file: "lib/github/actions.ts", gate: null, prChecks: true },
+  useRerunRun: {
+    file: "lib/github/actions.ts",
+    gate: null,
+    prChecks: true,
+    bothLenses: true,
+  },
+  useRerunJob: {
+    file: "lib/github/actions.ts",
+    gate: null,
+    prChecks: true,
+    bothLenses: true,
+  },
+  usePlayCiJob: {
+    file: "lib/github/actions.ts",
+    gate: null,
+    prChecks: true,
+    bothLenses: true,
+  },
   useApproveWorkflowRun: {
     file: `${Q}pr-actions.ts`,
     gate: null,
     prChecks: true,
+    bothLenses: true,
   },
 };
+
+const BOTH_LENSES = [
+  /\bprChecksRecheck\(repo, "origin"\)/,
+  /\bprChecksRecheck\(repo, "upstream"\)/,
+];
 
 /** Writes that deliberately arm nothing, each with its reason. */
 const EXCLUDED = {
@@ -274,7 +309,9 @@ function checkPushRecheckFamily(raw) {
   for (const c of [...ROSTER, ...RUN_STATUS_CALLEES])
     if (!calledCallees.has(c)) problems.push(`roster callee ${c} not found`);
 
-  for (const [name, { file, gate, prChecks }] of Object.entries(ARMED)) {
+  for (const [name, { file, gate, prChecks, bothLenses }] of Object.entries(
+    ARMED,
+  )) {
     const hook = hooks.get(`${file}#${name}`);
     if (!hook) {
       problems.push(`${file} ${name}: hook not found`);
@@ -291,7 +328,15 @@ function checkPushRecheckFamily(raw) {
       );
     // Positional: the builder must be an argument of the arm call itself, not a
     // value computed beside it.
-    const handing = armCallArgs(hook.body).map((a) => PR_CHECKS.test(a));
+    const args = armCallArgs(hook.body);
+    if (
+      bothLenses &&
+      !args.every((a) => BOTH_LENSES.every((lens) => lens.test(a)))
+    )
+      problems.push(
+        `${file} ${name}: an arm call does not hand both lenses' PR checks reads`,
+      );
+    const handing = args.map((a) => PR_CHECKS.test(a));
     if (prChecks && (handing.length === 0 || handing.includes(false)))
       problems.push(
         `${file} ${name}: an arm call does not hand the recheck the PR's checks reads`,
@@ -391,6 +436,56 @@ test("dropping a gate fails the check", () => {
   assert.ok(
     checkPushRecheckFamily(sources).some((p) => p.includes("useMergePr")),
   );
+});
+
+test("a flipped release gate or a dropped origin gate fails the check", () => {
+  for (const [file, from, to, name] of [
+    [
+      `${Q}tags-releases.ts`,
+      "if (!args.draft) recheckRunsAfterPush(",
+      "if (args.draft) recheckRunsAfterPush(",
+      "useCreateRelease",
+    ],
+    [
+      `${Q}issues.ts`,
+      'if (lens === "origin") recheckRunsAfterPush(',
+      "recheckRunsAfterPush(",
+      "useCreateLinkedBranch",
+    ],
+  ]) {
+    const sources = mutate(realSources(), file, (text) =>
+      text.replace(from, to),
+    );
+    assert.ok(
+      checkPushRecheckFamily(sources).some(
+        (p) => p.includes(name) && p.includes("not guarded"),
+      ),
+      name,
+    );
+  }
+});
+
+test("a both-lens arm that drops a lens fails the check", () => {
+  for (const [file, name] of [
+    [`${Q}sync.ts`, "usePush"],
+    [`${Q}pr-actions.ts`, "useApproveWorkflowRun"],
+    ["lib/github/actions.ts", "useRerunRun"],
+  ]) {
+    const sources = mutate(realSources(), file, (text) => {
+      const body = topLevelUnits(text).get(name);
+      assert.ok(body, `${name} not found in ${file}`);
+      return text.replace(
+        body,
+        body.replace('...prChecksRecheck(repo, "upstream"),', ""),
+      );
+    });
+    assert.ok(
+      checkPushRecheckFamily(sources).some(
+        (p) => p.includes(name) && p.includes("both lenses"),
+      ),
+      name,
+    );
+  }
 });
 
 test("an arm that stops handing the PR's checks reads fails the check", () => {

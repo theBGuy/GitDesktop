@@ -18,11 +18,13 @@
 //
 // The imports are DYNAMIC because this file pulls @tanstack/react-query, which the
 // CI `guards` job (no install step) can't resolve: unresolved deps skip every test
-// here but the source pin, and GD_EXPECT_DEPS turns a skip into a failure on an
-// installed run.
+// here but the source pins and the filter-matcher table, and GD_EXPECT_DEPS turns
+// a skip into a failure on an installed run.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+// Import-free (types only), so it loads without node_modules like the source pin.
+import { recheckFilterMatches } from "../src/lib/git/queries/push-writes.ts";
 
 let deps = null;
 try {
@@ -622,6 +624,62 @@ test("a plain arm re-reads no PR reads", (t) => {
   assert.equal(c.marked("runs"), true);
   for (const name of ["details7", "diff7", "details8", "upstream7", "ci"])
     assert.equal(c.marked(name), false, name);
+});
+
+// ── Push: prChecksRecheck's key shapes against the reads they must reach ─────
+
+/** The three filters `prChecksRecheck` (queries/pr-actions.ts) builds, spelled as
+ *  the source pin below requires them, instantiated for repo `r`, lens `origin`,
+ *  PR 7. */
+const PR_CHECKS_SHAPES = {
+  exact: { queryKey: ["repo", "r", "pr", "origin", 7], exact: true },
+  lensWide: { queryKey: ["repo", "r", "pr", "origin"], numberedChild: true },
+  ci: { queryKey: ["repo", "r", "pr-ci", "origin"] },
+};
+
+test("source pin: prChecksRecheck builds the exact, lens-wide and CI-map shapes", () => {
+  const source = readFileSync(
+    new URL("../src/lib/git/queries/pr-actions.ts", import.meta.url),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
+  for (const shape of [
+    '{ queryKey: ["repo", repo, "pr", lens], numberedChild: true }',
+    '{ queryKey: ["repo", repo, "pr", lens, number], exact: true }',
+    "{ queryKey: [...repoKeys.prCi(repo), lens] }",
+  ])
+    assert.ok(source.includes(shape), shape);
+  // The details key the exact shape mirrors (prs.ts prDetailsOptions).
+  const prs = readFileSync(
+    new URL("../src/lib/git/queries/prs.ts", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    prs.includes('queryKey: ["repo", repo, "pr", lens, number] as const'),
+  );
+});
+
+test("recheckFilterMatches: exact, numbered-child and prefix modes", () => {
+  const m = (shape, key) => recheckFilterMatches(PR_CHECKS_SHAPES[shape], key);
+  const details7 = ["repo", "r", "pr", "origin", 7];
+  const diff7 = ["repo", "r", "pr", "origin", 7, "diff"];
+  const details8 = ["repo", "r", "pr", "origin", 8];
+  const upstream7 = ["repo", "r", "pr", "upstream", 7];
+  const named = ["repo", "r", "pr", "origin", "resolve-worktree"];
+  const ciPage = ["repo", "r", "pr-ci", "origin", "open", null, "7:"];
+  const ciUpstream = ["repo", "r", "pr-ci", "upstream", "open", null, "7:"];
+  assert.equal(m("exact", details7), true);
+  assert.equal(m("exact", diff7), false, "exact reached the subtree");
+  assert.equal(m("exact", details8), false);
+  assert.equal(m("lensWide", details7), true);
+  assert.equal(m("lensWide", details8), true);
+  assert.equal(m("lensWide", diff7), false, "lens-wide reached the subtree");
+  assert.equal(m("lensWide", named), false, "a non-number leaf matched");
+  assert.equal(m("lensWide", upstream7), false, "lens-wide crossed lenses");
+  assert.equal(m("ci", ciPage), true);
+  assert.equal(m("ci", ciUpstream), false);
+  assert.equal(m("ci", details7), false);
+  // A shorter key never matches a longer prefix.
+  assert.equal(m("exact", ["repo", "r", "pr"]), false);
 });
 
 // ── Remote-branch delete: the one delayed PR-list re-read ──────────────────

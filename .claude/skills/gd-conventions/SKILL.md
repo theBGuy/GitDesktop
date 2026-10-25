@@ -683,21 +683,24 @@ one grep away on the named symbol. Grows via Conventions-sync.
   and hot working-tree ops keep their narrow `invalidate`. The window-focus
   pass refetches only active queries that are stale by their own staleTime
   or errored, never a blanket invalidation.
-- **Push-like run recheck** — writes that create a run or start one again,
-  which the forge can surface after the call returns (push, tag push, PR
-  create, resolve push, origin-lens forge merge, update-branch, PR reopen, repo
-  publish, release publish, linked-branch create, run-workflow, GitLab
-  arm-auto-merge, re-run, re-run job, play job, approve run), arm
-  `recheckRunsAfterPush` (`queries/push-writes.ts`) on success: the run can
-  appear, or flip status, after the settle-time read. The PR-scoped arms also
-  hand it `prChecksRecheck` (`queries/pr-actions.ts`), so the PR's checks rollup
-  and the list's CI badges are re-read with the run lists: create, resolve push
-  (finish-resolve's filter covers every PR in the lens), update-branch on
-  accept and on the head move, and reopen name their PR; a plain push and the
-  four run writes name none and cover every PR in both lenses. A later arm
-  re-arms the per-repo timer, and its one fire covers every coalesced arm's
-  reads. Exempt: deletion pushes, and cancel (it stops a run rather than
-  starting one). A remote-branch delete instead schedules
+- **Push-like run recheck** — writes whose own default trigger starts CI for
+  the code they touch arm `recheckRunsAfterPush` (`queries/push-writes.ts`) on
+  success, because the run can appear, or flip status, after the settle-time
+  read: pushing commits or tags, opening, reopening, landing (origin-lens
+  merge, GitLab arm-auto-merge) or updating a pull request, a resolve push,
+  publishing a release or repository, creating a branch (linked-branch create,
+  origin only), dispatching a workflow, and re-running, playing or approving a
+  run. Out of scope: workflows keyed on other events (labels, comments,
+  reviews, ready-for-review, release deletion, Pages builds), which a forge can
+  start on almost any write. Deletion pushes and cancel are reasoned
+  exclusions. The arms that hand `prChecksRecheck` (`queries/pr-actions.ts`),
+  so the PR's checks rollup and the list's CI badges are re-read with the run
+  lists: create, resolve push (finish-resolve's filter covers every PR in the
+  lens), merge and GitLab arm-auto-merge (a fast-forward leaves the base on the
+  PR's head sha), update-branch on accept and on the head move, and reopen name
+  their PR; a plain push and the four run writes name none and cover every PR
+  in both lenses. A later arm re-arms the per-repo timer, and its one fire
+  covers every coalesced arm's reads. A remote-branch delete instead schedules
   `recheckPrListAfterRemoteDelete` with keys its call site builds (GitHub
   closes a head-deleted PR asynchronously). Guard:
   `scripts/push-recheck-family.test.mjs`, keyed on the api callees.

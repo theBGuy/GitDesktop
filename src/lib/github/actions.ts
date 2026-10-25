@@ -524,10 +524,16 @@ function useActionsMutation<TArgs>(
 }
 
 /** Re-run, re-run job, play job and approve run (`useApproveWorkflowRun` in
- *  queries/pr-actions.ts) each arm the delayed run recheck: the forge can flip the
- *  run's status (on Bitbucket, create the re-run's fresh pipeline) after the
- *  settle-time read. Their variables name no PR, so the recheck re-reads every
- *  on-screen PR's checks in both lenses, as a plain push does. */
+ *  queries/pr-actions.ts) each arm the delayed run recheck: GitHub's attempt
+ *  transition and GitLab's status flip can land after the settle-time read.
+ *  Bitbucket's re-run creates its pipeline within the call, so there the recheck
+ *  costs extra reads. These arms hand PR checks reads for both lenses because
+ *  `useActionsMutation`'s `onSuccess` sees no variables and none names a PR.
+ *  RunDetailView (`RUN_REPAIR_DELAY_MS`) and ChecksRollup
+ *  (`CHECKS_REPAIR_DELAY_MS`) already repair at 4.5 s, re-reading the Actions
+ *  subtree or that view's PR keys; this arm also covers the press they don't (the
+ *  Actions panel's re-run) and the run lists and PR checks at 8 s. The overlap
+ *  costs one extra read. */
 export function useRerunRun(repo: string) {
   const queryClient = useQueryClient();
   return useActionsMutation(
@@ -590,7 +596,7 @@ export function usePlayCiJob(repo: string) {
 /** GitHub creates a dispatched run only after it accepts the dispatch, so the run
  *  can start after the settle-time read and a dispatch arms the delayed run
  *  recheck like a push. GitLab and Bitbucket create the pipeline within the call,
- *  so there the recheck costs one extra list read. */
+ *  so there the recheck costs one extra read of each active run list. */
 export function useRunWorkflow(repo: string) {
   const queryClient = useQueryClient();
   return useActionsMutation(
