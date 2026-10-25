@@ -13,16 +13,16 @@ const RATE_LIMIT_PHRASES = [
   "too many requests",
 ];
 
-/** 429 status tokens. Matched as whole words only: a bare 429 is as likely a
- *  URL path segment or an issue ref as a status. */
-const RATE_LIMIT_STATUS = ["http 429", "(http 429)", "429 too many requests"];
+/** The 429 status token, matched as a whole word only: a bare 429 is as likely
+ *  a URL path segment or an issue ref as a status. */
+const RATE_LIMIT_STATUS = ["http 429"];
 
 /** gh's 401 wording (go-gh's `HTTP 401: Bad credentials (…)`) and the
  *  not-signed-in instruction gh and glab print. Matched as substrings. */
 const AUTH_PHRASES = ["bad credentials", "auth login"];
 
-/** 401 status tokens, whole words only for the same reason as the 429 ones. */
-const AUTH_STATUS = ["http 401", "(http 401)", "401 unauthorized"];
+/** 401 status tokens, whole words only for the same reason as the 429 token. */
+const AUTH_STATUS = ["http 401", "401 unauthorized"];
 
 /** Slack past the reset second, so the re-read doesn't land a hair early. */
 export const RESET_GRACE_MS = 5_000;
@@ -71,7 +71,7 @@ function matches(
 }
 
 /** Whether `error` is a forge's rate-limit refusal, the app's own held-call
- *  text for a GitHub budget already used up included. */
+ *  text for a GitHub limit already reached included. */
 export function isRateLimitError(error: unknown): boolean {
   const text = forgeMessage(error);
   return text !== null && matches(text, RATE_LIMIT_PHRASES, RATE_LIMIT_STATUS);

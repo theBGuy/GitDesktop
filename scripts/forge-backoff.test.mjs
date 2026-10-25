@@ -208,3 +208,62 @@ test("the query client's default retry is shouldRetryQuery", () => {
     source.replace(/\r?\n/g, "\r\n").replace(/retry:\s*/, "retry :\n  "),
   );
 });
+
+/** Throws unless every function-valued `retry` in a query module composes
+ *  `shouldRetryQuery` (imported from @/lib/forge-backoff) over its own kind
+ *  check, rather than counting failures itself. */
+function assertPredicateComposes(source) {
+  const code = source.replace(/\r\n/g, "\n").replace(/\/\/[^\n]*/g, "");
+  assert.match(
+    code,
+    /import\s*\{[^}]*\bshouldRetryQuery\b[^}]*\}\s*from\s*["']@\/lib\/forge-backoff["']/,
+    "shouldRetryQuery is imported from @/lib/forge-backoff",
+  );
+  const heads = [
+    ...code.matchAll(/\bretry\s*:\s*\(\s*(\w+)\s*,\s*(\w+)\s*\)\s*=>/g),
+  ];
+  assert.ok(heads.length > 0, "a function-valued retry exists");
+  for (const head of heads) {
+    const rest = code.slice(head.index + head[0].length);
+    const end = rest.search(/\n\s*[A-Za-z_$][\w$]*\s*:/);
+    const body = end === -1 ? rest : rest.slice(0, end);
+    const call = new RegExp(
+      String.raw`\bshouldRetryQuery\s*\(\s*${head[1]}\s*,\s*${head[2]}\s*\)`,
+    );
+    assert.match(body, call, "the retry predicate calls shouldRetryQuery");
+  }
+}
+
+test("the PR and issue list retry predicates compose shouldRetryQuery", () => {
+  for (const file of [
+    "src/lib/git/queries/prs.ts",
+    "src/lib/git/queries/issues.ts",
+  ]) {
+    const source = readFileSync(join(ROOT, file), "utf8");
+    assertPredicateComposes(source);
+    // Mutation controls: a predicate counting failures itself, and the import
+    // dropped, each fail.
+    const counting = source.replace(
+      /shouldRetryQuery\(\s*failureCount\s*,\s*err\s*\)/,
+      "failureCount < 1",
+    );
+    assert.notEqual(counting, source, file);
+    assert.throws(
+      () => assertPredicateComposes(counting),
+      /calls shouldRetryQuery/,
+      file,
+    );
+    const unimported = source.replace(
+      /\bfrom\s*["']@\/lib\/forge-backoff["']/,
+      "",
+    );
+    assert.notEqual(unimported, source, file);
+    assert.throws(
+      () => assertPredicateComposes(unimported),
+      /forge-backoff/,
+      file,
+    );
+    // CRLF is free.
+    assertPredicateComposes(source.replace(/\r?\n/g, "\r\n"));
+  }
+});

@@ -1156,9 +1156,11 @@ authenticated; when you're not signed in the tab shows a **Sign in** button that
 sign-in in-app, and if a session **expired or was revoked** it becomes **Reconnect**
 instead of a dead end. When GitHub's **API rate limit** is in effect, the tab says so,
 with the time access resumes when GitHub reports it; your sign-in is untouched, so
-there's nothing to reconnect. GitLab does the same when its CLI names the limit.) When a
-token is within a week of expiring, a quiet **dismissible notice** at the top of this
-tab (and the Issues tab) reminds you to reconnect before it lapses.
+there's nothing to reconnect. GitLab does the same when its CLI names the limit.) While a
+GitHub limit is in effect, GitDesktop holds back most of the requests the limit covers
+until it lifts, and most actions that need one say so. When a token is within a week of
+expiring, a quiet **dismissible notice** at the top of this tab (and the Issues tab)
+reminds you to reconnect before it lapses.
 
 What you can *do* here follows your access on the repository: when you lack the access an
 action needs — push access to **merge** or to flip a pull request between **draft** and

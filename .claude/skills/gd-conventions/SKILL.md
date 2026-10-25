@@ -998,6 +998,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `@lezer/highlight` drops theme coloring — neither shows in build or tests.
   Remedy is `pnpm dedupe`, then an `overrides:` pin in `pnpm-workspace.yaml`
   for a split that survives it.
+- **gh rate-limit hold:** `github/runner.rs` holds a gh call whose argv
+  classifies to a limited (host, bucket) pair (REST core, GraphQL or search)
+  and returns gh-shaped rate-limit stderr without spawning. Evidence comes
+  from `forge::session::gh_error_is_rate_limit` (the one shared predicate) or
+  a 429 status line. A hold ends when it runs out, when a call on its bucket
+  that started after it succeeds (or gets a non-limit 4xx), on a recheck that
+  sees quota (primary holds only, never before any secondary evidence on the
+  hold has run out: a quota read can't lift a secondary limit), or on an
+  auth-epoch bump. A result from a call or probe that started before the hold
+  may lengthen it but never clears or shortens it. A new gh family joins
+  `classify_call` only after its bucket is verified in gh's source, and
+  unknown argv is never held. Frontend retry and backoff key on the shared
+  `isRateLimitError` / `isAuthError` (`src/lib/forge-backoff.ts`), never a
+  re-spelled match.
 
 ## Code comments
 

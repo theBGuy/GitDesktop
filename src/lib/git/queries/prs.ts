@@ -6,6 +6,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { shouldRetryQuery } from "@/lib/forge-backoff";
 import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
@@ -84,11 +85,12 @@ export function usePrList(
     queryFn: () => api.forgePrList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
-    // invalidArgument marks a refusal that is deterministic for this scope — the filter
-    // caps, the magic values, and GitLab's walk horizon — so a retry only re-spends the
-    // walk (up to 30 `glab` calls) to reach the same answer.
+    // invalidArgument is deterministic per scope (filter caps, magic values, GitLab's
+    // walk horizon), so a retry re-spends the walk (up to 30 `glab` calls) for the same
+    // answer; the rest takes the default, which never retries rate limits or 401s.
     retry: (failureCount, err) =>
-      !(isAppError(err) && err.kind === "invalidArgument") && failureCount < 1,
+      !(isAppError(err) && err.kind === "invalidArgument") &&
+      shouldRetryQuery(failureCount, err),
     // State, limit and filter stay free so a tab switch, "Load more" or a filter
     // change keeps the current rows instead of flashing skeletons, but lens must
     // match: a fork numbers PRs independently of its parent, so another lens's rows

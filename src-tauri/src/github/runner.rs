@@ -333,11 +333,25 @@ async fn run_gh_raw_resolved_with(
     gate: &'static Mutex<RateGate>,
     epoch: u64,
 ) -> AppResult<GhOutput> {
+    run_gh_gated(gh, gh_host, args, gate, epoch, || {
+        spawn_gh_resolved(gh, repo_path, gh_host, args, timeout)
+    })
+    .await
+}
+
+async fn run_gh_gated<F: std::future::Future<Output = AppResult<GhOutput>>>(
+    gh: &std::path::Path,
+    gh_host: Option<&str>,
+    args: &[&str],
+    gate: &'static Mutex<RateGate>,
+    epoch: u64,
+    spawn: impl FnOnce() -> F,
+) -> AppResult<GhOutput> {
     let generation = gate.lock().unwrap_or_else(|p| p.into_inner()).generation;
     if let Some(held) = gate_before(gate, gh, gh_host, args, epoch) {
         return Ok(held);
     }
-    let out = spawn_gh_resolved(gh, repo_path, gh_host, args, timeout).await?;
+    let out = spawn().await?;
     gate_after(gate, gh, gh_host, args, &out, epoch, generation);
     Ok(out)
 }
@@ -459,65 +473,58 @@ pub async fn run_gh_input_raw(
         None => None,
     };
     let epoch = gh_auth_epoch();
-    let generation = rate_gate()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .generation;
-    if let Some(held) = gate_before(rate_gate(), &gh, gh_host.as_deref(), args, epoch) {
-        return Ok(held);
-    }
-    let mut cmd = Command::new(&gh);
-    apply_gh_env(&mut cmd, gh_host.as_deref());
-    cmd.args(args);
-    if let Some(repo) = repo_path {
-        cmd.current_dir(repo);
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    cmd.kill_on_drop(true);
-
-    let mut child = cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            AppError::GhNotFound
-        } else {
-            AppError::Io(e)
-        }
-    })?;
-    // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
-    // outside it a stall hangs the caller forever instead of failing at the
-    // deadline. It still precedes the drain rather than running concurrently the
-    // way the git runner has to — one API body in, one small JSON document back —
-    // and the timeout now bounds the exchange whatever a caller sends.
-    let exchange = async move {
-        // Dropping the handle after the write closes the pipe so gh reads EOF.
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(input.as_bytes()).await.map_err(AppError::Io)?;
-            stdin.shutdown().await.ok();
-        }
-        child.wait_with_output().await.map_err(AppError::Io)
-    };
-    let output = tokio::time::timeout(timeout, exchange)
-        .await
-        .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
-
-    let out = GhOutput {
-        stdout: output.stdout,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        code: output.status.code().unwrap_or(-1),
-    };
-    gate_after(
-        rate_gate(),
+    run_gh_gated(
         &gh,
         gh_host.as_deref(),
         args,
-        &out,
+        rate_gate(),
         epoch,
-        generation,
-    );
-    Ok(out)
+        || async {
+            let mut cmd = Command::new(&gh);
+            apply_gh_env(&mut cmd, gh_host.as_deref());
+            cmd.args(args);
+            if let Some(repo) = repo_path {
+                cmd.current_dir(repo);
+            }
+            cmd.stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            #[cfg(windows)]
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            cmd.kill_on_drop(true);
+
+            let mut child = cmd.spawn().map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    AppError::GhNotFound
+                } else {
+                    AppError::Io(e)
+                }
+            })?;
+            // The write runs INSIDE the timeout: a stalled stdin write is unbounded, so
+            // outside it a stall hangs the caller forever instead of failing at the
+            // deadline. It still precedes the drain rather than running concurrently the
+            // way the git runner has to — one API body in, one small JSON document back —
+            // and the timeout bounds the exchange whatever a caller sends.
+            let exchange = async move {
+                // Dropping the handle after the write closes the pipe so gh reads EOF.
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(input.as_bytes()).await.map_err(AppError::Io)?;
+                    stdin.shutdown().await.ok();
+                }
+                child.wait_with_output().await.map_err(AppError::Io)
+            };
+            let output = tokio::time::timeout(timeout, exchange)
+                .await
+                .map_err(|_| AppError::Timeout(timeout.as_secs()))??;
+
+            Ok(GhOutput {
+                stdout: output.stdout,
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                code: output.status.code().unwrap_or(-1),
+            })
+        },
+    )
+    .await
 }
 
 /// Splits `gh api -i` output into headers and body, including failed responses.
@@ -931,8 +938,12 @@ type RateKey = (Option<String>, Bucket);
 
 struct HoldEntry {
     until: i64,
+    // Quota reads say nothing about Secondary limits and cannot lift their active waits.
+    clear_floor: i64,
     recheck_at: i64,
     epoch: u64,
+    // Results may clear or shorten only when their starting generation is at least this.
+    // Same-epoch refusals still record.
     generation: u64,
     strikes: u32,
     kind: LimitKind,
@@ -942,6 +953,7 @@ struct HoldEntry {
 #[derive(Default)]
 struct RateGate {
     entries: HashMap<RateKey, HoldEntry>,
+    // Monotonic refusal counter captured before each call or probe starts.
     generation: u64,
 }
 
@@ -1127,14 +1139,10 @@ fn limit_evidence(class: CallClass, out: &GhOutput, now: i64) -> Option<LimitEvi
 }
 
 fn is_bucket_success(out: &GhOutput) -> bool {
-    if out.code == 0 {
-        return true;
-    }
     let stdout = out.stdout_lossy();
-    matches!(
-        parse_status(split_response(&stdout).0),
-        Some(200..=299 | 304)
-    )
+    let headers = split_response(&stdout).0;
+    !is_rate_limit_response(&out.stderr, headers)
+        && (out.code == 0 || matches!(parse_status(headers), Some(200..=299 | 304)))
 }
 
 fn is_answered_non_limit(out: &GhOutput) -> bool {
@@ -1229,6 +1237,25 @@ impl RateGate {
                     entry.until = until;
                 }
             }
+            if ev.kind == LimitKind::Secondary {
+                let strikes = entry.strikes.max(1);
+                let wait = (SECONDARY_BASE_SECS << strikes.saturating_sub(1).min(4))
+                    .min(SECONDARY_MAX_SECS);
+                let until = ev
+                    .until_hint
+                    .unwrap_or(now.saturating_add(wait))
+                    .min(now.saturating_add(MAX_HOLD_SECS));
+                entry.clear_floor = entry.clear_floor.max(until);
+                // Replacing Primary timing can shorten a hold, so only current evidence
+                // may demote it.
+                if entry.kind == LimitKind::Primary && generation >= entry.generation {
+                    entry.kind = LimitKind::Secondary;
+                    entry.strikes = strikes;
+                    entry.until = until;
+                    entry.recheck_at = until;
+                    entry.probe_pending = false;
+                }
+            }
             entry.generation = self.generation;
             return false;
         }
@@ -1252,6 +1279,11 @@ impl RateGate {
             key,
             HoldEntry {
                 until,
+                clear_floor: if ev.kind == LimitKind::Secondary {
+                    until
+                } else {
+                    0
+                },
                 recheck_at: if ev.kind == LimitKind::Primary {
                     until.min(now.saturating_add(RECHECK_SECS))
                 } else {
@@ -1271,6 +1303,7 @@ impl RateGate {
         &mut self,
         key: &RateKey,
         reading: Option<(u64, i64)>,
+        // True for a probe started by recording a hold; a recording probe never clears.
         at_record: bool,
         now: i64,
         epoch: u64,
@@ -1284,8 +1317,12 @@ impl RateGate {
             return false;
         };
         entry.probe_pending = false;
-        // A probe predating a newer refusal may lengthen its hold, but never weaken it.
-        if generation < entry.generation {
+        // Primary quota readings cannot settle a Secondary hold.
+        if entry.kind == LimitKind::Secondary {
+            return false;
+        }
+        // Probes predating a refusal or inside a Secondary wait may only lengthen the hold.
+        if generation < entry.generation || now < entry.clear_floor {
             if let Some((0, reset)) = reading.filter(|(_, reset)| *reset > now) {
                 let until = reset.min(now.saturating_add(MAX_HOLD_SECS));
                 if until > entry.until {
@@ -1733,6 +1770,7 @@ mod tests {
             0
         ));
         assert_eq!(gate.entries[&key].until, RATE_NOW + 60);
+        assert_eq!(gate.entries[&key].clear_floor, 0);
         assert!(gate.entries[&key].probe_pending);
         assert!(!gate.apply_probe(
             &key,
@@ -1949,6 +1987,178 @@ mod tests {
             "",
             "HTTP/2.0 403 Forbidden\r\n\r\n"
         )));
+        let mut limited = rate_out(
+            "GraphQL: API rate limit exceeded for user ID 1.",
+            "HTTP/2.0 200 OK\r\n\r\n",
+        );
+        for code in [1, 0] {
+            limited.code = code;
+            assert!(
+                !is_bucket_success(&limited),
+                "rate-limit evidence outranks HTTP success"
+            );
+        }
+    }
+
+    #[test]
+    fn rate_secondary_evidence_blocks_quota_clear_until_its_wait_ends() {
+        for hint in [Some(RATE_NOW + 121), Some(RATE_NOW + 901), None] {
+            let mut gate = RateGate::default();
+            let key = rate_key();
+            assert!(gate.record(
+                key.clone(),
+                rate_ev(LimitKind::Primary, None),
+                RATE_NOW,
+                7,
+                0,
+            ));
+            let probe_generation = gate.generation;
+            assert!(!gate.record(
+                key.clone(),
+                rate_ev(LimitKind::Secondary, hint),
+                RATE_NOW + 1,
+                7,
+                0,
+            ));
+            assert_eq!(gate.entries[&key].kind, LimitKind::Primary);
+            assert_eq!(
+                gate.entries[&key].clear_floor,
+                hint.unwrap_or(RATE_NOW + 61)
+            );
+            assert_eq!(gate.entries[&key].recheck_at, RATE_NOW + 60);
+            assert!(!gate.apply_probe(
+                &key,
+                Some((4000, 0)),
+                true,
+                RATE_NOW + 2,
+                7,
+                probe_generation,
+            ));
+            let now = if hint.is_some() {
+                RATE_NOW + 60
+            } else {
+                RATE_NOW + 2
+            };
+            let verdict = if hint.is_some() {
+                Verdict::Recheck
+            } else {
+                Verdict::Hold
+            };
+            assert_eq!(gate.verdict(&key, now, 7), verdict);
+            let until = gate.entries[&key].until;
+            for reading in [Some((4000, 0)), Some((0, now + 1))] {
+                assert!(!gate.apply_probe(&key, reading, false, now, 7, gate.generation));
+                assert_eq!(gate.entries[&key].until, until);
+                assert!(!gate.entries[&key].probe_pending);
+                assert!(gate.entries[&key].recheck_at <= now + RECHECK_SECS + CLOCK_SLACK_SECS);
+                assert_eq!(gate.verdict(&key, now, 7), Verdict::Hold);
+            }
+            assert!(gate.apply_probe(
+                &key,
+                Some((4000, 0)),
+                false,
+                hint.unwrap_or(RATE_NOW + 61) + 1,
+                7,
+                gate.generation,
+            ));
+            assert!(!gate.entries.contains_key(&key));
+        }
+    }
+
+    #[test]
+    fn rate_secondary_refusal_demotes_an_active_primary_hold() {
+        for hint in [Some(RATE_NOW + 121), None, Some(RATE_NOW + 2)] {
+            let mut gate = RateGate::default();
+            let key = rate_key();
+            assert!(gate.record(
+                key.clone(),
+                rate_ev(LimitKind::Primary, None),
+                RATE_NOW,
+                7,
+                0
+            ));
+            let probe_generation = gate.generation;
+            assert!(!gate.record(
+                key.clone(),
+                rate_ev(LimitKind::Secondary, hint),
+                RATE_NOW + 1,
+                7,
+                probe_generation,
+            ));
+            let until = hint.unwrap_or(RATE_NOW + 61);
+            assert_eq!(gate.entries[&key].kind, LimitKind::Secondary);
+            assert_eq!(gate.entries[&key].strikes, 1);
+            assert_eq!(gate.entries[&key].until, until);
+            assert_eq!(gate.entries[&key].clear_floor, until);
+            assert_eq!(gate.entries[&key].recheck_at, until);
+            assert!(!gate.entries[&key].probe_pending);
+            assert_eq!(gate.verdict(&key, RATE_NOW + 1, 7), Verdict::Hold);
+            for generation in [probe_generation, gate.generation] {
+                for reading in [Some((4000, 0)), Some((0, RATE_NOW + 62))] {
+                    assert!(!gate.apply_probe(&key, reading, false, RATE_NOW + 1, 7, generation));
+                    assert_eq!(gate.entries[&key].until, until);
+                }
+            }
+            assert!(!gate.record(
+                key.clone(),
+                rate_ev(LimitKind::Primary, None),
+                RATE_NOW + 1,
+                7,
+                0
+            ));
+            assert_eq!(gate.entries[&key].kind, LimitKind::Secondary);
+            assert_eq!(gate.entries[&key].strikes, 1);
+        }
+    }
+
+    #[test]
+    fn rate_secondary_demotion_replaces_only_a_current_generation_primary_hold() {
+        for current_generation in [true, false] {
+            for hint in [None, Some(RATE_NOW + 131)] {
+                let mut gate = RateGate::default();
+                let key = rate_key();
+                assert!(!gate.record(
+                    key.clone(),
+                    rate_ev(LimitKind::Primary, Some(RATE_NOW + 2400)),
+                    RATE_NOW,
+                    7,
+                    0,
+                ));
+                let generation = gate.generation;
+                assert!(!gate.record(
+                    key.clone(),
+                    rate_ev(LimitKind::Secondary, hint),
+                    RATE_NOW + 10,
+                    7,
+                    if current_generation { generation } else { 0 },
+                ));
+                let entry = &gate.entries[&key];
+                assert!(entry.generation > generation);
+                if current_generation {
+                    let until = hint.unwrap_or(RATE_NOW + 70);
+                    assert_eq!(entry.until, until);
+                    assert_eq!(entry.kind, LimitKind::Secondary);
+                    assert_eq!(entry.strikes, 1);
+                    assert_eq!(entry.recheck_at, until);
+                    assert!(!entry.probe_pending);
+                    assert_eq!(gate.verdict(&key, until + 1, 7), Verdict::Pass);
+                    assert!(gate.record(
+                        key.clone(),
+                        rate_ev(LimitKind::Primary, None),
+                        until + 1,
+                        7,
+                        gate.generation,
+                    ));
+                    assert_eq!(gate.entries[&key].kind, LimitKind::Primary);
+                } else {
+                    assert_eq!(entry.until, RATE_NOW + 2400);
+                    assert_eq!(entry.kind, LimitKind::Primary);
+                    assert_eq!(entry.strikes, 0);
+                    assert_eq!(entry.recheck_at, RATE_NOW + 300);
+                    assert_eq!(gate.verdict(&key, RATE_NOW + 71, 7), Verdict::Hold);
+                }
+            }
+        }
     }
 
     #[test]
@@ -1991,6 +2201,28 @@ mod tests {
             Duration::from_secs(1),
             gate,
             7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.stderr, HELD_CORE);
+        assert_eq!(out.code, 1);
+        assert!(out.stdout.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rate_gated_helper_holds_without_invoking_spawn() {
+        static GATE: OnceLock<Mutex<RateGate>> = OnceLock::new();
+        let gate = GATE.get_or_init(|| Mutex::new(RateGate::default()));
+        seed_rate_hold(gate, "zp-held-input.invalid");
+        let out = run_gh_gated(
+            std::path::Path::new("Z:/zp-nonexistent-gh/gh.exe"),
+            Some("zp-held-input.invalid"),
+            &["api", "repos/o/r/issues", "--input", "-"],
+            gate,
+            7,
+            || -> std::future::Ready<AppResult<GhOutput>> {
+                panic!("a held call must not invoke its spawn closure");
+            },
         )
         .await
         .unwrap();
@@ -2484,6 +2716,7 @@ mod tests {
             rate_key(),
             HoldEntry {
                 until: RATE_NOW + 180,
+                clear_floor: RATE_NOW + 180,
                 recheck_at: RATE_NOW + 180,
                 epoch: 7,
                 generation: 5,

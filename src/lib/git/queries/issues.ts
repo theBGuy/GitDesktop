@@ -7,6 +7,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
+import { shouldRetryQuery } from "@/lib/forge-backoff";
 import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -220,14 +221,14 @@ export function useIssueList(
     queryFn: () => api.forgeIssueList(repo, state, limit, lens, filter),
     enabled,
     staleTime: 30_000,
-    // issuesDisabled is a permanent repo condition — retrying only delays the notice.
-    // invalidArgument is the same story per scope (filter caps, magic values, GitLab's
-    // walk horizon): the second walk reaches the same refusal at the same cost.
+    // issuesDisabled is permanent and invalidArgument deterministic per scope (filter
+    // caps, magic values, GitLab's walk horizon), so a retry reaches the same refusal;
+    // the rest takes the default, which never retries rate limits or 401s.
     retry: (failureCount, err) =>
       !(
         isAppError(err) &&
         (err.kind === "issuesDisabled" || err.kind === "invalidArgument")
-      ) && failureCount < 1,
+      ) && shouldRetryQuery(failureCount, err),
     // State, limit and filter stay free so a tab switch, "Load more" or a filter
     // change keeps the current rows instead of flashing skeletons, but lens must
     // match: a fork numbers issues independently of its parent, so another lens's
