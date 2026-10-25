@@ -262,8 +262,9 @@ fn last_rebase_instruction(done: &str) -> Option<(&str, Option<&str>)> {
 }
 
 /// Unreadable or unrecognized rebase state yields "other", never a guessed stop kind.
-/// Git writes `rebase-merge/amend` only at a completed edit stop; a failed edit
-/// pick (a held index.lock or conflict) is in `done` but lacks that marker.
+/// For an edit line, git writes `rebase-merge/amend` only once its pick succeeds;
+/// a failed edit pick is in `done` but lacks it. Failed folds also write `amend`,
+/// which `empty_fold_stop` relies on.
 fn rebase_stop_kind(git_dir: &Path) -> Option<&'static str> {
     if !rebase_in_progress(git_dir) {
         return None;
@@ -410,8 +411,7 @@ async fn empty_fold_stop(git_dir: &Path, repo: &str, failure: &str) -> Option<(S
         return None;
     }
     let next = first.next()?;
-    if validate_hash(next).is_err()
-        || stopped.starts_with(next)
+    if stopped.starts_with(next)
         || next.starts_with(stopped)
         || stopped_sha.starts_with(next)
         || next.starts_with(stopped_sha)
@@ -9060,11 +9060,19 @@ mod tests {
         assert!(rebasing(&repo).await, "left for the banner");
         assert!(!git(&repo, &["ls-files", "-u"]).await.trim().is_empty());
         assert!(!op_state(&repo).await.unwrap().edit_paused, "conflicted");
+        assert_eq!(
+            serde_json::to_value(op_state(&repo).await.unwrap()).unwrap()["rebaseStop"],
+            "pick"
+        );
 
         std::fs::write(dir.path().join("a.txt"), "resolved\n").unwrap();
         git(&repo, &["add", "a.txt"]).await;
         assert!(git(&repo, &["ls-files", "-u"]).await.trim().is_empty());
         assert!(!op_state(&repo).await.unwrap().edit_paused, "resolved");
+        assert_eq!(
+            serde_json::to_value(op_state(&repo).await.unwrap()).unwrap()["rebaseStop"],
+            "pick"
+        );
     }
 
     /// Reword keeps each commit's author and author date, and a squash its leader's;
@@ -11171,7 +11179,7 @@ mod tests {
         std::fs::write(&todo, "fixup HEAD\n").unwrap();
         assert!(
             empty_fold_stop(&git_dir, &repo, &failure).await.is_none(),
-            "a non-hash next token must refuse recovery"
+            "the remaining-fold loop must reject a non-hash operand"
         );
         std::fs::write(&todo, format!("fixup {c}\n")).unwrap();
         let stopped = git_dir.join("rebase-merge/stopped-sha");
