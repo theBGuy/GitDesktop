@@ -37,28 +37,34 @@ import { cn } from "@/lib/utils";
 import {
   activeRepoOp,
   deriveStashBannerState,
+  OP_VERBS,
   opPhrase,
+  opStoppedText,
 } from "./conflict-banner-state";
 
 const OP_LABELS: Record<
   RepoOp,
   { banner: string; cont: string; verb: string }
 > = {
-  merge: { banner: "Merge in progress", cont: "Finish merge", verb: "Merging" },
+  merge: {
+    banner: "Merge in progress",
+    cont: "Finish merge",
+    verb: OP_VERBS.merge,
+  },
   rebase: {
     banner: "Rebase in progress",
     cont: "Continue rebase",
-    verb: "Rebasing",
+    verb: OP_VERBS.rebase,
   },
   "cherry-pick": {
     banner: "Cherry-pick in progress",
     cont: "Continue cherry-pick",
-    verb: "Cherry-picking",
+    verb: OP_VERBS["cherry-pick"],
   },
   revert: {
     banner: "Revert in progress",
     cont: "Continue revert",
-    verb: "Reverting",
+    verb: OP_VERBS.revert,
   },
 };
 
@@ -242,10 +248,14 @@ export function ConflictBanner({
   const busy = abortOp.isPending || continueOp.isPending;
   const onError = (e: unknown) => toastError(e);
   const opVerb = op ? OP_LABELS[op].verb : null;
-  const conflictText =
-    conflictedCount > 0
-      ? `${conflictedCount} conflict${conflictedCount === 1 ? "" : "s"}`
-      : "all conflicts resolved";
+  // Read only under conflictedCount > 0; a stop with none left says why below.
+  const conflictText = `${conflictedCount} conflict${conflictedCount === 1 ? "" : "s"}`;
+  const opText =
+    op === null
+      ? null
+      : conflictedCount > 0
+        ? `${opVerb} · ${conflictText}`
+        : opStoppedText(op, opState.data?.rebaseStop);
   // A rebase deliberately paused at an `edit` (not a conflict): the user amends
   // the commit via the Changes tab, then continues.
   const editPaused = Boolean(opState.data?.editPaused) && conflictedCount === 0;
@@ -411,8 +421,8 @@ export function ConflictBanner({
             <span className="min-w-0 text-pretty">
               {editPaused ? (
                 "Rebase paused — amend this commit's changes in Changes, then Continue"
-              ) : opVerb ? (
-                `${opVerb} · ${conflictText}`
+              ) : opText ? (
+                opText
               ) : markerRows ? (
                 <>
                   {state.lead}

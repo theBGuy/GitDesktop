@@ -412,7 +412,7 @@ const BARE_REV_ALLOWLIST = [
   },
   {
     file: "git/ops.rs",
-    fn: "git_rebase_edit_with_timeout",
+    fn: "rebase_edit_with_timeout",
     rationale:
       "`base` is a commit sha, validated with validate_hash at fn entry",
   },

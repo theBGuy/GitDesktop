@@ -24,9 +24,9 @@ export type StashBannerState =
   | { kind: "resolved"; lead: string; tail: string; announcement: string };
 
 /** The `RepoOpState` flags that name an operation. Derived, so a renamed field
- *  breaks here; `editPaused` is excluded because it modifies `rebasing` rather
- *  than naming an op of its own. */
-type RepoOpFlag = Exclude<keyof RepoOpState, "editPaused">;
+ *  breaks here; `editPaused` and `rebaseStop` are excluded because they qualify
+ *  `rebasing` rather than naming an op of their own. */
+type RepoOpFlag = Exclude<keyof RepoOpState, "editPaused" | "rebaseStop">;
 
 /** Which op the banner names. `RepoOpState`'s flags are independent booleans and
  *  the banner shows one op, so the precedence lives here rather than in a
@@ -42,6 +42,41 @@ const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
  *  pins its precedence. */
 export function activeRepoOp(opState: RepoOpState | undefined): RepoOp | null {
   return OP_BY_FLAG.find(([flag]) => opState?.[flag])?.[1] ?? null;
+}
+
+/** The banner's one verb source: its status lines and its toasts read it. */
+export const OP_VERBS: Record<RepoOp, string> = {
+  merge: "Merging",
+  rebase: "Rebasing",
+  "cherry-pick": "Cherry-picking",
+  revert: "Reverting",
+};
+
+const REBASE_STOPPED = "Rebase stopped — Continue or Abort.";
+
+type RebaseStop = NonNullable<RepoOpState["rebaseStop"]>;
+
+/** A `done` line is written before its step runs, so the exec copy claims only
+ *  that the rebase stopped there, never that the step failed. */
+const REBASE_STOP_TEXT: Record<RebaseStop, string> = {
+  pick: `${OP_VERBS.rebase} · no conflicts left`,
+  exec: "Rebase stopped after an exec step — Continue or Abort.",
+  break: "Rebase paused at a break — Continue when you're ready.",
+  edit: REBASE_STOPPED,
+  other: REBASE_STOPPED,
+};
+
+/** The banner's status line while `op` is active with no unmerged paths; the
+ *  caller renders its own arms first (conflicts, an edit pause). A rebase stop
+ *  this build doesn't know, or none yet, reads as plainly stopped. */
+export function opStoppedText(
+  op: RepoOp,
+  rebaseStop: RepoOpState["rebaseStop"] | undefined,
+): string {
+  if (op !== "rebase") return `${OP_VERBS[op]} · no conflicts left`;
+  return rebaseStop != null && Object.hasOwn(REBASE_STOP_TEXT, rebaseStop)
+    ? REBASE_STOP_TEXT[rebaseStop]
+    : REBASE_STOPPED;
 }
 
 const RESOLVED_TAIL =

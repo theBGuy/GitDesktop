@@ -318,6 +318,15 @@ pub struct RepoOpState {
     /// An interactive rebase is paused at an `edit` (vs a conflict) — the user
     /// should amend the commit, then continue.
     pub edit_paused: bool,
+    /// Why an in-progress rebase is stopped, from the last line of
+    /// `rebase-merge/done` (git appends the in-flight item before running it):
+    /// "edit" | "pick" | "exec" | "break" | "other". `None` when `rebasing`
+    /// is false. "pick" covers the pick family (pick/reword/squash/fixup —
+    /// a conflict stop or an emptied commit); the apply backend
+    /// (`rebase-apply`: `rebase --apply` or `git am`, no done file) and any
+    /// unreadable or unrecognized state read as "other", never as a guessed
+    /// kind.
+    pub rebase_stop: Option<String>,
 }
 
 impl RepoOpState {
