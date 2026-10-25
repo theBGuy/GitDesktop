@@ -2,6 +2,7 @@
   when the repository can't be read, instead of showing the first-commit
   welcome, and a file's history does the same instead of reporting none. A
   failed refresh or Load more keeps the loaded commits on screen with a note, a
-  failed search of all history says so rather than reporting no matches, and a
-  failed check for unpushed commits keeps the "not pushed" markers it last
-  showed and holds squash and Edit history.
+  failed search of all history says so rather than reporting no matches, and
+  when the check for unpushed commits fails, squash and Edit history say they
+  couldn't check which commits are pushed instead of treating them all as
+  already pushed.

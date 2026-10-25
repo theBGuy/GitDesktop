@@ -3,10 +3,7 @@ import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
-import {
-  offlinePendingMessage,
-  refreshFailed,
-} from "@/features/conversations/remote-section-state";
+import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
@@ -22,7 +19,12 @@ import {
 } from "@/lib/git/queries";
 import type { ContributorChurn } from "@/lib/git/types";
 import { useWorkflowRuns } from "@/lib/github/actions";
-import { type BoardCardRead, boardNotice } from "./board-notice";
+import {
+  type BoardCardRead,
+  boardNotice,
+  rememberCardErrors,
+  unloadedCardBody,
+} from "./board-notice";
 import { CommunityCard } from "./CommunityCard";
 import {
   ActionsDurationChart,
@@ -126,8 +128,7 @@ function ContributorsList({ data }: { data: ContributorChurn[] }) {
   );
 }
 
-/** Every card that reads data of its own; the board notice lists them in
- *  board order and quotes the first failure's reason. */
+/** Every card that reads data of its own: the keys of {@link CARD_NOUN}. */
 type CardId =
   | "commitActivity"
   | "codeFrequency"
@@ -153,19 +154,34 @@ const CARD_NOUN: Record<CardId, string> = {
   dependencies: "dependencies",
 };
 
-type CardRead = BoardCardRead & {
-  isFetching: boolean;
-  refetch: () => Promise<unknown>;
-};
+type CardRead = BoardCardRead & { refetch: () => Promise<unknown> };
 
-/** A card's body while its read holds no data. A hosted read parked offline
- *  says it waits, a settled failure says it couldn't load (never an empty
- *  claim), and anything else still loads. Muted and non-live: the board notice
- *  is the one announcement. */
-function unloadedCard(q: CardRead, noun: string, skeleton: ReactNode) {
-  if (q.isPaused) return <Empty>{offlinePendingMessage(noun)}</Empty>;
-  if (refreshFailed(q)) return <Empty>Couldn't load {noun}.</Empty>;
-  return skeleton;
+/** The cards whose query keys carry the trailing window: their failures are
+ *  remembered per window. */
+const WINDOWED: ReadonlySet<CardId> = new Set([
+  "commitActivity",
+  "codeFrequency",
+  "contributors",
+  "commitTimes",
+]);
+
+/** A card's body while its read holds no data, as {@link unloadedCardBody}
+ *  decides it: never an empty claim. Muted and non-live: the board notice is
+ *  the one announcement. */
+function unloadedCard(
+  q: CardRead,
+  retrying: boolean,
+  noun: string,
+  skeleton: ReactNode,
+) {
+  switch (unloadedCardBody(q, retrying)) {
+    case "offline":
+      return <Empty>{offlinePendingMessage(noun)}</Empty>;
+    case "failed":
+      return <Empty>Couldn't load {noun}.</Empty>;
+    case "loading":
+      return skeleton;
+  }
 }
 
 function durationMinutes(start: string, end: string): number {
@@ -193,11 +209,17 @@ export function InsightsBoard({
   // The Retry in flight, as a token: a newer press supersedes an older one's
   // settle. Cleared on a repo switch, whose cards it never refetched.
   const [retrying, setRetrying] = useState<object | null>(null);
+  // Each card's last real error, per window (rememberCardErrors).
+  const [lastErrors, setLastErrors] = useState<
+    Readonly<Record<string, unknown>>
+  >({});
   const [retryRepo, setRetryRepo] = useState(repoPath);
-  if (retryRepo !== repoPath) {
+  const repoChanged = retryRepo !== repoPath;
+  if (repoChanged) {
     setRetryRepo(repoPath);
     setRetrying(null);
   }
+  const isRetrying = retrying !== null && !repoChanged;
   const weeks = allTime ? 0 : WINDOW_WEEKS;
 
   const gh = useForgeStatus(repoPath);
@@ -256,19 +278,34 @@ export function InsightsBoard({
     ...CARD_NOUN,
     runs: isGitLab || isBitbucket ? "pipelines" : CARD_NOUN.runs,
   };
-  // The cards on screen with a read of their own, in board order.
-  const cardReads: CardRead[] = [
-    commitActivity,
-    codeFreq,
-    contributors,
-    punchCard,
-    ...(canGh ? [runs] : []),
-    ...(canForks && forkProvider ? [forkActivity] : []),
-    ...(canGhOnly ? [community, traffic, dependencies] : []),
+  // The cards on screen with a read of their own, in board order: the notice
+  // quotes the first failure in this order.
+  const cardReads: (readonly [CardId, CardRead])[] = [
+    ["commitActivity", commitActivity],
+    ["codeFrequency", codeFreq],
+    ["contributors", contributors],
+    ["commitTimes", punchCard],
+    ...(canGh ? ([["runs", runs]] as const) : []),
+    ...(canForks && forkProvider
+      ? ([["forkActivity", forkActivity]] as const)
+      : []),
+    ...(canGhOnly
+      ? ([
+          ["community", community],
+          ["traffic", traffic],
+          ["dependencies", dependencies],
+        ] as const)
+      : []),
   ];
+  const keyed = cardReads.map(([id, read]) => ({
+    key: WINDOWED.has(id) ? `${id}:${weeks}` : id,
+    read,
+  }));
+  const seenErrors = rememberCardErrors(lastErrors, keyed, repoChanged);
+  if (seenErrors !== lastErrors) setLastErrors(seenErrors);
   const notice = boardNotice(
-    cardReads,
-    retrying !== null,
+    keyed.map(({ key, read }) => ({ read, lastError: seenErrors[key] })),
+    isRetrying,
     (e) => presentError(e).summary,
   );
   const retryFailed = notice
@@ -334,6 +371,7 @@ export function InsightsBoard({
             {commitActivity.data === undefined ? (
               unloadedCard(
                 commitActivity,
+                isRetrying,
                 noun.commitActivity,
                 <ChartSkeleton />,
               )
@@ -350,7 +388,12 @@ export function InsightsBoard({
             stale={codeFreq.isPlaceholderData}
           >
             {codeFreq.data === undefined ? (
-              unloadedCard(codeFreq, noun.codeFrequency, <ChartSkeleton />)
+              unloadedCard(
+                codeFreq,
+                isRetrying,
+                noun.codeFrequency,
+                <ChartSkeleton />,
+              )
             ) : codeFreq.data.length ? (
               <CodeFrequencyChart data={codeFreq.data} />
             ) : (
@@ -367,6 +410,7 @@ export function InsightsBoard({
             {contributors.data === undefined ? (
               unloadedCard(
                 contributors,
+                isRetrying,
                 noun.contributors,
                 <ContributorsSkeleton />,
               )
@@ -383,7 +427,12 @@ export function InsightsBoard({
             stale={punchCard.isPlaceholderData}
           >
             {punchCard.data === undefined ? (
-              unloadedCard(punchCard, noun.commitTimes, <PunchCardSkeleton />)
+              unloadedCard(
+                punchCard,
+                isRetrying,
+                noun.commitTimes,
+                <PunchCardSkeleton />,
+              )
             ) : (
               <PunchCard grid={punchCard.data} />
             )}
@@ -402,7 +451,7 @@ export function InsightsBoard({
               }
             >
               {runs.data === undefined ? (
-                unloadedCard(runs, noun.runs, <ChartSkeleton />)
+                unloadedCard(runs, isRetrying, noun.runs, <ChartSkeleton />)
               ) : durationPoints.length ? (
                 <ActionsDurationChart data={durationPoints} />
               ) : (
@@ -425,7 +474,12 @@ export function InsightsBoard({
               }
             >
               {forkActivity.data === undefined ? (
-                unloadedCard(forkActivity, noun.forkActivity, <ChartSkeleton />)
+                unloadedCard(
+                  forkActivity,
+                  isRetrying,
+                  noun.forkActivity,
+                  <ChartSkeleton />,
+                )
               ) : forkProvider ? (
                 <ForkActivityCard
                   repoPath={repoPath}
@@ -442,7 +496,12 @@ export function InsightsBoard({
           {(canGhOnly || forgeDetecting) && (
             <InsightCard title="Community" bodyClassName={CARD_BODY.community}>
               {community.data === undefined ? (
-                unloadedCard(community, noun.community, <ChartSkeleton />)
+                unloadedCard(
+                  community,
+                  isRetrying,
+                  noun.community,
+                  <ChartSkeleton />,
+                )
               ) : (
                 <CommunityCard data={community.data} />
               )}
@@ -456,7 +515,12 @@ export function InsightsBoard({
               bodyClassName={CARD_BODY.traffic}
             >
               {traffic.data === undefined ? (
-                unloadedCard(traffic, noun.traffic, <TrafficSkeleton />)
+                unloadedCard(
+                  traffic,
+                  isRetrying,
+                  noun.traffic,
+                  <TrafficSkeleton />,
+                )
               ) : (
                 <TrafficCard data={traffic.data} />
               )}
@@ -469,7 +533,12 @@ export function InsightsBoard({
               bodyClassName={CARD_BODY.dependencies}
             >
               {dependencies.data === undefined ? (
-                unloadedCard(dependencies, noun.dependencies, <ChartSkeleton />)
+                unloadedCard(
+                  dependencies,
+                  isRetrying,
+                  noun.dependencies,
+                  <ChartSkeleton />,
+                )
               ) : (
                 <DependenciesCard data={dependencies.data} />
               )}

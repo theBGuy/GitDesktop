@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
-use crate::git::history::unborn_head;
+use crate::git::history::read_unless_unborn;
 use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
 
 /// One full-history `git log` pass plus a working-tree scan can outlast the
@@ -443,13 +443,11 @@ pub async fn git_contributor_activity(
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
     // `git log` refuses an unborn HEAD, which has no history to chart; any other
     // failed run is an Err, never an empty window.
-    if out.code != 0 && unborn_head(&repo_path).await? {
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(Vec::new());
-    }
-    let out = out.exit_verdict()?;
+    };
     let text = out.stdout_lossy();
     let mut by_author: HashMap<String, ContributorChurn> = HashMap::new();
     // Each commit block starts with the \x01 sentinel; its first line is
@@ -504,13 +502,11 @@ pub async fn git_commit_activity(repo_path: String, weeks: u32) -> AppResult<Vec
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
     // `git log` refuses an unborn HEAD, which has no history to chart; any other
     // failed run is an Err, never an empty window.
-    if out.code != 0 && unborn_head(&repo_path).await? {
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(Vec::new());
-    }
-    let out = out.exit_verdict()?;
+    };
     let mut counts: HashMap<String, u32> = HashMap::new();
     for line in out.stdout_lossy().lines() {
         let week = line.trim();
@@ -546,13 +542,11 @@ pub async fn git_code_frequency(repo_path: String, weeks: u32) -> AppResult<Vec<
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
     // `git log` refuses an unborn HEAD, which has no history to chart; any other
     // failed run is an Err, never an empty window.
-    if out.code != 0 && unborn_head(&repo_path).await? {
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(Vec::new());
-    }
-    let out = out.exit_verdict()?;
+    };
     let mut by_week: HashMap<String, (u64, u64)> = HashMap::new();
     let mut current: Option<String> = None;
     // A "\0<week>" line sets the current bucket; following numstat rows add to it.
@@ -595,13 +589,11 @@ pub async fn git_punch_card(repo_path: String, weeks: u32) -> AppResult<Vec<Vec<
         &since,
     );
     let mut grid = vec![vec![0u32; 24]; 7];
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
     // `git log` refuses an unborn HEAD, which has no history to chart; any other
     // failed run is an Err, never an empty window.
-    if out.code != 0 && unborn_head(&repo_path).await? {
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(grid);
-    }
-    let out = out.exit_verdict()?;
+    };
     for line in out.stdout_lossy().lines() {
         let mut parts = line.split_whitespace();
         let (Some(d), Some(h)) = (parts.next(), parts.next()) else {
@@ -756,8 +748,11 @@ mod tests {
         }
         let log = crate::git::history::git_log(repo.clone(), 10, 0, None).await;
         assert!(log.is_err(), "{log:?}");
-        let blame = crate::git::history::git_blame(repo, "a.txt".into(), Some(sha)).await;
+        // No rev: blame's own run must fail, past the probes.
+        let blame = crate::git::history::git_blame(repo.clone(), "a.txt".into(), None).await;
         assert!(blame.is_err(), "{blame:?}");
+        let unpushed = crate::git::branches::git_unpushed_count(repo).await;
+        assert!(unpushed.is_err(), "{unpushed:?}");
     }
 
     #[test]

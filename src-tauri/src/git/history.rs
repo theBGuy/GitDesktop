@@ -1,6 +1,6 @@
 use crate::error::AppResult;
 use crate::git::diff::parse_numstat_z;
-use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
+use crate::git::runner::{run_git, run_git_raw, GitOutput, DEFAULT_TIMEOUT};
 use crate::git::types::{
     BlameLine, CommitDetails, CommitSummary, DiffStatEntry, FileDiff, StagedDiff,
 };
@@ -16,10 +16,14 @@ pub fn validate_hash(hash: &str) -> AppResult<()> {
 
 /// Whether HEAD is unborn: a symbolic HEAD naming a branch ref that doesn't
 /// exist. `rev-parse --verify --quiet HEAD` exits 1 both for that and for a
-/// branch ref that exists but holds garbage (measured, git 2.51.1), so exit 1
-/// is confirmed with `show-ref --exists`. Anything else (not a repository, a
-/// detached HEAD that doesn't resolve, a broken ref) is a failed read carrying
-/// git's report, never an empty answer. The healthy path is one spawn.
+/// branch ref that exists but holds garbage (measured, git 2.51.1), so an exit
+/// 1 is confirmed: `symbolic-ref -q HEAD` names the branch and `show-ref
+/// --exists` says whether it exists. That check needs git 2.43+; older git has
+/// no `--exists` and reads a broken ref as unborn too. A ref that appears
+/// between the probes (a first commit landing) gets one re-probe of HEAD.
+/// Anything else (not a repository, a detached HEAD that doesn't resolve, a
+/// broken ref) is an error, carrying git's report where git gave one, never an
+/// empty answer. The healthy path is one spawn.
 pub(crate) async fn unborn_head(repo_path: &str) -> AppResult<bool> {
     let head = run_git_raw(
         Some(repo_path),
@@ -50,19 +54,61 @@ pub(crate) async fn unborn_head(repo_path: &str) -> AppResult<bool> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    match exists.code {
-        // 2 is `--exists`'s "missing"; 129 is a git older than 2.43, which has
-        // no `--exists` and so can't tell a missing ref from a broken one.
-        2 | 129 => Ok(true),
-        _ => Err(crate::error::AppError::Command(
+    let broken = || {
+        crate::error::AppError::Command(
             format!(
                 "{name} doesn't resolve to a commit.\n{}",
                 exists.full_failure_text()
             )
             .trim_end()
             .to_string(),
-        )),
+        )
+    };
+    match exists.code {
+        // 2 is `--exists`'s "missing"; 129 is a git older than 2.43, which has
+        // no `--exists` and so can't tell a missing ref from a broken one.
+        2 | 129 => Ok(true),
+        // The ref exists: either a first commit landed since the first probe,
+        // or the ref is broken. One re-probe of HEAD tells them apart.
+        0 => {
+            let again = run_git_raw(
+                Some(repo_path),
+                &["rev-parse", "--verify", "--quiet", "HEAD"],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            match again.code {
+                0 => Ok(false),
+                1 => Err(broken()),
+                _ => again.exit_verdict().map(|_| false),
+            }
+        }
+        _ => Err(broken()),
     }
+}
+
+/// Runs a read git refuses on an unborn HEAD: `None` when it failed and HEAD
+/// is unborn (there is no history to read), the output when it succeeded, and
+/// an Err for any other failure. When the probe finds HEAD born after the run
+/// failed (a first commit landing between the two), the read runs once more,
+/// so that race answers instead of erring; a real failure fails again with its
+/// own report.
+pub(crate) async fn read_unless_unborn(
+    repo_path: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> AppResult<Option<GitOutput>> {
+    let out = run_git_raw(Some(repo_path), args, timeout).await?;
+    if out.code == 0 {
+        return Ok(Some(out));
+    }
+    if unborn_head(repo_path).await? {
+        return Ok(None);
+    }
+    run_git_raw(Some(repo_path), args, timeout)
+        .await?
+        .exit_verdict()
+        .map(Some)
 }
 
 /// Paged commit history. When `search` is set, searches the whole history by
@@ -193,7 +239,8 @@ pub async fn git_blame(
 
     // Resolve the optional rev to a concrete 40-hex sha, or guard the unborn-HEAD
     // case: an unknown rev (exit 1) and an unborn HEAD get friendly errors, and
-    // any other probe failure carries git's own report.
+    // any other probe failure is an error, carrying git's report where git gave
+    // one.
     let resolved_rev = match rev.as_deref().map(str::trim) {
         None => {
             // No rev: blame the working tree, but a zero-commit repo has no HEAD to
@@ -576,8 +623,12 @@ mod tests {
             .await
             .unwrap_err();
         match err {
+            // blame-errors.ts keys on this exact lead.
             crate::error::AppError::InvalidArgument(msg) => {
-                assert!(msg.contains("no commits yet"), "unexpected message: {msg}");
+                assert!(
+                    msg.starts_with("repository has no commits yet"),
+                    "unexpected message: {msg}"
+                );
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
         }
@@ -746,9 +797,12 @@ mod tests {
         let unborn = unborn_head(&repo).await;
         assert!(unborn.is_err(), "unborn_head: {unborn:?}");
         assert!(git_log(repo.clone(), 10, 0, None).await.is_err());
+        let unpushed = crate::git::branches::git_unpushed_count(repo).await;
+        assert!(unpushed.is_err(), "{unpushed:?}");
     }
 
-    /// The Code TODOs detail view reads this exact phrase as "untracked"; any
+    /// One of the two "no history to blame" shapes blame-errors.ts reads as
+    /// not tracked (the other is `blame_unborn_head_errors`'s refusal); any
     /// other blame failure is a failed read.
     #[tokio::test]
     async fn blame_untracked_file_says_no_such_path_in_head() {

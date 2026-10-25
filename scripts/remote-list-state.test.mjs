@@ -1,13 +1,15 @@
 // Pins the remote list section's render ladder, the detail pane's ladder, the
-// list notice, the infinite-query failure split, the "Load more" guard, the
-// permanent-error predicate and the park it withholds, the review-comments
-// notice, the PR sub-list notice, the empty-picker line, and the board's
-// failure-notice grouping.
+// list notice, the infinite-query failure split, the sticky
+// failedSinceLastSuccess predicate, the "Load more" guard, the permanent-error
+// predicate and the park it withholds, the review-comments notice, the PR
+// sub-list notice, the empty-picker line, and the board's failure-notice
+// grouping.
 // The contract under test: a failed or offline read replaces a list or a pane
 // only when it has nothing to draw; with content cached, it stays and a notice
 // sits above it, so an outage never reads as data loss, and a read parked
-// offline says so instead of spinning a skeleton forever. A failure being
-// refetched (a reconnect's resumed read) says nothing until it settles.
+// offline says so instead of spinning a skeleton forever. Under refreshFailed,
+// a failure being refetched (a reconnect's resumed read) says nothing until it
+// settles; failedSinceLastSuccess holds through that refetch instead.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so
@@ -18,6 +20,7 @@ import { test } from "node:test";
 import {
   detailNoticeMessage,
   emptyPickerCopy,
+  failedSinceLastSuccess,
   groupNoticesByMessage,
   guardedLimit,
   guardObservation,
@@ -1133,6 +1136,29 @@ test("an infinite query's failed Load more is no failed refresh", () => {
     "Couldn't load more commits — showing the ones already loaded.",
   );
   assert.equal(more.cause, "load-more");
+});
+
+test("a failure holds through its read's own background refetches", () => {
+  const base = { isPaused: false, errorUpdatedAt: 2, dataUpdatedAt: 1 };
+  // A refetch over loaded data keeps isError (refreshFailed goes quiet there).
+  const withData = { ...base, isError: true, isFetching: true };
+  assert.equal(failedSinceLastSuccess(withData), true);
+  assert.equal(refreshFailed(withData), false);
+  // A never-loaded read's refetch resets it to pending: isError false, error
+  // null, errorUpdatedAt untouched (query-core fetchState).
+  const reset = { ...base, isError: false, isFetching: true, dataUpdatedAt: 0 };
+  assert.equal(failedSinceLastSuccess(reset), true);
+  // A success after the failure clears it; a park is no failure.
+  assert.equal(
+    failedSinceLastSuccess({ ...base, isError: false, dataUpdatedAt: 3 }),
+    false,
+  );
+  assert.equal(failedSinceLastSuccess({ ...withData, isPaused: true }), false);
+  // Negative control: a read that never failed.
+  assert.equal(
+    failedSinceLastSuccess({ ...base, isError: false, errorUpdatedAt: 0 }),
+    false,
+  );
 });
 
 test("an infinite query's failure says nothing while parked or fetching", () => {

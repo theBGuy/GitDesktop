@@ -45,6 +45,7 @@ import {
   useRetryFocusRescue,
 } from "@/features/conversations/ConversationListPanel";
 import {
+  failedSinceLastSuccess,
   listNotice,
   refreshFailed,
   splitInfiniteFailure,
@@ -930,14 +931,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     opInProgress,
   });
   // A no-upstream count read that failed won't agree by waiting, so the hold
-  // names it rather than "refreshing" indefinitely. Sticky through the retry
-  // each status poll fires: a never-loaded read's refetch resets it to pending,
-  // so its last settle being the error counts too.
+  // names it rather than "refreshing" indefinitely, and keeps naming it through
+  // the retry each status poll fires.
   const countUnchecked =
-    noUpstream &&
-    (unpushedVsRemotes.isError ||
-      unpushedVsRemotes.errorUpdatedAt > unpushedVsRemotes.dataUpdatedAt) &&
-    !unpushedVsRemotes.isPaused;
+    noUpstream && failedSinceLastSuccess(unpushedVsRemotes);
   const refreshingHint = countUnchecked
     ? UNPUSHED_UNCHECKED_HINT
     : HISTORY_REFRESHING_HINT;

@@ -1,5 +1,6 @@
-// Pure, import-free: scripts/remote-list-state.test.mjs imports this file
-// through Node's type stripping, which resolves no aliases.
+// Pure, import-free: scripts/remote-list-state.test.mjs, and
+// insights/board-notice.ts with its scripts/board-notice.test.mjs, import this
+// file through Node's type stripping, which resolves no aliases.
 
 /** The degraded notice's link-style action; extra actions wear it too. */
 export const DEGRADED_ACTION_CLASS =
@@ -27,6 +28,21 @@ export function refreshFailed(q: {
   isFetching?: boolean;
 }): boolean {
   return q.isError && !q.isPaused && !q.isFetching;
+}
+
+/** Whether a read's last settle was a failure, held through its own
+ *  background refetches where {@link refreshFailed} goes quiet: react-query
+ *  keeps `isError` through a refetch of a read with data, and resets a
+ *  never-loaded one to pending (`isError` false, `error` null) while its
+ *  `errorUpdatedAt` stays newer than `dataUpdatedAt`. A park is no failure.
+ *  For a line that must not blank and re-announce on every poll. */
+export function failedSinceLastSuccess(q: {
+  isError: boolean;
+  isPaused: boolean;
+  errorUpdatedAt: number;
+  dataUpdatedAt: number;
+}): boolean {
+  return (q.isError || q.errorUpdatedAt > q.dataUpdatedAt) && !q.isPaused;
 }
 
 /** The line a picker shows while it draws no options. A park outranks the

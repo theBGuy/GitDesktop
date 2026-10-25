@@ -59,7 +59,7 @@ pub(crate) fn validate_branch_name(name: &str) -> AppResult<()> {
 /// detached. Read with `symbolic-ref`, never `rev-parse --abbrev-ref`: the short form
 /// disambiguates, so a branch shadowed by a same-named tag reads `heads/<name>` (or the
 /// full ref, when that is ambiguous too). An UNBORN branch still answers here — sites
-/// that must refuse before the first commit check [`head_is_unborn`] themselves. Any
+/// that must refuse before the first commit check `git::history::unborn_head`. Any
 /// other failure (not a repository, git missing) is an `Err`.
 pub(crate) async fn current_branch_ref(repo_path: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
@@ -2814,27 +2814,25 @@ pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool>
 /// unborn probe runs only after rev-list fails.
 #[tauri::command]
 pub async fn git_unpushed_count(repo_path: String) -> AppResult<u32> {
-    let out = run_git_raw(
-        Some(&repo_path),
+    let failed =
+        |text: String| AppError::Command(format!("couldn't count the unpushed commits.\n{text}"));
+    // Only an unborn HEAD answers 0.
+    let out = match crate::git::history::read_unless_unborn(
+        &repo_path,
         &["rev-list", "--count", "HEAD", "--not", "--remotes"],
         DEFAULT_TIMEOUT,
     )
-    .await?;
-    let failed =
-        |text: String| AppError::Command(format!("couldn't count the unpushed commits.\n{text}"));
-    if out.code == 0 {
-        let stdout = out.stdout_lossy();
-        return stdout
-            .trim()
-            .parse()
-            .map_err(|_| failed(format!("unexpected rev-list output: {}", stdout.trim())));
-    }
-    // Only an unborn HEAD answers 0; a failed probe reports rev-list's failure,
-    // which names what the count couldn't read.
-    match crate::git::history::unborn_head(&repo_path).await {
-        Ok(true) => Ok(0),
-        Ok(false) | Err(_) => Err(failed(out.full_failure_text())),
-    }
+    .await
+    {
+        Ok(Some(out)) => out,
+        Ok(None) => return Ok(0),
+        Err(e) => return Err(failed(e.to_string())),
+    };
+    let stdout = out.stdout_lossy();
+    stdout
+        .trim()
+        .parse()
+        .map_err(|_| failed(format!("unexpected rev-list output: {}", stdout.trim())))
 }
 
 /// A process-unique suffix for the throwaway worktree directory name.

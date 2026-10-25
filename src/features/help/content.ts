@@ -2997,9 +2997,11 @@ Bitbucket).
 
 The repository statistics stay up if a background refresh fails, with a line saying they
 couldn't refresh and a **Retry**. If they fail to load, the panel says why and offers
-**Retry**. On the board, a chart that can't load says so, and one line at the top gives
-the reason with a single **Retry** for every failed chart; the hosted cards say they'll
-load once you're back online.`,
+**Retry**. On the board, a chart whose local read fails says so, and one line at the top
+offers a single **Retry** for every failed chart, giving the reason when it has one
+for a chart with nothing loaded; a failed refresh keeps the loaded charts under that
+line. While you're
+offline, the hosted cards say they'll load once you're back online.`,
   },
   {
     id: "code-todos",
@@ -3030,8 +3032,9 @@ Select a TODO to see a **syntax-highlighted excerpt** of the code around that li
 with **blame attribution** — who wrote that line, and how long ago.
 
 The excerpt and its attribution stay on screen if a background refresh fails, with a line
-saying it couldn't refresh and a **Retry**. A file Git doesn't track yet shows its excerpt
-read straight from disk, marked *Not tracked yet*. If Git can't read a tracked file's
+saying it couldn't refresh and a **Retry**. A file Git doesn't track yet (or any file
+before the repository's first commit) shows its excerpt read straight from disk, marked
+*Not tracked yet*. If Git can't read a tracked file's
 history, the excerpt still shows, with the reason and a **Retry**. Only when nothing can be
 read does the pane say why and offer **Retry**.
 
@@ -3424,7 +3427,8 @@ runs and a toast tells you when the description is ready; **View** reopens it on
   deleted from \`.gitdesktop/aiignore\`, so commit the change to share it; global
   rules leave your Settings patterns and stop applying in every repository. Going
   the other way, the **Tracked** tab's **Exclude … from AI** hides a whole selection
-  in one step. If your AI settings can't be read, the tab says so and offers **Retry**.
+  in one step. If your AI settings can't be read, the **AI excluded** tab says so and
+  offers **Retry**.
 - **Hide AI** (Settings → General) hides the AI surfaces (finished AI activity in the
   activity dock and notification inbox included), mutes AI desktop notifications, and
   pauses your automations — nothing new runs or posts while it's on. Your configuration

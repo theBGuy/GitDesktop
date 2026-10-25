@@ -40,6 +40,7 @@ import type { BlameLine } from "@/lib/git/types";
 import { createCardLatch } from "@/lib/hover-card-latch";
 import { useUiStore } from "@/lib/stores/ui";
 import { validEpochMs } from "@/lib/time";
+import { isUnknownRevisionError } from "./blame-errors";
 
 /** `git blame --porcelain` reports uncommitted lines with an all-zero sha
  *  (author "Not Committed Yet"). Those rows aren't navigable commits, so the
@@ -204,8 +205,10 @@ export function BlameDialog({
         <p>
           {!shortRev
             ? "Couldn't blame this file."
-            : isUnknownRevision(blame.error)
-              ? `Couldn't blame this file at ${shortRev} — it may not exist at that revision, or the commit isn't available locally.`
+            : // Only a rev git couldn't resolve says it isn't available; the
+              // reason line below shows git's report for every failure.
+              isUnknownRevisionError(blame.error)
+              ? `Couldn't blame this file at ${shortRev} — that revision isn't available locally.`
               : `Couldn't blame this file at ${shortRev}.`}
         </p>
         {blame.isError ? (
@@ -432,18 +435,5 @@ function BlameLines({
         );
       })}
     </div>
-  );
-}
-
-/** Whether blame refused the rev itself (git/history.rs's "unknown revision"
- *  InvalidArgument), the one failure the at-a-revision guess describes; any
- *  other failure gets git's reason alone. */
-function isUnknownRevision(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const e = error as { kind?: unknown; message?: unknown };
-  return (
-    e.kind === "invalidArgument" &&
-    typeof e.message === "string" &&
-    e.message.startsWith("unknown revision: ")
   );
 }
