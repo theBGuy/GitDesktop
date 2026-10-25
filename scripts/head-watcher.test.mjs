@@ -34,6 +34,8 @@ const COMMIT_RS = "src-tauri/src/git/commit.rs";
 const BRANCHES = "src/lib/git/queries/branches.ts";
 const SYNC = "src/features/repository/SyncControls.tsx";
 const SWITCHER = "src/features/repository/BranchSwitcher.tsx";
+const COMMIT_OPS = "src/lib/git/queries/commit-ops.ts";
+const DETAIL = "src/features/history/CommitDetailView.tsx";
 
 /** The HEAD-move set: every family a commit's aftermath refreshes except the
  *  four StatusLogSync already refreshes on a move. */
@@ -231,16 +233,29 @@ function checkStatusLogSync(panel, core) {
 function checkUndoLast(panel) {
   const problems = [];
   const body = blockAfter(panel, "async function undoLast()").text;
-  const live = body.indexOf("useUiStore.getState().repoPath === repoPath");
-  const prune = body.search(
-    /if \(\s*useUiStore\.getState\(\)\.selectedCommitHash === lastCommit\.hash\s*\)\s*\{\s*clearSelectedCommit\(\);\s*\}/,
-  );
-  if (prune < 0)
+  const guard = "if (useUiStore.getState().repoPath === repoPath)";
+  const live = body.indexOf(guard);
+  if (live < 0) return [...problems, "undoLast has no live-repo guard"];
+  // Every post-undo selection write sits inside the live-repo guard: the panel
+  // survives a repo switch, so one outside it would prune the next repo's.
+  const guarded = balanced(body, body.indexOf("{", live));
+  const prune =
+    /if \(\s*useUiStore\.getState\(\)\.selectedCommitHash === lastCommit\.hash\s*\)\s*\{\s*clearSelectedCommit\(\);\s*\}/;
+  if (!prune.test(body))
     problems.push(
       "undoLast doesn't clearSelectedCommit under the selectedCommitHash guard",
     );
-  else if (live < 0 || live > prune)
+  else if (!prune.test(guarded))
     problems.push("the selection prune sits outside the live-repo guard");
+  for (const write of ["setSelected(", "setAnchorHash("]) {
+    const all = body.split(write).length - 1;
+    const inside = guarded.split(write).length - 1;
+    if (all === 0) problems.push(`undoLast never prunes through ${write}`);
+    else if (all !== inside)
+      problems.push(
+        `undoLast's ${write} prune sits outside the live-repo guard`,
+      );
+  }
   if (/selectCommit\(\s*null\s*\)/.test(body.replace(/\/\/[^\n]*/g, "")))
     problems.push("undoLast deselects through the bumping selectCommit");
   const detailsAt = body.indexOf("gitCommitDetails(");
@@ -317,6 +332,44 @@ function checkRewriteStatusKey(branches, core) {
   )
     ? []
     : ["branchRewriteStatusOptions doesn't key on repoKeys.rewriteStatus"];
+}
+
+/** useCommitRecordsParent keys through the shared builder, which yields the
+ *  contract's `["repo", repo, "records-parent", hash]`. */
+function checkRecordsParentKey(core, commitOps) {
+  const problems = [];
+  if (
+    !/recordsParent:\s*\(repo: string, hash: string\)\s*=>\s*\[\s*"repo",\s*repo,\s*"records-parent",\s*hash\s*\]\s*as const/.test(
+      blockAfter(core, "export const repoKeys =").text,
+    )
+  )
+    problems.push("repoKeys.recordsParent isn't the records-parent key");
+  const hook = blockAfter(
+    commitOps,
+    "export function useCommitRecordsParent(",
+    "{",
+    ") {",
+  ).text;
+  if (!/queryKey:\s*repoKeys\.recordsParent\(repo, hash\)/.test(hook))
+    problems.push(
+      "useCommitRecordsParent doesn't key on repoKeys.recordsParent",
+    );
+  if (commitOps.includes('"records-parent"'))
+    problems.push("commit-ops.ts hand-spells the records-parent key");
+  return problems;
+}
+
+/** The commit detail ⋯ menu's Amend row: a log that failed with nothing
+ *  loaded says so, ahead of the refreshing arms, never "refreshing". */
+function checkDetailAmendArms(detail) {
+  const at = detail.indexOf("Amend commit…");
+  if (at < 0) return ["CommitDetailView has no Amend row"];
+  const row = detail.slice(at, detail.indexOf("</DropdownMenuItem>", at));
+  return /case isHead:\s*return null;\s*case log\.data === undefined && refreshFailed\(log\):\s*return AMEND_HOLD_HINT\["log-unread"\];\s*case logTop === undefined:/.test(
+    row,
+  )
+    ? []
+    : ["the Amend row doesn't name a failed log read ahead of refreshing"];
 }
 
 /** Every .ts/.tsx under src/, by repo-relative path. */
@@ -520,6 +573,36 @@ test("StatusLogSync re-reads the HEAD-move set through preMoveStale", () => {
   );
 });
 
+test("the records-parent key has one builder", () => {
+  const core = read(CORE);
+  const commitOps = read(COMMIT_OPS);
+  assert.deepEqual(checkRecordsParentKey(core, commitOps), []);
+  assert.notDeepEqual(
+    checkRecordsParentKey(
+      core,
+      mutate(
+        commitOps,
+        "queryKey: repoKeys.recordsParent(repo, hash),",
+        'queryKey: ["repo", repo, "records-parent", hash] as const,',
+      ),
+    ),
+    [],
+    "control: the hook hand-builds its key",
+  );
+});
+
+test("the detail Amend row names a failed log read", () => {
+  const detail = read(DETAIL);
+  assert.deepEqual(checkDetailAmendArms(detail), []);
+  assert.notDeepEqual(
+    checkDetailAmendArms(
+      mutate(detail, "case log.data === undefined && refreshFailed(log):", ""),
+    ),
+    [],
+    "control: the failed-log arm removed",
+  );
+});
+
 test("the rewrite-status family has one key builder", () => {
   const core = read(CORE);
   const branches = read(BRANCHES);
@@ -710,6 +793,28 @@ test("undo prunes the undone commit's selection without bumping", () => {
     checkUndoLast(mutate(panel, "clearSelectedCommit();")),
     [],
     "control: the clearSelectedCommit call removed",
+  );
+  // Cut the Set/anchor prune out of the live-repo guard and paste it after.
+  const from = panel.indexOf("const undone = lastCommit.hash;");
+  const endMark = "setAnchorHash((a) => (a === undone ? null : a));";
+  const to = panel.indexOf(endMark, from) + endMark.length;
+  assert.ok(from >= 0 && to > from, "control premise: the prune is present");
+  const guardAt = panel.indexOf(
+    "if (useUiStore.getState().repoPath === repoPath)",
+    panel.indexOf("async function undoLast()"),
+  );
+  const guardOpen = panel.indexOf("{", guardAt);
+  const guardEnd = guardOpen + balanced(panel, guardOpen).length;
+  assert.ok(from > guardOpen && to < guardEnd, "control premise: inside");
+  const movedOut =
+    panel.slice(0, from) +
+    panel.slice(to, guardEnd) +
+    panel.slice(from, to) +
+    panel.slice(guardEnd);
+  assert.notDeepEqual(
+    checkUndoLast(movedOut),
+    [],
+    "control: the multi-selection prune moved out of the live-repo guard",
   );
   assert.notDeepEqual(
     checkClearSelectedCommit(

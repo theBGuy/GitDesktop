@@ -613,9 +613,13 @@ export function CommitDetailView({
                   {(() => {
                     // Only HEAD can be amended; until the log and status agree
                     // on it, the row waits rather than claiming out of reach.
+                    // A log that failed with nothing loaded (and isn't retrying)
+                    // isn't refreshing.
                     switch (true) {
                       case isHead:
                         return null;
+                      case log.data === undefined && refreshFailed(log):
+                        return AMEND_HOLD_HINT["log-unread"];
                       case logTop === undefined:
                       case isLatest:
                       case hash === head?.oid:

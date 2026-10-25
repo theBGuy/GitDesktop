@@ -125,10 +125,15 @@ export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own"
 export const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
 /** Amend's menu-row reason, on the History menu and the commit detail ⋯ menu
- *  alike: only HEAD can be amended, and HEAD is unknown while the reads disagree. */
-export const AMEND_HOLD_HINT: Record<"refreshing" | "not-latest", string> = {
+ *  alike: only HEAD can be amended, and HEAD is unknown while the reads
+ *  disagree, or for good while the log has never been read. */
+export const AMEND_HOLD_HINT: Record<
+  "refreshing" | "not-latest" | "log-unread",
+  string
+> = {
   refreshing: HISTORY_REFRESHING_HINT,
   "not-latest": " (latest commit only)",
+  "log-unread": " (couldn't read the history)",
 };
 
 /** The same hold once the no-upstream count read has failed: which commits are
@@ -160,9 +165,9 @@ const REPLACES_MESSAGE_BODY: Record<
   (short: string) => string
 > = {
   amend: (s) =>
-    `Amending loads ${s}'s message into the commit box, replacing the title and description you've written. Cancel keeps what you wrote and doesn't start the amend.`,
+    `Amending loads ${s}'s message into the commit box, replacing the title and description already in it. Cancel keeps them and doesn't start the amend.`,
   undo: (s) =>
-    `Undoing ${s} loads its message into the commit box, replacing the title and description you've written. Cancel keeps what you wrote and doesn't undo the commit.`,
+    `Undoing ${s} loads its message into the commit box, replacing the title and description already in it. Cancel keeps them and doesn't undo the commit.`,
 };
 
 /** Asked right before a route writes `hash`'s message into the commit box. Names

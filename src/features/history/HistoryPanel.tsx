@@ -174,6 +174,7 @@ type HeadRowHold =
   | "already-pushed"
   | "detached-root"
   | "shallow-boundary"
+  | "checking-parent"
   | "parent-unread"
   | "already-at";
 const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
@@ -183,6 +184,8 @@ const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
   "already-pushed": " (already pushed)",
   "detached-root": UNDO_DETACHED_ROOT_HINT,
   "shallow-boundary": " (its parent commit isn't in this shallow clone)",
+  // The menu twin of the shortcut's "Still checking the latest commit" toast.
+  "checking-parent": " (checking the latest commit…)",
   "parent-unread": " (couldn't check the latest commit's parent)",
   "already-at": " (already at this commit)",
 };
@@ -509,13 +512,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       head &&
       (head.upstream === null || head.upstreamGone || head.ahead > 0),
   );
-  // Whether HEAD is a root commit, which sends undo down git's ref-deleting
-  // path. The log walks HEAD's ancestry and only stops paging once a page comes
-  // up short, so a lone loaded commit with no next page means HEAD has no parent.
+  // A lone loaded commit: a true root or a depth-limited clone's boundary. The
+  // log walks HEAD's ancestry and only stops paging once a page comes up short,
+  // so one loaded commit with no next page has no parent the log can reach.
   const headIsRoot = log.data?.pages[0]?.length === 1 && !log.hasNextPage;
-  // A lone loaded commit can also be a depth-limited clone's oldest one, whose
-  // parent the graft hides from the log: its raw header tells the two apart.
-  // Read only for that lone commit, so ordinary history spawns nothing.
+  // The graft hides a boundary commit's parent from the log; its raw header
+  // tells the two apart. Read only for that lone commit, so ordinary history
+  // spawns nothing.
   const recordsParent = useCommitRecordsParent(
     repoPath,
     lastCommit?.hash ?? "",
@@ -523,7 +526,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   );
   const shallowBoundary = headIsRoot && recordsParent.data === true;
   const rootKnown = !headIsRoot || recordsParent.data !== undefined;
-  // Only a measured root takes git's ref-deleting path and its confirm.
+  // Only a measured root (rootUndo) takes git's ref-deleting path and its
+  // confirm.
   const rootUndo = headIsRoot && recordsParent.data === false;
   // The root confirm promises to delete the branch's ref, which a detached HEAD
   // doesn't have: every route explains the backend's refusal instead.
@@ -555,8 +559,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       return;
     }
     const undoIn = repoPath;
-    // Only the root case is lossy enough to ask about: an ordinary undo is gated
-    // to unpushed commits and leaves everything staged.
+    // The root case is the only one that asks about the commit itself: an
+    // ordinary undo is gated to unpushed commits and leaves everything staged.
+    // (Typed text in the commit box asks separately, below.)
     if (rootUndo) {
       if (!(await useConfirm.getState().ask(UNDO_ROOT_COMMIT_CONFIRM))) return;
       // Ahead of the promotion check, which reads the start repo: a switch
@@ -623,17 +628,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       if (useUiStore.getState().selectedCommitHash === lastCommit.hash) {
         clearSelectedCommit();
       }
+      // The panel's own multi-selection keeps no gone commit, nor an anchor a
+      // shift-range would extend from. The panel survives a repo switch, so
+      // after one its selection is the new repo's and stays untouched.
+      const undone = lastCommit.hash;
+      setSelected((s) => {
+        if (!s.has(undone)) return s;
+        const next = new Set(s);
+        next.delete(undone);
+        return next;
+      });
+      setAnchorHash((a) => (a === undone ? null : a));
     }
-    // The panel's own multi-selection keeps no gone commit, nor an anchor a
-    // shift-range would extend from.
-    const undone = lastCommit.hash;
-    setSelected((s) => {
-      if (!s.has(undone)) return s;
-      const next = new Set(s);
-      next.delete(undone);
-      return next;
-    });
-    setAnchorHash((a) => (a === undone ? null : a));
     toast.success(
       `Undid ${lastCommit.hash.slice(0, 7)} — changes are staged again`,
     );
@@ -1282,9 +1288,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       switch (true) {
         case (menuIndex === 0 && !isHead) ||
           (commit.hash === head?.oid && !isHead) ||
-          menuIndex < 0 ||
-          (isHead && headIsRoot && !rootKnown && !recordsParent.isError):
+          menuIndex < 0:
           return "refreshing";
+        case isHead && headIsRoot && !rootKnown && !recordsParent.isError:
+          return "checking-parent";
         case !isHead && menuIndex > 0:
           return "not-latest";
         case undoCommit.isPending:

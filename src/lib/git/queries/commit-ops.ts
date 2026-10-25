@@ -109,7 +109,7 @@ export function useCommitRecordsParent(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "records-parent", hash] as const,
+    queryKey: repoKeys.recordsParent(repo, hash),
     queryFn: () => api.gitCommitRecordsParent(repo, hash),
     enabled: enabled && hash !== "",
     staleTime: Number.POSITIVE_INFINITY,

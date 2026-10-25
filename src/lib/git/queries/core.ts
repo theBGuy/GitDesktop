@@ -77,6 +77,8 @@ export const repoKeys = {
   unpushedMessages: (repo: string) =>
     ["repo", repo, "unpushed-messages"] as const,
   rewriteStatus: (repo: string) => ["repo", repo, "rewrite-status"] as const,
+  recordsParent: (repo: string, hash: string) =>
+    ["repo", repo, "records-parent", hash] as const,
   commitDetails: (repo: string, hash: string) =>
     ["repo", repo, "commit", hash] as const,
   commitFiles: (repo: string, hash: string) =>

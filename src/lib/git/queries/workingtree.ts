@@ -18,11 +18,12 @@ import { useRepoMutation, workingTreeKeys } from "./internal";
  *  axis follows), so a rule edit invalidates the view whatever settings held. */
 const aiExcludedKey = (repo: string) => ["repo", repo, "ai-excluded"] as const;
 
-/** The HEAD-dependent families any HEAD move makes stale, minus the four the
- *  status/log sync already refreshes itself (log, the two unpushed reads, op
- *  state): history, branch tips/counters, HEAD-rev blobs, and prospective
+/** The HEAD-dependent families a commit's aftermath refreshes, minus the four
+ *  the status/log sync already refreshes itself (log, the two unpushed reads,
+ *  op state): history, branch tips/counters, HEAD-rev blobs, and prospective
  *  operation state (merge/conflict previews, local-PR merge states). Shared by
- *  a commit's aftermath and StatusLogSync's outside-move refresh. */
+ *  a commit's aftermath and StatusLogSync's outside-move refresh; not every
+ *  HEAD-dependent read (StatusLogSync re-reads rewrite-status beside it). */
 export const headMoveAftermathKeys = (repo: string) =>
   [
     repoKeys.commits(repo),
