@@ -124,6 +124,11 @@ export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own"
  *  unpushed, and which commit is HEAD, are unknown until they agree again. */
 export const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
+/** The same hold once the no-upstream count read has failed: which commits are
+ *  unpushed stays unknown until it reads again. */
+export const UNPUSHED_UNCHECKED_HINT =
+  " (couldn't check which commits are pushed)";
+
 /** Menu-row reason while a merge/rebase/cherry-pick/revert is mid-flight —
  *  Edit history, Squash and Cherry-pick to branch all say it. */
 export const OP_IN_PROGRESS_HINT = " (finish the operation in Changes first)";

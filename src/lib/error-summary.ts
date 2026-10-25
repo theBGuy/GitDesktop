@@ -122,6 +122,21 @@ const PROSE_LEADS = new Set([
   "worktree",
 ]);
 
+/** `message` with its kind's Rust display lead removed, so a classifier
+ *  matches the app-written detail: `invalid argument: unknown revision: x`
+ *  reads `unknown revision: x`. Only a lead ending in `": "` is stripped; a
+ *  whole-sentence lead (a timeout, git not found) and a message without its
+ *  lead pass through unchanged. */
+export function appErrorDetail(
+  kind: AppError["kind"],
+  message: string,
+): string {
+  const lead = DISPLAY_LEADS[kind]?.[0];
+  return lead?.endsWith(": ") && message.startsWith(lead)
+    ? message.slice(lead.length)
+    : message;
+}
+
 /** `message` in the summary's register: a known Rust lead swapped for its
  *  display form, and a dropped lead's prose remainder sentence-cased. */
 function displayRegister(kind: AppError["kind"], message: string): string {

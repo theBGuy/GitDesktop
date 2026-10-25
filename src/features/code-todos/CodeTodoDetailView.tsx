@@ -14,12 +14,14 @@ import {
   useRetryFocusRescue,
 } from "@/features/conversations/ConversationListPanel";
 import {
+  DEGRADED_ACTION_CLASS,
   detailNoticeMessage,
   refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { diffLang } from "@/features/diff/diff-lang";
 import { HighlightedLine } from "@/features/diff/HighlightedLine";
+import { isNoBlameHistoryError } from "@/features/history/blame-errors";
 import { CreateLocalIssueDialog } from "@/features/issues/CreateLocalIssueDialog";
 import { useOpenFile } from "@/features/sessions/useOpenFile";
 import { presentError } from "@/lib/error-summary";
@@ -54,6 +56,13 @@ export function CodeTodoDetailView({
   text: string;
 }) {
   const blame = useBlame(repoPath, path);
+  // "Not tracked yet" only when blame says the file has no history (git
+  // refusing an untracked path, or a repository with no commits yet); any
+  // other blame failure (a damaged repository, say) is a failed read that says
+  // why. Read above the ladder: these describe the failure, never swap content.
+  const notTracked = isNoBlameHistoryError(blame.error);
+  const blameReason =
+    blame.error == null ? null : presentError(blame.error).summary;
   // A failed blame refresh keeps the loaded excerpt and attribution under a
   // notice; only a blame with nothing loaded falls back to the disk read below.
   const pane = resolveDetailPane({
@@ -67,7 +76,9 @@ export function CodeTodoDetailView({
   // Fallback content source: `git blame` refuses untracked files, but we scan
   // `--untracked`, so a brand-new file's content is read straight off disk.
   // Only a blame that errored with nothing loaded counts: a tracked file's
-  // failed refresh keeps its blame, never pays the read, never reads untracked.
+  // failed refresh keeps its blame, never pays the read. Any such failure takes
+  // the disk read, so the excerpt still shows; `notTracked` decides what the
+  // header says about it.
   const untracked = blame.isError && blame.data === undefined;
   const fileText = useFileText(repoPath, path, untracked);
   const openFile = useOpenFile();
@@ -213,7 +224,28 @@ export function CodeTodoDetailView({
         )}
         {untracked && (
           <p className="mt-2 text-xs text-muted-foreground">
-            Not tracked yet — no history.
+            {notTracked ? (
+              "Not tracked yet — no history."
+            ) : (
+              <>
+                Couldn't read this file's history. {blameReason}
+                {/* With the disk read failed too, the body's Retry re-asks
+                    both reads, so this blame-only one would duplicate it. */}
+                {previewUnavailable ? null : (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      aria-label="Retry reading this file's history"
+                      onClick={() => void blame.refetch()}
+                      className={DEGRADED_ACTION_CLASS}
+                    >
+                      Retry
+                    </button>
+                  </>
+                )}
+              </>
+            )}
           </p>
         )}
 

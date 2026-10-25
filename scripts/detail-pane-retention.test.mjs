@@ -147,8 +147,8 @@ const SITES = [
     stale: "blame.isPlaceholderData",
     identity: ["path", "line"],
     shell: "notice",
-    // Blame failing with nothing loaded is an untracked file's designed
-    // disk-read fallback; the error arm is both sources failing.
+    // Blame with nothing loaded (untracked, or an unreadable history) takes
+    // the designed disk-read fallback; the error arm is both sources failing.
     errorIf: "previewUnavailable",
     rescue: "previewUnavailable",
     retry: {

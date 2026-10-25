@@ -59,7 +59,7 @@ pub(crate) fn validate_branch_name(name: &str) -> AppResult<()> {
 /// detached. Read with `symbolic-ref`, never `rev-parse --abbrev-ref`: the short form
 /// disambiguates, so a branch shadowed by a same-named tag reads `heads/<name>` (or the
 /// full ref, when that is ambiguous too). An UNBORN branch still answers here — sites
-/// that must refuse before the first commit check [`head_is_unborn`] themselves. Any
+/// that must refuse before the first commit check `git::history::unborn_head`. Any
 /// other failure (not a repository, git missing) is an `Err`.
 pub(crate) async fn current_branch_ref(repo_path: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
@@ -2776,9 +2776,11 @@ async fn verify_pin_and_merge(
 /// Whether a commit is reachable from any remote-tracking ref (`refs/remotes/*`) —
 /// i.e. it has been pushed. Gates the History-tab commit-comment surface, which can
 /// only anchor a comment on a commit the forge already knows about. The sha is
-/// validated (hex) BEFORE spawning git; a VALID sha the repo doesn't recognise
-/// (unfetched / unpushed) makes git error, which we map to `Ok(false)` — "not on a
-/// remote" is a normal answer here, not an app failure.
+/// validated (hex) BEFORE spawning git. `Ok(false)` comes only from a read that
+/// succeeded and matched no ref; any failed run is an Err, since the UI would read
+/// a defaulted false as "not pushed". git exits nonzero for a well-formed sha the
+/// repo lacks (pinned by `commit_on_remote_errs_for_an_unknown_oid`), so an empty
+/// answer from exit 0 is a real "not on a remote".
 #[tauri::command]
 pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool> {
     crate::git::history::validate_hash(&sha)?;
@@ -2795,7 +2797,10 @@ pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool>
     )
     .await?;
     if out.code != 0 {
-        return Ok(false);
+        return Err(AppError::Command(format!(
+            "couldn't check whether {sha} is on a remote.\n{}",
+            out.full_failure_text()
+        )));
     }
     Ok(!out.stdout_lossy().trim().is_empty())
 }
@@ -2804,20 +2809,30 @@ pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool>
 /// i.e. unpublished anywhere. The History tab uses this to mark "not pushed" rows on
 /// a branch with NO upstream, where "ahead of upstream" is undefined: the fork point
 /// and everything below it live on `origin/<base>` and ARE published. A repo with no
-/// remotes yields the full `HEAD` count (correct); a benign git error (unborn `HEAD`)
-/// maps to `0`.
+/// remotes yields the full `HEAD` count. Only an unborn `HEAD` maps to `0`; any other
+/// failed run is an Err, never a defaulted count. The healthy path is one spawn: the
+/// unborn probe runs only after rev-list fails.
 #[tauri::command]
 pub async fn git_unpushed_count(repo_path: String) -> AppResult<u32> {
-    let out = run_git_raw(
-        Some(&repo_path),
+    let failed =
+        |text: String| AppError::Command(format!("couldn't count the unpushed commits.\n{text}"));
+    // Only an unborn HEAD answers 0.
+    let out = match crate::git::history::read_unless_unborn(
+        &repo_path,
         &["rev-list", "--count", "HEAD", "--not", "--remotes"],
         DEFAULT_TIMEOUT,
     )
-    .await?;
-    if out.code != 0 {
-        return Ok(0);
-    }
-    Ok(out.stdout_lossy().trim().parse().unwrap_or(0))
+    .await
+    {
+        Ok(Some(out)) => out,
+        Ok(None) => return Ok(0),
+        Err(e) => return Err(failed(e.to_string())),
+    };
+    let stdout = out.stdout_lossy();
+    stdout
+        .trim()
+        .parse()
+        .map_err(|_| failed(format!("unexpected rev-list output: {}", stdout.trim())))
 }
 
 /// A process-unique suffix for the throwaway worktree directory name.
@@ -8403,6 +8418,76 @@ mod tests {
         assert_eq!(stderr, expected.full_failure_text());
         assert!(stderr.contains("MERGE_HEAD exists"), "{stderr}");
         f.assert_snapshot().await;
+    }
+
+    /// Pins the measured exit of `for-each-ref --contains` on a well-formed oid
+    /// the repo lacks, which decides how `commit_on_remote` reads an empty answer.
+    #[tokio::test]
+    async fn commit_on_remote_errs_for_an_unknown_oid() {
+        let (_base, base) = temp_base("on-remote-unknown");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        let unknown = "0123456789abcdef0123456789abcdef01234567";
+        let raw = run_git_raw(
+            Some(&repo),
+            &[
+                "for-each-ref",
+                "refs/remotes",
+                "--contains",
+                unknown,
+                "--format=%(refname)",
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            raw.code, 0,
+            "for-each-ref answered an unknown oid with exit 0"
+        );
+        let result = super::commit_on_remote(repo.clone(), unknown.into()).await;
+        assert!(matches!(result, Err(AppError::Command(_))), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn commit_on_remote_answers_from_remote_tracking_refs() {
+        let (_base, base) = temp_base("on-remote-answers");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        let pushed = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "local"]).await;
+        let local = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        assert!(super::commit_on_remote(repo.clone(), pushed).await.unwrap());
+        assert!(!super::commit_on_remote(repo.clone(), local).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_reads_zero_on_an_unborn_head() {
+        let (_base, base) = temp_base("unpushed-unborn");
+        let repo = base.to_string_lossy().into_owned();
+        run(&repo, &["init", "-q"]).await;
+        assert_eq!(super::git_unpushed_count(repo).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_counts_every_commit_without_a_remote() {
+        let (_base, base) = temp_base("unpushed-no-remote");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        run(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]).await;
+        assert_eq!(super::git_unpushed_count(repo).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_errs_outside_a_repository() {
+        let (_base, base) = temp_base("unpushed-broken");
+        let repo = base.to_string_lossy().into_owned();
+        init_repo(&repo, "r.txt").await;
+        std::fs::rename(base.join(".git"), base.join("git-moved")).unwrap();
+        let result = super::git_unpushed_count(repo).await;
+        assert!(matches!(result, Err(AppError::Command(_))), "{result:?}");
     }
 
     #[tokio::test]

@@ -40,6 +40,7 @@ import type { BlameLine } from "@/lib/git/types";
 import { createCardLatch } from "@/lib/hover-card-latch";
 import { useUiStore } from "@/lib/stores/ui";
 import { validEpochMs } from "@/lib/time";
+import { isUnknownRevisionError } from "./blame-errors";
 
 /** `git blame --porcelain` reports uncommitted lines with an all-zero sha
  *  (author "Not Committed Yet"). Those rows aren't navigable commits, so the
@@ -202,9 +203,14 @@ export function BlameDialog({
     return shell(
       <div className="flex flex-col items-start gap-2 p-3 text-xs text-muted-foreground">
         <p>
-          {shortRev
-            ? `Couldn't blame this file at ${shortRev} — it may not exist at that revision, or the commit isn't available locally.`
-            : "Couldn't blame this file (it may be binary or untracked)."}
+          {!shortRev
+            ? "Couldn't blame this file."
+            : // Only a rev git couldn't resolve says it isn't available. The
+              // reason line below is presentError's one-line summary: git's
+              // report, or the app's own text for its refusals.
+              isUnknownRevisionError(blame.error)
+              ? `Couldn't blame this file at ${shortRev} — that revision isn't available locally.`
+              : `Couldn't blame this file at ${shortRev}.`}
         </p>
         {blame.isError ? (
           <>

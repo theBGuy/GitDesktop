@@ -17,11 +17,17 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import { refreshFailed } from "@/features/conversations/remote-section-state";
 import { presentError } from "@/lib/error-summary";
 import { useTodoScan } from "@/lib/git/queries";
 import type { TodoScanItem } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
+import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { MarkerChip } from "./MarkerChip";
 import { DEFAULT_MARKERS, TODO_SCAN_CAP } from "./markers";
@@ -211,9 +217,28 @@ export function CodeTodosPanel({
   }
 
   const busy = scan.isFetching;
+  // A failed rescan keeps the loaded TODOs under a notice; only a scan with
+  // nothing loaded says it couldn't scan, and "No TODO comments found" comes
+  // only from a scan that answered empty.
+  const failed = refreshFailed(scan);
+  const loadFailed = scan.data === undefined && failed;
+  const rescanFailed = scan.data !== undefined && failed;
+  // Retry resets the scan to loading, unmounting itself; focus lands on the root.
+  const { hostRef, retryRef } = useRetryFocusRescue(loadFailed && !noMarkers);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      className="flex min-h-0 flex-1 flex-col outline-none"
+    >
+      {/* Pre-mounted, never under aria-busy: a live region created together
+          with its text announces unreliably. */}
+      <div role="status" className="sr-only">
+        {loadFailed && !noMarkers
+          ? `Couldn't scan for TODOs. ${presentError(scan.error).summary}`
+          : ""}
+      </div>
       <div className="flex flex-wrap items-center gap-1 border-b p-2">
         {DEFAULT_MARKERS.map((marker) => {
           const on = enabledMarkers.has(marker);
@@ -233,9 +258,13 @@ export function CodeTodosPanel({
         <Button
           variant="ghost"
           size="icon-sm"
-          className="ml-auto"
+          className={cn("ml-auto", ARIA_DISABLED_CLASS)}
           aria-label="Rescan for TODOs"
+          // Busy stays focusable, so a keyboard press never drops focus to
+          // <body>. No markers only ever arises from a chip press, with focus
+          // on the chip, so that state keeps a plain disabled.
           disabled={busy || noMarkers}
+          focusableWhenDisabled={!noMarkers}
           onClick={() => scan.refetch()}
         >
           <ArrowClockwiseIcon className={cn(busy && "animate-spin")} />
@@ -250,18 +279,26 @@ export function CodeTodosPanel({
           autoComplete="off"
         />
       </div>
+      <DegradedListNotice
+        noun="TODOs"
+        degraded={rescanFailed && !noMarkers}
+        message={
+          // Loaded TODOs, not filtered ones: a filter matching nothing still
+          // sits over the last loaded results.
+          allItems.length > 0
+            ? "Couldn't rescan for TODOs — showing the last loaded results."
+            : "Couldn't rescan for TODOs."
+        }
+        retryLabel="Retry scanning for TODOs"
+        onRetry={rescanFailed ? () => void scan.refetch() : undefined}
+        className="shrink-0 border-b px-3 py-1.5"
+      />
 
       {noMarkers ? (
         <p className="px-3 py-8 text-center text-xs text-muted-foreground">
           Select a marker above to scan.
         </p>
-      ) : scan.isPending ? (
-        <div className="space-y-2 p-3">
-          {Array.from({ length: 6 }, (_, i) => (
-            <Skeleton key={i} className="h-7 w-full" />
-          ))}
-        </div>
-      ) : scan.isError ? (
+      ) : loadFailed ? (
         <div className="p-4 text-center text-xs">
           <p className="font-medium text-destructive">
             Couldn't scan for TODOs.
@@ -270,6 +307,7 @@ export function CodeTodosPanel({
             {presentError(scan.error).summary}
           </p>
           <Button
+            ref={retryRef}
             variant="outline"
             size="xs"
             className="mt-3"
@@ -277,6 +315,12 @@ export function CodeTodosPanel({
           >
             Retry
           </Button>
+        </div>
+      ) : scan.data === undefined ? (
+        <div className="space-y-2 p-3">
+          {Array.from({ length: 6 }, (_, i) => (
+            <Skeleton key={i} className="h-7 w-full" />
+          ))}
         </div>
       ) : allItems.length === 0 ? (
         <Empty className="flex-1">

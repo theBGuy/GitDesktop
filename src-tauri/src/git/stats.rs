@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+use crate::git::history::read_unless_unborn;
 use crate::git::runner::{run_git, run_git_raw, DEFAULT_TIMEOUT};
 
 /// One full-history `git log` pass plus a working-tree scan can outlast the
@@ -442,10 +443,11 @@ pub async fn git_contributor_activity(
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
-    if out.code != 0 {
+    // `git log` refuses an unborn HEAD, which has no history to chart; any other
+    // failed run is an Err, never an empty window.
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(Vec::new());
-    }
+    };
     let text = out.stdout_lossy();
     let mut by_author: HashMap<String, ContributorChurn> = HashMap::new();
     // Each commit block starts with the \x01 sentinel; its first line is
@@ -500,10 +502,11 @@ pub async fn git_commit_activity(repo_path: String, weeks: u32) -> AppResult<Vec
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
-    if out.code != 0 {
+    // `git log` refuses an unborn HEAD, which has no history to chart; any other
+    // failed run is an Err, never an empty window.
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(Vec::new());
-    }
+    };
     let mut counts: HashMap<String, u32> = HashMap::new();
     for line in out.stdout_lossy().lines() {
         let week = line.trim();
@@ -539,10 +542,11 @@ pub async fn git_code_frequency(repo_path: String, weeks: u32) -> AppResult<Vec<
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
-    if out.code != 0 {
+    // `git log` refuses an unborn HEAD, which has no history to chart; any other
+    // failed run is an Err, never an empty window.
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(Vec::new());
-    }
+    };
     let mut by_week: HashMap<String, (u64, u64)> = HashMap::new();
     let mut current: Option<String> = None;
     // A "\0<week>" line sets the current bucket; following numstat rows add to it.
@@ -584,11 +588,12 @@ pub async fn git_punch_card(repo_path: String, weeks: u32) -> AppResult<Vec<Vec<
         weeks,
         &since,
     );
-    let out = run_git_raw(Some(&repo_path), &args, STATS_TIMEOUT).await?;
     let mut grid = vec![vec![0u32; 24]; 7];
-    if out.code != 0 {
+    // `git log` refuses an unborn HEAD, which has no history to chart; any other
+    // failed run is an Err, never an empty window.
+    let Some(out) = read_unless_unborn(&repo_path, &args, STATS_TIMEOUT).await? else {
         return Ok(grid);
-    }
+    };
     for line in out.stdout_lossy().lines() {
         let mut parts = line.split_whitespace();
         let (Some(d), Some(h)) = (parts.next(), parts.next()) else {
@@ -647,6 +652,107 @@ mod tests {
             (stats.commit_count, stats.files_changed, stats.additions),
             (1, 1, 2)
         );
+    }
+
+    fn temp_repo(tag: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("gd-stats-{tag}-"))
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        (dir, repo)
+    }
+
+    /// Each insights read for `weeks` (0 = all time) as one comparable shape:
+    /// Ok carries whether the answer is empty, Err the error's text.
+    async fn insights_reads(repo: &str, weeks: u32) -> Vec<Result<bool, String>> {
+        let r = repo.to_string();
+        vec![
+            git_contributor_activity(r.clone(), weeks)
+                .await
+                .map(|v| v.is_empty())
+                .map_err(|e| format!("{e:?}")),
+            git_commit_activity(r.clone(), weeks)
+                .await
+                .map(|v| v.is_empty())
+                .map_err(|e| format!("{e:?}")),
+            git_code_frequency(r.clone(), weeks)
+                .await
+                .map(|v| v.is_empty())
+                .map_err(|e| format!("{e:?}")),
+            git_punch_card(r, weeks)
+                .await
+                .map(|g| g.iter().flatten().all(|&n| n == 0))
+                .map_err(|e| format!("{e:?}")),
+        ]
+    }
+
+    #[tokio::test]
+    async fn insights_reads_are_empty_on_an_unborn_head() {
+        let (_dir, repo) = temp_repo("insights-unborn");
+        git(&repo, &["init", "-q"]).await;
+        for weeks in [0, 52] {
+            assert_eq!(insights_reads(&repo, weeks).await, vec![Ok(true); 4]);
+        }
+    }
+
+    #[tokio::test]
+    async fn insights_reads_err_in_a_broken_repo() {
+        let (dir, repo) = temp_repo("insights-broken");
+        git(&repo, &["init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "seed"]).await;
+        // Negative control: the healthy repo answers non-empty.
+        assert_eq!(insights_reads(&repo, 0).await, vec![Ok(false); 4]);
+        std::fs::rename(dir.path().join(".git"), dir.path().join("git-moved")).unwrap();
+        for read in insights_reads(&repo, 0).await {
+            assert!(
+                matches!(&read, Err(e) if e.contains("Git") && e.contains("not a git repository")),
+                "{read:?}"
+            );
+        }
+    }
+
+    /// HEAD resolves but its commit object is gone, so the unborn probe passes
+    /// and only each read's own failed run can say so: a revert to "nonzero
+    /// exit = empty" fails here even with the probe intact.
+    #[tokio::test]
+    async fn reads_err_when_the_head_commit_is_missing() {
+        let (dir, repo) = temp_repo("missing-head-commit");
+        git(&repo, &["init", "-q"]).await;
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "seed"]).await;
+        let sha = git(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let object = dir
+            .path()
+            .join(".git/objects")
+            .join(&sha[..2])
+            .join(&sha[2..]);
+        std::fs::remove_file(&object).expect("the HEAD commit is a loose object");
+        let probe = run_git_raw(
+            Some(&repo),
+            &["rev-parse", "--verify", "--quiet", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(probe.code, 0, "the premise: HEAD still resolves");
+        for read in insights_reads(&repo, 0).await {
+            assert!(read.is_err(), "{read:?}");
+        }
+        let log = crate::git::history::git_log(repo.clone(), 10, 0, None).await;
+        assert!(log.is_err(), "{log:?}");
+        // No rev: blame's own run must fail, past the probes.
+        let blame = crate::git::history::git_blame(repo.clone(), "a.txt".into(), None).await;
+        assert!(blame.is_err(), "{blame:?}");
+        let unpushed = crate::git::branches::git_unpushed_count(repo).await;
+        assert!(unpushed.is_err(), "{unpushed:?}");
     }
 
     #[test]

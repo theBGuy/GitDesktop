@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,16 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  DEGRADED_ACTION_CLASS,
+  listNotice,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
+import { presentError } from "@/lib/error-summary";
 import {
   aiExcludePatternLinesForPath,
   globLiteralPath,
@@ -342,11 +353,70 @@ export function RepositoryFilesDialog({
   }, [tab, tracked.data, ignored.data, aiDerived, activeRule, q]);
 
   const view = { tracked, ignored, ai: aiView }[tab];
-  // A settings error keeps the ai view's query disabled, which reads as pending
-  // forever — surface it as the error it is instead of an endless spinner.
-  const settingsBlocked = tab === "ai" && settings.isError;
-  const pendingLoad = view.isPending && !settingsBlocked;
-  const isError = view.isError || settingsBlocked;
+  // A failed read keeps the rows it loaded under a notice; only a list with
+  // nothing loaded says it couldn't load, and the empty copy comes only from a
+  // read that answered empty. A settings error keeps the ai view's query
+  // disabled, so it is the AI tab's own failure, and outranks the view's: the
+  // view is read through it.
+  const hasView = view.data !== undefined;
+  const loadedCount = {
+    tracked: tracked.data?.length ?? 0,
+    ignored: ignored.data?.length ?? 0,
+    ai: aiDerived.paths.length,
+  }[tab];
+  const settingsFailed = tab === "ai" && refreshFailed(settings);
+  const failedRead = settingsFailed ? settings : view;
+  const listFailed = settingsFailed || refreshFailed(view);
+  const loadFailed = !hasView && listFailed;
+  const failedNoun = settingsFailed
+    ? "your AI settings"
+    : `${TAB_LABEL[tab]} files`;
+  const notice = hasView
+    ? listNotice({
+        noun: failedNoun,
+        failed: listFailed,
+        offline: false,
+        placeholder: false,
+        // Loaded rows, not filtered ones: a filter matching nothing still sits
+        // over the last loaded results.
+        hasRows: loadedCount > 0,
+        loadMoreFailed: false,
+      })
+    : null;
+  const failureLine = loadFailed
+    ? `Couldn't load ${failedNoun}. ${presentError(failedRead.error).summary}`
+    : "";
+  // Opening re-runs a failed read, so a failure is announced when the read
+  // fails. Through an automatic re-read (a settings recovery re-enabling a view
+  // read that fails the same way) the live text holds, so it isn't repeated
+  // back to back. A Retry press clears it until that re-read settles, so a
+  // failure the user asked about again is announced again.
+  const inFlight = settings.isFetching || view.isFetching;
+  const [announcement, setAnnouncement] = useState("");
+  const [retryPhase, setRetryPhase] = useState<"idle" | "pressed" | "fetching">(
+    "idle",
+  );
+  if (retryPhase === "pressed" && inFlight) setRetryPhase("fetching");
+  if (
+    (retryPhase === "fetching" && !inFlight) ||
+    (!open && retryPhase !== "idle")
+  )
+    setRetryPhase("idle");
+  const nextAnnouncement =
+    !open || retryPhase !== "idle"
+      ? ""
+      : failureLine || (inFlight ? announcement : "");
+  if (nextAnnouncement !== announcement) setAnnouncement(nextAnnouncement);
+  const retryFailedRead = () => {
+    setRetryPhase("pressed");
+    void failedRead.refetch();
+  };
+  const describedText = failureLine || notice?.message || "";
+  const describedId = useId();
+  // Either Retry unmounts as its read refetches; focus returns to the filter,
+  // which drives the list.
+  const rescue = useRetryFocusRescue(loadFailed);
+  const noticeRescue = useRetryFocusRescue(notice !== null);
   const busy =
     untrack.isPending ||
     forceAdd.isPending ||
@@ -737,15 +807,53 @@ export function RepositoryFilesDialog({
         </div>
 
         <Input
-          ref={filterRef}
+          ref={(node) => {
+            filterRef.current = node;
+            rescue.hostRef(node);
+            noticeRescue.hostRef(node);
+          }}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           onKeyDown={onFilterKeyDown}
           placeholder={`Filter ${TAB_LABEL[tab]} files — ↑↓ to move, Enter to select`}
           aria-label={`Filter ${TAB_LABEL[tab]} files`}
+          aria-describedby={describedText ? describedId : undefined}
           className="h-8"
           autoComplete="off"
         />
+        <span id={describedId} hidden>
+          {describedText}
+        </span>
+        <div role="status" className="sr-only">
+          {nextAnnouncement}
+        </div>
+        {/* The Retry sits beside the notice rather than in it, so its rescue
+            lands on the filter instead of the notice's own wrapper. */}
+        <div
+          className={
+            notice
+              ? "flex flex-wrap items-center gap-x-1.5 px-1 text-[11px] text-muted-foreground"
+              : "contents"
+          }
+        >
+          <DegradedListNotice
+            noun={failedNoun}
+            degraded={notice !== null}
+            message={notice?.message}
+            className="p-0"
+          />
+          {notice && (
+            <button
+              ref={noticeRescue.retryRef}
+              type="button"
+              aria-label={notice.retryLabel}
+              onClick={retryFailedRead}
+              className={DEGRADED_ACTION_CLASS}
+            >
+              Retry
+            </button>
+          )}
+        </div>
 
         {tab === "ai" && ruleStats.length > 0 && (
           <div
@@ -789,14 +897,28 @@ export function RepositoryFilesDialog({
         )}
 
         <div className="min-h-0 flex-1 border">
-          {pendingLoad ? (
+          {loadFailed ? (
+            <div className="p-4 text-xs">
+              <p className="text-muted-foreground">
+                Couldn't load {failedNoun}.
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {presentError(failedRead.error).summary}
+              </p>
+              <Button
+                ref={rescue.retryRef}
+                variant="outline"
+                size="sm"
+                className="mt-2 cursor-pointer"
+                onClick={retryFailedRead}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : !hasView ? (
             <div className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
               <Spinner /> Loading…
             </div>
-          ) : isError ? (
-            <p className="p-4 text-xs text-muted-foreground">
-              Couldn't load {TAB_LABEL[tab]} files.
-            </p>
           ) : filtered.length === 0 ? (
             <p className="p-4 text-xs text-muted-foreground">
               {emptyMessage()}
@@ -821,9 +943,11 @@ export function RepositoryFilesDialog({
 
         <DialogFooter className="flex-wrap gap-2 sm:justify-start">
           {count === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              Select files to act on them.
-            </p>
+            loadFailed ? null : (
+              <p className="text-xs text-muted-foreground">
+                Select files to act on them.
+              </p>
+            )
           ) : (
             <>
               {tab === "tracked" && (

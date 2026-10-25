@@ -615,6 +615,9 @@ entry shows the author's avatar (from GitHub or Gravatar, or their initials). Cl
 a commit to see its message, author, and full diff; **Shift + ↑ / ↓** extends the
 selection to compare a range.
 
+If the history can't be read, the tab says why and offers **Retry**. A failed refresh or
+**Load more** keeps the commits already loaded under a line saying so.
+
 ## Commit actions
 
 {{Secondaryclick}} a commit (or use the commit detail view) for:
@@ -673,7 +676,8 @@ When the repo is connected to **GitHub**, **GitLab**, or **Bitbucket** and the c
 **pushed**, opening it shows a **comments pane** below the diff: a **whole-commit composer**
 plus its thread, and **clickable line numbers** on the diff — click or drag a range to anchor
 a comment to those lines (create / edit / delete your own). An **unpushed** commit shows a
-push hint instead, and a local-only repo shows no comment pane at all.
+push hint instead, and a local-only repo shows no comment pane at all. If the app can't
+check whether the commit is on the remote, it says so and offers **Retry**.
 
 ## Exploring a file's past
 
@@ -690,7 +694,9 @@ The **Blame file…** command (from the command palette) opens a fuzzy picker of
 tracked file and blames the one you choose as it is now.
 
 Blame keeps its lines up if a background refresh fails, with a line saying it couldn't
-refresh and a **Retry**. A file that fails to blame says why and offers **Retry**.
+refresh and a **Retry**. A file that fails to blame says why and offers **Retry**. File
+history and the **Blame file…** picker work the same way: a failed refresh keeps what's
+shown, and a list that can't load says why and offers **Retry**.
 
 > History-rewriting actions (reset, Edit history, squash) only ever touch **unpushed**
 > commits, and a push of rewritten history becomes a safe
@@ -2993,7 +2999,11 @@ Bitbucket).
 
 The repository statistics stay up if a background refresh fails, with a line saying they
 couldn't refresh and a **Retry**. If they fail to load, the panel says why and offers
-**Retry**.`,
+**Retry**. On the board, a chart whose local read fails says so, and one line at the top
+offers a single **Retry** for every failed chart. When a failed chart has nothing loaded,
+that line gives the first failure's reason in board order, if known. A local chart that
+fails to refresh keeps its last loaded data. While you're offline, a hosted card with
+nothing loaded says it will load once you're back online.`,
   },
   {
     id: "code-todos",
@@ -3015,7 +3025,8 @@ Very large working trees are capped at 2,000 matches.
 
 Results are **grouped by file** in collapsible sections. **Filter** them by typing text or
 a path fragment, or narrow to one or more **markers** (show only \`FIXME\`s, say). The list
-is fully keyboard-navigable.
+is fully keyboard-navigable. A failed rescan keeps the last results under a line saying
+so, with a **Retry**.
 
 ## The detail pane
 
@@ -3023,9 +3034,11 @@ Select a TODO to see a **syntax-highlighted excerpt** of the code around that li
 with **blame attribution** — who wrote that line, and how long ago.
 
 The excerpt and its attribution stay on screen if a background refresh fails, with a line
-saying it couldn't refresh and a **Retry**. A file Git doesn't track yet shows its excerpt
-read straight from disk, marked *Not tracked yet*. Only when nothing can be read does the
-pane say why and offer **Retry**.
+saying it couldn't refresh and a **Retry**. A file Git doesn't track yet (or any file
+before the repository's first commit) shows its excerpt read straight from disk, marked
+*Not tracked yet*. If Git can't read a tracked file's
+history, the excerpt still shows, with the reason and a **Retry**. Only when nothing can be
+read does the pane say why and offer **Retry**.
 
 From there you can:
 
@@ -3416,7 +3429,8 @@ runs and a toast tells you when the description is ready; **View** reopens it on
   deleted from \`.gitdesktop/aiignore\`, so commit the change to share it; global
   rules leave your Settings patterns and stop applying in every repository. Going
   the other way, the **Tracked** tab's **Exclude … from AI** hides a whole selection
-  in one step.
+  in one step. If your AI settings can't be read, the **AI excluded** tab says so and
+  offers **Retry**.
 - **Hide AI** (Settings → General) hides the AI surfaces (finished AI activity in the
   activity dock and notification inbox included), mutes AI desktop notifications, and
   pauses your automations — nothing new runs or posts while it's on. Your configuration
