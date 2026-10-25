@@ -796,6 +796,18 @@ mod tests {
         .unwrap();
         // The premise: the probe alone reads this exactly like an unborn HEAD.
         assert_eq!(probe.code, 1, "{:?}", probe.stderr);
+        // `show-ref --exists` arrived in git 2.43; older git reads this as unborn.
+        let exists = run_git_raw(
+            Some(&repo),
+            &["show-ref", "--exists", &branch],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        if exists.code == 129 {
+            assert!(unborn_head(&repo).await.unwrap());
+            return;
+        }
         let unborn = unborn_head(&repo).await;
         assert!(unborn.is_err(), "unborn_head: {unborn:?}");
         assert!(git_log(repo.clone(), 10, 0, None).await.is_err());
