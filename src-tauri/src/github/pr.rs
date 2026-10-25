@@ -5114,6 +5114,72 @@ pub async fn gh_pr_comments_view(
     })
 }
 
+/// Narrow fields avoid the full view's stack, check-run and merge-settings reads.
+fn lean_pr_view_args<'a>(n: &'a str, slug: &'a str, fields: &'a str) -> [&'a str; 7] {
+    ["pr", "view", n, "--repo", slug, "--json", fields]
+}
+
+const PR_NODE_ID_FIELDS: &str = "id";
+const PR_TITLE_BODY_FIELDS: &str = "title,body";
+
+#[derive(Deserialize)]
+struct RawPrNodeId {
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct RawPrTitleBody {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+}
+
+async fn gh_pr_view_lean<T: serde::de::DeserializeOwned>(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+    fields: &str,
+) -> AppResult<T> {
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    let n = number.to_string();
+    let out = run_gh(
+        Some(repo_path),
+        &lean_pr_view_args(&n, &slug, fields),
+        GH_TIMEOUT,
+    )
+    .await?;
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request",
+            format!("could not parse gh pr view {fields}: {e}"),
+        )
+    })
+}
+
+/// The PR's GraphQL node id, used by label mutations.
+pub async fn gh_pr_node_id(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<String> {
+    let raw: RawPrNodeId =
+        gh_pr_view_lean(&repo_path, number, lens.as_deref(), PR_NODE_ID_FIELDS).await?;
+    Ok(raw.id)
+}
+
+/// The current title and body an edit must preserve when either is omitted.
+pub async fn gh_pr_title_body(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<(String, String)> {
+    let raw: RawPrTitleBody =
+        gh_pr_view_lean(&repo_path, number, lens.as_deref(), PR_TITLE_BODY_FIELDS).await?;
+    Ok((raw.title, raw.body))
+}
+
 /// Full details for one PR's read view.
 pub async fn gh_pr_view(
     repo_path: String,
@@ -7526,6 +7592,32 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+
+    #[test]
+    fn lean_pr_args_request_only_their_fields() {
+        for (fields, expected) in [
+            (super::PR_NODE_ID_FIELDS, "id"),
+            (super::PR_TITLE_BODY_FIELDS, "title,body"),
+        ] {
+            assert_eq!(
+                super::lean_pr_view_args("67", "o/r", fields),
+                ["pr", "view", "67", "--repo", "o/r", "--json", expected]
+            );
+        }
+    }
+
+    #[test]
+    fn lean_pr_twins_parse_and_default() {
+        let id: super::RawPrNodeId = serde_json::from_str(r#"{"id":"PR_x"}"#).unwrap();
+        assert_eq!(id.id, "PR_x");
+        let id: super::RawPrNodeId = serde_json::from_str("{}").unwrap();
+        assert_eq!(id.id, "");
+        let text: super::RawPrTitleBody =
+            serde_json::from_str(r#"{"title":"t","body":"b"}"#).unwrap();
+        assert_eq!((text.title.as_str(), text.body.as_str()), ("t", "b"));
+        let text: super::RawPrTitleBody = serde_json::from_str(r#"{"title":"t"}"#).unwrap();
+        assert_eq!((text.title.as_str(), text.body.as_str()), ("t", ""));
+    }
 
     #[test]
     fn graphql_review_mapping_preserves_exact_fields_and_null_defaults() {

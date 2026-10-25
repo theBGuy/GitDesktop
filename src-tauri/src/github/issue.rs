@@ -7,7 +7,9 @@ use crate::error::{AppError, AppResult};
 use crate::github::gh_unreadable;
 use crate::github::pr::{PrAuthor, PrListLabel, PrRef, PrThreadOut, RepoLabel};
 use crate::github::repo_meta::invalidate_repo_meta_after;
-use crate::github::runner::{run_gh, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::runner::{
+    run_gh, run_gh_cached_get, run_gh_input, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+};
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -281,14 +283,17 @@ struct RawIssue {
     labels: Vec<RepoLabel>,
 }
 
-/// Lock state isn't exposed by `gh issue view --json`, so it's fetched from the
-/// REST issue object in parallel.
+/// The REST issue object's lock fields: `gh issue view --json` exposes no lock state.
 #[derive(Deserialize, Default)]
 struct LockState {
     #[serde(default)]
     locked: bool,
     #[serde(default)]
-    reason: Option<String>,
+    active_lock_reason: Option<String>,
+}
+
+fn issue_lock_args(issue_path: &str) -> [&str; 2] {
+    ["api", issue_path]
 }
 
 #[derive(Serialize)]
@@ -341,15 +346,12 @@ pub async fn gh_issue_view(
     let n = number.to_string();
     let issue_path = format!("repos/{slug}/issues/{number}");
     let view_args = ["issue", "view", &n, "--repo", &slug, "--json", ISSUE_VIEW_FIELDS];
-    let lock_args = [
-        "api",
-        &issue_path,
-        "--jq",
-        "{locked: .locked, reason: .active_lock_reason}",
-    ];
+    // Unchanged issues revalidate with a 304, which costs no rate budget.
+    // Keep the GET unshaped: --jq would bypass the conditional layer.
+    let lock_args = issue_lock_args(&issue_path);
     let (view_res, lock_res) = tokio::join!(
         run_gh(Some(&repo_path), &view_args, GH_TIMEOUT),
-        run_gh(Some(&repo_path), &lock_args, GH_TIMEOUT),
+        run_gh_cached_get(Some(&repo_path), &lock_args, GH_TIMEOUT),
     );
     // Same disabled-issues remap as `gh_issue_list`, plus the version-floor remap:
     // this read requests fields older gh builds don't have.
@@ -387,7 +389,7 @@ pub async fn gh_issue_view(
         issue_type: raw.issue_type,
         is_pinned: raw.is_pinned,
         locked: lock.locked,
-        active_lock_reason: lock.reason,
+        active_lock_reason: lock.active_lock_reason,
         confidential: false,
         due_date: None,
         comments: raw
@@ -410,6 +412,93 @@ pub async fn gh_issue_view(
             .collect(),
         labels: raw.labels,
     })
+}
+
+fn lean_issue_view_args<'a>(n: &'a str, slug: &'a str, fields: &'a str) -> [&'a str; 7] {
+    ["issue", "view", n, "--repo", slug, "--json", fields]
+}
+
+const ISSUE_NODE_ID_FIELDS: &str = "id";
+const ISSUE_TITLE_BODY_FIELDS: &str = "title,body";
+const ISSUE_SUMMARY_FIELDS: &str = "number,title,state";
+
+#[derive(Deserialize)]
+struct RawIssueNodeId {
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct RawIssueTitleBody {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+}
+
+/// Number, title and state for a PR-description candidate probe.
+#[derive(Deserialize)]
+pub struct IssueSummary {
+    #[serde(default)]
+    pub number: u64,
+    #[serde(default)]
+    pub title: String,
+    /// The issue view's `state`, exactly as the full view reports it.
+    #[serde(default)]
+    pub state: String,
+}
+
+async fn gh_issue_view_lean<T: serde::de::DeserializeOwned>(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+    fields: &str,
+) -> AppResult<T> {
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    let n = number.to_string();
+    let out = run_gh(
+        Some(repo_path),
+        &lean_issue_view_args(&n, &slug, fields),
+        GH_TIMEOUT,
+    )
+    .await
+    .map_err(map_issues_disabled)?;
+    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the issue",
+            format!("could not parse gh issue view {fields}: {e}"),
+        )
+    })
+}
+
+/// The issue's GraphQL node id, used by label mutations.
+pub async fn gh_issue_node_id(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<String> {
+    let raw: RawIssueNodeId =
+        gh_issue_view_lean(&repo_path, number, lens.as_deref(), ISSUE_NODE_ID_FIELDS).await?;
+    Ok(raw.id)
+}
+
+/// The current title and body an edit must preserve when either is omitted.
+pub async fn gh_issue_title_body(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<(String, String)> {
+    let raw: RawIssueTitleBody =
+        gh_issue_view_lean(&repo_path, number, lens.as_deref(), ISSUE_TITLE_BODY_FIELDS).await?;
+    Ok((raw.title, raw.body))
+}
+
+pub async fn gh_issue_summary(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<IssueSummary> {
+    gh_issue_view_lean(&repo_path, number, lens.as_deref(), ISSUE_SUMMARY_FIELDS).await
 }
 
 #[derive(Deserialize)]
@@ -1530,6 +1619,91 @@ mod tests {
         ISSUE_TIMELINE_QUERY,
     };
     use crate::error::AppError;
+
+    #[test]
+    fn lean_issue_args_request_only_their_fields() {
+        for (fields, expected) in [
+            (super::ISSUE_NODE_ID_FIELDS, "id"),
+            (super::ISSUE_TITLE_BODY_FIELDS, "title,body"),
+            (super::ISSUE_SUMMARY_FIELDS, "number,title,state"),
+        ] {
+            assert_eq!(
+                super::lean_issue_view_args("6", "o/r", fields),
+                ["issue", "view", "6", "--repo", "o/r", "--json", expected]
+            );
+        }
+    }
+
+    #[test]
+    fn lean_issue_twins_parse_and_default() {
+        let id: super::RawIssueNodeId = serde_json::from_str(r#"{"id":"I_x"}"#).unwrap();
+        assert_eq!(id.id, "I_x");
+        let id: super::RawIssueNodeId = serde_json::from_str("{}").unwrap();
+        assert_eq!(id.id, "");
+        let text: super::RawIssueTitleBody =
+            serde_json::from_str(r#"{"title":"t","body":"b"}"#).unwrap();
+        assert_eq!((text.title.as_str(), text.body.as_str()), ("t", "b"));
+        let text: super::RawIssueTitleBody = serde_json::from_str("{}").unwrap();
+        assert_eq!((text.title.as_str(), text.body.as_str()), ("", ""));
+        let summary: super::IssueSummary =
+            serde_json::from_str(r#"{"number":6,"title":"T","state":"OPEN"}"#).unwrap();
+        assert_eq!(
+            (
+                summary.number,
+                summary.title.as_str(),
+                summary.state.as_str()
+            ),
+            (6, "T", "OPEN")
+        );
+        let summary: super::IssueSummary = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            (
+                summary.number,
+                summary.title.as_str(),
+                summary.state.as_str()
+            ),
+            (0, "", "")
+        );
+    }
+
+    #[test]
+    fn issue_lock_state_reads_the_rest_issue_object() {
+        let lock: super::LockState = serde_json::from_str(
+            r#"{"number":6,"locked":true,"active_lock_reason":"too heated","title":"x","body":"y"}"#,
+        )
+        .unwrap();
+        assert!(lock.locked);
+        assert_eq!(lock.active_lock_reason.as_deref(), Some("too heated"));
+        let lock: super::LockState =
+            serde_json::from_str(r#"{"locked":false,"active_lock_reason":null}"#).unwrap();
+        assert!(!lock.locked);
+        assert_eq!(lock.active_lock_reason, None);
+        let lock: super::LockState =
+            serde_json::from_str(r#"{"locked":true,"reason":"spam"}"#).unwrap();
+        assert_eq!(lock.active_lock_reason, None);
+    }
+
+    #[test]
+    fn issue_lock_read_qualifies_for_the_conditional_layer() {
+        assert!(!crate::github::runner::bypasses(&super::issue_lock_args(
+            "repos/o/r/issues/6"
+        )));
+        assert!(crate::github::runner::bypasses(&[
+            "api",
+            "repos/o/r/issues/6",
+            "--jq",
+            "{locked: .locked}"
+        ]));
+    }
+
+    #[test]
+    fn gh_issue_view_lock_read_is_conditional() {
+        let body =
+            crate::github::repo_meta::tests::wiring_body(include_str!("issue.rs"), "gh_issue_view");
+        assert!(body.contains("run_gh_cached_get("));
+        assert!(body.contains("issue_lock_args("));
+        assert!(!body.contains("\"--jq\""));
+    }
 
     /// A `type:issue` search answers a repo with its tracker OFF with zero rows and no
     /// error (measured), so an empty filtered page alone can't tell "no matches" from
