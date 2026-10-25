@@ -2535,7 +2535,7 @@ test("preparing-slot-hide premise: the real roles, hosts and sites", () => {
   assert.ok(check.expectScanned.atLeast >= 500);
   const hosts = [
     "src/features/actions/run-slots.tsx",
-    "src/features/diff/DiffViewer.tsx",
+    "src/features/diff/file-slot.tsx",
   ];
   for (const file of hosts) {
     const source = read(file);

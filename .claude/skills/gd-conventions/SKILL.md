@@ -320,11 +320,13 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   both (one shared constant or prop), so a load whose probe hasn't failed
   never grows at the probe→list flip; while a probe has failed with nothing
   loaded, its retries may pin 1 row.
-- The Changes pane swaps files through a two-slot hold: `FileSlot` in
-  `src/features/diff/DiffViewer.tsx` is the reference implementation, with its
-  transitions in `diff-pane-slots.ts` and the `DiffPaneHold` context
-  (`diff-pane-hold.tsx`) carrying `interactive` and the settle reports down to
-  the surfaces. The held view (the last settled one) stays in flow and
+- The diff panes swap files through a two-slot hold: `useFileSlots` +
+  `FileSlots` in `src/features/diff/file-slot.tsx` is the reference
+  implementation (the Changes pane and every file-rail host render it; it
+  imports nothing that reaches `./DiffSurface`, so hosts stay off the diff
+  chunk), with its transitions in `diff-pane-slots.ts` and the `DiffPaneHold`
+  context (`diff-pane-hold.tsx`) carrying `interactive` and the settle reports
+  down to the surfaces. The held view (the last settled one) stays in flow and
   `inert`; a held FILE slot is also dimmed (`PLACEHOLDER_FADE` +
   `opacity-80` + `delay-100`), while a held placeholder stays undimmed. The
   target prepares out of sight at full size, clipped over the held view (how
@@ -378,9 +380,23 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   the reveal, so while `revealing` the host paints its loading frame, never
   the stale item, and `active` stays false until a visible commit painted the
   view's item, so that move shows the new item directly instead of holding
-  one the user never saw on screen. The History file rail and Compare don't
-  hold yet; they are follow-ups that would adopt one of these. A placeholder
-  across a key whose response can't prove identity may drive RENDERING only,
+  one the user never saw on screen. File rails (History's commit and
+  file-history panes, Compare, stashes, the agent worktree, a pull request's
+  Files pane and commit drill-in) hold through `FileSlots`, not
+  `useEntityHold`: they are arrowed at keyboard speed, and the diff pane's
+  bound re-arms per target where the entity hold's runs from the hold's
+  start. A change of the entity a host's `keyedPaneView` carries (the commit,
+  comparison, stash or pull request) never holds: the shown slot re-targets
+  in place under its slot id, so a read that keeps previous data serves it
+  there (History's commit view and Compare dim it, never over a held slot).
+  Each file's reads, comment anchors and composer live in a per-slot child,
+  which calls `useSlotRead` with the read it shows (a not-pending stand-in for
+  an in-memory patch), so the host's busy and dim follow the shown slot and a
+  previous entity's answer never counts as settled, and passes any line
+  widget through `useSlotWidget`, so a held slot's composer stays as it was.
+  `scripts/diff-pane-hold.test.mjs` pins the host roster (`SLOT_HOSTS`,
+  closed by the lazy diff wrapper's consumers). A placeholder across a key
+  whose response can't prove identity may drive RENDERING only,
   with every interactive or forge consumer gated on `!isPlaceholderData`
   (commit-on-remote is the example); the Changes diff takes none, since
   `FileDiff` echoes only the path and a same-path staged/unstaged placeholder
@@ -393,8 +409,8 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   placeholder, while the hold and the deferred selection's one-render lag feed
   interaction gates (handlers, hotkeys, palette); a render gate that reads the
   lag flickers before the hold starts.
-- The preparing-slot rule: every two-slot host's preparing slot (the Changes
-  pane's `FileSlot`, the Actions tab's `RunSlots`, and any host that adopts the
+- The preparing-slot rule: every two-slot host's preparing slot (the diff
+  panes' `FileSlot`, the Actions tab's `RunSlots`, and any host that adopts the
   pattern) hides only by a full clip (`[clip-path:inset(50%)]`) plus `inert`,
   set as the `preparing` entry of the host's role-keyed class map, written as a
   plain class string (a literal, a literal-only `+` chain or interpolation-free

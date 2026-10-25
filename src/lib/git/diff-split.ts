@@ -170,6 +170,176 @@ export function sectionFilePath(section: string): string | undefined {
   );
 }
 
+/** A rename/copy SOURCE, which has no a/ or b/ prefix; quoted exactly when the
+ *  header's a-side field opens with the same escaped name (the mirror of
+ *  `movedFilePath`'s b-side test). */
+function movedSourcePath(
+  value: string,
+  headerRest: string | undefined,
+): string | undefined {
+  const quoted =
+    value.length >= 2 &&
+    value.startsWith('"') &&
+    value.endsWith('"') &&
+    !!headerRest?.startsWith(`"a/${value.slice(1)}`);
+  if (!quoted) return value || undefined;
+  return unescapeCQuoted(value.slice(1, -1)) || undefined;
+}
+
+export type ModeTransition = "to-exec" | "from-exec" | "other";
+export type HeaderOnlyKind =
+  | "new-empty"
+  | "deleted-empty"
+  | "mode"
+  | "rename"
+  | "copy";
+
+/** A diff section that changes no content: only its header says what changed. */
+export interface HeaderOnlyDiff {
+  kind: HeaderOnlyKind;
+  /** The `mode` kind, and a mode change riding a rename or copy. */
+  transition?: ModeTransition;
+  oldMode?: string;
+  newMode?: string;
+  /** The rename/copy kinds, decoded. */
+  oldPath?: string;
+  newPath?: string;
+}
+
+const MODE_LINE = /^(old|new) mode ([0-7]{6})$/;
+const MOVE_LINE = /^(rename|copy) (from|to) (.+)$/;
+/** Header lines that carry no change of their own. */
+const QUIET_LINE =
+  /^(?:index [0-9a-f]+\.\.[0-9a-f]+(?: [0-7]{6})?|(?:dis)?similarity index \d+%)$/;
+
+function modeTransition(oldMode: string, newMode: string): ModeTransition {
+  if (oldMode === "100644" && newMode === "100755") return "to-exec";
+  if (oldMode === "100755" && newMode === "100644") return "from-exec";
+  return "other";
+}
+
+/**
+ * What a hunk-less diff section changed: a new or deleted empty file, a mode
+ * change, or a rename or copy with no content change. Null for anything else:
+ * an empty section, a hunk or file header line, git's binary marker, a line
+ * after a blank one, or any header line this doesn't recognize (callers then
+ * render it as they always did). A renamed empty file reads as a rename (git
+ * pairs its delete and add), and a rename or copy beside a new or deleted file
+ * header is unclassifiable. Lines are read one at a time, so a diff with
+ * content stops at its first `---` or `@@` line.
+ */
+export function classifyHeaderOnlyDiff(text: string): HeaderOnlyDiff | null {
+  /** The logical line from `at` (one trailing CR dropped) and where the next
+   *  one starts. */
+  const lineAt = (at: number) => {
+    const end = text.indexOf("\n", at);
+    const stop = end < 0 ? text.length : end;
+    return { line: text.slice(at, stop).replace(/\r$/, ""), next: stop + 1 };
+  };
+  const first = lineAt(0);
+  if (!first.line.startsWith("diff --git ")) return null;
+  const header = first.line.slice("diff --git ".length);
+  const modes: { old?: string; new?: string } = {};
+  const moves: { kind?: "rename" | "copy"; from?: string; to?: string } = {};
+  let created = false;
+  let deleted = false;
+  let blank = false;
+  let at = first.next;
+  while (at < text.length) {
+    const { line, next } = lineAt(at);
+    at = next;
+    // Trailing blank lines are transport; content after one is not a header.
+    if (line === "") {
+      blank = true;
+      continue;
+    }
+    if (blank || line.startsWith("---") || line.startsWith("@@")) return null;
+    const mode = MODE_LINE.exec(line);
+    if (mode) {
+      if (modes[mode[1] as "old" | "new"] !== undefined) return null;
+      modes[mode[1] as "old" | "new"] = mode[2];
+      continue;
+    }
+    const move = MOVE_LINE.exec(line);
+    if (move) {
+      const kind = move[1] as "rename" | "copy";
+      const end = move[2] as "from" | "to";
+      if ((moves.kind && moves.kind !== kind) || moves[end] !== undefined)
+        return null;
+      moves.kind = kind;
+      moves[end] =
+        end === "from"
+          ? movedSourcePath(move[3], header)
+          : movedFilePath(move[3], header);
+      if (moves[end] === undefined) return null;
+      continue;
+    }
+    if (/^new file mode [0-7]{6}$/.test(line)) created = true;
+    else if (/^deleted file mode [0-7]{6}$/.test(line)) deleted = true;
+    else if (!QUIET_LINE.test(line)) return null;
+  }
+  // Both halves of a mode change, or neither.
+  if ((modes.old === undefined) !== (modes.new === undefined)) return null;
+  const modeChange =
+    modes.old !== undefined && modes.new !== undefined
+      ? {
+          transition: modeTransition(modes.old, modes.new),
+          oldMode: modes.old,
+          newMode: modes.new,
+        }
+      : {};
+  if (moves.kind) {
+    if (moves.from === undefined || moves.to === undefined) return null;
+    if (created || deleted) return null;
+    return {
+      kind: moves.kind,
+      ...modeChange,
+      oldPath: moves.from,
+      newPath: moves.to,
+    };
+  }
+  if (created && deleted) return null;
+  if (created) return modes.old === undefined ? { kind: "new-empty" } : null;
+  if (deleted)
+    return modes.old === undefined ? { kind: "deleted-empty" } : null;
+  return modes.old === undefined ? null : { kind: "mode", ...modeChange };
+}
+
+/** The mode-change sentence, shared by the `mode` title and the rename/copy
+ *  detail line so both use one term. */
+export const MODE_CHANGE: Record<
+  ModeTransition,
+  (oldMode: string, newMode: string) => string
+> = {
+  "to-exec": () => "File is now executable",
+  "from-exec": () => "File is no longer executable",
+  other: (oldMode, newMode) =>
+    `File mode changed from ${oldMode} to ${newMode}`,
+};
+
+/** A section's mode change in words, or null when it carries none. */
+export function modeChangeMessage(diff: HeaderOnlyDiff): string | null {
+  if (diff.transition === undefined) return null;
+  return MODE_CHANGE[diff.transition](diff.oldMode ?? "", diff.newMode ?? "");
+}
+
+/** What a header-only diff changed, in sentence case with no trailing period
+ *  (the diff pane's placeholder style; a surface with sentence copy adds one). */
+export const HEADER_ONLY_MESSAGE: Record<
+  HeaderOnlyKind,
+  (diff: HeaderOnlyDiff) => string
+> = {
+  "new-empty": () => "New empty file",
+  "deleted-empty": () => "Deleted empty file",
+  mode: (diff) => modeChangeMessage(diff) ?? "File mode changed",
+  rename: () => "Renamed with no content changes",
+  copy: () => "Copied with no content changes",
+};
+
+export function headerOnlyMessage(diff: HeaderOnlyDiff): string {
+  return HEADER_ONLY_MESSAGE[diff.kind](diff);
+}
+
 /** True when a diff section carries git's own binary marker at line start —
  *  hunk body lines are prefixed (+/-/space), so content can't match. A
  *  section never STARTS with the marker (every section opens with

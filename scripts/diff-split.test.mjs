@@ -8,7 +8,11 @@ import { test } from "node:test";
 
 import {
   binaryRowPaths,
+  classifyHeaderOnlyDiff,
   diffSectionStats,
+  HEADER_ONLY_MESSAGE,
+  headerOnlyMessage,
+  MODE_CHANGE,
   sectionFilePath,
   sectionIsBinary,
   splitUnifiedDiff,
@@ -731,4 +735,246 @@ test("empty files or an empty section map flag nothing", () => {
     ],
     [],
   );
+});
+
+// ---------------------------------------------------------- header-only diffs
+
+// Shapes as git 2.51 prints them for a per-file diff (the probe that recorded
+// them ran `git diff --no-index -- /dev/null empty.txt` and `--cached` diffs
+// in a scratch repo), plus a forge patch's rename sections.
+const headerOnly = [
+  {
+    name: "an untracked empty file (--no-index)",
+    text: "diff --git a/empty.txt b/empty.txt\nnew file mode 100644\nindex 0000000..e69de29\n",
+    expected: { kind: "new-empty" },
+    message: "New empty file",
+  },
+  {
+    name: "a deleted empty file",
+    text: "diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\nindex e69de29..0000000\n",
+    expected: { kind: "deleted-empty" },
+    message: "Deleted empty file",
+  },
+  {
+    name: "a file made executable",
+    text: "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n",
+    expected: {
+      kind: "mode",
+      transition: "to-exec",
+      oldMode: "100644",
+      newMode: "100755",
+    },
+    message: "File is now executable",
+  },
+  {
+    name: "a file no longer executable",
+    text: "diff --git a/run.sh b/run.sh\nold mode 100755\nnew mode 100644\n",
+    expected: {
+      kind: "mode",
+      transition: "from-exec",
+      oldMode: "100755",
+      newMode: "100644",
+    },
+    message: "File is no longer executable",
+  },
+  {
+    name: "another mode pair",
+    text: "diff --git a/link b/link\nold mode 120000\nnew mode 100644\n",
+    expected: {
+      kind: "mode",
+      transition: "other",
+      oldMode: "120000",
+      newMode: "100644",
+    },
+    message: "File mode changed from 120000 to 100644",
+  },
+  {
+    name: "a pure rename",
+    text: "diff --git a/a.txt b/b.txt\nsimilarity index 100%\nrename from a.txt\nrename to b.txt\n",
+    expected: { kind: "rename", oldPath: "a.txt", newPath: "b.txt" },
+    message: "Renamed with no content changes",
+  },
+  {
+    name: "a pure copy",
+    text: "diff --git a/a.txt b/c.txt\nsimilarity index 100%\ncopy from a.txt\ncopy to c.txt\n",
+    expected: { kind: "copy", oldPath: "a.txt", newPath: "c.txt" },
+    message: "Copied with no content changes",
+  },
+  {
+    // git pairs an empty file's delete and add into this rename (probed).
+    name: "a renamed empty file reads as a rename",
+    text: "diff --git a/gone.txt b/new.txt\nsimilarity index 100%\nrename from gone.txt\nrename to new.txt\n",
+    expected: { kind: "rename", oldPath: "gone.txt", newPath: "new.txt" },
+    message: "Renamed with no content changes",
+  },
+  {
+    name: "a rename over the empty blob still reads as a rename, not an empty file",
+    text: "diff --git a/e.txt b/f.txt\nsimilarity index 100%\nrename from e.txt\nrename to f.txt\nindex e69de29..e69de29 100644\n",
+    expected: { kind: "rename", oldPath: "e.txt", newPath: "f.txt" },
+    message: "Renamed with no content changes",
+  },
+  {
+    name: "trailing blank lines",
+    text: "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n\n\n",
+    expected: {
+      kind: "mode",
+      transition: "to-exec",
+      oldMode: "100644",
+      newMode: "100755",
+    },
+    message: "File is now executable",
+  },
+  {
+    name: "trailing blank CRLF lines",
+    text: "diff --git a/gone.txt b/gone.txt\r\ndeleted file mode 100644\r\nindex e69de29..0000000\r\n\r\n",
+    expected: { kind: "deleted-empty" },
+    message: "Deleted empty file",
+  },
+  {
+    name: "a mode change riding a rename",
+    text: "diff --git a/a.sh b/b.sh\nold mode 100644\nnew mode 100755\nsimilarity index 100%\nrename from a.sh\nrename to b.sh\n",
+    expected: {
+      kind: "rename",
+      transition: "to-exec",
+      oldMode: "100644",
+      newMode: "100755",
+      oldPath: "a.sh",
+      newPath: "b.sh",
+    },
+    message: "Renamed with no content changes",
+  },
+  {
+    name: "C-quoted non-ASCII paths on both ends of a rename",
+    text: 'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251-2.txt"\nsimilarity index 100%\nrename from "caf\\303\\251.txt"\nrename to "caf\\303\\251-2.txt"\n',
+    expected: { kind: "rename", oldPath: "café.txt", newPath: "café-2.txt" },
+    message: "Renamed with no content changes",
+  },
+  {
+    name: "a C-quoted new empty file",
+    text: 'diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"\nnew file mode 100644\nindex 0000000..e69de29\n',
+    expected: { kind: "new-empty" },
+    message: "New empty file",
+  },
+  {
+    name: "CRLF transport",
+    text: "diff --git a/run.sh b/run.sh\r\nold mode 100644\r\nnew mode 100755\r\n",
+    expected: {
+      kind: "mode",
+      transition: "to-exec",
+      oldMode: "100644",
+      newMode: "100755",
+    },
+    message: "File is now executable",
+  },
+  {
+    name: "a CRLF rename keeps the paths whole",
+    text: "diff --git a/a.txt b/b.txt\r\nsimilarity index 100%\r\nrename from a.txt\r\nrename to b.txt\r\n",
+    expected: { kind: "rename", oldPath: "a.txt", newPath: "b.txt" },
+    message: "Renamed with no content changes",
+  },
+];
+
+for (const { name, text, expected, message } of headerOnly) {
+  test(`classifyHeaderOnlyDiff: ${name}`, () => {
+    const diff = classifyHeaderOnlyDiff(text);
+    assert.deepEqual(diff, expected);
+    assert.equal(headerOnlyMessage(diff), message);
+  });
+}
+
+const notHeaderOnly = [
+  { name: "an empty string", text: "" },
+  { name: "whitespace only", text: "\n  \n" },
+  {
+    name: "a section with a hunk",
+    text: "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n",
+  },
+  {
+    name: "a mode change with an edit",
+    text: "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\nindex 1111111..2222222\n--- a/run.sh\n+++ b/run.sh\n@@ -1 +1 @@\n-a\n+b\n",
+  },
+  {
+    name: "a binary section",
+    text: "diff --git a/x.png b/x.png\nindex 1111111..2222222 100644\nBinary files a/x.png and b/x.png differ\n",
+  },
+  {
+    name: "a new binary file",
+    text: "diff --git a/x.png b/x.png\nnew file mode 100644\nindex 0000000..2222222\nBinary files /dev/null and b/x.png differ\n",
+  },
+  { name: "a bare header", text: "diff --git a/f.txt b/f.txt\n" },
+  {
+    name: "an index line alone",
+    text: "diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n",
+  },
+  {
+    name: "an unrecognized header line",
+    text: "diff --git a/f.txt b/f.txt\nnew mode 100755\nsomething else\n",
+  },
+  {
+    name: "half a mode change",
+    text: "diff --git a/run.sh b/run.sh\nnew mode 100755\n",
+  },
+  {
+    name: "a rename missing its destination",
+    text: "diff --git a/a.txt b/b.txt\nsimilarity index 100%\nrename from a.txt\n",
+  },
+  {
+    name: "file headers with no hunk",
+    text: "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n",
+  },
+  { name: "text without a diff header", text: "new file mode 100644\n" },
+  {
+    name: "a rename beside a new-file header",
+    text: "diff --git a/a.txt b/b.txt\nnew file mode 100644\nrename from a.txt\nrename to b.txt\n",
+  },
+  {
+    name: "a header line after a blank line",
+    text: "diff --git a/run.sh b/run.sh\nold mode 100644\n\nnew mode 100755\n",
+  },
+  {
+    name: "a hunk after a blank line",
+    text: "diff --git a/f.txt b/f.txt\nnew file mode 100644\n\n@@ -0,0 +1 @@\n+a\n",
+  },
+  {
+    name: "a header that only starts after leading blank lines",
+    text: "\n\ndiff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n",
+  },
+];
+
+test("classifyHeaderOnlyDiff: hunk lines shaped like headers never read as header-only", () => {
+  // The scan ends at the first `---` line, so what follows can't steer it.
+  const text =
+    "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n--- a/run.sh\n+++ b/run.sh\n@@ -1 +1 @@\n-old mode 100644\n+new mode 100755\n";
+  assert.equal(classifyHeaderOnlyDiff(text), null);
+});
+
+for (const { name, text } of notHeaderOnly) {
+  test(`classifyHeaderOnlyDiff: ${name} is not header-only`, () => {
+    assert.equal(classifyHeaderOnlyDiff(text), null);
+  });
+}
+
+test("header-only copy: total Records, sentence case, no trailing period", () => {
+  assert.deepEqual(Object.keys(MODE_CHANGE).sort(), [
+    "from-exec",
+    "other",
+    "to-exec",
+  ]);
+  assert.deepEqual(Object.keys(HEADER_ONLY_MESSAGE).sort(), [
+    "copy",
+    "deleted-empty",
+    "mode",
+    "new-empty",
+    "rename",
+  ]);
+  const all = [
+    ...Object.values(MODE_CHANGE).map((f) => f("100644", "100755")),
+    ...headerOnly.map(({ text }) =>
+      headerOnlyMessage(classifyHeaderOnlyDiff(text)),
+    ),
+  ];
+  for (const message of all) {
+    assert.match(message, /^[A-Z]/, message);
+    assert.doesNotMatch(message, /\.$/, message);
+  }
 });

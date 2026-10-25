@@ -28,8 +28,18 @@ import {
   type DiffLineAnchor,
   type LineWidget,
 } from "@/features/diff/DiffSurfaceLazy";
+import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+  useSlotWidget,
+} from "@/features/diff/file-slot";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { TimeTrackingControls } from "@/features/issues/RemoteIssueViewParts";
+import { sectionIsBinary } from "@/lib/git/diff-split";
 import {
   type PendingThreadWrites,
   useAddMrSpentTime,
@@ -45,6 +55,7 @@ import type {
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
+import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { DraftCommentCard } from "./PendingReviewBar";
 import { ReviewThreadCard, type SuggestionApply } from "./ReviewThreads";
@@ -199,15 +210,185 @@ export function PrFilesPane({
     rowAttr: "data-path",
   });
 
-  // Anchors for the SELECTED file only: threads (with a known line, not outdated)
+  // The file's diff swaps through the pane's two-slot hold, within this pull
+  // request; another one re-targets the shown slot in place.
+  const diffEntity = `${lens ?? ""}#${number ?? ""}`;
+  const diffTarget = effectivePath
+    ? keyedPaneView(repoPath ?? "", diffEntity, effectivePath, effectivePath)
+    : placeholderPaneView(diffEntity);
+  const diffSlots = useFileSlots(diffTarget);
+
+  const fileRows = files.map((file) => (
+    <button
+      type="button"
+      key={file.path}
+      data-path={file.path}
+      aria-current={effectivePath === file.path || undefined}
+      className={cn(
+        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
+        effectivePath === file.path
+          ? "bg-accent text-accent-foreground"
+          : "hover:bg-muted/60",
+      )}
+      onClick={() => onSelectPath(file.path)}
+    >
+      <PathText path={file.path} className="flex-1 font-mono" />
+      {/* Plain DiffStat, not DiffStatSlot: the binary flag arrives after the diff
+          loads, but the forge counts ship with the row, so the cell never starts
+          empty — and the sibling detail rails all render the plain form. */}
+      <DiffStat
+        added={file.additions}
+        deleted={file.deletions}
+        isBinary={binaryPaths?.has(file.path) ?? false}
+      />
+    </button>
+  ));
+
+  return (
+    <DetailRailRow>
+      <DetailRail ariaLabel="Changed files">
+        {/* overflow-hidden contains the list's natural height (vendored Root is
+            `relative`-only) so a long file list can't leak a window scrollbar. */}
+        <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+          {repoPath !== undefined ? (
+            <FileRowActions
+              repoPath={repoPath}
+              blameRev={blameRev}
+              onKeyDown={onFilesKeyDown}
+            >
+              {fileRows}
+            </FileRowActions>
+          ) : (
+            <div onKeyDown={onFilesKeyDown}>{fileRows}</div>
+          )}
+        </ScrollArea>
+      </DetailRail>
+      <main className="min-w-0 flex-1">
+        <FileSlots
+          slots={diffSlots}
+          target={diffTarget}
+          busy={diffSlots.holding || diffSlots.read.loading}
+        >
+          {(view) =>
+            view.kind === "file" ? (
+              <PrFileDiffSlot
+                path={view.file}
+                fileDiff={fileDiff}
+                isPending={isPending}
+                isError={isError}
+                isPaused={isPaused}
+                isFetching={isFetching}
+                onRetry={onRetry}
+                dataIsPlaceholder={dataIsPlaceholder}
+                threads={threads}
+                drafts={drafts}
+                repoPath={repoPath}
+                lens={lens}
+                number={number}
+                previewRev={previewRev}
+                lineWidget={lineWidget}
+                onQuote={onQuote}
+                onReply={onReply}
+                onResolve={onResolve}
+                pendingWrites={pendingWrites}
+                provider={provider}
+                apply={apply}
+                fileDiffLookup={fileDiffLookup}
+                mentions={mentions}
+                reportRead={diffSlots.reportRead}
+              />
+            ) : (
+              <DiffPlaceholder message="Select a file to see its changes" />
+            )
+          }
+        </FileSlots>
+      </main>
+    </DetailRailRow>
+  );
+}
+
+/** One file's diff in the Files pane's slot: its section of the pull request's
+ *  patch, and the threads and drafts anchored to it, so a held file never shows
+ *  the next one's. */
+function PrFileDiffSlot({
+  path,
+  fileDiff,
+  isPending,
+  isError,
+  isPaused,
+  isFetching,
+  onRetry,
+  dataIsPlaceholder,
+  threads,
+  drafts,
+  repoPath,
+  lens,
+  number,
+  previewRev,
+  lineWidget,
+  onQuote,
+  onReply,
+  onResolve,
+  pendingWrites,
+  provider,
+  apply,
+  fileDiffLookup,
+  mentions,
+  reportRead,
+}: {
+  path: string;
+  /** The parent's diff for ITS selected file; absent with no patch loaded. */
+  fileDiff: ComponentProps<typeof DiffContent>["data"];
+  isPending: boolean;
+  isError: boolean;
+  isPaused?: boolean;
+  isFetching: boolean;
+  onRetry?: () => void;
+  dataIsPlaceholder?: boolean;
+  threads?: ReviewThreadOut[];
+  drafts?: ReviewDraft[];
+  repoPath?: string;
+  lens?: RemoteLens;
+  number?: number;
+  previewRev?: string;
+  /** The parent's composer, for its selected file: only a shown slot opens it. */
+  lineWidget?: LineWidget;
+  reportRead: (read: SlotRead) => void;
+} & DiffThreadWiring) {
+  useSlotRead(reportRead, {
+    isPlaceholderData: dataIsPlaceholder ?? false,
+    isPending,
+    isPaused,
+  });
+  // The parent builds the diff of its selected file; a held slot's file is
+  // another section of the same in-memory patch, or failing a lookup, the diff
+  // it last showed.
+  const own =
+    fileDiff !== undefined && fileDiff.filePath === path ? fileDiff : undefined;
+  const shown = useRetained(own, own !== undefined);
+  const section =
+    fileDiff !== undefined && own === undefined
+      ? fileDiffLookup?.(path)
+      : undefined;
+  const data =
+    own ??
+    (section !== undefined
+      ? {
+          filePath: path,
+          text: section,
+          isBinary: sectionIsBinary(section),
+          isTruncated: false,
+        }
+      : shown);
+
+  // Anchors for THIS slot's file only: threads (with a known line, not outdated)
   // AND pending-review drafts on this path. Multiple items on the same side+line
   // collapse into ONE stacked anchor (the diff library keeps a single render per
   // side+line — last write wins — so threads + a draft here must share it).
   const lineAnchors = useMemo<DiffLineAnchor[]>(() => {
-    if (!effectivePath) return [];
     const threadsBySideLine = new Map<string, ReviewThreadOut[]>();
     for (const t of threads ?? []) {
-      if (t.path !== effectivePath || t.line <= 0 || t.isOutdated) continue;
+      if (t.path !== path || t.line <= 0 || t.isOutdated) continue;
       const side = t.side === "old" ? "old" : "new";
       const key = `${side}:${t.line}`;
       const bucket = threadsBySideLine.get(key);
@@ -218,7 +399,7 @@ export function PrFilesPane({
     // Drafts only render when the store owner keys (repoPath/lens/number) are present.
     if (repoPath !== undefined && lens !== undefined && number !== undefined) {
       for (const d of drafts ?? []) {
-        if (d.path !== effectivePath || d.line <= 0) continue;
+        if (d.path !== path || d.line <= 0) continue;
         const key = `${d.side}:${d.line}`;
         const bucket = draftsBySideLine.get(key);
         if (bucket) bucket.push(d);
@@ -268,7 +449,7 @@ export function PrFilesPane({
       };
     });
   }, [
-    effectivePath,
+    path,
     threads,
     drafts,
     repoPath,
@@ -284,71 +465,22 @@ export function PrFilesPane({
     mentions,
   ]);
 
-  const fileRows = files.map((file) => (
-    <button
-      type="button"
-      key={file.path}
-      data-path={file.path}
-      className={cn(
-        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
-        effectivePath === file.path
-          ? "bg-accent text-accent-foreground"
-          : "hover:bg-muted/60",
-      )}
-      onClick={() => onSelectPath(file.path)}
-    >
-      <PathText path={file.path} className="flex-1 font-mono" />
-      {/* Plain DiffStat, not DiffStatSlot: the binary flag arrives after the diff
-          loads, but the forge counts ship with the row, so the cell never starts
-          empty — and the sibling detail rails all render the plain form. */}
-      <DiffStat
-        added={file.additions}
-        deleted={file.deletions}
-        isBinary={binaryPaths?.has(file.path) ?? false}
-      />
-    </button>
-  ));
-
+  const widget = useSlotWidget(lineWidget);
   return (
-    <DetailRailRow>
-      <DetailRail ariaLabel="Changed files">
-        {/* overflow-hidden contains the list's natural height (vendored Root is
-            `relative`-only) so a long file list can't leak a window scrollbar. */}
-        <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-          {repoPath !== undefined ? (
-            <FileRowActions
-              repoPath={repoPath}
-              blameRev={blameRev}
-              onKeyDown={onFilesKeyDown}
-            >
-              {fileRows}
-            </FileRowActions>
-          ) : (
-            <div onKeyDown={onFilesKeyDown}>{fileRows}</div>
-          )}
-        </ScrollArea>
-      </DetailRail>
-      <main className="min-w-0 flex-1">
-        {effectivePath ? (
-          <DiffContent
-            filePath={effectivePath}
-            data={fileDiff}
-            isPending={isPending}
-            isError={isError}
-            isPaused={isPaused}
-            isFetching={isFetching}
-            onRetry={onRetry}
-            dataIsPlaceholder={dataIsPlaceholder}
-            repoPath={repoPath}
-            previewRev={previewRev}
-            lineAnchors={lineAnchors}
-            lineWidget={lineWidget}
-          />
-        ) : (
-          <DiffPlaceholder message="Select a file to see its changes" />
-        )}
-      </main>
-    </DetailRailRow>
+    <DiffContent
+      filePath={path}
+      data={data}
+      isPending={isPending}
+      isError={isError}
+      isPaused={isPaused}
+      isFetching={isFetching}
+      onRetry={onRetry}
+      dataIsPlaceholder={dataIsPlaceholder}
+      repoPath={repoPath}
+      previewRev={previewRev}
+      lineAnchors={lineAnchors}
+      lineWidget={widget}
+    />
   );
 }
 

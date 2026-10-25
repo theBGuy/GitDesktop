@@ -4,10 +4,11 @@
 // a rowless diff settle at build instead of waiting out the hold bound; and the
 // two-slot hold's transitions (src/features/diff/diff-pane-slots.ts), which keep
 // the last settled pane up while the next one prepares, for at most the 400 ms
-// bound. Also the hunk buttons' hosts (same diff-rows.ts): what expanding does
-// to the `@@` rows, the inline headers' extend-row feed, and the post-write
-// hold's release test (`answeredSince`, diff-pane-slots.ts) with the
-// react-query behavior it reads.
+// bound, with the file-rail hosts' entity axis and slot ids, and the roster of
+// hosts rendering through the shared slots. Also the hunk buttons' hosts (same
+// diff-rows.ts): what expanding does to the `@@` rows, the inline headers'
+// extend-row feed, and the post-write hold's release test (`answeredSince` and
+// the status wait, diff-pane-slots.ts) with the react-query behavior it reads.
 //
 // Not testable here: the settle reports themselves (layout effects across the
 // pane's surfaces), what `inert` blocks, and the hold's release commit. Those
@@ -21,8 +22,10 @@
 // skip only when one of those PACKAGES is unresolved (the no-install guards
 // job); GD_EXPECT_DEPS turns that skip into a failure on an installed run.
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-
+import { fileURLToPath } from "node:url";
 import {
   answeredSince,
   answerMark,
@@ -30,11 +33,19 @@ import {
   filePaneView,
   HOLD_BOUND_MS,
   isHolding,
+  keyedPaneView,
+  NO_STAGING_KEEP,
   paneSlots,
   paneViewKey,
+  placeholderPaneView,
   retargetPane,
   settlePane,
+  slotWidget,
+  stagingKeep,
   startPaneHold,
+  statusBehind,
+  statusWaitFor,
+  WORKING_TREE_ENTITY,
 } from "../src/features/diff/diff-pane-slots.ts";
 import {
   collapseAllContext,
@@ -47,6 +58,7 @@ import {
   hunkRangeText,
 } from "../src/features/diff/diff-rows.ts";
 import { parseHunks } from "../src/lib/git/hunks.ts";
+import { maskNonCode } from "./lib/ts-mask.mjs";
 
 // ---------------------------------------------------------- firstHunkHasSepRow
 
@@ -192,6 +204,7 @@ test("hunkHeaderExtendData: hunk 0's data is an object, never a bare 0", () => {
 // ----------------------------------------------------------------- pane slots
 
 const REPO = "C:/repo";
+const E = WORKING_TREE_ENTITY;
 const file = (path, staged = false) => ({ path, staged, untracked: false });
 const view = (path, staged = false, repo = REPO) =>
   filePaneView(repo, file(path, staged));
@@ -199,7 +212,8 @@ const PLACEHOLDER = { kind: "placeholder" };
 const phases = (hold) =>
   paneSlots(hold).map(({ view: v, phase }) => [paneViewKey(v), phase]);
 /** A file shown and settled: the state a click away from it starts from. */
-const settledOn = (v) => settlePane(startPaneHold(v), v.key, v.repo, true);
+const settledOn = (v) =>
+  settlePane(startPaneHold(v), v.key, v.repo, v.entity, true);
 
 test("the hold bound is 400 ms", () => {
   assert.equal(HOLD_BOUND_MS, 400);
@@ -210,23 +224,25 @@ test("same key: a reselect (fresh object) does not hold", () => {
   const next = retargetPane(hold, view("a.ts"));
   assert.equal(next, hold);
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/repo:false:a.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:a.ts", "shown"],
+  ]);
 });
 
 test("different key, same repo: the shown file holds while the target prepares", () => {
   const next = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   assert.equal(isHolding(next), true);
   assert.deepEqual(phases(next), [
-    ["file:C:/repo:false:a.ts", "held"],
-    ["file:C:/repo:false:b.ts", "preparing"],
+    ["file:working-tree:C:/repo:false:a.ts", "held"],
+    ["file:working-tree:C:/repo:false:b.ts", "preparing"],
   ]);
 });
 
 test("same path, other side: staged and unstaged are different slots", () => {
   const next = retargetPane(settledOn(view("a.ts", false)), view("a.ts", true));
   assert.deepEqual(phases(next), [
-    ["file:C:/repo:false:a.ts", "held"],
-    ["file:C:/repo:true:a.ts", "preparing"],
+    ["file:working-tree:C:/repo:false:a.ts", "held"],
+    ["file:working-tree:C:/repo:true:a.ts", "preparing"],
   ]);
 });
 
@@ -240,7 +256,7 @@ test("first selection: the file prepares out of sight over the placeholder", () 
   const next = retargetPane(startPaneHold(PLACEHOLDER), view("a.ts"));
   assert.deepEqual(phases(next), [
     ["placeholder", "held"],
-    ["file:C:/repo:false:a.ts", "preparing"],
+    ["file:working-tree:C:/repo:false:a.ts", "preparing"],
   ]);
 });
 
@@ -259,7 +275,9 @@ test("conflicted source: a file target swaps at once", () => {
     view("a.ts"),
   );
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/repo:false:a.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:a.ts", "shown"],
+  ]);
 });
 
 test("repo changed: nothing is held across repos", () => {
@@ -268,22 +286,26 @@ test("repo changed: nothing is held across repos", () => {
     view("a.ts", false, "C:/other"),
   );
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/other:false:a.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/other:false:a.ts", "shown"],
+  ]);
 });
 
 test("rapid retarget: the held slot stays the last settled file", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   const next = retargetPane(holding, view("c.ts"));
   assert.deepEqual(phases(next), [
-    ["file:C:/repo:false:a.ts", "held"],
-    ["file:C:/repo:false:c.ts", "preparing"],
+    ["file:working-tree:C:/repo:false:a.ts", "held"],
+    ["file:working-tree:C:/repo:false:c.ts", "preparing"],
   ]);
 });
 
 test("retarget back to the held file: it is shown again, no hold", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   const next = retargetPane(holding, view("a.ts"));
-  assert.deepEqual(phases(next), [["file:C:/repo:false:a.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:a.ts", "shown"],
+  ]);
 });
 
 test("stale-key settle: a replaced slot's report is ignored, either edge", () => {
@@ -291,64 +313,88 @@ test("stale-key settle: a replaced slot's report is ignored, either edge", () =>
     retargetPane(settledOn(view("a.ts")), view("b.ts")),
     view("c.ts"),
   );
-  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO, true), holding);
-  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO, false), holding);
+  assert.equal(
+    settlePane(holding, "C:/repo:false:b.ts", REPO, E, true),
+    holding,
+  );
+  assert.equal(
+    settlePane(holding, "C:/repo:false:b.ts", REPO, E, false),
+    holding,
+  );
   // The held file is already settled: its settled report changes nothing.
-  assert.equal(settlePane(holding, "C:/repo:false:a.ts", REPO, true), holding);
+  assert.equal(
+    settlePane(holding, "C:/repo:false:a.ts", REPO, E, true),
+    holding,
+  );
 });
 
 test("the preparing target's unsettled report neither promotes nor drops it", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
-  assert.equal(settlePane(holding, "C:/repo:false:b.ts", REPO, false), holding);
+  assert.equal(
+    settlePane(holding, "C:/repo:false:b.ts", REPO, E, false),
+    holding,
+  );
 });
 
 test("settle, then unsettle, then retarget: the loading view swaps, not held", () => {
   const settled = settledOn(view("a.ts"));
-  const loading = settlePane(settled, "C:/repo:false:a.ts", REPO, false);
+  const loading = settlePane(settled, "C:/repo:false:a.ts", REPO, E, false);
   assert.equal(loading.shownSettled, false);
-  assert.equal(settlePane(loading, "C:/repo:false:a.ts", REPO, false), loading);
+  assert.equal(
+    settlePane(loading, "C:/repo:false:a.ts", REPO, E, false),
+    loading,
+  );
   const next = retargetPane(loading, view("b.ts"));
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:b.ts", "shown"],
+  ]);
 });
 
 test("unsettle, then settle again: the view is held again", () => {
   const settled = settledOn(view("a.ts"));
-  const loading = settlePane(settled, "C:/repo:false:a.ts", REPO, false);
-  const again = settlePane(loading, "C:/repo:false:a.ts", REPO, true);
+  const loading = settlePane(settled, "C:/repo:false:a.ts", REPO, E, false);
+  const again = settlePane(loading, "C:/repo:false:a.ts", REPO, E, true);
   assert.equal(isHolding(retargetPane(again, view("b.ts"))), true);
 });
 
 test("a held file that goes loading is dropped by the next retarget", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
-  const heldLoading = settlePane(holding, "C:/repo:false:a.ts", REPO, false);
+  const heldLoading = settlePane(holding, "C:/repo:false:a.ts", REPO, E, false);
   assert.equal(isHolding(heldLoading), true);
   const next = retargetPane(heldLoading, view("c.ts"));
-  assert.deepEqual(phases(next), [["file:C:/repo:false:c.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:c.ts", "shown"],
+  ]);
 });
 
 test("settle from another repo is ignored", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
   assert.equal(
-    settlePane(holding, "C:/repo:false:b.ts", "C:/other", true),
+    settlePane(holding, "C:/repo:false:b.ts", "C:/other", E, true),
     holding,
   );
 });
 
 test("current-key settle: the target is promoted to a single slot", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("b.ts"));
-  const next = settlePane(holding, "C:/repo:false:b.ts", REPO, true);
+  const next = settlePane(holding, "C:/repo:false:b.ts", REPO, E, true);
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:b.ts", "shown"],
+  ]);
 });
 
 test("a shown file starts unsettled; its first settle marks it, a repeat is a no-op", () => {
   const hold = startPaneHold(view("a.ts"));
   assert.equal(hold.shownSettled, false);
-  const settled = settlePane(hold, "C:/repo:false:a.ts", REPO, true);
+  const settled = settlePane(hold, "C:/repo:false:a.ts", REPO, E, true);
   assert.equal(settled.shownSettled, true);
   assert.equal(isHolding(settled), false);
-  assert.equal(settlePane(settled, "C:/repo:false:a.ts", REPO, true), settled);
+  assert.equal(
+    settlePane(settled, "C:/repo:false:a.ts", REPO, E, true),
+    settled,
+  );
 });
 
 test("the placeholder and conflict views start settled", () => {
@@ -362,33 +408,37 @@ test("the placeholder and conflict views start settled", () => {
 test("an unsettled shown file is swapped out, never held", () => {
   const next = retargetPane(startPaneHold(view("a.ts")), view("b.ts"));
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:b.ts", "shown"],
+  ]);
 });
 
 test("expire, then retarget: the unsettled promotion is not held", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("s.ts"));
-  const expired = expirePane(holding, "C:/repo:false:s.ts");
+  const expired = expirePane(holding, "C:/repo:false:s.ts", E);
   assert.equal(expired.shownSettled, false);
   const next = retargetPane(expired, view("f.ts"));
   assert.equal(isHolding(next), false);
-  assert.deepEqual(phases(next), [["file:C:/repo:false:f.ts", "shown"]]);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:f.ts", "shown"],
+  ]);
 });
 
 test("settle, then retarget: the settled promotion is held", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("s.ts"));
-  const settled = settlePane(holding, "C:/repo:false:s.ts", REPO, true);
+  const settled = settlePane(holding, "C:/repo:false:s.ts", REPO, E, true);
   assert.equal(settled.shownSettled, true);
   const next = retargetPane(settled, view("f.ts"));
   assert.deepEqual(phases(next), [
-    ["file:C:/repo:false:s.ts", "held"],
-    ["file:C:/repo:false:f.ts", "preparing"],
+    ["file:working-tree:C:/repo:false:s.ts", "held"],
+    ["file:working-tree:C:/repo:false:f.ts", "preparing"],
   ]);
 });
 
 test("expire, then a late settle of the shown file: it holds again", () => {
   const holding = retargetPane(settledOn(view("a.ts")), view("s.ts"));
-  const expired = expirePane(holding, "C:/repo:false:s.ts");
-  const settled = settlePane(expired, "C:/repo:false:s.ts", REPO, true);
+  const expired = expirePane(holding, "C:/repo:false:s.ts", E);
+  const settled = settlePane(expired, "C:/repo:false:s.ts", REPO, E, true);
   assert.equal(settled.shownSettled, true);
   assert.equal(isHolding(retargetPane(settled, view("f.ts"))), true);
 });
@@ -408,8 +458,10 @@ test("retargeting while holding keeps the held file's settle", () => {
 
 test("bound expiry: the target is promoted to a single slot", () => {
   const holding = retargetPane(startPaneHold(PLACEHOLDER), view("b.ts"));
-  const next = expirePane(holding, "C:/repo:false:b.ts");
-  assert.deepEqual(phases(next), [["file:C:/repo:false:b.ts", "shown"]]);
+  const next = expirePane(holding, "C:/repo:false:b.ts", E);
+  assert.deepEqual(phases(next), [
+    ["file:working-tree:C:/repo:false:b.ts", "shown"],
+  ]);
 });
 
 test("bound expiry for a replaced target is ignored", () => {
@@ -417,7 +469,453 @@ test("bound expiry for a replaced target is ignored", () => {
     retargetPane(settledOn(view("a.ts")), view("b.ts")),
     view("c.ts"),
   );
-  assert.equal(expirePane(holding, "C:/repo:false:b.ts"), holding);
+  assert.equal(expirePane(holding, "C:/repo:false:b.ts", E), holding);
+});
+
+// A file-rail host's views carry its entity (here a commit): a hold starts only
+// between files of one entity, and an entity change re-targets the shown slot
+// in place under its own id, so its mounted reads serve their previous answer.
+
+const COMMIT_A = "aaaa";
+const COMMIT_B = "bbbb";
+const hostView = (path, entity = COMMIT_A, repo = REPO) =>
+  keyedPaneView(repo, entity, path, path);
+const report = (hold, v, settled) =>
+  settlePane(hold, v.key, v.repo, v.entity, settled);
+const hostSettledOn = (v) => report(startPaneHold(v), v, true);
+const ids = (hold) =>
+  paneSlots(hold).map(({ phase, slotId }) => [phase, slotId]);
+
+test("entity change while idle: the shown slot re-targets in place, no hold", () => {
+  const shown = hostSettledOn(hostView("a.ts"));
+  for (const path of ["a.ts", "b.ts"]) {
+    const next = retargetPane(shown, hostView(path, COMMIT_B));
+    assert.equal(isHolding(next), false, path);
+    assert.deepEqual(ids(next), [["shown", shown.shownId]], path);
+    assert.equal(next.shown.entity, COMMIT_B, path);
+    // Its reads serve the previous entity's answer until the new one lands.
+    assert.equal(next.shownSettled, false, path);
+  }
+});
+
+test("entity change mid-hold: the hold drops and the shown slot re-targets in place", () => {
+  const shown = hostSettledOn(hostView("a.ts"));
+  const holding = retargetPane(shown, hostView("b.ts"));
+  assert.equal(isHolding(holding), true);
+  const next = retargetPane(holding, hostView("c.ts", COMMIT_B));
+  assert.equal(isHolding(next), false);
+  assert.deepEqual(ids(next), [["shown", shown.shownId]]);
+});
+
+test("same-entity path change over a settled file holds, the target in a fresh slot", () => {
+  const shown = hostSettledOn(hostView("a.ts"));
+  const next = retargetPane(shown, hostView("b.ts"));
+  const [held, preparing] = ids(next);
+  assert.deepEqual(held, ["held", shown.shownId]);
+  assert.equal(preparing[0], "preparing");
+  assert.notEqual(preparing[1], shown.shownId);
+});
+
+test("promotion keeps the preparing slot's id, by settle or by the bound", () => {
+  const holding = retargetPane(
+    hostSettledOn(hostView("a.ts")),
+    hostView("b.ts"),
+  );
+  const preparingId = holding.targetId;
+  assert.deepEqual(ids(report(holding, hostView("b.ts"), true)), [
+    ["shown", preparingId],
+  ]);
+  assert.deepEqual(ids(expirePane(holding, "b.ts", COMMIT_A)), [
+    ["shown", preparingId],
+  ]);
+});
+
+test("back to the held file adopts the held slot's id", () => {
+  const shown = hostSettledOn(hostView("a.ts"));
+  const holding = retargetPane(shown, hostView("b.ts"));
+  assert.deepEqual(ids(retargetPane(holding, hostView("a.ts"))), [
+    ["shown", shown.shownId],
+  ]);
+});
+
+test("replace-outright mints a fresh id, and no id repeats across a run", () => {
+  const unsettled = startPaneHold(hostView("a.ts"));
+  const replaced = retargetPane(unsettled, hostView("b.ts"));
+  assert.equal(isHolding(replaced), false);
+  assert.notEqual(replaced.shownId, unsettled.shownId);
+  let hold = hostSettledOn(hostView("a.ts"));
+  const seen = new Set([hold.shownId]);
+  for (const path of ["b.ts", "c.ts", "d.ts"]) {
+    hold = retargetPane(hold, hostView(path));
+    assert.ok(!seen.has(hold.targetId), path);
+    seen.add(hold.targetId);
+  }
+});
+
+test("a stale entity's report on the same path is ignored", () => {
+  const inPlace = retargetPane(
+    hostSettledOn(hostView("a.ts")),
+    hostView("a.ts", COMMIT_B),
+  );
+  assert.equal(report(inPlace, hostView("a.ts", COMMIT_A), true), inPlace);
+  assert.equal(
+    report(inPlace, hostView("a.ts", COMMIT_B), true).shownSettled,
+    true,
+  );
+});
+
+test("the bound's expiry for another entity's target is ignored", () => {
+  const holding = retargetPane(
+    hostSettledOn(hostView("a.ts")),
+    hostView("b.ts"),
+  );
+  assert.equal(expirePane(holding, "b.ts", COMMIT_B), holding);
+});
+
+test("a host's placeholder holds a first file only within its entity", () => {
+  const resting = startPaneHold(placeholderPaneView(COMMIT_A));
+  assert.equal(isHolding(retargetPane(resting, hostView("a.ts"))), true);
+  assert.equal(
+    isHolding(retargetPane(resting, hostView("a.ts", COMMIT_B))),
+    false,
+  );
+});
+
+test("a host's placeholder is one per entity: another entity's is another view", () => {
+  const resting = startPaneHold(placeholderPaneView(COMMIT_A));
+  const next = retargetPane(resting, placeholderPaneView(COMMIT_B));
+  assert.notEqual(next, resting);
+  assert.equal(isHolding(next), false);
+  assert.notEqual(next.shownId, resting.shownId);
+  // The Changes pane's placeholder keeps its one identity.
+  assert.equal(paneViewKey(placeholderPaneView()), "placeholder");
+});
+
+test("the same host key in another repo is another view, never held", () => {
+  const shown = hostSettledOn(hostView("a.ts"));
+  const next = retargetPane(shown, hostView("a.ts", COMMIT_A, "C:/other"));
+  assert.equal(isHolding(next), false);
+  assert.notEqual(next.shownId, shown.shownId);
+});
+
+test("release and advance in one render: a file kept settled through its write is held", () => {
+  // The post-write keep repaints nothing, so the shown file reports no edge
+  // while the write releases and the selection advances in the same render.
+  const shown = settledOn(view("a.ts"));
+  assert.deepEqual(phases(retargetPane(shown, view("b.ts"))), [
+    ["file:working-tree:C:/repo:false:a.ts", "held"],
+    ["file:working-tree:C:/repo:false:b.ts", "preparing"],
+  ]);
+  // Had the emptied side fallen back to a loading paint, the advance would
+  // replace it outright and paint the next file over nothing.
+  const fellBack = settlePane(shown, "C:/repo:false:a.ts", REPO, E, false);
+  assert.equal(isHolding(retargetPane(fellBack, view("b.ts"))), false);
+});
+
+// ------------------------------------------------------- post-write status wait
+
+test("post-write status wait: tracked stage and unstage record status, discards don't", () => {
+  assert.equal(statusWaitFor("stage", false), "if-emptied");
+  assert.equal(statusWaitFor("unstage", false), "if-emptied");
+  assert.equal(statusWaitFor("discard", false), null);
+  for (const kind of ["stage", "unstage", "discard"])
+    assert.equal(statusWaitFor(kind, true), "always", kind);
+});
+
+test("post-write status wait: a tracked write waits on status only after an empty diff", () => {
+  const wait = statusWaitFor("stage", false);
+  // The diff leg holds until it answers; status adds nothing before that.
+  assert.equal(
+    statusBehind(wait, false, { answered: false, empty: true }),
+    false,
+  );
+  // A press that leaves content releases on the diff's answer alone.
+  assert.equal(
+    statusBehind(wait, false, { answered: true, empty: false }),
+    false,
+  );
+  // An emptied side waits for status, and releases once it answers.
+  assert.equal(
+    statusBehind(wait, false, { answered: true, empty: true }),
+    true,
+  );
+  assert.equal(
+    statusBehind(wait, true, { answered: true, empty: true }),
+    false,
+  );
+  // Discards never wait; an untracked file's write waits until status answers.
+  assert.equal(
+    statusBehind(null, false, { answered: true, empty: true }),
+    false,
+  );
+  assert.equal(
+    statusBehind("always", false, { answered: false, empty: false }),
+    true,
+  );
+  assert.equal(
+    statusBehind("always", true, { answered: true, empty: false }),
+    false,
+  );
+});
+
+// ---------------------------------------------------- staging view keep
+
+// One render of the staging view per step, from a file shown in hunk mode:
+// whether it keeps its last hunk view rather than fall back.
+
+/** A shown file in hunk mode, no write in flight, on its side of status. */
+const SHOWN_LIVE = {
+  live: true,
+  interactive: true,
+  writeHolding: false,
+  emptiedByWrite: false,
+  writeReleased: true,
+  onSide: true,
+  nonEmptyAnswer: true,
+  leftBoundExpired: false,
+};
+
+/** The kept flag at each step, from the hunk view on screen. */
+function keepRun(steps) {
+  let state = stagingKeep(NO_STAGING_KEEP, SHOWN_LIVE);
+  return steps.map((step) => {
+    state = stagingKeep(state, { ...SHOWN_LIVE, ...step });
+    return state.kept;
+  });
+}
+
+/** A stage or unstage that empties the side, up to the write's release. */
+const EMPTIED = [
+  // The press: the write runs over the old answer.
+  { writeHolding: true, writeReleased: false },
+  // The side answers empty; status hasn't answered.
+  {
+    live: false,
+    writeHolding: true,
+    emptiedByWrite: true,
+    writeReleased: false,
+    nonEmptyAnswer: false,
+  },
+  // Status answers with the file off the side; the write releases next.
+  {
+    live: false,
+    emptiedByWrite: true,
+    writeReleased: false,
+    onSide: false,
+    nonEmptyAnswer: false,
+  },
+];
+const LEFT = { live: false, onSide: false, nonEmptyAnswer: false };
+
+test("staging keep: an emptied side keeps its last view past the write's release", () => {
+  assert.deepEqual(keepRun([...EMPTIED, LEFT, LEFT]), [
+    false,
+    true,
+    true,
+    true,
+    true,
+  ]);
+});
+
+test("staging keep: the selection moving on holds the kept view (release and advance)", () => {
+  assert.deepEqual(keepRun([...EMPTIED, { ...LEFT, interactive: false }]), [
+    false,
+    true,
+    true,
+    true,
+  ]);
+});
+
+test("staging keep: a hidden Changes list never prunes, so the keep lets go after the bound", () => {
+  const kept = keepRun([...EMPTIED, LEFT, { ...LEFT, leftBoundExpired: true }]);
+  assert.deepEqual(kept, [false, true, true, true, false]);
+});
+
+test("staging keep: a file still on its side once status answered paints its answer", () => {
+  assert.deepEqual(
+    keepRun([...EMPTIED.slice(0, 2), { ...LEFT, onSide: true }]),
+    [false, true, false],
+  );
+});
+
+test("staging keep: a partial stage repaints the remaining hunk, no keep", () => {
+  assert.deepEqual(
+    keepRun([{ writeHolding: true, writeReleased: false }, {}]),
+    [false, false],
+  );
+});
+
+test("staging keep: a non-empty answer releases the emptied keep", () => {
+  assert.deepEqual(keepRun([...EMPTIED, LEFT, {}, { ...LEFT }]), [
+    false,
+    true,
+    true,
+    true,
+    false,
+    false,
+  ]);
+});
+
+test("staging keep: a discard that empties the side paints its answer", () => {
+  // A discard holds no view (the pane passes neither write flag for one).
+  assert.deepEqual(
+    keepRun([{ live: false, nonEmptyAnswer: false, onSide: false }]),
+    [false],
+  );
+});
+
+test("staging keep: an untracked file's full stage keeps through the re-keyed read", () => {
+  assert.deepEqual(
+    keepRun([
+      // Status still waits; the untracked read answers the whole file.
+      { writeHolding: true, writeReleased: false },
+      // Status answered and re-keyed the read, which hasn't answered.
+      {
+        live: false,
+        writeHolding: true,
+        writeReleased: false,
+        nonEmptyAnswer: false,
+      },
+      // The tracked read answers empty; the file left the unstaged side.
+      { ...LEFT, emptiedByWrite: true, writeReleased: false },
+      LEFT,
+    ]),
+    [false, true, true, true],
+  );
+});
+
+test("staging keep: a held slot keeps its view whatever its read does", () => {
+  assert.deepEqual(
+    keepRun([
+      { interactive: false },
+      { live: false, interactive: false, nonEmptyAnswer: false },
+      { live: false, interactive: false, nonEmptyAnswer: true },
+    ]),
+    [false, true, true],
+  );
+});
+
+test("staging keep: a view the fallback replaced is never kept again", () => {
+  // The file left hunk mode (binary, truncated) while shown: the fallback
+  // paints, and a later hold has nothing to keep.
+  assert.deepEqual(
+    keepRun([{ live: false }, { live: false, interactive: false }]),
+    [false, false],
+  );
+});
+
+test("staging keep: an external change while shown paints as it lands", () => {
+  assert.deepEqual(keepRun([LEFT]), [false]);
+});
+
+// ------------------------------------------------------------- slot widget
+
+/** The widget a slot renders at each `[phase, live widget]` step. */
+function widgetRun(steps) {
+  let kept = steps[0][1];
+  return steps.map(([phase, live]) => {
+    const next = slotWidget(phase, live, kept);
+    kept = next.keep;
+    return next.render;
+  });
+}
+
+const COMPOSER_A = { enabled: true, file: "a.ts" };
+const COMPOSER_B = { enabled: true, file: "b.ts" };
+
+test("slot widget: a preparing slot follows its live widget, so promotion swaps nothing", () => {
+  // Mounted before its composer could open (comments not ready yet).
+  assert.deepEqual(
+    widgetRun([
+      ["preparing", undefined],
+      ["preparing", COMPOSER_A],
+      ["shown", COMPOSER_A],
+    ]),
+    [undefined, COMPOSER_A, COMPOSER_A],
+  );
+});
+
+test("slot widget: a held slot keeps the widget it had while shown", () => {
+  assert.deepEqual(
+    widgetRun([
+      ["shown", COMPOSER_A],
+      // The selection moved on: the live widget is the next file's, or none.
+      ["held", COMPOSER_B],
+      ["held", undefined],
+      // Back to it: it follows the live widget again.
+      ["shown", COMPOSER_A],
+    ]),
+    [COMPOSER_A, COMPOSER_A, COMPOSER_A, COMPOSER_A],
+  );
+});
+
+// ------------------------------------------------------------------ slot roster
+
+// Every file-rail diff host swaps files through the shared slots
+// (src/features/diff/file-slot.tsx), as the Changes pane does. The roster is
+// closed by the lazy diff wrapper's consumers: a new consumer is a deliberate
+// decision here, a slot host or a recorded exemption.
+const SLOT_HOSTS = [
+  "src/features/compare/BranchDiffView.tsx",
+  "src/features/history/CommitDetailView.tsx",
+  "src/features/history/FileHistoryDialog.tsx",
+  "src/features/pulls/PrCommitDetail.tsx",
+  "src/features/pulls/RemotePrViewParts.tsx",
+  "src/features/repository/StashesDialog.tsx",
+  "src/features/sessions/WorktreeChangesView.tsx",
+];
+const NOT_SLOT_HOSTS = [
+  // A transcript step's inline diff: one file per step, no rail to swap.
+  "src/features/sessions/AgentTranscript.tsx",
+  // A conflict side, which the resolve flow renders whole.
+  "src/features/repository/ConflictResolveView.tsx",
+];
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/** The module specifiers a source imports, read at code positions only. */
+function specifiers(raw, masked) {
+  return [...masked.matchAll(/\bfrom\s*"/g)].map((m) => {
+    const open = m.index + m[0].length;
+    return raw.slice(open, masked.indexOf('"', open));
+  });
+}
+
+test("slot roster: the lazy diff wrapper's consumers are the slot hosts and the exemptions", () => {
+  const seen = readdirSync(join(ROOT, "src"), { recursive: true })
+    .map((entry) => `src/${String(entry).split("\\").join("/")}`)
+    .filter((file) => /\.tsx?$/.test(file))
+    .filter((file) => {
+      const raw = readFileSync(join(ROOT, file), "utf8");
+      return specifiers(raw, maskNonCode(raw, file.endsWith(".tsx"))).includes(
+        "@/features/diff/DiffSurfaceLazy",
+      );
+    })
+    .sort();
+  assert.ok(seen.length > 0, "no consumer found: the scan read nothing");
+  assert.deepEqual(seen, [...SLOT_HOSTS, ...NOT_SLOT_HOSTS].sort());
+});
+
+for (const file of [...SLOT_HOSTS, "src/features/diff/DiffViewer.tsx"]) {
+  test(`slot roster: ${file} renders its diff through the file slots`, () => {
+    const raw = readFileSync(join(ROOT, file), "utf8");
+    const masked = maskNonCode(raw, true);
+    const module = file.startsWith("src/features/diff/")
+      ? "./file-slot"
+      : "@/features/diff/file-slot";
+    assert.ok(specifiers(raw, masked).includes(module), `imports ${module}`);
+    assert.match(masked, /\buseFileSlots\(/, "holds through useFileSlots");
+    assert.match(masked, /<FileSlots\b/, "renders <FileSlots>");
+  });
+}
+
+test("answeredSince: a key with no answer yet never counts as answered", () => {
+  assert.equal(
+    answeredSince(
+      { isFetched: false, dataUpdatedAt: 0, errorUpdateCount: 0 },
+      new Set(),
+    ),
+    false,
+  );
 });
 
 // ------------------------------------------------------------- diffRendersRows
@@ -1066,7 +1564,8 @@ test("hold premise: a failed refetch moves the error count and keeps the data", 
 // the settle: every diff entry under the file's prefix (both untracked-axis
 // keys), the status entry by exact key.
 
-/** A diff query key for f.txt on the unstaged side, `untracked` last. */
+/** The prefix of f.txt's unstaged-side diff keys; `diffKeyFor` appends the
+ *  `untracked` axis. */
 const diffPrefix = ["repo", "r", "diff", "f.txt", false];
 const diffKeyFor = (untracked) => [...diffPrefix, untracked];
 
@@ -1142,18 +1641,6 @@ test("answeredSince: an error answer releases too", { skip }, async () => {
   assert.equal(after.errorUpdateCount, 1);
   assert.equal(answeredSince(after, marks), true);
   unsubscribe();
-});
-
-test("answeredSince: a key with no answer yet never counts as answered", {
-  skip,
-}, () => {
-  assert.equal(
-    answeredSince(
-      { isFetched: false, dataUpdatedAt: 0, errorUpdateCount: 0 },
-      new Set(),
-    ),
-    false,
-  );
 });
 
 test("answeredSince: the status marks are the status entry alone", {

@@ -502,12 +502,16 @@ the last list up, with a line above it saying it couldn't refresh.
   \`bin\`; untracked files count every line as an addition from the moment they
   appear (files Git converts as it stores them, such as Git LFS files, wait until
   they're staged), and conflicted rows show none while the conflict is unresolved.
-- **Hunk-level staging** — in a file's diff, each hunk has its own Stage / Unstage /
-  Discard buttons.
+- **Hunk-level staging** — in a file's diff, each hunk has its own Stage hunk and
+  Discard… buttons, or Unstage hunk on a staged file's diff. Discard returns the hunk
+  to the file's staged version when part of the file is staged, to the last commit
+  otherwise, and removes it from an untracked file. To discard a staged hunk, unstage
+  it first.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
-  spanning as many hunks as you like, then stage or discard just those. In both the
-  unified and the split view a drag picks up every changed line it crosses, added and
-  removed alike; hold Shift while dragging to take one side of a change on its own.
+  spanning as many hunks as you like, then stage or discard just those (or unstage
+  them, on a staged file's diff). In both the unified and the split view a drag picks
+  up every changed line it crosses, added and removed alike; hold Shift while dragging
+  to take one side of a change on its own.
   Hold {{key:mod}} while dragging and the new run joins the selection instead of
   replacing it; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's

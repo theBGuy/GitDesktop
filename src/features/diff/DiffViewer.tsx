@@ -68,7 +68,7 @@ import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
-import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import {
   DIFF_MAX_LINE_CHARS,
   DIFF_MEGA_LINE_CHARS,
@@ -87,26 +87,17 @@ import {
   useShikiRouting,
 } from "./DiffSurface";
 import { fileExt } from "./diff-lang";
-import {
-  DiffPaneHold,
-  type DiffPaneHoldValue,
-  useDiffPaneHold,
-  useReportPaneSettled,
-} from "./diff-pane-hold";
+import { useDiffPaneHold, useReportPaneSettled } from "./diff-pane-hold";
 import {
   answeredSince,
   answerMark,
-  expirePane,
   filePaneView,
   HOLD_BOUND_MS,
-  isHolding,
   type PaneView,
-  paneSlots,
-  paneViewKey,
-  retargetPane,
-  type SlotPhase,
-  settlePane,
-  startPaneHold,
+  type StatusWait,
+  stagingKeep,
+  statusBehind,
+  statusWaitFor,
 } from "./diff-pane-slots";
 import { restingDiffMessage } from "./diff-resting-message";
 import {
@@ -121,6 +112,7 @@ import {
   hunkRangeText,
   hunkStart,
 } from "./diff-rows";
+import { FileSlots, useFileSlots } from "./file-slot";
 import { ImagePanes } from "./ImageDiff";
 import {
   canPreviewMarkdown,
@@ -172,87 +164,39 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   const target = paneTarget(repoPath, file, isConflicted);
 
   // The last settled view stays painted while a newly selected file prepares
-  // out of sight, clipped over it, so a click swaps the pane once (see
-  // diff-pane-slots.ts).
-  const [storedHold, setHold] = useState(() => startPaneHold(target));
-  const hold = retargetPane(storedHold, target);
-  if (hold !== storedHold) setHold(hold);
-  const holding = isHolding(hold);
-  const preparingKey =
-    holding && hold.target.kind === "file" ? hold.target.key : null;
-  useEffect(() => {
-    if (preparingKey === null) return;
-    const bound = window.setTimeout(
-      () => setHold((h) => expirePane(h, preparingKey)),
-      HOLD_BOUND_MS,
-    );
-    return () => window.clearTimeout(bound);
-  }, [preparingKey]);
-  const onSlotSettled = useCallback(
-    (key: string, repo: string, settled: boolean) =>
-      setHold((h) => settlePane(h, key, repo, settled)),
-    [],
-  );
-  // Focus inside a slot that turns held lands here rather than on <body>. A
-  // sibling of the slots, never an ancestor: a focusable ancestor would take
-  // focus on every click into the code and swallow keyboard scrolling.
-  const focusSinkRef = useRef<HTMLSpanElement>(null);
-
-  const renderView = (view: PaneView<SelectedFile>) => {
-    if (view.kind === "file") {
-      return (
-        <WorkingTreeDiff
-          repoPath={view.repo}
-          file={view.file}
-          focusSink={focusSinkRef}
-        />
-      );
-    }
-    if (view.kind === "conflict") {
-      return resolveHere === view.key ? (
-        <ConflictResolveView repoPath={repoPath} path={view.key} />
-      ) : (
-        <ConflictFileView repoPath={repoPath} path={view.key} />
-      );
-    }
-    return (
-      <DiffPlaceholder
-        message={restingDiffMessage(
-          status.isPending,
-          status.data?.entries.length ?? 0,
-          statusReadFailed(status),
-        )}
-      />
-    );
-  };
+  // out of sight, clipped over it, so a click swaps the pane once.
+  const slots = useFileSlots(target);
 
   return (
-    // The busy signal lives here: both slots are inert while holding, and an
-    // inert subtree is out of the accessibility tree along with its aria-busy.
-    <div className="relative h-full" aria-busy={holding || undefined}>
-      <span ref={focusSinkRef} tabIndex={-1} className="sr-only" />
-      {paneSlots(hold).map(({ view: slotView, phase }) => {
-        // A held slot paints what it settled with; the live slot takes this
-        // render's target (same key, but the selection's freshest object).
-        const view = phase === "held" ? slotView : target;
-        return view.kind === "file" ? (
-          <FileSlot
-            key={paneViewKey(view)}
-            slotKey={view.key}
-            repo={view.repo}
-            phase={phase}
-            onSettled={onSlotSettled}
-            focusRescue={focusSinkRef}
-          >
-            {renderView(view)}
-          </FileSlot>
-        ) : (
-          <PaneFrame key={paneViewKey(view)} held={phase === "held"}>
-            {renderView(view)}
-          </PaneFrame>
+    <FileSlots slots={slots} target={target} busy={slots.holding}>
+      {(view) => {
+        if (view.kind === "file") {
+          return (
+            <WorkingTreeDiff
+              repoPath={view.repo}
+              file={view.file}
+              focusSink={slots.sinkRef}
+            />
+          );
+        }
+        if (view.kind === "conflict") {
+          return resolveHere === view.key ? (
+            <ConflictResolveView repoPath={repoPath} path={view.key} />
+          ) : (
+            <ConflictFileView repoPath={repoPath} path={view.key} />
+          );
+        }
+        return (
+          <DiffPlaceholder
+            message={restingDiffMessage(
+              status.isPending,
+              status.data?.entries.length ?? 0,
+              statusReadFailed(status),
+            )}
+          />
         );
-      })}
-    </div>
+      }}
+    </FileSlots>
   );
 }
 
@@ -266,102 +210,17 @@ function paneTarget(
   return filePaneView(repoPath, file);
 }
 
-const SLOT_FRAME_CLASS: Record<SlotPhase, string> = {
-  shown: "h-full",
-  held: "h-full",
-  // Stacked over the held slot (absolute, rendered after it) at full size, so
-  // container queries, the split/unified measure and row measurement are final
-  // before it shows. Hidden by a full clip, never `invisible`: the vendored
-  // Button's transition-all animates inherited visibility, so its buttons would
-  // paint a frame late at promotion. Never opacity either: the frame's
-  // PLACEHOLDER_FADE would fade the slot in instead of showing it at once.
-  preparing: "absolute inset-0 [clip-path:inset(50%)]",
-};
-
-/** The no-file placeholder or a conflict view. Only the placeholder is ever
- *  held (a first selection prepares out of sight, clipped over it), and
- *  undimmed: it isn't content. */
-function PaneFrame({ held, children }: { held: boolean; children: ReactNode }) {
-  return (
-    <div className="h-full" inert={held}>
-      {children}
-    </div>
-  );
-}
-
-/**
- * One file's slot. Its surfaces report their loading gates here; the slot is
- * settled once at least one gate has reported and every reported gate is
- * settled, and it reports each change of that state up: settling promotes it
- * while it is the preparing target, and either edge updates the shown file's
- * settle. A render-null arm that never reports is invisible to that check, so
- * each one reports. Held and preparing slots are inert and non-interactive.
- */
-function FileSlot({
-  slotKey,
-  repo,
-  phase,
-  onSettled,
-  focusRescue,
-  children,
-}: {
-  slotKey: string;
-  repo: string;
-  phase: SlotPhase;
-  onSettled: (key: string, repo: string, settled: boolean) => void;
-  focusRescue: RefObject<HTMLElement | null>;
-  children: ReactNode;
-}) {
-  const frameRef = useRef<HTMLDivElement>(null);
-  const [gates, setGates] = useState<ReadonlyMap<object, boolean>>(
-    () => new Map(),
-  );
-  // Stable on purpose: every gate's layout effect depends on it, so a fresh
-  // function per render would re-register them all in a loop.
-  const reportSettled = useCallback((settled: boolean) => {
-    const gate = {};
-    setGates((prev) => new Map(prev).set(gate, settled));
-    return () =>
-      setGates((prev) => {
-        const next = new Map(prev);
-        next.delete(gate);
-        return next;
-      });
-  }, []);
-  const settled = gates.size > 0 && Array.from(gates.values()).every(Boolean);
-  // Both edges: a shown slot that goes loading again (Raw to Preview, a
-  // rebuild's measure gap) must not be held by the next click.
-  useLayoutEffect(() => {
-    onSettled(slotKey, repo, settled);
-  }, [settled, slotKey, repo, onSettled]);
-  // `inert` blurs a focused descendant to <body> after this commit; hand focus
-  // to the pane's sink first.
-  useLayoutEffect(() => {
-    if (phase === "held" && frameRef.current?.contains(document.activeElement))
-      focusRescue.current?.focus({ preventScroll: true });
-  }, [phase, focusRescue]);
-  // Memoized for identity: the context reaches every gate in the slot.
-  const hold = useMemo<DiffPaneHoldValue>(
-    () => ({ interactive: phase === "shown", reportSettled }),
-    [phase, reportSettled],
-  );
-  return (
-    <div
-      ref={frameRef}
-      className={cn(
-        SLOT_FRAME_CLASS[phase],
-        PLACEHOLDER_FADE,
-        // The delay keeps a fast swap from flashing a half-dimmed pane.
-        phase === "held" && "opacity-80 delay-100",
-      )}
-      inert={phase !== "shown"}
-    >
-      <DiffPaneHold value={hold}>{children}</DiffPaneHold>
-    </div>
-  );
-}
-
 type HunkActionKind = "stage" | "unstage" | "discard";
+
+/** What a patch application does: `--cached` stages or unstages, a plain
+ *  reverse apply discards. */
+function writeKind(opts: {
+  cached: boolean;
+  reverse: boolean;
+}): HunkActionKind {
+  if (!opts.cached) return "discard";
+  return opts.reverse ? "unstage" : "stage";
+}
 
 // A hunk click refused because the live diff moved past the text it was shown
 // from: the house refusal shape, per kind.
@@ -375,6 +234,26 @@ const STALE_HUNK_ACTION: Record<HunkActionKind, string> = {
  *  from this pane is in flight or its reads haven't answered yet, or the
  *  displayed diff still trails the text it was given. */
 const UPDATING_DIFF_REASON = "Updating the diff…";
+
+/** What an unstaged-side Discard puts back, read from live status when its
+ *  confirm opens: the worktree reverts to the index copy, which is the staged
+ *  version once anything is staged and the last commit otherwise. */
+type DiscardRestores = "remove" | "unknown" | "staged" | "commit";
+
+const DISCARD_BODY: Record<
+  DiscardRestores,
+  (label: string, path: string) => string
+> = {
+  commit: (label, path) =>
+    `Reverts ${label} in ${path} to the last committed version. This cannot be undone.`,
+  staged: (label, path) =>
+    `Reverts ${label} in ${path} to the staged version. Staged changes to this file are kept. This cannot be undone.`,
+  remove: (label, path) =>
+    `Removes ${label} from ${path}. This cannot be undone.`,
+  // Status hasn't answered: name no version rather than guess one.
+  unknown: (label, path) =>
+    `Reverts ${label} in ${path}. This cannot be undone.`,
+};
 
 /** The hunk button a write was fired from, so focus can follow the hunks once
  *  the refreshed diff is on screen. */
@@ -496,13 +375,23 @@ function WorkingTreeDiff({
   const [discard, setDiscard] = useState<{
     label: string;
     run: () => void;
-    // A new (untracked) file has no committed version to revert to — the
-    // confirm wording changes from "revert to last committed" to "remove".
-    newFile?: boolean;
+    // Captured at open, like `run`: the close effect below drops the confirm
+    // once the text moves, so its copy can't change while it's up.
+    restores: DiscardRestores;
     // The diff text the confirm's `run` was built against — see the close
     // effect below.
     forText: string;
   } | null>(null);
+  // Live status, never the diff text (the discard always restores the index
+  // copy). Any staged change wins: if status lags with one, the index still
+  // equals HEAD, so "the staged version" stays true.
+  const discardRestores: DiscardRestores = untracked
+    ? "remove"
+    : liveEntry === undefined
+      ? "unknown"
+      : liveEntry.staged != null
+        ? "staged"
+        : "commit";
   // Declared with the hooks above the `!hunkMode` early return below.
   const shownDiscard = useRetained(discard);
   // The drag-selected lines to stage/unstage/discard — file-wide, since the
@@ -529,11 +418,17 @@ function WorkingTreeDiff({
   // answer marks the reads' cache entries showed at the settle. Pressing sets
   // it too, since `isPending` reaches render a task after the press.
   const [write, setWrite] = useState<{
+    // A stage or unstage, which keeps the view through an emptied side; a
+    // discard paints whatever its answer is.
+    keeps: boolean;
     settled: {
       diff: ReadonlySet<string>;
-      // Set for an untracked file only: its partial stage re-keys the diff
-      // from status, so the hold waits on status as well.
-      status: ReadonlySet<string> | null;
+      // The status answer the hold may also wait on (`statusWaitFor`), with
+      // the marks status showed at the settle.
+      status: {
+        wait: Exclude<StatusWait, null>;
+        marks: ReadonlySet<string>;
+      } | null;
     } | null;
   } | null>(null);
   // The fire-time refusal: set synchronously at the press and cleared when the
@@ -564,18 +459,21 @@ function WorkingTreeDiff({
   // the buttons.
   const settled = write?.settled ?? null;
   const diffBehind = settled !== null && !answeredSince(diff, settled.diff);
-  const statusBehind =
-    settled?.status != null && !answeredSince(status, settled.status);
+  // This side's answer is empty: a press may have emptied it, which only
+  // status can confirm.
+  const emptyAnswer = diff.data !== undefined && diff.data.text.trim() === "";
+  const statusWaiting =
+    settled?.status != null &&
+    statusBehind(
+      settled.status.wait,
+      answeredSince(status, settled.status.marks),
+      { answered: !diffBehind, empty: emptyAnswer },
+    );
   const refreshing =
-    write !== null && (settled === null || diffBehind || statusBehind);
-  // `parsed`, `hunkMode`, and `busy` are computed above the `!hunkMode` early
-  // return because the hotkey registrations below run unconditionally and read
-  // them.
-  const busy =
-    applyPatch.isPending ||
-    applyPartial.isPending ||
-    discardUntracked.isPending ||
-    refreshing;
+    write !== null && (settled === null || diffBehind || statusWaiting);
+  const onSide = file.staged
+    ? liveEntry?.staged != null
+    : liveEntry?.unstaged != null;
   // Before paint, so a button enabled by the release can't meet a stale ref.
   useLayoutEffect(() => {
     if (write === null || refreshing) return;
@@ -592,12 +490,12 @@ function WorkingTreeDiff({
   const refetchStatus = status.refetch;
   useEffect(() => {
     if (diffBehind && diffIdle) void refetchDiff({ cancelRefetch: false });
-    if (statusBehind && statusIdle)
+    if (statusWaiting && statusIdle)
       void refetchStatus({ cancelRefetch: false });
   }, [
     diffBehind,
     diffIdle,
-    statusBehind,
+    statusWaiting,
     statusIdle,
     refetchDiff,
     refetchStatus,
@@ -632,10 +530,68 @@ function WorkingTreeDiff({
   // so part of a new file can be committed. Binary/huge untracked files have
   // `parsed === null` and still fall through to the whole-file view below.
   const hunkMode = parsed !== null && parsed.hunks.length > 0;
+  const liveText = diff.data?.text;
+  const liveView = useMemo(
+    () =>
+      hunkMode && parsed !== null && liveText !== undefined
+        ? { text: liveText, hunks: parsed.hunks }
+        : null,
+    [hunkMode, parsed, liveText],
+  );
+  // A held or preparing slot is inert, but hotkeys and the portaled Discard
+  // confirm reach past `inert`, so each gates on this as well.
+  const { interactive } = useDiffPaneHold();
+  // The hunk view on screen stays painted, its controls held, where falling
+  // back would repaint the pane (see `stagingKeep`): a held slot paints what it
+  // settled with, and it is held exactly when a press's release and the
+  // selection's move land in one render. Only this pane's own stage or
+  // unstage sets the emptied keep, so an external change paints as it lands.
+  // The emptied keep is a token, so its bound can't outlive it.
+  const [lastView, setLastView] = useState(liveView);
+  const [emptied, setEmptied] = useState<object | null>(null);
+  const [leftExpiredFor, setLeftExpiredFor] = useState<object | null>(null);
+  const keep = stagingKeep(
+    { hasView: lastView !== null, emptied: emptied !== null },
+    {
+      live: liveView !== null,
+      interactive,
+      writeHolding: refreshing && write?.keeps === true,
+      emptiedByWrite:
+        write?.keeps === true && settled !== null && !diffBehind && emptyAnswer,
+      writeReleased: write === null,
+      onSide,
+      nonEmptyAnswer: diff.data !== undefined && !emptyAnswer,
+      leftBoundExpired: emptied !== null && leftExpiredFor === emptied,
+    },
+  );
+  const kept = keep.kept;
+  const shownView = liveView ?? (kept ? lastView : null);
+  if (shownView !== lastView) setLastView(shownView);
+  if (keep.emptied !== (emptied !== null)) setEmptied(keep.emptied ? {} : null);
+  // Status took the file off this side: the selection's move or prune is due a
+  // render later, but a collapsed Changes list never prunes, so the keep lets
+  // go after the bound.
+  const leftSide = emptied !== null && write === null && !onSide;
+  useEffect(() => {
+    if (!leftSide || emptied === null) return;
+    const bound = window.setTimeout(
+      () => setLeftExpiredFor(emptied),
+      HOLD_BOUND_MS,
+    );
+    return () => window.clearTimeout(bound);
+  }, [leftSide, emptied]);
+  // `busy` is computed above the early return because the hotkey
+  // registrations below run unconditionally and read it.
+  const busy =
+    applyPatch.isPending ||
+    applyPartial.isPending ||
+    discardUntracked.isPending ||
+    refreshing ||
+    kept;
   // A selection is valid only against the diff text it was dragged against —
   // stale by text means every consumer sees no selection at the same instant.
   const selection =
-    selectionState !== null && selectionState.forText === diff.data?.text
+    selectionState !== null && selectionState.forText === liveText
       ? selectionState.lines
       : null;
   // Preview swaps the staging view out entirely, so the selection actions and
@@ -643,12 +599,13 @@ function WorkingTreeDiff({
   // whole cluster while a drag selection exists). Same predicate as the
   // read-only surface, so the two hosts can't drift on what's previewable.
   const canPreview =
-    hunkMode && canPreviewMarkdown(file.path, repoPath, workingRevs);
+    shownView !== null && canPreviewMarkdown(file.path, repoPath, workingRevs);
   const previewOn = canPreview && mdView === "preview";
   useFocusOnControlsSwap(previewOn, controlsRef);
-  // A held or preparing slot is inert, but hotkeys and the portaled Discard
-  // confirm reach past `inert`, so each gates on this as well.
-  const { interactive } = useDiffPaneHold();
+  // Swapping between the staging view and the whole-file fallback (the file
+  // turned empty, header-only or binary, or back) unmounts the toolbar control
+  // that held focus, and the arm that mounts is new to it: land on the sink.
+  useFocusOnControlsSwap(shownView !== null, focusSink);
   // A confirm pending when the slot is held is dropped, not just hidden: a
   // retarget back to this file must never reopen it.
   if (!interactive && discard !== null) setDiscard(null);
@@ -676,7 +633,7 @@ function WorkingTreeDiff({
     () => setLangOpen(true),
     // In Preview the picker isn't mounted, so the action would open nothing.
     interactive &&
-      hunkMode &&
+      shownView !== null &&
       selection === null &&
       !previewOn &&
       Boolean(fileExt(file.path)),
@@ -691,19 +648,18 @@ function WorkingTreeDiff({
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
   // opened against (a refetch while the dialog is up), whichever arm opened it.
-  const liveText = diff.data?.text;
   useEffect(() => {
     if (discard !== null && discard.forText !== liveText) setDiscard(null);
   }, [discard, liveText]);
   // The fallback view renders no confirm, so a close in progress ended with
   // its unmount: nothing is left to wait for.
-  if (!hunkMode && confirmClosing) setConfirmClosing(false);
+  if (shownView === null && confirmClosing) setConfirmClosing(false);
   // A flag flip can leave the decoded text byte-identical, so the text-keyed
   // guards above never fire for it; leaving hunk mode clears both here.
   if (!hunkMode && selectionState !== null) setSelectionState(null);
   if (!hunkMode && discard !== null) setDiscard(null);
 
-  if (!hunkMode) {
+  if (shownView === null) {
     return (
       <DiffSurface
         filePath={file.path}
@@ -745,6 +701,7 @@ function WorkingTreeDiff({
   async function runWrite(
     mutate: () => Promise<unknown>,
     focus: HunkFocus | null,
+    kind: HunkActionKind,
   ) {
     if (writingRef.current) return;
     // A diff gone from the cache refuses too, silently: it has no flag to name.
@@ -756,8 +713,9 @@ function WorkingTreeDiff({
     }
     writingRef.current = true;
     hunkFocusRef.current = focus;
-    const wasUntracked = untracked;
-    setWrite({ settled: null });
+    const wait = statusWaitFor(kind, untracked);
+    const keeps = kind !== "discard";
+    setWrite({ keeps, settled: null });
     try {
       await mutate();
       clearSelection();
@@ -774,9 +732,13 @@ function WorkingTreeDiff({
           cache.findAll({ queryKey, exact }).map((q) => answerMark(q.state)),
         );
       setWrite({
+        keeps,
         settled: {
           diff: marks(repoKeys.diff(repoPath, file.path, file.staged), false),
-          status: wasUntracked ? marks(repoKeys.status(repoPath), true) : null,
+          status:
+            wait === null
+              ? null
+              : { wait, marks: marks(repoKeys.status(repoPath), true) },
         },
       });
     }
@@ -789,7 +751,11 @@ function WorkingTreeDiff({
   ) {
     if (!parsed) return;
     const patch = buildHunkPatch(parsed, hunk);
-    void runWrite(() => applyPatch.mutateAsync({ patch, ...opts }), focus);
+    void runWrite(
+      () => applyPatch.mutateAsync({ patch, ...opts }),
+      focus,
+      writeKind(opts),
+    );
   }
 
   // Stage/unstage/discard the file-wide line selection. `build_partial_patch`
@@ -801,6 +767,7 @@ function WorkingTreeDiff({
     void runWrite(
       () => applyPartial.mutateAsync({ diffText, selected, ...opts }),
       null,
+      writeKind(opts),
     );
   }
 
@@ -810,7 +777,11 @@ function WorkingTreeDiff({
   function discardLines(lines: number[], focus: HunkFocus | null) {
     if (lines.length === 0) return;
     const path = file.path;
-    void runWrite(() => discardUntracked.mutateAsync({ path, lines }), focus);
+    void runWrite(
+      () => discardUntracked.mutateAsync({ path, lines }),
+      focus,
+      "discard",
+    );
   }
 
   // A whole-hunk action, fired by the per-hunk buttons with the diff text that
@@ -821,6 +792,12 @@ function WorkingTreeDiff({
     forText: string,
     focus: HunkFocus,
   ) {
+    // The staged side offers no Discard (it would revert the working tree,
+    // not the staged hunk); a press that reaches here anyway is refused aloud.
+    if (kind === "discard" && file.staged) {
+      toast.info(STALE_HUNK_ACTION.discard);
+      return;
+    }
     if (writingRef.current) return;
     // A hunk from a stale display would patch lines the user never saw.
     if (forText !== (diff.data?.text ?? "")) {
@@ -838,8 +815,8 @@ function WorkingTreeDiff({
     }
     if (kind === "discard") {
       setDiscard({
-        label: hunk.header,
-        newFile: untracked,
+        label: `the hunk at ${hunkRangeText(hunk)}`,
+        restores: discardRestores,
         forText,
         run: untracked
           ? () => discardLines(hunkAddedNewLines(hunk), focus)
@@ -930,7 +907,7 @@ function WorkingTreeDiff({
                     onClick={() =>
                       setDiscard({
                         label: `${selection.length} selected ${selection.length === 1 ? "line" : "lines"}`,
-                        newFile: untracked,
+                        restores: discardRestores,
                         forText: diff.data?.text ?? "",
                         run: untracked
                           ? () =>
@@ -1065,13 +1042,14 @@ function WorkingTreeDiff({
             <StagingDiffView
               repoPath={repoPath}
               filePath={file.path}
-              diffText={diff.data?.text ?? ""}
+              diffText={shownView.text}
               contentRevs={workingRevs}
               viewMode={viewMode}
               isDark={isDark}
-              hunks={parsed.hunks}
+              hunks={shownView.hunks}
               staged={file.staged}
               busy={busy}
+              frozen={kept}
               selection={selection}
               onSelect={(lines, forText) =>
                 setSelectionState(lines === null ? null : { lines, forText })
@@ -1098,20 +1076,11 @@ function WorkingTreeDiff({
           <DialogHeader>
             <DialogTitle>Discard changes?</DialogTitle>
             <DialogDescription>
-              {shownDiscard?.newFile ? (
-                <>
-                  Removes{" "}
-                  <span className="font-mono">{shownDiscard?.label}</span> from{" "}
-                  {file.path}. This cannot be undone.
-                </>
-              ) : (
-                <>
-                  Reverts{" "}
-                  <span className="font-mono">{shownDiscard?.label}</span> in{" "}
-                  {file.path} to the last committed version. This cannot be
-                  undone.
-                </>
-              )}
+              {shownDiscard &&
+                DISCARD_BODY[shownDiscard.restores](
+                  shownDiscard.label,
+                  file.path,
+                )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1451,7 +1420,10 @@ interface HunkActionProps {
   hunk: DiffHunk;
   index: number;
   staged: boolean;
+  /** A press's own hold: a write from this pane in flight or refreshing. */
   busy: boolean;
+  /** The displayed diff trails the text the pane was given. */
+  trailing: boolean;
   onHunkAction: (
     hunk: DiffHunk,
     kind: HunkActionKind,
@@ -1459,17 +1431,27 @@ interface HunkActionProps {
   ) => void;
 }
 
-/** Stage/Unstage + Discard for one hunk, wherever its host is. Both buttons are
- *  described by the hunk's line range: their names repeat on every hunk, and
- *  the hosts don't sit in hunk order in the tab sequence. */
+/** Stage + Discard for one hunk, or Unstage alone on a staged diff (whose
+ *  Discard would revert the working tree, not the hunk shown), wherever its
+ *  host is. The buttons are described by the hunk's line range: their names
+ *  repeat on every hunk, and the hosts don't sit in hunk order in the tab
+ *  sequence. */
 function HunkActionButtons({
   hunk,
   index,
   staged,
   busy,
+  trailing,
   onHunkAction,
 }: HunkActionProps) {
   const rangeId = useId();
+  const held = busy || trailing;
+  // A refresh's trail delays the held look, so a fast one never blinks it; the
+  // vendored Button transitions everything with no reduced-motion arm, hence
+  // the explicit duration. Accepted: ARIA_DISABLED_CLASS drops pointer events
+  // at once, so a click in that first 100 ms does nothing, and the stale text
+  // would refuse it anyway.
+  const heldLook = trailing && !busy && "delay-100 motion-reduce:duration-0";
   const fire = (kind: HunkActionKind) => (e: ReactMouseEvent<HTMLElement>) => {
     // The second click of a double-click is ignored: the hold releases within
     // a double-click's interval, by which time the NEXT hunk's button can sit
@@ -1494,7 +1476,8 @@ function HunkActionButtons({
       <DisabledReasonButton
         variant="secondary"
         size="xs"
-        disabled={busy}
+        className={heldLook || undefined}
+        disabled={held}
         reason={UPDATING_DIFF_REASON}
         aria-describedby={rangeId}
         data-hunk-primary={index}
@@ -1503,18 +1486,20 @@ function HunkActionButtons({
       >
         {staged ? "Unstage" : "Stage"} hunk
       </DisabledReasonButton>
-      <DisabledReasonButton
-        variant="ghost"
-        size="xs"
-        className="text-destructive"
-        disabled={busy}
-        reason={UPDATING_DIFF_REASON}
-        aria-describedby={rangeId}
-        onKeyDown={swallowRepeatedActivation}
-        onClick={fire("discard")}
-      >
-        Discard…
-      </DisabledReasonButton>
+      {!staged && (
+        <DisabledReasonButton
+          variant="ghost"
+          size="xs"
+          className={cn("text-destructive", heldLook)}
+          disabled={held}
+          reason={UPDATING_DIFF_REASON}
+          aria-describedby={rangeId}
+          onKeyDown={swallowRepeatedActivation}
+          onClick={fire("discard")}
+        >
+          Discard…
+        </DisabledReasonButton>
+      )}
     </>
   );
 }
@@ -1571,6 +1556,7 @@ function StagingDiffView({
   hunks,
   staged,
   busy,
+  frozen,
   selection,
   onSelect,
   onHunkAction,
@@ -1587,6 +1573,8 @@ function StagingDiffView({
   hunks: DiffHunk[];
   staged: boolean;
   busy: boolean;
+  /** The parent is keeping this view up past its data: never rebuild it. */
+  frozen: boolean;
   selection: SelectedLine[] | null;
   onSelect: (lines: SelectedLine[] | null, forText: string) => void;
   onHunkAction: (
@@ -1610,18 +1598,72 @@ function StagingDiffView({
   const deferredText = useDeferredValue(diffText);
   const deferredPath = useDeferredValue(filePath);
   // The hunks parsed from `deferredText`: both resolve in the same deferred
-  // render, so the overlay and its buttons pair with the rows on screen. Each
-  // click carries `deferredText`, and the parent refuses it once the live text
-  // has moved past the display.
-  const viewHunks = useDeferredValue(hunks);
+  // render, so the overlay and its buttons pair with the rows on screen.
+  const deferredHunks = useDeferredValue(hunks);
+  // Hard-shorten over-long lines before rendering so a file with lines in the
+  // 4K–20K band can't freeze the un-virtualized renderer here either (past the
+  // mega threshold it falls back to the whole-file surface). DISPLAY-ONLY:
+  // shortening preserves line COUNT and numbers, so the drag manager, paint
+  // helpers, hunk anchors, and every mutation path (all working off the ORIGINAL
+  // text) stay correct. Measure once; unchanged files fast-path to the same
+  // string reference.
+  const live = useMemo(() => {
+    const longest = longestLineLength(deferredText);
+    if (longest <= DIFF_MAX_LINE_CHARS) {
+      return {
+        text: deferredText,
+        hunks: deferredHunks,
+        longestLine: longest,
+        displayText: deferredText,
+        shortened: 0,
+      };
+    }
+    const short = shortenLongLines(deferredText, DIFF_MAX_LINE_CHARS);
+    return {
+      text: deferredText,
+      hunks: deferredHunks,
+      longestLine: longest,
+      displayText: short.text,
+      shortened: short.shortened,
+    };
+  }, [deferredText, deferredHunks]);
+  // Whole-file highlight context + expand. The staging view renders every hunk
+  // regardless, so content mode may engage for big diffs too — bounded by the
+  // file highlight budget, not the read-only surface's render cap. `pending`
+  // holds the paint so the diff is built once in its final layout.
+  const {
+    content,
+    pending: contentPending,
+    hold: contentHold,
+  } = useFileContent(
+    repoPath,
+    deferredPath,
+    deferredText,
+    // Shortened hunk text (long lines cut) no longer lines up with the
+    // whole-file reads content mode maps syntax onto, and the reads are wasted
+    // IPC there — skip content mode once any line is over the shorten cap.
+    live.longestLine > DIFF_MAX_LINE_CHARS ? undefined : contentRevs,
+    HIGHLIGHT_MAX_LINES,
+    frozen,
+  );
+  // Through a refresh's hold the rows, the hunks over them, and the text a
+  // click carries all stay the build on screen; the parent refuses a click
+  // once its live text has moved past that display.
+  const {
+    text: shownText,
+    hunks: viewHunks,
+    displayText,
+    shortened,
+  } = useRetained(live, !contentHold);
   const onDisplayedHunkAction = useCallback(
     (hunk: DiffHunk, kind: HunkActionKind, focus: HunkFocus) =>
-      onHunkAction(hunk, kind, deferredText, focus),
-    [onHunkAction, deferredText],
+      onHunkAction(hunk, kind, shownText, focus),
+    [onHunkAction, shownText],
   );
   // The buttons hold until the display has caught up with the text the parent
   // released them for, not only until that text arrives.
-  const held = busy || deferredText !== diffText;
+  const trailing = shownText !== diffText;
+  const held = busy || trailing;
   // The hunk a hunk action's focus last landed on, re-landable while armed
   // (see the re-land effect below). A pointer press or a fresh key press is the
   // user taking over; a held key's auto-repeats are not, since the press that
@@ -1650,46 +1692,13 @@ function StagingDiffView({
     disarmRef.current = disarm;
   }, []);
   useEffect(() => disarmReland, [disarmReland]);
-  // Hard-shorten over-long lines before rendering so a file with lines in the
-  // 4K–20K band can't freeze the un-virtualized renderer here either (past the
-  // mega threshold it falls back to the whole-file surface). DISPLAY-ONLY:
-  // shortening preserves line COUNT and numbers, so the drag manager, paint
-  // helpers, hunk anchors, and every mutation path (all working off the ORIGINAL
-  // text) stay correct. Measure once; unchanged files fast-path to the same
-  // string reference.
-  const { longestLine, displayText, shortened } = useMemo(() => {
-    const longest = longestLineLength(deferredText);
-    if (longest <= DIFF_MAX_LINE_CHARS) {
-      return { longestLine: longest, displayText: deferredText, shortened: 0 };
-    }
-    const short = shortenLongLines(deferredText, DIFF_MAX_LINE_CHARS);
-    return {
-      longestLine: longest,
-      displayText: short.text,
-      shortened: short.shortened,
-    };
-  }, [deferredText]);
-  // Whole-file highlight context + expand. The staging view renders every hunk
-  // regardless, so content mode may engage for big diffs too — bounded by the
-  // file highlight budget, not the read-only surface's render cap. `pending`
-  // holds the paint so the diff is built once in its final layout.
-  const { content, pending: contentPending } = useFileContent(
-    repoPath,
-    deferredPath,
-    deferredText,
-    // Shortened hunk text (long lines cut) no longer lines up with the
-    // whole-file reads content mode maps syntax onto, and the reads are wasted
-    // IPC there — skip content mode once any line is over the shorten cap.
-    longestLine > DIFF_MAX_LINE_CHARS ? undefined : contentRevs,
-    HIGHLIGHT_MAX_LINES,
-  );
   // `blocked` is omitted: a mega-line file never reaches this view —
   // WorkingTreeDiff routes it to the whole-file DiffSurface fallback first.
   const { holdForGrammar, grammarState, workerHighlighter } = useShikiRouting({
     filePath: deferredPath,
     text: displayText,
     content: content ?? null,
-    contentPending,
+    contentPending: contentPending || contentHold,
     syntaxMap,
     customLanguages,
   });
@@ -1697,12 +1706,12 @@ function StagingDiffView({
   // Built from the shortened DISPLAY text; the original text still backs every
   // stage/unstage/discard patch (see WorkingTreeDiff). Null while content reads
   // are pending: don't build an intermediate diff the arriving reads would
-  // immediately restructure.
+  // immediately restructure; through a refresh's hold, the build on screen.
   // grammarState: rebuild-trigger dep — see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
-  const diffFile = useMemo(
+  const builtDiffFile = useMemo(
     () =>
-      contentPending || holdForGrammar
+      contentPending || holdForGrammar || contentHold
         ? null
         : createDiffFile(
             deferredPath,
@@ -1718,9 +1727,14 @@ function StagingDiffView({
       content,
       contentPending,
       holdForGrammar,
+      contentHold,
       grammarState,
     ],
   );
+  const diffFile = useRetained(builtDiffFile, !contentHold);
+  // A hold over a view that never built (a grammar was still loading) has
+  // nothing to keep, so it renders nothing too.
+  const holdBlank = contentHold && diffFile === null;
 
   // The library can expand collapsed context but offers no way back; track when
   // the user has expanded so we can show a Collapse control. Reset per diff.
@@ -1739,12 +1753,12 @@ function StagingDiffView({
   const split = viewMode === "split";
   // A split drag crosses whole rows, so each side of a crossed row is classified
   // against the diff's own `-`/`+` numbers: context and expanded context sit in
-  // neither set. Keyed on `deferredText`, which classifies identically to the
+  // neither set. Keyed on `shownText`, which classifies identically to the
   // `displayText` the rows are built from (shortenLongLines only truncates long
   // lines, preserving line count and numbering; capDiffText, which drops lines,
   // is not on this path). The parent's `hunks` prop tracks the LIVE text, which
   // can lead the deferred rows, so reusing it would misclassify in that window.
-  const changed = useMemo(() => changedLinesOf(deferredText), [deferredText]);
+  const changed = useMemo(() => changedLinesOf(shownText), [shownText]);
 
   // Inline hunk headers ride the library's extend rows. Both props reach its
   // store in a passive effect, so everything a header shows (the hunks, held,
@@ -1770,13 +1784,14 @@ function StagingDiffView({
             hunk={hunk}
             index={data.hunk}
             staged={staged}
-            busy={held}
+            busy={busy}
+            trailing={trailing}
             onHunkAction={onDisplayedHunkAction}
           />
         </HunkHeaderBar>
       );
     },
-    [viewHunks, split, staged, held, onDisplayedHunkAction],
+    [viewHunks, split, staged, busy, trailing, onDisplayedHunkAction],
   );
 
   useEffect(() => {
@@ -1912,7 +1927,7 @@ function StagingDiffView({
         paintLines(container, next, split);
         // Stamp against the text these rows were BUILT from — the live
         // diff.data.text can already be newer while the deferred render lags.
-        onSelectRef.current(next.length ? next : null, deferredText);
+        onSelectRef.current(next.length ? next : null, shownText);
       },
     });
     paintLines(container, selectedRef.current ?? [], split); // re-assert after (re)mount
@@ -1921,7 +1936,7 @@ function StagingDiffView({
       container.removeEventListener("mouseover", onMouseOver);
       manager.destroy();
     };
-  }, [diffFile, split, deferredText, changed]);
+  }, [diffFile, split, shownText, changed]);
 
   // Paint the committed selection from state (incl. cleared → []).
   useEffect(() => {
@@ -2103,6 +2118,7 @@ function StagingDiffView({
   useReportPaneSettled(
     !contentPending &&
       !holdForGrammar &&
+      !holdBlank &&
       (diffFile === null ||
         !diffRendersRows(diffFile) ||
         anchors.some((a) => a.top >= 0)),
@@ -2114,7 +2130,7 @@ function StagingDiffView({
   // placeholder so loading never reads as "No changes to show". The effects above
   // guard on `!diffFile`, so they no-op while pending and re-bind on the single
   // build.
-  if (contentPending || holdForGrammar) return null;
+  if (contentPending || holdForGrammar || holdBlank) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   // A line-1 hunk has nothing above it to host its buttons — the pane-top bar
   // instead. Predicted from the hunk so it paints with the first rows; a measure
@@ -2156,7 +2172,8 @@ function StagingDiffView({
             hunk={viewHunks[0]}
             index={0}
             staged={staged}
-            busy={held}
+            busy={busy}
+            trailing={trailing}
             onHunkAction={onDisplayedHunkAction}
           />
         </HunkHeaderBar>
@@ -2191,7 +2208,8 @@ function StagingDiffView({
               hunk={viewHunks[i]}
               index={i}
               staged={staged}
-              busy={held}
+              busy={busy}
+              trailing={trailing}
               onHunkAction={onDisplayedHunkAction}
             />
           </div>

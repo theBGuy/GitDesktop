@@ -23,6 +23,14 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
+import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+} from "@/features/diff/file-slot";
 import { presentError } from "@/lib/error-summary";
 import {
   useCommitAuthorAvatarIndex,
@@ -57,11 +65,14 @@ export function FileHistoryDialog({
     if (!open) setSelected(null);
   }, [open]);
 
-  const diff = useCommitFileDiff(
-    repoPath,
-    open ? activeHash : null,
-    open ? path : null,
-  );
+  // The diff swaps through the pane's two-slot hold, keyed on the commit (the
+  // rail is commits); the dialog's file is the entity, and a closed dialog
+  // rests on the placeholder so a reopen starts fresh.
+  const diffTarget =
+    open && activeHash
+      ? keyedPaneView(repoPath, path, activeHash, activeHash)
+      : placeholderPaneView(path);
+  const diffSlots = useFileSlots(diffTarget);
   const name = path.split("/").pop() ?? path;
 
   // A failed read never reads as "No history for this file.": with nothing
@@ -169,6 +180,7 @@ export function FileHistoryDialog({
                       type="button"
                       key={c.hash}
                       data-hash={c.hash}
+                      aria-current={c.hash === activeHash || undefined}
                       onClick={() => setSelected(c.hash)}
                       className={cn(
                         "flex w-full items-start gap-2 border-b px-2.5 py-2 text-left text-xs",
@@ -217,23 +229,52 @@ export function FileHistoryDialog({
           </div>
 
           <div className="min-h-0 flex-1 overflow-hidden border">
-            {activeHash ? (
-              <DiffSurface
-                filePath={path}
-                diff={diff}
-                repoPath={repoPath}
-                imageRevs={{ old: `${activeHash}~1`, new: activeHash }}
-                contentRevs={{
-                  oldRev: `${activeHash}~1`,
-                  newRev: activeHash,
-                }}
-              />
-            ) : (
-              <DiffPlaceholder message="Select a commit" />
-            )}
+            <FileSlots
+              slots={diffSlots}
+              target={diffTarget}
+              busy={diffSlots.holding || diffSlots.read.loading}
+            >
+              {(view) =>
+                view.kind === "file" ? (
+                  <FileHistoryDiffSlot
+                    repoPath={repoPath}
+                    path={path}
+                    hash={view.file}
+                    reportRead={diffSlots.reportRead}
+                  />
+                ) : (
+                  <DiffPlaceholder message="Select a commit" />
+                )
+              }
+            </FileSlots>
           </div>
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The dialog file's diff at one commit, in the pane's slot, on its own read. */
+function FileHistoryDiffSlot({
+  repoPath,
+  path,
+  hash,
+  reportRead,
+}: {
+  repoPath: string;
+  path: string;
+  hash: string;
+  reportRead: (read: SlotRead) => void;
+}) {
+  const diff = useCommitFileDiff(repoPath, hash, path);
+  useSlotRead(reportRead, diff);
+  return (
+    <DiffSurface
+      filePath={path}
+      diff={diff}
+      repoPath={repoPath}
+      imageRevs={{ old: `${hash}~1`, new: hash }}
+      contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
+    />
   );
 }
