@@ -2055,8 +2055,7 @@ mod tests {
         );
         assert_eq!(gate.entries[&key].kind, LimitKind::Secondary);
         assert_eq!(gate.entries[&key].clear_floor, RATE_NOW + 900);
-        assert!(gate.entries[&key].until >= RATE_NOW + 900);
-        assert_eq!(gate.entries[&key].recheck_at, RATE_NOW + 62);
+        assert_eq!(gate.entries[&key].until, RATE_NOW + 900);
         assert_eq!(gate.verdict(&key, RATE_NOW + 899, 7), Verdict::Hold);
     }
 
@@ -2436,21 +2435,22 @@ mod tests {
     #[test]
     fn rate_answered_non_limit_resets_secondary_strikes() {
         let key = rate_key();
-        for (stderr, clears) in [
-            ("gh: Not Found (HTTP 404)", true),
-            ("HTTP 403: Resource not accessible", true),
+        for (stderr, clears, expected_until) in [
+            ("gh: Not Found (HTTP 404)", true, RATE_NOW + 121),
+            ("HTTP 403: Resource not accessible", true, RATE_NOW + 121),
             (
                 "gh: API rate limit exceeded for user ID 1. (HTTP 403)",
                 false,
+                RATE_NOW + 180,
             ),
-            ("HTTP 429: Too Many Requests", false),
-            ("gh: Too Many Requests (HTTP 429)", false),
-            ("HTTP 4040: odd", false),
-            ("(HTTP 4040)", false),
-            ("HTTP 40: odd", false),
-            ("HTTP 4ab: odd", false),
-            ("HTTP 500: failed", false),
-            ("connection failed", false),
+            ("HTTP 429: Too Many Requests", false, RATE_NOW + 181),
+            ("gh: Too Many Requests (HTTP 429)", false, RATE_NOW + 181),
+            ("HTTP 4040: odd", false, RATE_NOW + 180),
+            ("(HTTP 4040)", false, RATE_NOW + 180),
+            ("HTTP 40: odd", false, RATE_NOW + 180),
+            ("HTTP 4ab: odd", false, RATE_NOW + 180),
+            ("HTTP 500: failed", false, RATE_NOW + 180),
+            ("connection failed", false, RATE_NOW + 180),
         ] {
             let mut gate = RateGate::default();
             gate.record(
@@ -2484,7 +2484,7 @@ mod tests {
             assert_eq!(gate.entries.contains_key(&key), !clears);
             if !clears {
                 assert_eq!(gate.entries[&key].strikes, 2);
-                assert_eq!(gate.entries[&key].until, gate.entries[&key].clear_floor);
+                assert_eq!(gate.entries[&key].until, expected_until, "{stderr}");
             }
             if clears {
                 gate.record(
@@ -2494,7 +2494,7 @@ mod tests {
                     7,
                     0,
                 );
-                assert_eq!(gate.entries[&key].until, RATE_NOW + 121);
+                assert_eq!(gate.entries[&key].until, expected_until, "{stderr}");
             }
         }
         let mut out = rate_out("HTTP 404: Not Found", "");
@@ -3097,7 +3097,7 @@ mod tests {
     }
 
     #[test]
-    fn rate_old_generation_header_cannot_shorten_hold() {
+    fn rate_refusal_header_cannot_shorten_a_secondary_wait() {
         for generation in [4, 5, 6] {
             let gate = generation_five_hold();
             gate_after_inner(
