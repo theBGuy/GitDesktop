@@ -1097,8 +1097,9 @@ and the view refreshes so you can decide again.
 ## Resolving conflicts
 
 During a **merge**, **rebase**, **cherry-pick**, or **revert**, a slim banner appears in
-**Changes** naming the operation and its conflict count, with **Abort** and a finish control
-that names it too (**Finish merge**, **Continue rebase**, **Continue cherry-pick**,
+**Changes** naming the operation and its conflict count or, when nothing is left to resolve,
+why a rebase stopped (an exec step, a break), with **Abort** and a finish control that names
+it too (**Finish merge**, **Continue rebase**, **Continue cherry-pick**,
 **Continue revert**). Conflicts from reapplying your stashed changes get the same banner
 without **Abort** or a finish control, since nothing is left in progress: resolve the files,
 and after a **Stash and reapply** the banner then offers to drop or keep the backup stash.

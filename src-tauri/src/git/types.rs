@@ -321,8 +321,9 @@ pub struct RepoOpState {
     /// Why an in-progress rebase is stopped, from the last line of
     /// `rebase-merge/done` (git appends the in-flight item before running it):
     /// "edit" | "pick" | "exec" | "break" | "other". `None` when `rebasing`
-    /// is false. "pick" covers the pick family (pick/reword/squash/fixup —
-    /// a conflict stop or an emptied commit); the apply backend
+    /// is false. "pick" covers pick/reword/squash/fixup and an edit without an
+    /// `amend` marker, e.g. a conflict stop, an emptied commit, or a rescheduled
+    /// pick. "edit" requires the `amend` marker. The apply backend
     /// (`rebase-apply`: `rebase --apply` or `git am`, no done file) and any
     /// unreadable or unrecognized state read as "other", never as a guessed
     /// kind.
@@ -332,8 +333,8 @@ pub struct RepoOpState {
 impl RepoOpState {
     /// Whether a multi-step operation is mid-flight — the single home of the flag
     /// list, so a gate can't drift by re-listing the fields and missing one.
-    /// `edit_paused` is excluded: it qualifies `rebasing` rather than standing on
-    /// its own.
+    /// `edit_paused` and `rebase_stop` are excluded: they qualify `rebasing`
+    /// rather than standing on their own as flags.
     pub fn mid_op(&self) -> bool {
         self.merging || self.rebasing || self.cherry_picking || self.reverting
     }

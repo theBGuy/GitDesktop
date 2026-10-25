@@ -248,7 +248,7 @@ export function ConflictBanner({
   const busy = abortOp.isPending || continueOp.isPending;
   const onError = (e: unknown) => toastError(e);
   const opVerb = op ? OP_LABELS[op].verb : null;
-  // Read only under conflictedCount > 0; a stop with none left says why below.
+  // Read only under conflictedCount > 0; a stop with none left reads opStoppedText below.
   const conflictText = `${conflictedCount} conflict${conflictedCount === 1 ? "" : "s"}`;
   const opText =
     op === null

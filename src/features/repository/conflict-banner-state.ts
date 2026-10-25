@@ -56,8 +56,8 @@ const REBASE_STOPPED = "Rebase stopped — Continue or Abort.";
 
 type RebaseStop = NonNullable<RepoOpState["rebaseStop"]>;
 
-/** A `done` line is written before its step runs, so the exec copy claims only
- *  that the rebase stopped there, never that the step failed. */
+/** A `done` line is written before its step runs, so the exec copy can also
+ *  show while that exec is still running; it never claims the step failed. */
 const REBASE_STOP_TEXT: Record<RebaseStop, string> = {
   pick: `${OP_VERBS.rebase} · no conflicts left`,
   exec: "Rebase stopped after an exec step — Continue or Abort.",

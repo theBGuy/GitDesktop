@@ -9,9 +9,9 @@ use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::runner::{
-    acquire_repo_lock, run_git, run_git_mutating, run_git_mutating_raw, run_git_raw,
+    acquire_repo_lock, holder_label, run_git, run_git_mutating, run_git_mutating_raw, run_git_raw,
     run_git_raw_env, run_git_raw_index_retry, run_git_raw_input, run_git_worktree_admin,
-    DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
+    subcommand_of, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, NETWORK_LOCK_WAIT_TIMEOUT, NETWORK_TIMEOUT,
     WORKTREE_OP_TIMEOUT,
 };
 use crate::git::types::{FileDiff, RepoOpState, RewriteStep, StashEntry, TagInfo};
@@ -247,10 +247,7 @@ pub(crate) fn rebase_marker_present(repo: &str) -> bool {
     })
 }
 
-/// True when an interactive rebase is paused at an `edit` instruction (the last
-/// executed todo line is `edit`/`e`), as opposed to a conflict. git writes
-/// `rebase-merge/amend` only at a completed edit stop: an `edit` line that itself
-/// failed (a held index.lock, a conflict) leaves the same `done` without it.
+/// Whether a rebase reached an amendable edit pause, rather than a failed edit pick.
 fn rebase_stopped_for_edit(git_dir: &Path) -> bool {
     rebase_stop_kind(git_dir) == Some("edit")
 }
@@ -265,6 +262,8 @@ fn last_rebase_instruction(done: &str) -> Option<(&str, Option<&str>)> {
 }
 
 /// Unreadable or unrecognized rebase state yields "other", never a guessed stop kind.
+/// Git writes `rebase-merge/amend` only at a completed edit stop; a failed edit
+/// pick (a held index.lock or conflict) is in `done` but lacks that marker.
 fn rebase_stop_kind(git_dir: &Path) -> Option<&'static str> {
     if !rebase_in_progress(git_dir) {
         return None;
@@ -272,7 +271,8 @@ fn rebase_stop_kind(git_dir: &Path) -> Option<&'static str> {
     let done = std::fs::read_to_string(git_dir.join("rebase-merge/done")).unwrap_or_default();
     Some(match last_rebase_instruction(&done).map(|(verb, _)| verb) {
         Some("edit" | "e") if git_dir.join("rebase-merge/amend").exists() => "edit",
-        Some("pick" | "p" | "reword" | "r" | "squash" | "s" | "fixup" | "f") => "pick",
+        Some("edit" | "e") => "pick",
+        Some(v) if is_fold(v) || matches!(v, "pick" | "p" | "reword" | "r") => "pick",
         Some("exec" | "x") => "exec",
         Some("break" | "b") => "break",
         _ => "other",
@@ -455,8 +455,8 @@ async fn empty_fold_stop(git_dir: &Path, repo: &str, failure: &str) -> Option<(S
     Some((message.to_str()?.to_string(), lines.len()))
 }
 
-/// The caller supplies its runner: edit holds the domain already, whereas each
-/// banner mutation acquires it separately. A failed rescue keeps the prior error.
+/// Callers hold the working-tree domain across the probe and every runner call.
+/// A failed rescue keeps the prior error.
 async fn recover_empty_folds<F, Fut>(
     repo: &str,
     git_dir: &Path,
@@ -742,6 +742,7 @@ pub(crate) async fn op_abort(state: &AppState, repo_path: &str, op: &str) -> App
 /// Finishes an in-progress operation once every conflict is resolved and
 /// staged. A merge concludes with its commit; rebase/cherry-pick/revert continue
 /// with `core.editor=true` so git never tries to open an editor.
+/// Empty-fold recovery applies to any rebase continued here, terminal-started included.
 ///
 /// `false` means the pending cherry-pick was dropped as empty instead of
 /// committed (the resolution left nothing to commit); `true` that the operation
@@ -757,7 +758,8 @@ pub async fn git_op_continue(
 }
 
 /// Testable core of [`git_op_continue`] — takes a plain `&AppState` so real-repo
-/// tokio tests can drive it. Same `bool` contract.
+/// tokio tests can drive it. Same `bool` contract. One working-tree hold covers
+/// continuation, recovery/skip, classification, and journal close.
 pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> AppResult<bool> {
     validate_op(op)?;
     let args: Vec<&str> = match op {
@@ -767,11 +769,21 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
         "merge" => vec!["commit", "--no-edit", "--cleanup=strip"],
         other => vec!["-c", "core.editor=true", other, "--continue"],
     };
+    // Only lock-free runners inside this compound, including recovery probes.
+    let domain = state.working_tree_lock(repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(&args)),
+    )
+    .await?;
     // Raw: a `--continue` refused over unresolved paths reports `<path>: needs
     // merge` on STDOUT with stderr empty (measured, git 2.51.1), which a
     // stderr-only error renders as "git exited with code 1".
-    let out = run_git_mutating_raw(state, repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(repo_path, &args, DEFAULT_TIMEOUT).await?;
     let out = if op == "rebase" && out.code != 0 {
+        // This includes terminal-started rebases continued here: git's own advice
+        // for this stop is the same commit-and-continue recovery.
         if let Some(git_dir) = absolute_git_dir(repo_path).await {
             recover_empty_folds(
                 repo_path,
@@ -781,7 +793,7 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
                 DEFAULT_TIMEOUT,
                 |args, timeout| async move {
                     let args: Vec<_> = args.iter().map(String::as_str).collect();
-                    run_git_mutating_raw(state, repo_path, &args, timeout).await
+                    run_git_raw_index_retry(repo_path, &args, timeout).await
                 },
             )
             .await?
@@ -801,13 +813,9 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
         if op == "cherry-pick"
             && (out.stderr.contains("is now empty") || out.stderr.contains("--allow-empty"))
         {
-            let skip = run_git_mutating_raw(
-                state,
-                repo_path,
-                &["cherry-pick", "--skip"],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
+            let skip =
+                run_git_raw_index_retry(repo_path, &["cherry-pick", "--skip"], DEFAULT_TIMEOUT)
+                    .await?;
             if skip.code == 0 {
                 // The skip ended the pick just as a commit would, so the journal's
                 // paused record closes here too.
@@ -5436,10 +5444,10 @@ pub(crate) async fn rewrite_commits_with_timeouts(
 
     // One hold across read → rebase → rollback covers this process's in-app ops; the MCP
     // server's separate AppState lock is outside it. The start-tip gate catches
-    // pre-start changes; a poll can briefly show the `break` pause's banner.
-    // Commits another git process makes WHILE rebase runs are unsupported: a
-    // rollback may drop them (the reflog keeps them). Only lock-free runners may
-    // run while held (see `run_git_mutating`).
+    // pre-start changes; a poll can briefly show `break`, or `exec` while a group
+    // or reword script runs. Commits another git process makes WHILE the rebase runs
+    // are unsupported: a rollback may drop them (the reflog keeps them). Only
+    // lock-free runners may run while held (see `run_git_mutating`).
     let domain = state.working_tree_lock(repo_path).await;
     let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a history rewrite").await?;
 
@@ -5596,6 +5604,7 @@ pub async fn git_rebase_edit(
     rebase_edit(&state, repo_path, base, steps, dropped).await
 }
 
+/// Testable core of [`git_rebase_edit`].
 pub(crate) async fn rebase_edit(
     state: &AppState,
     repo_path: String,
@@ -5606,8 +5615,8 @@ pub(crate) async fn rebase_edit(
     rebase_edit_with_timeout(state, repo_path, base, steps, dropped, DEFAULT_TIMEOUT).await
 }
 
-/// [`git_rebase_edit`] with the timeout of the `rebase --continue` that runs the plan
-/// after the start-tip gate injectable; every other git call keeps `DEFAULT_TIMEOUT`.
+/// [`rebase_edit`] with an injectable timeout for the plan's continue and each
+/// recovery re-drive; every other git call keeps `DEFAULT_TIMEOUT`.
 pub(crate) async fn rebase_edit_with_timeout(
     state: &AppState,
     repo_path: String,
@@ -5637,8 +5646,8 @@ pub(crate) async fn rebase_edit_with_timeout(
     let guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a history rewrite").await?;
 
     // Refuse while a sequencer op is mid-flight, BEFORE the scratch-dir clear below:
-    // it would delete that rebase's pending message files, and its `exec … -F msg`
-    // lines would fail on --continue. [`op_state`]'s detection is the one marker set.
+    // it would delete that rebase's pending message files and scripts, and its pending
+    // `exec` lines would fail on --continue. [`op_state`]'s detection is the one marker set.
     if op_in_progress(&repo_path).await {
         return Err(AppError::InvalidArgument(MID_OP_REFUSAL.into()));
     }
@@ -5811,7 +5820,8 @@ const REBASE_DIR_EXISTS: &str = "It seems that there is already a rebase-merge d
 /// keep git's own fallback todo a plain pick list, which the missing-commits check
 /// compares ours against; `--no-verify` skips the pre-rebase hook. post-checkout fires
 /// at the start; post-rewrite fires at the finish, with the scripts mapping rewords
-/// on both routes and fold groups on the replay route.
+/// on both routes and fold groups on the replay route; on the edit route git's
+/// native folds also fire their own `post-rewrite amend`.
 const REBASE_START_ARGS: [&str; 22] = [
     "-c",
     "core.editor=true",
@@ -6035,12 +6045,11 @@ fn group_script(git: &str, leader: &str, folds: &[String], message_file: Option<
     script
 }
 
-/// The sh script a reword runs (LF only) after its pick: it amends with the new
-/// message, then points the pick's rewritten-list line at the amended commit. git
-/// records that line before the exec, so it would otherwise send the pick's notes and
-/// post-rewrite to the orphaned pre-amend commit; `--no-post-rewrite` leaves the
-/// finish's mapping as the only one. Only replay runs commit hooks. A temp file and `mv`
-/// stand in for `sed -i`, whose syntax differs between GNU and BSD sed.
+/// The LF-only reword script runs after its pick or, on the edit route, after
+/// a group's native fixups. Every rewritten-list line naming the pre-amend commit
+/// must point at the amended one, so notes and rebase-finish mappings reach it.
+/// This amend emits no post-rewrite event; only replay runs commit hooks. A temp
+/// file and `mv` stand in for `sed -i`, whose syntax differs between GNU and BSD sed.
 fn reword_script(git: &str, message_file: &str, route: TodoRoute) -> String {
     let verify = match route {
         TodoRoute::Replay => "",
@@ -10982,8 +10991,8 @@ mod tests {
             ("x", "exec"),
             ("break", "break"),
             ("b", "break"),
-            ("edit", "other"),
-            ("e", "other"),
+            ("edit", "pick"),
+            ("e", "pick"),
             ("label", "other"),
             ("", "other"),
         ] {
@@ -11150,6 +11159,21 @@ mod tests {
         let git_dir = git_dir_of(&repo).await;
         let todo = git_dir.join("rebase-merge/git-rebase-todo");
         assert!(empty_fold_stop(&git_dir, &repo, &failure).await.is_some());
+        let amend = git_dir.join("rebase-merge/amend");
+        let original_amend = std::fs::read_to_string(&amend).unwrap();
+        std::fs::write(&amend, format!("{c}\n")).unwrap();
+        assert!(
+            empty_fold_stop(&git_dir, &repo, &failure).await.is_none(),
+            "a mismatched amend oid must refuse recovery"
+        );
+        std::fs::write(&amend, original_amend).unwrap();
+        // HEAD resolves to a non-empty commit, but todo operands must be hashes.
+        std::fs::write(&todo, "fixup HEAD\n").unwrap();
+        assert!(
+            empty_fold_stop(&git_dir, &repo, &failure).await.is_none(),
+            "a non-hash next token must refuse recovery"
+        );
+        std::fs::write(&todo, format!("fixup {c}\n")).unwrap();
         let stopped = git_dir.join("rebase-merge/stopped-sha");
         let done = git_dir.join("rebase-merge/done");
         let original_done = std::fs::read_to_string(&done).unwrap();
