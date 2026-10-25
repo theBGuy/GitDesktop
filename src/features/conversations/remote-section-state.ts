@@ -1,5 +1,5 @@
-// Pure, import-free: node test suites and other import-free modules load this
-// file through Node's type stripping, which resolves no aliases.
+// Pure, import-free: node test suites, and modules that suites load, import
+// this file through Node's type stripping, which resolves no aliases.
 
 /** The degraded notice's link-style action; extra actions wear it too. */
 export const DEGRADED_ACTION_CLASS =

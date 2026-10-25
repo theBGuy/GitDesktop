@@ -2997,11 +2997,11 @@ Bitbucket).
 
 The repository statistics stay up if a background refresh fails, with a line saying they
 couldn't refresh and a **Retry**. If they fail to load, the panel says why and offers
-**Retry**. On the board, a chart that can't load says so, and one line at the top offers
-a single **Retry** for every failed chart. When a failed chart has nothing loaded, that
-line gives the first failure's reason in board order, if known. A chart that fails to
-refresh keeps its last loaded data. While you're offline, a hosted card with nothing
-loaded says it will load once you're back online.`,
+**Retry**. On the board, a chart whose local read fails says so, and one line at the top
+offers a single **Retry** for every failed chart. When a failed chart has nothing loaded,
+that line gives the first failure's reason in board order, if known. A local chart that
+fails to refresh keeps its last loaded data. While you're offline, a hosted card with
+nothing loaded says it will load once you're back online.`,
   },
   {
     id: "code-todos",

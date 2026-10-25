@@ -374,7 +374,10 @@ export function InsightsBoard({
           <InsightCard
             title="Commit activity"
             bodyClassName={CARD_BODY.chart}
-            stale={commitActivity.isPlaceholderData}
+            stale={
+              commitActivity.isPlaceholderData &&
+              cardBody(commitActivity, isRetrying) === "data"
+            }
           >
             {commitActivity.data === undefined ||
             cardBody(commitActivity, isRetrying) !== "data" ? (
@@ -394,7 +397,10 @@ export function InsightsBoard({
           <InsightCard
             title="Code frequency"
             bodyClassName={CARD_BODY.chart}
-            stale={codeFreq.isPlaceholderData}
+            stale={
+              codeFreq.isPlaceholderData &&
+              cardBody(codeFreq, isRetrying) === "data"
+            }
           >
             {codeFreq.data === undefined ||
             cardBody(codeFreq, isRetrying) !== "data" ? (
@@ -415,7 +421,10 @@ export function InsightsBoard({
             title="Contributors"
             className="xl:col-span-2"
             bodyClassName={CARD_BODY.contributors}
-            stale={contributors.isPlaceholderData}
+            stale={
+              contributors.isPlaceholderData &&
+              cardBody(contributors, isRetrying) === "data"
+            }
           >
             {contributors.data === undefined ||
             cardBody(contributors, isRetrying) !== "data" ? (
@@ -435,7 +444,10 @@ export function InsightsBoard({
           <InsightCard
             title="Commits by day & hour"
             className="xl:col-span-2"
-            stale={punchCard.isPlaceholderData}
+            stale={
+              punchCard.isPlaceholderData &&
+              cardBody(punchCard, isRetrying) === "data"
+            }
           >
             {punchCard.data === undefined ||
             cardBody(punchCard, isRetrying) !== "data" ? (

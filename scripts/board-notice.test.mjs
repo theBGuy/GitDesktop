@@ -1,13 +1,15 @@
 // Pins the Insights board's failure decisions
 // (src/features/repository/insights/board-notice.ts): which cards count as
-// loaded, what a card with no data draws, the per-card-and-window memory of
-// each card's last reason, and the board's one notice line. The read states
-// come from query-core 5.104.5: a refetch of a read with data keeps `isError`;
-// a refetch of a never-loaded read resets it to pending (`isError` false,
-// `error` null) and keeps `errorUpdatedAt`; a window toggle serves the other
-// window's data as placeholder until its own read lands.
+// loaded, what a card with no data draws, the per-repository memory of each
+// card's last reason (per window for the windowed cards), and the board's one
+// notice line. The read states come from query-core 5.104.5: a refetch of a
+// read with data keeps `isError`; a refetch of a never-loaded read resets it
+// to pending (`isError` false, `error` null) and keeps `errorUpdatedAt`; a
+// window toggle serves the other window's data as placeholder until its own
+// read lands.
 //
-// Not testable here: the board's Retry token and its settle, and the live
+// Not testable here: the board's Retry token and its settle, the repositories
+// it keeps memory for (the current one and the one before it), and the live
 // region announcing. Those need the live app.
 //
 // The imports reach straight into `src/` under Node's type stripping, so both
@@ -169,7 +171,7 @@ test("a card with no data: offline, failed, or loading", () => {
   );
 });
 
-test("a card draws its data, a placeholder while pending, never for a failure", () => {
+test("a card draws its data, a placeholder while pending or retried, never for a settled failure", () => {
   assert.equal(cardBody(healthy, false), "data");
   // A failed window's own read, with another window's rows as placeholder.
   assert.equal(cardBody(resetPlaceholder, false), "failed");

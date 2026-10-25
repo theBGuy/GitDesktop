@@ -39,8 +39,8 @@ export function unloadedCardBody(
 }
 
 /** What a card draws: its data, or {@link unloadedCardBody}'s arm. Another
- *  window's placeholder rows stand in while this window loads, never for a
- *  failed read. */
+ *  window's placeholder rows stand in while this window loads, and for a failed
+ *  read only while the board's own Retry refetches it. */
 export function cardBody(
   read: BoardCardRead,
   retrying: boolean,
