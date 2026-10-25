@@ -1,10 +1,11 @@
-// Pins the push-like run-recheck family: every hook whose mutation makes the forge
-// start runs (a push of commits, a merge, a workflow dispatch) arms
-// `recheckRunsAfterPush` (push-writes.ts), because the forge creates the runs a few
-// seconds after the write lands, after any settle-time read. The arms that move a
-// PR's head or land it also hand the recheck that PR's checks reads
-// (`prChecksRecheck`). Keyed on the CALLEE, not the hook: a new unit naming one of
-// these api functions must arm the recheck or join the reasoned exclusions.
+// Pins the push-like run-recheck family: every hook whose write creates a run or
+// starts one again (a push, a publish, a dispatch, a merge, a reopen, a re-run, a
+// play, an approval) arms `recheckRunsAfterPush` (push-writes.ts), because the
+// forge can surface that run after the settle-time read. The PR-scoped arms (push,
+// create, resolve push, update-branch, reopen, re-run, re-run job, play job,
+// approve run) also hand the recheck PR checks reads (`prChecksRecheck`) as one of
+// its arguments. Keyed on the CALLEE, not the hook: a new unit naming one of these
+// api functions must arm the recheck or join the reasoned exclusions.
 //
 // The checker is a pure function over source text, so the suite feeds it the real
 // files (must pass) and in-memory mutants (must fail) without touching disk. It
@@ -14,7 +15,8 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
-/** The api functions whose backend command makes the forge start runs. */
+/** The api functions of writes that create a run or start one again, which the
+ *  forge can surface after the call returns. */
 const ROSTER = [
   "gitPush",
   "gitPushTag",
@@ -23,20 +25,34 @@ const ROSTER = [
   "forgePrMerge",
   "ghPrUpdateBranch",
   "forgePrCreate",
+  "forgePrReopen",
   "forgePublishRepo",
+  "forgeReleaseCreate",
+  "forgeReleaseEdit",
+  "ghIssueCreateLinkedBranch",
   "forgeCiDispatch",
   "forgeGlMrAutoMerge",
+  "forgeCiRunRerun",
+  "forgeCiJobRerun",
+  "forgeGlCiPlayJob",
+  "forgeCiRunApprove",
 ];
+
+/** Run writes the rule leaves out on purpose: a unit naming one must be a reasoned
+ *  exclusion (or armed). */
+const RUN_STATUS_CALLEES = ["forgeCiRunCancel"];
 
 const Q = "lib/git/queries/";
 /** Corpus paths, relative to `src/`. */
 const CORPUS_FILES = ["lib/github/actions.ts"];
 
+const RELEASE_GATE = "if (releasePublishes(args))";
+
 /** The hooks that must arm the recheck: the condition that must guard every arm
- *  call in it (null = armed on every success), and whether its arm hands the PR's
- *  checks reads along. */
+ *  call in it (null = armed on every success), and whether its arm calls hand the
+ *  PR's checks reads along. */
 const ARMED = {
-  usePush: { file: `${Q}sync.ts`, gate: null, prChecks: false },
+  usePush: { file: `${Q}sync.ts`, gate: null, prChecks: true },
   usePushTag: { file: `${Q}tags-releases.ts`, gate: null, prChecks: false },
   useMergeRemotePr: {
     file: `${Q}pr-resolve.ts`,
@@ -51,20 +67,40 @@ const ARMED = {
   useMergePr: {
     file: `${Q}pr-actions.ts`,
     gate: 'if (args.lens === "origin" && !data.queued)',
-    prChecks: true,
+    prChecks: false,
   },
   usePrUpdateBranch: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
+  useReopenPr: { file: `${Q}pr-actions.ts`, gate: null, prChecks: true },
   useGlArmAutoMerge: { file: `${Q}pr-actions.ts`, gate: null, prChecks: false },
   useCreatePr: { file: `${Q}pr-write.ts`, gate: null, prChecks: true },
   usePublishRepo: { file: `${Q}remotes.ts`, gate: null, prChecks: false },
+  useCreateRelease: {
+    file: `${Q}tags-releases.ts`,
+    gate: RELEASE_GATE,
+    prChecks: false,
+  },
+  useEditRelease: {
+    file: `${Q}tags-releases.ts`,
+    gate: RELEASE_GATE,
+    prChecks: false,
+  },
+  useCreateLinkedBranch: { file: `${Q}issues.ts`, gate: null, prChecks: false },
   useRunWorkflow: {
     file: "lib/github/actions.ts",
     gate: null,
     prChecks: false,
   },
+  useRerunRun: { file: "lib/github/actions.ts", gate: null, prChecks: true },
+  useRerunJob: { file: "lib/github/actions.ts", gate: null, prChecks: true },
+  usePlayCiJob: { file: "lib/github/actions.ts", gate: null, prChecks: true },
+  useApproveWorkflowRun: {
+    file: `${Q}pr-actions.ts`,
+    gate: null,
+    prChecks: true,
+  },
 };
 
-/** Push-adjacent writes that deliberately arm nothing, each with its reason. */
+/** Writes that deliberately arm nothing, each with its reason. */
 const EXCLUDED = {
   useDeleteRemoteBranch: {
     file: `${Q}branches.ts`,
@@ -78,10 +114,10 @@ const EXCLUDED = {
       "pushes a deletion, which starts runs only for rare on-delete workflows",
     mustCall: null,
   },
-  useCreateLinkedBranch: {
-    file: `${Q}issues.ts`,
+  useCancelRun: {
+    file: "lib/github/actions.ts",
     reason:
-      "creates a server-side ref at an existing commit: no commits are pushed; starts runs only for rare on-create workflows",
+      "stops a run rather than starting one, so it is outside the rule; GitHub keeps the run active until the cancel lands, so the active-run poll sees it end",
     mustCall: null,
   },
 };
@@ -93,6 +129,25 @@ const SETTLE_ARM = {
   start: "const settleUpdate = useEffectEvent(",
   call: /recheckRunsAfterPush\(\s*queryClient,\s*repoPath,\s*prChecksRecheck\(repoPath, lens, number\),?\s*\)/,
 };
+
+/** The argument text of every `recheckRunsAfterPush(…)` call in `body`, matched by
+ *  paren depth. */
+function armCallArgs(body) {
+  const out = [];
+  const opener = /\brecheckRunsAfterPush\(/g;
+  for (const m of body.matchAll(opener)) {
+    const start = m.index + m[0].length;
+    let depth = 1;
+    let i = start;
+    while (i < body.length && depth > 0) {
+      if (body[i] === "(") depth++;
+      else if (body[i] === ")") depth--;
+      i++;
+    }
+    out.push(depth === 0 ? body.slice(start, i - 1) : body.slice(start));
+  }
+  return out;
+}
 
 const PR_CHECKS = /\bprChecksRecheck\(/;
 
@@ -200,7 +255,9 @@ function checkPushRecheckFamily(raw) {
   const calledCallees = new Set();
   for (const { file, name, body } of hooks.values()) {
     // A callee's own definition (`export const forgeCiDispatch = …`) names it.
-    const callees = ROSTER.filter((c) => c !== name && namesCallee(body, c));
+    const callees = [...ROSTER, ...RUN_STATUS_CALLEES].filter(
+      (c) => c !== name && namesCallee(body, c),
+    );
     for (const c of callees) calledCallees.add(c);
     const armed = listed(ARMED, file, name);
     if (callees.length > 0 && !armed && !listed(EXCLUDED, file, name))
@@ -214,7 +271,7 @@ function checkPushRecheckFamily(raw) {
         `${file} ${name}: arms recheckRunsAfterPush outside the family`,
       );
   }
-  for (const c of ROSTER)
+  for (const c of [...ROSTER, ...RUN_STATUS_CALLEES])
     if (!calledCallees.has(c)) problems.push(`roster callee ${c} not found`);
 
   for (const [name, { file, gate, prChecks }] of Object.entries(ARMED)) {
@@ -232,10 +289,15 @@ function checkPushRecheckFamily(raw) {
       problems.push(
         `${file} ${name}: an arm call is not guarded by \`${gate}\``,
       );
-    if (PR_CHECKS.test(hook.body) !== prChecks)
+    // Positional: the builder must be an argument of the arm call itself, not a
+    // value computed beside it.
+    const handing = armCallArgs(hook.body).map((a) => PR_CHECKS.test(a));
+    if (prChecks && (handing.length === 0 || handing.includes(false)))
       problems.push(
-        `${file} ${name}: ${prChecks ? "does not hand" : "hands"} the recheck the PR's checks reads`,
+        `${file} ${name}: an arm call does not hand the recheck the PR's checks reads`,
       );
+    if (!prChecks && PR_CHECKS.test(hook.body))
+      problems.push(`${file} ${name}: hands the recheck the PR's checks reads`);
   }
 
   for (const [name, { file, reason, mustCall }] of Object.entries(EXCLUDED)) {
@@ -525,7 +587,66 @@ test("an empty corpus, a missing corpus file or a missing view fails closed", ()
   const { "lib/github/actions.ts": _actions, ...noActions } = realSources();
   assert.ok(
     checkPushRecheckFamily(noActions).some((p) =>
-      p.includes("lib/github/actions.ts"),
+      p.includes("lib/github/actions.ts: missing from the corpus"),
     ),
   );
+});
+
+test("PR checks reads computed beside the arm call, not passed to it, fail the check", () => {
+  const sources = mutate(realSources(), `${Q}pr-write.ts`, (text) => {
+    const body = topLevelUnits(text).get("useCreatePr");
+    assert.ok(body, "useCreatePr not found");
+    const moved = body
+      .replace(/prChecksRecheck\([^)]*\),/, "[],")
+      .replace(
+        "const queryClient = useQueryClient();",
+        'const queryClient = useQueryClient();\n  void prChecksRecheck(repo, "origin");',
+      );
+    return text.replace(body, moved);
+  });
+  const problems = checkPushRecheckFamily(sources);
+  assert.ok(
+    problems.some(
+      (p) => p.includes("useCreatePr") && p.includes("does not hand"),
+    ),
+    JSON.stringify(problems),
+  );
+});
+
+test("a run write must arm or be a reasoned exclusion", () => {
+  for (const [name, call] of [
+    ["useSneakyRerun", "forgeCiRunRerun(repo, id, false)"],
+    ["useSneakyCancel", "forgeCiRunCancel(repo, id)"],
+  ]) {
+    const sources = mutate(
+      realSources(),
+      "lib/github/actions.ts",
+      (text) =>
+        `${text}\nexport function ${name}(repo: string) {\n  return useActionsMutation(repo, (id: number) => ${call}, "rerun-run");\n}\n`,
+    );
+    assert.ok(
+      checkPushRecheckFamily(sources).some((p) => p.includes(name)),
+      name,
+    );
+  }
+  for (const [from, to, name] of [
+    [
+      "export function usePlayCiJob(",
+      "export function usePlay(",
+      "usePlayCiJob",
+    ],
+    [
+      "export function useCancelRun(",
+      "export function useStop(",
+      "useCancelRun",
+    ],
+  ]) {
+    const renamed = mutate(realSources(), "lib/github/actions.ts", (text) =>
+      text.replace(from, to),
+    );
+    assert.ok(
+      checkPushRecheckFamily(renamed).some((p) => p.includes(name)),
+      name,
+    );
+  }
 });

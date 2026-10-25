@@ -520,6 +520,7 @@ function assertUnionFires(t, recheck, repo) {
   assert.equal(c.marked("ci"), true, "the second arm's read was dropped");
   assert.equal(c.marked("diff7"), false, "an exact read reached its subtree");
   assert.equal(c.marked("details8"), false);
+  assert.equal(c.marked("upstream7"), false);
 }
 
 test("coalesced arms fire ONE recheck covering every arm's PR reads", (t) => {
@@ -563,6 +564,53 @@ test("a numbered-child read re-reads every PR's details in the lens, nothing und
   assert.equal(c.marked("diff7"), false);
   assert.equal(c.marked("upstream7"), false);
   assert.equal(c.marked("ci"), false);
+});
+
+test("overlapping owed filters invalidate a matched query ONCE", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const c = prChecksCache(t, "C:/push-i");
+  const hits = [];
+  const invalidate = c.qc.invalidateQueries.bind(c.qc);
+  c.qc.invalidateQueries = (filters, options) => {
+    hits.push(
+      c.qc
+        .getQueryCache()
+        .findAll(filters)
+        .some((q) => q.queryHash === JSON.stringify(c.keys.details7)),
+    );
+    return invalidate(filters, options);
+  };
+  // The finish-resolve shape over the lens, plus another arm's exact key in it:
+  // two calls on one active query would cancel the first call's refetch.
+  recheckRunsAfterPush(c.qc, "C:/push-i", [
+    { queryKey: ["repo", "C:/push-i", "pr", "origin"], numberedChild: true },
+  ]);
+  recheckRunsAfterPush(c.qc, "C:/push-i", [
+    { queryKey: c.keys.details7, exact: true },
+  ]);
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS);
+  assert.equal(hits.filter(Boolean).length, 1, JSON.stringify(hits));
+  assert.equal(c.marked("details7"), true);
+  assert.equal(c.marked("details8"), true);
+});
+
+test("a fired recheck forgets what it owed", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const c = prChecksCache(t, "C:/push-j");
+  recheckRunsAfterPush(c.qc, "C:/push-j", [
+    { queryKey: c.keys.details7, exact: true },
+  ]);
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS);
+  assert.equal(c.marked("details7"), true);
+  // Re-seeded reads are fresh again; a later plain arm owes the run lists only.
+  c.qc.setQueryData(c.keys.details7, { seeded: true });
+  c.qc.setQueryData(c.keys.runs, { seeded: true });
+  recheckRunsAfterPush(c.qc, "C:/push-j");
+  t.mock.timers.tick(PUSH_RUN_RECHECK_MS);
+  assert.equal(c.marked("runs"), true);
+  assert.equal(c.marked("details7"), false, "the first fire's reads re-fired");
 });
 
 test("a plain arm re-reads no PR reads", (t) => {

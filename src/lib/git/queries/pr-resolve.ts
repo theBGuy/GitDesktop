@@ -112,7 +112,8 @@ export function useMergeRemotePr(repo: string, lens: RemoteLens) {
 /** Commits a paused remote-PR resolution and pushes the head branch; the run
  *  recheck gates on the outcome like {@link useMergeRemotePr}'s. Neither the
  *  variables nor the outcome name the PR, so the checks re-read covers every PR's
- *  details in the lens (only an open one refetches). */
+ *  details in the lens (only a PR whose view is on screen refetches now; the rest
+ *  re-read when next opened). */
 export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
   const queryClient = useQueryClient();
   return useRepoMutation(

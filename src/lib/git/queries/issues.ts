@@ -40,6 +40,7 @@ import {
   pendingMutationEntries,
   pendingWritesFor,
 } from "./pr-writes";
+import { recheckRunsAfterPush } from "./push-writes";
 
 /** The issue-rail writes whose pending state a row reads back from the cache, so it
  *  survives the row's remount on an issue switch. */
@@ -1123,7 +1124,11 @@ export function useIssueDevelopment(
   });
 }
 
+/** The new branch is a server-side ref at an existing commit, but the forge may
+ *  still start create or push workflows for it after the call returns, so it arms
+ *  the delayed run recheck. */
 export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { issueId: string; name: string }) =>
@@ -1133,6 +1138,7 @@ export function useCreateLinkedBranch(repo: string, lens: RemoteLens) {
       // `repo`, and the issue panel survives a repo switch — without the key the
       // newly-live repo's controls would read the pending create as busy.
       identity: ["create-linked-branch", repo, lens],
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     },
   );
 }

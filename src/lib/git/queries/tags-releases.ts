@@ -138,7 +138,14 @@ export function usePrefetchRelease(repo: string) {
   );
 }
 
+/** A published release fires the forge's release event, whose runs can start after
+ *  the settle-time read; GitHub fires no release workflows for a draft, so only a
+ *  non-draft write (a published create, or an edit that leaves it published or
+ *  publishes it) arms the recheck. Shared by the create and edit hooks. */
+const releasePublishes = (args: { draft: boolean }) => !args.draft;
+
 export function useCreateRelease(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -165,11 +172,15 @@ export function useCreateRelease(repo: string) {
       // host survives a repo switch — without the key the newly-live repo's
       // controls would read the pending create as busy.
       identity: ["create-release", repo],
+      onSuccess: (_d, args) => {
+        if (releasePublishes(args)) recheckRunsAfterPush(queryClient, repo);
+      },
     },
   );
 }
 
 export function useEditRelease(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: ReleaseWriteVars["edit-release"]) =>
@@ -182,7 +193,12 @@ export function useEditRelease(repo: string) {
         args.draft,
         args.latest,
       ),
-    { identity: releaseWriteKey("edit-release", repo) },
+    {
+      identity: releaseWriteKey("edit-release", repo),
+      onSuccess: (_d, args) => {
+        if (releasePublishes(args)) recheckRunsAfterPush(queryClient, repo);
+      },
+    },
   );
 }
 

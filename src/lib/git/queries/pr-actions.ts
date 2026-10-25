@@ -517,16 +517,13 @@ export function useMergePr(repo: string) {
     },
     {
       identity: prWriteKey("merge", repo),
-      // A landed merge pushes the base branch, whose runs start after the settle's
-      // read. The run lists read origin, so an upstream-lens merge's runs land
-      // outside them; a queued merge has landed nothing yet.
+      // A landed merge pushes the base branch, whose runs can start after the
+      // settle-time read. They run on the base, so the merged PR's checks and the
+      // list's badges don't move: the run lists alone are re-read. Those read
+      // origin, so an upstream-lens merge arms nothing; nor does a queued one.
       onSuccess: (data, args) => {
         if (args.lens === "origin" && !data.queued)
-          recheckRunsAfterPush(
-            queryClient,
-            repo,
-            prChecksRecheck(repo, args.lens, args.number),
-          );
+          recheckRunsAfterPush(queryClient, repo);
       },
     },
   );
@@ -555,12 +552,12 @@ export const prUpdateBranchKeys = (
     ["repo", repo, "prs", lens],
   ] as const;
 
-/** The PR reads a push-like write's new runs change, handed to
+/** The PR reads a write's new runs change when they run on a PR's head, handed to
  *  `recheckRunsAfterPush` so they are re-read with the run lists: the PR's details
  *  (its checks rollup rides them, and nothing polls them) matched exactly, so the
  *  diff and threads under it are not re-read, and the list's CI-badge map, whose
  *  row digest doesn't move with a run. No `number` re-reads every PR's details in
- *  the lens, for an arm whose result names no PR. */
+ *  the lens, for an arm that can't name its PR; only those on screen refetch. */
 export const prChecksRecheck = (
   repo: string,
   lens: RemoteLens,
@@ -608,13 +605,21 @@ export function usePrUpdateBranch(repo: string) {
 
 /** Approve a workflow run GitHub is holding for maintainer approval (a first-time
  *  contributor's fork PR). Invalidates the Actions subtree like re-run/cancel, plus
- *  the PR subtree — the PR checks list renders these runs off PR details. */
+ *  the PR subtree — the PR checks list renders these runs off PR details. GitHub can
+ *  flip the approved run's status after the settle-time read, so success arms the
+ *  run recheck; the variables name no PR, so it re-reads every on-screen PR's
+ *  checks in both lenses, as a plain push does. */
 export function useApproveWorkflowRun(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: runWriteKey("approve-run", repo),
     mutationFn: (args: ApproveRunVars) =>
       api.forgeCiRunApprove(repo, args.runId, args.lens),
+    onSuccess: () =>
+      recheckRunsAfterPush(queryClient, repo, [
+        ...prChecksRecheck(repo, "origin"),
+        ...prChecksRecheck(repo, "upstream"),
+      ]),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
@@ -671,9 +676,9 @@ export const glMrMergeStateOptions = (repo: string, number: number) =>
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the
  *  pipeline just passed, so the whole MR view must refresh, and that merge's
- *  pipeline starts after the settle's read, so the arm also schedules the run
- *  recheck. `lens` rides the variables only to name the target PR (GitLab has no
- *  upstream lens). */
+ *  pipeline can start after the settle-time read, so the arm also schedules the
+ *  run recheck. `lens` rides the variables only to name the target PR (GitLab has
+ *  no upstream lens). */
 export function useGlArmAutoMerge(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(
@@ -731,12 +736,24 @@ export function useClosePr(repo: string) {
   );
 }
 
+/** Reopening fires the forge's PR-reopened event (one of GitHub's default
+ *  `pull_request` activity types), whose runs on the PR's head can start after the
+ *  settle-time read, so it arms the recheck with that PR's checks reads. */
 export function useReopenPr(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { number: number; lens: RemoteLens }) =>
       api.forgePrReopen(repo, args.number, args.lens),
-    { identity: prWriteKey("reopen", repo) },
+    {
+      identity: prWriteKey("reopen", repo),
+      onSuccess: (_d, args) =>
+        recheckRunsAfterPush(
+          queryClient,
+          repo,
+          prChecksRecheck(repo, args.lens, args.number),
+        ),
+    },
   );
 }
 

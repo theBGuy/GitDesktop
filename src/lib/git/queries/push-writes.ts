@@ -3,8 +3,9 @@
  * filed under, the variables it carries, how a pending push reads back out of
  * the mutation cache, the label a branch row's spinner shows for it, the reasons
  * a push puts on the other controls it holds, the HEAD-push latch, the one
- * delayed run-list recheck (plus any PR checks reads its arms hand it) armed on a
- * successful push-like write or on the observed head move, and the delayed
+ * delayed run-list recheck (plus any PR checks reads its arms hand it) armed by a
+ * successful write that creates a run or starts one again, which the forge can
+ * surface after the call returns, or by the observed head move, and the delayed
  * PR-list re-read a remote-branch delete schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
@@ -150,16 +151,17 @@ export function nextPushLatch(
   return { ...Object.fromEntries(kept), ...Object.fromEntries(added) };
 }
 
-/** How long after a push-like write its runs are read once more: the forge
- *  creates a push's runs a few seconds after it lands, after any settle-time
- *  read. */
+/** How long after a write that creates a run or starts one again (a push, a
+ *  dispatch, a publish, a re-run, an approval) the runs are read once more: the
+ *  forge can surface the run, or flip its status, after the settle-time read. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
-/** A read a push-like write owes the same delayed re-read as the run lists (a PR's
- *  checks rollup, the list's CI badges). Built by the caller, since this file spells
- *  no PR keys. `exact` matches `queryKey` alone; `numberedChild` matches only keys
- *  one segment longer whose last segment is a number (every PR's details in a lens,
- *  for an arm that can't name its PR); neither = prefix match. */
+/** A read such a write owes the same delayed re-read as the run lists (a PR's
+ *  checks rollup, the list's CI badges). Built by the caller: this import-free file
+ *  can't import repoKeys, and the pr-ci family may be spelled only in core.ts.
+ *  `exact` matches `queryKey` alone; `numberedChild` matches only keys one segment
+ *  longer whose last segment is a number (every PR's details in a lens, for an arm
+ *  that can't name its PR); neither = prefix match. */
 export interface RecheckFilter {
   queryKey: readonly unknown[];
   exact?: boolean;
@@ -168,7 +170,8 @@ export interface RecheckFilter {
 
 /** The one pending recheck per repo: a later arm re-arms its timer and adds its
  *  filters to the ones already owed (deduplicated by value), so repeat writes never
- *  stack timers and the one fire covers every coalesced arm. */
+ *  stack timers and the one fire covers every coalesced arm. The fire drops the
+ *  entry, so the next arm owes only its own filters. */
 const pendingRunRechecks = new Map<
   string,
   { timer: ReturnType<typeof setTimeout>; owed: Map<string, RecheckFilter> }
@@ -177,11 +180,33 @@ const pendingRunRechecks = new Map<
 const filterId = (f: RecheckFilter) =>
   JSON.stringify([f.queryKey, f.exact === true, f.numberedChild === true]);
 
+/** Whether `key` starts with `prefix`, segment by segment. Filter keys hold only
+ *  primitives, so a serialized compare is exact. */
+const startsWithKey = (key: readonly unknown[], prefix: readonly unknown[]) =>
+  key.length >= prefix.length &&
+  prefix.every((s, i) => JSON.stringify(key[i]) === JSON.stringify(s));
+
+/** {@link RecheckFilter}'s three match modes, applied to one query key. */
+export function recheckFilterMatches(
+  f: RecheckFilter,
+  key: readonly unknown[],
+): boolean {
+  if (!startsWithKey(key, f.queryKey)) return false;
+  if (f.numberedChild)
+    return (
+      key.length === f.queryKey.length + 1 &&
+      typeof key[f.queryKey.length] === "number"
+    );
+  return f.exact !== true || key.length === f.queryKey.length;
+}
+
 /** One delayed re-read of the write's own repo's run lists plus `extra`; only the
  *  observers active then refetch. A paged list past its first page is skipped: no
  *  automatic refetch replays deep pages (actions.ts `useWorkflowRunPages`), so it
  *  keeps its last full read until something invalidates it (most arms' whole-repo
- *  settle, or the panel's Refresh). */
+ *  settle, or the panel's Refresh). The owed filters fire as ONE invalidation over
+ *  their union: two overlapping filters as two calls would invalidate a query twice
+ *  in one tick, and the second call's refetch cancels the first's. */
 export function recheckRunsAfterPush(
   queryClient: QueryClient,
   repo: string,
@@ -205,17 +230,12 @@ export function recheckRunsAfterPush(
           ((query.state.data as { pages?: unknown[] } | undefined)?.pages
             ?.length ?? 0) <= 1,
       });
-      for (const f of owed.values())
-        void queryClient.invalidateQueries(
-          f.numberedChild
-            ? {
-                queryKey: f.queryKey,
-                predicate: (query) =>
-                  query.queryKey.length === f.queryKey.length + 1 &&
-                  typeof query.queryKey[f.queryKey.length] === "number",
-              }
-            : { queryKey: f.queryKey, exact: f.exact === true },
-        );
+      const filters = [...owed.values()];
+      if (filters.length > 0)
+        void queryClient.invalidateQueries({
+          predicate: (query) =>
+            filters.some((f) => recheckFilterMatches(f, query.queryKey)),
+        });
     }, PUSH_RUN_RECHECK_MS),
   });
 }
