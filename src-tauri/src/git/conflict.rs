@@ -81,8 +81,8 @@ fn validate_rel_path(path: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Builds each refusal a git-reported conflict path can hit; the pane keys on the opening
-/// sentence via ConflictFileView.tsx's PATH_REFUSAL_PREFIX.
+/// The sentence refusal for the leading-dash check and the shared path gate; the pane keys
+/// on its opening via ConflictFileView.tsx's PATH_REFUSAL_PREFIX.
 fn conflict_path_refusal(path: &str, why: &str) -> AppError {
     let shown = crate::git::ops::discard_shown(path);
     AppError::InvalidArgument(format!(
