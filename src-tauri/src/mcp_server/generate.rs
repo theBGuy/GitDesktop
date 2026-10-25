@@ -843,10 +843,10 @@ fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
     }
 }
 
-/// Candidates the Related issues section shows: assemble_pr_recipe's take(8).
+/// Candidates the Related issues section renders (assemble_pr_recipe).
 const RELATED_ISSUE_CAP: usize = 8;
-/// GitHub probes per gather; successes stop at the section cap, so this binds only
-/// after repeated failed probes against the shared rate budget.
+/// Caps GitHub probes per gather to bound spend on the shared rate limit;
+/// successes stop at the section cap first, so it binds only after 9+ failed probes.
 const MAX_ISSUE_PROBES: usize = 16;
 
 /// A real issue from the repo's tracker the model may link. KEEP IN SYNC with the
@@ -1003,7 +1003,7 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
     // Real candidate issues (defensive cap 8, mirrored TS-side). Empty ⇒ the ban
     // stands, no `## Related issues` section, unchanged note.
     let candidates: Vec<&IssueCandidate> =
-        p.candidate_issues.iter().filter(|c| c.number > 0).take(8).collect();
+        p.candidate_issues.iter().filter(|c| c.number > 0).take(RELATED_ISSUE_CAP).collect();
     let has_candidates = !candidates.is_empty();
 
     // Jira candidates (Bitbucket + linked project). Mention-only, and native
@@ -2392,7 +2392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn few_numbers_probe_exactly_as_before() {
+    async fn under_the_cap_only_off_page_numbers_are_probed() {
         let mut calls = Vec::new();
         let (out, included) = pin_extracted_candidates(
             &[3, 4, 5],
