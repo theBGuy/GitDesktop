@@ -5,6 +5,10 @@ export interface RepoOpState {
   reverting: boolean;
   /** An interactive rebase is paused at an `edit` (vs a conflict). */
   editPaused: boolean;
+  /** Why an in-progress rebase is stopped: "edit" | "pick" | "exec" |
+   *  "break" | "other"; null when no rebase is in progress. Render any
+   *  value this build doesn't know as "other". */
+  rebaseStop: "edit" | "pick" | "exec" | "break" | "other" | null;
 }
 
 export type RepoOp = "merge" | "rebase" | "cherry-pick" | "revert";

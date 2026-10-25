@@ -308,6 +308,23 @@ pub struct SubmoduleRemoveOutcome {
     pub module_data_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RebaseStop {
+    /// A completed edit pick with an `amend` marker, ready for amendment.
+    Edit,
+    /// Pick/reword/squash/fixup or an edit without an `amend` marker, e.g. a
+    /// conflict stop, an emptied commit, or a rescheduled pick.
+    Pick,
+    /// An exec instruction.
+    Exec,
+    /// A break instruction.
+    Break,
+    /// The apply backend (`rebase --apply` or `git am`, no done file), or
+    /// unreadable or unrecognized state, never a guessed kind.
+    Other,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoOpState {
@@ -318,13 +335,17 @@ pub struct RepoOpState {
     /// An interactive rebase is paused at an `edit` (vs a conflict) — the user
     /// should amend the commit, then continue.
     pub edit_paused: bool,
+    /// Why an in-progress rebase is stopped, from the last line of
+    /// `rebase-merge/done` (git appends the in-flight item before running it).
+    /// `None` when `rebasing` is false.
+    pub rebase_stop: Option<RebaseStop>,
 }
 
 impl RepoOpState {
     /// Whether a multi-step operation is mid-flight — the single home of the flag
     /// list, so a gate can't drift by re-listing the fields and missing one.
-    /// `edit_paused` is excluded: it qualifies `rebasing` rather than standing on
-    /// its own.
+    /// `edit_paused` and `rebase_stop` are excluded: they qualify `rebasing`
+    /// rather than standing on their own as flags.
     pub fn mid_op(&self) -> bool {
         self.merging || self.rebasing || self.cherry_picking || self.reverting
     }

@@ -24,9 +24,9 @@ export type StashBannerState =
   | { kind: "resolved"; lead: string; tail: string; announcement: string };
 
 /** The `RepoOpState` flags that name an operation. Derived, so a renamed field
- *  breaks here; `editPaused` is excluded because it modifies `rebasing` rather
- *  than naming an op of its own. */
-type RepoOpFlag = Exclude<keyof RepoOpState, "editPaused">;
+ *  breaks here; `editPaused` and `rebaseStop` are excluded because they qualify
+ *  `rebasing` rather than naming an op of their own. */
+type RepoOpFlag = Exclude<keyof RepoOpState, "editPaused" | "rebaseStop">;
 
 /** Which op the banner names. `RepoOpState`'s flags are independent booleans and
  *  the banner shows one op, so the precedence lives here rather than in a
@@ -42,6 +42,103 @@ const OP_BY_FLAG: readonly (readonly [RepoOpFlag, RepoOp])[] = [
  *  pins its precedence. */
 export function activeRepoOp(opState: RepoOpState | undefined): RepoOp | null {
   return OP_BY_FLAG.find(([flag]) => opState?.[flag])?.[1] ?? null;
+}
+
+/** The banner's one verb source: its status lines and its toasts read it. */
+export const OP_VERBS: Record<RepoOp, string> = {
+  merge: "Merging",
+  rebase: "Rebasing",
+  "cherry-pick": "Cherry-picking",
+  revert: "Reverting",
+};
+
+const REBASE_STOPPED = "Rebase stopped — Continue or Abort.";
+
+type RebaseStop = NonNullable<RepoOpState["rebaseStop"]>;
+
+/** A `done` line is written before its step runs, so the exec copy can also
+ *  show while that exec is still running; it never claims the step failed. */
+const REBASE_STOP_TEXT: Record<RebaseStop, string> = {
+  pick: `${OP_VERBS.rebase} · no conflicts left`,
+  exec: "Rebase stopped after an exec step — Continue or Abort.",
+  break: "Rebase paused at a break — Continue when you're ready.",
+  edit: REBASE_STOPPED,
+  other: REBASE_STOPPED,
+};
+
+export function conflictCount(n: number): string {
+  return `${n} conflict${n === 1 ? "" : "s"}`;
+}
+
+/** `opStatusText`'s line once no unmerged paths are left. A rebase stop this
+ *  build doesn't know, or none yet, reads as plainly stopped. */
+export function opStoppedText(
+  op: RepoOp,
+  rebaseStop: RepoOpState["rebaseStop"] | undefined,
+): string {
+  if (op !== "rebase") return `${OP_VERBS[op]} · no conflicts left`;
+  return rebaseStop != null && Object.hasOwn(REBASE_STOP_TEXT, rebaseStop)
+    ? REBASE_STOP_TEXT[rebaseStop]
+    : REBASE_STOPPED;
+}
+
+/** The banner's status line while `op` is active, outside an edit pause. */
+export function opStatusText(
+  op: RepoOp,
+  conflictedCount: number,
+  rebaseStop: RepoOpState["rebaseStop"] | undefined,
+): string {
+  if (conflictedCount === 0) return opStoppedText(op, rebaseStop);
+  return `${OP_VERBS[op]} · ${conflictCount(conflictedCount)}`;
+}
+
+export type BannerArgs = {
+  op: RepoOp | null;
+  conflictedCount: number;
+  /** A rebase paused at an `edit` with nothing unmerged. */
+  editPaused: boolean;
+  rebaseStop: RepoOpState["rebaseStop"] | undefined;
+  stash: StashBannerState;
+};
+
+/** Planned pauses and a resolved reapply read as info; the rest as warnings. */
+export function opInfoTone(a: BannerArgs): boolean {
+  const breakPaused =
+    a.op === "rebase" && a.conflictedCount === 0 && a.rebaseStop === "break";
+  return (
+    a.editPaused ||
+    breakPaused ||
+    (a.op === null && a.stash.kind === "resolved")
+  );
+}
+
+export type BannerStatus =
+  | { kind: "text"; text: string }
+  | { kind: "reapply"; lead: string; tail: string };
+
+export function bannerStatus(a: BannerArgs): BannerStatus {
+  if (a.editPaused) {
+    return {
+      kind: "text",
+      text: "Rebase paused — amend this commit's changes in Changes, then Continue",
+    };
+  }
+  if (a.op) {
+    return {
+      kind: "text",
+      text: opStatusText(a.op, a.conflictedCount, a.rebaseStop),
+    };
+  }
+  if (a.stash.kind !== "none") {
+    return { kind: "reapply", lead: a.stash.lead, tail: a.stash.tail };
+  }
+  // Unmerged paths with no op to continue (a stash pop or apply, `switch -m`),
+  // so the line says where they get resolved.
+  const n = a.conflictedCount;
+  return {
+    kind: "text",
+    text: `${conflictCount(n)} — resolve ${n === 1 ? "it" : "them"} in the changes list.`,
+  };
 }
 
 const RESOLVED_TAIL =
@@ -79,7 +176,7 @@ export function deriveStashBannerState(args: {
     return {
       state: {
         kind: "conflicted",
-        lead: `Reapplying your stashed changes · ${n} conflict${n === 1 ? "" : "s"}`,
+        lead: `Reapplying your stashed changes · ${conflictCount(n)}`,
         tail: `The ${opPhrase(marker)} finished. Resolve ${n === 1 ? "it" : "them"} in the changes list; your changes are also kept in a backup stash.`,
       },
       clearMarker: false,
