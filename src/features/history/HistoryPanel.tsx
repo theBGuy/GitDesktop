@@ -9,6 +9,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type MouseEvent,
+  type ReactNode,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -39,11 +40,21 @@ import {
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { AmendForcePushDialog } from "@/features/commit/AmendForcePushDialog";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  listNotice,
+  refreshFailed,
+  splitInfiniteFailure,
+} from "@/features/conversations/remote-section-state";
 import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
+import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import { gitCommitDetails, headBranchPin } from "@/lib/git/api";
 import {
@@ -85,6 +96,7 @@ import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { CommitContextMenuItems } from "./CommitContextMenu";
@@ -99,6 +111,7 @@ import {
   RANGE_MERGE_ITEM_REASON,
   revertCommitConfirm,
   UNDO_ROOT_COMMIT_CONFIRM,
+  UNPUSHED_UNCHECKED_HINT,
 } from "./commit-confirms";
 import { EditHistoryDialog } from "./EditHistoryDialog";
 import {
@@ -621,6 +634,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // engages and the per-row "not pushed" markers reflect what's truly published.
   const noUpstream = isNoUpstream(head);
   const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
+  // The `?? 0` below never claims "all pushed" for a failed count read: an
+  // errored count fails `viewAgrees`, so the markers serve the last agreeing
+  // snapshot (or mark nothing) and squash / Edit history hold.
   const unpushedCount = head
     ? noUpstream
       ? (unpushedVsRemotes.data ?? 0)
@@ -678,29 +694,122 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     [view.commits, view.count],
   );
 
-  if (log.isPending) {
-    return (
-      <>
-        <div className="border-b p-2">
-          {/* A disabled copy of the header below, so the rows don't shift when
-              the log lands. */}
-          <Input
-            disabled
-            value={filterText}
-            placeholder={FILTER_PLACEHOLDER}
-            className="h-7"
-            autoComplete="off"
-          />
-        </div>
-        <div className="flex-1">
-          <ListRowSkeletons rows={3} lines={2} indent={false} name="commits" />
-        </div>
-      </>
+  // A failed read never stands in for an answer: "No commits yet" and "No
+  // commits match" render only from reads that returned empty, and a failure
+  // over loaded pages keeps them under the notice. The notice speaks for the
+  // list on screen only, so a log failure is silent while search results show.
+  const logLoadFailed = log.data === undefined && refreshFailed(log);
+  const searchShown = searchActive && commits.length > 0;
+  const searchLoadFailed =
+    searchShown && search.data === undefined && refreshFailed(search);
+  const shownRead = searchShown ? search : log;
+  const notice =
+    shownRead.data === undefined
+      ? null
+      : listNotice({
+          noun: searchShown ? "matches" : "commits",
+          ...splitInfiniteFailure(shownRead),
+          offline: false,
+          placeholder: false,
+          // Loaded rows, not filtered ones: a filter matching nothing still sits
+          // over the last loaded results.
+          hasRows: (searchShown ? searchCommits : commits).length > 0,
+        });
+  // Each Retry's arm unmounts as its read refetches; focus lands on the shell.
+  const logRescue = useRetryFocusRescue(logLoadFailed);
+  const searchRescue = useRetryFocusRescue(searchLoadFailed);
+  // A Load more that fetches the last page unmounts under the user's focus;
+  // the same edge rescue lands it on the shell. Each flag is true exactly
+  // while its button is mounted (the list arm, in its mode, with a next page).
+  const listArm = log.data !== undefined && commits.length > 0;
+  const logMoreRescue = useRetryFocusRescue(
+    listArm && !searchActive && log.hasNextPage,
+  );
+  const searchMoreRescue = useRetryFocusRescue(
+    listArm && searchActive && search.hasNextPage,
+  );
+  // Pre-mounted at one tree position, never under aria-busy: a live region
+  // created together with its text announces unreliably.
+  const announcement = logLoadFailed
+    ? `Couldn't load the history. ${presentError(log.error).summary}`
+    : searchLoadFailed
+      ? `Couldn't search all history. ${presentError(search.error).summary}`
+      : "";
+  const shell = (body: ReactNode, header: ReactNode = null) => (
+    <div
+      ref={(node) => {
+        logRescue.hostRef(node);
+        searchRescue.hostRef(node);
+        logMoreRescue.hostRef(node);
+        searchMoreRescue.hostRef(node);
+      }}
+      tabIndex={-1}
+      className="flex min-h-0 flex-1 flex-col outline-none"
+    >
+      <div role="status" className="sr-only">
+        {announcement}
+      </div>
+      {header}
+      <DegradedListNotice
+        noun={searchShown ? "matches" : "commits"}
+        degraded={notice !== null}
+        message={notice?.message}
+        retryLabel={notice?.retryLabel}
+        onRetry={
+          notice?.cause === "refresh"
+            ? () => void shownRead.refetch()
+            : undefined
+        }
+        className="shrink-0 border-b px-3 py-1.5"
+      />
+      {body}
+    </div>
+  );
+
+  if (logLoadFailed) {
+    return shell(
+      <div className="px-3 py-8 text-center text-xs">
+        <p className="font-medium text-destructive">
+          Couldn't load the history.
+        </p>
+        <p className="mt-1 text-muted-foreground">
+          {presentError(log.error).summary}
+        </p>
+        <Button
+          ref={logRescue.retryRef}
+          variant="outline"
+          size="sm"
+          className="mt-2 cursor-pointer"
+          onClick={() => void log.refetch()}
+        >
+          Retry
+        </Button>
+      </div>,
+    );
+  }
+
+  // A never-loaded read refetching after a failure loads like a first read.
+  if (log.data === undefined) {
+    return shell(
+      <div className="flex-1">
+        <ListRowSkeletons rows={3} lines={2} indent={false} name="commits" />
+      </div>,
+      <div className="border-b p-2">
+        {/* A disabled copy of the header below, so the rows don't shift when
+            the log lands. */}
+        <Input
+          disabled
+          value={filterText}
+          placeholder={FILTER_PLACEHOLDER}
+          className="h-7"
+          autoComplete="off"
+        />
+      </div>,
     );
   }
 
   if (commits.length === 0) {
-    return (
+    return shell(
       <Empty className="flex-1">
         <EmptyHeader>
           <EmptyMedia variant="icon">
@@ -722,7 +831,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             Go to Changes
           </Button>
         </EmptyContent>
-      </Empty>
+      </Empty>,
     );
   }
 
@@ -821,7 +930,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     agreed,
     opInProgress,
   });
-  const squashDisabledHint = squashHold ? SQUASH_HOLD_HINT[squashHold] : "";
+  // A no-upstream count read that settled in error won't agree by waiting, so
+  // the hold names it rather than "refreshing" indefinitely.
+  const countUnchecked = noUpstream && refreshFailed(unpushedVsRemotes);
+  const refreshingHint = countUnchecked
+    ? UNPUSHED_UNCHECKED_HINT
+    : HISTORY_REFRESHING_HINT;
+  const squashDisabledHint =
+    squashHold === "refreshing"
+      ? refreshingHint
+      : squashHold
+        ? SQUASH_HOLD_HINT[squashHold]
+        : "";
   const squashMax = selectedIndices.at(-1) ?? -1;
 
   function openSquash() {
@@ -863,7 +983,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       case opInProgress:
         return OP_IN_PROGRESS_HINT;
       case !agreed:
-        return HISTORY_REFRESHING_HINT;
+        return refreshingHint;
       default:
         return "";
     }
@@ -1110,22 +1230,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     );
   }
 
-  return (
+  return shell(
     <>
-      <div className="border-b p-2">
-        <Input
-          ref={filterRef}
-          value={filterText}
-          onChange={(e) => {
-            setFilterText(e.target.value);
-            // Clearing the box returns to filtering the loaded pages.
-            if (!e.target.value.trim()) setSearchMode(false);
-          }}
-          placeholder={FILTER_PLACEHOLDER}
-          className="h-7"
-          autoComplete="off"
-        />
-      </div>
       {/* Keyed so a repo switch remounts it closed: clearing menuTarget under
           an open menu would leave Base UI's popup empty. */}
       <ContextMenu key={repoPath}>
@@ -1143,11 +1249,43 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             />
           }
         >
-          {visibleCommits.length === 0 ? (
+          {searchLoadFailed ? (
+            <div className="px-3 py-8 text-center text-xs">
+              <p className="font-medium text-destructive">
+                Couldn't search all history.
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {presentError(search.error).summary}
+              </p>
+              <div className="mt-2 flex justify-center gap-2">
+                <Button
+                  ref={searchRescue.retryRef}
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => void search.refetch()}
+                >
+                  Retry
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground"
+                  onClick={() => {
+                    setFilterText("");
+                    setSearchMode(false);
+                    filterRef.current?.focus();
+                  }}
+                >
+                  Clear filter
+                </Button>
+              </div>
+            </div>
+          ) : visibleCommits.length === 0 ? (
             <div className="px-3 py-8 text-center">
               <p className="text-xs text-muted-foreground">
                 {searchActive
-                  ? search.isFetching
+                  ? search.isFetching || search.data === undefined
                     ? "Searching all history…"
                     : `No commits match "${filterText.trim()}"`
                   : `No loaded commits match "${filterText.trim()}"`}
@@ -1190,10 +1328,14 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             <div className="space-y-0.5 px-3 py-2 text-center">
               {search.hasNextPage && (
                 <Button
+                  ref={searchMoreRescue.retryRef}
                   variant="ghost"
                   size="xs"
-                  className="text-muted-foreground"
+                  className={cn("text-muted-foreground", ARIA_DISABLED_CLASS)}
+                  // Focusable while busy, so a press never drops focus to
+                  // <body>; the button is the Load more retry too.
                   disabled={search.isFetchingNextPage}
+                  focusableWhenDisabled
                   onClick={() => search.fetchNextPage()}
                 >
                   {search.isFetchingNextPage && (
@@ -1231,10 +1373,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               {log.hasNextPage && (
                 <div className="px-3 py-2 text-center">
                   <Button
+                    ref={logMoreRescue.retryRef}
                     variant="ghost"
                     size="xs"
-                    className="text-muted-foreground"
+                    className={cn("text-muted-foreground", ARIA_DISABLED_CLASS)}
                     disabled={log.isFetchingNextPage}
+                    focusableWhenDisabled
                     onClick={() => log.fetchNextPage()}
                   >
                     {log.isFetchingNextPage && (
@@ -1368,7 +1512,21 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         openedIn={mergePick?.repo ?? null}
         onClose={() => setMergePick((m) => (m === mergePick ? null : m))}
       />
-    </>
+    </>,
+    <div className="border-b p-2">
+      <Input
+        ref={filterRef}
+        value={filterText}
+        onChange={(e) => {
+          setFilterText(e.target.value);
+          // Clearing the box returns to filtering the loaded pages.
+          if (!e.target.value.trim()) setSearchMode(false);
+        }}
+        placeholder={FILTER_PLACEHOLDER}
+        className="h-7"
+        autoComplete="off"
+      />
+    </div>,
   );
 }
 

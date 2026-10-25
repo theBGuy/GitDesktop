@@ -310,6 +310,23 @@ export function listNotice(input: {
   return null;
 }
 
+/** An infinite query's failure split by which fetch failed, for
+ *  {@link listNotice}: a failed Load more leaves the loaded pages standing, so it
+ *  must not read as a failed refresh. Settled like {@link refreshFailed}: a park
+ *  or a fetch in flight says nothing yet. */
+export function splitInfiniteFailure(q: {
+  isError: boolean;
+  isFetchNextPageError: boolean;
+  isPaused: boolean;
+  isFetching: boolean;
+}): { failed: boolean; loadMoreFailed: boolean } {
+  const settled = refreshFailed(q);
+  return {
+    failed: settled && !q.isFetchNextPageError,
+    loadMoreFailed: settled && q.isFetchNextPageError,
+  };
+}
+
 /** The one line a small section over a single read (a pull request's tasks, a
  *  commit's comments) shows, or null. `rowCount` is `undefined` until the read
  *  has loaded; loaded rows stay drawn under {@link listNotice}'s line. With

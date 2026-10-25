@@ -14,6 +14,23 @@ pub fn validate_hash(hash: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Whether HEAD is unborn. `rev-parse --verify --quiet` exits 1 exactly when
+/// HEAD doesn't resolve; any other failure (not a repository, a corrupt ref) is
+/// a failed read and carries git's own report, never an empty answer.
+pub(crate) async fn unborn_head(repo_path: &str) -> AppResult<bool> {
+    let head = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if head.code == 1 {
+        return Ok(true);
+    }
+    head.exit_verdict()?;
+    Ok(false)
+}
+
 /// Paged commit history. When `search` is set, searches the whole history by
 /// commit message (literal, case-insensitive) instead of paging recent commits.
 #[tauri::command]
@@ -23,15 +40,7 @@ pub async fn git_log(
     skip: u32,
     search: Option<String>,
 ) -> AppResult<Vec<CommitSummary>> {
-    let head_exists = run_git_raw(
-        Some(&repo_path),
-        &["rev-parse", "--verify", "--quiet", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .code
-        == 0;
-    if !head_exists {
+    if unborn_head(&repo_path).await? {
         return Ok(Vec::new());
     }
 
@@ -109,15 +118,7 @@ pub async fn git_file_log(
     // A zero-commit repo has no HEAD to walk, so `git log --follow` would surface
     // raw git stderr. Mirror `git_log`'s guard: an unborn HEAD has no history, so
     // return an empty list rather than an error.
-    let head_exists = run_git_raw(
-        Some(&repo_path),
-        &["rev-parse", "--verify", "--quiet", "HEAD"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .code
-        == 0;
-    if !head_exists {
+    if unborn_head(&repo_path).await? {
         return Ok(Vec::new());
     }
     let limit_arg = limit.to_string();
@@ -163,15 +164,7 @@ pub async fn git_blame(
             // No rev: blame the working tree, but a zero-commit repo has no HEAD to
             // blame — return a friendly error rather than raw git stderr (and never
             // an empty Ok, which would masquerade as an empty file).
-            let head_exists = run_git_raw(
-                Some(&repo_path),
-                &["rev-parse", "--verify", "--quiet", "HEAD"],
-                DEFAULT_TIMEOUT,
-            )
-            .await?
-            .code
-                == 0;
-            if !head_exists {
+            if unborn_head(&repo_path).await? {
                 return Err(crate::error::AppError::InvalidArgument(
                     "repository has no commits yet — blame needs at least one commit".into(),
                 ));
@@ -187,19 +180,20 @@ pub async fn git_blame(
                 )));
             }
             // Resolve first: validates arbitrary revspecs (branch names from the
-            // Compare surface) and normalizes to a 40-hex sha.
+            // Compare surface) and normalizes to a 40-hex sha. Only exit 1 means
+            // the rev doesn't resolve; any other failure keeps git's own reason.
             let resolved = run_git_raw(
                 Some(&repo_path),
                 &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")],
                 DEFAULT_TIMEOUT,
             )
             .await?;
-            if resolved.code != 0 {
+            if resolved.code == 1 {
                 return Err(crate::error::AppError::InvalidArgument(format!(
                     "unknown revision: {rev}"
                 )));
             }
-            Some(resolved.stdout_lossy().trim().to_string())
+            Some(resolved.exit_verdict()?.stdout_lossy().trim().to_string())
         }
     };
 
@@ -618,6 +612,76 @@ mod tests {
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].hash, first);
         assert_eq!(next[0].subject, "one");
+    }
+
+    #[tokio::test]
+    async fn blame_unknown_rev_says_unknown_revision() {
+        let (_dir, repo, _first, _second) = two_commit_repo("unknown-rev").await;
+        let err = git_blame(repo.clone(), "file.txt".into(), Some("no-such-rev".into()))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, crate::error::AppError::InvalidArgument(msg) if msg == "unknown revision: no-such-rev"),
+            "{err:?}"
+        );
+    }
+
+    /// A git run that fails for any reason but "absent" carries git's own report,
+    /// on both the rev probe and the no-rev HEAD probe.
+    #[tokio::test]
+    async fn blame_in_a_broken_repo_reports_gits_reason() {
+        let (dir, repo, first, _second) = two_commit_repo("broken").await;
+        std::fs::rename(dir.path().join(".git"), dir.path().join("git-moved")).unwrap();
+        for rev in [Some(first), None] {
+            let err = git_blame(repo.clone(), "file.txt".into(), rev.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, crate::error::AppError::Git { stderr, .. } if stderr.contains("not a git repository")),
+                "rev {rev:?}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_log_errs_in_a_broken_repo() {
+        let (dir, repo, _first, _second) = two_commit_repo("log-broken").await;
+        std::fs::rename(dir.path().join(".git"), dir.path().join("git-moved")).unwrap();
+        for search in [None, Some("one".to_string())] {
+            let result = git_log(repo.clone(), 10, 0, search.clone()).await;
+            assert!(
+                matches!(&result, Err(crate::error::AppError::Git { stderr, .. }) if stderr.contains("not a git repository")),
+                "search {search:?}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn git_log_is_empty_on_an_unborn_head() {
+        let (_dir, repo) = temp_repo("log-unborn");
+        git(&repo, &["init"]).await;
+        assert!(git_log(repo, 10, 0, None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_history_errs_in_a_broken_repo() {
+        let (dir, repo, _first, _second) = two_commit_repo("file-log-broken").await;
+        std::fs::rename(dir.path().join(".git"), dir.path().join("git-moved")).unwrap();
+        let result = git_file_log(repo, "file.txt".into(), 10, 0).await;
+        assert!(
+            matches!(&result, Err(crate::error::AppError::Git { stderr, .. }) if stderr.contains("not a git repository")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_history_is_empty_on_an_unborn_head() {
+        let (_dir, repo) = temp_repo("file-log-unborn");
+        git(&repo, &["init"]).await;
+        assert!(git_file_log(repo, "file.txt".into(), 10, 0)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -596,6 +596,17 @@ one grep away on the named symbol. Grows via Conventions-sync.
   truncated says "may be incomplete" with no Retry; a failure offers Retry; a
   park never does. Several sub-lists of ONE read share one line and one Retry
   through `unknownListsNotice`, never stacked per-list notices.
+- **Fail toward unknown** — empty, negative or advisory copy ("no X", "not
+  pushed", "unavailable") renders only from a SUCCESSFUL read that answered so,
+  gated on the read's data, never on its absence: a failed read keeps loaded
+  content under a notice or says it couldn't load, with Retry. An infinite
+  query splits a failed Load more from a failed refresh through
+  `splitInfiniteFailure` (remote-section-state) before `listNotice`. The Rust
+  twin of "Advisory probes fail SAFE toward inaction": a probe returns Err for a
+  failed git run, never a defaulted verdict, and reads its negative answer only
+  from a run that gave it (exit 0 with nothing matched, or `rev-parse --verify
+  --quiet`'s exit 1 for a ref that doesn't resolve); `commit_on_remote` and
+  `git_unpushed_count` in git/branches.rs are the models.
 - **Settings list retention** — a repo-settings list read renders through
   `RemoteListSection` (repo-settings/parts), never `AsyncListBody` fed a raw
   query error: a failed or parked refresh keeps loaded rows under a notice.

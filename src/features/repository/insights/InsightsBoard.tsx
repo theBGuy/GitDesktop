@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
+import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
   useCodeFrequency,
@@ -119,6 +125,68 @@ function ContributorsList({ data }: { data: ContributorChurn[] }) {
   );
 }
 
+/** Every card that reads data of its own, in board order: the board notice
+ *  names the first failure in this order. */
+type CardId =
+  | "commitActivity"
+  | "codeFrequency"
+  | "contributors"
+  | "commitTimes"
+  | "runs"
+  | "forkActivity"
+  | "community"
+  | "traffic"
+  | "dependencies";
+
+/** What a card's failure line says it couldn't load. `runs` is the GitHub
+ *  noun; pipeline providers swap in their own at the call site. */
+const CARD_NOUN: Record<CardId, string> = {
+  commitActivity: "commit activity",
+  codeFrequency: "code frequency",
+  contributors: "contributors",
+  commitTimes: "commit times",
+  runs: "workflow runs",
+  forkActivity: "fork activity",
+  community: "community insights",
+  traffic: "traffic",
+  dependencies: "dependencies",
+};
+
+type CardRead = {
+  data: unknown;
+  error: unknown;
+  isError: boolean;
+  isPaused: boolean;
+  isFetching: boolean;
+  refetch: () => Promise<unknown>;
+};
+
+/** A card's body while its read holds no data. A hosted read parked offline
+ *  says it waits, a settled failure says it couldn't load (never an empty
+ *  claim), and anything else still loads. Muted and non-live: the board notice
+ *  is the one announcement. */
+function unloadedCard(q: CardRead, noun: string, skeleton: ReactNode) {
+  if (q.isPaused) return <Empty>{offlinePendingMessage(noun)}</Empty>;
+  if (refreshFailed(q)) return <Empty>Couldn't load {noun}.</Empty>;
+  return skeleton;
+}
+
+/** The board's one failure line and the reads its Retry refetches, or null.
+ *  Silent only while a user's Retry is settling (`retrying`), so the sentence
+ *  never swaps mid-retry; a background refetch, a polling run list's
+ *  included, never blanks it. */
+function boardNotice(
+  cards: readonly (readonly [CardId, CardRead])[],
+  retrying: boolean,
+) {
+  const failed = cards.filter(([, q]) => refreshFailed(q));
+  if (retrying || failed.length === 0) return null;
+  const message = failed.every(([, q]) => q.data !== undefined)
+    ? "Couldn't refresh some insights — showing the last loaded ones."
+    : `Couldn't load some insights. ${presentError(failed[0][1].error).summary}`;
+  return { message, failed: failed.map(([, q]) => q) };
+}
+
 function durationMinutes(start: string, end: string): number {
   const s = new Date(start).getTime();
   const e = new Date(end).getTime();
@@ -141,6 +209,14 @@ export function InsightsBoard({
   active: boolean;
 }) {
   const [allTime, setAllTime] = useState(false);
+  // The Retry in flight, as a token: a newer press supersedes an older one's
+  // settle. Cleared on a repo switch, whose cards it never refetched.
+  const [retrying, setRetrying] = useState<object | null>(null);
+  const [retryRepo, setRetryRepo] = useState(repoPath);
+  if (retryRepo !== repoPath) {
+    setRetryRepo(repoPath);
+    setRetrying(null);
+  }
   const weeks = allTime ? 0 : WINDOW_WEEKS;
 
   const gh = useForgeStatus(repoPath);
@@ -195,6 +271,41 @@ export function InsightsBoard({
       conclusion: r.conclusion || "—",
     }));
 
+  const noun: Record<CardId, string> = {
+    ...CARD_NOUN,
+    runs: isGitLab || isBitbucket ? "pipelines" : CARD_NOUN.runs,
+  };
+  // The cards on screen with a read of their own, in board order.
+  const notice = boardNotice(
+    [
+      ["commitActivity", commitActivity],
+      ["codeFrequency", codeFreq],
+      ["contributors", contributors],
+      ["commitTimes", punchCard],
+      ...(canGh ? ([["runs", runs]] as const) : []),
+      ...(canForks && forkProvider
+        ? ([["forkActivity", forkActivity]] as const)
+        : []),
+      ...(canGhOnly
+        ? ([
+            ["community", community],
+            ["traffic", traffic],
+            ["dependencies", dependencies],
+          ] as const)
+        : []),
+    ],
+    retrying !== null,
+  );
+  const retryFailed = notice
+    ? () => {
+        const token = {};
+        setRetrying(token);
+        void Promise.allSettled(notice.failed.map((q) => q.refetch())).then(
+          () => setRetrying((t) => (t === token ? null : t)),
+        );
+      }
+    : undefined;
+
   return (
     // `h-full`, not `flex-1`: the tab host this mounts in is a block element, so
     // a flex-item sizing hint is inert there and the grid's natural height would
@@ -229,6 +340,14 @@ export function InsightsBoard({
           </Button>
         </div>
       </div>
+      <DegradedListNotice
+        noun="insights"
+        degraded={notice !== null}
+        message={notice?.message}
+        retryLabel="Retry loading insights"
+        onRetry={retryFailed}
+        className="shrink-0 border-b px-3 py-1.5"
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -237,9 +356,13 @@ export function InsightsBoard({
             bodyClassName={CARD_BODY.chart}
             stale={commitActivity.isPlaceholderData}
           >
-            {commitActivity.isPending ? (
-              <ChartSkeleton />
-            ) : commitActivity.data?.length ? (
+            {commitActivity.data === undefined ? (
+              unloadedCard(
+                commitActivity,
+                noun.commitActivity,
+                <ChartSkeleton />,
+              )
+            ) : commitActivity.data.length ? (
               <CommitActivityChart data={commitActivity.data} />
             ) : (
               <Empty>No commits in this window.</Empty>
@@ -251,9 +374,9 @@ export function InsightsBoard({
             bodyClassName={CARD_BODY.chart}
             stale={codeFreq.isPlaceholderData}
           >
-            {codeFreq.isPending ? (
-              <ChartSkeleton />
-            ) : codeFreq.data?.length ? (
+            {codeFreq.data === undefined ? (
+              unloadedCard(codeFreq, noun.codeFrequency, <ChartSkeleton />)
+            ) : codeFreq.data.length ? (
               <CodeFrequencyChart data={codeFreq.data} />
             ) : (
               <Empty>No code changes in this window.</Empty>
@@ -266,9 +389,13 @@ export function InsightsBoard({
             bodyClassName={CARD_BODY.contributors}
             stale={contributors.isPlaceholderData}
           >
-            {contributors.isPending ? (
-              <ContributorsSkeleton />
-            ) : contributors.data?.length ? (
+            {contributors.data === undefined ? (
+              unloadedCard(
+                contributors,
+                noun.contributors,
+                <ContributorsSkeleton />,
+              )
+            ) : contributors.data.length ? (
               <ContributorsList data={contributors.data} />
             ) : (
               <Empty>No contributors in this window.</Empty>
@@ -280,12 +407,10 @@ export function InsightsBoard({
             className="xl:col-span-2"
             stale={punchCard.isPlaceholderData}
           >
-            {punchCard.isPending ? (
-              <PunchCardSkeleton />
-            ) : punchCard.data ? (
-              <PunchCard grid={punchCard.data} />
+            {punchCard.data === undefined ? (
+              unloadedCard(punchCard, noun.commitTimes, <PunchCardSkeleton />)
             ) : (
-              <Empty>No commit times to chart.</Empty>
+              <PunchCard grid={punchCard.data} />
             )}
           </InsightCard>
 
@@ -301,15 +426,12 @@ export function InsightsBoard({
                 )
               }
             >
-              {runs.isPending ? (
-                <ChartSkeleton />
+              {runs.data === undefined ? (
+                unloadedCard(runs, noun.runs, <ChartSkeleton />)
               ) : durationPoints.length ? (
                 <ActionsDurationChart data={durationPoints} />
               ) : (
-                <Empty>
-                  No completed{" "}
-                  {isGitLab || isBitbucket ? "pipelines" : "workflow runs"} yet.
-                </Empty>
+                <Empty>No completed {noun.runs} yet.</Empty>
               )}
             </InsightCard>
           )}
@@ -327,9 +449,9 @@ export function InsightsBoard({
                 )
               }
             >
-              {forkActivity.isPending ? (
-                <ChartSkeleton />
-              ) : forkActivity.data && forkProvider ? (
+              {forkActivity.data === undefined ? (
+                unloadedCard(forkActivity, noun.forkActivity, <ChartSkeleton />)
+              ) : forkProvider ? (
                 <ForkActivityCard
                   repoPath={repoPath}
                   data={forkActivity.data}
@@ -344,12 +466,10 @@ export function InsightsBoard({
 
           {(canGhOnly || forgeDetecting) && (
             <InsightCard title="Community" bodyClassName={CARD_BODY.community}>
-              {community.isPending ? (
-                <ChartSkeleton />
-              ) : community.data ? (
-                <CommunityCard data={community.data} />
+              {community.data === undefined ? (
+                unloadedCard(community, noun.community, <ChartSkeleton />)
               ) : (
-                <Empty>Community insights are unavailable.</Empty>
+                <CommunityCard data={community.data} />
               )}
             </InsightCard>
           )}
@@ -360,12 +480,10 @@ export function InsightsBoard({
               className="xl:col-span-2"
               bodyClassName={CARD_BODY.traffic}
             >
-              {traffic.isPending ? (
-                <TrafficSkeleton />
-              ) : traffic.data ? (
-                <TrafficCard data={traffic.data} />
+              {traffic.data === undefined ? (
+                unloadedCard(traffic, noun.traffic, <TrafficSkeleton />)
               ) : (
-                <Empty>Traffic is unavailable.</Empty>
+                <TrafficCard data={traffic.data} />
               )}
             </InsightCard>
           )}
@@ -375,12 +493,10 @@ export function InsightsBoard({
               title="Dependencies"
               bodyClassName={CARD_BODY.dependencies}
             >
-              {dependencies.isPending ? (
-                <ChartSkeleton />
-              ) : dependencies.data ? (
-                <DependenciesCard data={dependencies.data} />
+              {dependencies.data === undefined ? (
+                unloadedCard(dependencies, noun.dependencies, <ChartSkeleton />)
               ) : (
-                <Empty>Dependencies are unavailable.</Empty>
+                <DependenciesCard data={dependencies.data} />
               )}
             </InsightCard>
           )}

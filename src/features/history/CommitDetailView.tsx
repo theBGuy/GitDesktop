@@ -33,6 +33,7 @@ import {
 } from "@/features/conversations/ConversationListPanel";
 import {
   detailNoticeMessage,
+  refreshFailed,
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
@@ -532,246 +533,284 @@ export function CommitDetailView({
   });
 
   return shell(
-    <div className="flex h-full flex-col" aria-busy={Boolean(staleDim)}>
-      <header className="flex flex-col gap-1 border-b px-4 py-3">
-        <h2 className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}>
-          {commit.subject}
-        </h2>
-        {commit.body && (
-          <p
-            className={cn(
-              "max-h-24 overflow-y-auto text-xs whitespace-pre-wrap text-muted-foreground",
-              PLACEHOLDER_FADE,
-              staleDim,
-            )}
-          >
-            {commit.body}
-          </p>
-        )}
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span
-            className={cn(
-              "flex items-center gap-2",
-              PLACEHOLDER_FADE,
-              staleDim,
-            )}
-          >
-            <CommitAuthorAvatar
-              name={commit.author}
-              email={commit.authorEmail}
-            />
-            <span>{commit.author}</span>
-            <span>•</span>
-            <span>
-              <RelativeTime date={commit.date} />
-            </span>
-            <span>•</span>
-          </span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 font-mono hover:text-foreground"
-            onClick={copyHash}
-            title="Copy full hash"
-          >
-            {hash.slice(0, 7)}
-            <CopyIcon className="size-3" />
-          </button>
-          <span className="flex-1" />
-          <DiffStat
-            added={totalAdded}
-            deleted={totalDeleted}
-            className={cn(
-              "flex items-center gap-2",
-              PLACEHOLDER_FADE,
-              staleDim,
-            )}
-          />
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="Commit actions"
-                />
-              }
+    <>
+      <div
+        className="flex min-h-0 flex-1 flex-col"
+        aria-busy={Boolean(staleDim)}
+      >
+        <header className="flex flex-col gap-1 border-b px-4 py-3">
+          <h2 className={cn("text-sm font-medium", PLACEHOLDER_FADE, staleDim)}>
+            {commit.subject}
+          </h2>
+          {commit.body && (
+            <p
+              className={cn(
+                "max-h-24 overflow-y-auto text-xs whitespace-pre-wrap text-muted-foreground",
+                PLACEHOLDER_FADE,
+                staleDim,
+              )}
             >
-              <DotsThreeVerticalIcon />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent className="min-w-56" align="end">
-              <DropdownMenuItem
-                className={MENU_HELD_ROW_CLASS}
-                disabled={!isHead}
-                onClick={() => requestAmend(hash)}
+              {commit.body}
+            </p>
+          )}
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span
+              className={cn(
+                "flex items-center gap-2",
+                PLACEHOLDER_FADE,
+                staleDim,
+              )}
+            >
+              <CommitAuthorAvatar
+                name={commit.author}
+                email={commit.authorEmail}
+              />
+              <span>{commit.author}</span>
+              <span>•</span>
+              <span>
+                <RelativeTime date={commit.date} />
+              </span>
+              <span>•</span>
+            </span>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 font-mono hover:text-foreground"
+              onClick={copyHash}
+              title="Copy full hash"
+            >
+              {hash.slice(0, 7)}
+              <CopyIcon className="size-3" />
+            </button>
+            <span className="flex-1" />
+            <DiffStat
+              added={totalAdded}
+              deleted={totalDeleted}
+              className={cn(
+                "flex items-center gap-2",
+                PLACEHOLDER_FADE,
+                staleDim,
+              )}
+            />
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="Commit actions"
+                  />
+                }
               >
-                Amend commit…
-                {isLatest && !isHead && HISTORY_REFRESHING_HINT}
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={doCheckoutCommit}>
-                Checkout commit
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={doRevertCommit}>
-                Revert changes in commit
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={doCherryPick}>
-                Cherry-pick commit
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => copyText(hash, "SHA copied")}>
-                Copy SHA
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-        {/* Inert as well as faded while the details are a placeholder: these
+                <DotsThreeVerticalIcon />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent className="min-w-56" align="end">
+                <DropdownMenuItem
+                  className={MENU_HELD_ROW_CLASS}
+                  disabled={!isHead}
+                  onClick={() => requestAmend(hash)}
+                >
+                  Amend commit…
+                  {isLatest && !isHead && HISTORY_REFRESHING_HINT}
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={doCheckoutCommit}>
+                  Checkout commit
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={doRevertCommit}>
+                  Revert changes in commit
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={doCherryPick}>
+                  Cherry-pick commit
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onClick={() => copyText(hash, "SHA copied")}>
+                  Copy SHA
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+          {/* Inert as well as faded while the details are a placeholder: these
             are CLICKABLE links mined from the previous commit's message, kept
             only to hold their space. `empty:hidden` drops the wrapper when no
             key matches, so the header's gap never spaces an empty row. */}
-        <div
-          inert={details.isPlaceholderData}
-          className={cn(
-            "empty:hidden",
-            PLACEHOLDER_FADE,
-            details.isPlaceholderData && "opacity-80",
-          )}
-        >
-          <JiraRefRow
-            repoPath={repoPath}
-            sources={[
-              { label: "commit subject", text: commit.subject },
-              { label: "commit message body", text: commit.body },
-            ]}
-          />
-        </div>
-      </header>
-
-      <DegradedListNotice
-        noun="this commit"
-        degraded={pane === "content-degraded"}
-        message={detailNoticeMessage({
-          noun: "commit",
-          isError: failed,
-          stale,
-        })}
-        onRetry={failed ? retryErrored : undefined}
-        className="shrink-0 border-b px-4 py-1.5"
-      />
-      <DetailRailRow>
-        <DetailRail
-          ariaLabel="Changed files"
-          className={cn(PLACEHOLDER_FADE, staleDim)}
-          header={
-            <p className="truncate text-xs text-muted-foreground">
-              {files.data.length} changed file
-              {files.data.length === 1 ? "" : "s"}
-            </p>
-          }
-        >
-          {/* overflow-hidden contains the list's natural height (vendored Root is
-              `relative`-only) so a long file list can't leak a window scrollbar. */}
-          <ScrollArea className="min-h-0 flex-1 overflow-hidden">
-            <FileRowActions
+          <div
+            inert={details.isPlaceholderData}
+            className={cn(
+              "empty:hidden",
+              PLACEHOLDER_FADE,
+              details.isPlaceholderData && "opacity-80",
+            )}
+          >
+            <JiraRefRow
               repoPath={repoPath}
-              blameRev={hash}
-              onKeyDown={onFilesKeyDown}
-            >
-              {files.data.map((file) => (
-                <button
-                  type="button"
-                  key={file.path}
-                  data-path={file.path}
-                  className={cn(
-                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
-                    effectivePath === file.path
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-muted/60",
-                  )}
-                  onClick={() => setSelectedPath(file.path)}
-                  onMouseEnter={() =>
-                    hoverPrefetch(() => prefetchFileDiff(hash, file.path))
-                  }
-                >
-                  <PathText path={file.path} className="flex-1 font-mono" />
-                  <DiffStat
-                    added={file.added}
-                    deleted={file.deleted}
-                    isBinary={file.isBinary}
-                  />
-                </button>
-              ))}
-            </FileRowActions>
-          </ScrollArea>
-        </DetailRail>
-        <main
-          ref={diffRegion}
-          aria-busy={Boolean(diffDim)}
-          className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
-          // Move as well as enter: a pointer resting here while the commit
-          // changes must still arm the new one before it reaches a line.
-          onPointerEnter={armDiff}
-          onPointerMove={armDiff}
-          onFocusCapture={armDiff}
-        >
-          {deferredPath ? (
-            <DiffSurface
-              filePath={deferredPath}
-              diff={diff}
-              repoPath={repoPath}
-              imageRevs={{ old: `${hash}~1`, new: hash }}
-              contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
-              lineAnchors={lineAnchors}
-              lineWidget={lineWidget}
+              sources={[
+                { label: "commit subject", text: commit.subject },
+                { label: "commit message body", text: commit.body },
+              ]}
             />
-          ) : (
-            <DiffPlaceholder message="Select a file to see its changes" />
-          )}
-        </main>
-      </DetailRailRow>
+          </div>
+        </header>
 
-      {/* Mounted for every commit, rendering only where comments are supported:
+        <DegradedListNotice
+          noun="this commit"
+          degraded={pane === "content-degraded"}
+          message={detailNoticeMessage({
+            noun: "commit",
+            isError: failed,
+            stale,
+          })}
+          onRetry={failed ? retryErrored : undefined}
+          className="shrink-0 border-b px-4 py-1.5"
+        />
+        <DetailRailRow>
+          <DetailRail
+            ariaLabel="Changed files"
+            className={cn(PLACEHOLDER_FADE, staleDim)}
+            header={
+              <p className="truncate text-xs text-muted-foreground">
+                {files.data.length} changed file
+                {files.data.length === 1 ? "" : "s"}
+              </p>
+            }
+          >
+            {/* overflow-hidden contains the list's natural height (vendored Root is
+              `relative`-only) so a long file list can't leak a window scrollbar. */}
+            <ScrollArea className="min-h-0 flex-1 overflow-hidden">
+              <FileRowActions
+                repoPath={repoPath}
+                blameRev={hash}
+                onKeyDown={onFilesKeyDown}
+              >
+                {files.data.map((file) => (
+                  <button
+                    type="button"
+                    key={file.path}
+                    data-path={file.path}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
+                      effectivePath === file.path
+                        ? "bg-accent text-accent-foreground"
+                        : "hover:bg-muted/60",
+                    )}
+                    onClick={() => setSelectedPath(file.path)}
+                    onMouseEnter={() =>
+                      hoverPrefetch(() => prefetchFileDiff(hash, file.path))
+                    }
+                  >
+                    <PathText path={file.path} className="flex-1 font-mono" />
+                    <DiffStat
+                      added={file.added}
+                      deleted={file.deleted}
+                      isBinary={file.isBinary}
+                    />
+                  </button>
+                ))}
+              </FileRowActions>
+            </ScrollArea>
+          </DetailRail>
+          <main
+            ref={diffRegion}
+            aria-busy={Boolean(diffDim)}
+            className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
+            // Move as well as enter: a pointer resting here while the commit
+            // changes must still arm the new one before it reaches a line.
+            onPointerEnter={armDiff}
+            onPointerMove={armDiff}
+            onFocusCapture={armDiff}
+          >
+            {deferredPath ? (
+              <DiffSurface
+                filePath={deferredPath}
+                diff={diff}
+                repoPath={repoPath}
+                imageRevs={{ old: `${hash}~1`, new: hash }}
+                contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
+                lineAnchors={lineAnchors}
+                lineWidget={lineWidget}
+              />
+            ) : (
+              <DiffPlaceholder message="Select a file to see its changes" />
+            )}
+          </main>
+        </DetailRailRow>
+
+        {/* Mounted for every commit, rendering only where comments are supported:
           arrowing through history must not tear down its per-commit drafts. */}
-      <CommitComments
-        enabled={showComments}
-        held={verdictHeld}
-        repoPath={repoPath}
-        sha={renderedHash}
-        canComment={canCommentCommits}
+        <CommitComments
+          enabled={showComments}
+          held={verdictHeld}
+          repoPath={repoPath}
+          sha={renderedHash}
+          canComment={canCommentCommits}
+          remoteLabel={remoteLabel}
+          diffSections={providerKey === "github" ? remoteSections : undefined}
+          // Only GitHub resolves a comment's line through the fetched patch, so only
+          // GitHub has to wait for it; the others anchor by plain line and are always
+          // ready.
+          diffReady={providerKey !== "github" || remoteDiff.isSuccess}
+          // Inline anchors are off while the diff isn't the rendered commit's, so
+          // the list keeps that file's comments too.
+          selectedPath={anchorsMatchDiff ? deferredPath : null}
+          onSelectFile={selectFileFromComments}
+          lens="origin"
+          stale={stale}
+        />
+
+        <AmendForcePushDialog {...forcePushDialog} />
+        <MergeParentDialog
+          repoPath={repoPath}
+          target={mergePick}
+          openedIn={mergePick?.repo ?? null}
+          onClose={() => setMergePick(null)}
+        />
+      </div>
+      {/* Outside the content's aria-busy, which would withhold its live line. */}
+      <CommitRemoteVerdictFooter
+        gate={gate}
+        onRemote={onRemote}
         remoteLabel={remoteLabel}
-        diffSections={providerKey === "github" ? remoteSections : undefined}
-        // Only GitHub resolves a comment's line through the fetched patch, so only
-        // GitHub has to wait for it; the others anchor by plain line and are always
-        // ready.
-        diffReady={providerKey !== "github" || remoteDiff.isSuccess}
-        // Inline anchors are off while the diff isn't the rendered commit's, so
-        // the list keeps that file's comments too.
-        selectedPath={anchorsMatchDiff ? deferredPath : null}
-        onSelectFile={selectFileFromComments}
-        lens="origin"
-        stale={stale}
       />
-      {gate && onRemote.data === false ? (
-        // Appears once a verdict has resolved false, so a cold load of a pushed
-        // commit shows no flash. While the next commit's verdict resolves it keeps
-        // the previous one, dimmed after a delay so a fast settle shows no pulse.
-        <p
-          aria-busy={verdictHeld}
-          className={cn(
-            "border-t px-4 py-2 text-xs text-muted-foreground",
-            PLACEHOLDER_FADE,
-            verdictHeld && "opacity-80 delay-100",
-          )}
-        >
+    </>,
+  );
+}
+
+/** The footer under a commit's comments. "Isn't on {remote} yet" renders only
+ *  from this commit's own settled false, never a previous commit's held
+ *  verdict; a failed check says it couldn't tell and offers Retry, unless a
+ *  retained true already shows the comments, since a pushed commit doesn't
+ *  become unpushed. */
+function CommitRemoteVerdictFooter({
+  gate,
+  onRemote,
+  remoteLabel,
+}: {
+  gate: boolean;
+  onRemote: ReturnType<typeof useCommitOnRemote>;
+  remoteLabel: string;
+}) {
+  const checkFailed = gate && onRemote.data !== true && refreshFailed(onRemote);
+  return (
+    <div className="shrink-0">
+      {/* Always mounted, so a failure arising while shown is announced; its
+          wrapper is the focus landing spot when Retry unmounts. */}
+      <DegradedListNotice
+        noun={remoteLabel}
+        degraded={checkFailed}
+        message={`Couldn't check whether this commit is on ${remoteLabel}.`}
+        retryLabel={`Retry checking ${remoteLabel}`}
+        onRetry={checkFailed ? () => void onRemote.refetch() : undefined}
+        className="border-t px-4 py-2"
+      />
+      {/* The raw error gate keeps the claim from flashing back mid-Retry: a
+          refetch over an errored read stays isError until it lands. A held
+          placeholder is another commit's verdict, so it claims nothing. */}
+      {gate &&
+      onRemote.data === false &&
+      !onRemote.isError &&
+      !onRemote.isPlaceholderData ? (
+        <p className="border-t px-4 py-2 text-xs text-muted-foreground">
           This commit isn't on {remoteLabel} yet — push it to comment.
         </p>
       ) : null}
-
-      <AmendForcePushDialog {...forcePushDialog} />
-      <MergeParentDialog
-        repoPath={repoPath}
-        target={mergePick}
-        openedIn={mergePick?.repo ?? null}
-        onClose={() => setMergePick(null)}
-      />
-    </div>,
+    </div>
   );
 }

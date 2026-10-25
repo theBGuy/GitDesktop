@@ -1,7 +1,8 @@
 // Pins the remote list section's render ladder, the detail pane's ladder, the
-// list notice, the "Load more" guard, the permanent-error predicate and the
-// park it withholds, the review-comments notice, the PR sub-list notice, the
-// empty-picker line, and the board's failure-notice grouping.
+// list notice, the infinite-query failure split, the "Load more" guard, the
+// permanent-error predicate and the park it withholds, the review-comments
+// notice, the PR sub-list notice, the empty-picker line, and the board's
+// failure-notice grouping.
 // The contract under test: a failed or offline read replaces a list or a pane
 // only when it has nothing to draw; with content cached, it stays and a notice
 // sits above it, so an outage never reads as data loss, and a read parked
@@ -32,6 +33,7 @@ import {
   resolveRemoteSection,
   reviewCommentsNotice,
   sectionReadNotice,
+  splitInfiniteFailure,
   stepLoadMoreGuard,
   ungroupedReason,
   unknownListNotice,
@@ -1105,6 +1107,63 @@ test("a failed refresh over a card-only section still reports, without the rows 
     listNotice({ ...base, failed: false, offline: true, hasRows: false }),
     null,
   );
+});
+
+test("an infinite query's failed Load more is no failed refresh", () => {
+  const settled = { isError: true, isPaused: false, isFetching: false };
+  assert.deepEqual(
+    splitInfiniteFailure({ ...settled, isFetchNextPageError: true }),
+    { failed: false, loadMoreFailed: true },
+  );
+  // A refetch or first-load failure is the list's own.
+  assert.deepEqual(
+    splitInfiniteFailure({ ...settled, isFetchNextPageError: false }),
+    { failed: true, loadMoreFailed: false },
+  );
+  // The split reaches the load-more sentence, never the refresh one.
+  const more = listNotice({
+    noun: "commits",
+    offline: false,
+    placeholder: false,
+    hasRows: true,
+    ...splitInfiniteFailure({ ...settled, isFetchNextPageError: true }),
+  });
+  assert.equal(
+    more.message,
+    "Couldn't load more commits — showing the ones already loaded.",
+  );
+  assert.equal(more.cause, "load-more");
+});
+
+test("an infinite query's failure says nothing while parked or fetching", () => {
+  const none = { failed: false, loadMoreFailed: false };
+  for (const isFetchNextPageError of [false, true]) {
+    for (const [isPaused, isFetching] of [
+      [true, false],
+      [false, true],
+      [true, true],
+    ]) {
+      assert.deepEqual(
+        splitInfiniteFailure({
+          isError: true,
+          isFetchNextPageError,
+          isPaused,
+          isFetching,
+        }),
+        none,
+      );
+    }
+    // Negative control: no error, no notice.
+    assert.deepEqual(
+      splitInfiniteFailure({
+        isError: false,
+        isFetchNextPageError,
+        isPaused: false,
+        isFetching: false,
+      }),
+      none,
+    );
+  }
 });
 
 test("the offline and detail notice strings are the ones every surface shows", () => {

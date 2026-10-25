@@ -48,8 +48,6 @@ export function InsightsPanel({
   const currentBranch = status.data?.branch?.name ?? null;
   const base = defaultBranch.data ?? null;
   const branchStats = useBranchStats(repoPath, currentBranch, base, active);
-  const showBranch =
-    currentBranch !== null && base !== null && currentBranch !== base;
   const data = stats.data;
 
   // A failed refresh keeps the loaded numbers under a notice; only a read with
@@ -149,7 +147,9 @@ export function InsightsPanel({
   }
 
   return shell(
-    <div className="space-y-5">
+    // A flex gap, not space-y: the hidden comparison's sr-only root stays a
+    // child, and space-y would give the section above it a trailing margin.
+    <div className="flex flex-col gap-5">
       <section>
         <SectionTitle>Overview</SectionTitle>
         <dl className="grid grid-cols-1 gap-x-8">
@@ -204,15 +204,115 @@ export function InsightsPanel({
         </section>
       )}
 
-      {showBranch && (
+      <BranchComparisonSection
+        currentBranch={currentBranch}
+        defaultBranch={defaultBranch}
+        branchStats={branchStats}
+      />
+    </div>,
+  );
+}
+
+/** The current branch against the default branch. Hidden when there is no
+ *  current branch (a failed status read is surfaced app-wide) or a successful
+ *  read found no default branch; a failed read of either says so with Retry.
+ *  The root always mounts, so its status line announces a failure that arises
+ *  while shown and it hosts focus when an arm's Retry unmounts. */
+function BranchComparisonSection({
+  currentBranch,
+  defaultBranch,
+  branchStats,
+}: {
+  currentBranch: string | null;
+  defaultBranch: ReturnType<typeof useDefaultBranch>;
+  branchStats: ReturnType<typeof useBranchStats>;
+}) {
+  const base = defaultBranch.data ?? null;
+  const baseUnread = currentBranch !== null && defaultBranch.data === undefined;
+  const baseFailed = baseUnread && refreshFailed(defaultBranch);
+  const compared =
+    currentBranch !== null && base !== null && currentBranch !== base;
+  const compareFailed =
+    compared && branchStats.data === undefined && refreshFailed(branchStats);
+  const baseRescue = useRetryFocusRescue(baseFailed);
+  const compareRescue = useRetryFocusRescue(compareFailed);
+  const announcement = baseFailed
+    ? `Couldn't read the default branch. ${presentError(defaultBranch.error).summary}`
+    : compareFailed
+      ? `Couldn't compare against ${base}. ${presentError(branchStats.error).summary}`
+      : "";
+  const shown = compared || baseFailed;
+
+  return (
+    <div
+      ref={(node) => {
+        baseRescue.hostRef(node);
+        compareRescue.hostRef(node);
+      }}
+      tabIndex={-1}
+      // Hidden, it keeps only its live region, out of the layout.
+      className={shown ? "outline-none" : "sr-only outline-none"}
+    >
+      <div role="status" className="sr-only">
+        {announcement}
+      </div>
+      {shown && (
         <section>
           <SectionTitle>
             <span className="font-mono">{currentBranch}</span>{" "}
-            <span className="font-normal text-muted-foreground">vs {base}</span>
+            <span className="font-normal text-muted-foreground">
+              vs {base ?? "the default branch"}
+            </span>
           </SectionTitle>
-          {branchStats.isPending ? (
-            <Skeleton className="h-16 w-full" />
-          ) : branchStats.data ? (
+          <DegradedListNotice
+            noun="the comparison"
+            degraded={
+              compared &&
+              branchStats.data !== undefined &&
+              refreshFailed(branchStats)
+            }
+            onRetry={() => void branchStats.refetch()}
+            className="px-0"
+          />
+          {baseFailed ? (
+            <div className="text-xs">
+              <p className="text-muted-foreground">
+                Couldn't read the default branch.
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {presentError(defaultBranch.error).summary}
+              </p>
+              <Button
+                ref={baseRescue.retryRef}
+                variant="outline"
+                size="sm"
+                className="mt-2 cursor-pointer"
+                aria-label="Retry reading the default branch"
+                onClick={() => void defaultBranch.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : compareFailed ? (
+            <div className="text-xs">
+              <p className="text-muted-foreground">
+                Couldn't compare against {base}.
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {presentError(branchStats.error).summary}
+              </p>
+              <Button
+                ref={compareRescue.retryRef}
+                variant="outline"
+                size="sm"
+                className="mt-2 cursor-pointer"
+                aria-label="Retry loading the comparison"
+                onClick={() => void branchStats.refetch()}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : branchStats.data && compared ? (
             <dl className="grid grid-cols-1 gap-x-8">
               <Stat label="Commits ahead">
                 {fmt(branchStats.data.commitCount)}
@@ -238,12 +338,10 @@ export function InsightsPanel({
               </Stat>
             </dl>
           ) : (
-            <p className="text-xs text-muted-foreground">
-              Couldn't compare against {base}.
-            </p>
+            <Skeleton className="h-16 w-full" />
           )}
         </section>
       )}
-    </div>,
+    </div>
   );
 }

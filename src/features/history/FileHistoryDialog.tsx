@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { CommitAuthorAvatar } from "@/components/commit-author-avatar";
 import { PathText } from "@/components/path-text";
 import { RelativeTime } from "@/components/relative-time";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -11,14 +12,25 @@ import {
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  listNotice,
+  refreshFailed,
+  splitInfiniteFailure,
+} from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
+import { presentError } from "@/lib/error-summary";
 import {
   useCommitAuthorAvatarIndex,
   useCommitFileDiff,
   useFileLog,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 /** Commit history for one file: pick a commit to see the file's diff there. */
@@ -52,6 +64,28 @@ export function FileHistoryDialog({
   );
   const name = path.split("/").pop() ?? path;
 
+  // A failed read never reads as "No history for this file.": with nothing
+  // loaded it says it couldn't load, and loaded commits stay under a notice.
+  const loadFailed = fileLog.data === undefined && refreshFailed(fileLog);
+  const notice =
+    fileLog.data === undefined
+      ? null
+      : listNotice({
+          noun: "commits",
+          ...splitInfiniteFailure(fileLog),
+          offline: false,
+          placeholder: false,
+          hasRows: commits.length > 0,
+        });
+  // Retry resets the read to loading, unmounting itself; focus lands on the
+  // list column.
+  const { hostRef, retryRef } = useRetryFocusRescue(loadFailed);
+  // Loading the last page unmounts Load more under the user's focus; land it
+  // on the column too. True exactly while the button is mounted.
+  const moreRescue = useRetryFocusRescue(
+    commits.length > 0 && fileLog.hasNextPage,
+  );
+
   // Arrow keys walk the commit list (single-select), mirroring HistoryPanel.
   const onListKeyDown = listKeyboardNav({
     items: commits,
@@ -72,9 +106,53 @@ export function FileHistoryDialog({
         </DialogHeader>
 
         <div className="flex min-h-0 flex-1 gap-3">
-          <div className="flex w-64 shrink-0 flex-col border">
+          <div
+            ref={(node) => {
+              hostRef(node);
+              moreRescue.hostRef(node);
+            }}
+            tabIndex={-1}
+            className="flex w-64 shrink-0 flex-col border outline-none"
+          >
+            {/* Pre-mounted, never under aria-busy: a live region created
+                together with its text announces unreliably. */}
+            <div role="status" className="sr-only">
+              {loadFailed
+                ? `Couldn't load this file's history. ${presentError(fileLog.error).summary}`
+                : ""}
+            </div>
+            <DegradedListNotice
+              noun="commits"
+              degraded={notice !== null}
+              message={notice?.message}
+              retryLabel={notice?.retryLabel}
+              onRetry={
+                notice?.cause === "refresh"
+                  ? () => void fileLog.refetch()
+                  : undefined
+              }
+              className="shrink-0 border-b px-2.5 py-1.5"
+            />
             <ScrollArea className="min-h-0 flex-1">
-              {fileLog.isPending ? (
+              {loadFailed ? (
+                <div className="p-3 text-xs">
+                  <p className="text-muted-foreground">
+                    Couldn't load this file's history.
+                  </p>
+                  <p className="mt-1 text-muted-foreground">
+                    {presentError(fileLog.error).summary}
+                  </p>
+                  <Button
+                    ref={retryRef}
+                    variant="outline"
+                    size="sm"
+                    className="mt-2 cursor-pointer"
+                    onClick={() => void fileLog.refetch()}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : fileLog.data === undefined ? (
                 <div className="flex justify-center p-4">
                   <Spinner />
                 </div>
@@ -113,17 +191,25 @@ export function FileHistoryDialog({
                     </button>
                   ))}
                   {fileLog.hasNextPage && (
-                    <button
-                      type="button"
-                      className="flex w-full items-center justify-center gap-1.5 px-2.5 py-2 text-center text-[11px] text-muted-foreground hover:bg-muted/60"
+                    <Button
+                      ref={moreRescue.retryRef}
+                      variant="ghost"
+                      size="xs"
+                      className={cn(
+                        "h-auto w-full gap-1.5 px-2.5 py-2 text-[11px] font-normal text-muted-foreground",
+                        ARIA_DISABLED_CLASS,
+                      )}
+                      // Focusable while busy, so a press never drops focus to
+                      // <body>; the button is the Load more retry too.
                       disabled={fileLog.isFetchingNextPage}
+                      focusableWhenDisabled
                       onClick={() => fileLog.fetchNextPage()}
                     >
                       {fileLog.isFetchingNextPage && (
                         <Spinner data-icon="inline-start" />
                       )}
                       Load more
-                    </button>
+                    </Button>
                   )}
                 </div>
               )}

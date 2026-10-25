@@ -204,7 +204,7 @@ export function BlameDialog({
         <p>
           {shortRev
             ? `Couldn't blame this file at ${shortRev} — it may not exist at that revision, or the commit isn't available locally.`
-            : "Couldn't blame this file (it may be binary or untracked)."}
+            : "Couldn't blame this file."}
         </p>
         {blame.isError ? (
           <>
