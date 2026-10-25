@@ -18,23 +18,19 @@ import { useRepoMutation, workingTreeKeys } from "./internal";
  *  axis follows), so a rule edit invalidates the view whatever settings held. */
 const aiExcludedKey = (repo: string) => ["repo", repo, "ai-excluded"] as const;
 
-/** The families a commit (or amend) makes stale BEYOND the working tree —
- *  history, branch tips/counters, HEAD-rev blobs, and operation state, both
- *  in-flight (a commit can conclude a merge or an interrupted journaled op)
- *  and prospective (merge/conflict previews, local-PR merge states).
- *  Invalidated fire-and-forget so the Commit button never waits on them;
- *  forge-backed keys (pr/issue/CI/…) are deliberately absent — a local
- *  commit cannot change forge state. */
-const commitAftermathKeys = (repo: string) =>
+/** The HEAD-dependent families a commit's aftermath refreshes, minus the four
+ *  the status/log sync already refreshes itself (log, the two unpushed reads,
+ *  op state): history, branch tips/counters, HEAD-rev blobs, and prospective
+ *  operation state (merge/conflict previews, local-PR merge states). Shared by
+ *  a commit's aftermath and StatusLogSync's outside-move refresh; not every
+ *  HEAD-dependent read (StatusLogSync re-reads rewrite-status beside it). */
+export const headMoveAftermathKeys = (repo: string) =>
   [
-    repoKeys.log(repo),
     repoKeys.commits(repo),
     repoKeys.branches(repo),
     ["repo", repo, "log-search"],
     ["repo", repo, "recent-commits"],
     ["repo", repo, "commit-authors"],
-    ["repo", repo, "unpushed-count"],
-    ["repo", repo, "unpushed-messages"],
     ["repo", repo, "branch-stats"],
     ["repo", repo, "stats"],
     ["repo", repo, "divergence"],
@@ -42,7 +38,6 @@ const commitAftermathKeys = (repo: string) =>
     ["repo", repo, "file-log"],
     ["repo", repo, "blame"],
     ["repo", repo, "file-b64", "HEAD"],
-    repoKeys.opState(repo),
     ["repo", repo, "conflict-file"],
     ["repo", repo, "merge-preview"],
     ["repo", repo, "conflict-preview"],
@@ -52,6 +47,21 @@ const commitAftermathKeys = (repo: string) =>
     ["repo", repo, "insights", "commit-activity"],
     ["repo", repo, "insights", "code-frequency"],
     ["repo", repo, "insights", "punch-card"],
+  ] as const;
+
+/** The families a commit (or amend) makes stale BEYOND the working tree: the
+ *  HEAD-move set plus the four the status/log sync owns, since a commit (which
+ *  can conclude a merge or an interrupted journaled op) refreshes them itself.
+ *  Invalidated fire-and-forget so the Commit button never waits on them;
+ *  forge-backed keys (pr/issue/CI/…) are deliberately absent — a local
+ *  commit cannot change forge state. */
+const commitAftermathKeys = (repo: string) =>
+  [
+    repoKeys.log(repo),
+    repoKeys.unpushedCount(repo),
+    repoKeys.unpushedMessages(repo),
+    repoKeys.opState(repo),
+    ...headMoveAftermathKeys(repo),
   ] as const;
 
 export function useFileDiff(

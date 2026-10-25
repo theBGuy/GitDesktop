@@ -28,8 +28,9 @@ export function AmendForcePushDialog({
   upstream: string | null;
   /** Starts the amend, resolving true once it actually began. False covers a
    *  gate refusal (a branch rule, or a read still settling), a commit that
-   *  couldn't be loaded, and a user who navigated away while it loaded — each
-   *  holds the "Don't show again" write back. */
+   *  couldn't be loaded, a user who navigated away while it loaded, and one who
+   *  declined to replace a typed message — each holds the "Don't show again"
+   *  write back. */
   onConfirm: () => Promise<boolean>;
   onCancel: () => void;
 }) {

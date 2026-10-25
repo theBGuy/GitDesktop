@@ -45,6 +45,8 @@ import {
 import {
   branchPushHoldItemReason,
   branchPushHoldReason,
+  branchRewriteStatusOptions,
+  carriesAllLocalCommits,
   refuseWhilePushRuns,
   repoStatusOptions,
   useBranchRewriteStatus,
@@ -58,7 +60,7 @@ import {
   useRepoStatus,
   useUpdateFromUpstream,
 } from "@/lib/git/queries";
-import type { ForkPrMatch } from "@/lib/git/types";
+import type { BranchRewriteStatus, ForkPrMatch } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
   formatBinding,
@@ -115,6 +117,18 @@ const FORCE_PUSH_DEGRADED: Record<PushGuard, string | undefined> = {
   leaseOnlyNoReflog:
     "Protected by the lease alone: the branch has no reflog for --force-if-includes to check.",
 };
+
+/** Reset to upstream's refusals when the confirm-time re-read no longer matches
+ *  what the menu offered: the upstream tip moved, the branch itself did, or the
+ *  read couldn't prove the upstream still carries every commit. KEEP IN STEP:
+ *  BranchSwitcher's twins name the branch menu instead of the Pull menu
+ *  (pinned by scripts/head-watcher.test.mjs). */
+const UPSTREAM_MOVED_NOTICE = (upstream: string) =>
+  `${upstream} moved since you opened this, so nothing was reset. Reopen the Pull menu to see where it stands now.`;
+const LOCAL_MOVED_NOTICE = (branch: string) =>
+  `${branch} changed since you opened this, so nothing was reset. Reopen the Pull menu to see where it stands now.`;
+const UNCONFIRMED_NOTICE = (upstream: string, branch: string) =>
+  `Couldn't confirm that ${upstream} still has every commit on ${branch}, so nothing was reset. Reopen the Pull menu to check again.`;
 
 export function SyncControls({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
@@ -243,15 +257,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // is the evidence a destructive confirm would quote.
   const rewriteData =
     diverged && !rewrite.isFetching ? rewrite.data : undefined;
+  // While the probe re-reads, the merge and reset rows hold in place rather than
+  // act on (or vanish over) an answer that may no longer stand.
+  const rewriteChecking = diverged && !detached && rewrite.isFetching;
   // The reflog verdict ALONE matches ordinary divergence too; only paired with
   // "no local commit lacks a patch-twin upstream" does it describe an upstream
   // that already carries this branch's work — and offering a reset while unique
   // work exists would destroy it.
-  const remoteRebased =
-    rewriteData?.remoteRewritten === true &&
-    rewriteData.localOnly === 0 &&
-    Boolean(rewriteData.upstreamTip) &&
-    Boolean(rewriteData.localTip);
+  const remoteRebased = carriesAllLocalCommits(rewriteData);
   // Patch twins upstream AND commits without one: a reset would destroy the
   // latter, a merge would re-import the former beside the copies already there.
   // `patchEqual > 0` is strong evidence, not proof — two sides can apply the same
@@ -394,6 +407,38 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // One wording for the refusal, shared by the disabled menu item and the tooltip
   // the branch menu shows for the same shape.
   const mergeDuplicatesReason = `${head?.upstream} already carries these changes under different ids — a merge would duplicate them. Use Pull with rebase.`;
+
+  // Pull with merge, checking FIRST: while the probe re-reads, the duplicate
+  // guard has no answer to stand on.
+  const mergeArm = ((): "checking" | "duplicates" | "offline" | "ready" => {
+    switch (true) {
+      case rewriteChecking:
+        return "checking";
+      case mixedRewrite:
+        return "duplicates";
+      case !!offlineHold:
+        return "offline";
+      default:
+        return "ready";
+    }
+  })();
+  const pullWithMerge: Record<
+    typeof mergeArm,
+    { label: string; disabled: boolean; title?: string }
+  > = {
+    checking: {
+      label: "Pull with merge (checking the remote…)",
+      disabled: true,
+    },
+    duplicates: {
+      label: `Pull with merge (${head?.upstream} already carries these changes under different ids)`,
+      disabled: true,
+      title: mergeDuplicatesReason,
+    },
+    offline: { label: `Pull with merge${offlineSuffix}`, disabled: true },
+    ready: { label: "Pull with merge", disabled: false },
+  };
+  const mergeRow = pullWithMerge[mergeArm];
 
   // Tooltip = the button's description (or its bare label when synced +
   // undefined) with the effective shortcut appended, e.g. "Push (Ctrl+P)".
@@ -560,9 +605,46 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // HEAD can move while the dialog sits open; the captured branch is the only
     // one the confirmation described. Says so rather than returning quietly: the
     // user just confirmed a destructive action, and silence reads as "it worked".
-    // Wording kept in step with the branch menu's twin.
+    // Wording kept in step with the branch menu's twin and with HistoryDialogs'
+    // Reset to commit pre-check.
     if (headNameRef.current !== branch) {
       toast.info("HEAD moved while the dialog was open — nothing was reset.");
+      return;
+    }
+    // An outside fetch can move the upstream while the prompt sits open, so the
+    // reset re-measures before it acts. A read that joins one in flight may have
+    // begun before that fetch's ref write and return the older tip; the reset
+    // then lands on the tip the probe proved carries every local commit.
+    let fresh: BranchRewriteStatus;
+    try {
+      fresh = await queryClient.fetchQuery({
+        ...branchRewriteStatusOptions(repoPath, branch),
+        staleTime: 0,
+      });
+    } catch (e) {
+      toastErrorWithNote(e, "Nothing was reset.");
+      return;
+    }
+    if (refuseIfSwitched(resetIn, "nothing was reset")) return;
+    // No measurable upstream tip proves nothing moved.
+    if (fresh.upstreamTip === null) {
+      toast.info(UNCONFIRMED_NOTICE(upstream, branch));
+      return;
+    }
+    if (fresh.upstreamTip !== tip) {
+      toast.info(UPSTREAM_MOVED_NOTICE(upstream));
+      return;
+    }
+    // Same upstream tip, but the read no longer proves the upstream carries
+    // every commit: name a local move only when the read measured one, since an
+    // unknown verdict (a failed reflog walk) proves nothing moved. A local move
+    // that is still carried proceeds, and the backend's pin refuses it.
+    if (!carriesAllLocalCommits(fresh)) {
+      if (fresh.localTip !== null && fresh.localTip !== localTip) {
+        toast.info(LOCAL_MOVED_NOTICE(branch));
+      } else {
+        toast.info(UNCONFIRMED_NOTICE(upstream, branch));
+      }
       return;
     }
     if (promotionBlocksCheckout(repoPath)) {
@@ -975,22 +1057,30 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                     refusal the same way. */}
                 <DropdownMenuItem
                   className={MENU_HELD_ROW_CLASS}
-                  disabled={mixedRewrite || !!offlineHold}
-                  title={mixedRewrite ? mergeDuplicatesReason : undefined}
+                  disabled={mergeRow.disabled}
+                  title={mergeRow.title}
                   onClick={() => void doPull("merge")}
                 >
-                  {mixedRewrite
-                    ? `Pull with merge (${head?.upstream} already carries these changes under different ids)`
-                    : `Pull with merge${offlineSuffix}`}
+                  {mergeRow.label}
                 </DropdownMenuItem>
                 {/* Offered only once the probe has measured an upstream that
                     carries every one of these commits, with no unique local
                     work; every other divergence keeps the two pull items
-                    alone. */}
-                {remoteRebased && (
-                  <DropdownMenuItem onClick={() => void doResetToUpstream()}>
-                    Reset to {head?.upstream}…
+                    alone. While the probe re-reads over an answer that offered
+                    it, the row holds its place with no onClick at all. */}
+                {rewriteChecking && carriesAllLocalCommits(rewrite.data) ? (
+                  <DropdownMenuItem className={MENU_HELD_ROW_CLASS} disabled>
+                    Reset to {head?.upstream}… (checking the remote…)
                   </DropdownMenuItem>
+                ) : (
+                  remoteRebased && (
+                    <DropdownMenuItem
+                      className={MENU_HELD_ROW_CLASS}
+                      onClick={() => void doResetToUpstream()}
+                    >
+                      Reset to {head?.upstream}…
+                    </DropdownMenuItem>
+                  )
                 )}
               </>
             )}

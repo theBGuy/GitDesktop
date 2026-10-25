@@ -4,6 +4,8 @@
  * commit context menu, and a tag's Checkout all ask through these, so no route
  * can pose a different question than its twin. Prompts go through
  * `useConfirm.getState().ask(...)`.
+ * Free of runtime imports so scripts/commit-confirms.test.mjs loads it under
+ * Node's type stripping.
  */
 
 const short = (hash: string) => hash.slice(0, 7);
@@ -124,6 +126,18 @@ export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own"
  *  unpushed, and which commit is HEAD, are unknown until they agree again. */
 export const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
+/** Amend's menu-row reason, on the History menu and the commit detail ⋯ menu
+ *  alike: only HEAD can be amended, and HEAD is unknown while the reads
+ *  disagree, or for good while the log has never been read. */
+export const AMEND_HOLD_HINT: Record<
+  "refreshing" | "not-latest" | "log-unread",
+  string
+> = {
+  refreshing: HISTORY_REFRESHING_HINT,
+  "not-latest": " (latest commit only)",
+  "log-unread": " (couldn't read the history)",
+};
+
 /** The same hold once the no-upstream count read has failed: which commits are
  *  unpushed stays unknown until it reads again. */
 export const UNPUSHED_UNCHECKED_HINT =
@@ -143,3 +157,45 @@ export const UNDO_ROOT_COMMIT_CONFIRM = {
   confirmLabel: "Undo first commit",
   confirmVariant: "destructive",
 } as const;
+
+/** The routes that write a commit's message into the commit box over whatever
+ *  the user typed there. */
+export type ReplacesMessageTrigger = "amend" | "undo";
+
+const REPLACES_MESSAGE_BODY: Record<
+  ReplacesMessageTrigger,
+  (short: string) => string
+> = {
+  amend: (s) =>
+    `Amending loads ${s}'s message into the commit box, replacing the title and description already in it. Cancel keeps them and doesn't start the amend.`,
+  undo: (s) =>
+    `Undoing ${s} loads its message into the commit box, replacing the title and description already in it. Cancel keeps them and doesn't undo the commit.`,
+};
+
+/** Asked right before a route writes `hash`'s message into the commit box. Names
+ *  only the title and description: co-authors are left as they are. */
+export const replacesMessageConfirm = (
+  trigger: ReplacesMessageTrigger,
+  hash: string,
+) =>
+  ({
+    title: "Replace the message in your commit box?",
+    body: REPLACES_MESSAGE_BODY[trigger](short(hash)),
+    confirmLabel: "Replace message",
+    confirmVariant: "destructive",
+  }) as const;
+
+/** Whether writing `message` into the commit box would lose typed text: the box
+ *  holds something, and it isn't already that message. Titles compare fully
+ *  trimmed; bodies only at the end: a loaded message's body is already
+ *  trimmed, so a box whose body starts with whitespace it lacks asks first (a
+ *  false prompt is the safe side). */
+export function replacesTypedMessage(
+  draft: { title: string; body: string },
+  message: { subject: string; body: string },
+): boolean {
+  const title = draft.title.trim();
+  const body = draft.body.trimEnd();
+  if (title === "" && body === "") return false;
+  return title !== message.subject.trim() || body !== message.body.trimEnd();
+}

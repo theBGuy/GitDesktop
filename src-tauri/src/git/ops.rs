@@ -944,9 +944,8 @@ fn remove_lines(content: &str, drop: &std::collections::HashSet<u32>) -> String 
 /// checks and a rewrite that has no stash and no reflog to recover from. The hold
 /// is why the reset runs on the lock-free runners: `run_git_mutating` re-acquires
 /// the same non-reentrant mutex and deadlocks, so its one-shot index.lock retry rides
-/// `run_git_raw_index_retry` instead. The `--mixed` arm keeps `run_git_mutating`: it
-/// has no guards to protect, so there is no check-then-act window and the retry is
-/// worth more than a hold.
+/// `run_git_raw_index_retry` instead. The `--mixed` arm holds the same lock across
+/// its pin checks and reset, using that lock-free runner too.
 ///
 /// The hold's reach ends at this process, as `run_git_mutating`'s own doc says: a
 /// separate MCP-server process holds its own lock, and no lock constrains a
@@ -969,15 +968,16 @@ pub async fn git_reset(
     git_reset_core_expecting(&state, repo_path, hash, mode, expected_head, expected_ref).await
 }
 
-/// The refusal a hard reset gets when HEAD is no longer the tip the user confirmed.
+/// The refusal a reset gets when HEAD is no longer the tip the user confirmed.
 /// KEEP IN STEP: one wording family with branches.rs's ref-move refusal and
 /// commit.rs's `UNDO_HEAD_MOVED` ("… — nothing was <verb>.").
 const RESET_HEAD_MOVED: &str = "The branch changed since you confirmed — nothing was reset.";
 
-/// The refusal a hard reset gets when HEAD sits on another branch (or none) than the one
+/// The refusal a reset gets when HEAD sits on another branch (or none) than the one
 /// the user confirmed, even at the same commit. KEEP IN STEP with the family above, and
 /// with the "HEAD moved while the dialog was open — nothing was reset." toasts in
-/// SyncControls.tsx and BranchSwitcher.tsx that answer a switch the frontend sees first.
+/// SyncControls.tsx, BranchSwitcher.tsx and HistoryDialogs.tsx that answer a switch the
+/// frontend sees first.
 const RESET_BRANCH_SWITCHED: &str =
     "The checked-out branch changed since you confirmed — nothing was reset.";
 
@@ -1006,6 +1006,50 @@ fn reset_tree_rollback_failed(oid: &str) -> String {
 const RESET_TREE_ROLLBACK_UNREAD: &str =
     "Updating your files failed, and the branch couldn't be moved back.";
 
+// KEEP IN STEP: the rollback family's "it now points at" and `refuse_if_switched`'s
+// "your files were not updated" apply to these tip refusals; unread-tip rollback
+// outcomes follow `roll_back_reset`'s per-outcome leads, hint and error-detail ordering.
+/// The tip moved again after the reset's swap, so the other process's commit stays.
+fn reset_tip_moved(label: &str, now: &str) -> String {
+    format!(
+        "Another Git process moved {label} right after the reset moved it, so your files were not updated. It now points at {}. {SWITCH_ROLLBACK_HINT}",
+        crate::git::commit::short_oid(now)
+    )
+}
+
+/// The ref was deleted after the reset's swap, so no current tip can be named.
+fn reset_tip_deleted(label: &str) -> String {
+    format!(
+        "Another Git process deleted {label} right after the reset moved it, so your files were not updated. {SWITCH_ROLLBACK_HINT}"
+    )
+}
+
+/// The unread-tip refusal follows `roll_back_reset`'s per-outcome leads, hint and
+/// error-detail ordering so the user knows whether the move-back succeeded.
+fn reset_tip_unread(
+    label: &str,
+    target: &str,
+    err: &AppError,
+    rolled: crate::git::commit::RolledBack,
+) -> String {
+    use crate::git::commit::RolledBack;
+    let short = crate::git::commit::short_oid(target);
+    match rolled {
+        RolledBack::Restored => format!(
+            "Couldn't confirm where {label} points after the reset moved it, so it was moved back and your files were not updated.\n{err}"
+        ),
+        RolledBack::Lost => format!(
+            "Couldn't confirm where {label} points after the reset moved it, and another Git process moved it before it could be moved back. Your files were not updated. {SWITCH_ROLLBACK_HINT}\n{err}"
+        ),
+        RolledBack::Stuck(why) => format!(
+            "Couldn't confirm where {label} points after the reset moved it, and it couldn't be moved back: it now points at {short}. Your files were not updated. {SWITCH_ROLLBACK_HINT}\n{err}\n{why}"
+        ),
+        RolledBack::Unread(why) => format!(
+            "Couldn't confirm where {label} points after the reset moved it to {short}, and it couldn't be moved back. Your files were not updated. {SWITCH_ROLLBACK_HINT}\n{err}\n{why}"
+        ),
+    }
+}
+
 #[cfg(test)]
 tokio::task_local! {
     /// Awaited by the hard reset it is scoped to, after its guards and before the
@@ -1028,10 +1072,34 @@ pub(crate) async fn git_reset_core(
     git_reset_core_expecting(state, repo_path, hash, mode, None, ExpectedRef::Any).await
 }
 
-/// `expected_head` and `expected_ref` are consulted in the hard arm only: the reset then
-/// runs only while HEAD is still that full oid on that branch (or detached, as it says),
-/// checked first under the guards' hold, and the ref moves only while it still holds that
-/// oid. The mixed arm ignores both, since its callers name an explicit user-chosen commit.
+async fn check_reset_pin(
+    repo_path: &str,
+    expected_head: Option<&str>,
+    expected_ref: &ExpectedRef,
+) -> AppResult<()> {
+    if expected_ref.moved(repo_path).await? {
+        return Err(AppError::Git {
+            code: 1,
+            stderr: RESET_BRANCH_SWITCHED.to_string(),
+        });
+    }
+    if let Some(expected) = expected_head {
+        let current = run_git_raw(Some(repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+        // A non-zero exit is an unborn HEAD.
+        if current.code != 0 || current.stdout_lossy().trim() != expected {
+            return Err(AppError::Git {
+                code: 1,
+                stderr: RESET_HEAD_MOVED.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Both arms check `expected_head` and `expected_ref` under the working-tree hold when
+/// sent. The hard arm also compares-and-swaps the ref against that oid. Mixed has no
+/// compare-and-swap: an outside commit between the pin check and `reset --mixed`
+/// stays unseen.
 pub(crate) async fn git_reset_core_expecting(
     state: &AppState,
     repo_path: String,
@@ -1051,13 +1119,12 @@ pub(crate) async fn git_reset_core_expecting(
         }
     };
     if !hard {
-        run_git_mutating(
-            state,
-            &repo_path,
-            &["reset", "--mixed", &hash],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
+        let domain = state.working_tree_lock(&repo_path).await;
+        let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
+        check_reset_pin(&repo_path, expected_head.as_deref(), &expected_ref).await?;
+        run_git_raw_index_retry(&repo_path, &["reset", "--mixed", &hash], DEFAULT_TIMEOUT)
+            .await?
+            .exit_verdict()?;
         return Ok(());
     }
     // One hold across both guards and the rewrite — see this function's doc for
@@ -1066,23 +1133,7 @@ pub(crate) async fn git_reset_core_expecting(
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a reset").await?;
     // Identity before tree state: a dirty-tree refusal would mislead when the real
     // problem is a tip the user never saw.
-    if expected_ref.moved(&repo_path).await? {
-        return Err(AppError::Git {
-            code: 1,
-            stderr: RESET_BRANCH_SWITCHED.to_string(),
-        });
-    }
-    if let Some(expected) = &expected_head {
-        let current =
-            run_git_raw(Some(&repo_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
-        // A non-zero exit is an unborn HEAD.
-        if current.code != 0 || current.stdout_lossy().trim() != expected {
-            return Err(AppError::Git {
-                code: 1,
-                stderr: RESET_HEAD_MOVED.to_string(),
-            });
-        }
-    }
+    check_reset_pin(&repo_path, expected_head.as_deref(), &expected_ref).await?;
     ensure_clean_tree(&repo_path).await?;
     if op_state(&repo_path).await?.mid_op() {
         return Err(AppError::InvalidArgument(
@@ -1140,6 +1191,20 @@ pub(crate) async fn git_reset_core_expecting(
         true,
     )
     .await?;
+    // A move landing between this read and `read-tree` taking index.lock stays unseen:
+    // the window shrinks, but never closes. A raced tip belongs to the other process.
+    let tip_refusal = match cas.oid(&repo_path).await {
+        Ok(Some(now)) if now == peeled => None,
+        Ok(Some(now)) => Some(reset_tip_moved(cas.label(), &now)),
+        Ok(None) => Some(reset_tip_deleted(cas.label())),
+        Err(e) => {
+            let rolled = cas.roll_back(&repo_path, old.as_deref(), Some(&peeled)).await;
+            Some(reset_tip_unread(cas.label(), &peeled, &e, rolled))
+        }
+    };
+    if let Some(stderr) = tip_refusal {
+        return Err(AppError::Git { code: 1, stderr });
+    }
     #[cfg(test)]
     crate::git::commit::run_phase_hook(&RESET_TREE_HOOK).await;
     let tree = run_git_raw_index_retry(
@@ -7635,13 +7700,65 @@ mod tests {
         assert_eq!(rev(&repo, "HEAD").await, base);
     }
 
-    /// The mixed arm serves History's reset and the MCP `reset_to_commit`, which name
-    /// an explicit commit, so a pin never reaches it.
+    /// A stale tip pin refuses before the mixed reset touches the ref, index or tree.
     #[tokio::test]
-    async fn mixed_reset_ignores_expected_head() {
+    async fn mixed_reset_refuses_stale_expected_head() {
         let (dir, repo) = setup_repo("reset-mixed-pin").await;
         let base = rev(&repo, "HEAD").await;
         commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_branch(&repo).await;
+        let state = AppState::default();
+
+        let result = git_reset_core_expecting(
+            &state,
+            repo.clone(),
+            base,
+            Some("mixed".into()),
+            Some("0".repeat(40)),
+            ExpectedRef::Branch(branch),
+        )
+        .await;
+
+        assert_reset_head_moved(result);
+        assert_eq!(rev(&repo, "HEAD").await, tip);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+    }
+
+    #[tokio::test]
+    async fn mixed_reset_refuses_switched_expected_branch() {
+        let (dir, repo) = setup_repo("reset-mixed-branch-pin").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_branch(&repo).await;
+        let state = AppState::default();
+
+        let result = git_reset_core_expecting(
+            &state,
+            repo.clone(),
+            base,
+            Some("mixed".into()),
+            Some(tip.clone()),
+            ExpectedRef::Branch("not-this-branch".into()),
+        )
+        .await;
+
+        assert_reset_switched(result, "mixed branch pin");
+        assert_eq!(head_branch(&repo).await, branch);
+        assert_eq!(rev(&repo, "HEAD").await, tip);
+        assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
+        assert_eq!(git(&repo, &["status", "--porcelain"]).await, "");
+    }
+
+    #[tokio::test]
+    async fn mixed_reset_with_matching_pin_keeps_working_tree() {
+        let (dir, repo) = setup_repo("reset-mixed-matched-pin").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_branch(&repo).await;
         let state = AppState::default();
 
         git_reset_core_expecting(
@@ -7649,11 +7766,11 @@ mod tests {
             repo.clone(),
             base.clone(),
             Some("mixed".into()),
-            Some("0".repeat(40)),
-            ExpectedRef::Branch("not-this-branch".into()),
+            Some(tip),
+            ExpectedRef::Branch(branch),
         )
         .await
-        .expect("a mixed reset runs whatever the pin says");
+        .expect("a mixed reset runs with a matching pin");
 
         assert_eq!(rev(&repo, "HEAD").await, base);
         assert_eq!(tree_text(dir.path(), "a.txt"), "v1\n");
@@ -7884,6 +8001,122 @@ mod tests {
             }
             other => panic!("{case}: expected the branch-switched refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn reset_tip_unread_wording_matches_the_rollback_outcome() {
+        use crate::git::commit::RolledBack;
+        let err = AppError::Timeout(30);
+        for label in ["main", "HEAD"] {
+            let restored = format!(
+                "Couldn't confirm where {label} points after the reset moved it, so it was moved back and your files were not updated.\ngit operation timed out after 30s"
+            );
+            let lost = format!(
+                "Couldn't confirm where {label} points after the reset moved it, and another Git process moved it before it could be moved back. Your files were not updated. Check the branch in a terminal; the reflog has every tip.\ngit operation timed out after 30s"
+            );
+            let stuck = format!(
+                "Couldn't confirm where {label} points after the reset moved it, and it couldn't be moved back: it now points at 1234567. Your files were not updated. Check the branch in a terminal; the reflog has every tip.\ngit operation timed out after 30s\nref lock held"
+            );
+            let unread = format!(
+                "Couldn't confirm where {label} points after the reset moved it to 1234567, and it couldn't be moved back. Your files were not updated. Check the branch in a terminal; the reflog has every tip.\ngit operation timed out after 30s\nrollback timed out"
+            );
+            for (rolled, expected) in [
+                (RolledBack::Restored, restored),
+                (RolledBack::Lost, lost),
+                (RolledBack::Stuck("ref lock held".into()), stuck),
+                (RolledBack::Unread("rollback timed out".into()), unread),
+            ] {
+                assert_eq!(
+                    reset_tip_unread(label, "1234567890abcdef", &err, rolled),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_hard_refuses_a_commit_right_after_its_swap() {
+        let (dir, repo) = setup_repo("reset-hard-commit-after").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_branch(&repo).await;
+        let full = head_ref(&repo).await;
+        let before = std::fs::read(dir.path().join("a.txt")).unwrap();
+        let state = AppState::default();
+
+        let result = RESET_SWAPPED_HOOK
+            .scope(
+                crate::git::commit::racing_git(
+                    &repo,
+                    &[&["commit", "--allow-empty", "-qm", "raced commit"]],
+                ),
+                reset_hard_on(
+                    &state,
+                    &repo,
+                    &base,
+                    &tip,
+                    ExpectedRef::Branch(branch.clone()),
+                ),
+            )
+            .await;
+
+        let racer = rev(&repo, "HEAD").await;
+        assert_ne!(racer, base);
+        assert_ne!(racer, tip);
+        assert_eq!(
+            git(&repo, &["log", "-1", "--format=%s"]).await.trim(),
+            "raced commit"
+        );
+        match result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_eq!(stderr, reset_tip_moved(&branch, &racer));
+            }
+            other => panic!("expected the raced-tip refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), before);
+        assert_eq!(head_branch(&repo).await, branch);
+        assert_eq!(rev(&repo, &full).await, racer);
+        assert_eq!(orig_head(&repo).await, None);
+    }
+
+    #[tokio::test]
+    async fn reset_hard_refuses_a_deleted_ref_right_after_its_swap() {
+        let (dir, repo) = setup_repo("reset-hard-deleted-after").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "a.txt", "v1\n", "second").await;
+        let tip = rev(&repo, "HEAD").await;
+        let branch = head_branch(&repo).await;
+        let full = head_ref(&repo).await;
+        let before = std::fs::read(dir.path().join("a.txt")).unwrap();
+        let state = AppState::default();
+
+        let result = RESET_SWAPPED_HOOK
+            .scope(
+                crate::git::commit::racing_git(&repo, &[&["update-ref", "-d", &full]]),
+                reset_hard_on(
+                    &state,
+                    &repo,
+                    &base,
+                    &tip,
+                    ExpectedRef::Branch(branch.clone()),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(AppError::Git { stderr, .. }) => {
+                assert_eq!(stderr, reset_tip_deleted(&branch));
+            }
+            other => panic!("expected the deleted-tip refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(dir.path().join("a.txt")).unwrap(), before);
+        assert_eq!(head_ref(&repo).await, full);
+        assert_eq!(
+            crate::git::commit::ref_oid(&repo, &full).await.unwrap(),
+            None
+        );
+        assert_eq!(orig_head(&repo).await, None);
     }
 
     /// Another process switches branches right after the swap landed, which the swap (it

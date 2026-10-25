@@ -68,19 +68,28 @@ export function viewAgrees(args: {
 export type StatusLogAction =
   | "refetch-log"
   | "refresh-side-keys"
+  | "refresh-head-set"
   | "refresh-count";
+
+/** How old a no-upstream count read may get against the status tick before the
+ *  sync re-reads it: a push from a terminal changes what's on the remotes
+ *  without moving HEAD, so nothing else would refresh it before a refocus. */
+export const NO_UPSTREAM_COUNT_RECHECK_MS = 30_000;
 
 /** Which invalidations the status/log sync fires for one observation:
  *  - 'refresh-side-keys': once per OBSERVED oid change, whichever side is
  *    stale — those families don't heal through the log refetch.
+ *  - 'refresh-head-set': on the same trigger, the rest of the HEAD-dependent
+ *    families; the caller re-reads only the ones {@link preMoveStale} passes.
  *  - 'refetch-log': a non-null oid (an unborn repo's settled-empty log must
  *    never refetch per poll), heads differ, the log has data, the LOG is the
  *    stale side and isn't already fetching — at most one call per status
  *    reading, so a log-first window can't loop.
  *  - 'refresh-count': heads agree in no-upstream mode and the count is
- *    errored or older than the log; never while the count is fetching (a read
- *    slower than one poll must land) or beside 'refresh-side-keys' (which
- *    already covers it).
+ *    errored, older than the log, or {@link NO_UPSTREAM_COUNT_RECHECK_MS} older
+ *    than the status reading; never while the count is fetching (a read slower
+ *    than one poll must land) or beside 'refresh-side-keys' (which already
+ *    covers it).
  *  Null when nothing fires. */
 export function statusLogAction(args: {
   oid: string | null | undefined;
@@ -97,7 +106,10 @@ export function statusLogAction(args: {
 }): ReadonlySet<StatusLogAction> | null {
   const actions = new Set<StatusLogAction>();
   const heads = headAgrees(args.logHead, args.oid);
-  if (args.oidChanged) actions.add("refresh-side-keys");
+  if (args.oidChanged) {
+    actions.add("refresh-side-keys");
+    actions.add("refresh-head-set");
+  }
   if (
     args.oid != null &&
     !heads &&
@@ -110,13 +122,36 @@ export function statusLogAction(args: {
   if (
     heads &&
     args.noUpstream &&
-    (args.countIsError || args.countAt < args.logAt) &&
+    (args.countIsError ||
+      args.countAt < args.logAt ||
+      args.statusAt - args.countAt >= NO_UPSTREAM_COUNT_RECHECK_MS) &&
     !args.countIsFetching &&
     !args.oidChanged
   ) {
     actions.add("refresh-count");
   }
   return actions.size > 0 ? actions : null;
+}
+
+/** Whether one query of the HEAD-move set is re-read on an observed outside
+ *  HEAD move: only when its data predates the last status reading where the old
+ *  oid was still current. A query an in-app write's own invalidation already
+ *  refreshed, or is refreshing, is skipped, so the sync rarely double-fetches
+ *  after in-app writes. Accepted residuals, each healing on the next focus:
+ *  - a read that refetched inside the last poll window before an outside move,
+ *    or started before the move and is still running when it is seen (skipped
+ *    as fetching), keeps pre-move data;
+ *  - an outside move inside an in-app write's window reads as in-app;
+ *  - an in-app move the poll sees before the write settles (slow commit hooks,
+ *    a multi-commit pick, revert or rebasing pull) re-reads the set twice;
+ *  - a read whose own refetch failed is re-read once, acting as a retry;
+ *  - an unborn repo's first commit seeds the oid rather than changing it. */
+export function preMoveStale(args: {
+  fetchStatus: "fetching" | "paused" | "idle";
+  dataUpdatedAt: number;
+  prevStatusAt: number;
+}): boolean {
+  return args.fetchStatus === "idle" && args.dataUpdatedAt <= args.prevStatusAt;
 }
 
 /** The snapshot advances ONLY on an agreeing render: null until the first
