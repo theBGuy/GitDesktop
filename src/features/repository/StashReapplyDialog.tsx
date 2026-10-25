@@ -62,7 +62,7 @@ export function StashReapplyDialog({
       {/* Focus the non-destructive primary so Enter completes the recovery. */}
       <DialogContent initialFocus={() => confirmRef.current}>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             Stash your changes and {target?.operationLabel}?
           </DialogTitle>
           <DialogDescription>

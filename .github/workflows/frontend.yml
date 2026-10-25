@@ -88,4 +88,4 @@ jobs:
       - name: Node suites needing node_modules (enforced)
         env:
           GD_EXPECT_DEPS: "1"
-        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs" "scripts/focus-refetch.test.mjs"
+        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs" "scripts/focus-refetch.test.mjs" "scripts/settings-cache-seed.test.mjs"

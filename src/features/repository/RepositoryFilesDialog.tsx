@@ -1047,7 +1047,7 @@ export function RepositoryFilesDialog({
       >
         <DialogContent finalFocus={() => filterRef.current}>
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {shownPending &&
                 PENDING_COPY[shownPending.kind].title(
                   pendingCount(shownPending),

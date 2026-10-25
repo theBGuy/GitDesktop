@@ -37,7 +37,7 @@ export function AutomationResultDialog() {
     >
       <DialogContent className="flex max-h-[80vh] flex-col sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             AI {shownResult?.mode === "security" ? "security audit" : "review"}
           </DialogTitle>
           <DialogDescription>

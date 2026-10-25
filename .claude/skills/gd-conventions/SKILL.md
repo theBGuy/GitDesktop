@@ -289,6 +289,13 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   not a silent gap.
 - Never degrade a surface to dodge machinery: no plain `<pre>` where the app
   highlights, no spinner where skeletons exist.
+- A docked action bar that a bottom-right toast can cover publishes its top
+  edge through `useToastClearance(ref, active)`
+  (`src/lib/use-toast-clearance.ts`), which lifts every toast above it while
+  `active` (only the Settings Save bar adopts it so far). Never pass
+  `toastOptions`, `style` or `className` to the app Toaster (`AppToaster` in
+  `src/main.tsx`): the vendored wrapper spreads caller props last, so they'd
+  replace its `cn-toast` class and CSS variables.
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
@@ -466,8 +473,12 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   govern.
 
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
-`min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. Link-styled
-clickables add `cursor-pointer` at the call site (vendored Button sets none).
+`min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. A Dialog/Sheet
+title that can reach the close button (dynamic children, `truncate`, or a >=40-char
+static) carries `pr-8` on the title or its first-row container;
+`showCloseButton={false}` exempts — the `dialog-title-inset` suite in
+`pnpm run checks` is the ratchet. Link-styled clickables add `cursor-pointer`
+at the call site (vendored Button sets none).
 Main-side panels (children of RepositoryView's `<main>`, a display:block host) root
 with `flex h-full min-h-0 flex-col` — `flex-1` is inert there, and the panel's
 natural height document-scrolls the whole tab, chrome included (#261's

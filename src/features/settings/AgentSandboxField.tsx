@@ -482,7 +482,7 @@ function ReviewDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {built ? "Rebuild custom agent image" : "Build custom agent image"}
           </DialogTitle>
           <DialogDescription>

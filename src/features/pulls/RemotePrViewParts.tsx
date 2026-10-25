@@ -557,7 +557,7 @@ export function MergePrDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {auto ? "Auto-merge" : "Merge"} {prNoun} #{number}?
           </DialogTitle>
           <DialogDescription>

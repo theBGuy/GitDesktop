@@ -925,7 +925,7 @@ export function TagDetailView({
             <DialogHeader>
               {/* Labelled from the `tag` PROP, which is also what the delete
                   targets — the rendered release can be the previous tag's. */}
-              <DialogTitle>Delete release {tag}?</DialogTitle>
+              <DialogTitle className="pr-8">Delete release {tag}?</DialogTitle>
               <DialogDescription>
                 Removes the {remoteLabel} release. This cannot be undone.
               </DialogDescription>
@@ -1045,7 +1045,7 @@ export function TagDetailView({
       <Dialog open={deleteTagOpen} onOpenChange={setDeleteTagOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete tag {tag}?</DialogTitle>
+            <DialogTitle className="pr-8">Delete tag {tag}?</DialogTitle>
             <DialogDescription>
               Deletes the local tag. This cannot be undone.
             </DialogDescription>

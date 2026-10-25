@@ -70,7 +70,7 @@ export function RepoAliasDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {repo?.alias ? "Change alias" : "Create alias"}
             </DialogTitle>
             <DialogDescription>
@@ -167,7 +167,7 @@ export function RemoveRepoDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Remove {display}?</DialogTitle>
+          <DialogTitle className="pr-8">Remove {display}?</DialogTitle>
           <DialogDescription>
             Removes the repository from GitDesktop. The folder at{" "}
             <span className="font-mono">{shownRepo?.path}</span> is kept unless

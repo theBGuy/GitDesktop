@@ -16,6 +16,7 @@ import {
   saveSettingsMerged,
   setRepoAlias,
 } from "./api";
+import { settingsSeedCallbacks } from "./heal";
 import type { RepoKeys } from "./mcp";
 
 export const settingsKeys = {
@@ -107,14 +108,20 @@ export function useReviewConfigured(): boolean {
   return secret.isSuccess ? secret.data !== null : true;
 }
 
+/**
+ * After `mutateAsync(next)` resolves successfully, the settings cache holds the
+ * committed (healed) snapshot of that write, unless a newer settings write started
+ * after it, in which case that newer write's optimistic patch or committed seed
+ * wins. Settings' Discard and its next Save build from that cache, so a failed
+ * post-save re-read can't leave the pre-save values there.
+ */
 export function useSaveSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (settings: AppSettings) => saveSettingsMerged(settings),
     // Local settings write — never park it offline.
     networkMode: "always",
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
   });
 }
 
@@ -123,8 +130,9 @@ export function useSaveSettings() {
  * `cycle-theme` command both go through this, so the two paths can't drift. It
  * optimistically patches the settings cache (so a bound `<Select>` reflects the
  * choice immediately, not a refetch later), persists it, applies the DOM class,
- * and rolls all three back if the store write throws. `useSaveSettings`'s
- * success-invalidate reconciles the cache on the happy path.
+ * and rolls all three back if the store write throws. On success
+ * `useSaveSettings` seeds the committed snapshot, unless a newer settings write
+ * started since, and its invalidate reconciles the rest.
  */
 export function useApplyTheme() {
   const queryClient = useQueryClient();
@@ -157,8 +165,7 @@ export function useAddRecentRepo() {
     mutationFn: (repo: { path: string; name: string }) => addRecentRepo(repo),
     // Local settings write — never park it offline.
     networkMode: "always",
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
   });
 }
 
@@ -178,8 +185,7 @@ export function usePersistRepoOwners() {
     ) => persistRepoOwners(owners),
     // Local settings write — never park it offline.
     networkMode: "always",
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
   });
 }
 
@@ -190,8 +196,7 @@ export function useSetRepoAlias() {
       setRepoAlias(args.path, args.alias),
     // Local settings write — never park it offline.
     networkMode: "always",
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
   });
 }
 
@@ -201,8 +206,7 @@ export function useRemoveRecentRepo() {
     mutationFn: (path: string) => removeRecentRepo(path),
     // Local settings write — never park it offline.
     networkMode: "always",
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
   });
 }
 
@@ -215,8 +219,7 @@ export function useRelocateRecentRepo() {
       relocateRecentRepo(args.oldPath, args.newPath),
     // Local settings write — never park it offline.
     networkMode: "always",
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
   });
 }
 

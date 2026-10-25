@@ -212,7 +212,7 @@ export function McpServerDialog({
     >
       <DialogContent className="sm:max-w-2xl" finalFocus={finalFocus}>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {editing ? "Edit MCP server" : "Add MCP server"}
           </DialogTitle>
           <DialogDescription>

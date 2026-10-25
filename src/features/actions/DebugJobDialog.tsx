@@ -113,8 +113,8 @@ export function DebugJobDialog({
         {job && (
           <>
             <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <SparkleIcon className="size-4 text-primary" />
+              <DialogTitle className="flex items-center gap-2 pr-8">
+                <SparkleIcon className="size-4 shrink-0 text-primary" />
                 Debug “{job.name}” with AI
               </DialogTitle>
               <DialogDescription>

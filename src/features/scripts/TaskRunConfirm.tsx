@@ -169,7 +169,7 @@ export function TaskRunConfirm() {
         initialFocus={replacing ? () => cancelRef.current : undefined}
       >
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {replacing ? "A task is already running" : `Run “${task?.name}”?`}
           </DialogTitle>
           <DialogDescription>

@@ -1146,7 +1146,7 @@ export function CreatePrDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Create {prNoun}</DialogTitle>
+            <DialogTitle className="pr-8">Create {prNoun}</DialogTitle>
             <DialogDescription>
               Pushes <span className="font-mono">{head || "…"}</span> and opens
               a {prNoun} into <span className="font-mono">{base || "…"}</span>{" "}

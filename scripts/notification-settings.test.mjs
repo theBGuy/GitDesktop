@@ -65,7 +65,7 @@ const {
 const NEEDS_DEPS =
   "needs node_modules — frontend.yml's installed step is the enforced run";
 
-const API_SOURCE = new URL("../src/lib/settings/api.ts", import.meta.url);
+const HEAL_SOURCE = new URL("../src/lib/settings/heal.ts", import.meta.url);
 const KIND = "pr-create-failed";
 const BOTH_ON = { inApp: true, os: true };
 const BOTH_OFF = { inApp: false, os: false };
@@ -191,7 +191,7 @@ test("global both-off delivers nothing", (t) => {
 });
 
 // NEGATIVE CONTROL for "heal fills missing prCreate from defaults": the real
-// api.ts with the heal's two default-fill arms removed must fail that check.
+// heal.ts with the heal's two default-fill arms removed must fail that check.
 // The copy sits under a `/src/lib/settings/` path so the hooks treat it as a
 // src module (env shim, `@/` imports onto the real tree).
 let mutantDir = null;
@@ -201,7 +201,7 @@ after(() => {
 
 test("the missing-key heal check fails against a heal without default fill", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
-  let text = readFileSync(API_SOURCE, "utf8");
+  let text = readFileSync(HEAL_SOURCE, "utf8");
   for (const needle of [
     ": defaults.sources[source].inApp,",
     ": defaults.sources[source].os,",
@@ -218,7 +218,7 @@ test("the missing-key heal check fails against a heal without default fill", asy
   writeFileSync(path.join(mutantDir, "package.json"), '{ "type": "module" }');
   const settingsDir = path.join(mutantDir, "src", "lib", "settings");
   mkdirSync(settingsDir, { recursive: true });
-  const mutantFile = path.join(settingsDir, "api.ts");
+  const mutantFile = path.join(settingsDir, "heal.ts");
   writeFileSync(mutantFile, text);
 
   const mutant = await import(pathToFileURL(mutantFile).href);

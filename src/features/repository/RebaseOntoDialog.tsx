@@ -153,7 +153,9 @@ export function RebaseOntoDialog({
     >
       <DialogContent className="flex max-h-[85vh] flex-col">
         <DialogHeader>
-          <DialogTitle>Change base of {currentLabel}</DialogTitle>
+          <DialogTitle className="pr-8">
+            Change base of {currentLabel}
+          </DialogTitle>
           <DialogDescription>
             Replay only {currentLabel}'s own commits onto a different branch —
             for when it was branched off the wrong one. Each one is rewritten

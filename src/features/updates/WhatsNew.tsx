@@ -72,7 +72,7 @@ export function WhatsNew() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogContent className="flex max-h-[80vh] flex-col sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>What's new in v{version}</DialogTitle>
+          <DialogTitle className="pr-8">What's new in v{version}</DialogTitle>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto">
           <Markdown>{notes}</Markdown>

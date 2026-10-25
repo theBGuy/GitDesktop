@@ -56,7 +56,7 @@ export function ConfirmDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
+          <DialogTitle className="pr-8">{title}</DialogTitle>
           <DialogDescription>{body}</DialogDescription>
         </DialogHeader>
         <DialogFooter>

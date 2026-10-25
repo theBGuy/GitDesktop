@@ -153,7 +153,7 @@ export function ForkPrPublishGuard({
           it must cost a deliberate Tab or click, never an ambient Enter. */}
       <DialogContent initialFocus={() => cancelRef.current}>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             This branch belongs to a pull request from a fork
           </DialogTitle>
           <DialogDescription>

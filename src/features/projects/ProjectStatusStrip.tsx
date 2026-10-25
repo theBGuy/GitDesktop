@@ -765,7 +765,7 @@ export function ProjectStatusUpdateDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {editing === null ? "Post status update" : "Edit status update"}
             </DialogTitle>
             <DialogDescription>

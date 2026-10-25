@@ -1,5 +1,6 @@
-// Pure value logic for the settings form's Save. Runtime-import-free so
-// scripts/settings-save-reset.test.mjs imports it directly.
+// Pure value logic for the settings form's Save and Discard. Runtime-import-free
+// so scripts/settings-save-reset.test.mjs and settings-discard-confirm.test.mjs
+// import it directly.
 
 /** JSON with object keys sorted, so the dirty check is insensitive to key
  *  order. The Tauri store round-trips nested objects (e.g. an imported
@@ -31,4 +32,31 @@ export function resetsAfterSave({
   written: unknown;
 }): boolean {
   return discarded || stableStringify(current) === stableStringify(written);
+}
+
+/** The footer Discard prompt's body. It counts staged secret VALUES (not
+ *  servers), since that is what the user typed and would lose. */
+export function discardConfirmBody(stagedCount: number): string {
+  const lead = "Every edit since your last save is undone";
+  if (stagedCount <= 0) return `${lead}.`;
+  const values = `${stagedCount} secret value${stagedCount === 1 ? "" : "s"}`;
+  return `${lead}, including ${values} you typed. Secrets already saved to your keychain aren't touched.`;
+}
+
+/** Whether a confirmed Discard still has anything to undo, judged at confirm
+ *  time: a Save that settled while the prompt was open may have left nothing
+ *  unsaved, and confirming then must do nothing. */
+export function discardActs({
+  current,
+  fresh,
+  stagedCount,
+}: {
+  current: unknown;
+  fresh: unknown | null;
+  stagedCount: number;
+}): boolean {
+  return (
+    stagedCount > 0 ||
+    (fresh !== null && stableStringify(current) !== stableStringify(fresh))
+  );
 }

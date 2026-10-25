@@ -177,7 +177,7 @@ function CustomLanguageDialog({
     >
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {initial ? "Edit custom language" : "New custom language"}
           </DialogTitle>
           <DialogDescription>

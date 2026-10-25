@@ -3180,8 +3180,8 @@ In the composer you can:
 Register **Model Context Protocol** servers under **Settings → MCP servers** — local
 (\`stdio\`) processes or remote (HTTP) endpoints, with environment variables / headers and
 **secrets kept in your OS keychain**, never in your settings file. Edits to the list,
-secrets included, apply only when you press **Save**, and **Discard** leaves stored
-secrets exactly as they were. Each session opts into the ones you choose from the
+secrets included, apply only when you press **Save**; **Discard** asks first and leaves
+stored secrets exactly as they were. Each session opts into the ones you choose from the
 composer's **MCP** picker. **Claude**, **Copilot**, and
 **opencode** run MCP servers on the **host** *or* in a **container**; **Codex** runs them
 in a **container** only (local/\`stdio\` servers — host Codex can't approve MCP tool calls,

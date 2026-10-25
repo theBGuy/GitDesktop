@@ -439,7 +439,7 @@ export function PublishDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Publish to {remoteLabel}</DialogTitle>
+            <DialogTitle className="pr-8">Publish to {remoteLabel}</DialogTitle>
             <DialogDescription>
               Creates a{" "}
               {isBitbucket

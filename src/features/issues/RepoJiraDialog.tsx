@@ -264,7 +264,7 @@ export function RepoJiraDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[85vh] flex-col sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {existingLink ? "Jira project" : "Link Jira project"}
           </DialogTitle>
           <DialogDescription>

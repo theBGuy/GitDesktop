@@ -148,7 +148,7 @@ export function DeleteTagDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete tag {shownName}?</DialogTitle>
+          <DialogTitle className="pr-8">Delete tag {shownName}?</DialogTitle>
           <DialogDescription>
             Removes the tag from this repository. The commit it points at is not
             affected.
@@ -682,7 +682,7 @@ export function MergeParentDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{prompt.title}</DialogTitle>
+          <DialogTitle className="pr-8">{prompt.title}</DialogTitle>
           <DialogDescription>{prompt.body}</DialogDescription>
         </DialogHeader>
         <div className="min-w-0">
@@ -749,7 +749,7 @@ export const CreateRefFromCommitDialog = withForm({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{title}</DialogTitle>
+            <DialogTitle className="pr-8">{title}</DialogTitle>
             <DialogDescription>{description}</DialogDescription>
           </DialogHeader>
           <form
