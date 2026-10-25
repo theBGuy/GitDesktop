@@ -205,8 +205,9 @@ export function BlameDialog({
         <p>
           {!shortRev
             ? "Couldn't blame this file."
-            : // Only a rev git couldn't resolve says it isn't available; the
-              // reason line below shows git's report for every failure.
+            : // Only a rev git couldn't resolve says it isn't available. The
+              // reason line below is presentError's one-line summary: git's
+              // report, or the app's own text for its refusals.
               isUnknownRevisionError(blame.error)
               ? `Couldn't blame this file at ${shortRev} — that revision isn't available locally.`
               : `Couldn't blame this file at ${shortRev}.`}

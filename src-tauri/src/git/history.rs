@@ -92,7 +92,8 @@ pub(crate) async fn unborn_head(repo_path: &str) -> AppResult<bool> {
 /// an Err for any other failure. When the probe finds HEAD born after the run
 /// failed (a first commit landing between the two), the read runs once more,
 /// so that race answers instead of erring; a real failure fails again with its
-/// own report.
+/// own report. Accepted cost: a non-timeout failure on a born HEAD runs the
+/// read twice (a timeout returns before the re-run).
 pub(crate) async fn read_unless_unborn(
     repo_path: &str,
     args: &[&str],
@@ -623,7 +624,8 @@ mod tests {
             .await
             .unwrap_err();
         match err {
-            // blame-errors.ts keys on this exact lead.
+            // blame-errors.ts matches these opening words, after stripping the
+            // serialized "invalid argument: " Display lead.
             crate::error::AppError::InvalidArgument(msg) => {
                 assert!(
                     msg.starts_with("repository has no commits yet"),

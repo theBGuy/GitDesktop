@@ -22,6 +22,9 @@ import { useWorkflowRuns } from "@/lib/github/actions";
 import {
   type BoardCardRead,
   boardNotice,
+  type CardErrorMemory,
+  cardBody,
+  cardErrorKey,
   rememberCardErrors,
   unloadedCardBody,
 } from "./board-notice";
@@ -156,8 +159,7 @@ const CARD_NOUN: Record<CardId, string> = {
 
 type CardRead = BoardCardRead & { refetch: () => Promise<unknown> };
 
-/** The cards whose query keys carry the trailing window: their failures are
- *  remembered per window. */
+/** The cards whose query keys carry the trailing window. */
 const WINDOWED: ReadonlySet<CardId> = new Set([
   "commitActivity",
   "codeFrequency",
@@ -165,9 +167,8 @@ const WINDOWED: ReadonlySet<CardId> = new Set([
   "commitTimes",
 ]);
 
-/** A card's body while its read holds no data, as {@link unloadedCardBody}
- *  decides it: never an empty claim. Muted and non-live: the board notice is
- *  the one announcement. */
+/** A card's body when {@link cardBody} says it draws no data: never an empty
+ *  claim. Muted and non-live: the board notice is the one announcement. */
 function unloadedCard(
   q: CardRead,
   retrying: boolean,
@@ -209,16 +210,20 @@ export function InsightsBoard({
   // The Retry in flight, as a token: a newer press supersedes an older one's
   // settle. Cleared on a repo switch, whose cards it never refetched.
   const [retrying, setRetrying] = useState<object | null>(null);
-  // Each card's last real error, per window (rememberCardErrors).
-  const [lastErrors, setLastErrors] = useState<
-    Readonly<Record<string, unknown>>
-  >({});
+  // Each card's last real error (rememberCardErrors), kept for this repo and
+  // the one before it.
+  const [lastErrors, setLastErrors] = useState<CardErrorMemory>({});
   const [retryRepo, setRetryRepo] = useState(repoPath);
+  const [previousRepo, setPreviousRepo] = useState<string | null>(null);
   const repoChanged = retryRepo !== repoPath;
   if (repoChanged) {
     setRetryRepo(repoPath);
+    setPreviousRepo(retryRepo);
     setRetrying(null);
   }
+  const keepRepos = [repoPath, repoChanged ? retryRepo : previousRepo].filter(
+    (r): r is string => r !== null,
+  );
   const isRetrying = retrying !== null && !repoChanged;
   const weeks = allTime ? 0 : WINDOW_WEEKS;
 
@@ -298,13 +303,16 @@ export function InsightsBoard({
       : []),
   ];
   const keyed = cardReads.map(([id, read]) => ({
-    key: WINDOWED.has(id) ? `${id}:${weeks}` : id,
+    key: cardErrorKey(id, WINDOWED.has(id) ? weeks : null),
     read,
   }));
-  const seenErrors = rememberCardErrors(lastErrors, keyed, repoChanged);
+  const seenErrors = rememberCardErrors(lastErrors, repoPath, keyed, keepRepos);
   if (seenErrors !== lastErrors) setLastErrors(seenErrors);
   const notice = boardNotice(
-    keyed.map(({ key, read }) => ({ read, lastError: seenErrors[key] })),
+    keyed.map(({ key, read }) => ({
+      read,
+      lastError: seenErrors[repoPath]?.[key],
+    })),
     isRetrying,
     (e) => presentError(e).summary,
   );
@@ -368,7 +376,8 @@ export function InsightsBoard({
             bodyClassName={CARD_BODY.chart}
             stale={commitActivity.isPlaceholderData}
           >
-            {commitActivity.data === undefined ? (
+            {commitActivity.data === undefined ||
+            cardBody(commitActivity, isRetrying) !== "data" ? (
               unloadedCard(
                 commitActivity,
                 isRetrying,
@@ -387,7 +396,8 @@ export function InsightsBoard({
             bodyClassName={CARD_BODY.chart}
             stale={codeFreq.isPlaceholderData}
           >
-            {codeFreq.data === undefined ? (
+            {codeFreq.data === undefined ||
+            cardBody(codeFreq, isRetrying) !== "data" ? (
               unloadedCard(
                 codeFreq,
                 isRetrying,
@@ -407,7 +417,8 @@ export function InsightsBoard({
             bodyClassName={CARD_BODY.contributors}
             stale={contributors.isPlaceholderData}
           >
-            {contributors.data === undefined ? (
+            {contributors.data === undefined ||
+            cardBody(contributors, isRetrying) !== "data" ? (
               unloadedCard(
                 contributors,
                 isRetrying,
@@ -426,7 +437,8 @@ export function InsightsBoard({
             className="xl:col-span-2"
             stale={punchCard.isPlaceholderData}
           >
-            {punchCard.data === undefined ? (
+            {punchCard.data === undefined ||
+            cardBody(punchCard, isRetrying) !== "data" ? (
               unloadedCard(
                 punchCard,
                 isRetrying,
@@ -450,7 +462,8 @@ export function InsightsBoard({
                 )
               }
             >
-              {runs.data === undefined ? (
+              {runs.data === undefined ||
+              cardBody(runs, isRetrying) !== "data" ? (
                 unloadedCard(runs, isRetrying, noun.runs, <ChartSkeleton />)
               ) : durationPoints.length ? (
                 <ActionsDurationChart data={durationPoints} />
@@ -473,7 +486,8 @@ export function InsightsBoard({
                 )
               }
             >
-              {forkActivity.data === undefined ? (
+              {forkActivity.data === undefined ||
+              cardBody(forkActivity, isRetrying) !== "data" ? (
                 unloadedCard(
                   forkActivity,
                   isRetrying,
@@ -495,7 +509,8 @@ export function InsightsBoard({
 
           {(canGhOnly || forgeDetecting) && (
             <InsightCard title="Community" bodyClassName={CARD_BODY.community}>
-              {community.data === undefined ? (
+              {community.data === undefined ||
+              cardBody(community, isRetrying) !== "data" ? (
                 unloadedCard(
                   community,
                   isRetrying,
@@ -514,7 +529,8 @@ export function InsightsBoard({
               className="xl:col-span-2"
               bodyClassName={CARD_BODY.traffic}
             >
-              {traffic.data === undefined ? (
+              {traffic.data === undefined ||
+              cardBody(traffic, isRetrying) !== "data" ? (
                 unloadedCard(
                   traffic,
                   isRetrying,
@@ -532,7 +548,8 @@ export function InsightsBoard({
               title="Dependencies"
               bodyClassName={CARD_BODY.dependencies}
             >
-              {dependencies.data === undefined ? (
+              {dependencies.data === undefined ||
+              cardBody(dependencies, isRetrying) !== "data" ? (
                 unloadedCard(
                   dependencies,
                   isRetrying,

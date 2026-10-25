@@ -609,8 +609,9 @@ one grep away on the named symbol. Grows via Conventions-sync.
   defaulted verdict, and reads its negative answer only from a run that gave it
   (exit 0 with nothing matched, or an unborn HEAD). The shared unborn probe is
   `unborn_head` (git/history.rs), which on git 2.43+ tells a missing branch ref
-  from a broken one; `commit_on_remote` and `git_unpushed_count` in
-  git/branches.rs are the models.
+  from a broken one; a read that runs first and probes only after it fails goes
+  through `read_unless_unborn` (same file). `commit_on_remote` and
+  `git_unpushed_count` in git/branches.rs are the models.
 - **AppError message classifiers** — a check over an AppError's `message`
   matches through `appErrorDetail` (`@/lib/error-summary`), since the wire
   message keeps the Rust Display lead (`invalid argument: …`); it strips only

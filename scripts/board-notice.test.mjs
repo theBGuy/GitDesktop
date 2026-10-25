@@ -17,6 +17,8 @@ import { test } from "node:test";
 import { refreshFailed } from "../src/features/conversations/remote-section-state.ts";
 import {
   boardNotice,
+  cardBody,
+  cardErrorKey,
   cardLoaded,
   rememberCardErrors,
   unloadedCardBody,
@@ -167,53 +169,113 @@ test("a card with no data: offline, failed, or loading", () => {
   );
 });
 
-test("the reason memory: kept through a reset, cleared by a repo switch", () => {
+test("a card draws its data, a placeholder while pending, never for a failure", () => {
+  assert.equal(cardBody(healthy, false), "data");
+  // A failed window's own read, with another window's rows as placeholder.
+  assert.equal(cardBody(resetPlaceholder, false), "failed");
+  // Negative control: a pending window with no failure keeps the placeholder.
+  const pendingPlaceholder = read({ data: [9], isPlaceholderData: true });
+  assert.equal(cardBody(pendingPlaceholder, false), "data");
+  // The board's own Retry over the failed window: the placeholder holds.
+  assert.equal(cardBody(resetPlaceholder, true), "data");
+  // Nothing at all: the unloaded arms.
+  assert.equal(cardBody(failedEmpty, false), "failed");
+  assert.equal(cardBody(read({ data: undefined }), false), "loading");
+});
+
+test("memory keys: windowed per window, hosted by id alone", () => {
+  assert.equal(cardErrorKey("commitActivity", 52), "commitActivity:52");
+  assert.equal(cardErrorKey("commitActivity", 0), "commitActivity:0");
+  assert.equal(cardErrorKey("traffic", null), "traffic");
+  assert.notEqual(
+    cardErrorKey("commitActivity", 52),
+    cardErrorKey("commitActivity", 0),
+  );
+});
+
+const k52 = cardErrorKey("commitActivity", 52);
+
+test("the reason memory: kept through a reset, unchanged passes keep identity", () => {
   const first = rememberCardErrors(
     {},
-    [{ key: "commitActivity:52", read: failedEmpty }],
-    false,
+    "/a",
+    [{ key: k52, read: failedEmpty }],
+    ["/a"],
   );
-  assert.deepEqual(first, { "commitActivity:52": "gone" });
+  assert.deepEqual(first, { "/a": { [k52]: "gone" } });
   // A reset error (null) keeps the entry, and an unchanged pass returns the
   // same object, so storing it during render settles.
   const kept = rememberCardErrors(
     first,
-    [{ key: "commitActivity:52", read: resetEmpty }],
-    false,
+    "/a",
+    [{ key: k52, read: resetEmpty }],
+    ["/a"],
   );
   assert.equal(kept, first);
-  // A repo switch drops it in the same pass, keeping only this render's errors.
-  assert.deepEqual(
-    rememberCardErrors(
-      first,
-      [{ key: "commitActivity:52", read: resetEmpty }],
-      true,
-    ),
-    {},
-  );
-  const switched = rememberCardErrors(
-    first,
-    [{ key: "traffic", read: { ...failedWithData, error: "new repo" } }],
-    true,
-  );
-  assert.deepEqual(switched, { traffic: "new repo" });
-  // Negative control: an empty memory stays the same object on a switch.
+  // A repo with nothing failed adds no entry.
   const empty = {};
-  assert.equal(rememberCardErrors(empty, [], true), empty);
+  assert.equal(
+    rememberCardErrors(empty, "/a", [{ key: k52, read: healthy }], ["/a"]),
+    empty,
+  );
+});
+
+test("a repo switch never quotes the previous repo, and switching back keeps its reason", () => {
+  const inA = rememberCardErrors(
+    {},
+    "/a",
+    [{ key: k52, read: failedEmpty }],
+    ["/a"],
+  );
+  // Switched to /b in this render: /b's lookup has nothing of /a's.
+  const inB = rememberCardErrors(
+    inA,
+    "/b",
+    [{ key: k52, read: healthy }],
+    ["/b", "/a"],
+  );
+  assert.equal(inB["/b"]?.[k52], undefined);
+  // Back to /a, whose cached failure refetches with its error reset to null.
+  const backInA = rememberCardErrors(
+    inB,
+    "/a",
+    [{ key: k52, read: resetEmpty }],
+    ["/a", "/b"],
+  );
+  assert.equal(
+    boardNotice([card(resetEmpty, backInA["/a"]?.[k52])], false, summarize)
+      ?.message,
+    "Couldn't load some insights. reason: gone",
+  );
+  // A repo outside the kept pair is pruned.
+  const inC = rememberCardErrors(backInA, "/c", [], ["/c", "/b"]);
+  assert.deepEqual(Object.keys(inC), []);
 });
 
 test("a window toggle quotes that window's own reason", () => {
   const memory = rememberCardErrors(
     {},
+    "/a",
     [
-      { key: "commitActivity:52", read: { ...failedEmpty, error: "year" } },
-      { key: "commitActivity:0", read: { ...failedEmpty, error: "all" } },
+      {
+        key: cardErrorKey("commitActivity", 52),
+        read: { ...failedEmpty, error: "year" },
+      },
+      {
+        key: cardErrorKey("commitActivity", 0),
+        read: { ...failedEmpty, error: "all" },
+      },
     ],
-    false,
+    ["/a"],
   );
   const shown = (weeks) =>
     boardNotice(
-      [card(resetPlaceholder, memory[`commitActivity:${weeks}`])],
+      [
+        card(
+          resetPlaceholder,
+          memory["/a"][cardErrorKey("commitActivity", weeks)],
+        ),
+      ],
       false,
       summarize,
     )?.message;

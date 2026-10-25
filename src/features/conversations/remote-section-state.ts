@@ -1,5 +1,4 @@
-// Pure, import-free: scripts/remote-list-state.test.mjs, and
-// insights/board-notice.ts with its scripts/board-notice.test.mjs, import this
+// Pure, import-free: node test suites and other import-free modules load this
 // file through Node's type stripping, which resolves no aliases.
 
 /** The degraded notice's link-style action; extra actions wear it too. */

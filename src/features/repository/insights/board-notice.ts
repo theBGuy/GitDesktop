@@ -38,23 +38,54 @@ export function unloadedCardBody(
   return "loading";
 }
 
-/** Each card's last real error, keyed by the caller per card and window (a
- *  window toggle reads another query, whose reason is its own). A never-loaded
- *  read's refetch resets its query error to null, which keeps the previous
- *  entry. `repoChanged` drops everything in the same render, so a switch never
- *  quotes the previous repository. Returns `prev` when nothing changes, so a
- *  caller may store it during render. */
+/** What a card draws: its data, or {@link unloadedCardBody}'s arm. Another
+ *  window's placeholder rows stand in while this window loads, never for a
+ *  failed read. */
+export function cardBody(
+  read: BoardCardRead,
+  retrying: boolean,
+): UnloadedCardBody | "data" {
+  if (cardLoaded(read)) return "data";
+  const unloaded = unloadedCardBody(read, retrying);
+  return read.data !== undefined && unloaded !== "failed" ? "data" : unloaded;
+}
+
+/** A card's key in the reason memory: a windowed card's per window (a toggle
+ *  reads another query), a hosted card's by id alone (`weeks` null). */
+export function cardErrorKey(id: string, weeks: number | null): string {
+  return weeks === null ? id : `${id}:${weeks}`;
+}
+
+/** Each repository's cards' last real errors, by {@link cardErrorKey}. */
+export type CardErrorMemory = Readonly<
+  Record<string, Readonly<Record<string, unknown>>>
+>;
+
+/** The memory after this render's cards in `repo`: a never-loaded read's
+ *  refetch resets its query error to null, which keeps the entry, so a switch
+ *  back to a repository with a cached failure still quotes it. Only the repos
+ *  in `keep` survive (bounded growth). Returns `prev` when nothing changes, so
+ *  a caller may store it during render. */
 export function rememberCardErrors(
-  prev: Readonly<Record<string, unknown>>,
+  prev: CardErrorMemory,
+  repo: string,
   cards: readonly { key: string; read: BoardCardRead }[],
-  repoChanged: boolean,
-): Readonly<Record<string, unknown>> {
-  let next = repoChanged && Object.keys(prev).length > 0 ? {} : prev;
+  keep: readonly string[],
+): CardErrorMemory {
+  let next = prev;
+  if (Object.keys(prev).some((r) => !keep.includes(r)))
+    next = Object.fromEntries(
+      Object.entries(prev).filter(([r]) => keep.includes(r)),
+    );
+  const before = next[repo];
+  let mine = before;
   for (const { key, read } of cards) {
-    if (read.error != null && next[key] !== read.error)
-      next = { ...next, [key]: read.error };
+    if (read.error != null && mine?.[key] !== read.error)
+      mine = { ...mine, [key]: read.error };
   }
-  return next;
+  return mine === before || mine === undefined
+    ? next
+    : { ...next, [repo]: mine };
 }
 
 /** The Insights board's one failure line and the reads its Retry refetches,
