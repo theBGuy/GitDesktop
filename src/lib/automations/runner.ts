@@ -34,6 +34,7 @@ import { presentError } from "@/lib/error-summary";
 import {
   forgePrComment,
   forgePrDiff,
+  forgePrExternalReviews,
   forgePrPoll,
   forgePrView,
   forgeStatus,
@@ -95,6 +96,7 @@ import {
   type ReviewBodyFetch,
   reviewBody,
 } from "./review-body";
+import { createRunReads, type RunReads } from "./run-reads";
 import {
   loadAutomations,
   loadAutomationsFresh,
@@ -484,6 +486,9 @@ async function run(
     }
     return gateSnapshot;
   };
+  // The pass's shared forge reads, threaded into each action's harvest. The event
+  // is fixed for the pass, so its keys need not name the head they read.
+  const reads = createRunReads();
   /**
    * The gate snapshot, or null when its stores couldn't be read — a failure records an
    * `eligibility-error` for this action and the caller skips it. Fail-closed like
@@ -654,12 +659,15 @@ async function run(
       staleKey,
       settled,
       recordProgress,
+      reads,
     });
     staleKey = undefined;
     // Reaching here means the action RAN: drop the shared snapshot so the next action
     // re-reads what happened meanwhile (a delivery, or a cancel in another window
-    // flushing a dismissal).
+    // flushing a dismissal). The review-activity read goes with it, since a delivery
+    // joins it; the diff at the pass's one head stays shared.
     gateSnapshot = null;
+    reads.evict(EXTERNAL_REVIEWS_READ);
   }
   // Nothing ran, but something was decided: one coalescing row. The steady upsert
   // in the store is what keeps a poll tick over an unchanged repo from paying a
@@ -697,6 +705,8 @@ interface RunOneActionInput {
   /** The pass's settled outcomes — pushed to in place. */
   settled: RunActionOutcome[];
   recordProgress: (running?: RunActionOutcome) => Promise<void>;
+  /** The pass's shared forge reads. */
+  reads: RunReads;
 }
 
 /** One action of a {@link run} pass, entered past every skip gate with its claim won
@@ -713,6 +723,7 @@ async function runOneAction({
   staleKey,
   settled,
   recordProgress,
+  reads,
 }: RunOneActionInput): Promise<void> {
   // Liveness heartbeat for the claim just won: refreshing the claim file's mtime makes
   // the Rust stale-reclaim window measure "this instance went quiet", not "this review
@@ -822,6 +833,7 @@ async function runOneAction({
       controller.signal,
       handle.setCliId,
       progress,
+      reads,
     );
     if (handle.isCancelled()) {
       // The dock's Cancel already patched the row to "cancelled" (keeping its Re-run)
@@ -1502,6 +1514,11 @@ interface RunProgress {
   timedOut: boolean;
 }
 
+/** {@link RunReads} keys. The diff names no identity because one instance serves one
+ *  pass, whose event is fixed; the review-activity prefix is evicted per action. */
+const DIFF_READ = "diff";
+const EXTERNAL_REVIEWS_READ = "extrev:";
+
 /** The whole unified diff a review event covers, from whichever source can serve
  *  it — every branch here lands unfiltered text that the caller then filters. */
 async function resolveDiff(
@@ -1587,12 +1604,14 @@ async function generateReviewText(
   signal: AbortSignal,
   onCliId: (id: string) => void,
   progress: RunProgress,
+  reads: RunReads,
 ): Promise<ReviewResult | EmptyDiffCause | null> {
   // Independent of each other, and the settings are only needed by the filter
   // below (the budget profile reuses the same read) — so they resolve alongside
-  // the diff rather than in front of it.
+  // the diff rather than in front of it. The raw diff is shared across the pass;
+  // each action filters it with its own patterns below.
   const [diff, appSettings] = await Promise.all([
-    resolveDiff(event),
+    reads.share(DIFF_READ, () => resolveDiff(event)),
     loadSettings(),
   ]);
   if (!diff.text.trim()) return null;
@@ -1648,8 +1667,7 @@ async function generateReviewText(
   // Scale the prompt's character budgets to the reviewing model (the user's Review-context
   // knob). Resolved BEFORE the own/external harvest so the own-comments distill trigger +
   // ledger cap key off the SAME budget as the rest of the prompt; reused verbatim at
-  // buildReviewPrompt below. Best-effort, never blocks the review. (external + own stay
-  // separate harvests — a shared-fetch dedup is the forge-dispatch-dedup backlog item.)
+  // buildReviewPrompt below. Best-effort, never blocks the review.
   const budgetProfile = await resolveBudgetProfile(
     ai,
     appSettings.reviewContextSize,
@@ -1691,6 +1709,18 @@ async function generateReviewText(
     resolveDocSurfacesContext(event.repoPath),
     readRepoInstructions(event.repoPath).catch(() => null),
   ]);
+  // The three harvests below share one review-activity read per action; the PR
+  // panel's external-reviews and reviewer-notes queries still read it under two
+  // keys of their own.
+  const reviews =
+    remoteNumber === undefined
+      ? undefined
+      : () =>
+          reads.share(
+            `${EXTERNAL_REVIEWS_READ}${event.repoPath}:${remoteNumber}`,
+            () =>
+              forgePrExternalReviews(event.repoPath, remoteNumber, "origin"),
+          );
   // Resolve external + own + (when not event-carried) reviewer-notes context and
   // the description in parallel — best-effort remote harvests; the notes and
   // description arms share one PR read.
@@ -1708,7 +1738,7 @@ async function generateReviewText(
           event.headSha,
           false,
           provider,
-          { budgetChars: budgetProfile.externalCharBudget },
+          { budgetChars: budgetProfile.externalCharBudget, reviews },
         ),
         resolveOwnCommentsContext(
           event.repoPath,
@@ -1720,12 +1750,18 @@ async function generateReviewText(
             distill: true,
             signal,
             ownBudgetChars: budgetProfile.ownCharBudget,
+            reviews,
           },
         ),
         // Skip the fetch when the event already carries the notes.
         eventNotes || remoteNumber === undefined
           ? Promise.resolve({})
-          : resolveReviewerNotesContext(event.repoPath, remoteNumber, prView),
+          : resolveReviewerNotesContext(
+              event.repoPath,
+              remoteNumber,
+              prView,
+              reviews,
+            ),
         bodyFetchFrom(prView, needsBody),
       ])
     : [{}, {}, {}, undefined];

@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import { useRepoMutation } from "./internal";
+import { recheckRunsAfterPush } from "./push-writes";
 
 export function remotesOptions(repo: string) {
   return {
@@ -33,7 +34,10 @@ export function useRemotes(repo: string) {
   });
 }
 
+/** Publishing pushes the repo's commits to the new remote, so it arms the delayed
+ *  run recheck like a push. */
 export function usePublishRepo(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -61,6 +65,7 @@ export function usePublishRepo(repo: string) {
       // the dialog survives a repo switch — without the key the newly-live repo's
       // controls would read the pending publish as busy.
       identity: ["publish-repo", repo],
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     },
   );
 }

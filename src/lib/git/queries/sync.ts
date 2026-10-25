@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { isDirtyTreeRefusal } from "@/lib/error-summary";
 import * as api from "../api";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
+import { prChecksRecheck } from "./pr-actions";
 import { pendingMutationEntries } from "./pr-writes";
 import {
   BRANCH_PUSH_ACTIVE_MESSAGE,
@@ -29,6 +30,7 @@ export {
   branchPushLabel,
   nextPushLatch,
   type PushVars,
+  recheckRunsAfterPush,
 } from "./push-writes";
 
 /** Fetch, pull and switch here are `localOnly`: they move HEAD, refs or the working
@@ -274,8 +276,14 @@ export function usePush(repo: string) {
     {
       identity: branchPushKey(repo),
       // The whole-repo default: a push moves the pushed branch's PR head, checks,
-      // mergeability and runs, and only active observers refetch.
-      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+      // mergeability and runs, and only active observers refetch. The push names
+      // no PR or lens, so the recheck re-reads every PR's details in both lenses:
+      // only on-screen PR views and active list CI maps refetch.
+      onSuccess: () =>
+        recheckRunsAfterPush(queryClient, repo, [
+          ...prChecksRecheck(repo, "origin"),
+          ...prChecksRecheck(repo, "upstream"),
+        ]),
     },
   );
 }

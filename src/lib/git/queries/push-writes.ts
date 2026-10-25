@@ -2,8 +2,11 @@
  * The import-free pieces of the branch-push bookkeeping: the key every push is
  * filed under, the variables it carries, how a pending push reads back out of
  * the mutation cache, the label a branch row's spinner shows for it, the reasons
- * a push puts on the other controls it holds, the HEAD-push latch, and the one
- * delayed run-list recheck a successful push schedules.
+ * a push puts on the other controls it holds, the HEAD-push latch, the one
+ * delayed run-list recheck (plus any PR checks reads its arms hand it) armed by a
+ * successful write whose own default trigger starts CI for the code it touches
+ * (the boundary at {@link PUSH_RUN_RECHECK_MS}), or by the observed head move, and
+ * the delayed PR-list re-read a remote-branch delete schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
  * file, and `scripts/push-writes.test.mjs` loads it straight from `src/` under
@@ -148,27 +151,81 @@ export function nextPushLatch(
   return { ...Object.fromEntries(kept), ...Object.fromEntries(added) };
 }
 
-/** How long after a push succeeds its runs are read once more: the forge creates
- *  a push's runs a few seconds after it lands, so the settle's own read can miss
- *  them. */
+/** How long after an armed write the runs are read once more: the forge can
+ *  surface the run, or flip its status, after the settle-time read. Armed writes
+ *  are those whose own default trigger starts CI for the code they touch: pushing
+ *  commits or tags; opening or reopening a pull request, landing it on the origin
+ *  lens, or updating its branch; publishing or deleting a release; publishing a
+ *  repository; creating a linked branch on the origin lens; dispatching a
+ *  workflow; and re-running, playing or approving a run. Out of scope:
+ *  non-default activity types (ready-for-review) and other events (labels,
+ *  comments, reviews, Pages builds). Deletion pushes and cancel are reasoned
+ *  exclusions. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
-/** The one pending recheck per repo: a later push re-arms it, so repeat pushes
- *  never stack timers. */
-const pendingRunRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+/** A read such a write owes the same delayed re-read as the run lists (a PR's
+ *  checks rollup, the list's CI badges). Built by the caller: this import-free file
+ *  can't import repoKeys, and the pr-ci family may be spelled only in core.ts.
+ *  `exact` matches `queryKey` alone; `numberedChild` matches only keys one segment
+ *  longer whose last segment is a number (every PR's details in a lens, for an arm
+ *  that can't name its PR); neither = prefix match. */
+export interface RecheckFilter {
+  queryKey: readonly unknown[];
+  exact?: boolean;
+  numberedChild?: boolean;
+}
 
-/** One delayed re-read of the push's own repo's run lists; only the observers
- *  active then refetch. A paged list past its first page is skipped: no automatic
- *  refetch replays deep pages (actions.ts `useWorkflowRunPages`), and the settle's
- *  own invalidation already refreshed it. */
+/** The one pending recheck per repo: a later arm re-arms its timer and adds its
+ *  filters to the ones already owed (deduplicated by value), so repeat writes never
+ *  stack timers and the one fire covers every coalesced arm. The fire drops the
+ *  entry, so the next arm owes only its own filters. */
+const pendingRunRechecks = new Map<
+  string,
+  { timer: ReturnType<typeof setTimeout>; owed: Map<string, RecheckFilter> }
+>();
+
+const filterId = (f: RecheckFilter) =>
+  JSON.stringify([f.queryKey, f.exact === true, f.numberedChild === true]);
+
+/** Whether `key` starts with `prefix`, segment by segment. Filter keys hold only
+ *  primitives, so a serialized compare is exact. */
+const startsWithKey = (key: readonly unknown[], prefix: readonly unknown[]) =>
+  key.length >= prefix.length &&
+  prefix.every((s, i) => JSON.stringify(key[i]) === JSON.stringify(s));
+
+/** {@link RecheckFilter}'s three match modes, applied to one query key. */
+export function recheckFilterMatches(
+  f: RecheckFilter,
+  key: readonly unknown[],
+): boolean {
+  if (!startsWithKey(key, f.queryKey)) return false;
+  if (f.numberedChild)
+    return (
+      key.length === f.queryKey.length + 1 &&
+      typeof key[f.queryKey.length] === "number"
+    );
+  return f.exact !== true || key.length === f.queryKey.length;
+}
+
+/** One delayed re-read of the write's own repo's run lists plus `extra`; only the
+ *  observers active then refetch. A paged list past its first page is skipped: no
+ *  automatic refetch replays deep pages (actions.ts `useWorkflowRunPages`), so it
+ *  keeps its last full read until something invalidates it (most arms' whole-repo
+ *  settle, or the panel's Refresh). The owed filters fire as ONE invalidation over
+ *  their union: two overlapping filters as two calls would invalidate a query twice
+ *  in one tick, and the second call's refetch cancels the first's. */
 export function recheckRunsAfterPush(
   queryClient: QueryClient,
   repo: string,
+  extra: readonly RecheckFilter[] = [],
 ): void {
-  clearTimeout(pendingRunRechecks.get(repo));
-  pendingRunRechecks.set(
-    repo,
-    setTimeout(() => {
+  const pending = pendingRunRechecks.get(repo);
+  clearTimeout(pending?.timer);
+  const owed = pending?.owed ?? new Map<string, RecheckFilter>();
+  for (const f of extra) owed.set(filterId(f), f);
+  pendingRunRechecks.set(repo, {
+    owed,
+    timer: setTimeout(() => {
       pendingRunRechecks.delete(repo);
       for (const kind of ["notify", "latest", "runs"])
         void queryClient.invalidateQueries({
@@ -180,6 +237,41 @@ export function recheckRunsAfterPush(
           ((query.state.data as { pages?: unknown[] } | undefined)?.pages
             ?.length ?? 0) <= 1,
       });
+      const filters = [...owed.values()];
+      if (filters.length > 0)
+        void queryClient.invalidateQueries({
+          predicate: (query) =>
+            filters.some((f) => recheckFilterMatches(f, query.queryKey)),
+        });
     }, PUSH_RUN_RECHECK_MS),
+  });
+}
+
+/** How long after a remote-branch delete the PR list is read once more: GitHub
+ *  closes a PR whose head branch is deleted asynchronously, so the settle's own
+ *  read can still show it open. */
+export const REMOTE_DELETE_PR_RECHECK_MS = 8_000;
+
+/** The one pending PR-list re-read per repo: a later delete re-arms it. */
+const pendingPrListRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** One delayed invalidation of exactly `keys` (the caller builds them: this file
+ *  can't import repoKeys, and the PR-list families may be spelled only in core.ts).
+ *  The caller owes the review-state map with the PR list (usePrReviewState's
+ *  co-invalidation contract); the CI and mergeability maps key on a digest of the
+ *  list's rows and re-key on their own. */
+export function recheckPrListAfterRemoteDelete(
+  queryClient: QueryClient,
+  repo: string,
+  keys: readonly (readonly unknown[])[],
+): void {
+  clearTimeout(pendingPrListRechecks.get(repo));
+  pendingPrListRechecks.set(
+    repo,
+    setTimeout(() => {
+      pendingPrListRechecks.delete(repo);
+      for (const queryKey of keys)
+        void queryClient.invalidateQueries({ queryKey });
+    }, REMOTE_DELETE_PR_RECHECK_MS),
   );
 }

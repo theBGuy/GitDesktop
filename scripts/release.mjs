@@ -551,9 +551,13 @@ async function main() {
       const runId = await findReleaseRun(tag);
       if (runId) {
         // Soft call (not the hard-failing run()): watching is long-running and
-        // the user may Ctrl+C, so a nonzero exit — an interrupt or a red leg —
-        // must not suppress the closing checklist printed below.
-        spawnSync("gh", ["run", "watch", String(runId)], { stdio: "inherit" });
+        // the user may Ctrl+C, so an interrupt's nonzero exit must not suppress
+        // the closing checklist printed below.
+        spawnSync(
+          "gh",
+          ["run", "watch", String(runId), "--interval", "60", "--compact"],
+          { stdio: "inherit" },
+        );
       } else {
         warn("release run did not appear yet — check the Actions page below");
       }

@@ -37,6 +37,7 @@ import {
   readPendingPrWrite,
 } from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
+import { type RecheckFilter, recheckRunsAfterPush } from "./push-writes";
 import {
   type ApproveRunVars,
   NO_PENDING_RUN_WRITES,
@@ -514,17 +515,36 @@ export function useMergePr(repo: string) {
         .catch(() => undefined);
       return outcome;
     },
-    { identity: prWriteKey("merge", repo) },
+    {
+      identity: prWriteKey("merge", repo),
+      // A landed merge pushes the base branch, whose runs can start after the
+      // settle-time read. A fast-forward merge puts the PR's head sha on the
+      // base, and Bitbucket's checks read that sha's statuses, so the PR's checks
+      // are re-read too. This hook can't tell the provider, so for any other
+      // merge that is a precaution of up to two reads. The run lists read
+      // origin, so an upstream-lens merge arms nothing; a queued merge has not
+      // landed yet.
+      onSuccess: (data, args) => {
+        if (args.lens === "origin" && !data.queued)
+          recheckRunsAfterPush(
+            queryClient,
+            repo,
+            prChecksRecheck(repo, args.lens, args.number),
+          );
+      },
+    },
   );
 }
 
 /** What an update-branch makes stale on the PR side: the PR subtree (details and its
  *  commits/files/checks rollup, mergeability, diff, review threads), the rows that
- *  carry PR state, the list's merge-status chips (its own mergeability map, which
- *  neither prefix matches), and the review-state map those rows group by (the new
- *  commit moves this PR's `updatedAt`). Exported because the set has to run TWICE:
- *  once when the forge accepts the job, and again once the poll sees the head
- *  actually move, since the first pass reads a head that has not shifted yet. */
+ *  carry PR state, the list's CI badges and merge-status chips (their own `pr-ci` and
+ *  mergeability maps: siblings of `pr` that neither the PR-subtree nor the PR-list
+ *  prefix reaches, so each is listed by name), and the review-state map those rows
+ *  group by (the new commit moves this PR's `updatedAt`).
+ *  Exported because the set has to run TWICE: once when the forge accepts the job,
+ *  and again once the poll sees the head actually move, since the first pass reads a
+ *  head that has not shifted yet. */
 export const prUpdateBranchKeys = (
   repo: string,
   number: number,
@@ -533,10 +553,28 @@ export const prUpdateBranchKeys = (
   [
     ["repo", repo, "pr", lens, number],
     [...repoKeys.prList(repo), lens],
+    [...repoKeys.prCi(repo), lens],
     [...repoKeys.prMergeability(repo), lens],
     [...repoKeys.prReviewState(repo), lens],
     ["repo", repo, "prs", lens],
   ] as const;
+
+/** The PR reads a write's new runs change when they run on a PR's head, handed to
+ *  `recheckRunsAfterPush` so they are re-read with the run lists: the PR's details
+ *  (its checks rollup rides them, and nothing polls them) matched exactly, so the
+ *  diff and threads under it are not re-read, and the list's CI-badge map, whose
+ *  row digest doesn't move with a run. No `number` re-reads every PR's details in
+ *  the lens, for an arm that can't name its PR; only those on screen refetch. */
+export const prChecksRecheck = (
+  repo: string,
+  lens: RemoteLens,
+  number?: number,
+): RecheckFilter[] => [
+  number === undefined
+    ? { queryKey: ["repo", repo, "pr", lens], numberedChild: true }
+    : { queryKey: ["repo", repo, "pr", lens, number], exact: true },
+  { queryKey: [...repoKeys.prCi(repo), lens] },
+];
 
 /** Merge (or rebase) the base branch into a PR's head — GitHub's "Update branch".
  *  GitHub QUEUES the work and answers 202, so resolving means accepted, not done —
@@ -545,13 +583,21 @@ export const prUpdateBranchKeys = (
  *  narrow: those keys plus the divergence key by name (it is a sibling of the PR
  *  subtree, not a child). Keyed off the args like the label mutation, which
  *  `useRepoMutation`'s static option can't do. The variables name the PR, so the
- *  view holds each PR's update on its own. */
+ *  view holds each PR's update on its own. The update is a server-side push to the
+ *  head, so acceptance arms the run recheck; the caller arms it again on the head
+ *  move, for a job that lands later than the recheck. */
 export function usePrUpdateBranch(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: prWriteKey("update-branch", repo),
     mutationFn: (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
       api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
+    onSuccess: (_d, args) =>
+      recheckRunsAfterPush(
+        queryClient,
+        repo,
+        prChecksRecheck(repo, args.lens, args.number),
+      ),
     onSettled: (_d, _e, args) => {
       const keys: QueryKey[] = [
         ...prUpdateBranchKeys(repo, args.number, args.lens),
@@ -566,13 +612,21 @@ export function usePrUpdateBranch(repo: string) {
 
 /** Approve a workflow run GitHub is holding for maintainer approval (a first-time
  *  contributor's fork PR). Invalidates the Actions subtree like re-run/cancel, plus
- *  the PR subtree — the PR checks list renders these runs off PR details. */
+ *  the PR subtree — the PR checks list renders these runs off PR details. GitHub can
+ *  flip the approved run's status after the settle-time read, so success arms the
+ *  run recheck. The variables name no PR, and the run view's approval sends no
+ *  lens, so it hands both lenses' PR checks reads. */
 export function useApproveWorkflowRun(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: runWriteKey("approve-run", repo),
     mutationFn: (args: ApproveRunVars) =>
       api.forgeCiRunApprove(repo, args.runId, args.lens),
+    onSuccess: () =>
+      recheckRunsAfterPush(queryClient, repo, [
+        ...prChecksRecheck(repo, "origin"),
+        ...prChecksRecheck(repo, "upstream"),
+      ]),
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "actions"] });
       queryClient.invalidateQueries({ queryKey: ["repo", repo, "pr"] });
@@ -628,9 +682,12 @@ export const glMrMergeStateOptions = (repo: string, number: number) =>
 
 /** Arm auto-merge (merge-when-pipeline-succeeds) on a GitLab MR. Default repo-wide
  *  invalidation is deliberate: an arm can race into an immediate merge when the
- *  pipeline just passed, so the whole MR view must refresh. `lens` rides the
- *  variables only to name the target PR (GitLab has no upstream lens). */
+ *  pipeline just passed, so the whole MR view must refresh, and that merge's
+ *  pipeline can start after the settle-time read, so the arm also schedules the
+ *  run recheck. `lens` rides the variables only to name the target PR (GitLab has
+ *  no upstream lens). */
 export function useGlArmAutoMerge(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -648,7 +705,10 @@ export function useGlArmAutoMerge(repo: string) {
         args.deleteBranch,
         args.sha,
       ),
-    { identity: prWriteKey("gl-arm-auto-merge", repo) },
+    {
+      identity: prWriteKey("gl-arm-auto-merge", repo),
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+    },
   );
 }
 
@@ -683,12 +743,24 @@ export function useClosePr(repo: string) {
   );
 }
 
+/** Reopening fires the forge's PR-reopened event (one of GitHub's default
+ *  `pull_request` activity types), whose runs on the PR's head can start after the
+ *  settle-time read, so it arms the recheck with that PR's checks reads. */
 export function useReopenPr(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { number: number; lens: RemoteLens }) =>
       api.forgePrReopen(repo, args.number, args.lens),
-    { identity: prWriteKey("reopen", repo) },
+    {
+      identity: prWriteKey("reopen", repo),
+      onSuccess: (_d, args) =>
+        recheckRunsAfterPush(
+          queryClient,
+          repo,
+          prChecksRecheck(repo, args.lens, args.number),
+        ),
+    },
   );
 }
 

@@ -1,5 +1,5 @@
 import { forgePrExternalReviews } from "@/lib/git/api";
-import type { ExternalReviewItem } from "@/lib/git/types";
+import type { ExternalReviewItem, ExternalReviewsOut } from "@/lib/git/types";
 import {
   allocateBodyCaps,
   capBody,
@@ -95,16 +95,21 @@ function isReviewerFinding(
  * flag, not the filter's.
  *
  * Used by the panel's external-reviews query as well as `resolveExternalContext`.
+ * `reviews` lets a run share one origin read of this PR with its other harvests; a
+ * thunk, so the Bitbucket short-circuit still makes no call.
  */
 export async function fetchExternalFindings(
   repoPath: string,
   prNumber: number,
   provider: string = "github",
+  reviews?: () => Promise<ExternalReviewsOut>,
 ): Promise<ExternalFindings> {
   if (provider === "bitbucket") return { items: [], incomplete: false };
   try {
     // Origin-pinned: AI review context reads the fork's own PR, not the upstream lens.
-    const read = await forgePrExternalReviews(repoPath, prNumber, "origin");
+    const read = await (reviews
+      ? reviews()
+      : forgePrExternalReviews(repoPath, prNumber, "origin"));
     return {
       items: read.items.filter((item) => isReviewerFinding(item, provider)),
       incomplete: read.itemsTruncated,
@@ -273,7 +278,8 @@ function formatExternalFindings(
  *
  * `opts.budgetChars` is the section budget the per-finding caps are fair-shared across —
  * the user's Review-context knob, so the knob reaches this section; the constant is a
- * defensive default for callers that don't resolve it.
+ * defensive default for callers that don't resolve it. `opts.reviews` is
+ * {@link fetchExternalFindings}'s shared read.
  */
 export async function resolveExternalContext(
   repoPath: string,
@@ -282,7 +288,7 @@ export async function resolveExternalContext(
   currentHeadSha: string | undefined,
   ignore: boolean,
   provider: string = "github",
-  opts?: { budgetChars?: number },
+  opts?: { budgetChars?: number; reviews?: () => Promise<ExternalReviewsOut> },
 ): Promise<ExternalContext> {
   if (ignore || kind !== "remote") return {};
   const prNumber = Number(ref);
@@ -292,6 +298,7 @@ export async function resolveExternalContext(
     repoPath,
     prNumber,
     provider,
+    opts?.reviews,
   );
   // A partial read with no surviving findings still discloses: there, an empty
   // section is not evidence that no reviewer flagged anything.

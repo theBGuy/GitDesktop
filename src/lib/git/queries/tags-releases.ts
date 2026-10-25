@@ -17,13 +17,17 @@ import {
   type TagPushState,
   tagPushKey,
 } from "./pr-writes";
+import { recheckRunsAfterPush } from "./push-writes";
 
 /** Pushes a tag to origin, so it keeps the default and pauses offline. Keyed per
  *  repo with the tag in the variables: {@link usePendingTagPushes} reads every
- *  push in flight, whichever mount fired it. */
+ *  push in flight, whichever mount fired it. A tag push can start runs, so it
+ *  arms the delayed run recheck like a branch push. */
 export function usePushTag(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(repo, (name: string) => api.gitPushTag(repo, name), {
     identity: tagPushKey(repo),
+    onSuccess: () => recheckRunsAfterPush(queryClient, repo),
   });
 }
 
@@ -134,7 +138,13 @@ export function usePrefetchRelease(repo: string) {
   );
 }
 
+/** A published release can start runs after the settle-time read: GitHub's
+ *  `release` event workflows, and GitLab's pipeline for a tag the release creates.
+ *  GitHub fires no release workflows for a draft, so this hook and
+ *  {@link useEditRelease} arm the recheck only on a non-draft write (a published
+ *  create, or an edit that leaves it published or publishes it). */
 export function useCreateRelease(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -161,11 +171,15 @@ export function useCreateRelease(repo: string) {
       // host survives a repo switch — without the key the newly-live repo's
       // controls would read the pending create as busy.
       identity: ["create-release", repo],
+      onSuccess: (_d, args) => {
+        if (!args.draft) recheckRunsAfterPush(queryClient, repo);
+      },
     },
   );
 }
 
 export function useEditRelease(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: ReleaseWriteVars["edit-release"]) =>
@@ -178,7 +192,12 @@ export function useEditRelease(repo: string) {
         args.draft,
         args.latest,
       ),
-    { identity: releaseWriteKey("edit-release", repo) },
+    {
+      identity: releaseWriteKey("edit-release", repo),
+      onSuccess: (_d, args) => {
+        if (!args.draft) recheckRunsAfterPush(queryClient, repo);
+      },
+    },
   );
 }
 
@@ -201,12 +220,18 @@ export function useGithubReleaseNotes(repo: string) {
   });
 }
 
+/** Deleting a published release fires GitHub's `release` event, so it arms the
+ *  recheck; the variables don't say whether it was a draft, so every delete does. */
 export function useDeleteRelease(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: ReleaseWriteVars["delete-release"]) =>
       api.forgeReleaseDelete(repo, args.tag, args.cleanupTag),
-    { identity: releaseWriteKey("delete-release", repo) },
+    {
+      identity: releaseWriteKey("delete-release", repo),
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
+    },
   );
 }
 

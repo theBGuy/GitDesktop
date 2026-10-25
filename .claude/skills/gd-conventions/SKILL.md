@@ -683,6 +683,36 @@ one grep away on the named symbol. Grows via Conventions-sync.
   and hot working-tree ops keep their narrow `invalidate`. The window-focus
   pass refetches only active queries that are stale by their own staleTime
   or errored, never a blanket invalidation.
+- **Push-like run recheck** — writes whose own default trigger starts CI for
+  the code they touch arm `recheckRunsAfterPush` (`queries/push-writes.ts`) on
+  success, because the run can appear, or flip status, after the settle-time
+  read. They are: pushing commits or tags; opening, reopening or landing a pull
+  request (origin-lens merge, GitLab arm-auto-merge) or updating its branch; a
+  resolve push; publishing or deleting a release; publishing a repository;
+  creating a linked branch on the origin lens; dispatching a workflow; and
+  re-running, playing or approving a run. Out of scope: non-default activity
+  types (ready-for-review) and other events (labels, comments, reviews, Pages
+  builds). Deletion pushes and cancel are reasoned exclusions. Some arms also
+  hand it `prChecksRecheck` (`queries/pr-actions.ts`), so the PR's checks
+  rollup and the list's CI badges are re-read with the run lists. Create, the
+  merge-resolve push (`useMergeRemotePr`), update-branch (on accept and on the
+  head move), reopen and merge name their PR; the finish-resolve push
+  (`useFinishRemotePrResolve`) covers every PR in its lens. A plain push,
+  re-run, re-run job, play job and approve name no PR and cover both lenses.
+  Merge hands them because a Bitbucket fast-forward puts the PR's head sha on
+  the base, and Bitbucket's checks read that sha's statuses; for any other
+  merge it is a precaution. A later arm re-arms the per-repo timer, and its
+  one fire covers every coalesced arm's reads. A remote-branch delete instead
+  schedules
+  `recheckPrListAfterRemoteDelete` with keys its call site builds (GitHub
+  closes a head-deleted PR asynchronously). Guard:
+  `scripts/push-recheck-family.test.mjs`, keyed on the api callees.
+- **Run-scoped forge reads** — an automation pass shares its diff and each
+  action's review-activity read, and an interactive review run shares its one
+  review-activity read, through `createRunReads`
+  (`src/lib/automations/run-reads.ts`): single-flight, rejection-evicting, and
+  entries the run's own delivery can change are evicted after each action that
+  ran. Consumers never mutate a shared result.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

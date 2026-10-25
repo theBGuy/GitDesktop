@@ -135,8 +135,10 @@ import {
   pendingWriteMatching,
   pendingWriteOfKind,
   prApprovalsOptions,
+  prChecksRecheck,
   prDiffOptions,
   prUpdateBranchKeys,
+  recheckRunsAfterPush,
   repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
@@ -1528,6 +1530,13 @@ export function RemotePrView({
         prUpdateBranchKeys(repoPath, number, lens).map((queryKey) =>
           queryClient.invalidateQueries({ queryKey }),
         ),
+      );
+      // A job slower than the accept-time run recheck starts the head's runs after
+      // that recheck fired, so the observed move arms it again (one timer per repo).
+      recheckRunsAfterPush(
+        queryClient,
+        repoPath,
+        prChecksRecheck(repoPath, lens, number),
       );
       // A long update spends the mergeability ladder against the UNKNOWN that GitHub
       // reports throughout, so the refetch above would land on a gave-up arm. The head

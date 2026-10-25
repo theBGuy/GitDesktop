@@ -1,5 +1,9 @@
 import { forgePrExternalReviews } from "@/lib/git/api";
-import type { ExternalReviewItem, RemoteLens } from "@/lib/git/types";
+import type {
+  ExternalReviewItem,
+  ExternalReviewsOut,
+  RemoteLens,
+} from "@/lib/git/types";
 import { GD_COMMENT_ANCHOR } from "./comment-branding";
 import {
   digestKey,
@@ -290,6 +294,9 @@ export async function resolveOwnCommentsContext(
      *  that can take minutes (a CLI generation model). Called only when a
      *  distill actually opens a model call; the caller clears it. */
     onStatus?: (status: string) => void;
+    /** A run's shared origin read of this PR's review activity, called in place
+     *  of this harvest's own; a thunk, so the Bitbucket return makes no call. */
+    reviews?: () => Promise<ExternalReviewsOut>;
   },
 ): Promise<OwnCommentsContext> {
   if (kind !== "remote" || provider === "bitbucket") return {};
@@ -301,7 +308,9 @@ export async function resolveOwnCommentsContext(
   try {
     // Origin-pinned: AI review context reads the fork's OWN PR; an upstream-lens
     // review is a separate follow-up.
-    const read = await forgePrExternalReviews(repoPath, prNumber, "origin");
+    const read = await (opts?.reviews
+      ? opts.reviews()
+      : forgePrExternalReviews(repoPath, prNumber, "origin"));
     items = read.items;
     truncated = read.itemsTruncated;
   } catch {

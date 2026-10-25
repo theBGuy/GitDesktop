@@ -3,7 +3,12 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { keepPreviousDataForKeyAxes, repoKeys } from "@/lib/git/queries";
+import {
+  keepPreviousDataForKeyAxes,
+  prChecksRecheck,
+  recheckRunsAfterPush,
+  repoKeys,
+} from "@/lib/git/queries";
 import {
   type CancelRunVars,
   type DispatchVars,
@@ -497,11 +502,13 @@ function useActionsMutation<TArgs>(
   repo: string,
   mutationFn: (args: TArgs) => Promise<void>,
   kind: RunWriteKind,
+  onSuccess?: () => void,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: runWriteKey(kind, repo),
     mutationFn,
+    onSuccess,
     // The awaited refresh is Actions' own; re-run/cancel/dispatch don't touch git
     // state. The two CI surfaces the `actions` prefix can't reach (a PR's own
     // checks, the list's `pr-ci` badges) ride along UNAWAITED — neither should
@@ -516,12 +523,21 @@ function useActionsMutation<TArgs>(
   });
 }
 
+/** Re-run, re-run job and play job arm the delayed run recheck: the attempt's
+ *  status can flip after the settle-time read. Their variables name no PR and
+ *  carry at most an optional `lens`, so they hand both lenses' PR checks reads. */
 export function useRerunRun(repo: string) {
+  const queryClient = useQueryClient();
   return useActionsMutation(
     repo,
     (args: RerunRunVars) =>
       forgeCiRunRerun(repo, args.runId, args.failed, args.lens),
     "rerun-run",
+    () =>
+      recheckRunsAfterPush(queryClient, repo, [
+        ...prChecksRecheck(repo, "origin"),
+        ...prChecksRecheck(repo, "upstream"),
+      ]),
   );
 }
 
@@ -534,32 +550,52 @@ export function useCancelRun(repo: string) {
 }
 
 /** Re-run one finished job (GitHub + GitLab). Invalidating the Actions subtree
- *  refreshes the run detail + list; the run goes active and the existing 5s poll
- *  takes over. */
+ *  refreshes the run detail + list; once the run reads active the existing 5s
+ *  poll takes over, and the recheck covers a status flip the settle missed (see
+ *  {@link useRerunRun}). */
 export function useRerunJob(repo: string) {
+  const queryClient = useQueryClient();
   return useActionsMutation(
     repo,
     (args: RerunJobVars) => forgeCiJobRerun(repo, args.jobId, args.lens),
     "rerun-job",
+    () =>
+      recheckRunsAfterPush(queryClient, repo, [
+        ...prChecksRecheck(repo, "origin"),
+        ...prChecksRecheck(repo, "upstream"),
+      ]),
   );
 }
 
 /** Play a manual GitLab CI job (GitLab-only). Invalidating the Actions subtree
- *  refreshes the run detail + list; the job goes active and the existing 5s
- *  poll takes over. */
+ *  refreshes the run detail + list; once the job reads active the existing 5s
+ *  poll takes over, and the recheck covers a status flip the settle missed (see
+ *  {@link useRerunRun}). */
 export function usePlayCiJob(repo: string) {
+  const queryClient = useQueryClient();
   return useActionsMutation(
     repo,
     (jobId: PlayJobVars) => forgeGlCiPlayJob(repo, jobId),
     "play-job",
+    () =>
+      recheckRunsAfterPush(queryClient, repo, [
+        ...prChecksRecheck(repo, "origin"),
+        ...prChecksRecheck(repo, "upstream"),
+      ]),
   );
 }
 
+/** GitHub creates a dispatched run only after it accepts the dispatch, so the run
+ *  can start after the settle-time read and a dispatch arms the delayed run
+ *  recheck like a push. GitLab and Bitbucket create the pipeline within the call,
+ *  so there the recheck costs one extra read of each active run list. */
 export function useRunWorkflow(repo: string) {
+  const queryClient = useQueryClient();
   return useActionsMutation(
     repo,
     (args: DispatchVars) =>
       forgeCiDispatch(repo, args.workflow, args.gitRef, args.inputs),
     "dispatch",
+    () => recheckRunsAfterPush(queryClient, repo),
   );
 }

@@ -7,6 +7,7 @@ import * as api from "../api";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
+import { recheckPrListAfterRemoteDelete } from "./push-writes";
 
 export function useBranches(repo: string) {
   return useQuery({
@@ -178,15 +179,30 @@ export function useDeleteBranch(repo: string) {
 }
 
 /** Deletes a branch on its remote (`git push <remote> --delete`). Invalidates
- *  the remote-branches list (the row disappears) and the local branches (their
- *  upstream may now be gone). */
+ *  the remote-branches list (the row disappears), the local branches (their
+ *  upstream may now be gone), and the PR rows across both lenses: GitHub closes a
+ *  PR whose head branch is deleted asynchronously, so those rows are re-read once
+ *  after a delay. The review-state map rides with the list (its co-invalidation
+ *  contract); the CI and mergeability maps re-key on the new rows. */
 export function useDeleteRemoteBranch(repo: string) {
+  const queryClient = useQueryClient();
+  const prListKeys = [
+    repoKeys.prList(repo),
+    repoKeys.prReviewState(repo),
+    ["repo", repo, "prs"],
+  ] as const;
   return useRepoMutation(
     repo,
     (args: { remote: string; name: string }) =>
       api.gitDeleteRemoteBranch(repo, args.remote, args.name),
     {
-      invalidate: [["repo", repo, "remote-branches"], repoKeys.branches(repo)],
+      invalidate: [
+        ["repo", repo, "remote-branches"],
+        repoKeys.branches(repo),
+        ...prListKeys,
+      ],
+      onSuccess: () =>
+        recheckPrListAfterRemoteDelete(queryClient, repo, prListKeys),
     },
   );
 }
