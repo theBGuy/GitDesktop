@@ -843,6 +843,12 @@ fn assemble_branch_recipe(p: BranchPieces) -> Recipe {
     }
 }
 
+/// Candidates the Related issues section renders (assemble_pr_recipe).
+const RELATED_ISSUE_CAP: usize = 8;
+/// Caps GitHub probes per gather to bound spend on the shared rate limit;
+/// successes stop at the section cap first, so it binds only after 9+ failed probes.
+const MAX_ISSUE_PROBES: usize = 16;
+
 /// A real issue from the repo's tracker the model may link. KEEP IN SYNC with the
 /// TS `PrPromptInput.issueCandidates` entries (src/lib/ai/types.ts).
 struct IssueCandidate {
@@ -850,6 +856,47 @@ struct IssueCandidate {
     title: String,
     /// Neutral state: "OPEN" / "CLOSED".
     state: String,
+}
+
+/// Pins in extraction order until RELATED_ISSUE_CAP renderable candidates are in.
+/// Open-page hits are free; other numbers consume the optional probe budget.
+/// Unprobed numbers are left out like failed probes.
+async fn pin_extracted_candidates<F, Fut>(
+    extracted: &[u64],
+    open_page: &[crate::github::issue::IssueInfo],
+    probe_budget: Option<usize>,
+    mut probe: F,
+) -> (Vec<IssueCandidate>, std::collections::HashSet<u64>)
+where
+    F: FnMut(u64) -> Fut,
+    Fut: std::future::Future<Output = Option<IssueCandidate>>,
+{
+    let mut out: Vec<IssueCandidate> = Vec::new();
+    let mut included = std::collections::HashSet::new();
+    let mut probes = 0;
+    for n in extracted {
+        if included.contains(n) {
+            continue;
+        }
+        if out.iter().filter(|c| c.number > 0).count() >= RELATED_ISSUE_CAP {
+            break;
+        }
+        if let Some(info) = open_page.iter().find(|i| i.number == *n) {
+            included.insert(*n);
+            out.push(IssueCandidate {
+                number: info.number,
+                title: info.title.clone(),
+                state: info.state.clone(),
+            });
+        } else if probe_budget.is_none_or(|budget| probes < budget) {
+            probes += 1;
+            if let Some(candidate) = probe(*n).await {
+                included.insert(*n);
+                out.push(candidate);
+            }
+        }
+    }
+    (out, included)
 }
 
 /// A real issue from the repo's LINKED Jira project the model may mention.
@@ -953,10 +1000,10 @@ fn assemble_pr_recipe(p: PrPieces) -> Recipe {
         "PR"
     };
 
-    // Real candidate issues (defensive cap 8, mirrored TS-side). Empty ⇒ the ban
+    // Real candidate issues (defensive cap, mirrored TS-side). Empty ⇒ the ban
     // stands, no `## Related issues` section, unchanged note.
     let candidates: Vec<&IssueCandidate> =
-        p.candidate_issues.iter().filter(|c| c.number > 0).take(8).collect();
+        p.candidate_issues.iter().filter(|c| c.number > 0).take(RELATED_ISSUE_CAP).collect();
     let has_candidates = !candidates.is_empty();
 
     // Jira candidates (Bitbucket + linked project). Mention-only, and native
@@ -1491,11 +1538,9 @@ impl GitDesktopMcp {
         }))
     }
 
-    /// Gather up to 8 real candidate issues for the PR-description prompt,
-    /// best-effort (any forge error → empty, matching the labels fetch). Numbers
-    /// referenced in the branch name + commit subjects are pinned first (extraction
-    /// order); remaining slots fill from the open-issue page ranked by title-token
-    /// overlap with the branch + subjects. Mirrors the TS candidate gathering.
+    /// Best-effort candidates: extracted numbers first, then title-ranked open issues.
+    /// All providers stop at a full section; GitHub alone caps probes at MAX_ISSUE_PROBES.
+    /// KEEP IN SYNC: src/features/pulls/useLinkedIssueChips.ts (its probes remain uncapped).
     async fn gather_pr_candidates(
         &self,
         head: &str,
@@ -1518,37 +1563,46 @@ impl GitDesktopMcp {
             .await
             .unwrap_or_default();
 
-        let mut out: Vec<IssueCandidate> = Vec::new();
-        let mut included: std::collections::HashSet<u64> = std::collections::HashSet::new();
-
-        // 1. Extracted numbers first (pinned). Not on the open page ⇒ probe the single-issue
-        //    view and drop silently on any error.
-        for n in &extracted {
-            if included.contains(n) {
-                continue;
+        let github = extracted
+            .iter()
+            .any(|n| !open_page.iter().any(|i| i.number == *n))
+            && crate::forge::detect_non_github(&self.repo).await.is_none();
+        let repo = self.repo.clone();
+        let probe = |n: u64| {
+            let repo = repo.clone();
+            async move {
+                if github {
+                    crate::github::issue::gh_issue_summary(repo, n, None)
+                        .await
+                        .ok()
+                        .map(|s| IssueCandidate {
+                            number: s.number,
+                            title: s.title,
+                            state: s.state,
+                        })
+                } else {
+                    crate::forge::forge_issue_view(repo, n, None)
+                        .await
+                        .ok()
+                        .map(|d| IssueCandidate {
+                            number: d.number,
+                            title: d.title,
+                            state: d.state,
+                        })
+                }
             }
-            if let Some(info) = open_page.iter().find(|i| i.number == *n) {
-                included.insert(*n);
-                out.push(IssueCandidate {
-                    number: info.number,
-                    title: info.title.clone(),
-                    state: info.state.clone(),
-                });
-            } else if let Ok(details) =
-                crate::forge::forge_issue_view(self.repo.clone(), *n, None).await
-            {
-                included.insert(*n);
-                out.push(IssueCandidate {
-                    number: details.number,
-                    title: details.title,
-                    state: details.state,
-                });
-            }
-        }
+        };
+        let (mut out, included) = pin_extracted_candidates(
+            &extracted,
+            &open_page,
+            github.then_some(MAX_ISSUE_PROBES),
+            probe,
+        )
+        .await;
 
-        // 2. Fill to 8 from the open page: shared long-token count, tie-broken by
-        //    `updated_at` desc.
-        if out.len() < 8 {
+        // Fill to RELATED_ISSUE_CAP from the open page: shared long-token count,
+        // tie-broken by `updated_at` desc.
+        if out.len() < RELATED_ISSUE_CAP {
             let context = format!("{head}\n{subjects}");
             let context_tokens = long_tokens(&context);
             let mut ranked: Vec<(usize, &crate::github::issue::IssueInfo)> = open_page
@@ -1570,7 +1624,7 @@ impl GitDesktopMcp {
                     .then_with(|| b.1.updated_at.cmp(&a.1.updated_at))
             });
             for (_, info) in ranked {
-                if out.len() >= 8 {
+                if out.len() >= RELATED_ISSUE_CAP {
                     break;
                 }
                 out.push(IssueCandidate {
@@ -2204,6 +2258,173 @@ fn committed_fallback_empty_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pr_candidates_use_the_github_probe_budget() {
+        let source = include_str!("generate.rs").replace("\r\n", "\n");
+        let start = source.find("\n    async fn gather_pr_candidates(").unwrap() + 1;
+        let rest = &source[start..];
+        let end = ["\n    fn ", "\n    async fn "]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len());
+        let body = rest[..end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for call in [
+            "github.then_some(MAX_ISSUE_PROBES)",
+            "gh_issue_summary(",
+            "forge_issue_view(",
+            "detect_non_github(",
+        ] {
+            assert!(
+                body.contains(call),
+                "gather_pr_candidates must contain {call}"
+            );
+        }
+    }
+
+    fn probe_candidate(number: u64) -> IssueCandidate {
+        IssueCandidate {
+            number,
+            title: format!("Issue {number}"),
+            state: "OPEN".into(),
+        }
+    }
+
+    fn probe_page_row(number: u64) -> crate::github::issue::IssueInfo {
+        crate::github::issue::IssueInfo {
+            number,
+            url: String::new(),
+            title: format!("Issue {number}"),
+            state: "OPEN".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            author: None,
+            labels: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn probes_stop_when_the_section_is_full() {
+        for budget in [Some(MAX_ISSUE_PROBES), None] {
+            let mut calls = Vec::new();
+            let (out, _) =
+                pin_extracted_candidates(&(1..=20).collect::<Vec<_>>(), &[], budget, |n| {
+                    calls.push(n);
+                    std::future::ready(Some(probe_candidate(n)))
+                })
+                .await;
+            assert_eq!(calls, (1..=8).collect::<Vec<_>>());
+            assert_eq!(out.iter().map(|c| c.number).collect::<Vec<_>>(), calls);
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_budget_bounds_failing_probes() {
+        let mut calls = Vec::new();
+        let (out, _) = pin_extracted_candidates(
+            &(1..=20).collect::<Vec<_>>(),
+            &[],
+            Some(MAX_ISSUE_PROBES),
+            |n| {
+                calls.push(n);
+                std::future::ready(None)
+            },
+        )
+        .await;
+        assert_eq!(calls, (1..=16).collect::<Vec<_>>());
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_budget_probes_every_failing_number() {
+        let mut calls = Vec::new();
+        let (out, _) = pin_extracted_candidates(&(1..=20).collect::<Vec<_>>(), &[], None, |n| {
+            calls.push(n);
+            std::future::ready(None)
+        })
+        .await;
+        assert_eq!(calls, (1..=20).collect::<Vec<_>>());
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn open_page_hits_still_pin_after_the_budget() {
+        let mut calls = Vec::new();
+        let extracted = (1..=17).chain([100]).collect::<Vec<_>>();
+        let (out, included) = pin_extracted_candidates(
+            &extracted,
+            &[probe_page_row(100)],
+            Some(MAX_ISSUE_PROBES),
+            |n| {
+                calls.push(n);
+                std::future::ready(None)
+            },
+        )
+        .await;
+        assert_eq!(calls, (1..=16).collect::<Vec<_>>());
+        assert_eq!(out.iter().map(|c| c.number).collect::<Vec<_>>(), [100]);
+        assert_eq!(included, std::collections::HashSet::from([100]));
+    }
+
+    #[tokio::test]
+    async fn budget_counts_failures_before_successes() {
+        let mut calls = Vec::new();
+        let (out, _) = pin_extracted_candidates(
+            &(1..=20).collect::<Vec<_>>(),
+            &[],
+            Some(MAX_ISSUE_PROBES),
+            |n| {
+                calls.push(n);
+                std::future::ready((n >= 13).then(|| probe_candidate(n)))
+            },
+        )
+        .await;
+        assert_eq!(calls, (1..=16).collect::<Vec<_>>());
+        assert_eq!(
+            out.iter().map(|c| c.number).collect::<Vec<_>>(),
+            [13, 14, 15, 16]
+        );
+    }
+
+    #[tokio::test]
+    async fn under_the_cap_only_off_page_numbers_are_probed() {
+        let mut calls = Vec::new();
+        let (out, included) = pin_extracted_candidates(
+            &[3, 4, 5],
+            &[probe_page_row(4)],
+            Some(MAX_ISSUE_PROBES),
+            |n| {
+                calls.push(n);
+                std::future::ready(Some(probe_candidate(n)))
+            },
+        )
+        .await;
+        assert_eq!(calls, [3, 5]);
+        assert_eq!(out.iter().map(|c| c.number).collect::<Vec<_>>(), [3, 4, 5]);
+        assert_eq!(included, std::collections::HashSet::from([3, 4, 5]));
+    }
+
+    #[tokio::test]
+    async fn page_hits_are_never_probed() {
+        let mut calls = Vec::new();
+        let (out, _) = pin_extracted_candidates(
+            &[3, 4, 5],
+            &[probe_page_row(3), probe_page_row(4), probe_page_row(5)],
+            Some(MAX_ISSUE_PROBES),
+            |n| {
+                calls.push(n);
+                std::future::ready(None)
+            },
+        )
+        .await;
+        assert!(calls.is_empty());
+        assert_eq!(out.iter().map(|c| c.number).collect::<Vec<_>>(), [3, 4, 5]);
+    }
 
     /// Pins the KEEP IN SYNC contract with `headerNewPath` in truncate.ts: both
     /// take the LAST separator and accept a quoted b-side, and both leave inner

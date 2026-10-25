@@ -20,6 +20,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{app_err, json_result, GitDesktopMcp, NumberArg, RunIdArg, GD_COMMENT_FOOTER};
+use crate::error::AppResult;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct CreateIssueArgs {
@@ -437,6 +438,47 @@ fn updater_notes_to_sync(notes: Option<&str>, sync: Option<bool>) -> Option<Stri
         .map(str::to_string)
 }
 
+/// `detect_non_github` returning None is forge's resilient GitHub default.
+async fn on_github(repo: &str) -> bool {
+    crate::forge::detect_non_github(repo).await.is_none()
+}
+
+/// GitHub needs only the preserved fields; other providers retain their full view.
+async fn pr_title_body_to_preserve(repo: &str, number: u64) -> AppResult<(String, String)> {
+    if on_github(repo).await {
+        crate::github::pr::gh_pr_title_body(repo.to_string(), number, None).await
+    } else {
+        let pr = crate::forge::forge_pr_view(repo.to_string(), number, None).await?;
+        Ok((pr.title, pr.body))
+    }
+}
+
+/// GitHub needs only the preserved fields; other providers retain their full view.
+async fn issue_title_body_to_preserve(repo: &str, number: u64) -> AppResult<(String, String)> {
+    if on_github(repo).await {
+        crate::github::issue::gh_issue_title_body(repo.to_string(), number, None).await
+    } else {
+        let issue = crate::forge::forge_issue_view(repo.to_string(), number, None).await?;
+        Ok((issue.title, issue.body))
+    }
+}
+
+/// Only GitHub uses the node id; other providers retain their full-view validation.
+async fn labelable_node_id(repo: &str, target: &str, number: u64) -> AppResult<String> {
+    match (target, on_github(repo).await) {
+        ("mr", true) => crate::github::pr::gh_pr_node_id(repo.to_string(), number, None).await,
+        ("mr", false) => Ok(crate::forge::forge_pr_view(repo.to_string(), number, None)
+            .await?
+            .id),
+        (_, true) => crate::github::issue::gh_issue_node_id(repo.to_string(), number, None).await,
+        (_, false) => Ok(
+            crate::forge::forge_issue_view(repo.to_string(), number, None)
+                .await?
+                .id,
+        ),
+    }
+}
+
 /// Point a just-edited release's updater manifest at `notes`, mirroring the in-app
 /// editor's gate: GitHub only, and only when the release ships a `latest.json` asset.
 /// `None` = a gate skipped it, `Some(Err)` = a ready-to-report sentence for the caller
@@ -719,10 +761,13 @@ impl GitDesktopMcp {
         // whichever the caller omitted — otherwise an omitted field would be wiped.
         // `base` needs no such read: None means the arm omits the field entirely.
         let (title, body) = if args.title.is_none() || args.body.is_none() {
-            let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
+            let (cur_title, cur_body) = pr_title_body_to_preserve(&self.repo, args.number)
                 .await
                 .map_err(app_err)?;
-            (args.title.unwrap_or(pr.title), args.body.unwrap_or(pr.body))
+            (
+                args.title.unwrap_or(cur_title),
+                args.body.unwrap_or(cur_body),
+            )
         } else {
             (args.title.unwrap(), args.body.unwrap())
         };
@@ -919,25 +964,11 @@ impl GitDesktopMcp {
                 ));
             }
         };
-        // The forge layer is a SHARED control keyed differently per provider: GitHub by
-        // GraphQL node id (on the item's node id), GitLab by name. The agent supplies
-        // only names, so resolve the item's node id + each name→id here; GitLab ignores
-        // the id side and takes the names. (GitLab RepoLabels carry no id, so the id
-        // maps come back empty there — harmless, since GitLab uses the name side.)
-        let labelable_id = match target {
-            "mr" => {
-                crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
-                    .await
-                    .map_err(app_err)?
-                    .id
-            }
-            _ => {
-                crate::forge::forge_issue_view(self.repo.clone(), args.number, None)
-                    .await
-                    .map_err(app_err)?
-                    .id
-            }
-        };
+        // GitHub labels use node ids; GitLab uses names and ignores the id side.
+        // Read the item before repo labels to preserve provider validation order.
+        let labelable_id = labelable_node_id(&self.repo, target, args.number)
+            .await
+            .map_err(app_err)?;
         let repo_labels = crate::forge::forge_repo_labels(self.repo.clone(), None)
             .await
             .map_err(app_err)?;
@@ -1402,12 +1433,12 @@ impl GitDesktopMcp {
         // fill whichever the caller omitted — otherwise an omitted field would be wiped
         // (same fetch-and-preserve as update_pull_request).
         let (title, body) = if args.title.is_none() || args.body.is_none() {
-            let issue = crate::forge::forge_issue_view(self.repo.clone(), args.number, None)
+            let (cur_title, cur_body) = issue_title_body_to_preserve(&self.repo, args.number)
                 .await
                 .map_err(app_err)?;
             (
-                args.title.unwrap_or(issue.title),
-                args.body.unwrap_or(issue.body),
+                args.title.unwrap_or(cur_title),
+                args.body.unwrap_or(cur_body),
             )
         } else {
             (args.title.unwrap(), args.body.unwrap())
@@ -1681,6 +1712,63 @@ mod tests {
     use super::super::CiId;
     use super::*;
     use rmcp::handler::server::wrapper::Parameters;
+
+    #[test]
+    fn lean_reads_branch_on_the_github_arm() {
+        for (name, calls) in [
+            (
+                "pr_title_body_to_preserve",
+                vec!["gh_pr_title_body(", "forge_pr_view("],
+            ),
+            (
+                "issue_title_body_to_preserve",
+                vec!["gh_issue_title_body(", "forge_issue_view("],
+            ),
+            (
+                "labelable_node_id",
+                vec![
+                    "gh_pr_node_id(",
+                    "gh_issue_node_id(",
+                    "forge_pr_view(",
+                    "forge_issue_view(",
+                ],
+            ),
+        ] {
+            let body =
+                crate::github::repo_meta::tests::wiring_body(include_str!("write_forge.rs"), name);
+            assert!(body.contains("on_github("), "{name}");
+            for call in &calls {
+                assert!(body.contains(call), "{name}: {call}");
+            }
+            if calls.len() == 2 {
+                assert!(
+                    body.find(calls[0]).unwrap() < body.find(calls[1]).unwrap(),
+                    "{name}: GitHub lean read must precede the forge fallback"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_tools_use_lean_read_helpers() {
+        let source = include_str!("write_forge.rs").replace("\r\n", "\n");
+        for (name, helper) in [
+            ("update_pull_request", "pr_title_body_to_preserve("),
+            ("edit_labels", "labelable_node_id("),
+            ("update_issue", "issue_title_body_to_preserve("),
+        ] {
+            let start = source.find(&format!("    async fn {name}(")).unwrap();
+            let body = source[start..]
+                .split("\n    }")
+                .next()
+                .unwrap()
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(body.contains(helper), "{name} must call {helper}");
+        }
+    }
 
     /// With ALL flags false, EVERY forge remote-write tool must return the
     /// `--allow-remote-write` gate error before touching the network. Params carry
