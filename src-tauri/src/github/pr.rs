@@ -4989,6 +4989,131 @@ fn map_gh_checks(rollup: Vec<RawCheck>, runs: Option<&[CheckRunEvent]>) -> Vec<P
         .collect()
 }
 
+fn graphql_reviews_to_out(raw: Vec<RawReview>) -> Vec<PrThreadOut> {
+    raw.into_iter()
+        .map(|r| PrThreadOut {
+            author: r.author.map(|a| a.login).unwrap_or_default(),
+            author_avatar_url: String::new(),
+            state: r.state,
+            body: r.body,
+            date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
+            id: r.id,
+            url: String::new(),
+            viewer_did_author: false,
+            is_minimized: false,
+            minimized_reason: String::new(),
+            // Reviews carry their own id in `id` (see `PrThreadOut::review_id`).
+            review_id: String::new(),
+        })
+        .collect()
+}
+
+fn graphql_comments_to_out(raw: Vec<RawComment>) -> Vec<PrThreadOut> {
+    raw.into_iter()
+        .map(|c| PrThreadOut {
+            author: c.author.map(|a| a.login).unwrap_or_default(),
+            author_avatar_url: String::new(),
+            state: String::new(),
+            body: c.body,
+            date: real_time_or_empty(c.created_at),
+            id: c.id,
+            url: c.url,
+            viewer_did_author: c.viewer_did_author,
+            is_minimized: c.is_minimized,
+            minimized_reason: c.minimized_reason,
+            // Conversation comments belong to no review.
+            review_id: String::new(),
+        })
+        .collect()
+}
+
+async fn reviews_with_top_up(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+    raw: Vec<RawReview>,
+) -> (Vec<PrThreadOut>, bool, bool) {
+    let top_up = if raw.len() >= 100 {
+        Some(gh_pr_reviews_paginated(repo_path, number, lens).await)
+    } else {
+        None
+    };
+    gh_top_up_or_unknown(graphql_reviews_to_out(raw), top_up, None)
+}
+
+async fn comments_with_top_up(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+    raw: Vec<RawComment>,
+) -> (Vec<PrThreadOut>, bool, bool) {
+    let top_up = if raw.len() >= 100 {
+        Some(gh_pr_comments_paginated(repo_path, number, lens).await)
+    } else {
+        None
+    };
+    gh_top_up_or_unknown(graphql_comments_to_out(raw), top_up, None)
+}
+
+/// A PR's conversation (comments and review summaries) with their completeness flags.
+pub struct PrConversation {
+    pub comments: Vec<PrThreadOut>,
+    pub comments_unknown: bool,
+    pub comments_truncated: bool,
+    pub reviews: Vec<PrThreadOut>,
+    pub reviewers_unknown: bool,
+}
+
+#[derive(Deserialize)]
+struct RawPrConversation {
+    #[serde(default)]
+    comments: Vec<RawComment>,
+    #[serde(default)]
+    reviews: Vec<RawReview>,
+}
+
+/// The MCP comments read shares gh_pr_view's mapping and top-ups so the
+/// conversation has the same shape and completeness on both read paths.
+pub async fn gh_pr_comments_view(
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+) -> AppResult<PrConversation> {
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let n = number.to_string();
+    let out = run_gh(
+        Some(&repo_path),
+        &[
+            "pr",
+            "view",
+            &n,
+            "--repo",
+            &slug,
+            "--json",
+            "comments,reviews",
+        ],
+        GH_TIMEOUT,
+    )
+    .await?;
+    let raw: RawPrConversation = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the pull request",
+            format!("could not parse gh pr view conversation: {e}"),
+        )
+    })?;
+    let (reviews, reviewers_unknown, _) =
+        reviews_with_top_up(&repo_path, number, lens.as_deref(), raw.reviews).await;
+    let (comments, comments_unknown, comments_truncated) =
+        comments_with_top_up(&repo_path, number, lens.as_deref(), raw.comments).await;
+    Ok(PrConversation {
+        comments,
+        comments_unknown,
+        comments_truncated,
+        reviews,
+        reviewers_unknown,
+    })
+}
+
 /// Full details for one PR's read view.
 pub async fn gh_pr_view(
     repo_path: String,
@@ -5092,57 +5217,10 @@ pub async fn gh_pr_view(
         Some(GH_REST_PR_COMMITS_CEILING),
     );
 
-    let reviews_top_up = if raw.reviews.len() >= 100 {
-        Some(gh_pr_reviews_paginated(&repo_path, number, lens.as_deref()).await)
-    } else {
-        None
-    };
-    let graphql_reviews: Vec<PrThreadOut> = raw
-        .reviews
-        .into_iter()
-        .map(|r| PrThreadOut {
-            author: login(r.author),
-            author_avatar_url: String::new(),
-            state: r.state,
-            body: r.body,
-            date: real_time_or_empty(r.submitted_at.unwrap_or_default()),
-            id: r.id,
-            url: String::new(),
-            viewer_did_author: false,
-            is_minimized: false,
-            minimized_reason: String::new(),
-            // Reviews carry their own id in `id` (see `PrThreadOut::review_id`).
-            review_id: String::new(),
-        })
-        .collect();
     let (reviews, reviewers_unknown, _reviews_truncated) =
-        gh_top_up_or_unknown(graphql_reviews, reviews_top_up, None);
-
-    let comments_top_up = if raw.comments.len() >= 100 {
-        Some(gh_pr_comments_paginated(&repo_path, number, lens.as_deref()).await)
-    } else {
-        None
-    };
-    let graphql_comments: Vec<PrThreadOut> = raw
-        .comments
-        .into_iter()
-        .map(|c| PrThreadOut {
-            author: login(c.author),
-            author_avatar_url: String::new(),
-            state: String::new(),
-            body: c.body,
-            date: real_time_or_empty(c.created_at),
-            id: c.id,
-            url: c.url,
-            viewer_did_author: c.viewer_did_author,
-            is_minimized: c.is_minimized,
-            minimized_reason: c.minimized_reason,
-            // Conversation comments belong to no review.
-            review_id: String::new(),
-        })
-        .collect();
+        reviews_with_top_up(&repo_path, number, lens.as_deref(), raw.reviews).await;
     let (comments, comments_unknown, comments_truncated) =
-        gh_top_up_or_unknown(graphql_comments, comments_top_up, None);
+        comments_with_top_up(&repo_path, number, lens.as_deref(), raw.comments).await;
 
     // Repo-level merge-method settings — one extra `gh api graphql` call the
     // `gh pr view --json` surface can't supply. Best-effort: on failure all three
@@ -7448,6 +7526,77 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+
+    #[test]
+    fn graphql_review_mapping_preserves_exact_fields_and_null_defaults() {
+        let raw = serde_json::from_value(serde_json::json!([
+            {"id": "R1", "author": {"login": "reviewer"}, "state": "APPROVED",
+             "body": "Looks good", "submittedAt": "2026-10-24T12:00:00Z"},
+            {"state": "PENDING", "submittedAt": null},
+            {}
+        ]))
+        .unwrap();
+        let rows = super::graphql_reviews_to_out(raw);
+        let expected = [
+            (
+                "reviewer",
+                "APPROVED",
+                "Looks good",
+                "2026-10-24T12:00:00Z",
+                "R1",
+            ),
+            ("", "PENDING", "", "", ""),
+            ("", "", "", "", ""),
+        ];
+        assert_eq!(rows.len(), expected.len());
+        for (row, (author, state, body, date, id)) in rows.iter().zip(expected) {
+            assert_eq!(row.author, author);
+            assert_eq!(row.author_avatar_url, "");
+            assert_eq!(row.state, state);
+            assert_eq!(row.body, body);
+            assert_eq!(row.date, date);
+            assert_eq!(row.id, id);
+            assert_eq!(row.url, "");
+            assert!(!row.viewer_did_author);
+            assert!(!row.is_minimized);
+            assert_eq!(row.minimized_reason, "");
+            assert_eq!(row.review_id, "");
+        }
+    }
+
+    #[test]
+    fn graphql_comment_mapping_preserves_exact_fields_and_minimized_defaults() {
+        let raw = serde_json::from_value(serde_json::json!([
+            {"id": "C1", "author": {"login": "commenter"}, "body": "A comment",
+             "createdAt": "2026-10-24T12:00:00Z", "url": "https://github.com/o/r/pull/1#C1",
+             "viewerDidAuthor": true, "isMinimized": true, "minimizedReason": "OUTDATED"},
+            {},
+            {"author": null, "createdAt": "0001-01-01T00:00:00Z"}
+        ]))
+        .unwrap();
+        let rows = super::graphql_comments_to_out(raw);
+        assert_eq!(rows.len(), 3);
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row.author, if i == 0 { "commenter" } else { "" });
+            assert_eq!(row.author_avatar_url, "");
+            assert_eq!(row.state, "");
+            assert_eq!(row.body, if i == 0 { "A comment" } else { "" });
+            assert_eq!(row.date, if i == 0 { "2026-10-24T12:00:00Z" } else { "" });
+            assert_eq!(row.id, if i == 0 { "C1" } else { "" });
+            assert_eq!(
+                row.url,
+                if i == 0 {
+                    "https://github.com/o/r/pull/1#C1"
+                } else {
+                    ""
+                }
+            );
+            assert_eq!(row.viewer_did_author, i == 0);
+            assert_eq!(row.is_minimized, i == 0);
+            assert_eq!(row.minimized_reason, if i == 0 { "OUTDATED" } else { "" });
+            assert_eq!(row.review_id, "");
+        }
+    }
 
     fn repo_view_fixture(code: i32, stdout: &str, stderr: &str) -> crate::github::runner::GhOutput {
         crate::github::runner::GhOutput {

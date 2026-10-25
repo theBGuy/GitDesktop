@@ -237,9 +237,23 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<PrCommentsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
-            .await
-            .map_err(app_err)?;
+        let conv = if crate::forge::detect_non_github(&self.repo).await.is_some() {
+            let pr = crate::forge::forge_pr_view(self.repo.clone(), args.number, None)
+                .await
+                .map_err(app_err)?;
+            crate::github::pr::PrConversation {
+                comments: pr.comments,
+                comments_unknown: pr.comments_unknown,
+                comments_truncated: pr.comments_truncated,
+                reviews: pr.reviews,
+                reviewers_unknown: pr.reviewers_unknown,
+            }
+        } else {
+            // None is the GitHub arm, matching forge_pr_view's dispatch.
+            crate::github::pr::gh_pr_comments_view(self.repo.clone(), args.number, None)
+                .await
+                .map_err(app_err)?
+        };
         let mut review_threads =
             crate::forge::forge_pr_review_threads(self.repo.clone(), args.number, None)
                 .await
@@ -257,11 +271,11 @@ impl GitDesktopMcp {
         }
         json_result_untrusted(&comments_payload(
             args.number,
-            pr.comments,
-            pr.comments_unknown,
-            pr.comments_truncated,
-            pr.reviews,
-            pr.reviewers_unknown,
+            conv.comments,
+            conv.comments_unknown,
+            conv.comments_truncated,
+            conv.reviews,
+            conv.reviewers_unknown,
             review_threads,
         ))
     }
