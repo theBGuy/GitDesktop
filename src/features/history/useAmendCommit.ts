@@ -10,15 +10,21 @@ import { gitCommitDetails, headBranchPin } from "@/lib/git/api";
 import { repoStatusOptions, repoStatusPoll } from "@/lib/git/queries";
 import type { RepoStatus } from "@/lib/git/types";
 import { useSettings } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import {
+  replacesMessageConfirm,
+  replacesTypedMessage,
+} from "./commit-confirms";
 
 /**
  * Loads a commit's message into the commit box and switches to the Changes
  * tab in amend mode. Shared by the history context menu and the commit
  * detail actions menu. Throws on lookup failure; callers surface the error.
  * Resolves whether the amend landed: false when the user moved on (another
- * navigation or repo) while the commit loaded, which is silent.
+ * navigation or repo) while the commit loaded, which is silent, or declined to
+ * replace a typed message in the commit box.
  */
 export function useAmendCommit(repoPath: string) {
   const queryClient = useQueryClient();
@@ -41,9 +47,23 @@ export function useAmendCommit(repoPath: string) {
       )?.branch;
       const branch = shownHead ? headBranchPin(shownHead) : null;
       const details = await gitCommitDetails(repoPath, hash);
-      const live = useUiStore.getState();
-      if (live.interactionEpoch !== epoch || live.repoPath !== firedOn) {
-        return false;
+      const moved = () => {
+        const live = useUiStore.getState();
+        return live.interactionEpoch !== epoch || live.repoPath !== firedOn;
+      };
+      if (moved()) return false;
+      // Asked last, right before the box is written; a Cancel answers false, so
+      // the force-push dialog's "Don't show again" never saves.
+      const draft = useUiStore.getState();
+      if (
+        replacesTypedMessage(
+          { title: draft.commitTitle, body: draft.commitBody },
+          details,
+        )
+      ) {
+        const ask = useConfirm.getState().ask;
+        if (!(await ask(replacesMessageConfirm("amend", hash)))) return false;
+        if (moved()) return false;
       }
       landAmend(hash, branch, details.subject, details.body);
       return true;

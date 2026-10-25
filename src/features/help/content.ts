@@ -593,8 +593,10 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   process commits or switches branches after History last showed it, or while the
   undo runs, Undo stops without undoing anything and says so. Undo also asks you
   to finish or abort a merge, cherry-pick or revert in progress, and to resolve
-  any conflicts, first. On a detached first commit there is nothing to undo onto,
-  and Undo says that instead.
+  any conflicts, first. On a detached first commit, or when the latest commit's
+  parent was never fetched (the oldest commit of a shallow clone), there is nothing
+  to undo onto, and Undo says so instead. Fetching more history from a terminal
+  (\`git fetch --deepen=1\`) gives that commit a parent, and Undo works again.
 
 > Discarding an **untracked** file moves it to the recycle bin, so it's recoverable —
 > it isn't deleted outright. The exception is a name Windows reserves for a device
@@ -643,7 +645,9 @@ If the history can't be read, the tab says why and offers **Retry**. A failed re
   cherry-pick that includes a merge is disabled — select the merge on its own to
   choose its mainline.
 - **Reset** the current branch to a commit — a **mixed reset**, so the changes from later
-  commits return to your working tree as uncommitted changes.
+  commits return to your working tree as uncommitted changes. If HEAD moves while the
+  dialog is open, or another Git process commits or switches branches before the reset
+  runs, nothing is reset and a toast says so.
 - **Edit history** — open the interactive-rebase editor over your unpushed commits, newest
   on top, where each commit gets an action: **pick** (keep), **reword** (edit its message),
   **squash** (combine it into the next older commit you keep, joining the messages),
@@ -783,11 +787,17 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   untracked files or folders (ignored ones aside) sitting where the upstream version has
   files; move them aside and run it again. If the branch moved, or you switched onto or
   off it, since you confirmed, or it is checked out in another worktree or being rebased
-  or bisected anywhere, the reset leaves it alone and says why. This is the "just merged
-  a PR — bring the default branch current before I switch back" flow; every branch's row
-  shows its own push/pull state (↑/↓ vs. its upstream) after a fetch, so the branches
-  with commits to pull are visible at a glance, and *Update default branch from its
-  remote* is available from the command palette too.
+  or bisected anywhere, the reset leaves it alone and says why. On the branch you're on,
+  if another Git process commits in the instant after the reset moves it, your files stay
+  as they were and the toast says where the branch points now when it can tell. The
+  reset of the branch you're on also measures it against its upstream again when you
+  confirm: if the upstream moved after the menu opened, or that check can't tell
+  whether it still has every commit on the branch, nothing is reset and the toast asks
+  you to reopen the branch menu. This is the "just merged a PR — bring the
+  default branch current before I switch back" flow; every branch's row shows its own
+  push/pull state (↑/↓ vs. its upstream) after a fetch, so the branches with commits
+  to pull are visible at a glance, and *Update default branch from its remote* is
+  available from the command palette too.
 - **While an update runs, its branch is held.** Switching to that branch, renaming or
   deleting it, or starting a second update is turned away with a short message until the
   update completes. Every worktree of the repository sees the same hold. An update a crash
@@ -1097,8 +1107,13 @@ and the Pull menu offers a confirmed **Reset to _origin/…_** that lines the tw
 instead. The reset won't overwrite untracked files or folders unless they're ignored: if
 any sit where the upstream version has files, it stops and names them so you can move
 them aside first. If the branch moves or you switch branches before the reset runs,
-or another Git process commits or switches branches while it runs, nothing is reset
-and the view refreshes so you can decide again.
+or another Git process switches branches while it runs, nothing is reset. If another
+Git process commits in the instant after the reset moves the branch, your files stay
+as they were and the toast says where the branch points now when it can tell. If the
+upstream moves after the Pull menu measured it, or the check when you confirm can't
+tell whether it still has every commit on the branch, nothing is reset and the toast
+asks you to reopen the menu.
+Each time the view refreshes so you can decide again.
 
 ## Resolving conflicts
 

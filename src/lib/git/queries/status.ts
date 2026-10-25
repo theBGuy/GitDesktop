@@ -61,7 +61,7 @@ export function useWorkingLineStats(repo: string, enabled: boolean) {
  *  invalidation refetches it. */
 export function useUnpushedCount(repo: string, enabled: boolean) {
   return useQuery({
-    queryKey: ["repo", repo, "unpushed-count"] as const,
+    queryKey: repoKeys.unpushedCount(repo),
     queryFn: () => api.gitUnpushedCount(repo),
     enabled: enabled && Boolean(repo),
     staleTime: 10_000,

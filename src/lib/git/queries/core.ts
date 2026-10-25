@@ -73,6 +73,10 @@ export const repoKeys = {
     ["repo", repo, "diff", file, staged] as const,
   commits: (repo: string) => ["repo", repo, "commits"] as const,
   log: (repo: string) => ["repo", repo, "log"] as const,
+  unpushedCount: (repo: string) => ["repo", repo, "unpushed-count"] as const,
+  unpushedMessages: (repo: string) =>
+    ["repo", repo, "unpushed-messages"] as const,
+  rewriteStatus: (repo: string) => ["repo", repo, "rewrite-status"] as const,
   commitDetails: (repo: string, hash: string) =>
     ["repo", repo, "commit", hash] as const,
   commitFiles: (repo: string, hash: string) =>

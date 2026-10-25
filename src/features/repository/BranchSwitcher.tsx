@@ -55,6 +55,7 @@ import {
   branchPushHoldReason,
   branchPushLabel,
   branchRewriteStatusOptions,
+  carriesAllLocalCommits,
   forgeFeatureReady,
   nextPushLatch,
   REMOTE_BRANCHES_STALE_TIME,
@@ -100,6 +101,7 @@ import { isSessionBranchName } from "@/lib/git/ref-name";
 import type {
   Branch,
   BranchHead,
+  BranchRewriteStatus,
   ForkPrMatch,
   RemoteBranch,
 } from "@/lib/git/types";
@@ -145,7 +147,7 @@ import {
   WORKTREE_PROMOTING_MESSAGE,
 } from "@/lib/stores/worktree-removal";
 import { isAppError } from "@/lib/tauri/invoke";
-import { errorToastAction, toastError } from "@/lib/toast";
+import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
   useDisabledReason,
@@ -209,6 +211,18 @@ const CLOSED_PR_SCAN_LIMIT = 100;
  *  is still in flight; each entry costs several rev-list spawns, so it is capped
  *  rather than run per branch. Rows past the cap fall back to the waiting slot. */
 const MAX_REWRITE_PREFETCH = 4;
+
+/** The current branch's reset-to-upstream refusals when the confirm-time re-read
+ *  no longer matches what the row offered: the upstream tip moved, the branch
+ *  itself did, or the read couldn't prove the upstream still carries every
+ *  commit. KEEP IN STEP: SyncControls' twins name the Pull menu instead of the
+ *  branch menu (pinned by scripts/head-watcher.test.mjs). */
+const UPSTREAM_MOVED_NOTICE = (upstream: string) =>
+  `${upstream} moved since you opened this, so nothing was reset. Reopen the branch menu to see where it stands now.`;
+const LOCAL_MOVED_NOTICE = (branch: string) =>
+  `${branch} changed since you opened this, so nothing was reset. Reopen the branch menu to see where it stands now.`;
+const UNCONFIRMED_NOTICE = (upstream: string, branch: string) =>
+  `Couldn't confirm that ${upstream} still has every commit on ${branch}, so nothing was reset. Reopen the branch menu to check again.`;
 
 interface BranchPr {
   state: PrAuditState;
@@ -1740,11 +1754,54 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // reads live; the captured name is the only branch the confirmation
         // described. Says so rather than returning quietly: the user just
         // confirmed a destructive action, and silence there reads as "it
-        // worked". Wording kept in step with the sync controls' twin.
+        // worked". Wording kept in step with the sync controls' twin and with
+        // HistoryDialogs' Reset to commit pre-check.
         if (currentNameRef.current !== branch.name) {
           toast.info(
             "HEAD moved while the dialog was open — nothing was reset.",
           );
+          return;
+        }
+        // An outside fetch can move the upstream while the prompt sits open, so
+        // the reset re-measures before it acts. A read that joins one in flight
+        // may have begun before that fetch's ref write and return the older tip;
+        // the reset then lands on the tip the probe proved carries every local
+        // commit.
+        let fresh: BranchRewriteStatus;
+        try {
+          fresh = await queryClient.fetchQuery({
+            ...branchRewriteStatusOptions(repoPath, branch.name),
+            staleTime: 0,
+          });
+        } catch (e) {
+          toastErrorWithNote(e, "Nothing was reset.");
+          return;
+        }
+        if (refuseIfSwitched(resetIn, "nothing was reset")) return;
+        // No measurable upstream tip proves nothing moved.
+        if (fresh.upstreamTip === null) {
+          toast.info(UNCONFIRMED_NOTICE(base, branch.name));
+          return;
+        }
+        if (fresh.upstreamTip !== tip) {
+          toast.info(UPSTREAM_MOVED_NOTICE(base));
+          return;
+        }
+        // Same upstream tip, but the read no longer proves the upstream carries
+        // every commit: name a local move only when the read measured one, since
+        // an unknown verdict (a failed reflog walk) proves nothing moved. A local
+        // move that is still carried proceeds, and the backend's pin refuses it.
+        if (!carriesAllLocalCommits(fresh)) {
+          if (fresh.localTip !== null && fresh.localTip !== localTip) {
+            toast.info(LOCAL_MOVED_NOTICE(branch.name));
+          } else {
+            toast.info(UNCONFIRMED_NOTICE(base, branch.name));
+          }
+          return;
+        }
+        // A promote can start during the re-read.
+        if (promotionBlocksCheckout(repoPath)) {
+          toast.info(PROMOTION_BLOCKS_CHECKOUT);
           return;
         }
         await hardReset.mutateAsync({
@@ -2350,10 +2407,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // nothing-unique case gets a reset item there. With local-only commits
         // the row shows a disabled update and no reset, so point at the pull that
         // keeps them.
-        const remedy =
-          status.localOnly === 0
-            ? `Open the branch menu and use the ${row.name} row's reset instead.`
-            : `Switch to ${row.name} and use Pull with rebase — it keeps the ${status.localOnly} commit${status.localOnly === 1 ? "" : "s"} only ${row.name} has.`;
+        const remedy = carriesAllLocalCommits(status)
+          ? `Open the branch menu and use the ${row.name} row's reset instead.`
+          : `Switch to ${row.name} and use Pull with rebase — it keeps the ${status.localOnly} commit${status.localOnly === 1 ? "" : "s"} only ${row.name} has.`;
         toast.warning(
           `${row.upstream} already carries ${row.name}'s changes under different ids — merging it in would duplicate them.`,
           { description: remedy, duration: 10000 },
@@ -2669,13 +2725,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // The pair, never the reflog verdict alone: offering a reset while unique
     // local work exists would destroy it. Both measured shas ride the item, the
     // upstream tip it lands on and the local tip the backend pins.
-    const resetTip =
-      rowRewrite?.remoteRewritten === true &&
-      rowRewrite.localOnly === 0 &&
-      rowRewrite.upstreamTip &&
-      rowRewrite.localTip
-        ? { tip: rowRewrite.upstreamTip, localTip: rowRewrite.localTip }
-        : null;
+    const resetTip = carriesAllLocalCommits(rowRewrite)
+      ? { tip: rowRewrite.upstreamTip, localTip: rowRewrite.localTip }
+      : null;
     // Patch twins upstream AND commits without one: a reset would destroy the
     // latter, and a merge would bring the twinned changes back in beside the
     // copies already there. `patchEqual > 0` is strong evidence, not proof — two

@@ -1,13 +1,28 @@
 import { useQuery } from "@tanstack/react-query";
 import * as api from "../api";
 import type { RewriteStep } from "../types";
+import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 
+/** Moves the CURRENT branch to `hash` and keeps the working tree (mixed). The
+ *  backend refuses unless HEAD is still `expectedHead` on `expectedBranch`, the
+ *  tip and branch the dialog opened on. */
 export function useResetToCommit(repo: string) {
-  return useRepoMutation(repo, (hash: string) => api.gitReset(repo, hash), {
-    // Local history write — never park it offline.
-    networkMode: "always",
-  });
+  return useRepoMutation(
+    repo,
+    (args: { hash: string; expectedHead: string; expectedBranch: string }) =>
+      api.gitReset(
+        repo,
+        args.hash,
+        "mixed",
+        args.expectedHead,
+        args.expectedBranch,
+      ),
+    {
+      // Local history write — never park it offline.
+      networkMode: "always",
+    },
+  );
 }
 
 /** Moves the CURRENT branch and the working tree to `hash`. The backend refuses
@@ -85,6 +100,23 @@ export const commitParentsOptions = (repo: string, hash: string) => ({
   networkMode: "always" as const,
 });
 
+/** Whether `hash`'s raw commit header records a parent: false for a true root,
+ *  true at a shallow clone's boundary, whose parent the graft hides from the log.
+ *  A commit's header never changes, and the read is local. */
+export function useCommitRecordsParent(
+  repo: string,
+  hash: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["repo", repo, "records-parent", hash] as const,
+    queryFn: () => api.gitCommitRecordsParent(repo, hash),
+    enabled: enabled && hash !== "",
+    staleTime: Number.POSITIVE_INFINITY,
+    networkMode: "always",
+  });
+}
+
 /** The parents of `hash`, read only while it is set. */
 export function useCommitParents(repo: string, hash: string | null) {
   return useQuery({
@@ -161,7 +193,7 @@ export function useUnpushedMessages(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "unpushed-messages", base] as const,
+    queryKey: [...repoKeys.unpushedMessages(repo), base] as const,
     queryFn: async () => {
       const list = await api.gitUnpushedMessages(repo, base);
       return Object.fromEntries(list.map((c) => [c.hash, c.message]));

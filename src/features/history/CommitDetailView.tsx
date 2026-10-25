@@ -78,11 +78,11 @@ import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 import {
+  AMEND_HOLD_HINT,
   CHERRY_PICK_ALREADY_APPLIED,
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
-  HISTORY_REFRESHING_HINT,
   type MergeParentOp,
   revertCommitConfirm,
 } from "./commit-confirms";
@@ -610,7 +610,20 @@ export function CommitDetailView({
                   onClick={() => requestAmend(hash)}
                 >
                   Amend commit…
-                  {isLatest && !isHead && HISTORY_REFRESHING_HINT}
+                  {(() => {
+                    // Only HEAD can be amended; until the log and status agree
+                    // on it, the row waits rather than claiming out of reach.
+                    switch (true) {
+                      case isHead:
+                        return null;
+                      case logTop === undefined:
+                      case isLatest:
+                      case hash === head?.oid:
+                        return AMEND_HOLD_HINT.refreshing;
+                      default:
+                        return AMEND_HOLD_HINT["not-latest"];
+                    }
+                  })()}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={doCheckoutCommit}>
                   Checkout commit

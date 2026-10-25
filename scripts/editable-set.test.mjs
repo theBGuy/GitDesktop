@@ -4,7 +4,9 @@
 // without an upstream, on a count read as fresh as the log), keep the last
 // agreeing set through a mismatch only while the log still shows its head,
 // and fall to nothing editable otherwise; plus the sync gates that refetch the
-// trailing side without looping, and squash's gate with its hold precedence.
+// trailing side without looping, re-read the HEAD-move set only where a read
+// predates the move, and recheck an aged no-upstream count; and squash's gate
+// with its hold precedence.
 //
 // Not testable here: the component's ref holding the last-seen oid (its update
 // rule is `observeHeadOid`, pinned below), the render-time setState loop,
@@ -21,7 +23,9 @@ import {
   EDIT_MAX,
   headAgrees,
   isNoUpstream,
+  NO_UPSTREAM_COUNT_RECHECK_MS,
   observeHeadOid,
+  preMoveStale,
   resolveUnpushedView,
   squashGate,
   statusLogAction,
@@ -361,17 +365,40 @@ test("statusLogAction: the log refetches only as the stale side", () => {
 test("statusLogAction: side keys fire exactly on an observed oid change", () => {
   assert.deepEqual(sync({ oidChanged: true }), [
     "refetch-log",
+    "refresh-head-set",
     "refresh-side-keys",
   ]);
   assert.deepEqual(
     sync({ oidChanged: true, logAt: 300 }),
-    ["refresh-side-keys"],
+    ["refresh-head-set", "refresh-side-keys"],
     "log-first: the side keys still fire",
   );
   assert.deepEqual(sync({ oidChanged: true, logHead: "N", logAt: 300 }), [
+    "refresh-head-set",
     "refresh-side-keys",
   ]);
   assert.equal(sync({ logAt: 300 }), null, "no oid change, no side keys");
+});
+
+test("statusLogAction: the HEAD-move set fires exactly on an oid change", () => {
+  for (const [label, over] of [
+    ["stale log", {}],
+    ["fresh log", { logAt: 300 }],
+    ["agreeing log", { logHead: "N", logAt: 300 }],
+    ["log fetching", { logIsFetching: true }],
+    ["no upstream, stale count", { noUpstream: true, countAt: 50 }],
+  ]) {
+    assert.ok(
+      sync({ ...over, oidChanged: true }).includes("refresh-head-set"),
+      `${label}: an observed move fires it`,
+    );
+    assert.ok(
+      !(sync({ ...over, oidChanged: false }) ?? []).includes(
+        "refresh-head-set",
+      ),
+      `${label}: no observed move, no fire`,
+    );
+  }
 });
 
 test("statusLogAction: the no-upstream count retries once heads agree", () => {
@@ -399,7 +426,7 @@ test("statusLogAction: the no-upstream count retries once heads agree", () => {
   );
   assert.deepEqual(
     sync({ ...agreeing, countAt: 50, oidChanged: true }),
-    ["refresh-side-keys"],
+    ["refresh-head-set", "refresh-side-keys"],
     "the side keys already cover the count",
   );
   assert.equal(
@@ -411,6 +438,94 @@ test("statusLogAction: the no-upstream count retries once heads agree", () => {
     sync({ ...agreeing, noUpstream: false, countAt: 50 }),
     null,
     "upstream mode",
+  );
+});
+
+test("statusLogAction: a no-upstream count past the recheck age re-reads", () => {
+  assert.equal(NO_UPSTREAM_COUNT_RECHECK_MS, 30_000);
+  // The count is fresher than the log, so only its age against the status
+  // reading can fire it (a terminal push moves no HEAD).
+  const countAt = 1_000;
+  const aged = (age, over = {}) =>
+    sync({
+      logHead: "N",
+      noUpstream: true,
+      logAt: 500,
+      countAt,
+      statusAt: countAt + age,
+      ...over,
+    });
+  assert.deepEqual(
+    aged(NO_UPSTREAM_COUNT_RECHECK_MS),
+    ["refresh-count"],
+    "exactly at the threshold",
+  );
+  assert.equal(
+    aged(NO_UPSTREAM_COUNT_RECHECK_MS - 1),
+    null,
+    "1 ms under the threshold",
+  );
+  assert.deepEqual(
+    aged(NO_UPSTREAM_COUNT_RECHECK_MS + 5_000),
+    ["refresh-count"],
+    "over the threshold",
+  );
+  assert.equal(
+    aged(NO_UPSTREAM_COUNT_RECHECK_MS + 5_000, { countIsFetching: true }),
+    null,
+    "a count read in flight must land",
+  );
+  assert.deepEqual(
+    aged(NO_UPSTREAM_COUNT_RECHECK_MS + 5_000, { oidChanged: true }),
+    ["refresh-head-set", "refresh-side-keys"],
+    "an oid change refreshes the count through the side keys instead",
+  );
+  assert.deepEqual(
+    aged(1, { countIsError: true }),
+    ["refresh-count"],
+    "an errored count re-reads under the threshold too",
+  );
+  assert.equal(
+    aged(NO_UPSTREAM_COUNT_RECHECK_MS + 5_000, { noUpstream: false }),
+    null,
+    "upstream mode reads status's ahead, never the count",
+  );
+});
+
+test("preMoveStale: only idle reads older than the last pre-move status", () => {
+  const stale = (over) =>
+    preMoveStale({
+      fetchStatus: "idle",
+      dataUpdatedAt: 100,
+      prevStatusAt: 200,
+      ...over,
+    });
+  assert.equal(stale({}), true, "pre-move data is re-read");
+  assert.equal(
+    stale({ dataUpdatedAt: 200 }),
+    true,
+    "data from the very reading the old oid held at is pre-move",
+  );
+  assert.equal(
+    stale({ dataUpdatedAt: 0 }),
+    true,
+    "a never-fetched read is re-read",
+  );
+  assert.equal(
+    stale({ dataUpdatedAt: 201 }),
+    false,
+    "a read refreshed since (an in-app write's invalidation) is skipped",
+  );
+  assert.equal(
+    stale({ fetchStatus: "fetching" }),
+    false,
+    "a read already refreshing is skipped",
+  );
+  assert.equal(stale({ fetchStatus: "paused" }), false, "a paused read waits");
+  assert.equal(
+    stale({ dataUpdatedAt: 100, prevStatusAt: 0 }),
+    false,
+    "no earlier status reading: nothing is known to predate the move",
   );
 });
 

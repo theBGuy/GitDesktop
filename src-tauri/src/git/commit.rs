@@ -551,7 +551,7 @@ impl CasRef {
     }
 
     /// The branch this names, for a verdict; neutral for a detached HEAD.
-    fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         match self {
             Self::Branch(full) => full.strip_prefix("refs/heads/").unwrap_or(full),
             Self::Detached(_) => "HEAD",
@@ -968,8 +968,36 @@ const UNDO_DETACHED_ROOT: &str =
 
 /// The refusal for a shallow clone's boundary commit: its parent is recorded but was
 /// never fetched, so `HEAD~1` can't resolve, and the root arm would delete the branch.
+/// KEEP IN STEP: HistoryPanel.tsx's `UNDO_SHALLOW_BOUNDARY` carries this exact
+/// sentence.
 const UNDO_SHALLOW_BOUNDARY: &str =
-    "The latest commit's parent isn't in this shallow clone — nothing was undone.";
+    "The latest commit's parent isn't in this shallow clone — nothing was undone. Run git fetch --deepen=1 in a terminal, then undo again.";
+
+async fn records_parent(repo_path: &str, oid: &str) -> AppResult<bool> {
+    // The raw object, not `rev-list --parents`: a shallow graft hides the parent
+    // line from traversal but not from the commit itself (measured, git 2.51.1).
+    let object = run_git_raw(
+        Some(repo_path),
+        &["cat-file", "commit", oid],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if object.code != 0 {
+        return Err(AppError::Git {
+            code: object.code,
+            stderr: object.full_failure_text(),
+        });
+    }
+    let text = object.stdout_lossy();
+    let mut header = text.lines().take_while(|line| !line.is_empty());
+    Ok(header.any(|line| line.starts_with("parent ")))
+}
+
+#[tauri::command]
+pub async fn git_commit_records_parent(repo_path: String, hash: String) -> AppResult<bool> {
+    crate::git::history::validate_hash(&hash)?;
+    records_parent(&repo_path, &hash).await
+}
 
 #[tauri::command]
 pub async fn git_undo_commit(
@@ -1054,23 +1082,7 @@ pub(crate) async fn git_undo_commit_core(
     // unborn, where the arm deletes `HEAD` and git does nothing.
     let mut target: Option<String> = None;
     if !head_oid.is_empty() {
-        // The raw object, not `rev-list --parents`: a shallow graft hides the parent
-        // line from traversal but not from the commit itself (measured, git 2.51.1).
-        let object = run_git_raw(
-            Some(&repo_path),
-            &["cat-file", "commit", &head_oid],
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-        if object.code != 0 {
-            return Err(AppError::Git {
-                code: object.code,
-                stderr: object.full_failure_text(),
-            });
-        }
-        let text = object.stdout_lossy();
-        let mut header = text.lines().take_while(|line| !line.is_empty());
-        if header.any(|line| line.starts_with("parent ")) {
+        if records_parent(&repo_path, &head_oid).await? {
             return Err(AppError::Git {
                 code: 1,
                 stderr: UNDO_SHALLOW_BOUNDARY.to_string(),
@@ -1905,11 +1917,16 @@ mod tests {
         assert!(!has_head(&repo).await, "the branch is unborn again");
     }
 
-    /// A depth-1 clone's only commit records a parent it never fetched: `HEAD~1` fails
-    /// to resolve there, and taking the root arm would delete the branch.
     #[tokio::test]
-    async fn undo_commit_refuses_a_shallow_clones_boundary_commit() {
-        let (dir, source) = amend_fixture("gd-undo-shallow-", &[]).await;
+    async fn records_parent_is_false_for_a_true_root() {
+        let (dir, repo) = amend_fixture("gd-records-parent-root-", &[]).await;
+        let root = raw_commit(&dir, &repo, "a.txt", "A").await;
+
+        assert!(!records_parent(&repo, &root).await.unwrap());
+    }
+
+    async fn shallow_boundary_fixture(prefix: &str) -> (tempfile::TempDir, String, String) {
+        let (dir, source) = amend_fixture(prefix, &[]).await;
         raw_commit(&dir, &source, "a.txt", "A").await;
         raw_commit(&dir, &source, "b.txt", "B").await;
         // `--depth` is ignored for a plain local path, so the source goes by URL.
@@ -1919,8 +1936,7 @@ mod tests {
         } else {
             format!("file:///{path}")
         };
-        let clone_dir = dir.path().join("clone");
-        let clone = clone_dir.to_string_lossy().into_owned();
+        let clone = dir.path().join("clone").to_string_lossy().into_owned();
         run_git(
             None,
             &["clone", "-q", "--depth", "1", &url, &clone],
@@ -1928,7 +1944,6 @@ mod tests {
         )
         .await
         .expect("the shallow clone succeeds");
-        let b = head(&clone).await;
         assert!(
             run_git_raw(
                 Some(&clone),
@@ -1941,6 +1956,23 @@ mod tests {
                 != 0,
             "fixture sanity: the boundary's parent does not resolve"
         );
+        (dir, source, clone)
+    }
+
+    #[tokio::test]
+    async fn records_parent_is_true_at_a_shallow_boundary() {
+        let (_dir, _source, clone) = shallow_boundary_fixture("gd-records-parent-shallow-").await;
+        let boundary = head(&clone).await;
+
+        assert!(records_parent(&clone, &boundary).await.unwrap());
+    }
+
+    /// A depth-1 clone's only commit records a parent it never fetched: `HEAD~1` fails
+    /// to resolve there, and taking the root arm would delete the branch.
+    #[tokio::test]
+    async fn undo_commit_refuses_a_shallow_clones_boundary_commit() {
+        let (_dir, source, clone) = shallow_boundary_fixture("gd-undo-shallow-").await;
+        let b = head(&clone).await;
 
         for expected in [Some(b.clone()), None] {
             assert_undo_refused(undo(&clone, expected).await, UNDO_SHALLOW_BOUNDARY);

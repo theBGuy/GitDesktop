@@ -193,6 +193,7 @@ pub fn run() {
             git::config::git_global_autocrlf,
             git::config::git_set_global_autocrlf,
             git::commit::git_undo_commit,
+            git::commit::git_commit_records_parent,
             git::commit::git_recent_commits,
             git::history::git_log,
             git::history::git_file_log,

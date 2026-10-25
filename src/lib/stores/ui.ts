@@ -588,6 +588,10 @@ interface UiState {
    *  A no-op inside a navigator's `beforeSelect`, whose request-time bump covers it. */
   noteUserInteraction: () => void;
   selectCommit: (hash: string | null) => void;
+  /** Drop the History selection because its commit left this branch's history (an
+   *  undo removed it), not because the user chose to. A prune, so it never bumps
+   *  {@link UiState.interactionEpoch}: a pending amend landing must not strand. */
+  clearSelectedCommit: () => void;
   selectCompareCommit: (hash: string | null) => void;
   setCommitDraft: (title: string, body: string) => void;
   setCommitTitle: (title: string) => void;
@@ -989,6 +993,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         selectedCommitHash: hash,
         interactionEpoch: s.interactionEpoch + 1,
       })),
+    clearSelectedCommit: () => set({ selectedCommitHash: null }),
     selectCompareCommit: (hash) =>
       set((s) => ({
         compareCommitHash: hash,

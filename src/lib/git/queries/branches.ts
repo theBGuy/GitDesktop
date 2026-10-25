@@ -4,6 +4,7 @@ import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
+import type { BranchRewriteStatus } from "../types";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
@@ -343,12 +344,24 @@ export function useBranchRewriteStatus(
  *  than a second spelling that can drift from it. */
 export function branchRewriteStatusOptions(repo: string, branch: string) {
   return {
-    queryKey: ["repo", repo, "rewrite-status", branch] as const,
+    queryKey: [...repoKeys.rewriteStatus(repo), branch] as const,
     queryFn: () => api.gitBranchRewriteStatus(repo, branch),
     staleTime: 30_000,
     networkMode: "always" as const,
   };
 }
+
+/** Whether a rewrite status proves the upstream already carries every local
+ *  commit, with both tips measured: the pair, never the reflog verdict alone,
+ *  is what may unlock a reset to the upstream (unique local work would be lost).
+ *  Every reset-to-upstream offer and confirm reads this one predicate. */
+export const carriesAllLocalCommits = (
+  d: BranchRewriteStatus | null | undefined,
+): d is BranchRewriteStatus & { upstreamTip: string; localTip: string } =>
+  d?.remoteRewritten === true &&
+  d.localOnly === 0 &&
+  Boolean(d.upstreamTip) &&
+  Boolean(d.localTip);
 
 /** Points a NON-current branch at its upstream's tip, refusing if that upstream
  *  moved away from `expectedTip`, or the branch away from `expectedLocalTip`,

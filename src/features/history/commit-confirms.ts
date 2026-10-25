@@ -124,6 +124,13 @@ export const RANGE_MERGE_ITEM_REASON = "includes a merge — pick it on its own"
  *  unpushed, and which commit is HEAD, are unknown until they agree again. */
 export const HISTORY_REFRESHING_HINT = " (refreshing history…)";
 
+/** Amend's menu-row reason, on the History menu and the commit detail ⋯ menu
+ *  alike: only HEAD can be amended, and HEAD is unknown while the reads disagree. */
+export const AMEND_HOLD_HINT: Record<"refreshing" | "not-latest", string> = {
+  refreshing: HISTORY_REFRESHING_HINT,
+  "not-latest": " (latest commit only)",
+};
+
 /** The same hold once the no-upstream count read has failed: which commits are
  *  unpushed stays unknown until it reads again. */
 export const UNPUSHED_UNCHECKED_HINT =
@@ -143,3 +150,42 @@ export const UNDO_ROOT_COMMIT_CONFIRM = {
   confirmLabel: "Undo first commit",
   confirmVariant: "destructive",
 } as const;
+
+/** The routes that write a commit's message into the commit box over whatever
+ *  the user typed there. */
+export type ReplacesMessageTrigger = "amend" | "undo";
+
+const REPLACES_MESSAGE_BODY: Record<
+  ReplacesMessageTrigger,
+  (short: string) => string
+> = {
+  amend: (s) =>
+    `Amending loads ${s}'s message into the commit box, replacing the title and description you've written. Cancel keeps what you wrote and doesn't start the amend.`,
+  undo: (s) =>
+    `Undoing ${s} loads its message into the commit box, replacing the title and description you've written. Cancel keeps what you wrote and doesn't undo the commit.`,
+};
+
+/** Asked right before a route writes `hash`'s message into the commit box. Names
+ *  only the title and description: co-authors are left as they are. */
+export const replacesMessageConfirm = (
+  trigger: ReplacesMessageTrigger,
+  hash: string,
+) =>
+  ({
+    title: "Replace the message in your commit box?",
+    body: REPLACES_MESSAGE_BODY[trigger](short(hash)),
+    confirmLabel: "Replace message",
+    confirmVariant: "destructive",
+  }) as const;
+
+/** Whether writing `message` into the commit box would lose typed text: the box
+ *  holds something, and it isn't already that message (compared trimmed). */
+export function replacesTypedMessage(
+  draft: { title: string; body: string },
+  message: { subject: string; body: string },
+): boolean {
+  const title = draft.title.trim();
+  const body = draft.body.trim();
+  if (title === "" && body === "") return false;
+  return title !== message.subject.trim() || body !== message.body.trim();
+}

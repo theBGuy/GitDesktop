@@ -10,9 +10,9 @@ export const headBranchPin = (head: BranchHead): string =>
 
 /** Moves the branch pointer to `hash`. `"mixed"` (the default) keeps every
  *  working-tree change; `"hard"` rewrites the working tree too and is refused
- *  outright while tracked changes are outstanding. `expectedHead` and
- *  `expectedBranch` ({@link headBranchPin}) apply to hard mode only: the backend
- *  refuses when HEAD is no longer that commit on that branch. */
+ *  outright while tracked changes are outstanding. With `expectedHead` and
+ *  `expectedBranch` ({@link headBranchPin}) set, either mode refuses when HEAD is
+ *  no longer that commit on that branch; MCP's unpinned route passes neither. */
 export const gitReset = (
   repoPath: string,
   hash: string,
@@ -55,6 +55,12 @@ export interface CommitParent {
   hash: string;
   subject: string;
 }
+
+/** Whether `hash`'s raw header names a parent, the same read undo's root arm
+ *  takes, so the menu and the backend's refusal can't disagree at a shallow
+ *  clone's boundary commit. */
+export const gitCommitRecordsParent = (repoPath: string, hash: string) =>
+  invoke<boolean>("git_commit_records_parent", { repoPath, hash });
 
 /** A commit's parents in git's parent order: index 0 is mainline 1. */
 export const gitCommitParents = (repoPath: string, hash: string) =>
