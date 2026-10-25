@@ -143,11 +143,12 @@ staging is for UTF-8 text; other encodings stage and discard as a whole file.
 Stage or unstage a drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`,
 without reaching for the button. Press `Space` on a focused file to stage or
 unstage it. Once the file you're viewing has nothing left to stage, whole or
-line by line, the next file opens. Stage, unstage, or discard single files or a
-multi-selection from the context menu (staging and unstaging a selection sit
-in the command palette too); discarding a whole untracked file goes to the
-recycle bin. Commit with title + body, co-authors suggested from history,
-amend, undo, reset, and revert.
+line by line, the next file in the list opens (the one above it, at the end of
+a section). Stage, unstage, or discard single files or a multi-selection from
+the context menu (staging and unstaging a selection sit in the command palette
+too); discarding a whole untracked file goes to the recycle bin. Commit with
+title + body, co-authors suggested from history, amend, undo, reset, and
+revert.
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/lines-poster.webp">

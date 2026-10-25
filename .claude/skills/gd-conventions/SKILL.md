@@ -139,11 +139,14 @@ to a single key, a dispatcher missing any of them either steals keystrokes from
 a text field or typeahead list, or withholds a named key that should still fire.
 Inner-clause drift between two dispatchers is the regression this prevents; the
 `unguarded-binding-dispatcher` guard in `pnpm run checks` is the ratchet.
-A focusable non-text element's Enter/Space handler returns on
-`hasChordModifier(e)` (binding.ts) before any preventDefault, so bound
-chords reach the window listener, except inside a modal that owns no chord of
-its own, where letting one through would fire app bindings behind the dialog
-(those sites stay unguarded under an `OWNS_CHORD` entry); the
+Each dispatcher also takes the listener's bare-Space carve-out: it consumes
+`space` only when its action ran (`consumeRequiresDispatch`), so a disabled
+one leaves the press to the focused control. An Enter/Space handler that
+activates a focused row, card or chip, or a list's marked row from its filter
+input, returns on `hasChordModifier(e)` (binding.ts) before any preventDefault,
+so bound chords reach the window listener, except inside a modal that owns no
+chord of its own, where letting one through would fire app bindings behind the
+dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 `scripts/activation-key-chords.test.mjs` scan is the ratchet.
 
 **Patterns the user has ruled on:**
@@ -225,7 +228,9 @@ its own, where letting one through would fire app bindings behind the dialog
 - The AI-generate chord in a dialog goes through `useGenerateChord`
   (`src/lib/hotkeys/useGenerateChord.ts`) — never a hand-rolled handler. Its
   invariants: effective-binding read (null = fully inert), `eventToBinding`
-  match, `preventDefault` before `enabled` on any surface WITH a generator,
+  match, `preventDefault` before `enabled` on any surface WITH a generator
+  (bare Space excepted: consumed only when Generate runs, otherwise it only
+  stops propagation, so the focused control's native press still happens),
   run only under the visible button's gate, swallow-don't-cancel while
   generating, handler mounted on `DialogContent` (the X close is a form
   sibling). The hook returns the `hint` string so buttons can't forget it.

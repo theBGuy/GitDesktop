@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
+  cursorAfterAdvance,
   dialogClaimStep,
   nextFileKey,
   pruneDecision,
@@ -254,6 +255,7 @@ function panelProblems(text) {
     "nextFileKey",
     "advanceSelectedFile",
     "selectionAfterAdvance",
+    "cursorAfterAdvance",
   ])
     if (!new RegExp(String.raw`\b${callee}\(`).test(event.body))
       problems.push(`the transition never calls ${callee}(`);
@@ -328,4 +330,77 @@ test("advance wiring mutation controls go red", () => {
     ),
   ];
   for (const mutant of mutants) assert.notDeepEqual(panelProblems(mutant), []);
+  // The pre-fix cursor write: the folder cursor dropped on every advance.
+  const start = text.indexOf("const cursor = cursorAfterAdvance(");
+  const endMark = "cursorAfter = cursor.cursor;";
+  const end = text.indexOf(endMark, start);
+  assert.ok(start !== -1 && end !== -1, "cursor control target not found");
+  const dropsFolder =
+    text.slice(0, start) +
+    "setActiveFolderKey(null);\n            cursorAfter = next;" +
+    text.slice(end + endMark.length);
+  assert.notDeepEqual(panelProblems(dropsFolder), []);
+});
+
+test("cursorAfterAdvance: a listed folder cursor stays put", () => {
+  assert.deepEqual(
+    cursorAfterAdvance("folder:unstaged:src", true, "unstaged:src/b.ts"),
+    { folderCursor: "folder:unstaged:src", cursor: "folder:unstaged:src" },
+  );
+});
+
+test("cursorAfterAdvance: otherwise the cursor follows the open file", () => {
+  // No folder cursor (list mode, or the cursor was on the file itself).
+  assert.deepEqual(cursorAfterAdvance(null, false, "staged:b"), {
+    folderCursor: null,
+    cursor: "staged:b",
+  });
+  // A folder cursor whose row is gone can't hold it.
+  assert.deepEqual(
+    cursorAfterAdvance("folder:unstaged:gone", false, "unstaged:c"),
+    { folderCursor: null, cursor: "unstaged:c" },
+  );
+});
+
+/** Problems with focusAdvancedRow: a non-cursor target arms its claim even
+ *  when it is mounted, so the claim's reveal keeps it in the window. */
+function mountedClaimProblems(text) {
+  const masked = maskNonCode(text, true);
+  const fn = /\bfunction focusAdvancedRow\s*\(/.exec(masked);
+  if (!fn) return ["focusAdvancedRow not found"];
+  const paren = matchBrace(masked, fn.index + fn[0].length - 1);
+  const open = masked.indexOf("{", paren);
+  const close = matchBrace(masked, open);
+  if (paren === -1 || close === -1) return ["focusAdvancedRow is unreadable"];
+  const body = masked.slice(open, close + 1);
+  const at = body.search(/\bif \(el\) \{/);
+  if (at === -1) return ["focusAdvancedRow has no mounted-row branch"];
+  const elOpen = body.indexOf("{", at);
+  const elClose = matchBrace(body, elOpen);
+  const problems = [];
+  if (/\breturn\b/.test(body.slice(elOpen, elClose + 1)))
+    problems.push(
+      "a mounted non-cursor target returns before arming its claim",
+    );
+  if (
+    !/deferFocusRow\(key, undefined, \{ cursorAtArm: cursorAfter \}\)/.test(
+      body.slice(elClose),
+    )
+  )
+    problems.push("focusAdvancedRow doesn't arm a non-cursor claim after it");
+  return problems;
+}
+
+test("a mounted non-cursor target still arms its claim", () => {
+  assert.deepEqual(mountedClaimProblems(source(PANEL)), []);
+});
+
+test("mounted-claim pin control goes red", () => {
+  const text = source(PANEL);
+  const mutant = mutate(
+    text,
+    'el.scrollIntoView({ block: "nearest" });\n    }\n    deferFocusRow',
+    'el.scrollIntoView({ block: "nearest" });\n      return;\n    }\n    deferFocusRow',
+  );
+  assert.notDeepEqual(mountedClaimProblems(mutant), []);
 });

@@ -78,7 +78,7 @@ import {
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { useUiStore } from "@/lib/stores/ui";
 import { ignoreToast, toastError } from "@/lib/toast";
@@ -91,6 +91,7 @@ import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { collapseDiscardEntries } from "./discard-targets";
 import { FileRow, MARKER_CHECK_PENDING } from "./FileRow";
 import {
+  cursorAfterAdvance,
   dialogClaimStep,
   nextFileKey,
   pruneDecision,
@@ -924,8 +925,10 @@ export function ChangesPanel({
   }
 
   /** Drops the claim when focus moves to a live control outside the list. A
-   *  null `relatedTarget` (an unmount, a window blur) keeps it, and so does a
-   *  dialog: the marker confirm must not cost the row its successor. */
+   *  null `relatedTarget` keeps it: an unmount, a window blur, and also a click
+   *  on non-focusable content (diff text), after which a later advance with
+   *  focus orphaned may pull focus back into the list. A dialog keeps it too:
+   *  the marker confirm must not cost the row its successor. */
   function trackListFocusOut(e: FocusEvent) {
     const next = e.relatedTarget;
     if (!(next instanceof Element) || !next.isConnected) return;
@@ -935,7 +938,10 @@ export function ChangesPanel({
   }
 
   /** Focuses a row an advance landed on. The new cursor takes the ordinary
-   *  route; any other row arms a non-cursor claim when it isn't mounted. */
+   *  route. Any other row arms a non-cursor claim even when it is mounted and
+   *  focused now: the same stage can shift the cursor's index, and the list's
+   *  cursor scroll would then carry the row out of the window and drop focus to
+   *  <body>; the claim's reveal keeps it in view and re-lands focus. */
   function focusAdvancedRow(key: string, cursorAfter: string | null) {
     if (key === cursorAfter) {
       focusRow(key);
@@ -947,7 +953,6 @@ export function ChangesPanel({
     if (el) {
       el.focus();
       el.scrollIntoView({ block: "nearest" });
-      return;
     }
     deferFocusRow(key, undefined, { cursorAtArm: cursorAfter });
   }
@@ -1108,8 +1113,14 @@ export function ChangesPanel({
             });
             setSelectedKeys((keys) => selectionAfterAdvance(keys, key, next));
             setAnchorKey(next);
-            setActiveFolderKey(null);
-            cursorAfter = next;
+            const cursor = cursorAfterAdvance(
+              activeFolderKey,
+              activeFolderKey !== null &&
+                navRows.some((r) => rowKeyOf(r) === activeFolderKey),
+              next,
+            );
+            setActiveFolderKey(cursor.folderCursor);
+            cursorAfter = cursor.cursor;
             shownPath = nextEntry.path;
           } else {
             clearSelectedFile();
@@ -1432,12 +1443,16 @@ export function ChangesPanel({
     // button. Added only on success, so a declined marker confirm (which moves
     // no row, and so would never clear it) leaves the row live.
     if (pendingLeaveKeys.current.has(key)) return;
+    // The repo the press landed in: a settle after a switch must not deaden
+    // a same-named row in the repository now open.
+    const firedOn = repoPath;
+    const markLeaving = () => {
+      if (landedIn(firedOn).live) pendingLeaveKeys.current.add(key);
+    };
     if (staged) {
       void unstage
         .mutateAsync(unstagePaths(entry))
-        .then(() => {
-          pendingLeaveKeys.current.add(key);
-        })
+        .then(markLeaving)
         .catch(onError);
       return;
     }
@@ -1446,7 +1461,7 @@ export function ChangesPanel({
     if (!canStage(entry)) return;
     void stageGuarded([entry])
       .then((ok) => {
-        if (ok) pendingLeaveKeys.current.add(key);
+        if (ok) markLeaving();
       })
       .catch(onError);
   }
@@ -2572,9 +2587,6 @@ function VirtualizedChangeList({
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
   }, [activeFlatIndex, activeRowKey, viewMode]);
-  // The same reveal for a non-cursor focus claim. Its own effect, declared after
-  // the cursor's so it wins a shared pass: folded into the cursor effect, the
-  // claim settling would re-key that effect and scroll back to the cursor.
   const focusTargetIndex = focusTargetKey
     ? flatRows.findIndex((r) => rowKeyOf(r) === focusTargetKey)
     : -1;
@@ -2603,6 +2615,9 @@ function VirtualizedChangeList({
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
   });
+  // The same reveal for a non-cursor focus claim. Its own effect, declared after
+  // the cursor's so it wins a shared pass: folded into the cursor effect, the
+  // claim settling would re-key that effect and scroll back to the cursor.
   useEffect(() => {
     if (focusTargetKey === null) return;
     return revealFocusTarget(focusTargetIndex, focusTargetKey);

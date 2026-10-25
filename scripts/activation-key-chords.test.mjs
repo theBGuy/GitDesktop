@@ -1,8 +1,10 @@
-// Pins the activation-key chord contract: a focusable non-text element's
-// Enter/Space handler returns on `hasChordModifier(e)` before any
-// preventDefault, so bound Ctrl/⌘/Alt chords reach the window listener (which
-// skips defaultPrevented events). Also pins the two predicates' truth tables and
-// the listener's bare-Space carve-out (`consumeRequiresDispatch`).
+// Pins the activation-key chord contract: an Enter/Space handler that activates
+// a focused row, card or chip (or a list's marked row from its filter input)
+// returns on `hasChordModifier(e)` before any preventDefault, so bound
+// Ctrl/⌘/Alt chords reach the window listener (which skips defaultPrevented
+// events). Also pins the two predicates' truth tables and the bare-Space
+// carve-out (`consumeRequiresDispatch`) in both binding dispatchers: the window
+// listener and the generate chord.
 //
 // The scan reads every src/**/*.tsx outside src/components/ui/ through
 // maskNonCode, so comments and string text can't steer it. A SITE is an
@@ -338,11 +340,14 @@ const GUARDED_SCANNED = [
   "src/features/settings/CommandsSection.tsx",
 ];
 
-/** Guarded sites on a host the scan doesn't read (a delegating container):
- *  the presence of their guard is the pin. */
+/** Guarded sites on a host the scan doesn't read: the presence of their guard
+ *  is the pin. */
 const GUARDED_PRESENCE = [
+  // A delegating container: Enter/Space on a focused thread header.
   "src/features/pulls/ReviewThreads.tsx",
+  // The filter's combobox input, whose Enter opens the marked repository row.
   "src/features/repository/RepoList.tsx",
+  // Delegating containers: narration links and rendered-markdown images.
   "src/features/sessions/AgentNarration.tsx",
   "src/components/markdown/markdown.tsx",
 ];
@@ -630,4 +635,39 @@ test("listener pin control goes red", () => {
     "dispatchAction(id);\n      e.preventDefault();",
   );
   assert.notDeepEqual(listenerProblems(preFix), []);
+});
+
+const GENERATE_CHORD = "src/lib/hotkeys/useGenerateChord.ts";
+
+/** Problems with the generate chord's consume gate: like the listener, it
+ *  takes bare Space only when its action ran, and otherwise only stops the
+ *  press reaching a handler behind the dialog. Empty when pinned. */
+function generateChordProblems(raw) {
+  const masked = maskNonCode(raw, false);
+  const problems = [];
+  if (
+    !/if \(enabled \|\| !consumeRequiresDispatch\(binding\)\) e\.preventDefault\(\);\s*else e\.stopPropagation\(\);/.test(
+      masked,
+    )
+  )
+    problems.push(
+      "the generate chord's preventDefault isn't gated on consumeRequiresDispatch",
+    );
+  if (/^\s*e\.preventDefault\(\);\s*$/m.test(masked))
+    problems.push("the generate chord consumes unconditionally");
+  return problems;
+}
+
+test("the generate chord consumes bare Space only when it runs", () => {
+  assert.deepEqual(generateChordProblems(read(GENERATE_CHORD)), []);
+});
+
+test("generate chord pin control goes red", () => {
+  const text = read(GENERATE_CHORD);
+  const preFix = mutate(
+    text,
+    "if (enabled || !consumeRequiresDispatch(binding)) e.preventDefault();\n      else e.stopPropagation();",
+    "e.preventDefault();",
+  );
+  assert.notDeepEqual(generateChordProblems(preFix), []);
 });

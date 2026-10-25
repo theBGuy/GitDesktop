@@ -49,7 +49,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Space on a focused file stages or unstages it — staging the last change in the file you're viewing opens the next file",
+      "Space on a focused file stages or unstages it — staging the last change in the file you're viewing opens the next file in the list (the one above it, at the end of a section)",
   },
   {
     group: "Diffs & staging",

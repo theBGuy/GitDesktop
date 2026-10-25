@@ -77,6 +77,20 @@ export function selectionAfterAdvance(
   return out;
 }
 
+/** The navigation cursor after the open file advanced to `nextKey`. A folder
+ *  row that holds the cursor and is still listed keeps it (tree mode: the user
+ *  parked the cursor there while the file's diff stayed open); otherwise the
+ *  cursor follows the open file to its successor. */
+export function cursorAfterAdvance(
+  folderCursor: string | null,
+  folderListed: boolean,
+  nextKey: string,
+): { folderCursor: string | null; cursor: string } {
+  if (folderCursor !== null && folderListed)
+    return { folderCursor, cursor: folderCursor };
+  return { folderCursor: null, cursor: nextKey };
+}
+
 /** Where focus sits while an advance waits to land it: on nobody (`orphaned`),
  *  still inside the dialog that held it (`dialog`), or on a live control of
  *  somebody else's (`other`). */

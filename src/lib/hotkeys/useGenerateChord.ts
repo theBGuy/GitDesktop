@@ -6,6 +6,7 @@ import {
   useRef,
 } from "react";
 import {
+  consumeRequiresDispatch,
   eventToBinding,
   firesInEditable,
   formatBinding,
@@ -36,7 +37,10 @@ export interface GenerateAction {
  *
  * Swallowing follows the generator, not its enabled state: while this surface
  * HAS a generator the chord is swallowed before `enabled` is consulted, so a
- * disabled Generate can't let the chord reach the global listener.
+ * disabled Generate can't let the chord reach the global listener. Bare Space
+ * is the listener's carve-out ({@link consumeRequiresDispatch}): a disabled
+ * Generate leaves it to the focused button, checkbox or scroller, and only
+ * stops its propagation so no handler behind the dialog takes it either.
  *
  * Two kinds of rebind are declined rather than swallowed, mirroring the guards
  * the global listener applies to the same keystroke. In a text field: a binding
@@ -83,7 +87,8 @@ export function useGenerateChord({
         isTypeaheadTarget(e.target)
       )
         return;
-      e.preventDefault();
+      if (enabled || !consumeRequiresDispatch(binding)) e.preventDefault();
+      else e.stopPropagation();
       if (enabled) run();
     },
     hint: bindingHint(binding),
