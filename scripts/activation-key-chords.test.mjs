@@ -638,36 +638,111 @@ test("listener pin control goes red", () => {
 });
 
 const GENERATE_CHORD = "src/lib/hotkeys/useGenerateChord.ts";
+const REPO_SETTINGS = "src/features/repo-settings/RepoSettingsDialog.tsx";
 
 /** Problems with the generate chord's consume gate: like the listener, it
- *  takes bare Space only when its action ran, and otherwise only stops the
- *  press reaching a handler behind the dialog. Empty when pinned. */
+ *  takes bare Space only when its action runs (`enabled` read at keydown,
+ *  function or value), otherwise only stops the press reaching a handler
+ *  behind the dialog, and leaves any key without Ctrl/⌘/Alt that a control
+ *  already took to that control. Empty when pinned. */
 function generateChordProblems(raw) {
   const masked = maskNonCode(raw, false);
   const problems = [];
-  if (
-    !/if \(enabled \|\| !consumeRequiresDispatch\(binding\)\) e\.preventDefault\(\);\s*else e\.stopPropagation\(\);/.test(
+  // Matched in CODE (a commented-out copy is blanked); the masked-out string
+  // is then read back from the raw text at the same offset.
+  const live =
+    /\bconst\s+([\w$]+)\s*=\s*typeof enabled === " {8}" \? enabled\(\) : enabled;/.exec(
       masked,
-    )
+    );
+  if (
+    live &&
+    !raw.slice(live.index, live.index + live[0].length).includes('"function"')
   )
+    problems.push("the generate chord's keydown read tests the wrong type");
+  if (!live)
+    problems.push("the generate chord doesn't read `enabled` at keydown");
+  const name = live ? escapeRe(live[1]) : "enabled";
+  const gate = new RegExp(
+    String.raw`if \(${name} \|\| !consumeRequiresDispatch\(binding\)\) e\.preventDefault\(\);\s*else e\.stopPropagation\(\);`,
+  );
+  const gateAt = masked.search(gate);
+  if (gateAt === -1)
     problems.push(
       "the generate chord's preventDefault isn't gated on consumeRequiresDispatch",
     );
+  if (!new RegExp(String.raw`if \(${name}\) run\(\);`).test(masked))
+    problems.push("the generate chord runs without its live `enabled`");
   if (/^\s*e\.preventDefault\(\);\s*$/m.test(masked))
     problems.push("the generate chord consumes unconditionally");
+  const ownedAt = masked.search(
+    /if \(e\.defaultPrevented && !hasModifier\(binding\)\) return;/,
+  );
+  if (ownedAt === -1)
+    problems.push(
+      "the generate chord takes a modifier-less key a control already consumed",
+    );
+  else if (gateAt !== -1 && ownedAt > gateAt)
+    problems.push("the defaultPrevented check runs after the consume gate");
   return problems;
+}
+
+/** Problems with the repository settings dialog's chord: its `enabled` is the
+ *  sink's `canRun`, never a constant that would always consume bare Space. */
+function repoSettingsChordProblems(raw) {
+  const masked = maskNonCode(raw, true);
+  return /\buseGenerateChord\(\{\s*enabled:\s*generate\.canRun,/.test(masked)
+    ? []
+    : [
+        "the settings dialog's chord isn't gated on the active section's canRun",
+      ];
 }
 
 test("the generate chord consumes bare Space only when it runs", () => {
   assert.deepEqual(generateChordProblems(read(GENERATE_CHORD)), []);
+  assert.deepEqual(repoSettingsChordProblems(read(REPO_SETTINGS)), []);
 });
 
-test("generate chord pin control goes red", () => {
+test("generate chord pin controls go red", () => {
   const text = read(GENERATE_CHORD);
-  const preFix = mutate(
-    text,
-    "if (enabled || !consumeRequiresDispatch(binding)) e.preventDefault();\n      else e.stopPropagation();",
-    "e.preventDefault();",
+  const mutants = [
+    mutate(
+      text,
+      "if (live || !consumeRequiresDispatch(binding)) e.preventDefault();\n      else e.stopPropagation();",
+      "e.preventDefault();",
+    ),
+    mutate(
+      text,
+      'const live = typeof enabled === "function" ? enabled() : enabled;',
+      "const live = true;",
+    ),
+    mutate(
+      text,
+      "      if (e.defaultPrevented && !hasModifier(binding)) return;\n",
+      "",
+    ),
+    // Narrowed back to bare Space: Shift+Space or a bare letter would run.
+    mutate(
+      text,
+      "if (e.defaultPrevented && !hasModifier(binding)) return;",
+      "if (e.defaultPrevented && consumeRequiresDispatch(binding)) return;",
+    ),
+    // A commented-out keydown read is not a keydown read.
+    mutate(
+      text,
+      'const live = typeof enabled === "function" ? enabled() : enabled;',
+      '// const live = typeof enabled === "function" ? enabled() : enabled;\n      const live = enabled;',
+    ),
+  ];
+  for (const mutant of mutants)
+    assert.notDeepEqual(generateChordProblems(mutant), []);
+  assert.notDeepEqual(
+    repoSettingsChordProblems(
+      mutate(
+        read(REPO_SETTINGS),
+        "enabled: generate.canRun,",
+        "enabled: true,",
+      ),
+    ),
+    [],
   );
-  assert.notDeepEqual(generateChordProblems(preFix), []);
 });

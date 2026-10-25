@@ -40,7 +40,13 @@ export interface GenerateAction {
  * disabled Generate can't let the chord reach the global listener. Bare Space
  * is the listener's carve-out ({@link consumeRequiresDispatch}): a disabled
  * Generate leaves it to the focused button, checkbox or scroller, and only
- * stops its propagation so no handler behind the dialog takes it either.
+ * stops its propagation so no handler behind the dialog takes it either. A
+ * shell whose sections come and go passes `enabled` as a function, read at
+ * keydown, so that answer follows the section showing now. A key without
+ * Ctrl/⌘/Alt that a focused control already took (a chip's or checkbox's Space
+ * toggle) is that control's, neither run nor stopped, as it is for the global
+ * listener; a Ctrl/⌘/Alt chord still fires past a preventDefault, since Base
+ * UI's disabled-but-focusable buttons prevent every key but Tab.
  *
  * Two kinds of rebind are declined rather than swallowed, mirroring the guards
  * the global listener applies to the same keystroke. In a text field: a binding
@@ -67,7 +73,7 @@ export function useGenerateChord({
   enabled,
   run,
 }: {
-  enabled: boolean;
+  enabled: boolean | (() => boolean);
   run?: () => void;
 }): {
   onKeyDown: (e: React.KeyboardEvent) => void;
@@ -80,6 +86,7 @@ export function useGenerateChord({
     onKeyDown: (e) => {
       if (binding === null || run === undefined || e.repeat) return;
       if (eventToBinding(e) !== binding) return;
+      if (e.defaultPrevented && !hasModifier(binding)) return;
       if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
       if (
         !hasModifier(binding) &&
@@ -87,9 +94,10 @@ export function useGenerateChord({
         isTypeaheadTarget(e.target)
       )
         return;
-      if (enabled || !consumeRequiresDispatch(binding)) e.preventDefault();
+      const live = typeof enabled === "function" ? enabled() : enabled;
+      if (live || !consumeRequiresDispatch(binding)) e.preventDefault();
       else e.stopPropagation();
-      if (enabled) run();
+      if (live) run();
     },
     hint: bindingHint(binding),
     binding,
@@ -130,10 +138,10 @@ export const GenerateActionContext = createContext<GenerateActionSink | null>(
 /**
  * Shell side of {@link GenerateActionContext}, for a container that owns the
  * chord but not the generator — a settings dialog whose sections come and go.
- * Provide `sink` on the context and call `runPublished` from the chord handler;
- * the swallow follows {@link useGenerateChord}'s contract, so the chord can
- * never leak out of the shell, and a section without a generator makes it a
- * no-op.
+ * Provide `sink` on the context and hand the chord `canRun` as its `enabled`
+ * and `runPublished` as its `run`; the swallow follows {@link useGenerateChord}'s
+ * contract, so the chord can never leak out of the shell, and a section without
+ * a generator makes it a no-op that leaves a bare Space to the focused control.
  *
  * `activeKey` is what makes the published action safe to run. Under an
  * `AnimatePresence mode="wait"` crossfade the OUTGOING section stays mounted —
@@ -145,6 +153,10 @@ export const GenerateActionContext = createContext<GenerateActionSink | null>(
  */
 export function useGenerateActionSink(activeKey: string): {
   sink: GenerateActionSink;
+  /** Whether the active section's published action would run now: the
+   *  chord's `enabled`, so a section without a generator leaves bare Space
+   *  to the focused control. */
+  canRun: () => boolean;
   runPublished: () => void;
 } {
   // A ref, not state: the value is only ever read at keydown time, and a
@@ -165,11 +177,15 @@ export function useGenerateActionSink(activeKey: string): {
     () => ({ activeKey, ...fns }),
     [activeKey, fns],
   );
+  const canRun = () => {
+    const action = current.current;
+    return action?.key === activeKey && action.enabled;
+  };
   return {
     sink,
+    canRun,
     runPublished: () => {
-      const action = current.current;
-      if (action?.key === activeKey && action.enabled) action.run();
+      if (canRun()) current.current?.run();
     },
   };
 }

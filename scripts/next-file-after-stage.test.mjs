@@ -404,3 +404,37 @@ test("mounted-claim pin control goes red", () => {
   );
   assert.notDeepEqual(mountedClaimProblems(mutant), []);
 });
+
+/** Problems with focusAdvanceTarget's fallback: a hidden target lands focus on
+ *  the silent span, never `landingRef` (the tree-view toggle while the toolbar
+ *  is up, which the next Space would press). Empty when pinned. */
+function landingProblems(text) {
+  const masked = maskNonCode(text, true);
+  const fn = /\bfunction focusAdvanceTarget\s*\(/.exec(masked);
+  if (!fn) return ["focusAdvanceTarget not found"];
+  const paren = matchBrace(masked, fn.index + fn[0].length - 1);
+  const open = masked.indexOf("{", paren);
+  const close = matchBrace(masked, open);
+  if (paren === -1 || close === -1) return ["focusAdvanceTarget is unreadable"];
+  const body = masked.slice(open, close + 1);
+  const problems = [];
+  if (!/\bmarkerLandingRef\.current\?\.focus\(\)/.test(body))
+    problems.push("a hidden target doesn't land on the silent span");
+  if (/(?<![\w$])landingRef\.current/.test(body))
+    problems.push("a hidden target lands on landingRef (a live control)");
+  return problems;
+}
+
+test("a hidden advance target lands on the silent span", () => {
+  assert.deepEqual(landingProblems(source(PANEL)), []);
+});
+
+test("landing pin control goes red", () => {
+  const text = source(PANEL);
+  const mutant = mutate(
+    text,
+    "    markerLandingRef.current?.focus();\n    return false;",
+    "    landingRef.current?.focus();\n    return false;",
+  );
+  assert.notDeepEqual(landingProblems(mutant), []);
+});

@@ -234,6 +234,10 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   run only under the visible button's gate, swallow-don't-cancel while
   generating, handler mounted on `DialogContent` (the X close is a form
   sibling). The hook returns the `hint` string so buttons can't forget it.
+  `enabled` may be a function read at keydown: a shell whose sections come and
+  go passes its sink's `canRun`, never `true`. A key without Ctrl/⌘/Alt that a
+  focused control already default-prevented stays that control's, neither run
+  nor stopped, matching the global listener's defaultPrevented skip.
   Recorded exception: surfaces with several per-row generators and no
   focused-row concept (Edit history's reword buttons) carry no chord.
 - A generator dialog that stays mounted across its own close rides

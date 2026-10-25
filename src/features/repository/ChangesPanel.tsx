@@ -429,7 +429,8 @@ export function ChangesPanel({
   const listRef = useRef<HTMLElement | null>(null);
   const viewToggleRef = useRef<HTMLButtonElement>(null);
   // A silent focus landing above the list: a clean tree's, where no toolbar
-  // renders, and the file list's when a failed status read recovers.
+  // renders, the file list's when a failed status read recovers, and an
+  // advance's when the filter or a folded folder hides its target row.
   const markerLandingRef = useRef<HTMLSpanElement>(null);
   // Where focus goes when the banner's reapply rows unmount under it: the
   // tree-view toggle while the toolbar is mounted, else the landing span.
@@ -958,8 +959,10 @@ export function ChangesPanel({
   }
 
   /** The same, for a target the filter or a folded folder hides: the silent
-   *  landing above the list takes focus instead. True when a ROW takes focus
-   *  (it announces itself), false for the landing. */
+   *  tabIndex=-1 span above the list takes focus instead — never `landingRef`,
+   *  which resolves to the tree-view toggle while the toolbar is up, where the
+   *  next Space would flip the saved view mode. True when a ROW takes focus (it
+   *  announces itself), false for the landing. */
   function focusAdvanceTarget(
     key: string | null,
     cursorAfter: string | null,
@@ -968,7 +971,7 @@ export function ChangesPanel({
       focusAdvancedRow(key, cursorAfter);
       return true;
     }
-    landingRef.current?.focus();
+    markerLandingRef.current?.focus();
     return false;
   }
 
