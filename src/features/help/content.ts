@@ -630,7 +630,8 @@ If the history can't be read, the tab says why and offers **Retry**. A failed re
 - **Amend** the most recent commit (reword, or fold in staged changes). If the commit
   box already holds a title or description other than that commit's message, Amend
   asks before replacing it, and Cancel does nothing. The amend stays tied to where you
-  started it: that commit, on that branch or on a detached HEAD. If a new commit lands, or HEAD detaches from that branch or reattaches from a detached
+  started it: that commit, on that branch or on a detached HEAD. If a new commit
+  lands, or HEAD detaches from that branch or reattaches from a detached
   start, the commit box holds the amend and says why until HEAD is back where you
   started; switching to another branch shows that branch's own draft instead. While it
   holds, **Stop amending** ends amend mode with your message kept. If another Git

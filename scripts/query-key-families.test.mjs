@@ -25,6 +25,10 @@ const FAMILIES = [
   { name: "discussion-list", builder: "repoKeys.discussionList" },
   { name: "findings", builder: "repoKeys.findings" },
   { name: "reactions", builder: "repoKeys.reactions" },
+  { name: "unpushed-count", builder: "repoKeys.unpushedCount" },
+  { name: "unpushed-messages", builder: "repoKeys.unpushedMessages" },
+  { name: "rewrite-status", builder: "repoKeys.rewriteStatus" },
+  { name: "records-parent", builder: "repoKeys.recordsParent" },
 ];
 
 // Three hand-spelled shapes are refused outside core.ts: the bare array literal

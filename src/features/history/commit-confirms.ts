@@ -4,6 +4,8 @@
  * commit context menu, and a tag's Checkout all ask through these, so no route
  * can pose a different question than its twin. Prompts go through
  * `useConfirm.getState().ask(...)`.
+ * Free of runtime imports so scripts/commit-confirms.test.mjs loads it under
+ * Node's type stripping.
  */
 
 const short = (hash: string) => hash.slice(0, 7);
@@ -184,13 +186,16 @@ export const replacesMessageConfirm = (
   }) as const;
 
 /** Whether writing `message` into the commit box would lose typed text: the box
- *  holds something, and it isn't already that message (compared trimmed). */
+ *  holds something, and it isn't already that message. Titles compare fully
+ *  trimmed; bodies only at the end: a loaded message's body is already
+ *  trimmed, so a box whose body starts with whitespace it lacks asks first (a
+ *  false prompt is the safe side). */
 export function replacesTypedMessage(
   draft: { title: string; body: string },
   message: { subject: string; body: string },
 ): boolean {
   const title = draft.title.trim();
-  const body = draft.body.trim();
+  const body = draft.body.trimEnd();
   if (title === "" && body === "") return false;
-  return title !== message.subject.trim() || body !== message.body.trim();
+  return title !== message.subject.trim() || body !== message.body.trimEnd();
 }

@@ -38,12 +38,8 @@ test("pickOntoHold: an operation in progress outranks every arm", () => {
 });
 
 test("pickOntoHold: a list with nothing loaded never claims no branches", () => {
-  const pending = hold({ ...NO_DATA, isPending: true });
-  assert.equal(pending, "loading");
-  assert.notEqual(pending, "no-branches", "the pre-fix arm while loading");
-  const failed = hold({ ...NO_DATA, isError: true });
-  assert.equal(failed, "unreadable");
-  assert.notEqual(failed, "no-branches", "the pre-fix arm on a failed read");
+  assert.equal(hold({ ...NO_DATA, isPending: true }), "loading");
+  assert.equal(hold({ ...NO_DATA, isError: true }), "unreadable");
 });
 
 test("pickOntoHold: the data arms, from a list that answered", () => {

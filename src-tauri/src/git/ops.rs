@@ -1002,8 +1002,13 @@ fn reset_tree_rollback_failed(oid: &str) -> String {
     )
 }
 
+/// The rollback failed and the ref couldn't be re-read, so no commit is named.
+const RESET_TREE_ROLLBACK_UNREAD: &str =
+    "Updating your files failed, and the branch couldn't be moved back.";
+
 // KEEP IN STEP: the rollback family's "it now points at" and `refuse_if_switched`'s
-// "your files were not updated" apply to all three tip refusals below.
+// "your files were not updated" apply to these tip refusals; unread-tip rollback
+// outcomes follow `roll_back_reset`'s per-outcome leads, hint and error-detail ordering.
 /// The tip moved again after the reset's swap, so the other process's commit stays.
 fn reset_tip_moved(label: &str, now: &str) -> String {
     format!(
@@ -1019,17 +1024,31 @@ fn reset_tip_deleted(label: &str) -> String {
     )
 }
 
-/// The tip is unreadable after the reset's swap, so only the reset's target is named.
-fn reset_tip_unread(label: &str, target: &str, err: &AppError) -> String {
-    format!(
-        "Couldn't confirm where {label} points after the reset moved it to {}, so your files were not updated.\n{err}",
-        crate::git::commit::short_oid(target)
-    )
+/// The unread-tip refusal follows `roll_back_reset`'s per-outcome leads, hint and
+/// error-detail ordering so the user knows whether the move-back succeeded.
+fn reset_tip_unread(
+    label: &str,
+    target: &str,
+    err: &AppError,
+    rolled: crate::git::commit::RolledBack,
+) -> String {
+    use crate::git::commit::RolledBack;
+    let short = crate::git::commit::short_oid(target);
+    match rolled {
+        RolledBack::Restored => format!(
+            "Couldn't confirm where {label} points after the reset moved it, so it was moved back and your files were not updated.\n{err}"
+        ),
+        RolledBack::Lost => format!(
+            "Couldn't confirm where {label} points after the reset moved it, and another Git process moved it before it could be moved back. Your files were not updated. {SWITCH_ROLLBACK_HINT}\n{err}"
+        ),
+        RolledBack::Stuck(why) => format!(
+            "Couldn't confirm where {label} points after the reset moved it, and it couldn't be moved back: it now points at {short}. Your files were not updated. {SWITCH_ROLLBACK_HINT}\n{err}\n{why}"
+        ),
+        RolledBack::Unread(why) => format!(
+            "Couldn't confirm where {label} points after the reset moved it to {short}, and it couldn't be moved back. Your files were not updated. {SWITCH_ROLLBACK_HINT}\n{err}\n{why}"
+        ),
+    }
 }
-
-/// The rollback failed and the ref couldn't be re-read, so no commit is named.
-const RESET_TREE_ROLLBACK_UNREAD: &str =
-    "Updating your files failed, and the branch couldn't be moved back.";
 
 #[cfg(test)]
 tokio::task_local! {
@@ -1178,7 +1197,10 @@ pub(crate) async fn git_reset_core_expecting(
         Ok(Some(now)) if now == peeled => None,
         Ok(Some(now)) => Some(reset_tip_moved(cas.label(), &now)),
         Ok(None) => Some(reset_tip_deleted(cas.label())),
-        Err(e) => Some(reset_tip_unread(cas.label(), &peeled, &e)),
+        Err(e) => {
+            let rolled = cas.roll_back(&repo_path, old.as_deref(), Some(&peeled)).await;
+            Some(reset_tip_unread(cas.label(), &peeled, &e, rolled))
+        }
     };
     if let Some(stderr) = tip_refusal {
         return Err(AppError::Git { code: 1, stderr });
@@ -7978,6 +8000,37 @@ mod tests {
                 assert_eq!(stderr, RESET_BRANCH_SWITCHED, "{case}")
             }
             other => panic!("{case}: expected the branch-switched refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_tip_unread_wording_matches_the_rollback_outcome() {
+        use crate::git::commit::RolledBack;
+        let err = AppError::Timeout(30);
+        for label in ["main", "HEAD"] {
+            let restored = format!(
+                "Couldn't confirm where {label} points after the reset moved it, so it was moved back and your files were not updated.\ngit operation timed out after 30s"
+            );
+            let lost = format!(
+                "Couldn't confirm where {label} points after the reset moved it, and another Git process moved it before it could be moved back. Your files were not updated. Check the branch in a terminal; the reflog has every tip.\ngit operation timed out after 30s"
+            );
+            let stuck = format!(
+                "Couldn't confirm where {label} points after the reset moved it, and it couldn't be moved back: it now points at 1234567. Your files were not updated. Check the branch in a terminal; the reflog has every tip.\ngit operation timed out after 30s\nref lock held"
+            );
+            let unread = format!(
+                "Couldn't confirm where {label} points after the reset moved it to 1234567, and it couldn't be moved back. Your files were not updated. Check the branch in a terminal; the reflog has every tip.\ngit operation timed out after 30s\nrollback timed out"
+            );
+            for (rolled, expected) in [
+                (RolledBack::Restored, restored),
+                (RolledBack::Lost, lost),
+                (RolledBack::Stuck("ref lock held".into()), stuck),
+                (RolledBack::Unread("rollback timed out".into()), unread),
+            ] {
+                assert_eq!(
+                    reset_tip_unread(label, "1234567890abcdef", &err, rolled),
+                    expected
+                );
+            }
         }
     }
 
