@@ -106,7 +106,7 @@ const DELETION_COPY = {
   },
 } as const;
 
-// src-tauri/src/git/conflict.rs's conflict_rel_path opens refusals with this.
+// src-tauri/src/git/conflict.rs's conflict_path_refusal opens path-gate refusals with this.
 // scripts/conflict-path-refusal.test.mjs pins both sides.
 const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
 

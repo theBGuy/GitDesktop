@@ -17,7 +17,7 @@ test("Rust conflict path refusals keep the pane's prefix", () => {
   assert.match(
     rust,
     /"Can't resolve the conflict in \{shown\}/,
-    "Rust conflict_rel_path must keep its refusal's opening format literal",
+    "Rust conflict_path_refusal must keep its refusal's opening format literal",
   );
 });
 
