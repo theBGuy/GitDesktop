@@ -40,8 +40,9 @@ import type {
   ReviewMode,
 } from "@/lib/ai/types";
 import { track } from "@/lib/analytics";
+import { createRunReads } from "@/lib/automations/run-reads";
 import { presentError } from "@/lib/error-summary";
-import { readRepoInstructions } from "@/lib/git/api";
+import { forgePrExternalReviews, readRepoInstructions } from "@/lib/git/api";
 import { repoIdentity } from "@/lib/git/repo-identity";
 import type { DiffStatEntry, RemoteLens } from "@/lib/git/types";
 import { emitNotification } from "@/lib/notifications/emit";
@@ -648,10 +649,18 @@ export async function startReview(
     // reaches the distill; streamAi reassigns `control.abort` once the stream opens.
     const preAbort = new AbortController();
     control.abort = preAbort;
+    // The harvests' shared review-activity read. Each resolver calls it only past its
+    // own remote/number/provider gates, with the same origin-pinned arguments its
+    // inline read would use.
+    const reads = createRunReads();
+    const reviews = () =>
+      reads.share("extrev", () =>
+        forgePrExternalReviews(target.repoPath, Number(target.ref), "origin"),
+      );
     // Third-party AI findings, GitDesktop's own prior comments, AND the author's "Notes
     // for reviewers" — all best-effort, remote-only soft context, resolved concurrently
-    // (independent harvests of the PR's review activity). Kept as separate fetches; a
-    // shared-fetch dedup is a later efficiency win.
+    // over ONE shared read of the PR's review activity. The PR panel's external-reviews
+    // and reviewer-notes queries still read it under two keys of their own.
     //
     // The doc-surface roster and the repo's instructions file ride along here: both
     // read the local working tree — whatever branch is checked out (see
@@ -671,7 +680,7 @@ export async function startReview(
         context.headSha,
         ignoreExternal,
         context.provider,
-        { budgetChars: budgetProfile.externalCharBudget },
+        { budgetChars: budgetProfile.externalCharBudget, reviews },
       ),
       resolveOwnCommentsContext(
         target.repoPath,
@@ -691,6 +700,7 @@ export async function startReview(
           onStatus: (s) => {
             if (!control.cancelled) patch({ status: s });
           },
+          reviews,
         },
       ),
       // Notes are lifted from the marker comment the Create-PR dialog (or an MCP client)
@@ -701,7 +711,12 @@ export async function startReview(
       /^\d+$/.test(target.ref) &&
       context.provider !== "bitbucket" &&
       !ignoreNotes
-        ? resolveReviewerNotesContext(target.repoPath, Number(target.ref))
+        ? resolveReviewerNotesContext(
+            target.repoPath,
+            Number(target.ref),
+            undefined,
+            reviews,
+          )
         : Promise.resolve({}),
       resolveDocSurfacesContext(target.repoPath),
       // Best-effort like every other read here: a missing or unreadable

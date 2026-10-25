@@ -17,13 +17,17 @@ import {
   type TagPushState,
   tagPushKey,
 } from "./pr-writes";
+import { recheckRunsAfterPush } from "./push-writes";
 
 /** Pushes a tag to origin, so it keeps the default and pauses offline. Keyed per
  *  repo with the tag in the variables: {@link usePendingTagPushes} reads every
- *  push in flight, whichever mount fired it. */
+ *  push in flight, whichever mount fired it. A tag push can start runs, so it
+ *  arms the delayed run recheck like a branch push. */
 export function usePushTag(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(repo, (name: string) => api.gitPushTag(repo, name), {
     identity: tagPushKey(repo),
+    onSuccess: () => recheckRunsAfterPush(queryClient, repo),
   });
 }
 

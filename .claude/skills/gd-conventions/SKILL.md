@@ -683,6 +683,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
   and hot working-tree ops keep their narrow `invalidate`. The window-focus
   pass refetches only active queries that are stale by their own staleTime
   or errored, never a blanket invalidation.
+- **Push-like run recheck** — any mutation that makes the forge receive a push
+  of commits (push, tag push, PR create, resolve push, origin-lens forge merge,
+  update-branch, repo publish) arms `recheckRunsAfterPush`
+  (`queries/push-writes.ts`) on success: the forge creates a push's runs a few
+  seconds after the settle-time invalidation has already read. Deletion pushes
+  and server-side refs at existing commits are exempt; a remote-branch delete
+  instead schedules `recheckPrListAfterRemoteDelete` with keys its call site
+  builds (GitHub closes a head-deleted PR asynchronously). Guard:
+  `scripts/push-recheck-family.test.mjs`, keyed on the push-family api callees.
+- **Run-scoped forge reads** — an automation or review run shares its
+  identical forge reads through `createRunReads`
+  (`src/lib/automations/run-reads.ts`): single-flight, rejection-evicting, and
+  entries the run's own delivery can change are evicted after each action that
+  ran. Consumers never mutate a shared result.
 - **Mutation identity pinning** — every mutation is constructed through
   `useMutation` from `@/lib/started-mutation`, never react-query's own (guard:
   `raw-react-query-mutation`, with `started-mutation-present` pinning the

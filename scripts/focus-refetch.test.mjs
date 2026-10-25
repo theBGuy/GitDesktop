@@ -11,7 +11,9 @@
 // read's cached shape to the other's `select`.
 //
 // Also pins push-writes.ts `recheckRunsAfterPush`: one run-list recheck per repo,
-// 8 s after the last push, skipping a list paged past page 1.
+// 8 s after the last push, skipping a list paged past page 1; and its sibling
+// `recheckPrListAfterRemoteDelete`: one PR-list re-read per repo, re-armed by a
+// later delete rather than stacked.
 //
 // The imports are DYNAMIC because this file pulls @tanstack/react-query, which the
 // CI `guards` job (no install step) can't resolve: unresolved deps skip every test
@@ -39,6 +41,8 @@ const {
   refetchRepoQueriesOnFocus,
   recheckRunsAfterPush,
   PUSH_RUN_RECHECK_MS,
+  recheckPrListAfterRemoteDelete,
+  REMOTE_DELETE_PR_RECHECK_MS,
 } = deps ?? {};
 
 const NEEDS_DEPS =
@@ -475,4 +479,54 @@ test("two repos each keep their own recheck", (t) => {
   assert.equal(b.marked("notify", "main"), true, "repo d's recheck was lost");
   assert.equal(a.calls.length, 4);
   assert.equal(b.calls.length, 4);
+});
+
+// ── Remote-branch delete: the one delayed PR-list re-read ──────────────────
+
+/** Two deletes 5 s apart must fire ONE invalidation pass, of the second call's
+ *  keys, `REMOTE_DELETE_PR_RECHECK_MS` after it. Throws on any other shape. */
+function assertPrListRecheckReArms(t, recheck, repo) {
+  const qc = new QueryClient();
+  t.after(() => qc.clear());
+  const calls = [];
+  qc.invalidateQueries = (filters) => {
+    calls.push(filters.queryKey);
+    return Promise.resolve();
+  };
+  recheck(qc, repo, [["repo", repo, "first"]]);
+  t.mock.timers.tick(5_000);
+  recheck(qc, repo, [
+    ["repo", repo, "pr-list"],
+    ["repo", repo, "prs"],
+  ]);
+  t.mock.timers.tick(REMOTE_DELETE_PR_RECHECK_MS - 1);
+  assert.deepEqual(calls, [], "the first delete's timer still fired");
+  t.mock.timers.tick(1);
+  assert.deepEqual(calls, [
+    ["repo", repo, "pr-list"],
+    ["repo", repo, "prs"],
+  ]);
+  t.mock.timers.tick(60_000);
+  assert.equal(calls.length, 2, "a second re-read fired");
+}
+
+test("two remote deletes within 8 s fire ONE PR-list re-read, of the latest keys", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  assertPrListRecheckReArms(t, recheckPrListAfterRemoteDelete, "C:/del-a");
+});
+
+test("NEGATIVE CONTROL: a stacking PR-list re-read fails the re-arm pin", (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // The helper with its clearTimeout re-arm reverted: every call keeps its timer.
+  const stacking = (qc, _repo, keys) => {
+    setTimeout(() => {
+      for (const queryKey of keys) void qc.invalidateQueries({ queryKey });
+    }, REMOTE_DELETE_PR_RECHECK_MS);
+  };
+  assert.throws(
+    () => assertPrListRecheckReArms(t, stacking, "C:/del-b"),
+    assert.AssertionError,
+  );
 });

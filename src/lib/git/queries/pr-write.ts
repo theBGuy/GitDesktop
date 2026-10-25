@@ -16,6 +16,7 @@ import {
   pendingMutationEntries,
   prWriteKey,
 } from "./pr-writes";
+import { recheckRunsAfterPush } from "./push-writes";
 
 export function useEditPr(repo: string, lens: RemoteLens) {
   return useRepoMutation(
@@ -159,7 +160,10 @@ export function usePendingLabelEdit(
   return useMutationCacheSnapshot(select, NO_PENDING_LABEL_EDIT);
 }
 
+/** Every provider pushes the head branch before opening the PR, so a create arms
+ *  the delayed run recheck like a push. */
 export function useCreatePr(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -197,6 +201,7 @@ export function useCreatePr(repo: string) {
       // controls would read the pending create as busy. `args.lens` is per-call,
       // already frozen in the vars.
       identity: ["create-pr", repo],
+      onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     },
   );
 }

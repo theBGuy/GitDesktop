@@ -1,5 +1,5 @@
 import { forgePrExternalReviews, forgePrView } from "@/lib/git/api";
-import type { PrDetails } from "@/lib/git/types";
+import type { ExternalReviewsOut, PrDetails } from "@/lib/git/types";
 
 /**
  * Lifts the author's "Notes for reviewers" from the newest conversation comment
@@ -43,11 +43,13 @@ export interface ReviewerNotesContext {
 
 /** `prView` lets a caller that already reads the PR share that one read; it must be
  *  this PR's origin read, since the author gate reads `pr.author` from it. The
- *  resolver awaits it inside its own catch, so a rejection still yields `{}`. */
+ *  resolver awaits it inside its own catch, so a rejection still yields `{}`.
+ *  `reviews` shares the run's origin review-activity read the same way. */
 export async function resolveReviewerNotesContext(
   repoPath: string,
   prNumber: number,
   prView?: Promise<PrDetails>,
+  reviews?: () => Promise<ExternalReviewsOut>,
 ): Promise<ReviewerNotesContext> {
   if (!Number.isInteger(prNumber) || prNumber <= 0) {
     // Never leave a passed read unhandled on the early return.
@@ -61,15 +63,17 @@ export async function resolveReviewerNotesContext(
   try {
     // Origin-pinned, matching `own-context.ts`: notes belong to the fork's own PR.
     // The PR fetch gives us the author login to gate the lift on (see module doc).
-    const [reviews, pr] = await Promise.all([
-      forgePrExternalReviews(repoPath, prNumber, "origin"),
+    const [read, pr] = await Promise.all([
+      reviews
+        ? reviews()
+        : forgePrExternalReviews(repoPath, prNumber, "origin"),
       prView ?? forgePrView(repoPath, prNumber, "origin"),
     ]);
     // Disclosed only beside lifted notes. A partial read with NO notes found stays
     // silent by design: notes are author instructions, and an "unseen notes may
     // exist" line gives the model nothing to act on and no section to carry it.
-    items = reviews.items;
-    truncated = reviews.itemsTruncated;
+    items = read.items;
+    truncated = read.itemsTruncated;
     prAuthor = pr.author;
   } catch {
     return {};

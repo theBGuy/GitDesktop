@@ -137,6 +137,7 @@ import {
   prApprovalsOptions,
   prDiffOptions,
   prUpdateBranchKeys,
+  recheckRunsAfterPush,
   repoKeys,
   TRIAGE_ACCESS_ITEM_REASON,
   triageAccessReason,
@@ -1529,6 +1530,9 @@ export function RemotePrView({
           queryClient.invalidateQueries({ queryKey }),
         ),
       );
+      // A job slower than the accept-time run recheck starts the head's runs after
+      // that recheck fired, so the observed move arms it again (one timer per repo).
+      recheckRunsAfterPush(queryClient, repoPath);
       // A long update spends the mergeability ladder against the UNKNOWN that GitHub
       // reports throughout, so the refetch above would land on a gave-up arm. The head
       // just moved: the question is new again, and the ladder has to start over with it.

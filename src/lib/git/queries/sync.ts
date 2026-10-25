@@ -29,6 +29,7 @@ export {
   branchPushLabel,
   nextPushLatch,
   type PushVars,
+  recheckRunsAfterPush,
 } from "./push-writes";
 
 /** Fetch, pull and switch here are `localOnly`: they move HEAD, refs or the working

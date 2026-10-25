@@ -2,8 +2,10 @@
  * The import-free pieces of the branch-push bookkeeping: the key every push is
  * filed under, the variables it carries, how a pending push reads back out of
  * the mutation cache, the label a branch row's spinner shows for it, the reasons
- * a push puts on the other controls it holds, the HEAD-push latch, and the one
- * delayed run-list recheck a successful push schedules.
+ * a push puts on the other controls it holds, the HEAD-push latch, the one
+ * delayed run-list recheck armed on a successful push-like write or on the
+ * observed head move, and the delayed PR-list re-read a remote-branch delete
+ * schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
  * file, and `scripts/push-writes.test.mjs` loads it straight from `src/` under
@@ -148,19 +150,20 @@ export function nextPushLatch(
   return { ...Object.fromEntries(kept), ...Object.fromEntries(added) };
 }
 
-/** How long after a push succeeds its runs are read once more: the forge creates
- *  a push's runs a few seconds after it lands, so the settle's own read can miss
- *  them. */
+/** How long after a push-like write its runs are read once more: the forge
+ *  creates a push's runs a few seconds after it lands, so the settle's own read
+ *  can miss them. */
 export const PUSH_RUN_RECHECK_MS = 8_000;
 
-/** The one pending recheck per repo: a later push re-arms it, so repeat pushes
+/** The one pending recheck per repo: a later arm re-arms it, so repeat writes
  *  never stack timers. */
 const pendingRunRechecks = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** One delayed re-read of the push's own repo's run lists; only the observers
+/** One delayed re-read of the write's own repo's run lists; only the observers
  *  active then refetch. A paged list past its first page is skipped: no automatic
- *  refetch replays deep pages (actions.ts `useWorkflowRunPages`), and the settle's
- *  own invalidation already refreshed it. */
+ *  refetch replays deep pages (actions.ts `useWorkflowRunPages`), so it keeps its
+ *  last full read until something invalidates it (most arms' whole-repo settle, or
+ *  the panel's Refresh). */
 export function recheckRunsAfterPush(
   queryClient: QueryClient,
   repo: string,
@@ -181,5 +184,33 @@ export function recheckRunsAfterPush(
             ?.length ?? 0) <= 1,
       });
     }, PUSH_RUN_RECHECK_MS),
+  );
+}
+
+/** How long after a remote-branch delete the PR list is read once more: GitHub
+ *  closes a PR whose head branch is deleted asynchronously, so the settle's own
+ *  read can still show it open. */
+export const REMOTE_DELETE_PR_RECHECK_MS = 8_000;
+
+/** The one pending PR-list re-read per repo: a later delete re-arms it. */
+const pendingPrListRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** One delayed invalidation of exactly `keys` (the caller builds them: this file
+ *  stays import-free, so it spells no query keys). The caller owes the review-state
+ *  map with the PR list (usePrReviewState's co-invalidation contract); the CI and
+ *  mergeability maps key on a digest of the list's rows and re-key on their own. */
+export function recheckPrListAfterRemoteDelete(
+  queryClient: QueryClient,
+  repo: string,
+  keys: readonly (readonly unknown[])[],
+): void {
+  clearTimeout(pendingPrListRechecks.get(repo));
+  pendingPrListRechecks.set(
+    repo,
+    setTimeout(() => {
+      pendingPrListRechecks.delete(repo);
+      for (const queryKey of keys)
+        void queryClient.invalidateQueries({ queryKey });
+    }, REMOTE_DELETE_PR_RECHECK_MS),
   );
 }

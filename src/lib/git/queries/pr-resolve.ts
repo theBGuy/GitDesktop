@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
 import { useRepoMutation } from "./internal";
 import { localPrWriteKey, prWriteKey } from "./pr-writes";
+import { recheckRunsAfterPush } from "./push-writes";
 
 /** Merge a local PR in an isolated worktree. Keyed so the view's hold reads the
  *  cache, which outlives the view's own mount. */
@@ -78,8 +79,10 @@ export function useAbortLocalPrMerge(repo: string) {
 /** Merges the base into a remote PR's head branch in an isolated worktree, pushing the
  *  head when it comes out clean. Repo-wide invalidation is deliberate: a clean run moves
  *  the remote branch, so mergeability, the PR view and branch state all go stale.
- *  The variables name the PR, so the view holds each PR's resolve on its own. */
+ *  The variables name the PR, so the view holds each PR's resolve on its own. Only a
+ *  `pushed` outcome sent anything, so only it arms the run recheck. */
 export function useMergeRemotePr(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { number: number; base: string; head: string; message?: string }) =>
@@ -91,12 +94,19 @@ export function useMergeRemotePr(repo: string, lens: RemoteLens) {
         args.message ?? null,
         lens,
       ),
-    { identity: prWriteKey("resolve-merge", repo) },
+    {
+      identity: prWriteKey("resolve-merge", repo),
+      onSuccess: (data) => {
+        if (data.status === "pushed") recheckRunsAfterPush(queryClient, repo);
+      },
+    },
   );
 }
 
-/** Commits a paused remote-PR resolution and pushes the head branch. */
+/** Commits a paused remote-PR resolution and pushes the head branch; the run
+ *  recheck gates on the outcome like {@link useMergeRemotePr}'s. */
 export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
@@ -113,6 +123,11 @@ export function useFinishRemotePrResolve(repo: string, lens: RemoteLens) {
         args.message ?? null,
         lens,
       ),
+    {
+      onSuccess: (data) => {
+        if (data.status === "pushed") recheckRunsAfterPush(queryClient, repo);
+      },
+    },
   );
 }
 

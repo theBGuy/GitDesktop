@@ -37,6 +37,7 @@ import {
   readPendingPrWrite,
 } from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
+import { recheckRunsAfterPush } from "./push-writes";
 import {
   type ApproveRunVars,
   NO_PENDING_RUN_WRITES,
@@ -514,17 +515,27 @@ export function useMergePr(repo: string) {
         .catch(() => undefined);
       return outcome;
     },
-    { identity: prWriteKey("merge", repo) },
+    {
+      identity: prWriteKey("merge", repo),
+      // A landed merge pushes the base branch, whose runs start after the settle's
+      // read. The run lists read origin, so an upstream-lens merge's runs land
+      // outside them; a queued merge has landed nothing yet.
+      onSuccess: (data, args) => {
+        if (args.lens === "origin" && !data.queued)
+          recheckRunsAfterPush(queryClient, repo);
+      },
+    },
   );
 }
 
 /** What an update-branch makes stale on the PR side: the PR subtree (details and its
  *  commits/files/checks rollup, mergeability, diff, review threads), the rows that
- *  carry PR state, the list's merge-status chips (its own mergeability map, which
- *  neither prefix matches), and the review-state map those rows group by (the new
- *  commit moves this PR's `updatedAt`). Exported because the set has to run TWICE:
- *  once when the forge accepts the job, and again once the poll sees the head
- *  actually move, since the first pass reads a head that has not shifted yet. */
+ *  carry PR state, the list's CI badges and merge-status chips (their own `pr-ci` and
+ *  mergeability maps: siblings of `pr`, which no prefix here matches), and the
+ *  review-state map those rows group by (the new commit moves this PR's `updatedAt`).
+ *  Exported because the set has to run TWICE: once when the forge accepts the job,
+ *  and again once the poll sees the head actually move, since the first pass reads a
+ *  head that has not shifted yet. */
 export const prUpdateBranchKeys = (
   repo: string,
   number: number,
@@ -533,6 +544,7 @@ export const prUpdateBranchKeys = (
   [
     ["repo", repo, "pr", lens, number],
     [...repoKeys.prList(repo), lens],
+    [...repoKeys.prCi(repo), lens],
     [...repoKeys.prMergeability(repo), lens],
     [...repoKeys.prReviewState(repo), lens],
     ["repo", repo, "prs", lens],
@@ -545,13 +557,16 @@ export const prUpdateBranchKeys = (
  *  narrow: those keys plus the divergence key by name (it is a sibling of the PR
  *  subtree, not a child). Keyed off the args like the label mutation, which
  *  `useRepoMutation`'s static option can't do. The variables name the PR, so the
- *  view holds each PR's update on its own. */
+ *  view holds each PR's update on its own. The update is a server-side push to the
+ *  head, so acceptance arms the run recheck; the caller arms it again on the head
+ *  move, for a job that lands later than the recheck. */
 export function usePrUpdateBranch(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey: prWriteKey("update-branch", repo),
     mutationFn: (args: { number: number; rebase: boolean; lens: RemoteLens }) =>
       api.ghPrUpdateBranch(repo, args.number, args.rebase, args.lens),
+    onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     onSettled: (_d, _e, args) => {
       const keys: QueryKey[] = [
         ...prUpdateBranchKeys(repo, args.number, args.lens),
