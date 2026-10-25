@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { withForm } from "@/lib/form";
 import {
   bindingKey,
+  consumeRequiresDispatch,
   eventToBinding,
   formatBinding,
   hasModifier,
@@ -24,8 +25,8 @@ import { settingsFormOpts } from "./settings-form";
 /** Keys refused without a modifier because they activate whatever has focus,
  *  on every surface. Space is deliberately NOT here — binding a single key to
  *  stage or select is the primary ask — so it binds, and the note on assignment
- *  carries its cost: a live bound action takes the keypress a focused button or
- *  checkbox would have used, and page scroll with it. */
+ *  carries its cost: a live bound action takes that keypress; a disabled one
+ *  leaves it. */
 const ACTIVATION_KEYS = new Set(["enter"]);
 
 /** Keys that scroll or move a selection on their own. A bare binding on one
@@ -53,17 +54,19 @@ function isBindableCombo(binding: string): boolean {
 }
 
 /** What accepting a modifier-less binding costs. The menu-and-picker clause is
- *  true only of character keys, which is all typeahead consumes; Space earns a
- *  longer line, being the one bindable key whose native job is activating the
- *  focused control, so a live action takes that keypress instead. */
+ *  true of what typeahead consumes: character keys and Space. Bare Space earns
+ *  a longer line, being the one bindable key whose native job is activating the
+ *  focused control: a live action takes that keypress, a disabled one leaves it
+ *  ({@link consumeRequiresDispatch}). Shift+Space has no such carve-out. */
 function consequenceNote(binding: string): string {
+  if (consumeRequiresDispatch(binding))
+    return `${formatBinding(binding)} stays quiet while you're typing or in a menu or picker, and on rows, cards and controls that use it themselves (a file in Changes stages, a board card peeks, a checkbox or switch toggles, a tab opens, a linked-issue chip flips its keyword). Elsewhere it runs the shortcut whenever the shortcut can run, taking the press from a focused button; when it can't, Space presses the button or scrolls as usual.`;
   const zones = isTypeaheadKey(binding)
     ? "while you're typing or in a menu or picker"
     : "while you're typing";
-  const quiet = `${formatBinding(binding)} stays quiet ${zones}, and fires anywhere else`;
-  return bindingKey(binding) === "space"
-    ? `${quiet} — including on a focused button, where it replaces the button's own Space press.`
-    : `${quiet}.`;
+  if (bindingKey(binding) === "space")
+    return `${formatBinding(binding)} stays quiet ${zones}, and on rows, cards and controls that use Space themselves (a checkbox or switch toggles, a tab opens, a linked-issue chip flips its keyword, a board card peeks). Anywhere else it fires, including on a focused button, where it replaces the button's own Space press.`;
+  return `${formatBinding(binding)} stays quiet ${zones}, and fires anywhere else.`;
 }
 
 /** Why a refused key can't stand alone. The two sets collide with different

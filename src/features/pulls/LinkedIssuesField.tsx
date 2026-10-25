@@ -6,6 +6,7 @@ import { usePanelPortalContainer } from "@/components/panel-portal";
 import { Button } from "@/components/ui/button";
 import { IssuePicker, StateIcon } from "@/features/issues/IssueRelations";
 import type { RemoteLens } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import type { JiraLink } from "@/lib/jira/store";
 import { JiraIssuePicker, JiraStatusIcon } from "./JiraIssuePicker";
 
@@ -153,6 +154,9 @@ function NativeLinkedIssuesField({
   }
 
   function onChipKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {
+    // Chords pass through untouched: a chord belongs to whatever owns it (the
+    // create and edit dialogs' submit), never to the focused chip's keyword.
+    if (hasChordModifier(e)) return;
     const chip = ordered[index];
     if (e.key === "ArrowLeft") {
       e.preventDefault();

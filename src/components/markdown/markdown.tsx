@@ -24,6 +24,7 @@ import { diffLang } from "@/features/diff/diff-lang";
 import { forgeRepoUrl } from "@/lib/git/api";
 import { issueDetailsOptions } from "@/lib/git/queries";
 import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { createCardLatch } from "@/lib/hover-card-latch";
 import {
   CARD_CLOSE_DELAY,
@@ -925,6 +926,7 @@ export function Markdown({
   /** The image branch's keyboard twin — the anchors above are real links and
    *  already answer Enter themselves. */
   function onKeyDown(e: React.KeyboardEvent) {
+    if (hasChordModifier(e)) return;
     if (e.key !== "Enter" && e.key !== " ") return;
     const img = (e.target as HTMLElement).closest("img");
     if (!img || !isLightboxImage(img)) return;

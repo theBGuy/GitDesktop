@@ -67,6 +67,7 @@ import { ISSUE_SWITCH_LOADING_REASON } from "@/features/issues/RemoteIssueViewPa
 import { presentError } from "@/lib/error-summary";
 import { type PendingRepoWrite, pendingWriteMatching } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { formatHmDelta, isValidJiraDuration } from "@/lib/jira/duration";
 import {
@@ -768,7 +769,10 @@ export function JiraLabelsPopover({
                         onClick={() => toggle(name, !checked)}
                         onKeyDown={(e) => {
                           if (onRowKeyDown(e, rowIndex)) return;
-                          if (e.key === " " || e.key === "Enter") {
+                          if (
+                            (e.key === " " || e.key === "Enter") &&
+                            !hasChordModifier(e)
+                          ) {
                             e.preventDefault();
                             toggle(name, !checked);
                           }
