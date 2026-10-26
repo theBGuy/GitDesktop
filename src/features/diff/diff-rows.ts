@@ -85,8 +85,9 @@ export function hunkHeaderExtendData(
   return { oldFile, newFile };
 }
 
-/** Where a hunk's Stage/Unstage + Discard buttons live: overlaid on its `@@`
- *  row, in its inline header, in the pane-top bar, or nowhere. */
+/** Where a hunk's buttons (Stage + Discard, or Unstage on a staged diff) live:
+ *  overlaid on its `@@` row, in its inline header, in the pane-top bar, or
+ *  nowhere. */
 export type HunkHost = "row" | "inline" | "top" | "none";
 
 /**

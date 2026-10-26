@@ -17,6 +17,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -74,7 +75,7 @@ import {
   changesSince,
   contentBuildGate,
   contentReadsKey,
-  type PaintedInputs,
+  type Painted,
   paintedAfter,
 } from "./file-content-gate";
 import { HUNK_SCOPED_MAX_LINES, hunkScopedProcessAST } from "./gap-isolation";
@@ -542,28 +543,34 @@ export function useFileContent(
   const pending = wantContent && (!oldSettled || !newSettled);
 
   // The inputs of the build on screen, and the one whose hold ran its bound.
-  const [painted, setPainted] = useState<PaintedInputs | null>(null);
-  const [expiredFor, setExpiredFor] = useState<PaintedInputs | null>(null);
+  const [painted, setPainted] = useState<Painted | null>(null);
+  const [expiredFor, setExpiredFor] = useState<Painted | null>(null);
   const now = {
     reads: contentReadsKey(filePath, oldRev, newRev),
     text: diffText,
     oldText,
     newText,
   };
+  const oldFetching = oldRev !== undefined && oldQ.isFetching;
+  const newFetching = newRev !== undefined && newQ.isFetching;
   const decision = contentBuildGate({
     wantContent,
     oldSettled,
     newSettled,
-    oldFetching: oldRev !== undefined && oldQ.isFetching,
-    newFetching: newRev !== undefined && newQ.isFetching,
+    oldFetching,
+    newFetching,
     ...changesSince(painted, now),
     boundExpired: painted !== null && expiredFor === painted,
     frozen,
   });
-  const nextPainted = paintedAfter(painted, decision, pending, now);
+  const nextPainted = paintedAfter(painted, decision, pending, now, {
+    wantContent,
+    inFlight: oldFetching || newFetching,
+  });
   if (nextPainted !== painted) setPainted(nextPainted);
   const hold = decision === "hold-previous";
-  // The bound runs from the hold's start: `painted` moves only at a build.
+  // The bound runs from the hold's start: no render during a hold moves
+  // `painted`.
   useEffect(() => {
     if (!hold || frozen || painted === null) return;
     const bound = window.setTimeout(
@@ -1464,8 +1471,30 @@ export function DiffContent({
   // A refetch can take the toolbar away (the file emptied, a mode-only change
   // left), unmounting the control that held focus: it lands on the arm that
   // replaced it.
-  const armLandingRef = useRef<HTMLDivElement>(null);
+  const armLandingRef = useRef<HTMLDivElement | null>(null);
   useFocusOnControlsSwap(showsToolbar, armLandingRef);
+  // Bringing the toolbar back unmounts that arm: only focus it held as it left
+  // (read in its ref cleanup, which runs before removal) lands on the toolbar's
+  // own landing, so a cold load or another file's swap never takes focus.
+  const armHeldFocus = useRef(false);
+  const armRef = useCallback((node: HTMLDivElement | null) => {
+    armLandingRef.current = node;
+    return () => {
+      armHeldFocus.current =
+        node !== null && node.contains(document.activeElement);
+      armLandingRef.current = null;
+    };
+  }, []);
+  const toolbarWasShown = useRef(showsToolbar);
+  useLayoutEffect(() => {
+    const was = toolbarWasShown.current;
+    toolbarWasShown.current = showsToolbar;
+    if (was || !showsToolbar) return;
+    const owned = armHeldFocus.current;
+    armHeldFocus.current = false;
+    if (owned && document.activeElement === document.body)
+      controlsRef.current?.focus({ preventScroll: true });
+  }, [showsToolbar, controlsRef]);
   // False only inside a held or preparing diff-pane slot, which `inert` can't
   // shield from global hotkeys.
   const { interactive } = useDiffPaneHold();
@@ -1528,12 +1557,14 @@ export function DiffContent({
     />
   );
   // The binary, image, empty and header-only arms draw retained data too, so
-  // they carry the same notice as the text diff. A placeholder arm is also the
-  // silent landing for focus its toolbar took with it; the image arm isn't, as
-  // a focusable ancestor would take every click into its scroller.
+  // they carry the same notice as the text diff. A placeholder arm is the
+  // focus landing for a toolbar swap (not the image arm: a focusable ancestor
+  // would take every click into its scroller), keyed apart from the toolbar
+  // arm, whose reuse of the node would drop its tabIndex under held focus.
   const withNotice = (arm: ReactNode, landing = true) => (
     <div
-      ref={landing ? armLandingRef : undefined}
+      key={landing ? "arm-landing" : "arm-image"}
+      ref={landing ? armRef : undefined}
       tabIndex={landing ? -1 : undefined}
       className="flex h-full flex-col outline-none"
     >

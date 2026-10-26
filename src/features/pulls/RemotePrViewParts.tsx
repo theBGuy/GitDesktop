@@ -35,6 +35,7 @@ import {
   type SlotRead,
   useFileSlots,
   useSlotRead,
+  useSlotRetained,
   useSlotWidget,
 } from "@/features/diff/file-slot";
 import { FileRowActions } from "@/features/history/FileRowActions";
@@ -55,7 +56,6 @@ import type {
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import type { ReviewDraft } from "@/lib/pulls/review-drafts";
-import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { DraftCommentCard } from "./PendingReviewBar";
 import { ReviewThreadCard, type SuggestionApply } from "./ReviewThreads";
@@ -273,6 +273,7 @@ export function PrFilesPane({
             view.kind === "file" ? (
               <PrFileDiffSlot
                 path={view.file}
+                entity={view.entity}
                 fileDiff={fileDiff}
                 isPending={isPending}
                 isError={isError}
@@ -312,6 +313,7 @@ export function PrFilesPane({
  *  the next one's. */
 function PrFileDiffSlot({
   path,
+  entity,
   fileDiff,
   isPending,
   isError,
@@ -337,6 +339,8 @@ function PrFileDiffSlot({
   reportRead,
 }: {
   path: string;
+  /** The pull request (lens and number) this slot's view belongs to. */
+  entity: string;
   /** The parent's diff for ITS selected file; absent with no patch loaded. */
   fileDiff: ComponentProps<typeof DiffContent>["data"];
   isPending: boolean;
@@ -362,10 +366,15 @@ function PrFileDiffSlot({
   });
   // The parent builds the diff of its selected file; a held slot's file is
   // another section of the same in-memory patch, or failing a lookup, the diff
-  // it last showed.
+  // it showed for this file of this pull request. A slot with no diff of its
+  // own shows its read's pending or failed state, never another file's.
   const own =
     fileDiff !== undefined && fileDiff.filePath === path ? fileDiff : undefined;
-  const shown = useRetained(own, own !== undefined);
+  const shown = useSlotRetained(
+    entity,
+    path,
+    dataIsPlaceholder ? undefined : own,
+  );
   const section =
     fileDiff !== undefined && own === undefined
       ? fileDiffLookup?.(path)

@@ -250,7 +250,8 @@ const DISCARD_BODY: Record<
     `Reverts ${label} in ${path} to the staged version. Staged changes to this file are kept. This cannot be undone.`,
   remove: (label, path) =>
     `Removes ${label} from ${path}. This cannot be undone.`,
-  // Status hasn't answered: name no version rather than guess one.
+  // Status doesn't list the file (not loaded yet, or an answer without it):
+  // name no version rather than guess one.
   unknown: (label, path) =>
     `Reverts ${label} in ${path}. This cannot be undone.`,
 };
@@ -392,7 +393,7 @@ function WorkingTreeDiff({
       : liveEntry.staged != null
         ? "staged"
         : "commit";
-  // Declared with the hooks above the `!hunkMode` early return below.
+  // Declared with the hooks above the fallback's early return below.
   const shownDiscard = useRetained(discard);
   // The drag-selected lines to stage/unstage/discard — file-wide, since the
   // single whole-file view lets a selection span multiple hunks.
@@ -604,7 +605,8 @@ function WorkingTreeDiff({
   useFocusOnControlsSwap(previewOn, controlsRef);
   // Swapping between the staging view and the whole-file fallback (the file
   // turned empty, header-only or binary, or back) unmounts the toolbar control
-  // that held focus, and the arm that mounts is new to it: land on the sink.
+  // that held focus: land on the sink. A cold load's first hunk view swaps in
+  // from nothing too, so focus that was on <body> then lands there as well.
   useFocusOnControlsSwap(shownView !== null, focusSink);
   // A confirm pending when the slot is held is dropped, not just hidden: a
   // retarget back to this file must never reopen it.
@@ -623,11 +625,12 @@ function WorkingTreeDiff({
     clearSelection,
     interactive && hunkMode && selection !== null && !busy && discard === null,
   );
-  // Only this toolbar's own arm registers: outside hunk mode the fallback
-  // DiffSurface below renders the picker and registers for itself, and a child's
-  // effect runs first — so an ungated registration here would win the dispatch
-  // (newest handler) and open a toolbar that isn't on screen. The selection arm
-  // replaces the picker with its stage/discard buttons, hence `selection`.
+  // Only this toolbar's own arm registers: while no hunk view is shown, the
+  // fallback DiffSurface below renders the picker and registers for itself,
+  // and a child's effect runs first — so an ungated registration here would
+  // win the dispatch (newest handler) and open a toolbar that isn't on screen.
+  // The selection arm replaces the picker with its stage/discard buttons,
+  // hence `selection`.
   useHotkeyAction(
     "change-diff-language",
     () => setLangOpen(true),
@@ -1536,15 +1539,15 @@ function HunkHeaderBar({
 /**
  * The working-tree diff as ONE whole-file view: content-mode highlighting with
  * collapsible expand, drag the line-number gutter to select lines to stage
- * across the whole file, and per-hunk Stage/Unstage/Discard buttons with
- * one host per hunk (`hunkHost`): overlaid on the `@@` row while the
- * gap above it is collapsed, inline in the library's extend row once the line
- * above shows, or the pane-top bar for a hunk starting on line 1. The library's
- * selection manager drives the drag, but the selection comes from our own row
- * anchors (its range is single-sided by model, and in split can retarget across
- * panes); only a unified Shift drag, which its range already models exactly,
- * rides it. We paint the `gd-line-selected` highlight ourselves — its own class
- * doesn't apply in this standalone setup.
+ * across the whole file, and per-hunk buttons (Stage + Discard, or Unstage on
+ * a staged diff) with one host per hunk (`hunkHost`): overlaid on the `@@` row
+ * while the gap above it is collapsed, inline in the library's extend row once
+ * the line above shows, or the pane-top bar for a hunk starting on line 1. The
+ * library's selection manager drives the drag, but the selection comes from our
+ * own row anchors (its range is single-sided by model, and in split can
+ * retarget across panes); only a unified Shift drag, which its range already
+ * models exactly, rides it. We paint the `gd-line-selected` highlight
+ * ourselves — its own class doesn't apply in this standalone setup.
  */
 function StagingDiffView({
   repoPath,

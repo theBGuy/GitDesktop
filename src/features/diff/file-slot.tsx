@@ -17,6 +17,7 @@ import {
 import {
   expirePane,
   HOLD_BOUND_MS,
+  heldRetained,
   isHolding,
   type PaneHold,
   type PaneView,
@@ -292,4 +293,22 @@ export function useSlotWidget<W>(widget: W | undefined): W | undefined {
   const next = slotWidget(phase, widget, kept);
   if (next.keep !== kept) setKept(next.keep);
   return next.render;
+}
+
+/** A slot child's last `value` read for its file (`entity` + `path`), which
+ *  only a held slot of that same file gets back (`heldRetained`): for a value
+ *  that only the shown slot's read supplies. */
+export function useSlotRetained<T>(
+  entity: string,
+  path: string,
+  value: T | undefined,
+): T | undefined {
+  const { phase } = useDiffPaneHold();
+  const stamped = useMemo(
+    () => (value === undefined ? undefined : { entity, path, value }),
+    [entity, path, value],
+  );
+  const [kept, setKept] = useState(stamped);
+  if (stamped !== undefined && stamped !== kept) setKept(stamped);
+  return heldRetained(phase, { entity, path }, kept);
 }

@@ -93,8 +93,9 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
   const deferredPath = useDeferredValue(effectivePath);
   const isUntracked = (path: string) =>
     entries.find((e) => e.path === path)?.unstaged === "untracked";
-  // The file's diff swaps through the pane's two-slot hold; its poll is a
-  // background refetch, which never holds or unsettles the shown file.
+  // The file's diff swaps through the pane's two-slot hold. Its poll is a
+  // background refetch: it never holds or dims, and new text unsettles the
+  // shown file only for the rebuild's row gap.
   const diffTarget = deferredPath
     ? keyedPaneView(repoPath, repoPath, deferredPath, deferredPath)
     : placeholderPaneView(repoPath);

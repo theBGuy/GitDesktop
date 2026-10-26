@@ -509,9 +509,10 @@ the last list up, with a line above it saying it couldn't refresh.
   it first.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
   spanning as many hunks as you like, then stage or discard just those (or unstage
-  them, on a staged file's diff). In both the unified and the split view a drag picks
-  up every changed line it crosses, added and removed alike; hold Shift while dragging
-  to take one side of a change on its own.
+  them, on a staged file's diff). Discarded lines go back where a discarded hunk would:
+  to the staged version or the last commit, or out of an untracked file. In both the
+  unified and the split view a drag picks up every changed line it crosses, added and
+  removed alike; hold Shift while dragging to take one side of a change on its own.
   Hold {{key:mod}} while dragging and the new run joins the selection instead of
   replacing it; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's

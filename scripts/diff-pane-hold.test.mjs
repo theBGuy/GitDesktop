@@ -32,6 +32,7 @@ import {
   expirePane,
   filePaneView,
   HOLD_BOUND_MS,
+  heldRetained,
   isHolding,
   keyedPaneView,
   NO_STAGING_KEEP,
@@ -849,6 +850,65 @@ test("slot widget: a held slot keeps the widget it had while shown", () => {
   );
 });
 
+// ----------------------------------------------------------- held retained
+
+const DIFF_X = { filePath: "x.ts", text: "x" };
+const RETAINED_PR_1_X = { entity: "origin#1", path: "x.ts", value: DIFF_X };
+/** [phase, the slot's entity, its path, what it retained, what it may paint
+ *  from it]. */
+const RETAINED_CASES = [
+  ["held", "origin#1", "x.ts", RETAINED_PR_1_X, DIFF_X],
+  ["held", "origin#2", "x.ts", RETAINED_PR_1_X, undefined],
+  // Re-targeted in place to another file and back to this pull request: the
+  // copy is another file's, so DiffContent's path check would paint blank.
+  ["held", "origin#1", "z.ts", RETAINED_PR_1_X, undefined],
+  ["shown", "origin#1", "x.ts", RETAINED_PR_1_X, undefined],
+  ["preparing", "origin#1", "x.ts", RETAINED_PR_1_X, undefined],
+  ["held", "origin#1", "x.ts", undefined, undefined],
+];
+
+function checkRetained(retained) {
+  for (const [phase, entity, path, kept, expected] of RETAINED_CASES)
+    assert.equal(
+      retained(phase, { entity, path }, kept),
+      expected,
+      `${phase} ${entity} ${path}`,
+    );
+}
+
+test("held retained: only a held slot of the stamped entity and path paints its copy", () => {
+  checkRetained(heldRetained);
+});
+
+test("held retained, negative control: an ungated or under-stamped copy fails", () => {
+  // Any phase falls back to the copy: a shown slot whose read failed paints
+  // the previous pull request's diff.
+  assert.throws(
+    () => checkRetained((_phase, _stamp, kept) => kept?.value),
+    assert.AssertionError,
+  );
+  // Held only, unstamped: a slot an entity change re-targeted holds the
+  // previous pull request's diff.
+  assert.throws(
+    () =>
+      checkRetained((phase, _stamp, kept) =>
+        phase === "held" ? kept?.value : undefined,
+      ),
+    assert.AssertionError,
+  );
+  // Stamped with the entity alone: a slot back on its pull request with
+  // another file holds the first file's diff.
+  assert.throws(
+    () =>
+      checkRetained((phase, stamp, kept) =>
+        phase === "held" && kept?.entity === stamp.entity
+          ? kept.value
+          : undefined,
+      ),
+    assert.AssertionError,
+  );
+});
+
 // ------------------------------------------------------------------ slot roster
 
 // Every file-rail diff host swaps files through the shared slots
@@ -867,7 +927,7 @@ const SLOT_HOSTS = [
 const NOT_SLOT_HOSTS = [
   // A transcript step's inline diff: one file per step, no rail to swap.
   "src/features/sessions/AgentTranscript.tsx",
-  // A conflict side, which the resolve flow renders whole.
+  // One file's proposed-resolution diff, inside its own resolve flow.
   "src/features/repository/ConflictResolveView.tsx",
 ];
 const ROOT = fileURLToPath(new URL("..", import.meta.url));

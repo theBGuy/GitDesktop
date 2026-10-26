@@ -77,8 +77,8 @@ export function BranchDiffView({
   // comes FROM the file list, so it belongs to the previous comparison both while
   // that list is a placeholder AND for the deferred frame after it settles — and a
   // fetch there "succeeds" with an empty diff, flashing "No changes to show".
-  // Per slot path: a held slot's file stays in the list it settled with, since
-  // a new list means a new comparison, which never holds.
+  // Per slot path: a held slot's read stays enabled while the current list
+  // still names its file (a tip move can refetch the list mid-hold).
   const diffEnabledFor = (path: string) =>
     !files.isPlaceholderData &&
     (files.data?.some((f) => f.path === path) ?? false);

@@ -541,8 +541,10 @@ function StashFiles({
   // Diff off a deferred path so rapid file arrowing only fetches the landed-on
   // file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
-  // The file's diff swaps through the pane's two-slot hold. This view is keyed
-  // per stash, so the stash is the one entity it ever shows.
+  // The file's diff swaps through the pane's two-slot hold. Its entity is the
+  // rev base: an orphan's sha, or a live stash's `stash@{N}` slot, so a drop or
+  // pop of this stash, or of a newer one, moves the next stash into the slot
+  // under this same view.
   const diffTarget = deferredPath
     ? keyedPaneView(repoPath, base, deferredPath, deferredPath)
     : placeholderPaneView(base);

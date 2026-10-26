@@ -4,8 +4,9 @@
 // scripts/diff-pane-hold.test.mjs loads it under Node's type stripping.
 
 /** One thing the pane can paint. `F` is the selected file's own shape. A file
- *  view carries its host's entity axis (the commit, comparison, stash or pull
- *  request it belongs to); a host's placeholder may carry one too. */
+ *  view carries its host's entity axis: what the host's rail moves within (a
+ *  commit, comparison, stash or pull request; file history's file, whose rail
+ *  lists commits; the agent's worktree). A host's placeholder may carry one. */
 export type PaneView<F> =
   | { kind: "placeholder"; entity?: string }
   | { kind: "conflict"; key: string }
@@ -47,6 +48,22 @@ export function slotWidget<W>(
   return phase === "held"
     ? { render: kept, keep: kept }
     : { render: live, keep: live };
+}
+
+/** A slot child's own copy of what it painted, stamped with the entity and
+ *  path it was read under. Only a held slot of that same entity and path
+ *  paints from it; a shown or preparing slot shows its read's own pending or
+ *  failed state, and a slot re-targeted in place never shows another file's. */
+export function heldRetained<T>(
+  phase: SlotPhase,
+  stamp: { entity: string; path: string },
+  retained: { entity: string; path: string; value: T } | undefined,
+): T | undefined {
+  return phase === "held" &&
+    retained?.entity === stamp.entity &&
+    retained.path === stamp.path
+    ? retained.value
+    : undefined;
 }
 
 /** How long a target may prepare unseen before it is promoted regardless: a slow
@@ -289,11 +306,11 @@ export const answeredSince = (
   before: ReadonlySet<string>,
 ) => q.isFetched && !before.has(answerMark(q));
 
-/** Which status answer the post-write hold waits on. An untracked file's
- *  partial stage re-keys the diff from status, so it always waits. A tracked
- *  stage or unstage waits only once its fresh diff answers empty: the side may
- *  have emptied, and only status tells that from a stale row. A tracked
- *  discard never waits. */
+/** Which status answer the post-write hold waits on. Every write to an
+ *  untracked file waits (status re-keys its diff once part of it is staged).
+ *  A tracked stage or unstage waits only once its fresh diff answers empty:
+ *  the side may have emptied, and only status tells that from a stale row. A
+ *  tracked discard never waits. */
 export type StatusWait = "always" | "if-emptied" | null;
 
 export function statusWaitFor(

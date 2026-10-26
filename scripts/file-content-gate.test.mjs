@@ -17,9 +17,27 @@ import {
 /** The reads of the default fixture: one file at a commit pair. */
 const READS = contentReadsKey("f.ts", "aaaa~1", "aaaa");
 
+/** Whether two paints were built from the same inputs. */
+const sameInputs = (a, b) =>
+  a !== null &&
+  b !== null &&
+  a.reads === b.reads &&
+  a.text === b.text &&
+  a.oldText === b.oldText &&
+  a.newText === b.newText;
+
 /** One render of a build site: what the gate decides over these reads, and
  *  whether the render builds (records new inputs) or keeps the paint. */
-function render(painted, reads, { boundExpired = false, frozen = false } = {}) {
+function render(
+  painted,
+  reads,
+  {
+    boundExpired = false,
+    frozen = false,
+    gate = contentBuildGate,
+    after = paintedAfter,
+  } = {},
+) {
   const now = {
     reads: reads.reads ?? READS,
     text: reads.text,
@@ -27,27 +45,36 @@ function render(painted, reads, { boundExpired = false, frozen = false } = {}) {
     newText: reads.new,
   };
   const pending = reads.wantContent !== false && reads.pending === true;
-  const decision = contentBuildGate({
+  const oldFetching = reads.oldFetching === true;
+  const newFetching = reads.newFetching === true;
+  const decision = gate({
     wantContent: reads.wantContent !== false,
     oldSettled: !pending,
     newSettled: !pending,
-    oldFetching: reads.oldFetching === true,
-    newFetching: reads.newFetching === true,
+    oldFetching,
+    newFetching,
     ...changesSince(painted, now),
     boundExpired,
     frozen,
   });
-  const next = paintedAfter(painted, decision, pending, now);
-  return { decision, painted: next, built: next !== null && next !== painted };
+  const next = after(painted, decision, pending, now, {
+    wantContent: reads.wantContent !== false,
+    inFlight: oldFetching || newFetching,
+  });
+  return {
+    decision,
+    painted: next,
+    built: next !== null && !sameInputs(next, painted),
+  };
 }
 
 /** Runs a sequence of read states from a settled paint, counting builds. */
-function run(start, steps) {
-  let { painted } = render(null, start);
+function run(start, steps, opts = {}) {
+  let { painted } = render(null, start, opts);
   let builds = 0;
   const decisions = [];
   for (const reads of steps) {
-    const r = render(painted, reads);
+    const r = render(painted, reads, opts);
     painted = r.painted;
     decisions.push(r.decision);
     if (r.built) builds++;
@@ -170,8 +197,131 @@ test("changesSince: no paint means no change", () => {
     {
       textChanged: false,
       contentChanged: false,
+      previousComplete: true,
     },
   );
+});
+
+const REFRESHING = {
+  ...BEFORE,
+  text: AFTER.text,
+  oldFetching: true,
+  newFetching: true,
+};
+
+// Two retired completeness rules, each kept as the negative control of the pin
+// it fails: "complete only when built with no read in flight" (a warm first
+// paint starts incomplete, so a two-step landing builds twice), and "complete
+// unless forced", with no inheritance (the forced paint's own re-render
+// completes it, so its late reads hold again).
+const inFlightRule = (painted, decision, pending, now, reads) => {
+  if (pending) return null;
+  if (decision === "hold-previous") return painted;
+  const complete = decision === "build" && !reads.inFlight;
+  if (sameInputs(painted, now))
+    return complete && !painted.complete ? { ...painted, complete } : painted;
+  return { ...now, complete };
+};
+const noInheritRule = (painted, decision, pending, now) => {
+  if (pending) return null;
+  if (decision === "hold-previous") return painted;
+  const complete = decision !== "hunk-only";
+  if (sameInputs(painted, now))
+    return complete === painted.complete ? painted : { ...painted, complete };
+  return { ...now, complete };
+};
+
+/** A first paint over warm reads that are refetching, then a changed landing
+ *  in two steps, `order` first: the decisions and the build count. */
+function warmTwoStep(order, after = paintedAfter) {
+  const steps =
+    order === "content"
+      ? [{ ...BEFORE, new: AFTER.new, oldFetching: true }, AFTER]
+      : [{ ...BEFORE, text: AFTER.text, newFetching: true }, AFTER];
+  return run({ ...BEFORE, oldFetching: true, newFetching: true }, steps, {
+    after,
+  });
+}
+
+test("a warm first paint holds a two-step landing once and builds once", () => {
+  for (const order of ["content", "text"]) {
+    const { decisions, builds } = warmTwoStep(order);
+    assert.deepEqual(decisions, ["hold-previous", "build"], order);
+    assert.equal(builds, 1, order);
+  }
+});
+
+test("negative control: the in-flight rule builds a warm two-step landing twice", () => {
+  for (const order of ["content", "text"]) {
+    const { decisions, builds } = warmTwoStep(order, inFlightRule);
+    assert.deepEqual(decisions, ["build", "build"], order);
+    assert.equal(builds, 2, order);
+  }
+});
+
+/** A refresh whose reads outlast the bound, with the forced paint's own
+ *  re-render before they land: the decisions, and the builds at landing. */
+function boundRunsOut({ gate = contentBuildGate, after = paintedAfter } = {}) {
+  let { painted } = render(null, BEFORE);
+  const decisions = [];
+  let buildsAtLanding = 0;
+  for (const [reads, opts, landing] of [
+    [REFRESHING, {}],
+    [REFRESHING, { boundExpired: true }],
+    // The forced paint's own re-render, its reads still in flight.
+    [REFRESHING, {}],
+    // The reads land.
+    [AFTER, {}, true],
+  ]) {
+    const r = render(painted, reads, { ...opts, gate, after });
+    painted = r.painted;
+    decisions.push(r.decision);
+    if (landing && r.built) buildsAtLanding++;
+  }
+  return { decisions, painted, buildsAtLanding };
+}
+
+test("a paint the bound forced is never held over: its late reads build once", () => {
+  const { decisions, painted, buildsAtLanding } = boundRunsOut();
+  assert.deepEqual(decisions, ["hold-previous", "hunk-only", "build", "build"]);
+  assert.equal(buildsAtLanding, 1);
+  assert.equal(painted.newText, AFTER.new);
+  assert.equal(painted.complete, true);
+});
+
+test("negative control: a forced paint its own re-render completes holds again", () => {
+  const { decisions, buildsAtLanding } = boundRunsOut({ after: noInheritRule });
+  assert.deepEqual(decisions, [
+    "hold-previous",
+    "hunk-only",
+    "build",
+    "hold-previous",
+  ]);
+  assert.equal(buildsAtLanding, 0);
+});
+
+test("negative control: a gate that counts a forced paint as complete holds again", () => {
+  const { decisions } = boundRunsOut({
+    gate: (i) => contentBuildGate({ ...i, previousComplete: true }),
+  });
+  assert.equal(decisions[3], "hold-previous");
+});
+
+test("a forced paint whose reads settle unchanged completes in place", () => {
+  let { painted } = render(null, BEFORE);
+  for (const [reads, opts] of [
+    [REFRESHING, {}],
+    [REFRESHING, { boundExpired: true }],
+  ])
+    painted = render(painted, reads, opts).painted;
+  assert.equal(painted.complete, false);
+  const settled = render(painted, { ...BEFORE, text: AFTER.text });
+  assert.equal(settled.built, false);
+  assert.equal(settled.painted.complete, true);
+  // Complete again, the next refresh holds once and builds once.
+  const next = render(settled.painted, { ...BEFORE, newFetching: true });
+  assert.equal(next.decision, "hold-previous");
+  assert.equal(render(next.painted, BEFORE).built, true);
 });
 
 test("revs changed: another commit's warm diff builds at once, never held", () => {

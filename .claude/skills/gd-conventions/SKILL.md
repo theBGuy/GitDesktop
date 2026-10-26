@@ -382,21 +382,27 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   view's item, so that move shows the new item directly instead of holding
   one the user never saw on screen. File rails (History's commit and
   file-history panes, Compare, stashes, the agent worktree, a pull request's
-  Files pane and commit drill-in) hold through `FileSlots`, not
-  `useEntityHold`: they are arrowed at keyboard speed, and the diff pane's
-  bound re-arms per target where the entity hold's runs from the hold's
-  start. A change of the entity a host's `keyedPaneView` carries (the commit,
-  comparison, stash or pull request) never holds: the shown slot re-targets
-  in place under its slot id, so a read that keeps previous data serves it
-  there (History's commit view and Compare dim it, never over a held slot).
-  Each file's reads, comment anchors and composer live in a per-slot child,
-  which calls `useSlotRead` with the read it shows (a not-pending stand-in for
-  an in-memory patch), so the host's busy and dim follow the shown slot and a
-  previous entity's answer never counts as settled, and passes any line
-  widget through `useSlotWidget`, so a held slot's composer stays as it was.
-  `scripts/diff-pane-hold.test.mjs` pins the host roster (`SLOT_HOSTS`,
-  closed by the lazy diff wrapper's consumers). A placeholder across a key
-  whose response can't prove identity may drive RENDERING only,
+  Files pane and commit drill-in) hold through `FileSlots`, not `useEntityHold`:
+  they are arrowed at keyboard speed, and the diff pane's bound re-arms per
+  target where the entity hold's runs from the hold's start. A change of the
+  entity a host's `keyedPaneView` carries never holds (it is whatever the rail
+  lists files of: a commit, comparison, stash or pull request; file history's
+  entity is its file, so its commit moves hold, and the agent view's is the
+  worktree): the shown slot re-targets in place under its slot id, so a read
+  that keeps previous data serves it there (History's commit view and Compare
+  dim it, never over a held slot). Each slot child paints its own file: it owns
+  that file's read or takes the host's (the pull request Files pane's patch and
+  composer belong to the parent and are handed down), and builds the comment
+  anchors for its own path. It calls `useSlotRead` with the read it shows (a
+  not-pending stand-in for an in-memory patch), so the host's busy and dim
+  follow the shown slot and a previous entity's answer never counts as settled,
+  and passes any line widget through `useSlotWidget`, so a held slot's composer
+  stays as it was. A value only the shown slot's read supplies, kept for when
+  the slot is held, goes through `useSlotRetained` (`heldRetained`): it comes
+  back only to a held slot of the entity and path it was read under, never to a
+  shown or preparing one. `scripts/diff-pane-hold.test.mjs` pins the host roster
+  (`SLOT_HOSTS`, closed by the lazy diff wrapper's consumers). A placeholder
+  across a key whose response can't prove identity may drive RENDERING only,
   with every interactive or forge consumer gated on `!isPlaceholderData`
   (commit-on-remote is the example); the Changes diff takes none, since
   `FileDiff` echoes only the path and a same-path staged/unstaged placeholder
@@ -561,12 +567,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 - `interactionEpoch` bumps belong to the user's request, synchronously (the
   store contract on `UiState.interactionEpoch`): a late bump retires whatever
   newer action is pending, a repo open included. Automatic corrections and
-  prunes write through `clearSelectedFile`, `defaultCompareBranch` and
-  `clearRemoteSelections`, which never bump, and a navigator's `beforeSelect`
-  never bumps (`noteUserInteraction` is a no-op there; the navigator already
-  counted the gesture). A continuation that would bump after its await bumps
-  at its request instead, re-checks the epoch and live repo after the await,
-  and lands through a non-bumping write (`useAmendCommit` + `landAmend` is the
+  prunes write through setters that never bump (`clearSelectedFile`,
+  `advanceSelectedFile`, `clearSelectedCommit`, `defaultCompareBranch` and
+  `clearRemoteSelections`), and a navigator's `beforeSelect` never bumps
+  (`noteUserInteraction` is a no-op there; the navigator already counted the
+  gesture). A continuation that would bump after its await bumps at its
+  request instead, re-checks the epoch and live repo after the await, and
+  lands through a non-bumping write (`useAmendCommit` + `landAmend` is the
   reference); the guarded post-await writes in the bullet above still bump
   late, a tracked follow-up. Review-enforced, not guarded: a regex over effect
   and continuation bodies would fail open.
