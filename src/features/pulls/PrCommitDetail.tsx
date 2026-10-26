@@ -19,6 +19,15 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffContent, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
+import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+  useSlotWidget,
+} from "@/features/diff/file-slot";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
@@ -28,13 +37,18 @@ import {
   useObjectsPresent,
   usePrCommitDiff,
 } from "@/lib/git/queries";
-import type { PrCommitOut, RemoteLens } from "@/lib/git/types";
+import type {
+  CommitCommentOut,
+  PrCommitOut,
+  RemoteLens,
+} from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
   CommitComments,
   CommitLineComposer,
+  type DiffSections,
   useCommitLineAnchors,
 } from "./CommitComments";
 
@@ -123,58 +137,12 @@ export function PrCommitDetail({
     rowAttr: "data-path",
   });
 
-  // Line-anchored comments on the SELECTED file that resolve to a new-side line
-  // render inline in the diff; ones that can't resolve fall back to the
-  // CommitComments labelled group. Grouping + range chips live in the shared hook.
-  const lineAnchors = useCommitLineAnchors(
-    comments.data,
-    sections,
-    effectivePath,
-    { provider, repoPath, lens },
-  );
-
-  const selected = files.find((f) => f.path === effectivePath);
-  const fileDiff = selected
-    ? {
-        filePath: selected.path,
-        text: selected.section,
-        isBinary: selected.isBinary,
-        isTruncated: false,
-      }
-    : undefined;
-
-  // Line-anchored comment creation: when the viewer can comment, clicking a diff
-  // line opens the inline composer below it. Anchored to the SELECTED file's
-  // section (GitHub recovers the diff `position` from it). Absent otherwise, so
-  // the diff stays read-only exactly as before.
-  const lineWidget = useMemo<LineWidget | undefined>(() => {
-    if (!canCommentCommits || !effectivePath) return undefined;
-    return {
-      enabled: true,
-      render: ({ side, line, fromLine, onClose }) => (
-        <CommitLineComposer
-          repoPath={repoPath}
-          sha={commit.oid}
-          path={effectivePath}
-          side={side}
-          line={line}
-          fromLine={fromLine}
-          provider={provider}
-          fileSection={sections.get(effectivePath)}
-          onClose={onClose}
-          lens={lens}
-        />
-      ),
-    };
-  }, [
-    canCommentCommits,
-    effectivePath,
-    repoPath,
-    commit.oid,
-    provider,
-    sections,
-    lens,
-  ]);
+  // The file's diff swaps through the pane's two-slot hold, within this
+  // commit; another one re-targets the shown slot in place.
+  const diffTarget = effectivePath
+    ? keyedPaneView(repoPath, commit.oid, effectivePath, effectivePath)
+    : placeholderPaneView(commit.oid);
+  const diffSlots = useFileSlots(diffTarget);
 
   // A failed or parked refresh keeps the loaded commit under a notice; only a
   // read with nothing loaded replaces the rail and pane.
@@ -339,6 +307,9 @@ export function PrCommitDetail({
                             type="button"
                             key={file.path}
                             data-path={file.path}
+                            aria-current={
+                              effectivePath === file.path || undefined
+                            }
                             className={cn(
                               "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
                               effectivePath === file.path
@@ -363,22 +334,34 @@ export function PrCommitDetail({
                   </DetailRail>
                   <main className="flex min-w-0 flex-1 flex-col">
                     <div className="min-h-0 flex-1">
-                      {effectivePath && fileDiff ? (
-                        <DiffContent
-                          filePath={effectivePath}
-                          data={fileDiff}
-                          isPending={false}
-                          isError={false}
-                          repoPath={repoPath}
-                          previewRev={
-                            commitPresent.data === true ? commit.oid : undefined
-                          }
-                          lineAnchors={lineAnchors}
-                          lineWidget={lineWidget}
-                        />
-                      ) : (
-                        <DiffPlaceholder message="No file changes in this commit" />
-                      )}
+                      <FileSlots
+                        slots={diffSlots}
+                        target={diffTarget}
+                        busy={diffSlots.holding || diffSlots.read.loading}
+                      >
+                        {(view) =>
+                          view.kind === "file" ? (
+                            <PrCommitFileDiffSlot
+                              repoPath={repoPath}
+                              sha={commit.oid}
+                              path={view.file}
+                              sections={sections}
+                              comments={comments.data}
+                              canComment={canCommentCommits}
+                              provider={provider}
+                              lens={lens}
+                              previewRev={
+                                commitPresent.data === true
+                                  ? commit.oid
+                                  : undefined
+                              }
+                              reportRead={diffSlots.reportRead}
+                            />
+                          ) : (
+                            <DiffPlaceholder message="No file changes in this commit" />
+                          )
+                        }
+                      </FileSlots>
                     </div>
                     <CommitComments
                       repoPath={repoPath}
@@ -400,5 +383,90 @@ export function PrCommitDetail({
         }
       })()}
     </div>
+  );
+}
+
+/** One file's diff in the commit's pane slot: its section of the commit's
+ *  patch, with the comments anchored to it and its own line composer, so a
+ *  held file never shows the next one's. */
+function PrCommitFileDiffSlot({
+  repoPath,
+  sha,
+  path,
+  sections,
+  comments,
+  canComment,
+  provider,
+  lens,
+  previewRev,
+  reportRead,
+}: {
+  repoPath: string;
+  sha: string;
+  path: string;
+  sections: DiffSections;
+  comments: CommitCommentOut[] | undefined;
+  canComment: boolean;
+  provider: "github" | "gitlab" | "bitbucket";
+  lens: RemoteLens;
+  previewRev: string | undefined;
+  reportRead: (read: SlotRead) => void;
+}) {
+  // The patch is in memory: never a placeholder, never pending.
+  useSlotRead(reportRead, { isPlaceholderData: false, isPending: false });
+  const section = sections.get(path);
+  // Line-anchored comments on this file that resolve to a new-side line
+  // render inline in the diff; ones that can't resolve fall back to the
+  // CommitComments labelled group. Grouping + range chips live in the shared hook.
+  const lineAnchors = useCommitLineAnchors(comments, sections, path, {
+    provider,
+    repoPath,
+    lens,
+  });
+  // Line-anchored comment creation: when the viewer can comment, clicking a diff
+  // line opens the inline composer below it. Anchored to this file's section
+  // (GitHub recovers the diff `position` from it). Absent otherwise, so the diff
+  // stays read-only exactly as before.
+  const widget = useMemo<LineWidget | undefined>(() => {
+    if (!canComment) return undefined;
+    return {
+      enabled: true,
+      render: ({ side, line, fromLine, onClose }) => (
+        <CommitLineComposer
+          repoPath={repoPath}
+          sha={sha}
+          path={path}
+          side={side}
+          line={line}
+          fromLine={fromLine}
+          provider={provider}
+          fileSection={sections.get(path)}
+          onClose={onClose}
+          lens={lens}
+        />
+      ),
+    };
+  }, [canComment, path, repoPath, sha, provider, sections, lens]);
+  const lineWidget = useSlotWidget(widget);
+  return (
+    <DiffContent
+      filePath={path}
+      data={
+        section === undefined
+          ? undefined
+          : {
+              filePath: path,
+              text: section,
+              isBinary: sectionIsBinary(section),
+              isTruncated: false,
+            }
+      }
+      isPending={false}
+      isError={false}
+      repoPath={repoPath}
+      previewRev={previewRev}
+      lineAnchors={lineAnchors}
+      lineWidget={lineWidget}
+    />
   );
 }

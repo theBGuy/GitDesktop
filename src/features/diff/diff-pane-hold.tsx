@@ -1,4 +1,5 @@
 import { createContext, useContext, useLayoutEffect } from "react";
+import type { SlotPhase } from "./diff-pane-slots";
 
 /**
  * What a diff-pane slot tells the surfaces inside it. Outside a slot (every
@@ -9,6 +10,9 @@ export interface DiffPaneHoldValue {
    *  pointer, focus and AT there, but not global hotkeys or portaled dialogs,
    *  so those gate on this. */
   interactive: boolean;
+  /** The slot's phase: a preparing slot shows the selection, a held one what
+   *  it settled with. */
+  phase: SlotPhase;
   /** Records one loading gate's state for the slot and returns its release.
    *  The slot is settled once at least one gate has reported and every gate
    *  that has reported is settled; a gate that never reports goes unseen. */
@@ -19,6 +23,7 @@ const release = () => undefined;
 
 const OUTSIDE_SLOT: DiffPaneHoldValue = {
   interactive: true,
+  phase: "shown",
   reportSettled: () => release,
 };
 

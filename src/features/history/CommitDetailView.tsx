@@ -38,10 +38,20 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface, type LineWidget } from "@/features/diff/DiffSurfaceLazy";
+import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+  useSlotWidget,
+} from "@/features/diff/file-slot";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import {
   CommitComments,
   CommitLineComposer,
+  type DiffSections,
   useCommitCommentsGate,
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
@@ -69,7 +79,12 @@ import {
   useRemoteCommitDiff,
   useRevertCommit,
 } from "@/lib/git/queries";
-import { providerLabel, type RepoStatus } from "@/lib/git/types";
+import {
+  type CommitCommentOut,
+  type ForgeProvider,
+  providerLabel,
+  type RepoStatus,
+} from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
@@ -136,11 +151,18 @@ export function CommitDetailView({
   // Fetch only once the path is one this commit actually changed. The path comes
   // FROM the file list, so it's the previous commit's both while that list is a
   // placeholder AND for the deferred frame after it settles — and a fetch there
-  // "succeeds" with an empty diff, flashing "No changes to show".
-  const diffEnabled =
+  // "succeeds" with an empty diff, flashing "No changes to show". Per slot path:
+  // a held slot's file stays in the list it settled with, since a new list means
+  // a new commit, which never holds.
+  const diffEnabledFor = (path: string) =>
     !files.isPlaceholderData &&
-    (files.data?.some((f) => f.path === deferredPath) ?? false);
-  const diff = useCommitFileDiff(repoPath, hash, deferredPath, diffEnabled);
+    (files.data?.some((f) => f.path === path) ?? false);
+  // The file's diff swaps through the pane's two-slot hold, within this commit;
+  // another commit re-targets the shown slot in place.
+  const diffTarget = deferredPath
+    ? keyedPaneView(repoPath, hash, deferredPath, deferredPath)
+    : placeholderPaneView(hash);
+  const diffSlots = useFileSlots(diffTarget);
   // The commit the header shows: while the selected one's details are still a
   // placeholder, the last one whose details settled (the placeholder's source).
   const [settledHash, setSettledHash] = useState(hash);
@@ -211,10 +233,9 @@ export function CommitDetailView({
     [remoteDiff.data],
   );
 
-  // Line-anchored comments + the inline composer target the RENDERED file, which
-  // the diff drives off `deferredPath` (not effectivePath) — so use deferredPath
-  // throughout, letting anchors/widget follow the file the diff actually shows
-  // while rapid arrow-keying settles.
+  // Line-anchored comments + the inline composer target the RENDERED file: each
+  // diff slot computes them for its own path (CommitFileDiffSlot), so a held
+  // file never shows the next one's anchors.
   // Inline comment bodies linkify against the same origin-lens repo they were
   // read from; the resolved provider only, never `providerKey`'s GitHub default.
   const commentRefs: MarkdownRefs | undefined = provider
@@ -224,62 +245,9 @@ export function CommitDetailView({
   // only as long as the file list is a placeholder too: a settled list starts
   // the selected commit's diff, which must not take the rendered one's anchors.
   const anchorsMatchDiff = renderedHash === hash || files.isPlaceholderData;
-  const lineAnchors = useCommitLineAnchors(
-    comments.data,
-    providerKey === "github" ? remoteSections : undefined,
-    commentsReady && anchorsMatchDiff ? deferredPath : null,
-    commentRefs,
-  );
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.
   const stale = details.isPlaceholderData || files.isPlaceholderData;
-  // The diff query outlasts that window with the previous FILE's diff, so the
-  // rendered lines can belong to another file or commit than `hash`+`deferredPath`.
-  const diffStale = stale || diff.isPlaceholderData;
-  const lineWidget = useMemo<LineWidget | undefined>(() => {
-    if (!commentsReady || !deferredPath) return undefined;
-    // A line click while stale would address `hash` — the newly selected commit —
-    // with a path and line read off the previous one's diff.
-    if (diffStale) return undefined;
-    // On GitHub the composer recovers its `position` from the FORGE diff; until
-    // that fetch succeeds `remoteSections` is empty, so every line would open the
-    // composer disabled with "This line isn't in the commit's diff for this file"
-    // — a reason that blames the line rather than the missing patch. So keep the
-    // line numbers un-clickable (read-only diff) until the remote diff loads; the
-    // whole-commit composer in the pane below still works. GitLab/Bitbucket anchor
-    // by plain line and need no remote diff, so they're unaffected.
-    if (providerKey === "github" && !remoteDiff.isSuccess) return undefined;
-    return {
-      enabled: true,
-      render: ({ side, line, fromLine, onClose }) => (
-        <CommitLineComposer
-          repoPath={repoPath}
-          sha={hash}
-          path={deferredPath}
-          side={side}
-          line={line}
-          fromLine={fromLine}
-          provider={providerKey}
-          fileSection={
-            providerKey === "github"
-              ? remoteSections.get(deferredPath)
-              : undefined
-          }
-          onClose={onClose}
-          lens="origin"
-        />
-      ),
-    };
-  }, [
-    commentsReady,
-    diffStale,
-    deferredPath,
-    repoPath,
-    hash,
-    providerKey,
-    remoteSections,
-    remoteDiff.isSuccess,
-  ]);
 
   // Same actions as the history list's right-click menu (minus the
   // dialog-driven ones), surfaced behind a visible ⋯ for discoverability.
@@ -414,9 +382,15 @@ export function CommitDetailView({
   const staleDim = stale && "opacity-80";
   // The diff pane keeps serving the previous file's diff for longer than the rest
   // (its query stays on placeholder data through the gated window above), so it
-  // fades on its own state. Never nested inside another dim — 0.8² reads as
-  // disabled.
-  const diffDim = (staleDim || diff.isPlaceholderData) && "opacity-80";
+  // fades on its own state, and never over a held slot, which carries its own
+  // dim: 0.8² reads as disabled.
+  const diffDim =
+    !diffSlots.holding &&
+    (staleDim || diffSlots.read.placeholder) &&
+    "opacity-80";
+  // Busy through a hold too, and through the blank a slow file promotes into.
+  const diffBusy =
+    Boolean(diffDim) || diffSlots.holding || diffSlots.read.loading;
 
   // Identity comes from the `hash` PROP, never `commit.hash`: while the next
   // commit's details load, `details.data` is still the previous commit's
@@ -702,6 +676,7 @@ export function CommitDetailView({
                     type="button"
                     key={file.path}
                     data-path={file.path}
+                    aria-current={effectivePath === file.path || undefined}
                     className={cn(
                       "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
                       effectivePath === file.path
@@ -726,7 +701,7 @@ export function CommitDetailView({
           </DetailRail>
           <main
             ref={diffRegion}
-            aria-busy={Boolean(diffDim)}
+            aria-busy={diffBusy}
             className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
             // Move as well as enter: a pointer resting here while the commit
             // changes must still arm the new one before it reaches a line.
@@ -734,19 +709,29 @@ export function CommitDetailView({
             onPointerMove={armDiff}
             onFocusCapture={armDiff}
           >
-            {deferredPath ? (
-              <DiffSurface
-                filePath={deferredPath}
-                diff={diff}
-                repoPath={repoPath}
-                imageRevs={{ old: `${hash}~1`, new: hash }}
-                contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
-                lineAnchors={lineAnchors}
-                lineWidget={lineWidget}
-              />
-            ) : (
-              <DiffPlaceholder message="Select a file to see its changes" />
-            )}
+            <FileSlots slots={diffSlots} target={diffTarget}>
+              {(view) =>
+                view.kind === "file" ? (
+                  <CommitFileDiffSlot
+                    repoPath={repoPath}
+                    hash={hash}
+                    path={view.file}
+                    enabled={diffEnabledFor(view.file)}
+                    stale={stale}
+                    comments={comments.data}
+                    commentsReady={commentsReady}
+                    anchorsOn={commentsReady && anchorsMatchDiff}
+                    commentRefs={commentRefs}
+                    providerKey={providerKey}
+                    remoteSections={remoteSections}
+                    remoteDiffReady={remoteDiff.isSuccess}
+                    reportRead={diffSlots.reportRead}
+                  />
+                ) : (
+                  <DiffPlaceholder message="Select a file to see its changes" />
+                )
+              }
+            </FileSlots>
           </main>
         </DetailRailRow>
 
@@ -787,6 +772,107 @@ export function CommitDetailView({
         remoteLabel={remoteLabel}
       />
     </>,
+  );
+}
+
+/** One file's diff in the commit's pane slot: its own read, comment anchors and
+ *  line composer, so a held slot paints only from what it settled with. */
+function CommitFileDiffSlot({
+  repoPath,
+  hash,
+  path,
+  enabled,
+  stale,
+  comments,
+  commentsReady,
+  anchorsOn,
+  commentRefs,
+  providerKey,
+  remoteSections,
+  remoteDiffReady,
+  reportRead,
+}: {
+  repoPath: string;
+  hash: string;
+  path: string;
+  enabled: boolean;
+  /** The commit's details or file list are still the previous commit's. */
+  stale: boolean;
+  comments: CommitCommentOut[] | undefined;
+  commentsReady: boolean;
+  /** Inline anchors are on: the diff is the rendered commit's. */
+  anchorsOn: boolean;
+  commentRefs: MarkdownRefs | undefined;
+  providerKey: ForgeProvider;
+  remoteSections: DiffSections;
+  remoteDiffReady: boolean;
+  reportRead: (read: SlotRead) => void;
+}) {
+  const diff = useCommitFileDiff(repoPath, hash, path, enabled);
+  useSlotRead(reportRead, diff);
+  const lineAnchors = useCommitLineAnchors(
+    comments,
+    providerKey === "github" ? remoteSections : undefined,
+    anchorsOn ? path : null,
+    commentRefs,
+  );
+  // The diff query outlasts the commit's own stale window with the previous
+  // FILE's diff, so the rendered lines can belong to another file or commit than
+  // `hash`+`path`.
+  const diffStale = stale || diff.isPlaceholderData;
+  const widget = useMemo<LineWidget | undefined>(() => {
+    if (!commentsReady) return undefined;
+    // A line click while stale would address `hash` — the newly selected commit —
+    // with a path and line read off the previous one's diff.
+    if (diffStale) return undefined;
+    // On GitHub the composer recovers its `position` from the FORGE diff; until
+    // that fetch succeeds `remoteSections` is empty, so every line would open the
+    // composer disabled with "This line isn't in the commit's diff for this file"
+    // — a reason that blames the line rather than the missing patch. So keep the
+    // line numbers un-clickable (read-only diff) until the remote diff loads; the
+    // whole-commit composer in the pane below still works. GitLab/Bitbucket anchor
+    // by plain line and need no remote diff, so they're unaffected.
+    if (providerKey === "github" && !remoteDiffReady) return undefined;
+    return {
+      enabled: true,
+      render: ({ side, line, fromLine, onClose }) => (
+        <CommitLineComposer
+          repoPath={repoPath}
+          sha={hash}
+          path={path}
+          side={side}
+          line={line}
+          fromLine={fromLine}
+          provider={providerKey}
+          fileSection={
+            providerKey === "github" ? remoteSections.get(path) : undefined
+          }
+          onClose={onClose}
+          lens="origin"
+        />
+      ),
+    };
+  }, [
+    commentsReady,
+    diffStale,
+    path,
+    repoPath,
+    hash,
+    providerKey,
+    remoteSections,
+    remoteDiffReady,
+  ]);
+  const lineWidget = useSlotWidget(widget);
+  return (
+    <DiffSurface
+      filePath={path}
+      diff={diff}
+      repoPath={repoPath}
+      imageRevs={{ old: `${hash}~1`, new: hash }}
+      contentRevs={{ oldRev: `${hash}~1`, newRev: hash }}
+      lineAnchors={lineAnchors}
+      lineWidget={lineWidget}
+    />
   );
 }
 

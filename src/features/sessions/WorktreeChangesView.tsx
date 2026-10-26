@@ -8,6 +8,14 @@ import { useRetryFocusRescue } from "@/features/conversations/ConversationListPa
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
 import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+} from "@/features/diff/file-slot";
+import {
   openStatusErrorDetails,
   StatusReadErrorState,
   StatusRefreshFailedStrip,
@@ -83,24 +91,15 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
       ? selectedPath
       : (entries[0]?.path ?? null);
   const deferredPath = useDeferredValue(effectivePath);
-  const selected = entries.find((e) => e.path === deferredPath) ?? null;
-  const untracked = selected?.unstaged === "untracked";
-  // Show the unstaged (HEAD → working tree) diff; the agent doesn't stage. Its own
-  // polling query (not the shared `useFileDiff`) so the diff keeps refreshing as the
-  // agent re-edits the SAME file — the shared key has no content hash, so it would
-  // otherwise serve a stale cached diff for the whole turn.
-  const diff = useQuery({
-    queryKey: [
-      "session-worktree-diff",
-      repoPath,
-      deferredPath ?? "",
-      untracked,
-    ] as const,
-    queryFn: () => gitDiffFile(repoPath, deferredPath ?? "", false, untracked),
-    enabled: deferredPath !== null,
-    refetchInterval: 1500,
-    networkMode: "always",
-  });
+  const isUntracked = (path: string) =>
+    entries.find((e) => e.path === path)?.unstaged === "untracked";
+  // The file's diff swaps through the pane's two-slot hold. Its poll is a
+  // background refetch: it never holds or dims, and new text unsettles the
+  // shown file only for the rebuild's row gap.
+  const diffTarget = deferredPath
+    ? keyedPaneView(repoPath, repoPath, deferredPath, deferredPath)
+    : placeholderPaneView(repoPath);
+  const diffSlots = useFileSlots(diffTarget);
 
   // Ahead of the skeleton, on the sticky gate.
   if (readFailed) {
@@ -189,6 +188,7 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
                     type="button"
                     key={file.path}
                     data-path={file.path}
+                    aria-current={effectivePath === file.path || undefined}
                     className={cn(
                       "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
                       effectivePath === file.path
@@ -207,22 +207,63 @@ export function WorktreeChangesView({ repoPath }: { repoPath: string }) {
             </ScrollArea>
           </DetailRail>
           <main className="min-w-0 flex-1">
-            {deferredPath ? (
-              <DiffSurface
-                filePath={deferredPath}
-                diff={diff}
-                repoPath={repoPath}
-                imageRevs={{ old: "HEAD", new: null }}
-                contentRevs={
-                  untracked ? { newRev: null } : { oldRev: ":0", newRev: null }
-                }
-              />
-            ) : (
-              <DiffPlaceholder message="Select a file to see its changes" />
-            )}
+            <FileSlots
+              slots={diffSlots}
+              target={diffTarget}
+              busy={diffSlots.holding || diffSlots.read.loading}
+            >
+              {(view) =>
+                view.kind === "file" ? (
+                  <WorktreeFileDiffSlot
+                    repoPath={repoPath}
+                    path={view.file}
+                    untracked={isUntracked(view.file)}
+                    reportRead={diffSlots.reportRead}
+                  />
+                ) : (
+                  <DiffPlaceholder message="Select a file to see its changes" />
+                )
+              }
+            </FileSlots>
           </main>
         </DetailRailRow>
       </div>
     </>
+  );
+}
+
+/** One file's working-tree diff in the pane's slot, on its own polled read. */
+function WorktreeFileDiffSlot({
+  repoPath,
+  path,
+  untracked,
+  reportRead,
+}: {
+  repoPath: string;
+  path: string;
+  untracked: boolean;
+  reportRead: (read: SlotRead) => void;
+}) {
+  // Show the unstaged (HEAD → working tree) diff; the agent doesn't stage. Its own
+  // polling query (not the shared `useFileDiff`) so the diff keeps refreshing as the
+  // agent re-edits the SAME file — the shared key has no content hash, so it would
+  // otherwise serve a stale cached diff for the whole turn.
+  const diff = useQuery({
+    queryKey: ["session-worktree-diff", repoPath, path, untracked] as const,
+    queryFn: () => gitDiffFile(repoPath, path, false, untracked),
+    refetchInterval: 1500,
+    networkMode: "always",
+  });
+  useSlotRead(reportRead, diff);
+  return (
+    <DiffSurface
+      filePath={path}
+      diff={diff}
+      repoPath={repoPath}
+      imageRevs={{ old: "HEAD", new: null }}
+      contentRevs={
+        untracked ? { newRev: null } : { oldRev: ":0", newRev: null }
+      }
+    />
   );
 }

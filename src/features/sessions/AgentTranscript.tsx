@@ -28,6 +28,10 @@ import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
 import type { AgentToolKind, TranscriptSegment } from "@/lib/ai/agent";
 import { presentError } from "@/lib/error-summary";
+import {
+  classifyHeaderOnlyDiff,
+  headerOnlyMessage,
+} from "@/lib/git/diff-split";
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
 import { useContainerWidth } from "@/lib/use-container-width";
@@ -265,6 +269,11 @@ function InlineDiff({
   }
   if (!diff.data.text.trim()) {
     return shell(<InlineNote>No changes to show.</InlineNote>);
+  }
+  // A diff that changed no content says what did, never a blank diff view.
+  const headerOnly = classifyHeaderOnlyDiff(diff.data.text);
+  if (headerOnly !== null) {
+    return shell(<InlineNote>{headerOnlyMessage(headerOnly)}.</InlineNote>);
   }
   return shell(
     <GitDiffView

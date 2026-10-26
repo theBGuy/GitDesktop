@@ -22,6 +22,14 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
+import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+} from "@/features/diff/file-slot";
 import { FileRowActions } from "@/features/history/FileRowActions";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
@@ -69,16 +77,17 @@ export function BranchDiffView({
   // comes FROM the file list, so it belongs to the previous comparison both while
   // that list is a placeholder AND for the deferred frame after it settles — and a
   // fetch there "succeeds" with an empty diff, flashing "No changes to show".
-  const diffEnabled =
+  // Per slot path: a held slot's read stays enabled while the current list
+  // still names its file (a tip move can refetch the list mid-hold).
+  const diffEnabledFor = (path: string) =>
     !files.isPlaceholderData &&
-    (files.data?.some((f) => f.path === deferredPath) ?? false);
-  const diff = useBranchFileDiff(
-    repoPath,
-    base,
-    compare,
-    deferredPath,
-    diffEnabled,
-  );
+    (files.data?.some((f) => f.path === path) ?? false);
+  // The file's diff swaps through the pane's two-slot hold, within this
+  // comparison; another one re-targets the shown slot in place.
+  const diffTarget = deferredPath
+    ? keyedPaneView(repoPath, cmpKey, deferredPath, deferredPath)
+    : placeholderPaneView(cmpKey);
+  const diffSlots = useFileSlots(diffTarget);
   // The diff is three-dot, so its old side is the fork point, not `base`'s tip.
   // The new side, and Blame, read at `compareRev`, the rev the backend resolved
   // `compare` to: the bare name would read a same-named tag's files instead. The
@@ -207,8 +216,15 @@ export function BranchDiffView({
   const staleDim = files.isPlaceholderData && "opacity-80";
   // The diff pane serves the previous file's diff for longer than the rest (its
   // query stays on placeholder data through the gated window above), so it fades
-  // on its own state. Never nested inside another dim — 0.8² reads as disabled.
-  const diffDim = (staleDim || diff.isPlaceholderData) && "opacity-80";
+  // on its own state, and never over a held slot, which carries its own dim:
+  // 0.8² reads as disabled.
+  const diffDim =
+    !diffSlots.holding &&
+    (staleDim || diffSlots.read.placeholder) &&
+    "opacity-80";
+  // Busy through a hold too, and through the blank a slow file promotes into.
+  const diffBusy =
+    Boolean(diffDim) || diffSlots.holding || diffSlots.read.loading;
 
   // Arrow keys walk the file list, mirroring the app's other lists.
   const onFilesKeyDown = listKeyboardNav({
@@ -286,30 +302,67 @@ export function BranchDiffView({
           </ScrollArea>
         </DetailRail>
         <main
-          aria-busy={Boolean(diffDim)}
+          aria-busy={diffBusy}
           className={cn("min-w-0 flex-1", PLACEHOLDER_FADE, diffDim)}
         >
-          {deferredPath ? (
-            <DiffSurface
-              filePath={deferredPath}
-              diff={diff}
-              repoPath={repoPath}
-              imageRevs={
-                sides
-                  ? { old: sides.mergeBase, new: sides.compareRev }
-                  : undefined
-              }
-              contentRevs={
-                sides
-                  ? { oldRev: sides.mergeBase, newRev: sides.compareRev }
-                  : undefined
-              }
-            />
-          ) : (
-            <DiffPlaceholder message="Select a file to see its changes" />
-          )}
+          <FileSlots slots={diffSlots} target={diffTarget}>
+            {(view) =>
+              view.kind === "file" ? (
+                <BranchFileDiffSlot
+                  repoPath={repoPath}
+                  base={base}
+                  compare={compare}
+                  path={view.file}
+                  enabled={diffEnabledFor(view.file)}
+                  sides={sides}
+                  reportRead={diffSlots.reportRead}
+                />
+              ) : (
+                <DiffPlaceholder message="Select a file to see its changes" />
+              )
+            }
+          </FileSlots>
         </main>
       </DetailRailRow>
     </div>,
+  );
+}
+
+/** One file's diff in the comparison's pane slot, on its own read. */
+function BranchFileDiffSlot({
+  repoPath,
+  base,
+  compare,
+  path,
+  enabled,
+  sides,
+  reportRead,
+}: {
+  repoPath: string;
+  base: string;
+  compare: string;
+  path: string;
+  enabled: boolean;
+  /** The fork point and the rev `compare` resolved to, once they belong to
+   *  this pair. */
+  sides: { mergeBase: string; compareRev: string } | null;
+  reportRead: (read: SlotRead) => void;
+}) {
+  const diff = useBranchFileDiff(repoPath, base, compare, path, enabled);
+  useSlotRead(reportRead, diff);
+  return (
+    <DiffSurface
+      filePath={path}
+      diff={diff}
+      repoPath={repoPath}
+      imageRevs={
+        sides ? { old: sides.mergeBase, new: sides.compareRev } : undefined
+      }
+      contentRevs={
+        sides
+          ? { oldRev: sides.mergeBase, newRev: sides.compareRev }
+          : undefined
+      }
+    />
   );
 }

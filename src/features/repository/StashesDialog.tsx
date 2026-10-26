@@ -34,6 +34,14 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
 import { DiffSurface } from "@/features/diff/DiffSurfaceLazy";
+import {
+  FileSlots,
+  keyedPaneView,
+  placeholderPaneView,
+  type SlotRead,
+  useFileSlots,
+  useSlotRead,
+} from "@/features/diff/file-slot";
 import type { ImageRevs } from "@/features/diff/ImageDiff";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -533,23 +541,14 @@ function StashFiles({
   // Diff off a deferred path so rapid file arrowing only fetches the landed-on
   // file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
-  const stashDiffQuery = useStashFileDiff(repoPath, stashIndex, deferredPath);
-  const orphanDiffQuery = useOrphanedStashFileDiff(
-    repoPath,
-    orphanSha,
-    deferredPath,
-  );
-  const diff = source.kind === "stash" ? stashDiffQuery : orphanDiffQuery;
-
-  // Image/SVG previews need the file's content on each side. Tracked changes
-  // read from the stash commit; untracked files from its ^3 parent.
-  const effectiveFile = files.data?.find((f) => f.path === deferredPath);
-  const imageRevs: ImageRevs | undefined = effectiveFile
-    ? {
-        old: `${base}^1`,
-        new: effectiveFile.untracked ? `${base}^3` : base,
-      }
-    : undefined;
+  // The file's diff swaps through the pane's two-slot hold. Its entity is the
+  // rev base: an orphan's sha, or a live stash's `stash@{N}` slot, so a drop or
+  // pop of this stash, or of a newer one, moves the next stash into the slot
+  // under this same view.
+  const diffTarget = deferredPath
+    ? keyedPaneView(repoPath, base, deferredPath, deferredPath)
+    : placeholderPaneView(base);
+  const diffSlots = useFileSlots(diffTarget);
 
   // A failed refresh keeps the loaded file list under a notice; only a read with
   // nothing loaded replaces it.
@@ -660,6 +659,7 @@ function StashFiles({
                 type="button"
                 key={file.path}
                 data-path={file.path}
+                aria-current={effectivePath === file.path || undefined}
                 className={cn(
                   "flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs",
                   effectivePath === file.path
@@ -680,24 +680,74 @@ function StashFiles({
         </ScrollArea>
       </aside>
       <main className="min-w-0 flex-1">
-        {deferredPath ? (
-          <DiffSurface
-            filePath={deferredPath}
-            diff={diff}
-            repoPath={repoPath}
-            imageRevs={imageRevs}
-            // Stash revs already match the diff's sides (^1↔stash, ^1↔^3 for
-            // untracked), so reuse them for whole-file highlight context.
-            contentRevs={
-              imageRevs
-                ? { oldRev: imageRevs.old, newRev: imageRevs.new }
-                : undefined
-            }
-          />
-        ) : (
-          <DiffPlaceholder message="This stash has no files" />
-        )}
+        <FileSlots
+          slots={diffSlots}
+          target={diffTarget}
+          busy={diffSlots.holding || diffSlots.read.loading}
+        >
+          {(view) =>
+            view.kind === "file" ? (
+              <StashFileDiffSlot
+                repoPath={repoPath}
+                source={source}
+                base={base}
+                path={view.file}
+                untracked={
+                  fileList.find((f) => f.path === view.file)?.untracked
+                }
+                reportRead={diffSlots.reportRead}
+              />
+            ) : (
+              <DiffPlaceholder message="This stash has no files" />
+            )
+          }
+        </FileSlots>
       </main>
     </>,
+  );
+}
+
+/** One stashed file's diff in the pane's slot, on its own read. */
+function StashFileDiffSlot({
+  repoPath,
+  source,
+  base,
+  path,
+  untracked,
+  reportRead,
+}: {
+  repoPath: string;
+  source: FileSource;
+  /** The commit-ish the file lives under. */
+  base: string;
+  path: string;
+  /** The file list's flag for this path; absent while the list lacks it. */
+  untracked: boolean | undefined;
+  reportRead: (read: SlotRead) => void;
+}) {
+  const stashIndex = source.kind === "stash" ? source.index : null;
+  const orphanSha = source.kind === "orphaned" ? source.sha : null;
+  const stashDiffQuery = useStashFileDiff(repoPath, stashIndex, path);
+  const orphanDiffQuery = useOrphanedStashFileDiff(repoPath, orphanSha, path);
+  const diff = source.kind === "stash" ? stashDiffQuery : orphanDiffQuery;
+  useSlotRead(reportRead, diff);
+  // Image/SVG previews need the file's content on each side. Tracked changes
+  // read from the stash commit; untracked files from its ^3 parent.
+  const imageRevs: ImageRevs | undefined =
+    untracked === undefined
+      ? undefined
+      : { old: `${base}^1`, new: untracked ? `${base}^3` : base };
+  return (
+    <DiffSurface
+      filePath={path}
+      diff={diff}
+      repoPath={repoPath}
+      imageRevs={imageRevs}
+      // Stash revs already match the diff's sides (^1↔stash, ^1↔^3 for
+      // untracked), so reuse them for whole-file highlight context.
+      contentRevs={
+        imageRevs ? { oldRev: imageRevs.old, newRev: imageRevs.new } : undefined
+      }
+    />
   );
 }
