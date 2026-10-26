@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { settingsFormOpts } from "@/features/settings/settings-form";
@@ -10,6 +11,7 @@ import {
   type LifecycleEvent,
 } from "@/lib/automations/types";
 import { withForm } from "@/lib/form";
+import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import {
@@ -81,11 +83,17 @@ export const AutomationsSection = withForm({
     onRegisterSave: undefined as
       | ((save: (() => void) | null) => void)
       | undefined,
+    /** The same for this panel's discard, so the host's confirmed footer
+     *  Discard (and "Discard and close") resets the lifecycle draft too. */
+    onRegisterDiscard: undefined as
+      | ((discard: (() => void) | null) => void)
+      | undefined,
   },
   render: function AutomationsSectionRender({
     form,
     onDirtyChange,
     onRegisterSave,
+    onRegisterDiscard,
   }) {
     const automations = useAutomations();
     const save = useSaveAutomations();
@@ -156,8 +164,92 @@ export const AutomationsSection = withForm({
       });
     }
 
-    function discard() {
+    // A reset never lands under an in-flight save: it waits for the save to
+    // settle (its refetch included) and then resets to the stored config the
+    // save left, a no-op when the save already wrote this draft.
+    const [resetQueued, setResetQueued] = useState(false);
+    useEffect(() => {
+      if (!resetQueued || save.isPending) return;
+      setResetQueued(false);
       setDraft(saved);
+    }, [resetQueued, save.isPending, saved]);
+    function discard() {
+      setResetQueued(true);
+    }
+    const mounted = useRef(true);
+    useEffect(() => {
+      mounted.current = true;
+      return () => {
+        mounted.current = false;
+      };
+    }, []);
+    const dirtyRef = useLatestRef(dirty);
+
+    // Bar-unmount focus, in the commit that hides the bar: land on the panel's
+    // heading when the removed bar held focus (now on body) or a confirmed
+    // Discard aimed there (focus may still sit in the closing prompt).
+    const headingRef = useRef<HTMLHeadingElement>(null);
+    const pendingHeadingFocus = useRef(false);
+    const barWasShown = useRef(false);
+    useLayoutEffect(() => {
+      const hid = barWasShown.current && !dirty;
+      barWasShown.current = dirty;
+      const aimed = pendingHeadingFocus.current;
+      pendingHeadingFocus.current = false;
+      if (!hid) return;
+      const active = document.activeElement;
+      if (aimed || active === null || active === document.body)
+        headingRef.current?.focus({ preventScroll: true });
+    }, [dirty]);
+
+    // For a prompt answer that flips no state: the frame outlasts the dialog's
+    // close commit and lands before Base UI's later focus return to a Discard
+    // button that is already gone.
+    function focusHeadingAfterPrompt() {
+      requestAnimationFrame(() =>
+        headingRef.current?.focus({ preventScroll: true }),
+      );
+    }
+
+    // This panel's own open Discard prompt, dismissed if the panel unmounts
+    // under it (a hotkey can navigate away past the modal).
+    const promptRef = useRef<ConfirmRequest | null>(null);
+    useEffect(
+      () => () => {
+        if (useConfirm.getState().request === promptRef.current)
+          promptRef.current?.resolve(false, false);
+      },
+      [],
+    );
+    async function requestDiscard() {
+      const answer = useConfirm.getState().ask({
+        title: "Discard unsaved changes?",
+        body: "Every automation rule change since your last save is undone.",
+        confirmLabel: "Discard changes",
+        confirmVariant: "destructive",
+        scope: "app",
+      });
+      const mine = useConfirm.getState().request;
+      promptRef.current = mine;
+      const ok = await answer;
+      if (promptRef.current === mine) promptRef.current = null;
+      if (!ok) {
+        // A superseding prompt or an unmounted panel keeps focus where it is.
+        if (
+          mounted.current &&
+          useConfirm.getState().request === null &&
+          !dirtyRef.current
+        )
+          focusHeadingAfterPrompt();
+        return;
+      }
+      if (!mounted.current) return;
+      if (!dirtyRef.current) {
+        focusHeadingAfterPrompt();
+        return;
+      }
+      pendingHeadingFocus.current = true;
+      discard();
     }
 
     function doSave() {
@@ -181,11 +273,19 @@ export const AutomationsSection = withForm({
       onRegisterSave(dirty ? () => doSaveRef.current() : null);
       return () => onRegisterSave(null);
     }, [dirty, onRegisterSave]);
+    const discardRef = useLatestRef(discard);
+    useEffect(() => {
+      if (!onRegisterDiscard) return;
+      onRegisterDiscard(dirty ? () => discardRef.current() : null);
+      return () => onRegisterDiscard(null);
+    }, [dirty, onRegisterDiscard]);
 
     return (
       <section className="space-y-3">
         <div>
-          <h2 className="text-sm font-medium">Automations</h2>
+          <h2 ref={headingRef} tabIndex={-1} className="text-sm font-medium">
+            Automations
+          </h2>
           <p className="mt-1 text-xs text-muted-foreground">
             Run an AI action automatically when something happens. These
             defaults apply to every repository; a repository can override them
@@ -220,9 +320,15 @@ export const AutomationsSection = withForm({
                   You have unsaved changes
                 </span>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={discard}>
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="sm"
+                    onClick={requestDiscard}
+                    disabled={save.isPending}
+                    reason="Saving…"
+                  >
                     Discard
-                  </Button>
+                  </DisabledReasonButton>
                   <Button size="sm" onClick={doSave} disabled={save.isPending}>
                     Save changes
                   </Button>

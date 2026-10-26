@@ -292,10 +292,11 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 - A docked action bar that a bottom-right toast can cover publishes its top
   edge through `useToastClearance(ref, active)`
   (`src/lib/use-toast-clearance.ts`), which lifts every toast above it while
-  `active` (only the Settings Save bar adopts it so far). Never pass
-  `toastOptions`, `style` or `className` to the app Toaster (`AppToaster` in
-  `src/main.tsx`): the vendored wrapper spreads caller props last, so they'd
-  replace its `cn-toast` class and CSS variables.
+  `active` (only the Settings Save bar adopts it so far). Beyond `position`
+  and `closeButton`, only the offset props ride along on the app Toaster
+  (`AppToaster` in `src/main.tsx`): the vendored wrapper spreads caller props
+  last, so `toastOptions` would drop its `cn-toast` class, `className` its
+  `toaster group` class, and `style` its CSS variables.
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
@@ -474,8 +475,8 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 
 **Layout gotchas.** `DialogContent` is a grid — truncating flex content needs
 `min-w-0` on the grid item; cap tall dialogs at `max-h-[85vh]`. A Dialog/Sheet
-title that can reach the close button (dynamic children, `truncate`, or a >=40-char
-static) carries `pr-8` on the title or its first-row container;
+title that can reach the close button (dynamic children, `truncate`, or static
+text of >=40 chars) carries `pr-8` on the title or its first-row container;
 `showCloseButton={false}` exempts — the `dialog-title-inset` suite in
 `pnpm run checks` is the ratchet. Link-styled clickables add `cursor-pointer`
 at the call site (vendored Button sets none).
@@ -906,6 +907,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `withAppStoreLock` (`src/lib/app-store-lock.ts`): identity/git resolution
   BEFORE the lock, reload → mutate → forced `save()` inside it, all within the
   module's serialize queue. Advisory and fail-open; cold-start instances skip it.
+- **Settings writes seed the cache** — component-started settings writes go
+  through the `src/lib/settings/queries.ts` hooks, and any new settings
+  `useMutation` spreads `...settingsSeedCallbacks(queryClient,
+  settingsKeys.settings)` (`src/lib/settings/heal.ts`): a resolved write leaves
+  its committed snapshot cached even when the re-read fails, unless a newer
+  settings mutation started. Raw api writers that bypass the hooks invalidate
+  the cache themselves. The queries.ts pin in
+  `scripts/settings-cache-seed.test.mjs` enforces the spread.
 - **Per-record repo scope** — a record offered per-repo-or-globally carries a
   `scope` string: the `"global"` sentinel (also the absent-value default) or
   an identity key. Reads match BOTH key forms (raw + identity, most-preferred

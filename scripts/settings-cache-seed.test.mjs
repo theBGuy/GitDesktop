@@ -77,7 +77,9 @@ function deferred() {
   return { promise, resolve };
 }
 
-const settings = (patch) => healLoadedSettings(patch);
+// Null without deps: the module-level fixtures below must not throw in the
+// no-install job, where every test that reads them skips.
+const settings = (patch) => (deps ? healLoadedSettings(patch) : null);
 
 /**
  * A client with `retry: false` whose settings read answers `reads` in order
@@ -161,8 +163,9 @@ const NO_GUARD = [["if (committed && ctx?.seq === started)", "if (committed)"]];
 const NO_NULL_ARM = [
   ["if (committed && ctx?.seq === started)", "if (ctx?.seq === started)"],
 ];
-// The reference-equality guard the start sequence replaced: seed only while the
-// cache still holds the object it held when the write started.
+// A cache-identity guard, the alternative the start sequence is pinned against:
+// seed only while the cache still holds the object it held when the write
+// started.
 const CACHE_IDENTITY_GUARD = [
   [
     "onMutate: (): SettingsSeedContext => ({ seq: ++started }),",

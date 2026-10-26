@@ -109,11 +109,12 @@ export function useReviewConfigured(): boolean {
 }
 
 /**
- * After `mutateAsync(next)` resolves successfully, the settings cache holds the
- * committed (healed) snapshot of that write, unless a newer settings write started
- * after it, in which case that newer write's optimistic patch or committed seed
- * wins. Settings' Discard and its next Save build from that cache, so a failed
- * post-save re-read can't leave the pre-save values there.
+ * After `mutateAsync(next)` resolves successfully, the settings cache holds that
+ * write's committed (healed) snapshot, or the re-read that followed it (which can
+ * include a later direct write), unless a newer settings mutation started after
+ * it, in which case that newer write's optimistic patch or committed seed wins.
+ * Settings' Discard and its next Save build from that cache, so a failed post-save
+ * re-read can't leave the pre-save values there.
  */
 export function useSaveSettings() {
   const queryClient = useQueryClient();

@@ -20,8 +20,8 @@ import type {
 } from "./api";
 
 /** A global server's per-repo states. Declared here rather than beside
- *  {@link McpRepoState} in ./mcp so `loadSettings` can heal against it without
- *  importing that module — "default" is key ABSENCE, so it is not a member. */
+ *  `McpRepoState` in ./mcp so the heal can check against it without importing
+ *  ./mcp — "default" is key ABSENCE, so it is not a member. */
 export const MCP_REPO_STATES = ["on", "optional", "off"] as const;
 
 /** How a server is reached. The Add/Edit dialog's transport toggle renders from
@@ -98,9 +98,8 @@ export const AUTOMATION_KIND_FILTERS = ["all", "failures"] as const;
 
 /** The agent CLIs offerable as the Default agent, in render order. Spelled out here
  *  rather than reusing lib/ai's identical `AgentKind` list because `lib/ai/agent.ts`
- *  imports the settings module, so importing back from it is the one edge that would
- *  close a cycle. (Other lib/ai leaves are imported above — they import nothing of
- *  ours.) */
+ *  imports `@tauri-apps/api/core` at load, which would break this module's
+ *  no-install test. (The lib/ai leaves imported above import nothing at runtime.) */
 export const DEFAULT_AGENT_IDS = [
   "claude",
   "codex",
@@ -202,9 +201,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   bitbucketTokenExpiresAt: null,
 };
 
-/** The stored theme's membership list. Spelled here because @/lib/theme reads
- *  `window.matchMedia` at load; `satisfies` pins it to {@link ThemeSetting} both
- *  ways, so a member missing from either side fails to compile. */
+/** The stored theme's membership list. Spelled here because @/lib/theme imports
+ *  use-is-dark.ts, which loads react and calls `window.matchMedia` at import time;
+ *  `satisfies` pins it to {@link ThemeSetting} both ways, so a member missing from
+ *  either side fails to compile. */
 const THEME_MEMBERS = {
   system: true,
   light: true,
@@ -444,7 +444,8 @@ function healEnumerated(settings: AppSettings): AppSettings {
 
 /** `value`'s own entries minus the `undefined`-valued ones. JSON storage cannot
  *  hold an `undefined`, so a committed object carrying one would shadow the default
- *  a re-read applies; stored (JSON-parsed) input spreads exactly as before. */
+ *  a re-read applies. JSON-parsed stored input has no undefined values, so the
+ *  strip leaves its entries unchanged. */
 function withoutUndefined<T>(value: T): T {
   if (value === null || value === undefined) return value;
   return Object.fromEntries(
@@ -458,7 +459,8 @@ function withoutUndefined<T>(value: T): T {
  *  {@link healNotifications}, which is total (a nested spread there would splash
  *  legacy primitives over the new channel objects). Enumerated fields are then
  *  membership-checked by {@link healEnumerated}. One transform for the load path
- *  and the post-write cache seed, so a seed always equals what a re-read returns. */
+ *  and the post-write cache seed, so a seed is stableStringify-equal to what a
+ *  re-read returns. */
 export function healLoadedSettings(
   saved: Partial<AppSettings> | null | undefined,
 ): AppSettings {
@@ -498,9 +500,10 @@ export interface SettingsSeedContext {
   seq: number;
 }
 
-/** Settings writes started in this runtime. Settings-only by construction: the one
- *  factory below over the one settings key is the only writer, so it orders exactly
- *  the settings write STARTS the seed guard compares. */
+/** Settings MUTATION starts in this runtime, stamped by the one factory below over
+ *  the one settings key. Direct api writers (persistRepoVisibility,
+ *  setBitbucketTokenExpiresAt, raw persistRepoOwners calls) don't stamp it and rely
+ *  on their call sites' invalidate. */
 let started = 0;
 
 /**

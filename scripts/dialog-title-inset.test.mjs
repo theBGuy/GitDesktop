@@ -1,17 +1,24 @@
 // A Dialog/Sheet title under an open content without a literal
-// `showCloseButton={false}` is at risk with a JSX-expression child, a `truncate`
-// class, or 40+ static characters (the 448px sm:max-w-md floor leaves ~396px
-// beside the 28px close, ~47 JetBrains Mono 14px characters). It carries `pr-8`
-// (32px, clear of the Dialog and the Sheet close), not overridden by a later
-// padding token, on itself or on a tag between its content opening and it.
+// `showCloseButton={false}` is at risk with a JSX-expression child, a
+// `truncate` class, or 40+ static characters (the 448px sm:max-w-md floor
+// leaves ~396px beside the 28px close, ~47 JetBrains Mono 14px characters).
+// It carries `pr-8` (32px, clear of the Dialog and the Sheet close), not
+// overridden by a right-padding token, on itself or on a tag between its
+// content's opening and it.
+//
+// On a raw container (no tailwind-merge) the token-order cancel is a
+// deliberately conservative over-approximation: CSS rule order decides there.
 //
 // Blind spots: a title built outside JSX reads as dynamic (flagged, the safe
-// direction), as do `{/* */}` comments and `{" "}` spacers in its children; a
-// wrapper that re-exports DialogTitle under another name is unscanned; a sibling carrying
-// `pr-8` between the content opening and the title false-passes the container
-// arm; a SHORT static title sharing a flex row with right-side siblings is not
-// flagged; the threshold assumes content at least 448px wide (minWidth 640 keeps
-// `sm:` active); a SheetTitle outside SheetHeader's p-4 still overlaps with pr-8.
+// direction), as do `{/* */}` comments and `{" "}` spacers in its children;
+// a wrapper that re-exports DialogTitle under another name is unscanned; a
+// sibling carrying `pr-8` between the content opening and the title
+// false-passes the container arm; a SHORT static title sharing a flex row
+// with right-side siblings is not flagged; the threshold assumes content at
+// least 448px wide (minWidth 640 keeps `sm:` active); a SheetTitle outside
+// SheetHeader's p-4 still overlaps with pr-8; the inset assumes the content
+// keeps its p-4, so a padding-stripped content (right padding below 8px)
+// that shows its close overlaps even with pr-8.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -37,7 +44,10 @@ const CONTENT_RE = /<(DialogContent|SheetContent)\b/g;
 const TITLE_RE = /<(DialogTitle|SheetTitle)\b/g;
 const OPENING_RE = /<([A-Za-z][\w$.:-]*)/g;
 const CONTENT_CLOSE_RE = /<\/\s*(?:DialogContent|SheetContent)\s*>/g;
-const PADDING_RE = /^(?:p|px|pr|pe)-/;
+// A bare `pe-*` never cancels (padding-right is emitted after it); a variant or
+// `!` one can still win, so it does.
+const PADDING_RE = /^(?:p|px|pr)-/;
+const FLAGGED_PADDING_RE = /^(?:p|px|pr|pe)-/;
 
 /** Index of the value of attribute `name` at brace depth 0 of the masked opening
  *  tag `[start, end)`, or -1. */
@@ -62,6 +72,21 @@ function topLevelAttr(masked, start, end, name) {
     }
   }
   return -1;
+}
+
+/** Whether a `{...spread}` sits at brace depth 0 of the masked opening tag
+ *  between `from` (at depth 0) and `end`. */
+function topLevelSpread(masked, from, end) {
+  let depth = 0;
+  for (let i = from; i < end; i++) {
+    const c = masked[i];
+    if (c === "{") {
+      if (depth === 0 && /^\{\s*\.\.\./.test(masked.slice(i, i + 8)))
+        return true;
+      depth++;
+    } else if (c === "}") depth--;
+  }
+  return false;
 }
 
 /** The className string of the opening tag `[start, end)`: `""` when it has none,
@@ -93,12 +118,19 @@ function classNameOf(src, masked, start, end) {
 
 const hasToken = (className, token) => className.split(/\s+/).includes(token);
 
-/** A standalone `pr-8` that no later padding token overrides (tailwind-merge
- *  keeps the last of a conflicting group). */
+/** A standalone `pr-8` that no right-padding token overrides. A bare token
+ *  cancels only after it (tailwind-merge keeps the last of a group); a variant
+ *  or `!` one cancels anywhere, since it can win regardless of order. */
 const hasInset = (className) => {
   const tokens = className.split(/\s+/);
   const at = tokens.lastIndexOf("pr-8");
-  return at !== -1 && !tokens.slice(at + 1).some((t) => PADDING_RE.test(t));
+  if (at === -1) return false;
+  return !tokens.some((t, i) => {
+    const base = t.split(":").at(-1).replace(/^!|!$/g, "");
+    if (base === "pr-8") return false;
+    if (base !== t) return FLAGGED_PADDING_RE.test(base);
+    return i > at && PADDING_RE.test(base);
+  });
 };
 
 /** Classifies every Dialog/Sheet title in one `.tsx` source: `titles` counts what
@@ -162,21 +194,28 @@ export function classifyDialogTitles(source, file) {
       findings.push(found(start, "unclassifiable", "unreadable children"));
       continue;
     }
-    // A content that closed before the title governs nothing: neither its
-    // exemption nor the tags inside it apply.
+    // A content that closed before the title (self-closing included) governs
+    // nothing: neither its exemption nor the tags inside it apply.
+    let closed = masked[contentEnd - 1] === "/";
     let from = contentEnd;
-    for (const c of masked.slice(contentEnd, start).matchAll(CONTENT_CLOSE_RE))
+    for (const c of masked
+      .slice(contentEnd, start)
+      .matchAll(CONTENT_CLOSE_RE)) {
+      closed = true;
       from = contentEnd + c.index + c[0].length - 1;
+    }
     const closeAt = topLevelAttr(
       masked,
       content,
       contentEnd,
       "showCloseButton",
     );
+    // A spread after the attribute may override it.
     const exempt =
-      from === contentEnd &&
+      !closed &&
       closeAt !== -1 &&
-      masked.startsWith("{false}", closeAt);
+      masked.startsWith("{false}", closeAt) &&
+      !topLevelSpread(masked, closeAt, contentEnd);
     if (exempt) continue;
     const dynamic = masked.slice(end + 1, close.index).includes("{");
     const text = src
@@ -458,7 +497,7 @@ test("a content that closed before the title governs nothing", () => {
 });
 
 test("a later padding token cancels the inset", () => {
-  for (const cls of ["pr-8 px-0", "pr-8 p-2", "pr-8 pr-2", "pr-8 pe-0"])
+  for (const cls of ["pr-8 px-0", "pr-8 p-2", "pr-8 pr-2"])
     assert.deepEqual(
       kinds(
         wrap(
@@ -486,6 +525,90 @@ test("a later padding token cancels the inset", () => {
       ),
     ),
     ["missing-inset"],
+  );
+});
+
+test("pe-* never cancels pr-8 (padding-right is emitted later)", () => {
+  assert.deepEqual(
+    kinds(
+      wrap(
+        "<DialogContent>",
+        '<DialogTitle className="pr-8 pe-0">{name}</DialogTitle>',
+      ),
+    ),
+    [],
+  );
+});
+
+test("a variant or important padding token cancels the inset anywhere", () => {
+  for (const cls of [
+    "pr-8 sm:pr-0",
+    "sm:p-0 pr-8",
+    "pr-8 pr-0!",
+    "pr-0! pr-8",
+    "!px-0 pr-8",
+    "hover:sm:pr-2 pr-8",
+    "pr-8 sm:pe-0",
+    "pr-8 pe-0!",
+    "pe-0! pr-8",
+  ])
+    assert.deepEqual(
+      kinds(
+        wrap(
+          "<DialogContent>",
+          `<DialogTitle className="${cls}">{name}</DialogTitle>`,
+        ),
+      ),
+      ["missing-inset"],
+      cls,
+    );
+  assert.deepEqual(
+    kinds(
+      wrap(
+        "<DialogContent>",
+        '<div className="flex pr-8 sm:pr-0"><DialogTitle>{name}</DialogTitle></div>',
+      ),
+    ),
+    ["missing-inset"],
+  );
+});
+
+test("a self-closing content counts as closed", () => {
+  assert.deepEqual(
+    kinds(
+      "const A = () => <DialogContent showCloseButton={false} />;\nconst B = () => (<><DialogHeader><DialogTitle>{name}</DialogTitle></DialogHeader></>);\n",
+    ),
+    ["missing-inset"],
+  );
+});
+
+test("a spread after showCloseButton={false} denies the exemption", () => {
+  assert.deepEqual(
+    kinds(
+      wrap(
+        "<DialogContent showCloseButton={false} {...props}>",
+        "<DialogTitle>{name}</DialogTitle>",
+      ),
+    ),
+    ["missing-inset"],
+  );
+  assert.deepEqual(
+    kinds(
+      wrap(
+        "<DialogContent {...props} showCloseButton={false}>",
+        "<DialogTitle>{name}</DialogTitle>",
+      ),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    kinds(
+      wrap(
+        "<DialogContent showCloseButton={false} style={{...base}}>",
+        "<DialogTitle>{name}</DialogTitle>",
+      ),
+    ),
+    [],
   );
 });
 

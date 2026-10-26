@@ -79,8 +79,8 @@ jobs:
       # started-mutation drives one through the app's mutation helper, which
       # imports react plus @tanstack/react-query, the palette-dialog suite
       # merges the palette's classes over the dialog's through tailwind-merge,
-      # and focus-refetch drives the window-focus pass over a real react-query
-      # cache.
+      # focus-refetch drives the window-focus pass and settings-cache-seed the
+      # seed factory, both over a real react-query cache.
       # check-enforced-node-suites.mjs fails any suite reading
       # process.env.GD_EXPECT_DEPS that this list leaves out.
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an

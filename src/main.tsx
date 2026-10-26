@@ -52,9 +52,10 @@ window.addEventListener("unhandledrejection", (e) => {
   trackCaughtError(e.reason, false);
 });
 
-// Only the offset props ride along: the wrapper spreads caller props last, so a
-// toastOptions, style or className here would replace its cn-toast class and
-// CSS vars wholesale. Unlifted, sonner keeps its own default offset.
+// Beyond position and closeButton, only the offset props ride along: the
+// wrapper spreads caller props last, so toastOptions would drop its cn-toast
+// class, className its toaster group class, and style its CSS variables.
+// Unlifted, sonner keeps its own default offset.
 function AppToaster() {
   const lift = useSyncExternalStore(subscribeToastClearance, toastClearance);
   const offset = lift > 0 ? { bottom: lift } : undefined;

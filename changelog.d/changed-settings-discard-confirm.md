@@ -1,2 +1,3 @@
-- Discard in Settings asks for confirmation first, counting any secret values
-  you typed, so unsaved edits only go away on purpose.
+- Discard in Settings, including the Automations panel's, asks for confirmation
+  first and counts any secret values you typed, so a stray click can't throw
+  your edits away.

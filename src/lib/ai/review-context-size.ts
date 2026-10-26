@@ -2,9 +2,9 @@
  *  `ReviewContextSize` union derives from this list, so the Settings labels map
  *  stays exhaustive and the menu can't silently drop an option.
  *
- *  A leaf module rather than part of context-budget.ts, which the value list
- *  would otherwise pull into a cycle: settings/api.ts reads this list to heal a
- *  stored value, and context-budget.ts reaches api.ts through guarded-fetch. */
+ *  A leaf module, not part of context-budget.ts, which reaches settings/api.ts
+ *  through guarded-fetch: settings/heal.ts (loaded by api.ts) reads this list to
+ *  heal a stored value, so living there would close a cycle. */
 export const REVIEW_CONTEXT_SIZES = [
   "auto",
   "small",

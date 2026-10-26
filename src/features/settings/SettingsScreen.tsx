@@ -150,9 +150,12 @@ export function SettingsScreen() {
   const closeAfterSave = useRef(false);
   // The Automations panel edits its own draft (saved independently of the
   // settings form); track its dirtiness so closing Settings still guards it, and
-  // hold its imperative save so "Save and close" persists it too.
+  // hold its imperative save and discard so the footer's Save and Discard (and
+  // the close guard's) reach it too.
   const [automationsDirty, setAutomationsDirty] = useState(false);
   const saveAutomationsRef = useRef<(() => void) | null>(null);
+  const discardAutomationsRef = useRef<(() => void) | null>(null);
+  const automationsDirtyRef = useLatestRef(automationsDirty);
   // Typed MCP secret values wait here until Save, in renderer memory only. It
   // lives on the screen, not the MCP section, so it outlives pane switches
   // exactly as the form draft does. The ref is the truth, written synchronously
@@ -460,6 +463,7 @@ export function SettingsScreen() {
     commitStaged([]);
     mcpBaseline.current = fresh?.mcpServers ?? null;
     if (fresh) form.reset(toDraft(fresh), { keepDefaultValues: true });
+    if (automationsDirtyRef.current) discardAutomationsRef.current?.();
   }
 
   async function requestDiscard() {
@@ -566,6 +570,9 @@ export function SettingsScreen() {
                   onDirtyChange={setAutomationsDirty}
                   onRegisterSave={(fn) => {
                     saveAutomationsRef.current = fn;
+                  }}
+                  onRegisterDiscard={(fn) => {
+                    discardAutomationsRef.current = fn;
                   }}
                 />
               )}

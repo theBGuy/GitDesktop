@@ -1,7 +1,8 @@
 // Pins src/lib/settings/heal.ts `healLoadedSettings`, the one transform both the
-// settings load and the post-write cache seed run: a seed must equal what a
-// re-read of the same committed object returns, the heal must be idempotent, and
-// each heal branch moved out of api.ts must still heal as it did there.
+// settings load and the post-write cache seed run: a seed must be
+// stableStringify-equal to what a re-read of the same committed object returns,
+// the heal must be idempotent, and
+// each heal branch must keep healing its input.
 //
 // heal.ts is runtime-import-free of ./api and @/lib/theme, so this suite needs no
 // install and runs in the no-install guards job, which is what fails an import

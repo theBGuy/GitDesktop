@@ -3499,8 +3499,9 @@ draft readied elsewhere is picked up by the background catch-up poller within it
   *Target branch*, or *Either branch*. A **Try a branch** field tells you live whether a branch
   would run, and names the exclude that skips it. Glob syntax matches branch rules — \`*\` within
   a path segment, \`**\` across \`/\`, \`?\` one character, \`{a,b}\` alternation.
-- **Save / Discard.** Both surfaces edit a draft behind Save / Discard (no per-toggle
-  autosave) — close with unsaved changes and the app confirms first.
+- **Save / Discard.** Both surfaces edit a draft (no per-toggle autosave): the repo dialog
+  behind Cancel / **Save changes**, and Settings behind **Save** / **Discard**, where
+  Discard asks first and closing with unsaved changes confirms too.
 - **Per-repo overrides.** The repo dialog shows the **effective** state (global defaults merged
   with this repo's overrides), badges each overridden cell as *Overridden*, and can enable an
   action that's globally off. **Reset to global defaults** drops every override so the repo

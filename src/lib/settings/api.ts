@@ -479,9 +479,11 @@ function serializedRecentRepoWrite<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-/** Moves a repo to the top of the recents. Resolves, like each writer a settings
- *  mutation calls, to the committed snapshot healed as a re-read returns it (`null`
- *  from an arm that never queued): the value that mutation seeds the cache with. */
+/** Moves a repo to the top of the recents and resolves to the committed snapshot
+ *  healed as a re-read returns it. Every writer a settings mutation calls resolves
+ *  to the snapshot that mutation seeds: that healed committed object, the reloaded
+ *  snapshot from a no-op arm (persistRepoOwners, relocateRecentRepo), or `null`
+ *  from an arm that never queued. */
 export function addRecentRepo(repo: {
   path: string;
   name: string;

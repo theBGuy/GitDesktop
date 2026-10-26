@@ -7,8 +7,8 @@
 export const TOAST_BAR_GAP = 12;
 
 /** The bottom offset that puts toasts `gap` px above a bar whose top edge sits
- *  at `barTop` (viewport px); 0 when the bar is off-screen or the measurement
- *  isn't a finite number. */
+ *  at `barTop` (viewport px); 0 when the bar sits at or below the viewport
+ *  bottom (or a measurement isn't finite). */
 export function barClearance({
   viewportHeight,
   barTop,
@@ -36,7 +36,7 @@ export function maxClearance(values: Iterable<number>): number {
 }
 
 // Entries are docked action bars, keyed per bar instance; the toaster clears the
-// tallest. Only the Settings Save bar publishes today.
+// highest. Only the Settings Save bar publishes today.
 const entries = new Map<string, number>();
 const listeners = new Set<() => void>();
 let aggregate = 0;

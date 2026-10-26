@@ -1,9 +1,9 @@
 import { darkQuery } from "@/lib/use-is-dark";
 
 /** Order the "Cycle theme" command steps through, and the picker's render order.
- *  `loadSettings` heals a stored theme against this list, so it is the single
- *  source: a theme reachable in the UI but missing here would be silently reset
- *  to "system" on load. */
+ *  `loadSettings` heals a stored theme against settings/heal.ts's THEME_MEMBERS,
+ *  compile-pinned to this list both ways, so adding or removing a theme means
+ *  editing both. */
 export const THEME_ORDER = ["system", "light", "dark", "slate"] as const;
 
 /**

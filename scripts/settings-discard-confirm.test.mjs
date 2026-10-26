@@ -1,10 +1,14 @@
 // Pins the Settings footer Discard: its confirm copy (the staged-secret count
 // singular at one value), when a confirmed Discard still acts, and, by source
 // scans the pure helpers can't see, the wiring around them: the prompt's scope
-// and copy, the one counter bump behind a confirmed answer, the reset's buffer
-// and baseline writes, the toaster's offset-only props, and the clearance
-// module's import-free shape. Every scan runs once against a mutated copy of
-// its source, so a pin that can't go red fails here instead of passing quietly.
+// and copy, the one counter bump behind a confirmed answer, the reset's buffer,
+// baseline and Automations-draft writes, the footer- and bar-hide focus rules,
+// both screens' prompt dismissal at unmount, the failed write's arm, the
+// Automations panel's own Discard prompt and draft registration, the toaster's
+// offset props and its ban on the wrapper-overriding props, and the clearance
+// module's import-free shape. Each scan must pass the real source and go red
+// under every mutation listed with it, so a scan that can't fail on those edits
+// fails here instead.
 //
 // `save-reset.ts` is runtime-import-free, so this suite imports it straight from
 // `src/` under Node's type stripping and runs in the no-install `guards` job.
@@ -18,6 +22,7 @@ import {
 } from "../src/features/settings/save-reset.ts";
 import {
   CLOSE,
+  escapeRe,
   maskNonCode,
   matchBrace,
   OPEN,
@@ -33,6 +38,7 @@ const source = (rel) =>
 const SCREEN = "src/features/settings/SettingsScreen.tsx";
 const MAIN = "src/main.tsx";
 const CLEARANCE = "src/lib/toast-clearance.ts";
+const AUTOMATIONS = "src/features/automations/AutomationsSection.tsx";
 
 // ------------------------------------------------------------- pure helpers
 
@@ -151,8 +157,9 @@ const ASK_ENTRIES = {
   confirmVariant: '"destructive"',
 };
 
-/** Problems with SettingsScreen's Discard prompt literal, `[]` when pinned. */
-function askLiteralProblems(text) {
+/** Problems with `requestDiscard`'s prompt literal in `text` against
+ *  `entries` (key to raw value), `[]` when pinned. */
+function promptLiteralProblems(text, entries) {
   const masked = maskNonCode(text, true);
   const request = functionBody(masked, "requestDiscard");
   if (!request) return ["requestDiscard not found"];
@@ -167,7 +174,7 @@ function askLiteralProblems(text) {
   while (/\s/.test(masked[open])) open++;
   const close = masked[open] === "{" ? matchBrace(masked, open) : -1;
   if (close === -1) return ["the ask's argument is not an inline literal"];
-  return Object.entries(ASK_ENTRIES)
+  return Object.entries(entries)
     .map(([key, want]) => [
       key,
       want,
@@ -175,6 +182,70 @@ function askLiteralProblems(text) {
     ])
     .filter(([, want, got]) => got !== want)
     .map(([key, want, got]) => `${key} is ${got ?? "missing"}, not ${want}`);
+}
+
+/** Problems with SettingsScreen's Discard prompt literal, `[]` when pinned. */
+const askLiteralProblems = (text) => promptLiteralProblems(text, ASK_ENTRIES);
+
+const AUTOMATIONS_ASK_ENTRIES = {
+  ...ASK_ENTRIES,
+  body: '"Every automation rule change since your last save is undone."',
+};
+
+/** Problems with the Automations panel's inline Discard, `[]` when pinned:
+ *  its button asks through `requestDiscard`, whose app-scoped prompt carries
+ *  the confirmed copy and whose draft reset runs only after a confirmed answer. */
+function automationsAskProblems(text) {
+  const problems = promptLiteralProblems(text, AUTOMATIONS_ASK_ENTRIES);
+  const masked = maskNonCode(text, true);
+  const request = functionBody(masked, "requestDiscard");
+  if (!request) return problems;
+  const body = masked.slice(request[0], request[1]);
+  const guard = body.indexOf("if (!ok) {");
+  const guardEnd = guard === -1 ? -1 : matchBrace(body, guard + 9);
+  const resets = [...body.matchAll(/\bdiscard\(\)/g)];
+  if (guardEnd === -1 || resets.length !== 1 || resets[0].index < guardEnd)
+    problems.push("the draft reset doesn't wait for a confirmed answer");
+  if (!/onClick=\{requestDiscard\}/.test(masked))
+    problems.push("the Discard button no longer asks first");
+  if (/onClick=\{discard\}/.test(masked))
+    problems.push("a button resets the draft without asking");
+  return problems;
+}
+
+/** Problems with the footer Discard's reach into the Automations draft, `[]`
+ *  when pinned: applyDiscard calls the panel's registered discard only while
+ *  the panel is dirty, the host wires the registration, and the panel
+ *  registers its discard while dirty. */
+function automationsDiscardRefProblems(screen, section) {
+  const masked = maskNonCode(screen, true);
+  const apply = functionBody(masked, "applyDiscard");
+  if (!apply) return ["applyDiscard not found"];
+  const problems = [];
+  if (
+    !/if \(automationsDirtyRef\.current\)\s*discardAutomationsRef\.current\?\.\(\);/.test(
+      masked.slice(apply[0], apply[1]),
+    )
+  )
+    problems.push("applyDiscard no longer resets a dirty Automations draft");
+  if (
+    !/const automationsDirtyRef = useLatestRef\(automationsDirty\)/.test(masked)
+  )
+    problems.push("the dirty gate no longer reads the live automationsDirty");
+  if (
+    !/onRegisterDiscard=\{\(fn\) => \{\s*discardAutomationsRef\.current = fn;\s*\}\}/.test(
+      masked,
+    )
+  )
+    problems.push("the host no longer wires the panel's discard");
+  const panel = maskNonCode(section, true);
+  if (
+    !/onRegisterDiscard\(dirty \? \(\) => discardRef\.current\(\) : null\)/.test(
+      panel,
+    )
+  )
+    problems.push("the panel no longer registers its discard while dirty");
+  return problems;
 }
 
 /** Problems with where the Discard counter bumps, `[]` when pinned. */
@@ -265,6 +336,8 @@ function failedWriteProblems(text) {
     if (matchBrace(masked, brace) > write) tryOpen = brace;
   }
   if (tryOpen === -1) return ["the settings write is not inside a try"];
+  if (!/\bawait\s+$/.test(masked.slice(tryOpen, write)))
+    return ["the settings write is not awaited inside its try"];
   const tryClose = matchBrace(masked, tryOpen);
   const katch = /^\s*catch\s*\([^)]*\)\s*\{/.exec(masked.slice(tryClose + 1));
   if (!katch) return ["the write's try has no catch"];
@@ -281,39 +354,102 @@ function failedWriteProblems(text) {
   return problems;
 }
 
-/** Problems with the footer-hide focus rule, `[]` when pinned: one layout
- *  effect keyed on the footer's visibility lands focus on the rail when the
- *  footer goes from shown to hidden and either a confirmed Discard aimed there
- *  or focus fell to body with the removed footer, and leaves it alone else. */
-function footerHideProblems(text) {
+/** Problems with a hide-focus rule, `[]` when pinned: one layout effect keyed
+ *  on the bar's visibility (`rule.shown`) acts only on a shown-to-hidden flip,
+ *  consumes the Discard aim (`rule.aim`) on every flip before its guard, and
+ *  then calls `rule.focus` only when that aim was set or focus fell to body
+ *  with the removed bar, leaving it alone else. */
+function hideFocusProblems(text, rule) {
+  const { shown, was, aim, focus } = rule;
   const masked = maskNonCode(text, true);
   const effects = [];
   for (const m of masked.matchAll(/useLayoutEffect\(\(\) => \{/g)) {
     const open = m.index + m[0].length - 1;
     const close = matchBrace(masked, open);
     if (close === -1) continue;
-    if (/^\s*,\s*\[footerVisible\]\s*\)/.test(masked.slice(close + 1)))
+    const deps = new RegExp(`^\\s*,\\s*\\[${shown}\\]\\s*\\)`);
+    if (deps.test(masked.slice(close + 1)))
       effects.push(masked.slice(open, close));
   }
   if (effects.length !== 1)
-    return [
-      `expected one [footerVisible] layout effect, found ${effects.length}`,
-    ];
+    return [`expected one [${shown}] layout effect, found ${effects.length}`];
   const body = effects[0];
+  const has = (literal) => body.includes(literal);
   const problems = [];
-  if (!/footerWasVisible\.current && !footerVisible/.test(body))
+  if (!has(`${was}.current && !${shown}`))
     problems.push("the effect no longer acts only on a shown-to-hidden flip");
-  if (!/pendingRailFocus\.current = false/.test(body))
+  if (!has(`${was}.current = ${shown};`))
+    problems.push("the effect no longer records the bar's visibility");
+  if (!has(`const aimed = ${aim}.current`))
+    problems.push(`the gate's aim no longer reads ${aim}`);
+  if (!has(`${aim}.current = false`))
     problems.push("the effect no longer consumes the Discard aim");
-  const gate = /if \(([^)]*)\)\s*focusRailItem\(/.exec(body);
-  if (!gate) return [...problems, "the effect no longer focuses the rail"];
+  if (!has("const active = document.activeElement"))
+    problems.push("the gate no longer reads document.activeElement");
+  const gate = new RegExp(`if \\(([^)]*)\\)\\s*${escapeRe(focus)}`).exec(body);
+  if (!gate) return [...problems, "the effect no longer moves focus"];
   for (const arm of ["aimed", "active === null", "active === document.body"])
     if (!gate[1].includes(arm)) problems.push(`the focus gate lost ${arm}`);
-  if (!/const aimed = pendingRailFocus\.current/.test(body))
-    problems.push("the gate's aim no longer reads pendingRailFocus");
-  if (!/const active = document\.activeElement/.test(body))
-    problems.push("the gate no longer reads document.activeElement");
+  if (
+    !/if \(!hid\) return;\s*const active = document\.activeElement/.test(body)
+  )
+    problems.push("the hide guard no longer directly precedes the focus read");
+  const consume = body.indexOf(`${aim}.current = false`);
+  const guard = body.indexOf("if (!hid) return;");
+  if (consume === -1 || guard === -1 || consume > guard)
+    problems.push(
+      "the Discard aim is no longer consumed before the hide guard",
+    );
   return problems;
+}
+
+const footerHideProblems = (text) =>
+  hideFocusProblems(text, {
+    shown: "footerVisible",
+    was: "footerWasVisible",
+    aim: "pendingRailFocus",
+    focus: "focusRailItem(",
+  });
+
+const barHideProblems = (text) =>
+  hideFocusProblems(text, {
+    shown: "dirty",
+    was: "barWasShown",
+    aim: "pendingHeadingFocus",
+    focus: "headingRef.current?.focus(",
+  });
+
+/** Problems with a screen's prompt dismissal, `[]` when pinned:
+ *  `requestDiscard` records the request its ask opened, and an unmount-only
+ *  effect resolves it `false` only while it is still the open prompt. */
+function promptDismissalProblems(text) {
+  const masked = maskNonCode(text, true);
+  const problems = [];
+  const request = functionBody(masked, "requestDiscard");
+  if (!request) return ["requestDiscard not found"];
+  const body = masked.slice(request[0], request[1]);
+  if (
+    !/\.ask\([\s\S]*?\);\s*const mine = useConfirm\.getState\(\)\.request;\s*promptRef\.current = mine;/.test(
+      body,
+    )
+  )
+    problems.push("requestDiscard no longer records the request it opened");
+  const cleanup =
+    /useEffect\(\s*\(\) => \(\) => \{\s*if \(useConfirm\.getState\(\)\.request === promptRef\.current\)\s*promptRef\.current\?\.resolve\(false, false\);\s*\},\s*\[\],?\s*\)/;
+  if (!cleanup.test(masked))
+    problems.push("no unmount effect dismisses the screen's own prompt");
+  return problems;
+}
+
+/** Problems with the panel's discard registration, `[]` when pinned: it
+ *  registers while dirty and deregisters on every re-run and unmount. */
+function discardRegistrationProblems(text) {
+  const masked = maskNonCode(text, true);
+  const effect =
+    /useEffect\(\(\) => \{\s*if \(!onRegisterDiscard\) return;\s*onRegisterDiscard\(dirty \? \(\) => discardRef\.current\(\) : null\);\s*return \(\) => onRegisterDiscard\(null\);\s*\}, \[dirty, onRegisterDiscard\]\);/;
+  return effect.test(masked)
+    ? []
+    : ["the panel's discard registration lost its shape or its cleanup"];
 }
 
 /** Problems with main.tsx's `<Toaster>` props, `[]` when pinned. */
@@ -409,6 +545,64 @@ test("the footer's hide lands focus on the rail only when it would drop", () => 
     source(SCREEN),
     (s) => s.replace(" || active === document.body)", ")"),
     (s) => s.replace("if (aimed || active === null", "if (active === null"),
+    (s) => s.replace("    footerWasVisible.current = footerVisible;\n", ""),
+    (s) =>
+      s
+        .replace("    if (!hid) return;\n", "")
+        .replace(
+          "    const active = document.activeElement;\n",
+          "    const active = document.activeElement;\n    if (!hid) return;\n",
+        ),
+    (s) =>
+      s
+        .replace(
+          "    pendingRailFocus.current = false;\n    if (!hid)",
+          "    if (!hid)",
+        )
+        .replace(
+          "    if (!hid) return;\n",
+          "    if (!hid) return;\n    pendingRailFocus.current = false;\n",
+        ),
+  );
+});
+
+test("the Automations bar's hide lands focus on its heading only when it would drop", () => {
+  pin(
+    barHideProblems,
+    source(AUTOMATIONS),
+    (s) => s.replace(" || active === document.body)", ")"),
+    (s) => s.replace("if (aimed || active === null", "if (active === null"),
+    (s) => s.replace("      barWasShown.current = dirty;\n", ""),
+    (s) =>
+      s
+        .replace(
+          "      pendingHeadingFocus.current = false;\n      if (!hid)",
+          "      if (!hid)",
+        )
+        .replace(
+          "      if (!hid) return;\n",
+          "      if (!hid) return;\n      pendingHeadingFocus.current = false;\n",
+        ),
+  );
+});
+
+for (const file of [SCREEN, AUTOMATIONS])
+  test(`${file} dismisses its own open prompt when it unmounts`, () => {
+    pin(
+      promptDismissalProblems,
+      source(file),
+      (s) =>
+        s.replace(
+          "if (useConfirm.getState().request === promptRef.current)",
+          "if (promptRef.current)",
+        ),
+      (s) => s.replace("promptRef.current = mine;", ""),
+    );
+  });
+
+test("the Automations panel deregisters its discard on every re-run", () => {
+  pin(discardRegistrationProblems, source(AUTOMATIONS), (s) =>
+    s.replace("      return () => onRegisterDiscard(null);\n", ""),
   );
 });
 
@@ -418,8 +612,67 @@ test("a failed settings write toasts and keeps the draft", () => {
       /try \{\n(\s*await saveSettings\.mutateAsync\([^;]*;)\n\s*\} catch \(e\) \{[\s\S]*?return;\n\s*\}/,
       (_m, write) => write.trim(),
     );
-  pin(failedWriteProblems, source(SCREEN), unwrap, (s) =>
-    s.replace(/(catch \(e\) \{[\s\S]*?)\n\s*return;/, "$1"),
+  pin(
+    failedWriteProblems,
+    source(SCREEN),
+    unwrap,
+    (s) => s.replace(/(catch \(e\) \{[\s\S]*?)\n\s*return;/, "$1"),
+    (s) =>
+      s.replace(
+        "await saveSettings.mutateAsync(",
+        "void saveSettings.mutateAsync(",
+      ),
+  );
+});
+
+test("the Automations panel's Discard asks first with the confirmed copy", () => {
+  pin(
+    automationsAskProblems,
+    source(AUTOMATIONS),
+    (s) => s.replace('scope: "app"', 'scope: "repo"'),
+    (s) =>
+      s.replace(
+        '"Every automation rule change since your last save is undone."',
+        '"Every edit is undone."',
+      ),
+    (s) => s.replace("onClick={requestDiscard}", "onClick={discard}"),
+    (s) =>
+      s
+        .replace(
+          "      pendingHeadingFocus.current = true;\n      discard();\n",
+          "",
+        )
+        .replace("      if (!ok) {\n", "      discard();\n      if (!ok) {\n"),
+  );
+});
+
+test("the footer Discard also resets a dirty Automations draft", () => {
+  const section = source(AUTOMATIONS);
+  const check = (screen) => automationsDiscardRefProblems(screen, section);
+  pin(
+    check,
+    source(SCREEN),
+    (s) =>
+      s.replace(
+        "    if (automationsDirtyRef.current) discardAutomationsRef.current?.();\n",
+        "",
+      ),
+    (s) =>
+      s.replace(
+        "if (automationsDirtyRef.current) discardAutomationsRef.current?.();",
+        "discardAutomationsRef.current?.();",
+      ),
+    (s) => s.replace("discardAutomationsRef.current = fn;", ""),
+  );
+  assert.ok(
+    automationsDiscardRefProblems(
+      source(SCREEN),
+      section.replace(
+        "onRegisterDiscard(dirty ? () => discardRef.current() : null);",
+        "onRegisterDiscard(null);",
+      ),
+    ).length > 0,
+    "the scan passed a panel that never registers its discard",
   );
 });
 
