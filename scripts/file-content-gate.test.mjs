@@ -209,8 +209,8 @@ const REFRESHING = {
   newFetching: true,
 };
 
-// Two retired completeness rules, each kept as the negative control of the pin
-// it fails: "complete only when built with no read in flight" (a warm first
+// Two plausible completeness rules, each kept as the negative control of the
+// pin it fails: "complete only when built with no read in flight" (a warm first
 // paint starts incomplete, so a two-step landing builds twice), and "complete
 // unless forced", with no inheritance (the forced paint's own re-render
 // completes it, so its late reads hold again).

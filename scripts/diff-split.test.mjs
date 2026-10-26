@@ -449,6 +449,41 @@ test("literal and octal-escaped emoji decode without replacement characters", ()
   }
 });
 
+// -------------------------------------------------------------- longQuotedRuns
+
+// A patch sets the length of an unescaped run inside a quoted name; this one
+// is past the engine's argument limit for spreading the run's bytes into push.
+const LONG_RUN = "n".repeat(200_000);
+const longOld = `${LONG_RUN}caf\\303\\251.txt`;
+const longNew = `${LONG_RUN}caf\\303\\251-2.txt`;
+const longRename =
+  `diff --git "a/${longOld}" "b/${longNew}"\n` +
+  "similarity index 100%\n" +
+  `rename from "${longOld}"\n` +
+  `rename to "${longNew}"\n`;
+
+test("a quoted rename destination with a long unescaped run decodes whole", () => {
+  const path = `${LONG_RUN}café-2.txt`;
+  assert.equal(sectionFilePath(longRename), path);
+  assert.deepEqual([...splitUnifiedDiff(longRename)], [[path, longRename]]);
+});
+
+test("a quoted rename source with a long unescaped run decodes whole", () => {
+  assert.deepEqual(classifyHeaderOnlyDiff(longRename), {
+    kind: "rename",
+    oldPath: `${LONG_RUN}café.txt`,
+    newPath: `${LONG_RUN}café-2.txt`,
+  });
+});
+
+test("negative control: spreading the long run's bytes into push throws", () => {
+  const bytes = [];
+  assert.throws(
+    () => bytes.push(...new TextEncoder().encode(LONG_RUN)),
+    RangeError,
+  );
+});
+
 // -------------------------------------------------------------- hunkStatistics
 
 test("a carriage return inside content preserves section keys and counts", () => {

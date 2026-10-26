@@ -38,7 +38,9 @@ function unescapeCQuoted(body: string): string {
       // backslash or control char elsewhere in the path still forces quoting).
       const start = i;
       while (i < body.length && body[i] !== "\\") i++;
-      bytes.push(...encoder.encode(body.slice(start, i)));
+      // Byte by byte, never `push(...run)`: spreading a long run past the
+      // engine's argument limit throws RangeError.
+      for (const byte of encoder.encode(body.slice(start, i))) bytes.push(byte);
       continue;
     }
     i++; // consume the backslash
@@ -62,7 +64,7 @@ function unescapeCQuoted(body: string): string {
     // Unknown escape: keep the character itself, by CODE POINT so a non-BMP one
     // survives whole.
     const char = String.fromCodePoint(body.codePointAt(i) as number);
-    bytes.push(...encoder.encode(char));
+    for (const byte of encoder.encode(char)) bytes.push(byte);
     i += char.length;
   }
   return new TextDecoder().decode(new Uint8Array(bytes));
