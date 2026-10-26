@@ -164,17 +164,13 @@ export const AutomationsSection = withForm({
       });
     }
 
-    // A reset never lands under an in-flight save: it waits for the save to
-    // settle (its refetch included) and then resets to the stored config the
-    // save left, a no-op when the save already wrote this draft.
-    const [resetQueued, setResetQueued] = useState(false);
-    useEffect(() => {
-      if (!resetQueued || save.isPending) return;
-      setResetQueued(false);
-      setDraft(saved);
-    }, [resetQueued, save.isPending, saved]);
+    // Resets at once to what an in-flight save (its refetch included) is
+    // writing, so nothing reads as unsaved once it lands and no edit made
+    // after the reset is overwritten by a deferred one.
     function discard() {
-      setResetQueued(true);
+      setDraft(
+        save.isPending && save.variables ? save.variables.lifecycles : saved,
+      );
     }
     const mounted = useRef(true);
     useEffect(() => {

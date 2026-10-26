@@ -492,6 +492,7 @@ export function SettingsScreen() {
     }
     if (!mounted.current || useUiStore.getState().view !== "settings") return;
     if (!unsavedNow()) {
+      if (automationsDirtyRef.current) discardAutomationsRef.current?.();
       focusRailAfterPrompt();
       return;
     }

@@ -676,6 +676,78 @@ test("the footer Discard also resets a dirty Automations draft", () => {
   );
 });
 
+/** Problems with the panel's draft reset, `[]` when pinned: `discard` resets
+ *  at once, to an in-flight save's lifecycles while it is pending, and no
+ *  queued reset survives to land after the save settles. */
+function automationsResetTargetProblems(text) {
+  const masked = maskNonCode(text, true);
+  const discard = functionBody(masked, "discard");
+  if (!discard) return ["discard not found"];
+  const problems = [];
+  if (
+    !/^\{\s*setDraft\(\s*save\.isPending && save\.variables\s*\?\s*save\.variables\.lifecycles\s*:\s*saved,?\s*\);\s*$/.test(
+      masked.slice(discard[0], discard[1]),
+    )
+  )
+    problems.push("discard no longer resets at once to the in-flight target");
+  if (/resetQueued/i.test(text)) problems.push("a queued reset is back");
+  return problems;
+}
+
+/** Problems with requestDiscard's no-op arm reaching the Automations draft,
+ *  `[]` when pinned: a settings Save that settled under the prompt still
+ *  leaves a dirty Automations draft to reset before the arm returns. */
+function noOpAutomationsProblems(text) {
+  const masked = maskNonCode(text, true);
+  const request = functionBody(masked, "requestDiscard");
+  if (!request) return ["requestDiscard not found"];
+  const gate = /if \(!unsavedNow\(\)\) \{([^{}]*)\}/.exec(
+    masked.slice(request[0], request[1]),
+  );
+  if (!gate) return ["requestDiscard lost its no-op arm"];
+  return /^\s*if \(automationsDirtyRef\.current\) discardAutomationsRef\.current\?\.\(\);\s*focusRailAfterPrompt\(\);\s*return;\s*$/.test(
+    gate[1],
+  )
+    ? []
+    : ["the no-op arm no longer resets a dirty Automations draft first"];
+}
+
+test("the Automations discard resets at once to an in-flight save's target", () => {
+  pin(automationsResetTargetProblems, source(AUTOMATIONS), (s) =>
+    s.replace(/ {4}function discard\(\) \{\n[\s\S]*?\n {4}\}\n/, () =>
+      [
+        "    const [resetQueued, setResetQueued] = useState(false);",
+        "    useEffect(() => {",
+        "      if (!resetQueued || save.isPending) return;",
+        "      setResetQueued(false);",
+        "      setDraft(saved);",
+        "    }, [resetQueued, save.isPending, saved]);",
+        "    function discard() {",
+        "      setResetQueued(true);",
+        "    }",
+        "",
+      ].join("\n"),
+    ),
+  );
+});
+
+test("a Discard whose settings Save settled under the prompt still resets Automations", () => {
+  const line =
+    "      if (automationsDirtyRef.current) discardAutomationsRef.current?.();\n";
+  pin(
+    noOpAutomationsProblems,
+    source(SCREEN),
+    (s) => inFunction(s, "requestDiscard", line, ""),
+    (s) =>
+      inFunction(
+        s,
+        "requestDiscard",
+        line,
+        "      discardAutomationsRef.current?.();\n",
+      ),
+  );
+});
+
 test("the counter bumps once, in applyDiscard, behind a confirmed answer", () => {
   pin(bumpProblems, source(SCREEN), (s) => {
     const body = s.slice(s.indexOf("async function requestDiscard"));
