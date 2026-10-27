@@ -9,8 +9,8 @@
  */
 import { isRunActive } from "../../lib/github/run-status.ts";
 
-/** When an identity re-reads the head list and the PR's checks, from when it
- *  was first seen. */
+/** When an identity re-reads the head list and the PR's checks, from when its
+ *  episode began. */
 export const CHECKS_RECHECK_DELAYS_MS = [15_000, 30_000, 60_000] as const;
 /** A step due within this much of a tick fires on it, so identities first seen
  *  a moment apart share one re-read instead of firing back to back. */
@@ -24,37 +24,49 @@ export type RecheckCheck = {
   startedAt?: string;
 };
 
-/** The pending checks' attempts over finished head rows, one identity per run:
- *  `<runId>|<sorted job ids>`, a check without a job id standing in as
- *  `name@startedAt`. Keyed on the CHECKS, never the row: a re-run mints new
- *  check runs, so it always reads as a new identity over the same stale row,
- *  while a lagging check of the old attempt keeps its own. A run the rows
- *  don't carry belongs to the per-run fallback. */
-export function recheckIdentities(
-  pendingChecks: readonly RecheckCheck[],
+/** The check attempts of runs with at least one `isPending` check, one
+ *  identity per run: `<runId>|<sorted job ids>` over ALL the run's checks,
+ *  pending or not, a check without a job id standing in as `name@startedAt`.
+ *  Keyed on the checks, never the row: a re-run (full or failed jobs only)
+ *  mints new check runs, so it reads as a new identity over the same stale
+ *  row, while a lagging check of the old attempt, or a sibling job settling,
+ *  keeps it. `live` holds those over a finished row (the mismatch), `active`
+ *  those over an executing row (paused, not resolved). A run the rows don't
+ *  carry belongs to the per-run fallback. */
+export function recheckIdentities<C extends RecheckCheck>(
+  checks: readonly C[],
+  isPending: (check: C) => boolean,
   rowsById: ReadonlyMap<string, { status: string }>,
-): string[] {
-  const parts = new Map<string, string[]>();
-  for (const c of pendingChecks) {
+): { live: string[]; active: string[] } {
+  const runs = new Map<string, { parts: string[]; pending: boolean }>();
+  for (const c of checks) {
     if (!c.runId) continue;
-    const row = rowsById.get(c.runId);
-    if (row === undefined || isRunActive(row.status)) continue;
     const part = c.jobId || `${c.name}@${c.startedAt ?? ""}`;
-    const list = parts.get(c.runId);
-    if (list) list.push(part);
-    else parts.set(c.runId, [part]);
+    const run = runs.get(c.runId);
+    if (run) {
+      run.parts.push(part);
+      run.pending ||= isPending(c);
+    } else runs.set(c.runId, { parts: [part], pending: isPending(c) });
   }
-  return [...parts]
-    .map(([runId, list]) => `${runId}|${[...list].sort().join(",")}`)
-    .sort();
+  const live: string[] = [];
+  const active: string[] = [];
+  for (const [runId, run] of runs) {
+    const row = rowsById.get(runId);
+    if (!run.pending || row === undefined) continue;
+    const id = `${runId}|${[...run.parts].sort().join(",")}`;
+    (isRunActive(row.status) ? active : live).push(id);
+  }
+  return { live: live.sort(), active: active.sort() };
 }
 
-/** One identity's progress: when it was first seen, whether its head-list read
- *  ran, how many ladder steps fired, and whether it is finished for good. */
+/** One identity's progress: when its episode began, whether its head-list read
+ *  ran, how many ladder steps fired, whether its row was last seen executing
+ *  (paused), and whether it is finished for good. */
 export type RecheckEntry = {
   firstSeenMs: number;
   headRefetched: boolean;
   firedSteps: number;
+  paused: boolean;
   done: boolean;
 };
 
@@ -69,17 +81,20 @@ export type RecheckActions = {
   nextDueMs: number | null;
 };
 
-/** Advances every identity to `nowMs`. Each one reads the head list on first
- *  sight and re-reads it with the PR's checks at each ladder step, then is
- *  done and never re-arms. While not `visible` (collapsed, or the tab hidden) nothing fires
+/** Advances every identity to `nowMs`. Each episode reads the head list on
+ *  first sight and re-reads it with the PR's checks at each ladder step, then
+ *  is done and never re-arms. An identity in `active` (its row executing) is
+ *  paused, not resolved: when its row reads finished again it starts one fresh
+ *  episode. One that left both lists has resolved (its check stopped reading
+ *  pending). While not `visible` (collapsed, or the tab hidden) nothing fires
  *  and nothing resolves; on return, steps that came due meanwhile collapse
- *  into one re-read. A visible identity that left `live` has resolved (its
- *  check stopped reading pending, or its row turned active). */
+ *  into one re-read. */
 export function reconcileRecheck(
   state: RecheckState,
   live: readonly string[],
   visible: boolean,
   nowMs: number,
+  active: readonly string[] = [],
 ): { state: RecheckState; actions: RecheckActions } {
   const actions: RecheckActions = {
     refetchHead: false,
@@ -88,19 +103,27 @@ export function reconcileRecheck(
   };
   if (!visible) return { state, actions };
   const liveSet = new Set(live);
+  const activeSet = new Set(active);
   const next = new Map(state);
   for (const [id, entry] of state) {
-    if (!entry.done && !liveSet.has(id)) next.set(id, { ...entry, done: true });
+    if (liveSet.has(id)) continue;
+    if (activeSet.has(id)) next.set(id, { ...entry, paused: true });
+    else if (!entry.done || entry.paused)
+      next.set(id, { ...entry, paused: false, done: true });
   }
   for (const id of liveSet) {
     const prev = next.get(id);
-    if (prev?.done) continue;
-    let entry: RecheckEntry = prev ?? {
-      firstSeenMs: nowMs,
-      headRefetched: false,
-      firedSteps: 0,
-      done: false,
-    };
+    if (prev?.done && !prev.paused) continue;
+    let entry: RecheckEntry =
+      prev === undefined || prev.paused
+        ? {
+            firstSeenMs: nowMs,
+            headRefetched: false,
+            firedSteps: 0,
+            paused: false,
+            done: false,
+          }
+        : prev;
     if (!entry.headRefetched) {
       actions.refetchHead = true;
       entry = { ...entry, headRefetched: true };

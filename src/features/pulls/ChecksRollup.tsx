@@ -877,22 +877,25 @@ export function ChecksRollup({
     : [];
   // Pending checks whose run's head-list row reads finished: the PR's checks can
   // lag the runs list, a failed PR read isn't retried, and a re-run started
-  // elsewhere sits over the old finished row. Each check attempt reads the head
-  // list at once, then re-reads it with the PR's checks on a short ladder, so a
-  // runs list that lagged at first sight still surfaces the new attempt.
-  const recheckIds =
+  // elsewhere sits over the old finished row. Keyed on the check's attempt (the
+  // run's full job-id set), each reads the head list at once, then re-reads it
+  // with the PR's checks on a short ladder, so a runs list that lagged at first
+  // sight still surfaces the new attempt. A row seen executing pauses it; its
+  // next finish starts one fresh episode.
+  const recheck =
     watcherProvider === "github"
       ? recheckIdentities(
-          checks.filter(
-            (c) =>
-              Boolean(c.runId) && !c.completedAt && bucketOf(c) === "pending",
-          ),
+          checks,
+          (c) => !c.completedAt && bucketOf(c) === "pending",
           headRunById,
         )
-      : [];
-  const recheckSignature = recheckIds.join("\n");
+      : { live: [], active: [] };
+  const recheckSignature = recheck.live.join("\n");
+  const recheckActiveSignature = recheck.active.join("\n");
   useEffect(() => {
     const live = recheckSignature === "" ? [] : recheckSignature.split("\n");
+    const active =
+      recheckActiveSignature === "" ? [] : recheckActiveSignature.split("\n");
     let timer: ReturnType<typeof setTimeout> | undefined;
     const reconcile = () => {
       const now = Date.now();
@@ -901,6 +904,7 @@ export function ChecksRollup({
         live,
         open,
         now,
+        active,
       );
       recheckState.current = state;
       // These invalidations never cancel a read in flight: the reads are
@@ -936,7 +940,7 @@ export function ChecksRollup({
     return () => {
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [recheckSignature, open, queryClient, repoPath]);
+  }, [recheckSignature, recheckActiveSignature, open, queryClient, repoPath]);
   useEffect(() => {
     let finished = false;
     const settledHeadIds: string[] = [];

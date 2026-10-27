@@ -1138,9 +1138,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   jobs reads only while the rollup is open (`useHeadRuns` / `useRunJobs`).
   While open, a check still pending over a finished row gets the bounded
   re-check in `src/features/pulls/check-recheck.ts`. Keyed on the check's
-  attempt (its job ids), never the row, it reads the head list on first sight,
-  re-reads it with the PR's checks at 15/30/60 s, then parks. Collapsing the
-  rollup or hiding its tab pauses it without resolving it.
+  attempt (the run's full job-id set), never the row, it reads the head list
+  on first sight, re-reads it with the PR's checks at 15/30/60 s, then parks.
+  A row seen executing pauses it and its next finish starts one fresh episode;
+  collapsing the rollup or hiding its tab pauses it without resolving it.
 
 ## Code comments
 
