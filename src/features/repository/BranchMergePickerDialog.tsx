@@ -197,7 +197,7 @@ export function BranchMergePickerDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {shownMode ? PICKER_COPY[shownMode].title(currentLabel) : ""}
           </DialogTitle>
           <DialogDescription>

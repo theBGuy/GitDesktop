@@ -272,7 +272,7 @@ export function BoardBulkFieldsDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle id={titleId}>
+          <DialogTitle id={titleId} className="pr-8">
             Edit fields on {eligibleCount}{" "}
             {eligibleCount === 1 ? noun : `${noun}s`}
           </DialogTitle>

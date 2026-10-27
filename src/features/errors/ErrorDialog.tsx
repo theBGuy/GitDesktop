@@ -86,7 +86,7 @@ export function ErrorDialog() {
         initialFocus={() => closeRef.current}
       >
         <DialogHeader>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 pr-8">
             <DialogTitle className="min-w-0 wrap-break-word">
               {shownPresentation?.summary}
             </DialogTitle>

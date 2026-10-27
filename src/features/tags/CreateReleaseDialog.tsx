@@ -544,7 +544,7 @@ export function CreateReleaseDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {initialTag ? `Release ${initialTag}` : "New release"}
             </DialogTitle>
             <DialogDescription>

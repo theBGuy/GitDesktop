@@ -1,6 +1,15 @@
 import { ArrowLeftIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
@@ -18,17 +27,24 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { AutomationsSection } from "@/features/automations/AutomationsSection";
+import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import {
   notificationsSignature,
   useNotificationsDraft,
 } from "@/lib/notifications/matrix";
-import { subscribeMcpRehome } from "@/lib/settings/api";
+import { type AppSettings, subscribeMcpRehome } from "@/lib/settings/api";
 import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
-import { useSaveSettings, useSettings } from "@/lib/settings/queries";
+import {
+  settingsKeys,
+  useSaveSettings,
+  useSettings,
+} from "@/lib/settings/queries";
+import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastComposedError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { AboutSection } from "./AboutSection";
 import { AccountsSection } from "./AccountsSection";
 import { AiProviderSection } from "./AiProviderSection";
@@ -60,7 +76,12 @@ import {
   stageMcpSecretSets,
 } from "./mcp/secret-ops";
 import { NotificationsSection } from "./NotificationsSection";
-import { resetsAfterSave, stableStringify } from "./save-reset";
+import {
+  discardActs,
+  discardConfirmBody,
+  resetsAfterSave,
+  stableStringify,
+} from "./save-reset";
 import { settingsFormOpts, toDraft } from "./settings-form";
 import { TerminalSection } from "./TerminalSection";
 import { UpdatesSection } from "./UpdatesSection";
@@ -104,6 +125,13 @@ const AI_PANELS = new Set<PanelId>([
   "automations",
 ]);
 
+/** Focuses `panel`'s entry in the Settings rail under `root`, if both exist. */
+function focusRailItem(root: HTMLElement | null, panel: string) {
+  root
+    ?.querySelector<HTMLElement>(`[data-rail-item="${CSS.escape(panel)}"]`)
+    ?.focus({ preventScroll: true });
+}
+
 export function SettingsScreen() {
   const closeSettings = useUiStore((s) => s.closeSettings);
   const settingsTarget = useUiStore((s) => s.settingsTarget);
@@ -111,6 +139,9 @@ export function SettingsScreen() {
   const repoPath = useUiStore((s) => s.repoPath);
   const settings = useSettings();
   const saveSettings = useSaveSettings();
+  const queryClient = useQueryClient();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLElement>(null);
   const [panel, setPanel] = useState<PanelId>(
     // Honor a deep-link target on first render (e.g. "Set up AI" → AI panel).
     (settingsTarget as PanelId | null) ?? "general",
@@ -119,9 +150,12 @@ export function SettingsScreen() {
   const closeAfterSave = useRef(false);
   // The Automations panel edits its own draft (saved independently of the
   // settings form); track its dirtiness so closing Settings still guards it, and
-  // hold its imperative save so "Save and close" persists it too.
+  // hold its imperative save and discard so the footer's Save and Discard (and
+  // the close guard's) reach it too.
   const [automationsDirty, setAutomationsDirty] = useState(false);
   const saveAutomationsRef = useRef<(() => void) | null>(null);
+  const discardAutomationsRef = useRef<(() => void) | null>(null);
+  const automationsDirtyRef = useLatestRef(automationsDirty);
   // Typed MCP secret values wait here until Save, in renderer memory only. It
   // lives on the screen, not the MCP section, so it outlives pane switches
   // exactly as the form draft does. The ref is the truth, written synchronously
@@ -136,7 +170,8 @@ export function SettingsScreen() {
   // The mcpServers this form last saw saved: the delete diff only removes
   // secrets of servers it knew about, never one another window added.
   const mcpBaseline = useRef<unknown>(null);
-  // Bumped by every Discard, so a Save can tell one ran during its write.
+  // Bumped by every confirmed Discard, so a Save can tell one ran during its
+  // write.
   const discards = useRef(0);
   const secretsDirty = stagedSecrets.length > 0;
   const secrets: McpSecretsHandle = {
@@ -163,6 +198,17 @@ export function SettingsScreen() {
       mounted.current = false;
     };
   }, []);
+  // This screen's own open Discard prompt. The prompt is app-scoped and global
+  // hotkeys still navigate under a modal, so leaving Settings dismisses it here
+  // rather than orphan a prompt for a form that no longer exists.
+  const promptRef = useRef<ConfirmRequest | null>(null);
+  useEffect(
+    () => () => {
+      if (useConfirm.getState().request === promptRef.current)
+        promptRef.current?.resolve(false, false);
+    },
+    [],
+  );
 
   // A deep-link fired while Settings is already open (no remount) still routes
   // to the requested section; consume the target so it doesn't re-fire.
@@ -187,6 +233,8 @@ export function SettingsScreen() {
     () => [{ items: visiblePanels.map((p) => ({ id: p.id, label: p.label })) }],
     [visiblePanels],
   );
+  // Read late (a deep link can move the panel while a prompt is open).
+  const activePanelRef = useLatestRef(activePanel);
 
   const form = useAppForm({
     ...settingsFormOpts,
@@ -201,7 +249,18 @@ export function SettingsScreen() {
         const discardsAtPress = discards.current;
         const current = settings.data;
         if (!current) return;
-        await saveSettings.mutateAsync({ ...current, ...value });
+        try {
+          await saveSettings.mutateAsync({ ...current, ...value });
+        } catch (e) {
+          // Nothing below runs on a failed write: the draft, the staged secrets
+          // and the stored ones all stay as they were, ready for another Save.
+          toastComposedError({
+            title: `Couldn't save settings: ${presentError(e).summary}`,
+            description: "Your changes are still here. Save again to retry.",
+            errors: [e],
+          });
+          return;
+        }
         // keepDefaultValues everywhere we reset-with-values: otherwise reset
         // rewrites the form's defaultValues and the per-render options sync
         // (which still sees settingsFormOpts' static defaults) clobbers the
@@ -345,6 +404,47 @@ export function SettingsScreen() {
   // MCP secrets should guard closing the screen.
   const closeDirty = dirty || automationsDirty || secretsDirty;
 
+  const footerVisible = dirty || secretsDirty;
+  const footerVisibleRef = useLatestRef(footerVisible);
+  useToastClearance(footerRef, footerVisible);
+
+  // Whether anything is unsaved against the settings CACHE right now, which a
+  // Save that just settled has already updated before this screen re-renders.
+  function unsavedNow() {
+    const fresh = queryClient.getQueryData<AppSettings>(settingsKeys.settings);
+    return discardActs({
+      current: form.state.values,
+      fresh: fresh ? toDraft(fresh) : null,
+      stagedCount: stagedRef.current.length,
+    });
+  }
+
+  // Footer-unmount focus, in the commit that hides it: land on the rail entry
+  // when the removed footer held focus (now on body) or a confirmed Discard aimed
+  // there (focus may still sit in the closing prompt); a control the user moved
+  // to keeps it. The aim is consumed on every footer flip.
+  const pendingRailFocus = useRef(false);
+  const footerWasVisible = useRef(false);
+  useLayoutEffect(() => {
+    const hid = footerWasVisible.current && !footerVisible;
+    footerWasVisible.current = footerVisible;
+    const aimed = pendingRailFocus.current;
+    pendingRailFocus.current = false;
+    if (!hid) return;
+    const active = document.activeElement;
+    if (aimed || active === null || active === document.body)
+      focusRailItem(rootRef.current, activePanelRef.current);
+  }, [footerVisible]);
+
+  // For an answer that leaves the footer where it was (nothing in it left to
+  // discard, or already gone), so no footer flip places focus: the frame
+  // outlasts the dialog's close and lands before Base UI's later focus return.
+  function focusRailAfterPrompt() {
+    requestAnimationFrame(() =>
+      focusRailItem(rootRef.current, activePanelRef.current),
+    );
+  }
+
   function save(andClose: boolean) {
     if (saveLock.current) return;
     // Persist the Automations panel's own draft alongside the settings form —
@@ -355,11 +455,49 @@ export function SettingsScreen() {
     form.handleSubmit();
   }
 
-  function discard() {
+  // A confirmed answer's reset, read from the cache at call time so a Save that
+  // settled while the prompt was open is kept rather than undone.
+  function applyDiscard() {
+    const fresh = queryClient.getQueryData<AppSettings>(settingsKeys.settings);
     discards.current += 1;
     commitStaged([]);
-    mcpBaseline.current = settings.data?.mcpServers ?? null;
-    if (saved) form.reset(saved, { keepDefaultValues: true });
+    mcpBaseline.current = fresh?.mcpServers ?? null;
+    if (fresh) form.reset(toDraft(fresh), { keepDefaultValues: true });
+    if (automationsDirtyRef.current) discardAutomationsRef.current?.();
+  }
+
+  async function requestDiscard() {
+    const answer = useConfirm.getState().ask({
+      title: "Discard unsaved changes?",
+      body: discardConfirmBody(stagedRef.current.length),
+      confirmLabel: "Discard changes",
+      confirmVariant: "destructive",
+      scope: "app",
+    });
+    const mine = useConfirm.getState().request;
+    promptRef.current = mine;
+    const ok = await answer;
+    if (promptRef.current === mine) promptRef.current = null;
+    if (!ok) {
+      // Base UI returns focus to Discard; when a clean Save took the footer away
+      // meanwhile, land on the rail instead. A superseding prompt or a closed
+      // screen keeps focus where it is.
+      if (
+        mounted.current &&
+        useConfirm.getState().request === null &&
+        !footerVisibleRef.current
+      )
+        focusRailAfterPrompt();
+      return;
+    }
+    if (!mounted.current || useUiStore.getState().view !== "settings") return;
+    if (!unsavedNow()) {
+      if (automationsDirtyRef.current) discardAutomationsRef.current?.();
+      focusRailAfterPrompt();
+      return;
+    }
+    pendingRailFocus.current = true;
+    applyDiscard();
   }
 
   function requestClose() {
@@ -384,7 +522,7 @@ export function SettingsScreen() {
   }, [closeSettings]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <header className="flex items-center gap-2 border-b px-3 py-2">
         <Button
           variant="ghost"
@@ -434,6 +572,9 @@ export function SettingsScreen() {
                   onRegisterSave={(fn) => {
                     saveAutomationsRef.current = fn;
                   }}
+                  onRegisterDiscard={(fn) => {
+                    discardAutomationsRef.current = fn;
+                  }}
                 />
               )}
               {activePanel === "notifications" && (
@@ -477,8 +618,9 @@ export function SettingsScreen() {
         </div>
       )}
 
-      {(dirty || secretsDirty) && (
+      {footerVisible && (
         <footer
+          ref={footerRef}
           role="status"
           className="flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2.5"
         >
@@ -486,7 +628,7 @@ export function SettingsScreen() {
             You have unsaved changes
           </span>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={discard}>
+            <Button variant="outline" size="sm" onClick={requestDiscard}>
               Discard
             </Button>
             <DisabledReasonButton
@@ -518,7 +660,7 @@ export function SettingsScreen() {
               variant="outline"
               onClick={() => {
                 setConfirmClose(false);
-                discard();
+                applyDiscard();
                 closeSettings();
               }}
             >

@@ -490,7 +490,7 @@ export function ConflictBanner({
                 <Dialog open={confirmAbort} onOpenChange={setConfirmAbort}>
                   <DialogContent>
                     <DialogHeader>
-                      <DialogTitle>
+                      <DialogTitle className="pr-8">
                         {editPaused
                           ? "Abort editing history?"
                           : `Abort the ${op}?`}

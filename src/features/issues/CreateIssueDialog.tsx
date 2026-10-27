@@ -577,7 +577,7 @@ export function CreateIssueDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {subIssueParentId
                 ? "Create sub-issue"
                 : isUpstream

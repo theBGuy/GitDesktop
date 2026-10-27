@@ -243,7 +243,7 @@ export function SquashDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Squash {count} commits?</DialogTitle>
+            <DialogTitle className="pr-8">Squash {count} commits?</DialogTitle>
             <DialogDescription>
               Combines the selected commits into one. This rewrites local
               history; a conflict rolls it back.

@@ -348,7 +348,7 @@ export function RunWorkflowDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {isPipelines ? "Run pipeline" : "Run workflow"}
           </DialogTitle>
           <DialogDescription>

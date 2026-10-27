@@ -442,7 +442,9 @@ export function PromoteLocalIssueDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Publish this issue to {targetLabel}?</DialogTitle>
+          <DialogTitle className="pr-8">
+            Publish this issue to {targetLabel}?
+          </DialogTitle>
           <DialogDescription>
             Opens a new issue on {targetLabel} with this title and description
             {shownCarriedCount > 0

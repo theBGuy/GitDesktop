@@ -273,7 +273,7 @@ function ReconnectFlow({
   return (
     <DialogContent className="sm:max-w-md">
       <DialogHeader>
-        <DialogTitle>{title}</DialogTitle>
+        <DialogTitle className="pr-8">{title}</DialogTitle>
         {showHost && (
           <p className="font-mono text-xs text-muted-foreground">{host}</p>
         )}

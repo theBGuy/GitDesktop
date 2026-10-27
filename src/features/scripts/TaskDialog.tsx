@@ -526,7 +526,9 @@ export function TaskDialog({
         finalFocus={closeFocusTarget}
       >
         <DialogHeader>
-          <DialogTitle>{shownEditing ? "Edit task" : "New task"}</DialogTitle>
+          <DialogTitle className="pr-8">
+            {shownEditing ? "Edit task" : "New task"}
+          </DialogTitle>
           <DialogDescription>
             A saved script you can run from here without a terminal. Point it at
             an existing script in the repo, or write one inline. Either way it

@@ -248,6 +248,22 @@
   overflow-wrap: anywhere;
 }
 
+/* Toasts lift above a docked action bar (src/lib/toast-clearance.ts) by moving
+   the toaster's bottom offset; easing it moves every toast together. The
+   shorthand restates sonner's own toaster transform transition, which it would
+   otherwise replace; sonner's reduced-motion block skips the toaster itself. */
+[data-sonner-toaster][data-y-position="bottom"] {
+  transition:
+    transform 400ms ease,
+    bottom 200ms var(--ease-out-quart);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-sonner-toaster][data-y-position="bottom"] {
+    transition: transform 400ms ease;
+  }
+}
+
 :root {
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
   --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);

@@ -110,7 +110,7 @@ export function FileHistoryDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex h-[80vh] flex-col sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle className="truncate">History of {name}</DialogTitle>
+          <DialogTitle className="truncate pr-8">History of {name}</DialogTitle>
           <DialogDescription>
             <PathText path={path} className="font-mono" />
           </DialogDescription>

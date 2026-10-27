@@ -397,7 +397,7 @@ export function ViewNameDialog({
           onSubmit={submit.onSubmit}
         >
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {mode === "create" ? "New view" : "Rename view"}
             </DialogTitle>
             <DialogDescription>
@@ -518,7 +518,7 @@ export function ViewFieldsDialog({
           onSubmit={submit.onSubmit}
         >
           <DialogHeader>
-            <DialogTitle>Fields in {viewName}</DialogTitle>
+            <DialogTitle className="pr-8">Fields in {viewName}</DialogTitle>
             <DialogDescription>
               Pick the fields this view shows, for everyone on the project. They
               follow the project's own field order.

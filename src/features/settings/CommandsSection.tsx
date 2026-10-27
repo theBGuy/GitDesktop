@@ -90,7 +90,7 @@ function CommandDialog({
     >
       <DialogContent className="sm:max-w-2xl" finalFocus={finalFocus}>
         <DialogHeader>
-          <DialogTitle>
+          <DialogTitle className="pr-8">
             {initial ? "Edit command" : "New slash command"}
           </DialogTitle>
           <DialogDescription>

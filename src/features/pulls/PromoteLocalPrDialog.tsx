@@ -364,7 +364,9 @@ export function PromoteLocalPrDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Publish this pull request to {remoteLabel}?</DialogTitle>
+          <DialogTitle className="pr-8">
+            Publish this pull request to {remoteLabel}?
+          </DialogTitle>
           <DialogDescription>
             Pushes <span className="font-mono">{pr.head}</span> to origin and
             opens a {prNoun} into <span className="font-mono">{pr.base}</span>{" "}

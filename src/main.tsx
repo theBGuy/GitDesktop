@@ -3,7 +3,7 @@
 import "@/lib/transport/install-desktop";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { domAnimation, LazyMotion, MotionConfig } from "motion/react";
-import { StrictMode } from "react";
+import { StrictMode, useSyncExternalStore } from "react";
 import { createRoot } from "react-dom/client";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { Toaster } from "@/components/ui/sonner";
@@ -14,6 +14,7 @@ import { calmTransition } from "@/lib/motion";
 import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
 import { commitTheme, initTheme } from "@/lib/theme";
+import { subscribeToastClearance, toastClearance } from "@/lib/toast-clearance";
 import App from "./App.tsx";
 import "./App.css";
 // Position is load-bearing: the vendored diff-view CSS must be imported plain
@@ -51,6 +52,23 @@ window.addEventListener("unhandledrejection", (e) => {
   trackCaughtError(e.reason, false);
 });
 
+// Beyond position and closeButton, only the offset props ride along: the
+// wrapper spreads caller props last, so toastOptions would drop its cn-toast
+// class, className its toaster group class, and style its CSS variables.
+// Unlifted, sonner keeps its own default offset.
+function AppToaster() {
+  const lift = useSyncExternalStore(subscribeToastClearance, toastClearance);
+  const offset = lift > 0 ? { bottom: lift } : undefined;
+  return (
+    <Toaster
+      position="bottom-right"
+      closeButton
+      offset={offset}
+      mobileOffset={offset}
+    />
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
@@ -65,7 +83,7 @@ createRoot(document.getElementById("root")!).render(
             </MotionConfig>
           </LazyMotion>
         </ErrorBoundary>
-        <Toaster position="bottom-right" closeButton />
+        <AppToaster />
         <ErrorDialog />
       </TooltipProvider>
     </QueryClientProvider>

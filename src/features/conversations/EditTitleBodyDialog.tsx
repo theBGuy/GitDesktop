@@ -192,7 +192,7 @@ export const EditTitleBodyDialog = withForm({
             }}
           >
             <DialogHeader>
-              <DialogTitle>{title}</DialogTitle>
+              <DialogTitle className="pr-8">{title}</DialogTitle>
               <DialogDescription>{description}</DialogDescription>
             </DialogHeader>
             <form.AppField

@@ -134,7 +134,7 @@ export function BlameDialog({
       {/* ph-no-capture: file name, path, and full file content — block from replay. */}
       <DialogContent className="ph-no-capture flex h-[80vh] flex-col sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle className="truncate">
+          <DialogTitle className="truncate pr-8">
             {shortRev ? `Blame: ${name} @ ${shortRev}` : `Blame: ${name}`}
           </DialogTitle>
           <DialogDescription>

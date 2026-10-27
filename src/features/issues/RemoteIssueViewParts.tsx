@@ -1268,7 +1268,7 @@ export function TransferIssueDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="pr-8">
               {verb} issue #{number}
             </DialogTitle>
             <DialogDescription>
@@ -1356,7 +1356,7 @@ export function DeleteIssueDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete issue #{number}?</DialogTitle>
+          <DialogTitle className="pr-8">Delete issue #{number}?</DialogTitle>
           <DialogDescription>
             This permanently deletes “{title}” on {remoteLabel}. This cannot be
             undone, and {roleHint}.

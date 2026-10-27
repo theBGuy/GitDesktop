@@ -113,7 +113,7 @@ export function ExploreCloneDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>Clone {target?.name}</DialogTitle>
+            <DialogTitle className="pr-8">Clone {target?.name}</DialogTitle>
             <DialogDescription>
               Choose a folder to clone into. Clones over HTTPS or SSH using your
               system git credentials.
