@@ -4,6 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::gh_unreadable;
 use crate::github::pr::{PrAuthor, PrListLabel, PrRef, PrThreadOut, RepoLabel};
 use crate::github::repo_meta::invalidate_repo_meta_after;
@@ -292,6 +293,26 @@ struct LockState {
     active_lock_reason: Option<String>,
 }
 
+/// Preserve unknown lock state on rate limits, transport failures, or non-Gh
+/// errors so actions cannot guess a direction. A 404 or other answered failure
+/// reads as unlocked.
+fn issue_lock_outcome(result: AppResult<crate::github::runner::GhOutput>) -> (LockState, bool) {
+    match result {
+        Ok(out) => (
+            serde_json::from_str(&out.stdout_lossy()).unwrap_or_default(),
+            false,
+        ),
+        Err(AppError::Gh(message)) => (
+            LockState::default(),
+            matches!(
+                classify_gh_failure(&message),
+                GhFailure::RateLimited | GhFailure::Transport
+            ),
+        ),
+        Err(_) => (LockState::default(), true),
+    }
+}
+
 fn issue_lock_args(issue_path: &str) -> [&str; 2] {
     ["api", issue_path]
 }
@@ -318,6 +339,7 @@ pub struct IssueDetails {
     pub issue_type: Option<IssueType>,
     pub is_pinned: bool,
     pub locked: bool,
+    pub lock_unknown: bool,
     pub active_lock_reason: Option<String>,
     /// GitLab-only: the issue is hidden from non-members. Always false on GitHub.
     pub confidential: bool,
@@ -358,11 +380,7 @@ pub async fn gh_issue_view(
     let out = view_res.map_err(map_issues_disabled).map_err(map_gh_too_old)?;
     let raw: RawIssue = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable("the issue", format!("could not parse gh issue view: {e}")))?;
-    // Best-effort: a failed lock lookup just leaves the issue shown as unlocked.
-    let lock: LockState = lock_res
-        .ok()
-        .and_then(|o| serde_json::from_str(&o.stdout_lossy()).ok())
-        .unwrap_or_default();
+    let (lock, lock_unknown) = issue_lock_outcome(lock_res);
 
     Ok(IssueDetails {
         id: raw.id,
@@ -389,6 +407,7 @@ pub async fn gh_issue_view(
         issue_type: raw.issue_type,
         is_pinned: raw.is_pinned,
         locked: lock.locked,
+        lock_unknown,
         active_lock_reason: lock.active_lock_reason,
         confidential: false,
         due_date: None,
@@ -1619,6 +1638,69 @@ mod tests {
         ISSUE_TIMELINE_QUERY,
     };
     use crate::error::AppError;
+    #[test]
+    fn issue_lock_preserves_unknown_state_and_camel_case_wire_key() {
+        let held = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+        for message in [
+            "gh: Not Found (HTTP 404)",
+            "HTTP 403: Resource not accessible by integration",
+            "",
+        ] {
+            let (lock, unknown) = super::issue_lock_outcome(Err(AppError::Gh(message.into())));
+            assert!(!lock.locked && !unknown && lock.active_lock_reason.is_none());
+        }
+        for body in [
+            r#"{"locked":true,"active_lock_reason":"too heated"}"#,
+            r#"{"locked":false}"#,
+            "garbage",
+        ] {
+            let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
+                code: 0,
+                stdout: body.as_bytes().to_vec(),
+                stderr: String::new(),
+            }));
+            assert!(!unknown);
+            assert_eq!(lock.locked, body.contains("true"));
+            assert_eq!(
+                lock.active_lock_reason.as_deref(),
+                body.contains("true").then_some("too heated")
+            );
+        }
+        for error in [
+            AppError::Gh(held.into()),
+            AppError::Gh("connection failed".into()),
+            AppError::Timeout(30),
+            AppError::GhNotFound,
+        ] {
+            let (lock, unknown) = super::issue_lock_outcome(Err(error));
+            assert!(unknown && !lock.locked && lock.active_lock_reason.is_none());
+        }
+        let issue = super::IssueDetails {
+            id: "I_1".into(),
+            number: 1,
+            title: String::new(),
+            body: String::new(),
+            author: String::new(),
+            author_avatar_url: String::new(),
+            state: "OPEN".into(),
+            created_at: String::new(),
+            url: String::new(),
+            assignees: vec![],
+            milestone: None,
+            issue_type: None,
+            is_pinned: false,
+            locked: false,
+            lock_unknown: true,
+            active_lock_reason: None,
+            confidential: false,
+            due_date: None,
+            comments: vec![],
+            labels: vec![],
+        };
+        let value = serde_json::to_value(issue).unwrap();
+        assert_eq!(value["lockUnknown"], true);
+        assert!(value.get("lock_unknown").is_none());
+    }
 
     #[test]
     fn lean_issue_args_request_only_their_fields() {

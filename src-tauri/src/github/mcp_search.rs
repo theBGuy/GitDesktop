@@ -9,7 +9,9 @@
 
 use serde::Serialize;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::forge::session::{classify_gh_failure, GhFailure};
+use crate::github::gh_failure_reason;
 use crate::github::runner::{run_gh_raw, GH_NETWORK_TIMEOUT};
 
 /// One repository hit, with its manifest files inlined (null when absent). The
@@ -80,14 +82,32 @@ pub async fn gh_github_mcp_search(
     // still exit non-zero on partial GraphQL errors — parse `data` regardless.
     let out = run_gh_raw(None, &args, GH_NETWORK_TIMEOUT).await?;
 
+    github_mcp_search_outcome(Ok(out))
+}
+
+fn github_mcp_search_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<GithubMcpSearchPage> {
+    let out = result?;
     let mut page = GithubMcpSearchPage {
         repos: Vec::new(),
         next_cursor: None,
     };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) else {
-        return Ok(page);
+    let value = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()).ok();
+    let search = value
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .filter(|v| v.is_object())
+        .and_then(|v| v.get("search"))
+        .filter(|v| v.is_object());
+    let Some(search) = search else {
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(page),
+        };
     };
-    let search = &v["data"]["search"];
     if search["pageInfo"]["hasNextPage"].as_bool().unwrap_or(false) {
         page.next_cursor = search["pageInfo"]["endCursor"].as_str().map(str::to_string);
     }
@@ -114,4 +134,90 @@ pub async fn gh_github_mcp_search(
         }
     }
     Ok(page)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn mcp_search_preserves_partial_data_and_classifies_missing_search() {
+        let partial = r#"{"data":{"search":{"nodes":[{"nameWithOwner":"o/r","sj":{"text":"{}"}}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}},"errors":[{"message":"unresolved"}]}"#;
+        let page = github_mcp_search_outcome(gh_output(1, partial, HELD_REST_STDERR)).unwrap();
+        assert_eq!(page.repos[0].server_json.as_deref(), Some("{}"));
+        assert_eq!(page.next_cursor.as_deref(), Some("next"));
+        for body in [
+            "",
+            "garbage",
+            "{}",
+            r#"{"data":null}"#,
+            r#"{"data":[]}"#,
+            r#"{"data":{}}"#,
+            r#"{"data":{"search":null}}"#,
+            r#"{"data":{"search":[]}}"#,
+        ] {
+            assert!(
+                github_mcp_search_outcome(gh_output(1, body, HELD_REST_STDERR)).is_err(),
+                "{body}"
+            );
+            assert!(
+                github_mcp_search_outcome(gh_output(1, body, NOT_FOUND_STDERR))
+                    .unwrap()
+                    .repos
+                    .is_empty()
+            );
+            assert!(github_mcp_search_outcome(gh_output(0, body, ""))
+                .unwrap()
+                .repos
+                .is_empty());
+        }
+    }
+
+    fn gh_output(
+        code: i32,
+        body: &str,
+        stderr: &str,
+    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
+        Ok(crate::github::runner::GhOutput {
+            code,
+            stdout: body.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        })
+    }
+
+    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
+    const ANSWERED_STDERR: &str =
+        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+
+    #[test]
+    fn mcp_search_preserves_denials_and_rejects_transient_failures() {
+        let absent = github_mcp_search_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(absent.repos.is_empty() && absent.next_cursor.is_none());
+        let absent = github_mcp_search_outcome(gh_output(1, "", ANSWERED_STDERR)).unwrap();
+        assert!(absent.repos.is_empty() && absent.next_cursor.is_none());
+        let loaded = github_mcp_search_outcome(gh_output(
+            0,
+            r#"{"data":{"search":{"nodes":[{"nameWithOwner":"o/r"}]}}}"#,
+            "",
+        ))
+        .unwrap();
+        assert!(loaded.repos.len() == 1);
+        for stderr in [
+            HELD_REST_STDERR,
+            "GitHub's GraphQL API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+        ] {
+            let error = github_mcp_search_outcome(gh_output(1, "", stderr))
+                .expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(github_mcp_search_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
 }

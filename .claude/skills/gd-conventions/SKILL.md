@@ -1116,6 +1116,12 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `@lezer/highlight` drops theme coloring — neither shows in build or tests.
   Remedy is `pnpm dedupe`, then an `overrides:` pin in `pnpm-workspace.yaml`
   for a split that survives it.
+- **Rate limits and absent gh reads:** limit copy comes from `forge-backoff.ts`
+  (`rateLimitSummary`/`rateLimitProvider`, `FORGE_KIND_HOSTS`, the runner-pinned
+  `HELD_RATE_LIMIT_TEXTS`), never a hard-coded provider. A Rust gh read that can
+  mean absence classifies via `classify_gh_failure` in a pure `*_outcome` fn
+  (RateLimited/Transport → Err, NotFound/Answered → absence), never "none" on a
+  non-zero exit (guard: check-rust-invariants check J).
 - **gh rate-limit hold:** `github/runner.rs` holds a gh call whose argv
   classifies to a limited (host, bucket) pair (REST core, GraphQL or search)
   and returns gh-shaped rate-limit stderr without spawning. Evidence comes

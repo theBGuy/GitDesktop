@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
-use crate::github::gh_unreadable;
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::repo_meta::invalidate_repo_meta_after;
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
+use crate::github::{gh_failure_reason, gh_unreadable};
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -39,54 +40,93 @@ pub struct SecurityStatus {
 // resolve the slug once via `gh_origin_slug` and thread it through here.
 
 /// Status-code probe for the 204/404 endpoints (e.g. vulnerability-alerts).
-async fn probe_ok(repo_path: &str, slug: &str, path: &str) -> bool {
-    run_gh_raw(
-        Some(repo_path),
-        &["api", &format!("repos/{slug}/{path}")],
-        GH_NETWORK_TIMEOUT,
+async fn probe_ok(repo_path: &str, slug: &str, path: &str) -> AppResult<bool> {
+    probe_ok_outcome(
+        run_gh_raw(
+            Some(repo_path),
+            &["api", &format!("repos/{slug}/{path}")],
+            GH_NETWORK_TIMEOUT,
+        )
+        .await,
     )
-    .await
-    .map(|o| o.code == 0)
-    .unwrap_or(false)
 }
 
-/// Reads a JSON-bodied endpoint and pulls out a boolean field (false on any error).
-async fn get_bool_field(repo_path: &str, slug: &str, path: &str, field: &str) -> bool {
-    let Ok(out) = run_gh_raw(
-        Some(repo_path),
-        &["api", &format!("repos/{slug}/{path}")],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await
-    else {
-        return false;
-    };
+fn probe_ok_outcome(result: AppResult<crate::github::runner::GhOutput>) -> AppResult<bool> {
+    let out = result?;
     if out.code != 0 {
-        return false;
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(false),
+        };
     }
-    serde_json::from_str::<Value>(&out.stdout_lossy())
+    Ok(true)
+}
+
+/// Reads a JSON-bodied endpoint and pulls out a boolean field.
+async fn get_bool_field(repo_path: &str, slug: &str, path: &str, field: &str) -> AppResult<bool> {
+    get_bool_field_outcome(
+        run_gh_raw(
+            Some(repo_path),
+            &["api", &format!("repos/{slug}/{path}")],
+            GH_NETWORK_TIMEOUT,
+        )
+        .await,
+        field,
+    )
+}
+
+fn get_bool_field_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+    field: &str,
+) -> AppResult<bool> {
+    let out = result?;
+    if out.code != 0 {
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(false),
+        };
+    }
+    Ok(serde_json::from_str::<Value>(&out.stdout_lossy())
         .ok()
         .and_then(|v| v.get(field).and_then(Value::as_bool))
-        .unwrap_or(false)
+        .unwrap_or(false))
 }
 
-async fn get_code_scanning(repo_path: &str, slug: &str) -> bool {
-    let Ok(out) = run_gh_raw(
-        Some(repo_path),
-        &["api", &format!("repos/{slug}/code-scanning/default-setup")],
-        GH_NETWORK_TIMEOUT,
+async fn get_code_scanning(repo_path: &str, slug: &str) -> AppResult<bool> {
+    get_code_scanning_outcome(
+        run_gh_raw(
+            Some(repo_path),
+            &["api", &format!("repos/{slug}/code-scanning/default-setup")],
+            GH_NETWORK_TIMEOUT,
+        )
+        .await,
     )
-    .await
-    else {
-        return false;
-    };
+}
+
+fn get_code_scanning_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<bool> {
+    let out = result?;
     if out.code != 0 {
-        return false;
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(false),
+        };
     }
-    serde_json::from_str::<Value>(&out.stdout_lossy())
+    Ok(serde_json::from_str::<Value>(&out.stdout_lossy())
         .ok()
-        .and_then(|v| v.get("state").and_then(Value::as_str).map(|s| s == "configured"))
-        .unwrap_or(false)
+        .and_then(|v| {
+            v.get("state")
+                .and_then(Value::as_str)
+                .map(|s| s == "configured")
+        })
+        .unwrap_or(false))
 }
 
 #[tauri::command]
@@ -128,13 +168,11 @@ pub async fn gh_security_get(repo_path: String) -> AppResult<SecurityStatus> {
         secret_scanning: status_on("secret_scanning"),
         secret_scanning_push_protection: status_on("secret_scanning_push_protection"),
         secret_scanning_ai_detection: status_on("secret_scanning_ai_detection"),
-        secret_scanning_non_provider_patterns: status_on(
-            "secret_scanning_non_provider_patterns",
-        ),
-        dependabot_alerts: alerts,
-        dependabot_security_updates: fixes,
-        private_vulnerability_reporting: pvr,
-        code_scanning,
+        secret_scanning_non_provider_patterns: status_on("secret_scanning_non_provider_patterns"),
+        dependabot_alerts: alerts?,
+        dependabot_security_updates: fixes?,
+        private_vulnerability_reporting: pvr?,
+        code_scanning: code_scanning?,
     })
 }
 
@@ -238,4 +276,107 @@ async fn apply_feature(repo_path: &str, slug: &str, feature: &str, enabled: bool
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn gh_output(
+        code: i32,
+        body: &str,
+        stderr: &str,
+    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
+        Ok(crate::github::runner::GhOutput {
+            code,
+            stdout: body.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        })
+    }
+
+    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
+    const ANSWERED_STDERR: &str =
+        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+
+    #[test]
+    fn security_probe_preserves_denials_and_rejects_transient_failures() {
+        let absent = probe_ok_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(!absent);
+        let absent = probe_ok_outcome(gh_output(1, "", ANSWERED_STDERR)).unwrap();
+        assert!(!absent);
+        let loaded = probe_ok_outcome(gh_output(0, "", "")).unwrap();
+        assert!(loaded);
+        for stderr in [
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+        ] {
+            let error =
+                probe_ok_outcome(gh_output(1, "", stderr)).expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(probe_ok_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
+
+    #[test]
+    fn security_bool_preserves_denials_and_rejects_transient_failures() {
+        let absent = get_bool_field_outcome(gh_output(1, "", NOT_FOUND_STDERR), "enabled").unwrap();
+        assert!(!absent);
+        let absent = get_bool_field_outcome(gh_output(1, "", ANSWERED_STDERR), "enabled").unwrap();
+        assert!(!absent);
+        let loaded =
+            get_bool_field_outcome(gh_output(0, r#"{"enabled":true}"#, ""), "enabled").unwrap();
+        assert!(loaded);
+        for stderr in [
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+        ] {
+            let error = get_bool_field_outcome(gh_output(1, "", stderr), "enabled")
+                .expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(
+            get_bool_field_outcome(Err(crate::error::AppError::Timeout(30)), "enabled").is_err()
+        );
+    }
+
+    #[test]
+    fn code_scanning_preserves_denials_and_rejects_transient_failures() {
+        let absent = get_code_scanning_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(!absent);
+        let absent = get_code_scanning_outcome(gh_output(1, "", ANSWERED_STDERR)).unwrap();
+        assert!(!absent);
+        let loaded =
+            get_code_scanning_outcome(gh_output(0, r#"{"state":"configured"}"#, "")).unwrap();
+        assert!(loaded);
+        for stderr in [
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+        ] {
+            let error = get_code_scanning_outcome(gh_output(1, "", stderr))
+                .expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(get_code_scanning_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
 }

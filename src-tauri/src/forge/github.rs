@@ -12,16 +12,16 @@ use crate::forge::model::{
     ForgeForkResult, ForgeRepo, ForgeRepoList, ForgeSearchList, ForgeSearchRepo, ForgeStatus,
     Implemented, Provider,
 };
-use crate::forge::session::mask_host_tokens;
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::forge::{
     validate_owner, validate_repo_name, Forge, FORK_LIST_CAP, FORK_POLL_ATTEMPTS, FORK_POLL_DELAY,
 };
-use crate::github::gh_unreadable;
 use crate::github::pr::{
     gh_list_repos, gh_status, gh_viewer_login, gh_viewer_login_fresh, GhRepo, GhStatus,
 };
 use crate::github::repo_meta::{invalidate_repo_meta_after, repo_object_ok};
 use crate::github::runner::{run_gh, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::{gh_failure_reason, gh_unreadable};
 
 /// GitHub via the `gh` CLI. Unit struct — `gh` carries all the state (auth, host).
 pub struct GitHubForge;
@@ -48,6 +48,7 @@ pub(crate) fn from_gh_status(gh: GhStatus) -> ForgeStatus {
             None => Implemented::none(),
         },
         probe_error: gh.probe_error,
+        reset_at: gh.reset_at,
     }
 }
 
@@ -1226,15 +1227,6 @@ pub async fn star_repo(owner: &str, name: &str, star: bool) -> AppResult<()> {
     Ok(())
 }
 
-/// Whether a failed `gh api` invocation's stderr looks like a 404 (Not Found) — the
-/// signal that a resource is absent (README missing, star not present) rather than a
-/// transport/auth/rate-limit failure that must be surfaced. gh prints the HTTP status
-/// on stderr (`HTTP 404: Not Found (…)`). Pure, so it's unit-testable.
-fn gh_stderr_is_404(stderr: &str) -> bool {
-    let s = mask_host_tokens(stderr).to_ascii_lowercase();
-    s.contains("404") || s.contains("not found")
-}
-
 /// Whether the signed-in user has starred `owner/name`. `GET
 /// user/starred/{owner}/{name}` answers 204 (starred) / 404 (not). A 404 → `false`;
 /// ANY other non-zero exit (403 rate-limit, 5xx, auth) is a real failure and
@@ -1244,18 +1236,18 @@ pub async fn starred(owner: &str, name: &str) -> AppResult<bool> {
     validate_repo_name(name)?;
     let endpoint = format!("user/starred/{owner}/{name}");
     let out = run_gh_raw(None, &["api", "--method", "GET", &endpoint], GH_TIMEOUT).await?;
+    starred_outcome(Ok(out))
+}
+
+fn starred_outcome(result: AppResult<crate::github::runner::GhOutput>) -> AppResult<bool> {
+    let out = result?;
     if out.code == 0 {
         return Ok(true);
     }
-    if gh_stderr_is_404(&out.stderr) {
+    if matches!(classify_gh_failure(&out.stderr), GhFailure::NotFound) {
         return Ok(false);
     }
-    let msg = out.stderr.trim();
-    Err(AppError::Gh(if msg.is_empty() {
-        format!("gh exited with code {} checking the star", out.code)
-    } else {
-        msg.to_string()
-    }))
+    Err(AppError::Gh(gh_failure_reason(&out)))
 }
 
 /// A repo's raw README markdown, or `None` when it has none. `gh api
@@ -1271,16 +1263,18 @@ pub async fn repo_readme(owner: &str, name: &str) -> AppResult<Option<String>> {
         GH_NETWORK_TIMEOUT,
     )
     .await?;
+    repo_readme_outcome(Ok(out))
+}
+
+fn repo_readme_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<Option<String>> {
+    let out = result?;
     if out.code != 0 {
-        if gh_stderr_is_404(&out.stderr) {
+        if matches!(classify_gh_failure(&out.stderr), GhFailure::NotFound) {
             return Ok(None);
         }
-        let msg = out.stderr.trim();
-        return Err(AppError::Gh(if msg.is_empty() {
-            format!("gh exited with code {} reading the README", out.code)
-        } else {
-            msg.to_string()
-        }));
+        return Err(AppError::Gh(gh_failure_reason(&out)));
     }
     Ok(Some(crate::forge::cap_readme(&out.stdout_lossy())))
 }
@@ -1401,6 +1395,97 @@ pub async fn fork_divergence(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn graphql_reset_maps_to_neutral_status_wire() {
+        let gh = GhStatus {
+            installed: true,
+            authenticated: true,
+            repo: None,
+            host: None,
+            login: None,
+            probe_error: Some(crate::forge::model::ProbeError::RateLimited),
+            reset_at: Some(1_800_000_060),
+        };
+        let gh_value = serde_json::to_value(&gh).unwrap();
+        assert_eq!(gh_value["resetAt"], 1_800_000_060_i64);
+        assert!(gh_value.get("reset_at").is_none());
+        let value = serde_json::to_value(from_gh_status(gh)).unwrap();
+        assert_eq!(value["resetAt"], 1_800_000_060_i64);
+        assert!(value.get("reset_at").is_none());
+    }
+
+    fn gh_output(
+        code: i32,
+        body: &str,
+        stderr: &str,
+    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
+        Ok(crate::github::runner::GhOutput {
+            code,
+            stdout: body.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        })
+    }
+
+    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
+    const ANSWERED_STDERR: &str =
+        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+
+    #[test]
+    fn starred_treats_only_not_found_as_unstarred() {
+        let absent = starred_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(!absent);
+        let loaded = starred_outcome(gh_output(0, "", "")).unwrap();
+        assert!(loaded);
+        for stderr in [
+            "HTTP 403: API rate limit exceeded for user ID 4041234 (https://api.github.com/)",
+            "gh: Not Found",
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+            ANSWERED_STDERR,
+            "",
+        ] {
+            let error =
+                starred_outcome(gh_output(1, "", stderr)).expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(starred_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
+
+    #[test]
+    fn readme_treats_only_not_found_as_absent() {
+        let absent = repo_readme_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(absent.is_none());
+        let loaded = repo_readme_outcome(gh_output(0, r#"# README"#, "")).unwrap();
+        assert!(loaded.as_deref() == Some("# README"));
+        for stderr in [
+            "HTTP 403: API rate limit exceeded for user ID 4041234 (https://api.github.com/)",
+            "gh: Not Found",
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+            ANSWERED_STDERR,
+            "",
+        ] {
+            let error =
+                repo_readme_outcome(gh_output(1, "", stderr)).expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(repo_readme_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
 
     #[test]
     fn repo_is_fork_of_verifies_parent_not_just_the_name() {
@@ -1429,21 +1514,28 @@ mod tests {
     }
 
     #[test]
-    fn gh_stderr_404_distinguishes_absence_from_other_failures() {
-        // gh's real 404 stderr shape.
-        assert!(gh_stderr_is_404("HTTP 404: Not Found (https://api.github.com/…)"));
-        assert!(gh_stderr_is_404("gh: Not Found"));
-        // Rate limit, auth, and 5xx are NOT absence — they must surface.
-        assert!(!gh_stderr_is_404("HTTP 403: API rate limit exceeded"));
-        assert!(!gh_stderr_is_404("HTTP 401: Bad credentials"));
-        assert!(!gh_stderr_is_404("HTTP 500: Internal Server Error"));
-        assert!(!gh_stderr_is_404(""));
-        let transport_verdicts = [
+    fn not_found_outcomes_distinguish_absence_from_other_failures() {
+        for stderr in [
+            "HTTP 404: Not Found (https://api.github.com/o/r)",
+            "gh: Not Found (HTTP 404)",
+        ] {
+            assert!(!starred_outcome(gh_output(1, "", stderr)).unwrap());
+            assert!(repo_readme_outcome(gh_output(1, "", stderr))
+                .unwrap()
+                .is_none());
+        }
+        for stderr in [
+            "gh: Not Found",
+            "HTTP 403: API rate limit exceeded",
+            "HTTP 401: Bad credentials",
+            "HTTP 500: Internal Server Error",
+            "",
             "Get \"https://api.github.com/repos/acme/404-page/readme\": dial tcp 140.82.112.6:443: connect: connection refused",
             "error connecting to ghe-404.example\ncheck your internet connection or https://githubstatus.com",
-        ]
-        .map(gh_stderr_is_404);
-        assert_eq!(transport_verdicts, [false, false]);
+        ] {
+            assert!(starred_outcome(gh_output(1, "", stderr)).is_err());
+            assert!(repo_readme_outcome(gh_output(1, "", stderr)).is_err());
+        }
     }
 
     #[test]
@@ -1719,6 +1811,7 @@ mod tests {
             host: Some("github.com".into()),
             login: Some("me".into()),
             probe_error: None,
+            reset_at: None,
         };
         let f = from_gh_status(gh);
         assert_eq!(f.provider, Some(Provider::GitHub));
@@ -1738,6 +1831,7 @@ mod tests {
             host: None,
             login: None,
             probe_error: None,
+            reset_at: None,
         };
         let f = from_gh_status(gh);
         assert_eq!(f.provider, None);
@@ -1755,6 +1849,7 @@ mod tests {
             host: Some("github.com".into()),
             login: None,
             probe_error: None,
+            reset_at: None,
         };
         let f = from_gh_status(gh);
         assert_eq!(f.provider, Some(Provider::GitHub));
@@ -1784,6 +1879,7 @@ mod tests {
             host,
             login: Some("me".into()),
             probe_error,
+            reset_at: None,
         }))
     }
 
@@ -1797,6 +1893,7 @@ mod tests {
             host: host.map(str::to_string),
             login: Some("me".into()),
             probe_error: None,
+            reset_at: None,
         }))
         .unwrap()
     }

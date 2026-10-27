@@ -22,6 +22,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { isTransportError, presentError } from "@/lib/error-summary";
+import { isRateLimitError, rateLimitProvider } from "@/lib/forge-backoff";
 import {
   isReconnectHostSafe,
   reconnectHostArg,
@@ -62,8 +63,8 @@ export function AsyncErrorCard({
   title: ReactNode;
   error: unknown;
   /** A permission-conditional closing note, in the card's muted style. Dropped
-   *  under a transport failure, where it would blame a role for a connection
-   *  problem. */
+   *  under a transport failure or a rate limit, where it would blame a role for
+   *  a connection problem or a limit. */
   hint?: ReactNode;
   children?: ReactNode;
   /** Omitted for a failure a retry can't change. */
@@ -81,7 +82,7 @@ export function AsyncErrorCard({
         </p>
       )}
       {children}
-      {hint && !isTransportError(error) && (
+      {hint && !isTransportError(error) && !isRateLimitError(error) && (
         <div className="mt-2 text-muted-foreground">{hint}</div>
       )}
       {onRetry && (
@@ -109,10 +110,16 @@ export { HeldSwitch, heldSwitchReason } from "@/components/held-switch";
 export { ACT_PENDING_REASON, AI_DRAFT_PENDING_REASON, OFFLINE_WRITE_REASON };
 
 /** What a {@link RemoteFormSection} with loaded fields says over them. */
-function formNoticeMessage(noun: string, failed: boolean): string {
-  return failed
+function formNoticeMessage(
+  noun: string,
+  failed: boolean,
+  error: unknown,
+): string {
+  if (!failed) return "You're offline — showing the last loaded version.";
+  const limited = rateLimitProvider(error);
+  return limited === null
     ? `Couldn't refresh ${noun} — showing the last loaded version.`
-    : "You're offline — showing the last loaded version.";
+    : `Couldn't refresh ${noun} while ${limited}'s API rate limit is in effect — showing the last loaded version.`;
 }
 
 /**
@@ -156,12 +163,20 @@ export function RemoteFormSection<T>({
   const noticeMessage = (() => {
     if (data === undefined)
       return parked ? offlinePendingMessage(noun) : undefined;
-    return failed || parked ? formNoticeMessage(noun, failed) : undefined;
+    return failed || parked
+      ? formNoticeMessage(noun, failed, query.error)
+      : undefined;
   })();
+  const coldError = data === undefined && !parked && query.isError;
+  // Pre-mounted, so a Retry that fails again is announced: a live region
+  // created together with its text announces unreliably.
+  const coldAnnouncement = coldError
+    ? `${errorTitle} ${presentError(query.error).summary}`
+    : "";
   const body = (() => {
     if (data !== undefined) return children(data);
     if (parked) return null;
-    return query.isError ? (
+    return coldError ? (
       <AsyncErrorCard
         title={errorTitle}
         error={query.error}
@@ -184,6 +199,9 @@ export function RemoteFormSection<T>({
       data-confirm-host
       className="min-w-0 space-y-3 outline-none"
     >
+      <div role="status" className="sr-only">
+        {coldAnnouncement}
+      </div>
       <DegradedListNotice
         noun={noun}
         degraded={noticeMessage !== undefined}
@@ -254,7 +272,7 @@ function AsyncListBody({
         retryLabel={retryLabel}
         retryRef={retryRef}
       >
-        {errorScope && !isTransportError(error) && (
+        {errorScope && !isTransportError(error) && !isRateLimitError(error) && (
           <ScopeErrorHint scope={errorScope} />
         )}
       </AsyncErrorCard>

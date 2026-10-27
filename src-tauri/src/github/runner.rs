@@ -899,7 +899,7 @@ const HELD_GRAPHQL: &str = "GitHub's GraphQL API rate limit has been reached, so
 const HELD_SEARCH: &str = "GitHub's search API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Bucket {
+pub(crate) enum Bucket {
     Core,
     Graphql,
     Search,
@@ -1177,7 +1177,7 @@ fn held_output(bucket: Bucket) -> GhOutput {
     }
 }
 
-fn probe_reading(body: &str, bucket: Bucket) -> Option<(u64, i64)> {
+pub(crate) fn probe_reading(body: &str, bucket: Bucket) -> Option<(u64, i64)> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let resource = value.get("resources")?.get(bucket.resource_name())?;
     Some((

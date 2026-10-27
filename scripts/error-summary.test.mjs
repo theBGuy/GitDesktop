@@ -925,21 +925,80 @@ test("bare transport words and phrases inside identifiers never classify", () =>
   }
 });
 
+const RATE_LIMITED =
+  "GitHub's API rate limit has been reached. Try again once it lifts.";
+const GITLAB_RATE_LIMITED =
+  "GitLab's API rate limit has been reached. Try again once it lifts.";
+
 test("an answered 401/403 or a rate limit outranks transport phrases", () => {
   // Each carries a phrase that classifies on its own, so the precedence is
-  // what keeps the raw line.
-  for (const message of [
-    "HTTP 401: token revoked; connection refused on retry (https://api.github.com/)",
-    "HTTP 403: Resource protected by organization SAML enforcement; connection reset",
-    "HTTP 401: Bad credentials from proxy after HTTP 503",
-    "HTTP 403: API rate limit exceeded; context deadline exceeded",
-    "HTTP 429: too many requests, connection refused",
-    "API rate limit exceeded; connection failed",
+  // what keeps the raw line, or the rate-limit sentence.
+  for (const [message, summary = message] of [
+    [
+      "HTTP 401: token revoked; connection refused on retry (https://api.github.com/)",
+    ],
+    [
+      "HTTP 403: Resource protected by organization SAML enforcement; connection reset",
+    ],
+    ["HTTP 401: Bad credentials from proxy after HTTP 503"],
+    [
+      "HTTP 403: API rate limit exceeded; context deadline exceeded",
+      RATE_LIMITED,
+    ],
+    ["HTTP 429: too many requests, connection refused", RATE_LIMITED],
+    ["API rate limit exceeded; connection failed", RATE_LIMITED],
   ]) {
     const p = presentError(appError("gh", message));
     assert.notEqual(p.summary, reach("GitHub"), message);
-    assert.equal(p.summary, message);
+    assert.equal(p.summary, summary);
   }
+});
+
+test("a rate limit reads as one sentence naming the provider and a held bucket", () => {
+  const held = (bucket) =>
+    `GitHub's ${bucket} API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.`;
+  for (const [kind, message, summary] of [
+    [
+      "gh",
+      held("REST"),
+      "GitHub's REST API rate limit has been reached. Try again once it lifts.",
+    ],
+    [
+      "gh",
+      held("GraphQL"),
+      "GitHub's GraphQL API rate limit has been reached. Try again once it lifts.",
+    ],
+    [
+      "gh",
+      held("search"),
+      "GitHub's search API rate limit has been reached. Try again once it lifts.",
+    ],
+    [
+      "gh",
+      "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+      RATE_LIMITED,
+    ],
+    [
+      "glab",
+      "429 Too Many Requests",
+      "GitLab's API rate limit has been reached. Try again once it lifts.",
+    ],
+    [
+      "bitbucket",
+      "Bitbucket rate limit reached (429). Wait a moment and try again.",
+      "Bitbucket's API rate limit has been reached. Try again once it lifts.",
+    ],
+  ]) {
+    const p = presentError(appError(kind, message));
+    assert.equal(p.summary, summary, message);
+    assert.equal(p.label, presentError(appError(kind, "x")).label);
+    // The raw text stays reachable through Details.
+    assert.equal(p.fullText, message);
+    assert.equal(p.long, true);
+  }
+  // A 404 is no rate limit and keeps its own line.
+  const notFound = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
+  assert.equal(presentError(appError("gh", notFound)).summary, notFound);
 });
 
 test("a message Rust already wrote as Couldn't reach keeps its own words", () => {
@@ -1010,13 +1069,16 @@ test("status-like digits in a dotted host or its port don't suppress the rewrite
 });
 
 test("a real status beside a masked host still suppresses the rewrite", () => {
-  for (const message of [
-    "401 unauthorized",
-    "gitlab.acme.com: 401 unauthorized; no such host on retry",
-    "gitlab.acme.com:8443: 429 too many requests; connection refused",
+  for (const [message, summary = message] of [
+    ["401 unauthorized"],
+    ["gitlab.acme.com: 401 unauthorized; no such host on retry"],
+    [
+      "gitlab.acme.com:8443: 429 too many requests; connection refused",
+      GITLAB_RATE_LIMITED,
+    ],
   ]) {
     const p = presentError(appError("glab", message));
-    assert.equal(p.summary, message, message);
+    assert.equal(p.summary, summary, message);
   }
 });
 
@@ -1070,14 +1132,17 @@ test("transport host positions cannot supply the masked hint scan's evidence", (
 });
 
 test("real 401 and 429 beside masked undotted and IPv6 hosts still suppress the rewrite", () => {
-  for (const message of [
-    "lookup gitlab-429: no such host; HTTP 401 unauthorized",
-    "dial tcp proxy-401:8080: connect: connection refused; HTTP 429",
-    "dial tcp [2001:db8::401]:443: connect: connection refused; HTTP 401",
+  for (const [message, summary = message] of [
+    ["lookup gitlab-429: no such host; HTTP 401 unauthorized"],
+    [
+      "dial tcp proxy-401:8080: connect: connection refused; HTTP 429",
+      GITLAB_RATE_LIMITED,
+    ],
+    ["dial tcp [2001:db8::401]:443: connect: connection refused; HTTP 401"],
   ]) {
     assert.equal(
       presentError(appError("glab", message)).summary,
-      message,
+      summary,
       message,
     );
   }

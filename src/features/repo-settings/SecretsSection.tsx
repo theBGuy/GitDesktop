@@ -15,7 +15,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import {
+  DEGRADED_ACTION_CLASS,
+  isPermanentListError,
+  offlinePendingMessage,
+  refreshFailed,
+} from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
+import { rateLimitProvider } from "@/lib/forge-backoff";
 import {
   useDeleteSecret,
   useDeleteVariable,
@@ -84,80 +93,141 @@ export function SecretsSection({
   // Environment scope exists only for Actions (secrets and variables).
   const envAllowed = kind === "variables" || app === "actions";
   const env = envAllowed && scope !== REPO_SCOPE ? scope : null;
+  const envHintId = useId();
+  // Offline outranks the failure it follows; a refetch in flight says nothing,
+  // so the Retry unmounts on press and the rescue below takes its focus.
+  const envParked =
+    envAllowed && envs.isPaused && (envs.data === undefined || envs.isError);
+  const envFailed = envAllowed && refreshFailed(envs);
+  const envRescue = useRetryFocusRescue(envFailed);
+  const envHint = (() => {
+    if (envParked) return offlinePendingMessage("environments");
+    if (!envFailed) return null;
+    if (envs.data === undefined)
+      return `Couldn't load environments, so only the repository scope is listed. ${presentError(envs.error).summary}`;
+    const limited = rateLimitProvider(envs.error);
+    return limited === null
+      ? "Couldn't refresh environments — showing the last loaded ones."
+      : `Couldn't refresh environments while ${limited}'s API rate limit is in effect — showing the last loaded ones.`;
+  })();
+  // Until a read succeeds, a picked environment it no longer lists stays a
+  // listed choice: an unknown list never silently resets the user's scope.
+  const envNames = envs.data ?? [];
+  const scopeEnvs =
+    env !== null &&
+    !envNames.includes(env) &&
+    (envs.data === undefined || envs.isError)
+      ? [...envNames, env]
+      : envNames;
 
   return (
     <div className="min-w-0 space-y-4">
-      <div className="flex flex-wrap items-end gap-2">
-        <div className="flex rounded-md border p-0.5">
-          {(["secrets", "variables"] as const).map((k) => (
-            <button
-              key={k}
-              type="button"
-              onClick={() => setKind(k)}
-              className={cn(
-                "cursor-pointer rounded px-2.5 py-1 text-xs capitalize",
-                kind === k
-                  ? "bg-accent font-medium text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {k}
-            </button>
-          ))}
-        </div>
+      {/* Flex, not space-y: the sr-only status takes no gap or margin. */}
+      <div
+        ref={envRescue.hostRef}
+        tabIndex={-1}
+        className="flex flex-col gap-2 outline-none"
+      >
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="flex rounded-md border p-0.5">
+            {(["secrets", "variables"] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setKind(k)}
+                className={cn(
+                  "cursor-pointer rounded px-2.5 py-1 text-xs capitalize",
+                  kind === k
+                    ? "bg-accent font-medium text-accent-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {k}
+              </button>
+            ))}
+          </div>
 
-        {kind === "secrets" && (
+          {kind === "secrets" && (
+            <div className="space-y-1">
+              <Label
+                htmlFor={storeSelectId}
+                className="text-[11px] text-muted-foreground"
+              >
+                Store
+              </Label>
+              <Select
+                items={APP_ITEMS}
+                value={app}
+                onValueChange={(v) => v && setApp(v as SecretApp)}
+              >
+                <SelectTrigger id={storeSelectId} size="sm" className="w-36">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {APPS.map((a) => (
+                    <SelectItem key={a.value} value={a.value}>
+                      {a.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           <div className="space-y-1">
             <Label
-              htmlFor={storeSelectId}
+              htmlFor={scopeSelectId}
               className="text-[11px] text-muted-foreground"
             >
-              Store
+              Scope
             </Label>
             <Select
-              items={APP_ITEMS}
-              value={app}
-              onValueChange={(v) => v && setApp(v as SecretApp)}
+              items={SCOPE_ITEMS}
+              value={env ?? REPO_SCOPE}
+              onValueChange={(v) => v && setScope(v)}
+              disabled={!envAllowed}
             >
-              <SelectTrigger id={storeSelectId} size="sm" className="w-36">
-                <SelectValue />
+              <SelectTrigger
+                id={scopeSelectId}
+                size="sm"
+                className="w-40"
+                aria-describedby={envHint === null ? undefined : envHintId}
+              >
+                <SelectValue onMouseEnter={clipTitleFromText} />
               </SelectTrigger>
               <SelectContent>
-                {APPS.map((a) => (
-                  <SelectItem key={a.value} value={a.value}>
-                    {a.label}
+                <SelectItem value={REPO_SCOPE}>Repository</SelectItem>
+                {scopeEnvs.map((e) => (
+                  <SelectItem key={e} value={e}>
+                    <SelectClipText>{e}</SelectClipText>
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </div>
+        </div>
+        {envHint !== null && (
+          <p id={envHintId} className="text-xs text-muted-foreground">
+            {envHint}
+            {envFailed && !isPermanentListError(envs.error) && (
+              <>
+                {" "}
+                <button
+                  ref={envRescue.retryRef}
+                  type="button"
+                  aria-label="Retry loading environments"
+                  onClick={() => void envs.refetch()}
+                  className={DEGRADED_ACTION_CLASS}
+                >
+                  Retry
+                </button>
+              </>
+            )}
+          </p>
         )}
-
-        <div className="space-y-1">
-          <Label
-            htmlFor={scopeSelectId}
-            className="text-[11px] text-muted-foreground"
-          >
-            Scope
-          </Label>
-          <Select
-            items={SCOPE_ITEMS}
-            value={env ?? REPO_SCOPE}
-            onValueChange={(v) => v && setScope(v)}
-            disabled={!envAllowed}
-          >
-            <SelectTrigger id={scopeSelectId} size="sm" className="w-40">
-              <SelectValue onMouseEnter={clipTitleFromText} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={REPO_SCOPE}>Repository</SelectItem>
-              {(envs.data ?? []).map((e) => (
-                <SelectItem key={e} value={e}>
-                  <SelectClipText>{e}</SelectClipText>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        {/* Pre-mounted: a live region created with its text announces unreliably. */}
+        <div role="status" className="sr-only">
+          {envHint ?? ""}
         </div>
       </div>
 

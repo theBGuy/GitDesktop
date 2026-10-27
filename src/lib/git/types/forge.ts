@@ -228,6 +228,9 @@ export interface ForgeStatus {
   /** Why the repo lookup failed, set only for a positively-identified class;
    *  absent on success and on every unclassified failure. */
   probeError?: "rateLimited" | null;
+  /** When the GraphQL limit behind a `rateLimited` probe resets (epoch
+   *  seconds); absent when that reset wasn't read. */
+  resetAt?: number | null;
 }
 
 export interface RepoLabel {

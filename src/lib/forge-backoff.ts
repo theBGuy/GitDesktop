@@ -1,8 +1,30 @@
 // Import-free: scripts/forge-backoff.test.mjs imports this file through Node's
 // type stripping, which resolves no aliases.
 
+/** The provider each forge kind's failures are named after (`AppError.kind`).
+ *  The one kind→provider map: error-summary.ts aliases it. */
+export const FORGE_KIND_HOSTS = {
+  gh: "GitHub",
+  glab: "GitLab",
+  bitbucket: "Bitbucket",
+  jira: "Jira",
+} as const;
+
 /** Forge kinds whose failures carry the forge's own answer (`AppError.kind`). */
-const FORGE_KINDS = new Set(["gh", "glab", "bitbucket", "jira"]);
+const FORGE_KINDS: ReadonlySet<string> = new Set(Object.keys(FORGE_KIND_HOSTS));
+
+/** The texts github/runner.rs returns in place of a held gh call (its HELD_*
+ *  constants), by the bucket each names. A cross-language contract pinned by
+ *  scripts/forge-backoff.test.mjs: a rewording on either side must move both. */
+export const HELD_RATE_LIMIT_TEXTS = {
+  REST: "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  GraphQL:
+    "GitHub's GraphQL API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  search:
+    "GitHub's search API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+} as const;
+
+export type HeldBucket = keyof typeof HELD_RATE_LIMIT_TEXTS;
 
 /** Rate-limit wording from gh, glab and the app's Bitbucket/Jira clients,
  *  mirroring Rust's `gh_error_is_rate_limit` and `GLAB_RATE_LIMIT_PHRASES`
@@ -71,10 +93,38 @@ function matches(
 }
 
 /** Whether `error` is a forge's rate-limit refusal, the app's own held-call
- *  text for a GitHub limit already reached included. */
+ *  text included ("GitHub's … API rate limit has been reached, so GitDesktop
+ *  didn't send this request"). */
 export function isRateLimitError(error: unknown): boolean {
   const text = forgeMessage(error);
   return text !== null && matches(text, RATE_LIMIT_PHRASES, RATE_LIMIT_STATUS);
+}
+
+/** The bucket a held-call text names, or null. Matched as a substring: a
+ *  wrapped error can carry the held text inside a longer message. */
+export function heldBucket(message: string): HeldBucket | null {
+  for (const [bucket, text] of Object.entries(HELD_RATE_LIMIT_TEXTS))
+    if (message.includes(text)) return bucket as HeldBucket;
+  return null;
+}
+
+/** The provider whose rate limit `error` is, or null when it isn't one. */
+export function rateLimitProvider(error: unknown): string | null {
+  if (!isRateLimitError(error)) return null;
+  const { kind } = error as { kind: keyof typeof FORGE_KIND_HOSTS };
+  return FORGE_KIND_HOSTS[kind];
+}
+
+/** One calm sentence for a rate-limit error, or null for anything else. Names
+ *  the bucket only for gh's held texts, the one source that knows it, and never
+ *  "this request": a caller may quote it for several reads. */
+export function rateLimitSummary(error: unknown): string | null {
+  const provider = rateLimitProvider(error);
+  if (provider === null) return null;
+  const { kind, message } = error as { kind: string; message: string };
+  const bucket = kind === "gh" ? heldBucket(message) : null;
+  const api = bucket === null ? "API" : `${bucket} API`;
+  return `${provider}'s ${api} rate limit has been reached. Try again once it lifts.`;
 }
 
 /** Whether `error` is a forge's credential verdict (a 401, or not signed in).

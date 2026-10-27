@@ -334,6 +334,8 @@ export function RemoteIssueView({
   })();
   const pinSuffix = itemSuffix || (pinHeld ? ` — ${pinHeld}` : "");
   const lockHeldSuffix = lockSuffix || (lockHeld ? ` — ${lockHeld}` : "");
+  // Either direction would be a guess while the lock state is unknown.
+  const lockUnknownSuffix = lockSuffix || " — couldn't check lock state";
   const selectIssue = useUiStore((s) => s.selectIssue);
   const openPr = useUiStore((s) => s.openPr);
   const repoName = useUiStore((s) => s.repoName);
@@ -1123,7 +1125,7 @@ export function RemoteIssueView({
   }
 
   async function doLock(reason: LockReason | null) {
-    if (lockPending || refuseWhileOffline()) return;
+    if (lockPending || issue?.lockUnknown || refuseWhileOffline()) return;
     try {
       await lockIssue.mutateAsync({ number, reason });
     } catch (e) {
@@ -1134,7 +1136,7 @@ export function RemoteIssueView({
   }
 
   async function doUnlock() {
-    if (lockPending || refuseWhileOffline()) return;
+    if (lockPending || issue?.lockUnknown || refuseWhileOffline()) return;
     try {
       await unlockIssue.mutateAsync(number);
     } catch (e) {
@@ -1435,8 +1437,14 @@ export function RemoteIssueView({
                 {/* Absent while a placeholder is served: which affordance renders
                     comes from the LOADED issue's lock state, so a click during that
                     window would lock or unlock the issue you actually selected. */}
+                {canLock && !detailsStale && issue.lockUnknown && (
+                  <DropdownMenuItem className={MENU_HELD_ROW_CLASS} disabled>
+                    Lock or unlock conversation{lockUnknownSuffix}
+                  </DropdownMenuItem>
+                )}
                 {canLock &&
                   !detailsStale &&
+                  !issue.lockUnknown &&
                   (issue.locked ? (
                     <DropdownMenuItem
                       className={MENU_HELD_ROW_CLASS}

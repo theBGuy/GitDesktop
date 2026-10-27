@@ -24,7 +24,17 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
+import {
+  refreshFailed,
+  splitInfiniteFailure,
+} from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
+import { presentError } from "@/lib/error-summary";
+import { isAuthError, rateLimitProvider } from "@/lib/forge-backoff";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
 import {
@@ -44,6 +54,7 @@ import {
 } from "@/lib/settings/mcp-registry";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
+import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { HostAllowNote } from "../HostAllowNote";
 
@@ -105,16 +116,7 @@ export function BrowseRegistryDialog({
 
   // Cursor-paginated registry search. TanStack Query owns abort (via signal),
   // caching, retry, and next-page fetching, keyed on the debounced query.
-  const {
-    data,
-    isLoading,
-    isError,
-    error,
-    refetch,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery({
+  const search = useInfiniteQuery({
     queryKey: ["mcp-browse", source, debounced],
     queryFn: ({ pageParam, signal }) =>
       source === "github"
@@ -128,6 +130,15 @@ export function BrowseRegistryDialog({
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.nextCursor,
   });
+  const {
+    data,
+    isLoading,
+    error,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = search;
 
   // Flatten pages and de-dupe by registry name (different versions can recur).
   const candidates = useMemo(() => {
@@ -158,12 +169,17 @@ export function BrowseRegistryDialog({
     return [...set];
   }, [candidates]);
 
-  const { data: ghStats } = useQuery({
+  const stats = useQuery({
     queryKey: ["gh-repo-stats", repoRefs],
     queryFn: () => ghRepoStats(repoRefs),
     enabled: repoRefs.length > 0,
     staleTime: 5 * 60_000,
   });
+  const ghStats = stats.data;
+  // Rows stay addable without their details, so the failure is one line under
+  // the results rather than a mark on every row.
+  const statsFailed = stats.data === undefined && refreshFailed(stats);
+  const statsLimited = rateLimitProvider(stats.error);
   const { data: npmInstalls } = useQuery({
     queryKey: ["npm-installs", npmPkgs],
     queryFn: () => npmWeeklyDownloadsBatch(npmPkgs),
@@ -203,13 +219,47 @@ export function BrowseRegistryDialog({
     toast.success(`Added "${name}" — review and enable it`);
   }
 
-  const errorMessage = isError
-    ? error instanceof Error
-      ? error.message
-      : source === "github"
-        ? "Couldn't search GitHub. Is the GitHub CLI signed in?"
-        : "Couldn't reach the MCP registry."
-    : null;
+  // Only a search with nothing loaded swaps the results for its error; a failed
+  // Load more or refresh keeps the rows under the notice below them.
+  const searchFailed = search.isError && data === undefined;
+  const searchError = (() => {
+    if (!searchFailed) return null;
+    if (source === "registry")
+      return {
+        title: null,
+        detail:
+          error instanceof Error
+            ? error.message
+            : "Couldn't reach the MCP registry.",
+        retryLabel: "Retry searching the MCP registry",
+      };
+    const summary = presentError(error).summary;
+    return {
+      title: "Couldn't search GitHub.",
+      detail: isAuthError(error)
+        ? `${summary} Is the GitHub CLI signed in?`
+        : summary,
+      retryLabel: "Retry searching GitHub",
+    };
+  })();
+  const searchAnnouncement =
+    searchError === null
+      ? ""
+      : [searchError.title, searchError.detail].filter(Boolean).join(" ");
+  const listFailure = splitInfiniteFailure(search);
+  const listNoticeMessage = (() => {
+    if (data === undefined) return undefined;
+    if (listFailure.loadMoreFailed)
+      return `Couldn't load more results. ${presentError(error).summary}`;
+    if (listFailure.failed)
+      return `Couldn't refresh the results — showing the last loaded ones. ${presentError(error).summary}`;
+    return undefined;
+  })();
+  const rowsShown = !isLoading && !searchFailed && candidates.length > 0;
+  // Each button unmounts under its own press (a refetch from nothing loads; a
+  // Load more of the last page ends the list), so focus lands on the box.
+  const searchRescue = useRetryFocusRescue(searchError !== null);
+  const loadMoreRescue = useRetryFocusRescue(rowsShown && hasNextPage);
 
   // Clamp a stale active index after the result set shrinks (search/retry).
   const safeActive =
@@ -283,9 +333,19 @@ export function BrowseRegistryDialog({
         </div>
 
         <div
+          ref={(node) => {
+            searchRescue.hostRef(node);
+            loadMoreRescue.hostRef(node);
+          }}
+          tabIndex={-1}
           onKeyDown={onListKeyDown}
-          className="max-h-[55vh] min-h-40 space-y-2 overflow-y-auto px-1"
+          className="max-h-[55vh] min-h-40 space-y-2 overflow-y-auto px-1 outline-none"
         >
+          {/* First, so space-y's end margins skip it. Pre-mounted: a live
+              region created together with its text announces unreliably. */}
+          <div role="status" className="sr-only">
+            {searchAnnouncement}
+          </div>
           {isLoading ? (
             <p className="flex items-center gap-2 py-6 text-xs text-muted-foreground">
               <Spinner />{" "}
@@ -293,11 +353,22 @@ export function BrowseRegistryDialog({
                 ? "Searching GitHub…"
                 : "Searching the registry…"}
             </p>
-          ) : errorMessage ? (
+          ) : searchError ? (
             <div className="space-y-2 py-6 text-xs">
-              <p className="text-muted-foreground">{errorMessage}</p>
-              <Button variant="outline" size="sm" onClick={() => refetch()}>
-                Try again
+              <div className="space-y-0.5">
+                {searchError.title && (
+                  <p className="font-medium">{searchError.title}</p>
+                )}
+                <p className="text-muted-foreground">{searchError.detail}</p>
+              </div>
+              <Button
+                ref={searchRescue.retryRef}
+                variant="outline"
+                size="sm"
+                aria-label={searchError.retryLabel}
+                onClick={() => refetch()}
+              >
+                Retry
               </Button>
             </div>
           ) : candidates.length === 0 ? (
@@ -567,10 +638,15 @@ export function BrowseRegistryDialog({
               {hasNextPage && (
                 <div className="flex justify-center py-1">
                   <Button
+                    ref={loadMoreRescue.retryRef}
                     variant="ghost"
                     size="sm"
+                    className={ARIA_DISABLED_CLASS}
                     onClick={() => fetchNextPage()}
+                    // Focusable while busy, so a press never drops focus to
+                    // <body>.
                     disabled={isFetchingNextPage}
+                    focusableWhenDisabled
                   >
                     {isFetchingNextPage && <Spinner data-icon="inline-start" />}
                     Load more
@@ -580,6 +656,37 @@ export function BrowseRegistryDialog({
             </>
           )}
         </div>
+
+        {/* Outside the results box, so it covers a loaded empty result too and
+            its healthy sr-only wrapper adds no end margin to the list. */}
+        <DegradedListNotice
+          noun="more results"
+          degraded={listNoticeMessage !== undefined}
+          message={listNoticeMessage}
+          retryLabel={
+            listFailure.loadMoreFailed
+              ? "Retry loading more results"
+              : "Retry loading the results"
+          }
+          onRetry={
+            listFailure.loadMoreFailed
+              ? () => void fetchNextPage()
+              : () => void refetch()
+          }
+          className="px-0 pb-0"
+        />
+
+        <DegradedListNotice
+          noun="repository details"
+          degraded={statsFailed}
+          message={
+            statsLimited === null
+              ? "Couldn't load star counts, licenses and archived status."
+              : `Star counts, licenses and archived status aren't shown while ${statsLimited}'s API rate limit is in effect.`
+          }
+          onRetry={() => void stats.refetch()}
+          className="px-0 pb-0"
+        />
 
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>

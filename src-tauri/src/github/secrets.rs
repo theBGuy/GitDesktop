@@ -10,8 +10,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::github::gh_unreadable;
+use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::runner::{run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT};
+use crate::github::{gh_failure_reason, gh_unreadable};
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -289,10 +290,23 @@ pub async fn gh_environments_list(repo_path: String) -> AppResult<Vec<String>> {
         GH_NETWORK_TIMEOUT,
     )
     .await?;
-    // A repo with environments disabled / none returns 404 (or an empty list);
-    // tolerate both as "no environments" rather than erroring the panel.
+    environments_list_outcome(Ok(out))
+}
+
+fn environments_list_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<Vec<String>> {
+    let out = result?;
+    // A 404 or an empty list means no environments; other answered failures keep
+    // the empty fallback. Rate limits and transport failures reject the read
+    // because they cannot establish absence.
     if out.code != 0 {
-        return Ok(Vec::new());
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(Vec::new()),
+        };
     }
     let resp: EnvsResp = serde_json::from_str(&out.stdout_lossy()).unwrap_or(EnvsResp {
         environments: Vec::new(),
@@ -303,6 +317,55 @@ pub async fn gh_environments_list(repo_path: String) -> AppResult<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn gh_output(
+        code: i32,
+        body: &str,
+        stderr: &str,
+    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
+        Ok(crate::github::runner::GhOutput {
+            code,
+            stdout: body.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        })
+    }
+
+    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
+    const ANSWERED_STDERR: &str =
+        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+
+    #[test]
+    fn environments_preserve_denials_and_reject_transient_failures() {
+        let absent = super::environments_list_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(absent.is_empty());
+        let absent = super::environments_list_outcome(gh_output(1, "", ANSWERED_STDERR)).unwrap();
+        assert!(absent.is_empty());
+        let loaded = super::environments_list_outcome(gh_output(
+            0,
+            r#"{"environments":[{"name":"production"}]}"#,
+            "",
+        ))
+        .unwrap();
+        assert!(loaded == ["production"]);
+        for stderr in [
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+        ] {
+            let error = super::environments_list_outcome(gh_output(1, "", stderr))
+                .expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(
+            super::environments_list_outcome(Err(crate::error::AppError::Timeout(30))).is_err()
+        );
+    }
 
     #[test]
     fn validate_var_name_admits_only_the_documented_shape() {

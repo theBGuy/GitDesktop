@@ -117,6 +117,9 @@ export interface IssueDetails {
   issueType: IssueType | null;
   isPinned: boolean;
   locked: boolean;
+  /** GitHub only: the lock lookup failed (rate limit, network), so `locked`
+   *  reads false without being an answer. Always false on GitLab. */
+  lockUnknown: boolean;
   /** GitHub's lock reason (off_topic/resolved/spam/too_heated) or null. */
   activeLockReason: string | null;
   /** GitLab-only: the issue is hidden from non-members. Always false on GitHub. */
