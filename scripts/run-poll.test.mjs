@@ -10,11 +10,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { notifyPollInterval } from "../src/features/actions/run-notify-diff.ts";
 import {
-  CHECKS_RECHECK_DELAYS_MS,
-  HEAD_WAKE_WINDOW_MS,
-  headRunsPollIntervalMs,
-  headWakeMismatches,
-  headWakeWindowClosed,
   listRunsPollIntervalMs,
   newestJobStartedAt,
   RUN_POLL_FAST_MS,
@@ -423,133 +418,23 @@ test("a jobs read keeps polling while its run row is active", () => {
   );
 });
 
-test("a pending check whose head row reads finished keeps the head poll awake", () => {
-  const row = (id, status, createdAt = ago(MIN)) => ({ id, status, createdAt });
-  const done = [row(1, "completed"), row(2, "completed")];
-  // Nothing pending and nothing active: the poll stops.
-  assert.equal(headRunsPollIntervalMs(done, [], NOW), false);
-  // The PR still reports run 2 pending while its row reads finished: a new
-  // attempt may be starting, so the poll keeps the mid tier.
-  assert.equal(headRunsPollIntervalMs(done, ["2"], NOW), RUN_POLL_MID_MS);
-  // A pending run whose row is active keeps its own faster ladder tier.
+test("a head poll over active runs keeps each active run's own tier", () => {
+  // Held for approval: the slow tier, however fresh.
   assert.equal(
-    headRunsPollIntervalMs(
-      [row(1, "completed"), row(2, "in_progress")],
-      ["2"],
-      NOW,
-    ),
-    RUN_POLL_FAST_MS,
+    runsPollIntervalMs([{ status: "waiting", createdAt: ago(MIN) }], NOW),
+    RUN_POLL_SLOW_MS,
   );
-  // A pending id the list does not carry changes nothing: the per-run
-  // fallback watches it.
-  assert.equal(headRunsPollIntervalMs(done, ["3"], NOW), false);
+  // An old executing run: its ladder gives 60 s.
   assert.equal(
-    headRunsPollIntervalMs(
-      [row(1, "in_progress", ago(5 * MIN)), row(2, "completed")],
-      ["3"],
-      NOW,
-    ),
-    RUN_POLL_MID_MS,
-  );
-  // An active fresh row elsewhere outranks the finished pending row.
-  assert.equal(
-    headRunsPollIntervalMs(
-      [row(1, "in_progress"), row(2, "completed")],
-      ["2"],
-      NOW,
-    ),
-    RUN_POLL_FAST_MS,
-  );
-  // A slow active row elsewhere is lifted to the mid tier by the pending row.
-  assert.equal(
-    headRunsPollIntervalMs(
-      [row(1, "in_progress", ago(30 * MIN)), row(2, "completed")],
-      ["2"],
-      NOW,
-    ),
-    RUN_POLL_MID_MS,
-  );
-  // Empty or unanswered rows: the base value.
-  assert.equal(headRunsPollIntervalMs([], ["2"], NOW), false);
-  assert.equal(headRunsPollIntervalMs(undefined, ["2"], NOW), false);
-});
-
-test("the wake re-checks at 15, 30 and 60 s and closes one mid tick later", () => {
-  assert.deepEqual([...CHECKS_RECHECK_DELAYS_MS], [15_000, 30_000, 60_000]);
-  assert.equal(HEAD_WAKE_WINDOW_MS, 75_000);
-});
-
-test("a wake mismatch is a pending id whose head row reads finished", () => {
-  const row = (id, status, updatedAt = "u1") => ({
-    id,
-    status,
-    createdAt: ago(MIN),
-    updatedAt,
-  });
-  const rows = [
-    row(1, "completed"),
-    row(2, "in_progress"),
-    row(3, "completed", "u3"),
-  ];
-  // A finished pending row is in, keyed by its attempt's updatedAt.
-  assert.deepEqual(headWakeMismatches(rows, ["1", "3"]), [
-    { id: "1", key: "1 u1" },
-    { id: "3", key: "3 u3" },
-  ]);
-  // An active pending row is out.
-  assert.deepEqual(headWakeMismatches(rows, ["2"]), []);
-  // A pending id the rows don't carry is out.
-  assert.deepEqual(headWakeMismatches(rows, ["9"]), []);
-  // Nothing pending, or nothing answered: none.
-  assert.deepEqual(headWakeMismatches(rows, []), []);
-  assert.deepEqual(headWakeMismatches(undefined, ["1"]), []);
-});
-
-test("the wake window closes exactly at its length", () => {
-  const start = NOW;
-  assert.equal(headWakeWindowClosed(start, start), false);
-  assert.equal(
-    headWakeWindowClosed(start, start + HEAD_WAKE_WINDOW_MS - 1),
-    false,
-  );
-  assert.equal(headWakeWindowClosed(start, start + HEAD_WAKE_WINDOW_MS), true);
-  assert.equal(
-    headWakeWindowClosed(start, start + HEAD_WAKE_WINDOW_MS + MIN),
-    true,
-  );
-});
-
-test("a closed wake parks the poll; a new attempt opens a new window", () => {
-  const done = (updatedAt) => [
-    { id: 2, status: "completed", createdAt: ago(MIN), updatedAt },
-  ];
-  assert.equal(
-    headRunsPollIntervalMs(done("u1"), ["2"], NOW, new Set(["2 u1"])),
-    false,
-  );
-  assert.equal(
-    headRunsPollIntervalMs(done("u2"), ["2"], NOW, new Set(["2 u1"])),
-    RUN_POLL_MID_MS,
-  );
-});
-
-test("only a finished pending row wakes the poll; active rows keep their tier", () => {
-  // A pending run held for approval is active: it keeps the slow tier.
-  assert.equal(
-    headRunsPollIntervalMs(
-      [{ id: 2, status: "waiting", createdAt: ago(MIN) }],
-      ["2"],
+    runsPollIntervalMs(
+      [{ status: "in_progress", createdAt: ago(30 * MIN) }],
       NOW,
     ),
     RUN_POLL_SLOW_MS,
   );
-  // An old executing pending run is active too: its ladder gives 60 s.
+  // Every row finished: the poll stops, whatever the PR's checks say.
   assert.equal(
-    headRunsPollIntervalMs(
-      [{ id: 2, status: "in_progress", createdAt: ago(30 * MIN) }],
-      ["2"],
-      NOW,
-    ),
-    RUN_POLL_SLOW_MS,
+    runsPollIntervalMs([{ status: "completed", createdAt: ago(MIN) }], NOW),
+    false,
   );
 });

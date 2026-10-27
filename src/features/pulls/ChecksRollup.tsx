@@ -68,13 +68,7 @@ import {
   useRunFailedLogs,
   useRunJobs,
 } from "@/lib/github/actions";
-import {
-  CHECKS_RECHECK_DELAYS_MS,
-  HEAD_WAKE_WINDOW_MS,
-  headWakeMismatches,
-  headWakeWindowClosed,
-  type PollRun,
-} from "@/lib/github/run-poll";
+import type { PollRun } from "@/lib/github/run-poll";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
@@ -92,6 +86,11 @@ import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 import { checkPresentation, isOutstanding } from "./check-presentation";
+import {
+  type RecheckState,
+  recheckIdentities,
+  reconcileRecheck,
+} from "./check-recheck";
 import {
   type JobRerunCandidate,
   rerunnableJobs,
@@ -770,13 +769,12 @@ export function ChecksRollup({
   // alone would read that as the settle already reported. Dropping an id that
   // reads active again re-arms it early, belt-and-braces.
   const settledRuns = useRef(new Map<string, string>());
-  // Head-poll wakes (see `wakeKeys` below): each open wake's PR re-check and
-  // close timers by wake key, and the keys whose one window has been spent.
-  // State, not a ref, so a window closing re-renders and drops its wake.
-  const wakeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>[]>());
-  const [closedWakes, setClosedWakes] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
+  // The pending-check re-check's progress per check attempt (see `recheckIds`
+  // below). A ref, so a collapse or a tab hide only stops its timer and a return
+  // resumes from each attempt's first-seen time; a PR switch remounts it empty.
+  const recheckState = useRef<RecheckState>(new Map());
+  // The parent's re-read of this PR's checks, read when a step fires.
+  const retryChecksRef = useLatestRef(onRetryChecks);
   // The blocked runs this rollup can approve. A run GitHub holds before it starts
   // may not reach the check rollup at all — that shape is unverified — so an empty
   // list renders nothing rather than an approval offer with nothing to approve.
@@ -840,9 +838,9 @@ export function ChecksRollup({
   // pending check could miss the attempt entirely. Open additionally watches
   // every running check, for the steps UI and general freshness; collapsed, the
   // latch keys are exactly the set the click consented to poll. Bounded both
-  // ways: collapsed, a latch-only run parks once its row finishes; open, a check
-  // still pending over a finished row wakes the poll and re-reads the PR's
-  // checks for one short window, then parks. The latch dies with the remount.
+  // ways — a settled run parks its own interval, and the latch dies with the
+  // per-PR remount; a check still pending over a finished row gets only the
+  // bounded re-check below.
   const mountedWatchIds = open
     ? [...new Set([...watchedRunIds, ...recentlyRerun.keys()])]
     : [...recentlyRerun.keys()];
@@ -851,15 +849,10 @@ export function ChecksRollup({
   // prop's default-to-github guess: anything else, a pending probe included,
   // keeps the per-run watchers below.
   const watcherProvider = forge.data?.provider;
-  // While open, a check still pending over a finished row may be a new attempt
-  // started elsewhere, so it wakes the head poll for one window. Never the latch
-  // keys: a latched run that finished must park.
   const headRuns = useHeadRuns(
     repoPath,
     headSha,
     watcherProvider === "github" && mountedWatchIds.length > 0,
-    open ? watchedRunIds : [],
-    closedWakes,
   );
   const headRunById = new Map(
     watcherProvider === "github"
@@ -882,64 +875,68 @@ export function ChecksRollup({
   const jobsReadIds = open
     ? runningRunIds.filter((id) => headRunById.has(id))
     : [];
-  // The open wakes, keyed per finished attempt. The PR's checks can lag the runs
-  // list, and a failed PR read isn't retried, so each wake re-reads the checks
-  // on a ladder, then closes, and its attempt never wakes again. A wake ends
-  // early when its check stops reading pending or its row turns active.
-  const wakeKeys =
-    watcherProvider === "github" && open
-      ? headWakeMismatches(headRuns.data, watchedRunIds)
-          .map((m) => m.key)
-          .filter((key) => !closedWakes.has(key))
+  // Pending checks whose run's head-list row reads finished: the PR's checks can
+  // lag the runs list, a failed PR read isn't retried, and a re-run started
+  // elsewhere sits over the old finished row. Each check attempt reads the head
+  // list at once, then re-reads it with the PR's checks on a short ladder, so a
+  // runs list that lagged at first sight still surfaces the new attempt.
+  const recheckIds =
+    watcherProvider === "github"
+      ? recheckIdentities(
+          checks.filter(
+            (c) =>
+              Boolean(c.runId) && !c.completedAt && bucketOf(c) === "pending",
+          ),
+          headRunById,
+        )
       : [];
-  const wakeSignature = [...wakeKeys].sort().join("\n");
+  const recheckSignature = recheckIds.join("\n");
   useEffect(() => {
-    const timers = wakeTimers.current;
-    return () => {
-      for (const list of timers.values()) for (const t of list) clearTimeout(t);
-      timers.clear();
-    };
-  }, []);
-  useEffect(() => {
-    const live = new Set(wakeSignature === "" ? [] : wakeSignature.split("\n"));
-    const ended: string[] = [];
-    for (const [key, list] of wakeTimers.current) {
-      if (live.has(key)) continue;
-      for (const t of list) clearTimeout(t);
-      wakeTimers.current.delete(key);
-      ended.push(key);
-    }
-    const close = (keys: string[]) =>
-      setClosedWakes((prev) => {
-        if (keys.every((k) => prev.has(k))) return prev;
-        const next = new Set(prev);
-        for (const k of keys) next.add(k);
-        return next;
-      });
-    if (ended.length > 0) close(ended);
-    for (const key of live) {
-      if (wakeTimers.current.has(key)) continue;
-      const startedAt = Date.now();
-      const list = CHECKS_RECHECK_DELAYS_MS.map((delay) =>
-        setTimeout(() => {
-          void queryClient.invalidateQueries({
-            queryKey: ["repo", repoPath, "pr"],
-          });
-          void queryClient.invalidateQueries({
-            queryKey: repoKeys.prCi(repoPath),
-          });
-        }, delay),
+    const live = recheckSignature === "" ? [] : recheckSignature.split("\n");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const reconcile = () => {
+      const now = Date.now();
+      const { state, actions } = reconcileRecheck(
+        recheckState.current,
+        live,
+        open,
+        now,
       );
-      const expire = () => {
-        const now = Date.now();
-        if (headWakeWindowClosed(startedAt, now)) close([key]);
+      recheckState.current = state;
+      // These invalidations never cancel a read in flight: the reads are
+      // non-abortable IPC, and a restart would only repeat one.
+      if (actions.refetchHead)
+        void queryClient.invalidateQueries(
+          { queryKey: ["repo", repoPath, "actions", "head-runs"] },
+          { cancelRefetch: false },
+        );
+      if (actions.reread) {
+        void queryClient.invalidateQueries(
+          { queryKey: ["repo", repoPath, "actions", "head-runs"] },
+          { cancelRefetch: false },
+        );
+        void queryClient.invalidateQueries(
+          { queryKey: repoKeys.prCi(repoPath) },
+          { cancelRefetch: false },
+        );
+        // This PR's checks ride the parent's details read; without the parent's
+        // re-read, the settle effect's broad PR key stands in for it.
+        const retry = retryChecksRef.current;
+        if (retry) retry();
         else
-          list.push(setTimeout(expire, startedAt + HEAD_WAKE_WINDOW_MS - now));
-      };
-      list.push(setTimeout(expire, HEAD_WAKE_WINDOW_MS));
-      wakeTimers.current.set(key, list);
-    }
-  }, [wakeSignature, queryClient, repoPath]);
+          void queryClient.invalidateQueries(
+            { queryKey: ["repo", repoPath, "pr"] },
+            { cancelRefetch: false },
+          );
+      }
+      if (actions.nextDueMs !== null)
+        timer = setTimeout(reconcile, Math.max(0, actions.nextDueMs - now));
+    };
+    reconcile();
+    return () => {
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [recheckSignature, open, queryClient, repoPath]);
   useEffect(() => {
     let finished = false;
     const settledHeadIds: string[] = [];

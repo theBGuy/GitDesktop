@@ -1136,9 +1136,11 @@ one grep away on the named symbol. Grows via Conventions-sync.
   interval; the branch badge's `useLatestRun` and the run notifier keep their
   own cadence. GitHub PR rollups watch runs through one head-sha list poll plus
   jobs reads only while the rollup is open (`useHeadRuns` / `useRunJobs`).
-  While open, a check still pending over a finished row (never a latch-only
-  re-run id) wakes that poll to 15 s and re-reads the PR's checks for one short
-  window per attempt, then parks.
+  While open, a check still pending over a finished row gets the bounded
+  re-check in `src/features/pulls/check-recheck.ts`. Keyed on the check's
+  attempt (its job ids), never the row, it reads the head list on first sight,
+  re-reads it with the PR's checks at 15/30/60 s, then parks. Collapsing the
+  rollup or hiding its tab pauses it without resolving it.
 
 ## Code comments
 
