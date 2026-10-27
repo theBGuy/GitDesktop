@@ -1,6 +1,6 @@
 ---
 name: gd-conventions
-description: GitDesktop repo playbook — hard safety rules, frontend and Rust/Tauri conventions, verification commands, and hard-won gotchas that are NOT in CLAUDE.md. Consult this before writing, refactoring, or reviewing ANY code in this repo, even for small changes. Preloaded into the implementer, spec-reviewer and spec-writer subagents; the main conversation should read it before direct implementation work too.
+description: GitDesktop repo playbook — hard repo rules, frontend and Rust/Tauri conventions, verification commands, and hard-won gotchas that are NOT in CLAUDE.md. Consult this before writing, refactoring, or reviewing ANY code in this repo, even for small changes. Preloaded into the implementer, spec-reviewer and spec-writer subagents; the main conversation should read it before direct implementation work too.
 ---
 
 # GitDesktop conventions & gotchas
@@ -9,32 +9,30 @@ You are working in the user's real repository. CLAUDE.md covers the project
 brief and docs-sync; this file adds what past sessions learned the hard way.
 Where this file and generic best practice disagree, this file wins.
 
-## Hard rules (violations have destroyed user state before)
+## Hard rules
 
-1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /
-   show` and `git branch --list`, each optionally prefixed with `-C <path>` to
-   address a task worktree. Everything else — commit, add/stage, checkout,
-   reset, stash, rm, clean, push, pull, fetch, merge, rebase, tag, branch
-   create/delete, worktree, remote, config — is forbidden, even "just to test".
-   The user commits their own work, possibly in parallel with your session; a
-   past subagent's stray commit wiped `.gitignore` and broke the app.
-2. **No stray files.** Create only what your task calls for. Scratch files go
-   in the session scratchpad or `C:/temp`, never the repo; destructive
-   experiments happen in a throwaway repo under `C:/temp`. (One exception, for
-   runs that may create files: the LF-copy gate's `__cigate__<name>` sibling,
-   deleted after the check — reviewers never create it: the LF copy is a file.)
-3. **Don't edit `src/components/ui/`** — vendored shadcn/Base UI primitives.
+1. **Don't edit `src/components/ui/`** — vendored shadcn/Base UI primitives.
    Fix at the feature/call-site level. That folder's `README.md` inventories
    the sanctioned local modifications (a re-vendor silently reverts them);
    any future sanctioned edit updates it in the same change.
-4. **Never repo-wide `cargo fmt`** in `src-tauri` (~35 files of collateral).
+2. **Never repo-wide `cargo fmt`** in `src-tauri` (~35 files of collateral).
    New files only: `rustfmt --edition 2021 <that file>` — and never on a
    `mod.rs`: rustfmt follows its `mod` declarations into every child file
    (measured: 6-file collateral). Verify an edit's formatting with
-   `rustfmt --edition 2021 --check --config skip_children=true` and compare
-   flagged hunks to your lines.
-5. **Report from evidence.** Verification claims come from command output in
-   this session, never memory. Quote failures verbatim.
+   `rustfmt --edition 2021 --check --config skip_children=true <that file>`
+   and compare flagged hunks to your lines.
+3. **`gd/session/*` branches are filtered from every branch surface** and
+   never deleted — the user dogfoods agent sessions on them; deleting one
+   breaks Resume.
+4. **`pnpm lint` is a rewrite, not a check** (`biome check --write` over
+   `src/` AND `site/`). Check form: `pnpm exec biome check ./src/`. In a task
+   worktree that check false-fails on CRLF, so the remedy splits by role.
+   WRITERS: use the per-file LF-copy `biome ci` gate (below), whose
+   `__cigate__<name>` sibling is deleted after the check, or whatever the
+   spec's Verification field names. REVIEWERS: run the check-only form scoped
+   to the package's own files, and in a fresh worktree treat tree-wide
+   formatting as unverifiable and report it as such — never create files (an
+   LF copy is a file), never any `--write` form.
 
 ## Verification commands (allowlisted — run, don't ask)
 
@@ -51,11 +49,10 @@ pnpm run checks                        # guard scripts + self-tests — CI quali
 Frontend changes run the first pair; Rust changes add the cargo pair. Not
 "done" until green.
 
-⚠ **`pnpm lint` is a rewrite, not a check** — it runs `biome check --write
-./src/ ./site/`, mutating every file under `src/` AND `site/` including
-the user's parallel work. Implementers fix only their own files via the
-targeted `pnpm exec biome check --write <files in scope>`; reviewers never
-run any `--write` form.
+⚠ **Formatting fixes stay in scope:** implementers format only their own files,
+via the targeted `pnpm exec biome check --write <files in scope>`, never the
+tree-wide `pnpm lint` (hard rule 4), which would rewrite the user's parallel
+work too.
 
 ⚠ **`biome check` false-fails on CRLF (this Windows worktree).** autocrlf checks
 files out CRLF, and `biome check` (formatter included) flags a CR on **unedited**
@@ -488,9 +485,6 @@ dedupe the animate group, so `animate-none` vs an existing `animate-in` is a
 build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 
 **State & rendering gotchas.**
-- **`gd/session/*` branches are filtered from every branch surface** (lists,
-  pickers, bulk actions) — the user dogfoods agent sessions on them; deleting
-  one breaks Resume. Hard invariant.
 - `<Activity>`-hidden subtrees still render but hold no query observers, so
   they fetch nothing while hidden; the re-show refetches anything past its
   staleTime. Keep a heavy query's `enabled` gated on the active tab as a
@@ -1200,11 +1194,8 @@ sweep stale "coming soon" mentions when a feature ships.
 - **Conventions-sync:** a change that builds a reusable primitive adds its line
   to THIS file in the same change (the docs-sync rule, applied to idioms). A
   change to a hard rule also updates every file that states that rule, wherever
-  it is restated — the always-loaded excerpt `.claude/rules/git-safety.md`, the
-  repo `AGENTS.md`, the agent definitions, and any carrier added later;
-  `scripts/check-rule-mirrors.mjs` holds the gated list for the git whitelist
-  and fails when a carrier drops the rule's core (the codex spec preamble
-  restates it condensed, synced by hand).
+  it is restated — the always-loaded excerpt `.claude/rules/repo-safety.md`, the
+  repo `AGENTS.md`, and any carrier added later.
 - **No inline gate predicates in CI YAML:** a check's logic never ships as an
   inline `node -e`/shell string in a workflow file — it is invisible to biome,
   to `node --test`, and to every static review lane (four independent defects
@@ -1235,4 +1226,4 @@ registration wired for new UI; docs-sync per the spec's `Docs-sync:` field
 (gaps flagged, never silently skipped); footprint sweep via
 `git --no-pager status` accounting for YOUR files only (the tree may hold the
 user's parallel WIP and sibling packages — don't touch or explain what isn't
-yours); nothing committed, ever.
+yours).
