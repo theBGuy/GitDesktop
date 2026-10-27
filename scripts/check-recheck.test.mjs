@@ -42,7 +42,7 @@ const rows = (...entries) =>
   );
 
 /** Runs one reconcile and returns the next state plus its actions. */
-const step = (state, live, visible, now, active = []) =>
+const step = (state, live, visible, now, active) =>
   reconcileRecheck(state, live, visible, now, active);
 
 test("the ladder re-reads at 15, 30 and 60 s, coalescing within 1 s", () => {
@@ -120,12 +120,12 @@ test("a check without a job id is identified by name@startedAt", () => {
 });
 
 test("normal finish: the PR lags, then resolves; one head read, steps dropped", () => {
-  let r = step(new Map(), ["1|a"], true, T0);
+  let r = step(new Map(), ["1|a"], true, T0, []);
   assert.equal(r.actions.refetchHead, true);
   assert.equal(r.actions.reread, false);
   assert.equal(r.actions.nextDueMs, T0 + 15_000);
   // The PR's next read shows the check finished: the identity leaves the set.
-  r = step(r.state, [], true, T0 + 5 * SEC);
+  r = step(r.state, [], true, T0 + 5 * SEC, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: false,
@@ -133,7 +133,7 @@ test("normal finish: the PR lags, then resolves; one head read, steps dropped", 
   });
   assert.equal(r.state.get("1|a").done, true);
   // A later lagging snapshot of the same attempt never re-arms it.
-  r = step(r.state, ["1|a"], true, T0 + 20 * SEC);
+  r = step(r.state, ["1|a"], true, T0 + 20 * SEC, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: false,
@@ -146,39 +146,39 @@ test("an outside re-run after a normal finish gets a new identity", () => {
   // runs list for a moment, then clears.
   const before = rows(["1", "completed", "u1"]);
   let live = identities([check("1", "a")], before).live;
-  let r = step(new Map(), live, true, T0);
+  let r = step(new Map(), live, true, T0, []);
   assert.equal(r.actions.refetchHead, true);
-  r = step(r.state, [], true, T0 + 5 * SEC);
+  r = step(r.state, [], true, T0 + 5 * SEC, []);
   // A re-run started in the browser: new check runs (new job ids) appear over
   // the same stale finished row before the head list catches up.
   live = identities([check("1", "b")], before).live;
-  r = step(r.state, live, true, T0 + 120 * SEC);
+  r = step(r.state, live, true, T0 + 120 * SEC, []);
   assert.equal(r.actions.refetchHead, true);
   assert.equal(r.actions.nextDueMs, T0 + 135 * SEC);
 });
 
 test("a lagging check re-reads at 15, 30 and 60 s, then is done for good", () => {
-  let r = step(new Map(), ["1|a"], true, T0);
-  r = step(r.state, ["1|a"], true, T0 + 15_000);
+  let r = step(new Map(), ["1|a"], true, T0, []);
+  r = step(r.state, ["1|a"], true, T0 + 15_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: true,
     nextDueMs: T0 + 30_000,
   });
-  r = step(r.state, ["1|a"], true, T0 + 30_000);
+  r = step(r.state, ["1|a"], true, T0 + 30_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: true,
     nextDueMs: T0 + 60_000,
   });
-  r = step(r.state, ["1|a"], true, T0 + 60_000);
+  r = step(r.state, ["1|a"], true, T0 + 60_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: true,
     nextDueMs: null,
   });
   assert.equal(r.state.get("1|a").done, true);
-  r = step(r.state, ["1|a"], true, T0 + 600_000);
+  r = step(r.state, ["1|a"], true, T0 + 600_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: false,
@@ -187,35 +187,35 @@ test("a lagging check re-reads at 15, 30 and 60 s, then is done for good", () =>
 });
 
 test("a step is due exactly one coalescing window early, never sooner", () => {
-  let r = step(new Map(), ["1|a"], true, T0);
-  r = step(r.state, ["1|a"], true, T0 + 15_000 - RECHECK_COALESCE_MS - 1);
+  let r = step(new Map(), ["1|a"], true, T0, []);
+  r = step(r.state, ["1|a"], true, T0 + 15_000 - RECHECK_COALESCE_MS - 1, []);
   assert.equal(r.actions.reread, false);
-  r = step(r.state, ["1|a"], true, T0 + 15_000 - RECHECK_COALESCE_MS);
+  r = step(r.state, ["1|a"], true, T0 + 15_000 - RECHECK_COALESCE_MS, []);
   assert.equal(r.actions.reread, true);
 });
 
 test("collapse mid-schedule, then re-open: overdue steps fire once", () => {
-  let r = step(new Map(), ["1|a"], true, T0);
-  r = step(r.state, ["1|a"], true, T0 + 15_000);
+  let r = step(new Map(), ["1|a"], true, T0, []);
+  r = step(r.state, ["1|a"], true, T0 + 15_000, []);
   assert.equal(r.actions.reread, true);
   // Collapsed: nothing fires and nothing resolves.
-  r = step(r.state, ["1|a"], false, T0 + 20_000);
+  r = step(r.state, ["1|a"], false, T0 + 20_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: false,
     nextDueMs: null,
   });
   // Re-opened past the 30 s step but before 60 s: one re-read, then 60 s.
-  r = step(r.state, ["1|a"], true, T0 + 45_000);
+  r = step(r.state, ["1|a"], true, T0 + 45_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: true,
     nextDueMs: T0 + 60_000,
   });
   // Re-opened past every step: the remaining ones collapse into one re-read.
-  let s = step(new Map(), ["2|b"], true, T0).state;
-  s = step(s, ["2|b"], false, T0 + 1_000).state;
-  const late = step(s, ["2|b"], true, T0 + 90_000);
+  let s = step(new Map(), ["2|b"], true, T0, []).state;
+  s = step(s, ["2|b"], false, T0 + 1_000, []).state;
+  const late = step(s, ["2|b"], true, T0 + 90_000, []);
   assert.deepEqual(late.actions, {
     refetchHead: false,
     reread: true,
@@ -227,9 +227,9 @@ test("collapse mid-schedule, then re-open: overdue steps fire once", () => {
 test("hide and show resume like collapse; the head read never repeats", () => {
   // A tab hide tears the effect down, leaving the state; the show reconciles
   // again from the original first-seen time.
-  let r = step(new Map(), ["1|a"], true, T0);
+  let r = step(new Map(), ["1|a"], true, T0, []);
   assert.equal(r.actions.refetchHead, true);
-  r = step(r.state, ["1|a"], true, T0 + 32_000);
+  r = step(r.state, ["1|a"], true, T0 + 32_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: true,
@@ -239,37 +239,37 @@ test("hide and show resume like collapse; the head read never repeats", () => {
 });
 
 test("two identities first seen together share one head read and one re-read", () => {
-  let r = step(new Map(), ["1|a", "2|b"], true, T0);
+  let r = step(new Map(), ["1|a", "2|b"], true, T0, []);
   assert.equal(r.actions.refetchHead, true);
-  r = step(r.state, ["1|a", "2|b"], true, T0 + 15_000);
+  r = step(r.state, ["1|a", "2|b"], true, T0 + 15_000, []);
   assert.equal(r.actions.reread, true);
   assert.equal(r.actions.nextDueMs, T0 + 30_000);
   assert.equal(r.state.get("1|a").firedSteps, 1);
   assert.equal(r.state.get("2|b").firedSteps, 1);
   // One seen a moment later still rides the same tick.
-  let s = step(new Map(), ["1|a"], true, T0).state;
-  s = step(s, ["1|a", "2|b"], true, T0 + 400).state;
-  const tick = step(s, ["1|a", "2|b"], true, T0 + 15_000);
+  let s = step(new Map(), ["1|a"], true, T0, []).state;
+  s = step(s, ["1|a", "2|b"], true, T0 + 400, []).state;
+  const tick = step(s, ["1|a", "2|b"], true, T0 + 15_000, []);
   assert.equal(tick.actions.reread, true);
   assert.equal(tick.state.get("2|b").firedSteps, 1);
   assert.equal(tick.actions.nextDueMs, T0 + 30_000);
 });
 
 test("an identity gone while hidden is resolved only once visible", () => {
-  let r = step(new Map(), ["1|a"], true, T0);
-  r = step(r.state, [], false, T0 + 5_000);
+  let r = step(new Map(), ["1|a"], true, T0, []);
+  r = step(r.state, [], false, T0 + 5_000, []);
   assert.equal(r.state.get("1|a").done, false);
   // Back on screen and still live: it resumes rather than counting as solved.
-  r = step(r.state, ["1|a"], true, T0 + 16_000);
+  r = step(r.state, ["1|a"], true, T0 + 16_000, []);
   assert.equal(r.actions.reread, true);
   // Back on screen and gone: now it is resolved.
-  r = step(r.state, [], true, T0 + 17_000);
+  r = step(r.state, [], true, T0 + 17_000, []);
   assert.equal(r.state.get("1|a").done, true);
 });
 
 test("a row turning active pauses its identity; the next finish starts afresh", () => {
   // t0: the new attempt's check reads pending over the cached finished row.
-  let r = step(new Map(), ["1|a"], true, T0);
+  let r = step(new Map(), ["1|a"], true, T0, []);
   assert.equal(r.actions.refetchHead, true);
   // t2s: the forced head read shows the run executing. Paused, not resolved.
   r = step(r.state, [], true, T0 + 2 * SEC, ["1|a"]);
@@ -280,27 +280,27 @@ test("a row turning active pauses its identity; the next finish starts afresh", 
   });
   assert.equal(r.state.get("1|a").done, false);
   // t300s: the run finished and the PR's read lags: one fresh episode.
-  r = step(r.state, ["1|a"], true, T0 + 300 * SEC);
+  r = step(r.state, ["1|a"], true, T0 + 300 * SEC, []);
   assert.equal(r.actions.refetchHead, true);
   assert.equal(r.actions.nextDueMs, T0 + 315 * SEC);
-  r = step(r.state, ["1|a"], true, T0 + 315 * SEC);
+  r = step(r.state, ["1|a"], true, T0 + 315 * SEC, []);
   assert.equal(r.actions.reread, true);
   // Once the check resolves, the identity is done for good.
-  r = step(r.state, [], true, T0 + 320 * SEC);
+  r = step(r.state, [], true, T0 + 320 * SEC, []);
   assert.equal(r.state.get("1|a").done, true);
 });
 
 test("a sibling job settling mid-ladder keeps the identity and its schedule", () => {
   const finished = rows(["1", "completed"]);
   const both = identities([check("1", "a"), check("1", "b")], finished).live;
-  let r = step(new Map(), both, true, T0);
+  let r = step(new Map(), both, true, T0, []);
   // Job b settles; job a still reads pending.
   const one = identities(
     [check("1", "a"), check("1", "b", { pending: false })],
     finished,
   ).live;
   assert.deepEqual(one, both);
-  r = step(r.state, one, true, T0 + 15_000);
+  r = step(r.state, one, true, T0 + 15_000, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: true,
@@ -319,24 +319,37 @@ test("a partial re-run (one job's id changes) is a new identity", () => {
     finished,
   ).live;
   assert.notDeepEqual(first, rerun);
-  let r = step(new Map(), first, true, T0);
-  r = step(r.state, [], true, T0 + 5 * SEC);
-  r = step(r.state, rerun, true, T0 + 60 * SEC);
+  let r = step(new Map(), first, true, T0, []);
+  r = step(r.state, [], true, T0 + 5 * SEC, []);
+  r = step(r.state, rerun, true, T0 + 60 * SEC, []);
   assert.equal(r.actions.refetchHead, true);
 });
 
 test("a paused identity whose check resolves is done for good", () => {
-  let r = step(new Map(), ["1|a"], true, T0);
+  let r = step(new Map(), ["1|a"], true, T0, []);
   r = step(r.state, [], true, T0 + 2 * SEC, ["1|a"]);
   // The check stops reading pending while the run executes: resolved.
-  r = step(r.state, [], true, T0 + 10 * SEC);
+  r = step(r.state, [], true, T0 + 10 * SEC, []);
   assert.equal(r.state.get("1|a").done, true);
   assert.equal(r.state.get("1|a").paused, false);
   // A lagging snapshot of the same attempt later never re-arms it.
-  r = step(r.state, ["1|a"], true, T0 + 300 * SEC);
+  r = step(r.state, ["1|a"], true, T0 + 300 * SEC, []);
   assert.deepEqual(r.actions, {
     refetchHead: false,
     reread: false,
     nextDueMs: null,
   });
+});
+
+test("a used-up ladder seen executing pauses, then its finish starts afresh", () => {
+  let r = step(new Map(), ["1|a"], true, T0, []);
+  r = step(r.state, ["1|a"], true, T0 + 60_000, []);
+  assert.equal(r.state.get("1|a").done, true);
+  // The check still reads stale; the head list then shows the run executing.
+  r = step(r.state, [], true, T0 + 100 * SEC, ["1|a"]);
+  assert.equal(r.state.get("1|a").paused, true);
+  // It finishes and the PR's read lags: one fresh episode.
+  r = step(r.state, ["1|a"], true, T0 + 300 * SEC, []);
+  assert.equal(r.actions.refetchHead, true);
+  assert.equal(r.actions.nextDueMs, T0 + 315 * SEC);
 });

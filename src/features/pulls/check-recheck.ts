@@ -94,7 +94,7 @@ export function reconcileRecheck(
   live: readonly string[],
   visible: boolean,
   nowMs: number,
-  active: readonly string[] = [],
+  active: readonly string[],
 ): { state: RecheckState; actions: RecheckActions } {
   const actions: RecheckActions = {
     refetchHead: false,

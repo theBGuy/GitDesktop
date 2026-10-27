@@ -17,6 +17,8 @@ const SOURCE = new URL(
   import.meta.url,
 );
 const source = () => readFileSync(SOURCE, "utf8").replace(/\r\n/g, "\n");
+/** The watched pending criteria, minus the run id the identities test. */
+const WATCHED_PREDICATE = '(c) => !c.completedAt && bucketOf(c) === "pending"';
 
 /** The span from `open` to its matching close bracket, or null. */
 function balanced(src, open) {
@@ -72,11 +74,7 @@ function pinFailures(src) {
   if (ids === null) failures.push("no readable recheckIdentities( call");
   else {
     if (ids[0] !== "checks") failures.push(`identities read \`${ids[0]}\``);
-    const predicate = ids[1] ?? "";
-    if (
-      !predicate.includes("!c.completedAt") ||
-      !predicate.includes('bucketOf(c) === "pending"')
-    )
+    if (ids[1] !== WATCHED_PREDICATE)
       failures.push("the pending predicate drifted from the watched criteria");
     if (ids[2] !== "headRunById") failures.push(`rows are \`${ids[2]}\``);
     if (ids.some((a) => /recentlyRerun|mountedWatchIds/.test(a)))
@@ -84,8 +82,11 @@ function pinFailures(src) {
   }
   const reduce = callArgs(src, "reconcileRecheck");
   if (reduce === null) failures.push("no readable reconcileRecheck( call");
-  else if (reduce[2] !== "open")
-    failures.push(`visibility is \`${reduce[2]}\``);
+  else {
+    if (reduce[2] !== "open") failures.push(`visibility is \`${reduce[2]}\``);
+    if (reduce[4] !== "active")
+      failures.push(`executing rows are \`${reduce[4]}\``);
+  }
   const cleanup = cleanupBody(src);
   if (cleanup !== "if (timer !== undefined) clearTimeout(timer);")
     failures.push(`cleanup is \`${cleanup}\``);
@@ -130,6 +131,19 @@ test("the pin fails when the identities read the latch or drop a criterion", () 
   assert.deepEqual(pinFailures(loose), [
     "the pending predicate drifted from the watched criteria",
   ]);
+  const wider = mutate(src, WATCHED_PREDICATE, `${WATCHED_PREDICATE} || c.foo`);
+  assert.deepEqual(pinFailures(wider), [
+    "the pending predicate drifted from the watched criteria",
+  ]);
+});
+
+test("the pin fails when the reducer loses the executing rows", () => {
+  const src = source();
+  const anchor = "        now,\n        active,\n      );";
+  const dropped = mutate(src, anchor, "        now,\n      );");
+  assert.deepEqual(pinFailures(dropped), ["executing rows are `undefined`"]);
+  const empty = mutate(src, anchor, "        now,\n        [],\n      );");
+  assert.deepEqual(pinFailures(empty), ["executing rows are `[]`"]);
 });
 
 test("the pin fails when the cleanup drops the attempts' progress", () => {
