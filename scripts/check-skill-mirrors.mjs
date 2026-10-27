@@ -12,10 +12,9 @@
 // GitDesktop's own skill surfacing, `.agents` first so it wins dedup, which is a
 // different question from what each CLI reads at startup.)
 //
-// EQUALITY, not presence — the opposite of check-rule-mirrors.mjs, and for the
-// opposite reason: these carriers are copies of one upstream document, so any
-// wording difference between them is drift rather than audience-appropriate
-// phrasing. Equality is asserted over NORMALIZED text, because three classes of
+// EQUALITY, not presence: these carriers are copies of one upstream document,
+// so any wording difference between them is drift rather than
+// audience-appropriate phrasing. Equality is asserted over NORMALIZED text, because three classes of
 // difference are legitimate and mechanical:
 //   1. line endings — the two trees were installed at different times, so one
 //      copy can be CRLF and the other LF with identical content;

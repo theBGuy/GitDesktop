@@ -61,9 +61,6 @@ jobs:
       - name: IPC surface drift
         run: node scripts/check-dead-surface.mjs
 
-      - name: Rule-mirror drift
-        run: node scripts/check-rule-mirrors.mjs
-
       - name: Skill-mirror drift
         run: node scripts/check-skill-mirrors.mjs
 

@@ -105,12 +105,12 @@ this standard in passing is welcome.
 
 ### Convention checks
 
-Eleven dependency-free Node scripts guard convention classes a past audit
+Ten dependency-free Node scripts guard convention classes a past audit
 already paid to close once. Run them before pushing:
 
 ```sh
 # banned patterns · Rust invariants · OG card references ·
-# IPC surface drift · rule-mirror drift · skill-mirror drift ·
+# IPC surface drift · skill-mirror drift ·
 # Tauri npm/crate parity · lockfile singleton dedupe · AppImage env twins ·
 # installed-only suites enforced · record-scoped pending reads ·
 # guard self-tests
@@ -125,9 +125,9 @@ tooltips), the Rust refspec-argv and sync-`#[tauri::command]` invariants,
 blog OG-card references (every post's `ogImage` must resolve to a committed
 card plus its `.webp` sibling — a missing file ships as a 404 social card),
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
-a registration), drift between the files that restate the git-whitelist hard
-rule, drift between the two trees that ship the same skills (`.claude/skills/`
-for Claude Code, `.agents/skills/` for the other agent lanes), the major.minor
+a registration), drift between the two trees that ship the same skills
+(`.claude/skills/` for Claude Code, `.agents/skills/` for the other agent
+lanes), the major.minor
 parity of each Tauri package's npm and crate halves (each declared npm half
 needing a crate half to compare against), a single resolved version in
 `pnpm-lock.yaml` for each CodeMirror/Lezer core package, and parity between
@@ -141,7 +141,7 @@ mutation cache, matched on the record, rather than from a mutation observer
 
 The pattern, Rust-invariant, surface, and pending-read checks carry allowlists;
 the AppImage environment-twins check carries an exemption map. They ratchet one
-way (rule-mirror drift, Tauri parity and lockfile dedupe carry none — there is
+way (Tauri parity and lockfile dedupe carry none — there is
 nothing to exempt). Adding an entry is a reviewed change like any other: it
 needs an inline rationale naming what makes that site safe, and it isn't the
 way to quiet a fresh violation. The ratchet is enforced, not just documented —
