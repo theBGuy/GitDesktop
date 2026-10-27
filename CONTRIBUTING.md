@@ -135,9 +135,8 @@ the Rust child-environment tables, and that every node suite which reads
 `GD_EXPECT_DEPS` (the ones that skip without `node_modules`) is listed in
 `frontend.yml`'s installed, enforced step (otherwise its skipped tests run
 in no CI job), and that the detail views one mounted instance reuses across
-records read a write's pending state from the mutation cache, matched on the
-record, rather than from a mutation observer (which would show one record's
-in-flight write on the next).
+records don't read a write's pending state from a mutation observer (which
+would show one record's in-flight write on the next).
 
 The pattern, Rust-invariant, surface, and pending-read checks carry allowlists;
 the AppImage environment-twins check carries an exemption map. They ratchet one

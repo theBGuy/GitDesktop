@@ -19,8 +19,8 @@ Where this file and generic best practice disagree, this file wins.
    New files only: `rustfmt --edition 2021 <that file>` — and never on a
    `mod.rs`: rustfmt follows its `mod` declarations into every child file
    (measured: 6-file collateral). Verify an edit's formatting with
-   `rustfmt --edition 2021 --check --config skip_children=true` and compare
-   flagged hunks to your lines.
+   `rustfmt --edition 2021 --check --config skip_children=true <that file>`
+   and compare flagged hunks to your lines.
 3. **`gd/session/*` branches are filtered from every branch surface** and
    never deleted — the user dogfoods agent sessions on them; deleting one
    breaks Resume.
@@ -49,11 +49,10 @@ pnpm run checks                        # guard scripts + self-tests — CI quali
 Frontend changes run the first pair; Rust changes add the cargo pair. Not
 "done" until green.
 
-⚠ **`pnpm lint` is a rewrite, not a check** — it runs `biome check --write
-./src/ ./site/`, mutating every file under `src/` AND `site/` including
-the user's parallel work. Implementers fix only their own files via the
-targeted `pnpm exec biome check --write <files in scope>`; reviewers never
-run any `--write` form.
+⚠ **Formatting fixes stay in scope:** implementers format only their own files,
+via the targeted `pnpm exec biome check --write <files in scope>`, never the
+tree-wide `pnpm lint` (hard rule 4), which would rewrite the user's parallel
+work too.
 
 ⚠ **`biome check` false-fails on CRLF (this Windows worktree).** autocrlf checks
 files out CRLF, and `biome check` (formatter included) flags a CR on **unedited**
@@ -438,9 +437,6 @@ dedupe the animate group, so `animate-none` vs an existing `animate-in` is a
 build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
 
 **State & rendering gotchas.**
-- **`gd/session/*` branches are filtered from every branch surface** (lists,
-  pickers, bulk actions) — the user dogfoods agent sessions on them; deleting
-  one breaks Resume. Hard invariant.
 - `<Activity>`-hidden subtrees still render but hold no query observers, so
   they fetch nothing while hidden; the re-show refetches anything past its
   staleTime. Keep a heavy query's `enabled` gated on the active tab as a
