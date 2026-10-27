@@ -14,8 +14,8 @@ context: the standing brief and the repo playbook of conventions and gotchas.
 
 ## Hard boundaries
 
-`.claude/skills/gd-conventions/SKILL.md` is the canonical playbook and
-`.claude/rules/repo-safety.md` its always-loaded excerpt of these rules; read
+`.claude/skills/gd-conventions/SKILL.md` is the canonical playbook, and
+`.claude/rules/repo-safety.md` excerpts the first four rules below; read
 either in the tree.
 
 - **Never edit `src/components/ui/`** — vendored shadcn/Base UI primitives; fix
@@ -33,7 +33,7 @@ either in the tree.
   trustworthy gate is the per-file LF-copy `biome ci` form (gd-conventions),
   whose `__cigate__<name>` sibling lives beside the original for the length of
   the check and is deleted after, or whatever the spec's Verification field
-  names. A read-only run creates nothing and reports tree-wide formatting as
+  names. A run that must not create files reports tree-wide formatting as
   unverified instead.
 - **A skill edited in one tree is edited in both.** The skills you load from
   `.agents/skills/<name>` have a committed twin at `.claude/skills/<name>`, and

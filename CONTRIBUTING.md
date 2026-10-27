@@ -127,29 +127,29 @@ card plus its `.webp` sibling — a missing file ships as a 404 social card),
 Tauri IPC drift (every registered command needs a caller, every `invoke()`
 a registration), drift between the two trees that ship the same skills
 (`.claude/skills/` for Claude Code, `.agents/skills/` for the other agent
-lanes), the major.minor
-parity of each Tauri package's npm and crate halves (each declared npm half
-needing a crate half to compare against), a single resolved version in
-`pnpm-lock.yaml` for each CodeMirror/Lezer core package, and parity between
-the AppImage guard's allowed exports and the Rust child-environment tables,
-and that every node suite which reads `GD_EXPECT_DEPS` (the ones that skip
-without `node_modules`) is listed in `frontend.yml`'s installed, enforced step
-(otherwise its skipped tests run in no CI job), and that the detail views one
-mounted instance reuses across records read a write's pending state from the
-mutation cache, matched on the record, rather than from a mutation observer
-(which would show one record's in-flight write on the next).
+lanes), the major.minor parity of each Tauri package's npm and crate
+halves (each declared npm half needing a crate half to compare against),
+a single resolved version in `pnpm-lock.yaml` for each CodeMirror/Lezer
+core package, and parity between the AppImage guard's allowed exports and
+the Rust child-environment tables, and that every node suite which reads
+`GD_EXPECT_DEPS` (the ones that skip without `node_modules`) is listed in
+`frontend.yml`'s installed, enforced step (otherwise its skipped tests run
+in no CI job), and that the detail views one mounted instance reuses across
+records read a write's pending state from the mutation cache, matched on the
+record, rather than from a mutation observer (which would show one record's
+in-flight write on the next).
 
 The pattern, Rust-invariant, surface, and pending-read checks carry allowlists;
 the AppImage environment-twins check carries an exemption map. They ratchet one
-way (Tauri parity and lockfile dedupe carry none — there is
-nothing to exempt). Adding an entry is a reviewed change like any other: it
-needs an inline rationale naming what makes that site safe, and it isn't the
-way to quiet a fresh violation. The ratchet is enforced, not just documented —
-an entry that no longer suppresses anything (its site gone, or its command back
-in live use) fails the gate as a stale allowlist entry, so the PR that removes
-the site removes its entry too. An AppImage exemption is live only while its
-variable is allowed by the guard and absent from the child-environment tables;
-otherwise it fails as stale.
+way (Tauri parity and lockfile dedupe carry none — there is nothing to exempt).
+Adding an entry is a reviewed change like any other: it needs an inline
+rationale naming what makes that site safe, and it isn't the way to quiet a
+fresh violation. The ratchet is enforced, not just documented — an entry that
+no longer suppresses anything (its site gone, or its command back in live use)
+fails the gate as a stale allowlist entry, so the PR that removes the site
+removes its entry too. An AppImage exemption is live only while its variable is
+allowed by the guard and absent from the child-environment tables; otherwise it
+fails as stale.
 
 Skill-mirror drift declares its skips rather than allowlisting sites: the ones
 rewritten per harness, and the ones living in a single tree, each entry naming

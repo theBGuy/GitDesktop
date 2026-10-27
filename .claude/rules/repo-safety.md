@@ -1,8 +1,8 @@
 # Repo safety rules (always loaded)
 
 > Excerpted from `.claude/skills/gd-conventions/SKILL.md` (the canonical playbook; a
-> change to one of these rules also updates every file that states it: this excerpt
-> and the repo `AGENTS.md`). Consult that skill before writing any code here.
+> change to one of these rules also updates every file that restates it, such as this
+> excerpt and the repo `AGENTS.md`). Consult that skill before writing any code here.
 
 1. **Don't edit `src/components/ui/`** — vendored primitives; fix at the call site. That
    folder's `README.md` inventories sanctioned local modifications.

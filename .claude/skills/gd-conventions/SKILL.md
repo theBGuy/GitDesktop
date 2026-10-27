@@ -1,6 +1,6 @@
 ---
 name: gd-conventions
-description: GitDesktop repo playbook — hard safety rules, frontend and Rust/Tauri conventions, verification commands, and hard-won gotchas that are NOT in CLAUDE.md. Consult this before writing, refactoring, or reviewing ANY code in this repo, even for small changes. Preloaded into the implementer, spec-reviewer and spec-writer subagents; the main conversation should read it before direct implementation work too.
+description: GitDesktop repo playbook — hard repo rules, frontend and Rust/Tauri conventions, verification commands, and hard-won gotchas that are NOT in CLAUDE.md. Consult this before writing, refactoring, or reviewing ANY code in this repo, even for small changes. Preloaded into the implementer, spec-reviewer and spec-writer subagents; the main conversation should read it before direct implementation work too.
 ---
 
 # GitDesktop conventions & gotchas

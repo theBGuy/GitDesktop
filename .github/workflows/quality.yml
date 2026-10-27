@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 jobs:
-  # BLOCKING. The eleven scripts are Node-stdlib-only by design, so this job
+  # BLOCKING. The ten scripts are Node-stdlib-only by design, so this job
   # needs no install step and stays a seconds-long gate on every PR.
   guards:
     runs-on: ubuntu-24.04
@@ -44,7 +44,7 @@ jobs:
           node-version-file: .node-version
 
       # One step per script so a failure names its own check in the UI. The same
-      # eleven scripts plus the self-tests below run locally via package.json's
+      # ten scripts plus the self-tests below run locally via package.json's
       # `checks` alias — a new guard is added in BOTH places, and in
       # CONTRIBUTING.md's *Convention checks* list. Exception: a guard needing a
       # built artifact (check-built-whitespace.mjs) runs from the workflow that
