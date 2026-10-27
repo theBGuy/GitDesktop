@@ -1623,26 +1623,22 @@ mod tests {
         ISSUE_TIMELINE_QUERY,
     };
     use crate::error::AppError;
+    use crate::github::test_support::{gh_output, HELD_REST_STDERR};
     #[test]
     fn issue_lock_missing_locked_field_leaves_state_unknown() {
         for body in ["{}", r#"{"message":"x"}"#] {
-            let lock = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
-                code: 0,
-                stdout: body.as_bytes().to_vec(),
-                stderr: String::new(),
-            }));
+            let lock = super::issue_lock_outcome(gh_output(0, body, ""));
             assert!(lock.is_none(), "{body}");
         }
     }
 
     #[test]
     fn issue_lock_failures_leave_state_unknown() {
-        let held = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
         for error in [
             AppError::Gh("gh: Not Found (HTTP 404)".into()),
             AppError::Gh("HTTP 403: Resource not accessible by integration".into()),
             AppError::Gh(String::new()),
-            AppError::Gh(held.into()),
+            AppError::Gh(HELD_REST_STDERR.into()),
             AppError::Gh("connection failed".into()),
             AppError::Timeout(30),
             AppError::GhNotFound,
@@ -1654,11 +1650,7 @@ mod tests {
 
     #[test]
     fn issue_lock_unreadable_body_leaves_state_unknown() {
-        let lock = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
-            code: 0,
-            stdout: b"garbage".to_vec(),
-            stderr: String::new(),
-        }));
+        let lock = super::issue_lock_outcome(gh_output(0, "garbage", ""));
         assert!(lock.is_none());
     }
 
@@ -1668,11 +1660,7 @@ mod tests {
             r#"{"locked":true,"active_lock_reason":"too heated"}"#,
             r#"{"locked":false}"#,
         ] {
-            let lock = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
-                code: 0,
-                stdout: body.as_bytes().to_vec(),
-                stderr: String::new(),
-            }));
+            let lock = super::issue_lock_outcome(gh_output(0, body, ""));
             let lock = lock.expect("parsed lock state");
             assert_eq!(lock.locked, body.contains("true"));
             assert_eq!(

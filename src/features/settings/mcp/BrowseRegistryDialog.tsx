@@ -179,7 +179,7 @@ export function BrowseRegistryDialog({
   // Rows stay addable without their details, so the failure is one line under
   // the results rather than a mark on every row.
   const statsFailed = stats.data === undefined && refreshFailed(stats);
-  const statsLimited = rateLimitClause(stats.error);
+  const statsLimitClause = rateLimitClause(stats.error);
   const { data: npmInstalls } = useQuery({
     queryKey: ["npm-installs", npmPkgs],
     queryFn: () => npmWeeklyDownloadsBatch(npmPkgs),
@@ -680,9 +680,9 @@ export function BrowseRegistryDialog({
           noun="repository details"
           degraded={statsFailed}
           message={
-            statsLimited === ""
+            statsLimitClause === ""
               ? "Couldn't load star counts, licenses and archived status."
-              : `Star counts, licenses and archived status aren't shown${statsLimited}.`
+              : `Star counts, licenses and archived status aren't shown${statsLimitClause}.`
           }
           onRetry={() => void stats.refetch()}
           className="px-0 pb-0"

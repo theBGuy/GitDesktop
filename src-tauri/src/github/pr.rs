@@ -186,9 +186,9 @@ fn graphql_reset_probe_args(
     {
         return None;
     }
-    // The host comes from the origin URL unvalidated: it is gated above (host
-    // charset, no leading `-`) and rides as ONE `--hostname=` argv, so its meaning
-    // never depends on how a CLI parses a dash-led value in a separate argv.
+    // The host comes from the origin URL, so it is gated above (host charset,
+    // no leading `-`) and rides as ONE `--hostname=` argv, so its meaning never
+    // depends on how a CLI parses a dash-led value in a separate argv.
     Some([
         "api".into(),
         "-i".into(),
