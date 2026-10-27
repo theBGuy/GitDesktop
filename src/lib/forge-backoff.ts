@@ -100,8 +100,9 @@ export function isRateLimitError(error: unknown): boolean {
   return text !== null && matches(text, RATE_LIMIT_PHRASES, RATE_LIMIT_STATUS);
 }
 
-/** The bucket a held-call text names, or null. Matched as a substring: a
- *  wrapped error can carry the held text inside a longer message. */
+/** The bucket a held-call text names, or null. Its caller passes only bare
+ *  messages, which are the held text alone today; a substring match also
+ *  names the bucket behind a raw prefix the bare rule strips (`error: `). */
 export function heldBucket(message: string): HeldBucket | null {
   for (const [bucket, text] of Object.entries(HELD_RATE_LIMIT_TEXTS))
     if (message.includes(text)) return bucket as HeldBucket;
@@ -129,10 +130,11 @@ const RATE_LIMIT_LEAD =
   /^(?:429\b|(?:api |secondary )?rate limit|too many requests|you have exceeded a secondary rate limit|you have triggered an abuse detection|(?:bitbucket|jira) rate limit reached|github's (?:rest|graphql|search) api rate limit has been reached)/;
 
 /** Whether the message IS the forge's or the runner's rate-limit text, so one
- *  sentence may stand in for it. App prose in front of the cause (a write that
- *  already landed, a partial state) fails the lead by construction, and a
- *  second meaningful line is app prose after it; either keeps its own words.
- *  glab alone wraps one diagnostic over lines, so its lines are read joined. */
+ *  sentence may stand in for it. App prose in front of the cause fails the lead
+ *  by construction. Only a single meaningful line can be bare (glab's lines are
+ *  read joined, as glab wraps one diagnostic): gh writes multi-line output of
+ *  its own too, but a second line may be app prose saying a write already
+ *  landed, so any message with one keeps its own words. */
 function isBareRateLimit(kind: string, message: string): boolean {
   const lines = message
     .split(/\r\n|[\n\r]/)

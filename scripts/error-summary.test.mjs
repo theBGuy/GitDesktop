@@ -1047,7 +1047,8 @@ const LIMIT_WRAPPERS = [
   [
     "github/project_views.rs view copy",
     "gh",
-    (e) => `The view "Board" was created, but its fields could not be copied.\n${e}`,
+    (e) =>
+      `The view "Board" was created, but its fields could not be copied.\n${e}`,
   ],
   [
     "github/release.rs updater manifest",
@@ -1125,8 +1126,16 @@ test("a bare rate-limit error from every forge still reads as one sentence", () 
   for (const [kind, message, summary] of [
     ["gh", LIMIT_CAUSES.held, sentence("GitHub", "REST ")],
     ["gh", LIMIT_CAUSES.ghRaw, sentence("GitHub")],
-    ["gh", "gh: API rate limit exceeded for user ID 1 (HTTP 403)", sentence("GitHub")],
-    ["gh", "GraphQL: API rate limit exceeded for user ID 1.", sentence("GitHub")],
+    [
+      "gh",
+      "gh: API rate limit exceeded for user ID 1 (HTTP 403)",
+      sentence("GitHub"),
+    ],
+    [
+      "gh",
+      "GraphQL: API rate limit exceeded for user ID 1.",
+      sentence("GitHub"),
+    ],
     [
       "gh",
       "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/)",
@@ -1137,7 +1146,11 @@ test("a bare rate-limit error from every forge still reads as one sentence", () 
       "HTTP 403: You have triggered an abuse detection mechanism. (https://ghe.example.com/api/v3/x)",
       sentence("GitHub"),
     ],
-    ["gh", "HTTP 429: Slow down (https://api.github.com/repos/o/r)", sentence("GitHub")],
+    [
+      "gh",
+      "HTTP 429: Slow down (https://api.github.com/repos/o/r)",
+      sentence("GitHub"),
+    ],
     ["gh", "gh: Too Many Requests (HTTP 429)", sentence("GitHub")],
     ["glab", LIMIT_CAUSES.glab, sentence("GitLab")],
     [
@@ -1148,7 +1161,11 @@ test("a bare rate-limit error from every forge still reads as one sentence", () 
     ["bitbucket", LIMIT_CAUSES.bitbucket, sentence("Bitbucket")],
     ["jira", LIMIT_CAUSES.jira, sentence("Jira")],
   ]) {
-    assert.equal(presentError(appError(kind, message)).summary, summary, message);
+    assert.equal(
+      presentError(appError(kind, message)).summary,
+      summary,
+      message,
+    );
   }
 });
 

@@ -40,7 +40,9 @@
 //      default) answers a rate limit or a network failure with a false claim.
 //      `forge::session::classify_gh_failure` only buckets the failure; the
 //      read's own outcome fn decides absence (RateLimited/Transport are an Err,
-//      and star status and the Explore README take a 403 as one too).
+//      and star status and the Explore README reject every failure but
+//      NotFound). An exit-0 body an outcome fn can't parse is an Err as well,
+//      which J doesn't scan: it reads exits only.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -2512,8 +2514,8 @@ const GH_EXIT_ABSENCE_FIX =
   "forge::session::classify_gh_failure, which only buckets the failure, and " +
   "let a pure *_outcome fn decide absence (RateLimited/Transport → Err; " +
   "NotFound/Answered → the read's absence, except star status and the Explore " +
-  "README, where a 403 is an Err), or allowlist a fail-safe or decoration " +
-  "read with rationale";
+  "README, which reject every failure but NotFound), or allowlist a fail-safe " +
+  "or decoration read with rationale";
 
 /** Whether `file` is in check J's scope: the GitHub reads. */
 export function ghExitAbsenceScope(file) {

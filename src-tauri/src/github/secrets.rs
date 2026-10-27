@@ -308,9 +308,12 @@ fn environments_list_outcome(
             GhFailure::NotFound | GhFailure::Answered => Ok(Vec::new()),
         };
     }
-    let resp: EnvsResp = serde_json::from_str(&out.stdout_lossy()).unwrap_or(EnvsResp {
-        environments: Vec::new(),
-    });
+    let resp: EnvsResp = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the environments",
+            format!("could not parse environments: {e}"),
+        )
+    })?;
     Ok(resp.environments.into_iter().map(|e| e.name).collect())
 }
 
@@ -333,6 +336,20 @@ mod tests {
     const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
     const ANSWERED_STDERR: &str =
         "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+
+    #[test]
+    fn environments_reject_unreadable_bodies_and_keep_missing_list_empty() {
+        assert!(super::environments_list_outcome(gh_output(0, "{}", ""))
+            .unwrap()
+            .is_empty());
+        for body in ["garbage", ""] {
+            let error = super::environments_list_outcome(gh_output(0, body, ""))
+                .expect_err("unreadable environments must reject");
+            assert!(
+                matches!(error, crate::error::AppError::Gh(message) if message.starts_with("Couldn't read the environments from GitHub.\n"))
+            );
+        }
+    }
 
     #[test]
     fn environments_preserve_denials_and_reject_transient_failures() {

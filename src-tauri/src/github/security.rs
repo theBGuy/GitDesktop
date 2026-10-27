@@ -90,10 +90,13 @@ fn get_bool_field_outcome(
             GhFailure::NotFound | GhFailure::Answered => Ok(false),
         };
     }
-    Ok(serde_json::from_str::<Value>(&out.stdout_lossy())
-        .ok()
-        .and_then(|v| v.get(field).and_then(Value::as_bool))
-        .unwrap_or(false))
+    let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the security settings",
+            format!("could not parse {field}: {e}"),
+        )
+    })?;
+    Ok(value.get(field).and_then(Value::as_bool).unwrap_or(false))
 }
 
 async fn get_code_scanning(repo_path: &str, slug: &str) -> AppResult<bool> {
@@ -119,14 +122,13 @@ fn get_code_scanning_outcome(
             GhFailure::NotFound | GhFailure::Answered => Ok(false),
         };
     }
-    Ok(serde_json::from_str::<Value>(&out.stdout_lossy())
-        .ok()
-        .and_then(|v| {
-            v.get("state")
-                .and_then(Value::as_str)
-                .map(|s| s == "configured")
-        })
-        .unwrap_or(false))
+    let value: Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the code scanning settings",
+            format!("could not parse code scanning: {e}"),
+        )
+    })?;
+    Ok(value.get("state").and_then(Value::as_str) == Some("configured"))
 }
 
 #[tauri::command]
@@ -297,6 +299,34 @@ mod tests {
     const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
     const ANSWERED_STDERR: &str =
         "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+
+    #[test]
+    fn security_bool_rejects_unreadable_bodies_and_keeps_missing_fields_false() {
+        for body in ["{}", r#"{"state":"not-configured"}"#] {
+            assert!(!get_bool_field_outcome(gh_output(0, body, ""), "enabled").unwrap());
+        }
+        for body in ["garbage", ""] {
+            let error = get_bool_field_outcome(gh_output(0, body, ""), "enabled")
+                .expect_err("unreadable security settings must reject");
+            assert!(
+                matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the security settings from GitHub.\n"))
+            );
+        }
+    }
+
+    #[test]
+    fn code_scanning_rejects_unreadable_bodies_and_keeps_missing_fields_false() {
+        for body in ["{}", r#"{"state":"not-configured"}"#] {
+            assert!(!get_code_scanning_outcome(gh_output(0, body, "")).unwrap());
+        }
+        for body in ["garbage", ""] {
+            let error = get_code_scanning_outcome(gh_output(0, body, ""))
+                .expect_err("unreadable security settings must reject");
+            assert!(
+                matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the code scanning settings from GitHub.\n"))
+            );
+        }
+    }
 
     #[test]
     fn security_probe_preserves_denials_and_rejects_transient_failures() {

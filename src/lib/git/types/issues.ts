@@ -117,8 +117,9 @@ export interface IssueDetails {
   issueType: IssueType | null;
   isPinned: boolean;
   locked: boolean;
-  /** GitHub only: the lock read failed or returned an unreadable body, so
-   *  `locked` reads false without being an answer. Always false on GitLab. */
+  /** GitHub only: the lock read failed or returned a body with no readable
+   *  `locked`, so `locked` reads false without being an answer. Always false
+   *  on GitLab. */
   lockUnknown: boolean;
   /** GitHub's lock reason (off_topic/resolved/spam/too_heated) or null. */
   activeLockReason: string | null;

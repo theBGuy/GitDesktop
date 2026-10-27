@@ -93,7 +93,16 @@ fn github_mcp_search_outcome(
         repos: Vec::new(),
         next_cursor: None,
     };
-    let value = serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()).ok();
+    let value = match serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()) {
+        Ok(value) => Some(value),
+        Err(error) if out.code == 0 => {
+            return Err(crate::github::gh_unreadable(
+                "the MCP search results",
+                error.to_string(),
+            ));
+        }
+        Err(_) => None,
+    };
     let search = value
         .as_ref()
         .and_then(|v| v.get("data"))
@@ -140,6 +149,28 @@ fn github_mcp_search_outcome(
 mod tests {
     use super::*;
     #[test]
+    fn mcp_search_rejects_unreadable_bodies_and_keeps_missing_search_empty() {
+        for body in [
+            "{}",
+            r#"{"data":null}"#,
+            r#"{"data":[]}"#,
+            r#"{"data":{}}"#,
+            r#"{"data":{"search":null}}"#,
+            r#"{"data":{"search":[]}}"#,
+        ] {
+            let empty = github_mcp_search_outcome(gh_output(0, body, "")).unwrap();
+            assert!(empty.repos.is_empty() && empty.next_cursor.is_none());
+        }
+        for body in ["garbage", ""] {
+            let error = github_mcp_search_outcome(gh_output(0, body, ""))
+                .expect_err("unreadable MCP search must reject");
+            assert!(
+                matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read "))
+            );
+        }
+    }
+
+    #[test]
     fn mcp_search_preserves_partial_data_and_classifies_missing_search() {
         let partial = r#"{"data":{"search":{"nodes":[{"nameWithOwner":"o/r","sj":{"text":"{}"}}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}},"errors":[{"message":"unresolved"}]}"#;
         let page = github_mcp_search_outcome(gh_output(1, partial, HELD_REST_STDERR)).unwrap();
@@ -165,10 +196,6 @@ mod tests {
                     .repos
                     .is_empty()
             );
-            assert!(github_mcp_search_outcome(gh_output(0, body, ""))
-                .unwrap()
-                .repos
-                .is_empty());
         }
     }
 

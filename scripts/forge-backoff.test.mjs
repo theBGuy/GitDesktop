@@ -314,13 +314,14 @@ test("the held-call mirror matches runner.rs's HELD_* constants", () => {
   assert.notDeepEqual(rustHeldTexts(reworded), expected);
 });
 
-test("a held text names its bucket, also when wrapped in a longer message", () => {
+test("a held text names its bucket, also behind a raw prefix", () => {
   assert.equal(heldBucket(HELD_RATE_LIMIT_TEXTS.REST), "REST");
   assert.equal(heldBucket(HELD_RATE_LIMIT_TEXTS.GraphQL), "GraphQL");
   assert.equal(heldBucket(HELD_RATE_LIMIT_TEXTS.search), "search");
+  // The bare rule strips the prefix, so the sentence still names the bucket.
   assert.equal(
-    heldBucket(`Couldn't load: ${HELD_RATE_LIMIT_TEXTS.GraphQL}\nmore`),
-    "GraphQL",
+    rateLimitSummary(gh(`error: ${HELD_RATE_LIMIT_TEXTS.GraphQL}`)),
+    "GitHub's GraphQL API rate limit has been reached. Try again once it lifts.",
   );
   assert.equal(heldBucket("API rate limit exceeded for user ID 1."), null);
   assert.equal(heldBucket(""), null);
@@ -401,8 +402,12 @@ test("a limit wrapped in app prose gets no sentence, though it is still a limit"
     gh(
       `The pull request was created, but applying its labels/assignees failed: ${HELD_TEXTS[0]}. Add them from the PR.`,
     ),
-    gh(`Merged #12, but couldn't clean up the remote head branch.\n${HELD_TEXTS[0]}`),
-    gh(`${HELD_TEXTS[0]}\nThe GitHub repository acme/app may have been created.`),
+    gh(
+      `Merged #12, but couldn't clean up the remote head branch.\n${HELD_TEXTS[0]}`,
+    ),
+    gh(
+      `${HELD_TEXTS[0]}\nThe GitHub repository acme/app may have been created.`,
+    ),
     {
       kind: "bitbucket",
       message:

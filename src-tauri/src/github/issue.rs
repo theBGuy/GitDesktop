@@ -286,7 +286,6 @@ struct RawIssue {
 /// The REST issue object's lock fields: `gh issue view --json` exposes no lock state.
 #[derive(Deserialize, Default)]
 struct LockState {
-    #[serde(default)]
     locked: bool,
     #[serde(default)]
     active_lock_reason: Option<String>,
@@ -1629,6 +1628,21 @@ mod tests {
         ISSUE_TIMELINE_QUERY,
     };
     use crate::error::AppError;
+    #[test]
+    fn issue_lock_missing_locked_field_leaves_state_unknown() {
+        for body in ["{}", r#"{"message":"x"}"#] {
+            let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
+                code: 0,
+                stdout: body.as_bytes().to_vec(),
+                stderr: String::new(),
+            }));
+            assert!(
+                unknown && !lock.locked && lock.active_lock_reason.is_none(),
+                "{body}"
+            );
+        }
+    }
+
     #[test]
     fn issue_lock_failures_leave_state_unknown() {
         let held = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
