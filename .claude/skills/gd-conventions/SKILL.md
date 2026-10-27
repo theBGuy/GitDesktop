@@ -1130,11 +1130,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   unknown argv is never held. Frontend retry and backoff key on the shared
   `isRateLimitError` / `isAuthError` (`src/lib/forge-backoff.ts`), never a
   re-spelled match.
-- **CI run polling** takes its cadence from `src/lib/github/run-poll.ts` (the
-  run-age ladder, `waiting` at 60 s, a list rule congruent with
-  `notifyPollInterval`), never a flat per-run interval. GitHub PR rollups watch
-  runs through one head-sha list poll plus jobs reads only while the rollup is
-  open (`useHeadRuns` / `useRunJobs`).
+- **CI run polling** (run lists, run details, PR rollups) takes its cadence
+  from `src/lib/github/run-poll.ts` (the run-age ladder, `waiting` at 60 s, a
+  list rule congruent with `notifyPollInterval`), never a flat per-run
+  interval; the branch badge's `useLatestRun` and the run notifier keep their
+  own cadence. GitHub PR rollups watch runs through one head-sha list poll plus
+  jobs reads only while the rollup is open (`useHeadRuns` / `useRunJobs`); a
+  check still pending over a finished row keeps it polling at least every 15 s.
 
 ## Code comments
 

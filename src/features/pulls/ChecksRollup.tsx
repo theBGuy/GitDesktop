@@ -527,8 +527,9 @@ function CheckRow({
  *  its jobs to the parent so each row resolves its own job (React Query dedupes
  *  by run-id key, so N rows sharing a run cost one fetch). Mounted per
  *  `mountedWatchIds` — the user's own re-runs always, plus every watched run
- *  while the rollup is open — except GitHub runs the head poll answers for;
- *  refetches on the run-age ladder while the run stays active. */
+ *  while the rollup is open — except, on GitHub, runs the head poll answers
+ *  for, and every run while that poll is pending or failed; refetches on the
+ *  run-age ladder while the run stays active. */
 function RunDetailFetcher({
   repoPath,
   runId,
@@ -548,9 +549,9 @@ function RunDetailFetcher({
 }
 
 /** Headless jobs fetcher for a running GitHub run the head poll answers for,
- *  mounted only while the rollup is open: the step peek and the step checklist
- *  are the jobs' only readers, so a collapsed rollup reads none. `run` is the
- *  run's head-list row, which sets the poll's ladder tier. */
+ *  mounted only while the rollup is open: the step peek, the step checklist and
+ *  the row's live flag are the jobs' only readers, so a collapsed rollup reads
+ *  none. `run` is the run's head-list row, which sets the poll's ladder tier. */
 function RunJobsFetcher({
   repoPath,
   runId,
@@ -825,8 +826,8 @@ export function ChecksRollup({
   // pending check could miss the attempt entirely. Open additionally watches
   // every running check, for the steps UI and general freshness; collapsed, the
   // latch keys are exactly the set the click consented to poll. Bounded both
-  // ways — a settled run parks its own interval, and the latch dies with the
-  // per-PR remount.
+  // ways — a settled run parks its own interval (on GitHub, once the checks stop
+  // reporting it pending), and the latch dies with the per-PR remount.
   const mountedWatchIds = open
     ? [...new Set([...watchedRunIds, ...recentlyRerun.keys()])]
     : [...recentlyRerun.keys()];
@@ -835,10 +836,14 @@ export function ChecksRollup({
   // prop's default-to-github guess: anything else, a pending probe included,
   // keeps the per-run watchers below.
   const watcherProvider = forge.data?.provider;
+  // A check still pending over a finished row may be a new attempt started
+  // elsewhere, so it keeps the head poll awake. Never the latch keys: a latched
+  // run that finished must park.
   const headRuns = useHeadRuns(
     repoPath,
     headSha,
     watcherProvider === "github" && mountedWatchIds.length > 0,
+    open ? watchedRunIds : [],
   );
   const headRunById = new Map(
     watcherProvider === "github"

@@ -23,11 +23,11 @@ import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
 import { invoke } from "@/lib/tauri/invoke";
 import {
+  headRunsPollIntervalMs,
   listRunsPollIntervalMs,
   type PollRun,
   runDetailPollIntervalMs,
   runJobsPollIntervalMs,
-  runsPollIntervalMs,
 } from "./run-poll";
 import { isRunActive } from "./run-status";
 
@@ -349,14 +349,16 @@ export function useRunDetail(
   });
 }
 
-/** Every run of a pull request's head commit (GitHub-only), polled at the
- *  fastest ladder tier among its active runs and stopped once none is active or
- *  a read errors. Keyed inside the `["repo", repo, "actions"]` subtree, so every
- *  Actions mutation's invalidation wakes it. */
+/** Every run of a pull request's head commit (GitHub-only), polled per
+ *  `headRunsPollIntervalMs`: `pendingIds` are the runs the PR's checks still
+ *  report pending, which keep the poll awake over a finished row. An errored
+ *  read stops it. Keyed inside the `["repo", repo, "actions"]` subtree, so
+ *  every Actions mutation's invalidation wakes it. */
 export function useHeadRuns(
   repo: string,
   headSha: string | null,
   enabled: boolean,
+  pendingIds: readonly string[],
 ) {
   return useQuery({
     queryKey: ["repo", repo, "actions", "head-runs", headSha] as const,
@@ -365,7 +367,7 @@ export function useHeadRuns(
     staleTime: 10_000,
     refetchInterval: (query) =>
       query.state.status !== "error" &&
-      runsPollIntervalMs(query.state.data, Date.now()),
+      headRunsPollIntervalMs(query.state.data, pendingIds, Date.now()),
   });
 }
 

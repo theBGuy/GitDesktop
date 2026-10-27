@@ -416,7 +416,7 @@ function SearchResults({
                 "h-auto w-full justify-center gap-1.5 rounded-none border-0 py-2 font-normal text-muted-foreground hover:bg-muted/60 hover:text-muted-foreground dark:hover:bg-muted/60",
                 ARIA_DISABLED_CLASS,
               )}
-              // Focusable while busy, so a press never drops focus to <body>.
+              // Focusable while busy, so a pending press keeps focus.
               disabled={search.isFetchingNextPage}
               focusableWhenDisabled
               onClick={() => search.fetchNextPage()}

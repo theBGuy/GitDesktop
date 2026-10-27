@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { notifyPollInterval } from "../src/features/actions/run-notify-diff.ts";
 import {
+  headRunsPollIntervalMs,
   listRunsPollIntervalMs,
   newestJobStartedAt,
   RUN_POLL_FAST_MS,
@@ -416,4 +417,55 @@ test("a jobs read keeps polling while its run row is active", () => {
     runJobsPollIntervalMs([{ status: "in_progress" }], null, NOW),
     RUN_POLL_FAST_MS,
   );
+});
+
+test("a pending check whose head row reads finished keeps the head poll awake", () => {
+  const row = (id, status, createdAt = ago(MIN)) => ({ id, status, createdAt });
+  const done = [row(1, "completed"), row(2, "completed")];
+  // Nothing pending and nothing active: the poll stops.
+  assert.equal(headRunsPollIntervalMs(done, [], NOW), false);
+  // The PR still reports run 2 pending while its row reads finished: a new
+  // attempt may be starting, so the poll keeps the mid tier.
+  assert.equal(headRunsPollIntervalMs(done, ["2"], NOW), RUN_POLL_MID_MS);
+  // A pending run whose row is active keeps its own faster ladder tier.
+  assert.equal(
+    headRunsPollIntervalMs(
+      [row(1, "completed"), row(2, "in_progress")],
+      ["2"],
+      NOW,
+    ),
+    RUN_POLL_FAST_MS,
+  );
+  // A pending id the list does not carry changes nothing: the per-run
+  // fallback watches it.
+  assert.equal(headRunsPollIntervalMs(done, ["3"], NOW), false);
+  assert.equal(
+    headRunsPollIntervalMs(
+      [row(1, "in_progress", ago(5 * MIN)), row(2, "completed")],
+      ["3"],
+      NOW,
+    ),
+    RUN_POLL_MID_MS,
+  );
+  // An active fresh row elsewhere outranks the finished pending row.
+  assert.equal(
+    headRunsPollIntervalMs(
+      [row(1, "in_progress"), row(2, "completed")],
+      ["2"],
+      NOW,
+    ),
+    RUN_POLL_FAST_MS,
+  );
+  // A slow active row elsewhere is lifted to the mid tier by the pending row.
+  assert.equal(
+    headRunsPollIntervalMs(
+      [row(1, "in_progress", ago(30 * MIN)), row(2, "completed")],
+      ["2"],
+      NOW,
+    ),
+    RUN_POLL_MID_MS,
+  );
+  // Empty or unanswered rows: the base value.
+  assert.equal(headRunsPollIntervalMs([], ["2"], NOW), false);
+  assert.equal(headRunsPollIntervalMs(undefined, ["2"], NOW), false);
 });

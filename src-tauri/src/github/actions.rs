@@ -695,6 +695,8 @@ async fn run_updated_at_probe(
 
 #[derive(Debug, Default, Deserialize)]
 struct RestJobsPage {
+    #[serde(default)]
+    total_count: u64,
     #[serde(default, deserialize_with = "de_null_vec")]
     jobs: Vec<RestJob>,
 }
@@ -760,6 +762,33 @@ fn from_rest_job(job: RestJob) -> RunJob {
     }
 }
 
+fn run_jobs_args(endpoint: &str, page: u32) -> Vec<String> {
+    let mut args = vec![
+        "api".into(),
+        "--method".into(),
+        "GET".into(),
+        endpoint.into(),
+        "-f".into(),
+        "per_page=100".into(),
+    ];
+    if page > 1 {
+        args.push("-f".into());
+        args.push(format!("page={page}"));
+    }
+    args
+}
+
+fn next_jobs_page(total: u64, fetched: usize, last_page_len: usize, page: u32) -> Option<u32> {
+    // The ten-page cap bounds a wrong total_count.
+    if fetched as u64 >= total || last_page_len < 100 || page >= 10 {
+        None
+    } else {
+        Some(page + 1)
+    }
+}
+
+/// Job reads follow every page, like `gh run view`'s job list, up to the paging cap.
+/// Each page revalidates independently; a failed page fails the whole read.
 #[tauri::command]
 pub async fn gh_run_jobs(repo_path: String, run_id: String) -> AppResult<Vec<RunJob>> {
     let id: u64 = run_id
@@ -767,19 +796,25 @@ pub async fn gh_run_jobs(repo_path: String, run_id: String) -> AppResult<Vec<Run
         .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
     let slug = crate::github::gh_origin_slug(&repo_path).await?;
     let endpoint = format!("repos/{slug}/actions/runs/{id}/jobs");
-    let out = run_gh_cached_get(
-        Some(&repo_path),
-        &["api", "--method", "GET", &endpoint, "-f", "per_page=100"],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await?;
-    let parsed: RestJobsPage = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        gh_unreadable(
-            "the workflow run jobs",
-            format!("could not parse the workflow run jobs: {e}"),
-        )
-    })?;
-    Ok(parsed.jobs.into_iter().map(from_rest_job).collect())
+    let mut jobs = Vec::new();
+    let mut page = 1;
+    loop {
+        let args = run_jobs_args(&endpoint, page);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+        let parsed: RestJobsPage = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the workflow run jobs",
+                format!("could not parse the workflow run jobs: {e}"),
+            )
+        })?;
+        let last_page_len = parsed.jobs.len();
+        jobs.extend(parsed.jobs.into_iter().map(from_rest_job));
+        match next_jobs_page(parsed.total_count, jobs.len(), last_page_len, page) {
+            Some(next) => page = next,
+            None => return Ok(jobs),
+        }
+    }
 }
 
 /// One run with its jobs and steps.
@@ -2394,6 +2429,69 @@ mod tests {
                 }
                 other => panic!("expected InvalidArgument, got {other}"),
             }
+        }
+    }
+
+    #[test]
+    fn first_jobs_page_keeps_its_conditional_get_argv() {
+        assert_eq!(
+            run_jobs_args("repos/o/r/actions/runs/1/jobs", 1),
+            [
+                "api",
+                "--method",
+                "GET",
+                "repos/o/r/actions/runs/1/jobs",
+                "-f",
+                "per_page=100"
+            ]
+        );
+    }
+
+    #[test]
+    fn later_jobs_pages_append_a_raw_page_field() {
+        let first = run_jobs_args("repos/o/r/actions/runs/1/jobs", 1);
+        let second = run_jobs_args("repos/o/r/actions/runs/1/jobs", 2);
+        assert_eq!(second[..first.len()], first);
+        assert_eq!(second[first.len()..], ["-f", "page=2"]);
+    }
+
+    #[test]
+    fn jobs_paging_stops_when_the_reported_total_is_collected() {
+        for total in [0, 1, 99, 100] {
+            assert_eq!(next_jobs_page(total, 100, 100, 1), None);
+        }
+        assert_eq!(next_jobs_page(250, 100, 100, 1), Some(2));
+        assert_eq!(next_jobs_page(250, 200, 100, 2), Some(3));
+        assert_eq!(next_jobs_page(250, 250, 50, 3), None);
+        assert_eq!(next_jobs_page(250, 300, 100, 3), None);
+    }
+
+    #[test]
+    fn a_short_jobs_page_ends_paging_even_with_more_reported() {
+        for last_page_len in [0, 1, 99] {
+            assert_eq!(
+                next_jobs_page(250, 100 + last_page_len, last_page_len, 2),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn jobs_paging_is_bounded_at_ten_pages() {
+        assert_eq!(next_jobs_page(u64::MAX, 900, 100, 9), Some(10));
+        assert_eq!(next_jobs_page(u64::MAX, 1000, 100, 10), None);
+        assert_eq!(next_jobs_page(u64::MAX, 1100, 100, 11), None);
+    }
+
+    #[test]
+    fn jobs_page_total_parses_and_defaults_to_zero_when_missing() {
+        let counted: RestJobsPage =
+            serde_json::from_str(r#"{"total_count":250,"jobs":[]}"#).unwrap();
+        assert_eq!(counted.total_count, 250);
+        for body in [r#"{"jobs":[]}"#, r#"{"total_count":0,"jobs":[]}"#] {
+            let page: RestJobsPage = serde_json::from_str(body).unwrap();
+            assert_eq!(page.total_count, 0);
+            assert_eq!(next_jobs_page(page.total_count, 100, 100, 1), None);
         }
     }
 

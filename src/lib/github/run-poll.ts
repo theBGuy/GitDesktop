@@ -130,6 +130,25 @@ export function runsPollIntervalMs(
   return best;
 }
 
+/** A PR head poll's interval: {@link runsPollIntervalMs}, except that a run the
+ *  PR's checks still report pending while its row reads finished holds the poll
+ *  at the mid tier at most, since a new attempt started elsewhere may be on its
+ *  way. A pending id the rows don't carry changes nothing. */
+export function headRunsPollIntervalMs(
+  rows: readonly (PollRun & { id: number | string })[] | undefined,
+  pendingIds: readonly string[],
+  nowMs: number,
+): number | false {
+  const base = runsPollIntervalMs(rows, nowMs);
+  if (rows === undefined || pendingIds.length === 0) return base;
+  const pending = new Set(pendingIds);
+  const stale = rows.some(
+    (r) => pending.has(String(r.id)) && !isRunActive(r.status),
+  );
+  if (!stale) return base;
+  return base === false ? RUN_POLL_MID_MS : Math.min(base, RUN_POLL_MID_MS);
+}
+
 /** A run list's interval. The governing runs are the newest (the list's first)
  *  when active, plus every `in_progress` run of the newest run's push (a
  *  non-empty `headSha`), the rule `notifyPollInterval` spells in
