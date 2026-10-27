@@ -775,10 +775,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   the base, and Bitbucket's checks read that sha's statuses; for any other
   merge it is a precaution. A later arm re-arms the per-repo timer, and its
   one fire covers every coalesced arm's reads. A remote-branch delete instead
-  schedules
-  `recheckPrListAfterRemoteDelete` with keys its call site builds (GitHub
-  closes a head-deleted PR asynchronously). Guard:
-  `scripts/push-recheck-family.test.mjs`, keyed on the api callees.
+  schedules `recheckPrListAfterRemoteDelete` with keys its call site builds
+  (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
+  close or reopen and an issue close or reopen arm the same re-read with
+  lens-scoped list keys, since the forge's list membership lags the row's own
+  state. Its per-repo entry holds the union of the keys owed and fires ONE
+  invalidation. Guard: `scripts/push-recheck-family.test.mjs`, keyed on the
+  api callees.
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`

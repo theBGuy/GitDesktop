@@ -24,6 +24,7 @@ import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { CreateLocalIssueDialog } from "../issues/CreateLocalIssueDialog";
 import { ImplementPlanButton } from "./ImplementPlanButton";
 import { PlanQuestions } from "./PlanQuestions";
@@ -127,6 +128,8 @@ export function PlanComposer({
   // milliseconds; a load that FAILED is deliberately NOT pending.
   const settingsPending = !settings.data && !settings.isError;
   const canPlan = (goal.trim().length > 0 || planningIssue) && !settingsPending;
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(composerBarRef, true);
 
   const submit = () => {
     if (!canPlan) return;
@@ -167,7 +170,7 @@ export function PlanComposer({
         )}
       </div>
 
-      <div className="shrink-0 border-t p-2">
+      <div ref={composerBarRef} className="shrink-0 border-t p-2">
         <div className="flex flex-col gap-2 border border-input bg-transparent p-3 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring/50 dark:bg-input/30">
           <textarea
             value={goal}
@@ -254,6 +257,10 @@ function PlanResult({ run, repoPath }: { run: PlanRun; repoPath: string }) {
   );
   const locked = Boolean(implementSession);
   const keptImpl = implementSession?.kept ?? false;
+  // Measured from the docked stack's wrapper: its top is the action row's, and it
+  // resizes as the follow-up composer below grows, which moves that row up.
+  const actionRowRef = useRef<HTMLDivElement>(null);
+  useToastClearance(actionRowRef, Boolean(draft || error));
   const goToSession = () => {
     if (implementSession) selectSession(implementSession.id);
   };
@@ -361,79 +368,86 @@ function PlanResult({ run, repoPath }: { run: PlanRun; repoPath: string }) {
       </div>
 
       {(draft || error) && (
-        <div className="shrink-0 border-t">
-          {draft && !locked && draft.unverified.length > 0 && (
-            <div className="flex items-start gap-2 border-b bg-warning/10 px-3 py-2 text-[11px] text-warning">
-              <WarningIcon className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                {draft.unverified.length} cited path
-                {draft.unverified.length === 1 ? "" : "s"} couldn't be matched
-                to a real file — double-check before filing:{" "}
-                <span className="font-mono">{draft.unverified.join(", ")}</span>
-              </span>
-            </div>
-          )}
-          {locked ? (
-            <div className="flex items-center gap-2 px-3 py-2.5">
-              <span className="min-w-0 text-[11px] text-muted-foreground">
-                {keptImpl
-                  ? "Implemented and kept."
-                  : "Being implemented by a session."}{" "}
-                Read-only.
-              </span>
-              {draft && (
-                <div className="ml-auto flex shrink-0 items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setLocalOpen(true)}
-                  >
-                    Create local issue
-                  </Button>
-                  <Button size="sm" onClick={goToSession}>
-                    View session
-                  </Button>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 px-3 py-2.5">
-              <Button variant="outline" size="sm" onClick={replan}>
-                Re-plan
-              </Button>
-              {costUsd != null && (
-                <span
-                  className="text-[11px] text-muted-foreground tabular-nums"
-                  title="Estimated cost of this planning run"
-                >
-                  {formatUsd(costUsd)}
+        <div ref={actionRowRef} className="shrink-0">
+          <div className="border-t">
+            {draft && !locked && draft.unverified.length > 0 && (
+              <div className="flex items-start gap-2 border-b bg-warning/10 px-3 py-2 text-[11px] text-warning">
+                <WarningIcon className="mt-0.5 size-3.5 shrink-0" />
+                <span>
+                  {draft.unverified.length} cited path
+                  {draft.unverified.length === 1 ? "" : "s"} couldn't be matched
+                  to a real file — double-check before filing:{" "}
+                  <span className="font-mono">
+                    {draft.unverified.join(", ")}
+                  </span>
                 </span>
-              )}
-              {draft && (
-                <div className="ml-auto flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setLocalOpen(true)}
-                  >
-                    Create local issue
-                  </Button>
-                  {ghReady && (
-                    <Button variant="outline" size="sm" onClick={createGithub}>
-                      Create {remoteLabel} issue
+              </div>
+            )}
+            {locked ? (
+              <div className="flex items-center gap-2 px-3 py-2.5">
+                <span className="min-w-0 text-[11px] text-muted-foreground">
+                  {keptImpl
+                    ? "Implemented and kept."
+                    : "Being implemented by a session."}{" "}
+                  Read-only.
+                </span>
+                {draft && (
+                  <div className="ml-auto flex shrink-0 items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setLocalOpen(true)}
+                    >
+                      Create local issue
                     </Button>
-                  )}
-                  <ImplementPlanButton run={run} />
-                </div>
-              )}
+                    <Button size="sm" onClick={goToSession}>
+                      View session
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 px-3 py-2.5">
+                <Button variant="outline" size="sm" onClick={replan}>
+                  Re-plan
+                </Button>
+                {costUsd != null && (
+                  <span
+                    className="text-[11px] text-muted-foreground tabular-nums"
+                    title="Estimated cost of this planning run"
+                  >
+                    {formatUsd(costUsd)}
+                  </span>
+                )}
+                {draft && (
+                  <div className="ml-auto flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setLocalOpen(true)}
+                    >
+                      Create local issue
+                    </Button>
+                    {ghReady && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={createGithub}
+                      >
+                        Create {remoteLabel} issue
+                      </Button>
+                    )}
+                    <ImplementPlanButton run={run} />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          {draft && !locked && (
+            <div className="border-t p-2">
+              <PlanFollowUp run={run} />
             </div>
           )}
-        </div>
-      )}
-
-      {draft && !locked && (
-        <div className="shrink-0 border-t p-2">
-          <PlanFollowUp run={run} />
         </div>
       )}
 

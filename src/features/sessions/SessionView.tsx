@@ -388,7 +388,11 @@ function SessionCanvas({
 
       <div className="flex min-h-0 flex-1 flex-col">
         {segment === "conversation" ? (
-          <SessionConversation session={session} repoPath={repoPath} />
+          <SessionConversation
+            session={session}
+            repoPath={repoPath}
+            terminalOpen={terminalOpen}
+          />
         ) : (
           <SessionChanges session={session} />
         )}

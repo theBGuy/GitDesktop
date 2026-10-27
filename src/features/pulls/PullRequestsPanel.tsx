@@ -345,6 +345,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     locals: localPrs.data ?? [],
     remotes: prList.data ?? [],
     stateFilter,
+    remotesArePlaceholder: prList.isPlaceholderData,
     authorFilter: listFilter.authorFilter,
     labelFilter: listFilter.labelFilter,
     mineActive: listFilter.mineActive,
@@ -1199,7 +1200,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         // A grow in flight serves the previous page, shorter than the new limit,
         // so the row stays mounted and busy then, even while the read is parked.
         hasMore={loadMore.growing || (prList.data?.length ?? 0) === limit}
-        remoteCount={prList.data?.length ?? 0}
+        remoteCount={stateRemote.length}
         loadingMore={prList.isFetching || loadMore.growing}
         onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}
         stateRemote={stateRemote}

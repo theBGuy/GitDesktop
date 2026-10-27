@@ -41,6 +41,7 @@ import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 type Phase = "loading" | "streaming" | "ready" | "blocked" | "idle";
@@ -133,6 +134,9 @@ export function ConflictResolveView({
   // The resolve view shares the diff pane's width budget, so the preview takes
   // the same legibility gate: below it, render unified.
   const [paneRef, paneWidth] = useContainerWidth<HTMLDivElement>();
+  // The action bar is mounted in every phase.
+  const actionBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(actionBarRef, true);
 
   const markersLeft = phase === "ready" && hasConflictMarkers(proposed);
 
@@ -480,7 +484,10 @@ export function ConflictResolveView({
       </div>
 
       {/* Action bar */}
-      <div className="flex items-center gap-2 border-t px-3 py-2">
+      <div
+        ref={actionBarRef}
+        className="flex items-center gap-2 border-t px-3 py-2"
+      >
         {generating ? (
           <Button variant="outline" size="sm" onClick={handleCancel}>
             <XIcon data-icon="inline-start" />

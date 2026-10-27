@@ -37,7 +37,11 @@ import {
   readPendingPrWrite,
 } from "./pr-writes";
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
-import { type RecheckFilter, recheckRunsAfterPush } from "./push-writes";
+import {
+  type RecheckFilter,
+  recheckPrListAfterRemoteDelete,
+  recheckRunsAfterPush,
+} from "./push-writes";
 import {
   type ApproveRunVars,
   NO_PENDING_RUN_WRITES,
@@ -478,6 +482,17 @@ export function useSetPrAssignees(repo: string, lens: RemoteLens) {
   });
 }
 
+/** The lens's PR rows a merge, close or reopen re-reads once more after a delay:
+ *  the forge's open-list membership can lag the state change the row itself
+ *  already reports. The review-state map rides with the list (its co-invalidation
+ *  contract), and `prs` is the head-branch PR lookups, which carry each row's
+ *  state too; the CI and mergeability maps re-key on the new rows. */
+const prStateRecheckKeys = (repo: string, lens: RemoteLens) => [
+  [...repoKeys.prList(repo), lens],
+  [...repoKeys.prReviewState(repo), lens],
+  ["repo", repo, "prs", lens],
+];
+
 /** Merge a PR on the forge. The variables name the PR they target (`number` +
  *  `lens`), so the view can scope its busy hold to that PR. `stack` rides them only
  *  to name the native stack the merge cascades through (the forge call ignores it),
@@ -523,8 +538,14 @@ export function useMergePr(repo: string) {
       // are re-read too. This hook can't tell the provider, so for any other
       // merge that is a precaution of up to two reads. The run lists read
       // origin, so an upstream-lens merge arms nothing; a queued merge has not
-      // landed yet.
+      // landed yet, so its row stays where it is too.
       onSuccess: (data, args) => {
+        if (!data.queued)
+          recheckPrListAfterRemoteDelete(
+            queryClient,
+            repo,
+            prStateRecheckKeys(repo, args.lens),
+          );
         if (args.lens === "origin" && !data.queued)
           recheckRunsAfterPush(
             queryClient,
@@ -733,13 +754,23 @@ export function useGlRemoveForkRelationship(repo: string) {
 }
 
 /** Close/reopen carry their target (`number` + `lens`) in the variables, like
- *  {@link useMergePr}, so a view's busy hold can be scoped to that PR. */
+ *  {@link useMergePr}, so a view's busy hold can be scoped to that PR. Both arm
+ *  the lens's delayed list re-read, as a landed merge does. */
 export function useClosePr(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: { number: number; lens: RemoteLens }) =>
       api.forgePrClose(repo, args.number, args.lens),
-    { identity: prWriteKey("close", repo) },
+    {
+      identity: prWriteKey("close", repo),
+      onSuccess: (_d, args) =>
+        recheckPrListAfterRemoteDelete(
+          queryClient,
+          repo,
+          prStateRecheckKeys(repo, args.lens),
+        ),
+    },
   );
 }
 
@@ -754,12 +785,18 @@ export function useReopenPr(repo: string) {
       api.forgePrReopen(repo, args.number, args.lens),
     {
       identity: prWriteKey("reopen", repo),
-      onSuccess: (_d, args) =>
+      onSuccess: (_d, args) => {
+        recheckPrListAfterRemoteDelete(
+          queryClient,
+          repo,
+          prStateRecheckKeys(repo, args.lens),
+        );
         recheckRunsAfterPush(
           queryClient,
           repo,
           prChecksRecheck(repo, args.lens, args.number),
-        ),
+        );
+      },
     },
   );
 }
