@@ -148,6 +148,9 @@ fn github_mcp_search_outcome(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::test_support::{
+        gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
+    };
     #[test]
     fn mcp_search_rejects_unreadable_bodies_and_keeps_missing_search_empty() {
         for body in [
@@ -198,23 +201,6 @@ mod tests {
             );
         }
     }
-
-    fn gh_output(
-        code: i32,
-        body: &str,
-        stderr: &str,
-    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
-        Ok(crate::github::runner::GhOutput {
-            code,
-            stdout: body.as_bytes().to_vec(),
-            stderr: stderr.into(),
-        })
-    }
-
-    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
-    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
-    const ANSWERED_STDERR: &str =
-        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
 
     #[test]
     fn mcp_search_preserves_denials_and_rejects_transient_failures() {

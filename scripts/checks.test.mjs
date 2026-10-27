@@ -112,6 +112,7 @@ import {
   lexRust,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
+  reportEmptyGhScope,
   splitStaleEntries,
   staleAllowlistEntries,
   TEST_MARKER_ALLOWLIST,
@@ -6906,6 +6907,24 @@ test("check J fails closed on a file it cannot lex", () => {
     ghExitAbsenceHits(src).map((h) => h.fn),
     ["<unreadable>"],
   );
+});
+
+test("check J's empty scope lands on J wherever it sits in the list", () => {
+  const j = { run: checkGhExitAbsence, hits: [] };
+  const k = { run: () => {}, hits: [] };
+  // A check added after J must not take J's failure.
+  reportEmptyGhScope([j, k], ["git/ops.rs", "forge/gitlab.rs"]);
+  assert.deepEqual(
+    j.hits.map((h) => h.fn),
+    ["<empty scope>"],
+  );
+  assert.deepEqual(k.hits, []);
+  // A scope with a GitHub file reports nothing.
+  const quiet = { run: checkGhExitAbsence, hits: [] };
+  reportEmptyGhScope([quiet, k], ["github/pr.rs"]);
+  assert.deepEqual(quiet.hits, []);
+  // Losing J from the list fails loudly rather than misrouting.
+  assert.throws(() => reportEmptyGhScope([k], []), /check J is missing/);
 });
 
 // ----------------------------------------------------------- check-dead-surface

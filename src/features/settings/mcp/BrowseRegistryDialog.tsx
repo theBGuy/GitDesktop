@@ -34,7 +34,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
-import { isAuthError, rateLimitProvider } from "@/lib/forge-backoff";
+import { isAuthError, rateLimitClause } from "@/lib/forge-backoff";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import type { McpServer } from "@/lib/settings/api";
 import {
@@ -179,7 +179,7 @@ export function BrowseRegistryDialog({
   // Rows stay addable without their details, so the failure is one line under
   // the results rather than a mark on every row.
   const statsFailed = stats.data === undefined && refreshFailed(stats);
-  const statsLimited = rateLimitProvider(stats.error);
+  const statsLimited = rateLimitClause(stats.error);
   const { data: npmInstalls } = useQuery({
     queryKey: ["npm-installs", npmPkgs],
     queryFn: () => npmWeeklyDownloadsBatch(npmPkgs),
@@ -680,9 +680,9 @@ export function BrowseRegistryDialog({
           noun="repository details"
           degraded={statsFailed}
           message={
-            statsLimited === null
+            statsLimited === ""
               ? "Couldn't load star counts, licenses and archived status."
-              : `Star counts, licenses and archived status aren't shown while ${statsLimited}'s API rate limit is in effect.`
+              : `Star counts, licenses and archived status aren't shown${statsLimited}.`
           }
           onRetry={() => void stats.refetch()}
           className="px-0 pb-0"

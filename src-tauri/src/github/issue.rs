@@ -284,7 +284,7 @@ struct RawIssue {
 }
 
 /// The REST issue object's lock fields: `gh issue view --json` exposes no lock state.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 struct LockState {
     locked: bool,
     #[serde(default)]
@@ -293,14 +293,9 @@ struct LockState {
 
 /// Lock state is known only from a parsed answer. Any failure or unreadable
 /// body leaves it unknown so neither Lock nor Unlock guesses a direction.
-fn issue_lock_outcome(result: AppResult<crate::github::runner::GhOutput>) -> (LockState, bool) {
-    match result {
-        Ok(out) => match serde_json::from_str(&out.stdout_lossy()) {
-            Ok(state) => (state, false),
-            Err(_) => (LockState::default(), true),
-        },
-        Err(_) => (LockState::default(), true),
-    }
+fn issue_lock_outcome(result: AppResult<crate::github::runner::GhOutput>) -> Option<LockState> {
+    let out = result.ok()?;
+    serde_json::from_str(&out.stdout_lossy()).ok()
 }
 
 fn issue_lock_args(issue_path: &str) -> [&str; 2] {
@@ -370,7 +365,7 @@ pub async fn gh_issue_view(
     let out = view_res.map_err(map_issues_disabled).map_err(map_gh_too_old)?;
     let raw: RawIssue = serde_json::from_str(&out.stdout_lossy())
         .map_err(|e| gh_unreadable("the issue", format!("could not parse gh issue view: {e}")))?;
-    let (lock, lock_unknown) = issue_lock_outcome(lock_res);
+    let lock = issue_lock_outcome(lock_res);
 
     Ok(IssueDetails {
         id: raw.id,
@@ -396,9 +391,9 @@ pub async fn gh_issue_view(
         milestone: raw.milestone,
         issue_type: raw.issue_type,
         is_pinned: raw.is_pinned,
-        locked: lock.locked,
-        lock_unknown,
-        active_lock_reason: lock.active_lock_reason,
+        locked: lock.as_ref().is_some_and(|l| l.locked),
+        lock_unknown: lock.is_none(),
+        active_lock_reason: lock.and_then(|l| l.active_lock_reason),
         confidential: false,
         due_date: None,
         comments: raw
@@ -1631,15 +1626,12 @@ mod tests {
     #[test]
     fn issue_lock_missing_locked_field_leaves_state_unknown() {
         for body in ["{}", r#"{"message":"x"}"#] {
-            let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
+            let lock = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
                 code: 0,
                 stdout: body.as_bytes().to_vec(),
                 stderr: String::new(),
             }));
-            assert!(
-                unknown && !lock.locked && lock.active_lock_reason.is_none(),
-                "{body}"
-            );
+            assert!(lock.is_none(), "{body}");
         }
     }
 
@@ -1655,19 +1647,19 @@ mod tests {
             AppError::Timeout(30),
             AppError::GhNotFound,
         ] {
-            let (lock, unknown) = super::issue_lock_outcome(Err(error));
-            assert!(unknown && !lock.locked && lock.active_lock_reason.is_none());
+            let lock = super::issue_lock_outcome(Err(error));
+            assert!(lock.is_none());
         }
     }
 
     #[test]
     fn issue_lock_unreadable_body_leaves_state_unknown() {
-        let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
+        let lock = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
             code: 0,
             stdout: b"garbage".to_vec(),
             stderr: String::new(),
         }));
-        assert!(unknown && !lock.locked && lock.active_lock_reason.is_none());
+        assert!(lock.is_none());
     }
 
     #[test]
@@ -1676,12 +1668,12 @@ mod tests {
             r#"{"locked":true,"active_lock_reason":"too heated"}"#,
             r#"{"locked":false}"#,
         ] {
-            let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
+            let lock = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
                 code: 0,
                 stdout: body.as_bytes().to_vec(),
                 stderr: String::new(),
             }));
-            assert!(!unknown);
+            let lock = lock.expect("parsed lock state");
             assert_eq!(lock.locked, body.contains("true"));
             assert_eq!(
                 lock.active_lock_reason.as_deref(),

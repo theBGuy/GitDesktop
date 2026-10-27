@@ -530,6 +530,9 @@ fn repo_dependencies_outcome(result: AppResult<GhOutput>) -> AppResult<RepoDepen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::test_support::{
+        gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
+    };
     #[test]
     fn community_profile_rejects_unreadable_bodies_and_keeps_missing_fields_empty() {
         let empty =
@@ -548,13 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn community_repo_rejects_unreadable_bodies_and_keeps_missing_fields_empty() {
-        let empty =
-            community_insights_outcome(gh_output(0, "{}", ""), gh_output(0, "{}", "")).unwrap();
-        assert_eq!(empty.health_percentage, 0);
-        assert!(!empty.has_readme && !empty.has_license);
-        assert_eq!(empty.forks_count, 0);
-        assert_eq!(empty.stargazers_count, 0);
+    fn community_repo_rejects_unreadable_bodies() {
         for body in ["garbage", ""] {
             let error = community_insights_outcome(gh_output(0, "{}", ""), gh_output(0, body, ""))
                 .expect_err("unreadable community insights must reject");
@@ -580,10 +577,9 @@ mod tests {
 
     #[test]
     fn traffic_clones_reject_unreadable_bodies_and_keep_missing_fields_empty() {
-        let body = "{}";
         let empty = traffic_details_outcome(
             RepoTraffic::default(),
-            gh_output(0, body, ""),
+            gh_output(0, "{}", ""),
             gh_output(0, "{}", ""),
             gh_output(0, "{}", ""),
         )
@@ -605,17 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn traffic_referrers_reject_unreadable_bodies_and_keep_missing_fields_empty() {
-        let body = "{}";
-        let empty = traffic_details_outcome(
-            RepoTraffic::default(),
-            gh_output(0, "{}", ""),
-            gh_output(0, body, ""),
-            gh_output(0, "{}", ""),
-        )
-        .unwrap();
-        assert!(empty.clones.is_empty() && empty.referrers.is_empty() && empty.paths.is_empty());
-        assert_eq!((empty.clones_count, empty.clones_uniques), (0, 0));
+    fn traffic_referrers_reject_unreadable_bodies() {
         for body in ["garbage", ""] {
             let error = traffic_details_outcome(
                 RepoTraffic::default(),
@@ -631,17 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn traffic_paths_reject_unreadable_bodies_and_keep_missing_fields_empty() {
-        let body = "{}";
-        let empty = traffic_details_outcome(
-            RepoTraffic::default(),
-            gh_output(0, "{}", ""),
-            gh_output(0, "{}", ""),
-            gh_output(0, body, ""),
-        )
-        .unwrap();
-        assert!(empty.clones.is_empty() && empty.referrers.is_empty() && empty.paths.is_empty());
-        assert_eq!((empty.clones_count, empty.clones_uniques), (0, 0));
+    fn traffic_paths_reject_unreadable_bodies() {
         for body in ["garbage", ""] {
             let error = traffic_details_outcome(
                 RepoTraffic::default(),
@@ -948,23 +924,6 @@ mod tests {
         )
         .is_err());
     }
-
-    fn gh_output(
-        code: i32,
-        body: &str,
-        stderr: &str,
-    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
-        Ok(crate::github::runner::GhOutput {
-            code,
-            stdout: body.as_bytes().to_vec(),
-            stderr: stderr.into(),
-        })
-    }
-
-    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
-    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
-    const ANSWERED_STDERR: &str =
-        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
 
     #[test]
     fn community_profile_preserves_denials_and_rejects_transient_failures() {

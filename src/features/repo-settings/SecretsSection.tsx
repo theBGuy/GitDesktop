@@ -24,7 +24,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
-import { rateLimitProvider } from "@/lib/forge-backoff";
+import { rateLimitClause } from "@/lib/forge-backoff";
 import {
   useDeleteSecret,
   useDeleteVariable,
@@ -105,10 +105,7 @@ export function SecretsSection({
     if (!envFailed) return null;
     if (envs.data === undefined)
       return `Couldn't load environments, so only the repository scope is listed. ${presentError(envs.error).summary}`;
-    const limited = rateLimitProvider(envs.error);
-    return limited === null
-      ? "Couldn't refresh environments — showing the last loaded ones."
-      : `Couldn't refresh environments while ${limited}'s API rate limit is in effect — showing the last loaded ones.`;
+    return `Couldn't refresh environments${rateLimitClause(envs.error)} — showing the last loaded ones.`;
   })();
   // Until a read succeeds, a picked environment it no longer lists stays a
   // listed choice: an unknown list never silently resets the user's scope.

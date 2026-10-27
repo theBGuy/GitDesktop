@@ -143,6 +143,7 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
     };
 
     let reset_at = if let Some(args) = graphql_reset_probe_args(probe_error, &host_hint) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let probe = run_gh_raw(Some(&repo_path), &args, GH_TIMEOUT).await;
         graphql_reset_at(probe, chrono::Utc::now().timestamp())
     } else {
@@ -176,12 +177,24 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
 fn graphql_reset_probe_args(
     probe_error: Option<crate::forge::model::ProbeError>,
     host_hint: &str,
-) -> Option<[&str; 5]> {
-    matches!(
+) -> Option<[String; 4]> {
+    if !matches!(
         probe_error,
         Some(crate::forge::model::ProbeError::RateLimited)
-    )
-    .then_some(["api", "-i", "rate_limit", "--hostname", host_hint])
+    ) || !crate::forge::is_safe_authority(host_hint)
+        || host_hint.starts_with('-')
+    {
+        return None;
+    }
+    // The host comes from the origin URL unvalidated: it is gated above (host
+    // charset, no leading `-`) and rides as ONE `--hostname=` argv, so its meaning
+    // never depends on how a CLI parses a dash-led value in a separate argv.
+    Some([
+        "api".into(),
+        "-i".into(),
+        "rate_limit".into(),
+        format!("--hostname={host_hint}"),
+    ])
 }
 
 fn graphql_reset_at(result: AppResult<crate::github::runner::GhOutput>, now: i64) -> Option<i64> {
@@ -778,7 +791,9 @@ pub async fn gh_repo_star_status(repo_path: String) -> AppResult<bool> {
     repo_star_status_outcome(Ok(out))
 }
 
-fn repo_star_status_outcome(result: AppResult<crate::github::runner::GhOutput>) -> AppResult<bool> {
+pub(crate) fn repo_star_status_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<bool> {
     let out = result?;
     if out.code == 0 {
         return Ok(true);
@@ -7644,6 +7659,9 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::github::test_support::{
+        gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
+    };
     #[test]
     fn graphql_reset_requires_current_bounded_exhaustion() {
         let now = 1_800_000_000;
@@ -7691,28 +7709,21 @@ mod tests {
     fn reset_probe_is_only_rate_limited_and_host_pinned() {
         use crate::forge::model::ProbeError;
         assert_eq!(super::graphql_reset_probe_args(None, "ghe.example"), None);
-        assert_eq!(
-            super::graphql_reset_probe_args(Some(ProbeError::RateLimited), "ghe.example"),
-            Some(["api", "-i", "rate_limit", "--hostname", "ghe.example"])
-        );
+        for host in ["-x", "a b", "x;y", "", "host=evil"] {
+            assert!(
+                super::graphql_reset_probe_args(Some(ProbeError::RateLimited), host).is_none(),
+                "{host}"
+            );
+        }
+        for host in ["ghe.example", "ghe.acme.com:8443"] {
+            let args =
+                super::graphql_reset_probe_args(Some(ProbeError::RateLimited), host).unwrap();
+            assert_eq!(
+                args.as_slice(),
+                ["api", "-i", "rate_limit", &format!("--hostname={host}")]
+            );
+        }
     }
-
-    fn gh_output(
-        code: i32,
-        body: &str,
-        stderr: &str,
-    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
-        Ok(crate::github::runner::GhOutput {
-            code,
-            stdout: body.as_bytes().to_vec(),
-            stderr: stderr.into(),
-        })
-    }
-
-    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
-    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
-    const ANSWERED_STDERR: &str =
-        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
 
     #[test]
     fn repo_star_status_treats_only_not_found_as_unstarred() {
@@ -7721,6 +7732,8 @@ mod tests {
         let loaded = super::repo_star_status_outcome(gh_output(0, "", "")).unwrap();
         assert!(loaded);
         for stderr in [
+            "HTTP 403: API rate limit exceeded for user ID 4041234 (https://api.github.com/)",
+            "gh: Not Found",
             HELD_REST_STDERR,
             "connection failed",
             "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",

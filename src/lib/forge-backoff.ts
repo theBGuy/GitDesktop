@@ -116,6 +116,16 @@ export function rateLimitProvider(error: unknown): string | null {
   return FORGE_KIND_HOSTS[kind];
 }
 
+/** " while {Provider}'s API rate limit is in effect" for a rate-limit error,
+ *  wrapped ones included, else "": the one spelling of that clause, spliced
+ *  into a sentence that reads whole either way. */
+export function rateLimitClause(error: unknown): string {
+  const provider = rateLimitProvider(error);
+  return provider === null
+    ? ""
+    : ` while ${provider}'s API rate limit is in effect`;
+}
+
 /** Raw prefixes a forge's own diagnostic can open with, stripped in turn: gh's
  *  `gh:` / `error:` / `GraphQL:` / `HTTP <status>:` (go-gh), and glab's
  *  client-go `<METHOD> <url>:` or a bare `<host>:`. */

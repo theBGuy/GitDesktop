@@ -283,23 +283,9 @@ async fn apply_feature(repo_path: &str, slug: &str, feature: &str, enabled: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn gh_output(
-        code: i32,
-        body: &str,
-        stderr: &str,
-    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
-        Ok(crate::github::runner::GhOutput {
-            code,
-            stdout: body.as_bytes().to_vec(),
-            stderr: stderr.into(),
-        })
-    }
-
-    const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
-    const NOT_FOUND_STDERR: &str = "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
-    const ANSWERED_STDERR: &str =
-        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
-
+    use crate::github::test_support::{
+        gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
+    };
     #[test]
     fn security_bool_rejects_unreadable_bodies_and_keeps_missing_fields_false() {
         for body in ["{}", r#"{"state":"not-configured"}"#] {

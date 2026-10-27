@@ -23,6 +23,7 @@ import {
   RATE_LIMIT_KNOWN_RESET_RECHECK_MS,
   RATE_LIMIT_RECHECK_MS,
   RESET_GRACE_MS,
+  rateLimitClause,
   rateLimitProvider,
   rateLimitRecheckDelayMs,
   rateLimitSummary,
@@ -395,6 +396,47 @@ test("non-rate-limit errors get no rate-limit copy", () => {
     rateLimitProvider({ kind: "glab", message: "429 Too Many Requests" }),
     "GitLab",
   );
+});
+
+test("the rate-limit clause names each forge, and is empty otherwise", () => {
+  const clause = (provider) =>
+    ` while ${provider}'s API rate limit is in effect`;
+  for (const [error, expected] of [
+    [gh(HELD_TEXTS[0]), clause("GitHub")],
+    [
+      gh("gh: API rate limit exceeded for user ID 1 (HTTP 403)"),
+      clause("GitHub"),
+    ],
+    [{ kind: "glab", message: "429 Too Many Requests" }, clause("GitLab")],
+    [
+      {
+        kind: "bitbucket",
+        message:
+          "Bitbucket rate limit reached (429). Wait a moment and try again.",
+      },
+      clause("Bitbucket"),
+    ],
+    [
+      {
+        kind: "jira",
+        message: "Jira rate limit reached (429). Wait a moment and try again.",
+      },
+      clause("Jira"),
+    ],
+    // A limit an app headline wraps is still a limit in effect.
+    [
+      gh(
+        `Merged #12, but couldn't clean up the remote head branch.\n${HELD_TEXTS[0]}`,
+      ),
+      clause("GitHub"),
+    ],
+    [gh("HTTP 404: Not Found (https://api.github.com/repos/o/r)"), ""],
+    [{ kind: "git", message: HELD_TEXTS[0] }, ""],
+    [new Error("rate limit"), ""],
+    [null, ""],
+    [undefined, ""],
+  ])
+    assert.equal(rateLimitClause(error), expected, String(error?.message));
 });
 
 test("a limit wrapped in app prose gets no sentence, though it is still a limit", () => {

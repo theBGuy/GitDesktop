@@ -2519,6 +2519,21 @@ const GH_EXIT_ABSENCE_FIX =
   "README, which reject every failure but NotFound), or allowlist a fail-safe " +
   "or decoration read with rationale";
 
+/** Check J reads only the GitHub files, so none in scope means it read
+ *  nothing: that fails J itself, found by its `run`, whatever its position. */
+export function reportEmptyGhScope(checks, relFiles) {
+  if (relFiles.some(ghExitAbsenceScope)) return;
+  const j = checks.find((c) => c.run === checkGhExitAbsence);
+  if (j === undefined) throw new Error("check J is missing from CHECKS");
+  j.hits.push({
+    file: "github/",
+    line: 0,
+    fn: "<empty scope>",
+    allowlisted: false,
+    fix: "check J found no src-tauri/src/github/*.rs or forge/github.rs to scan — update ghExitAbsenceScope",
+  });
+}
+
 /** Whether `file` is in check J's scope: the GitHub reads. */
 export function ghExitAbsenceScope(file) {
   return file.startsWith("github/") || file === "forge/github.rs";
@@ -2636,19 +2651,10 @@ function main() {
   ];
 
   const files = rustFiles(SRC);
-  // Check J reads only the GitHub files; none in scope means it read nothing.
-  const ghScoped = files.filter((path) =>
-    ghExitAbsenceScope(relative(SRC, path).replace(/\\/g, "/")),
+  reportEmptyGhScope(
+    CHECKS,
+    files.map((path) => relative(SRC, path).replace(/\\/g, "/")),
   );
-  if (ghScoped.length === 0) {
-    CHECKS.at(-1).hits.push({
-      file: "github/",
-      line: 0,
-      fn: "<empty scope>",
-      allowlisted: false,
-      fix: "check J found no src-tauri/src/github/*.rs or forge/github.rs to scan — update ghExitAbsenceScope",
-    });
-  }
   for (const path of files) {
     // Normalise CRLF: on Windows a git checkout materialises these files with
     // CRLF, and a trailing `\r` would leak into every reported line.

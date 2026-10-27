@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
-import { rateLimitProvider } from "@/lib/forge-backoff";
+import { rateLimitClause } from "@/lib/forge-backoff";
 import {
   useForkRepoByName,
   usePendingFork,
@@ -211,10 +211,7 @@ function ExploreDetailBody({
     // A read parked offline would otherwise say it is checking until reconnect.
     if (starred.isPaused) return OFFLINE_WRITE_REASON;
     if (!starred.isError) return "Checking star status…";
-    const limited = rateLimitProvider(starred.error);
-    return limited === null
-      ? "Couldn't check star status."
-      : `Couldn't check star status while ${limited}'s API rate limit is in effect.`;
+    return `Couldn't check star status${rateLimitClause(starred.error)}.`;
   })();
 
   const star = starParts(repo.stars ?? null);

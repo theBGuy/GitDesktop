@@ -93,6 +93,7 @@ import { useJiraLink } from "@/lib/jira/queries";
 import { useRepoNotificationsDialog } from "@/lib/notifications/matrix";
 import {
   ACT_PENDING_REASON,
+  isOfflineNow,
   OFFLINE_ITEM_REASON,
   pendingWriteReason,
   refuseWhileOffline,
@@ -626,7 +627,15 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
           warmRepoSettingsDialog((dialog) => setReadyDialog(() => dialog));
         }
         // Opening the menu is the Star row's retry: it has no room for one.
-        if (open && canStar && starStatus.isError && !starStatus.isFetching) {
+        // Offline, a refetch would only park.
+        if (
+          open &&
+          canStar &&
+          starStatus.isError &&
+          !starStatus.isFetching &&
+          !starStatus.isPaused &&
+          !isOfflineNow()
+        ) {
           void starStatus.refetch();
         }
       }}

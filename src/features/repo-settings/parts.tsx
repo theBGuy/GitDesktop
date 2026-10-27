@@ -22,7 +22,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { highlightJson } from "@/features/diff/shiki-highlighter";
 import { isTransportError, presentError } from "@/lib/error-summary";
-import { isRateLimitError, rateLimitProvider } from "@/lib/forge-backoff";
+import { isRateLimitError, rateLimitClause } from "@/lib/forge-backoff";
 import {
   isReconnectHostSafe,
   reconnectHostArg,
@@ -116,10 +116,7 @@ function formNoticeMessage(
   error: unknown,
 ): string {
   if (!failed) return "You're offline — showing the last loaded version.";
-  const limited = rateLimitProvider(error);
-  return limited === null
-    ? `Couldn't refresh ${noun} — showing the last loaded version.`
-    : `Couldn't refresh ${noun} while ${limited}'s API rate limit is in effect — showing the last loaded version.`;
+  return `Couldn't refresh ${noun}${rateLimitClause(error)} — showing the last loaded version.`;
 }
 
 /**

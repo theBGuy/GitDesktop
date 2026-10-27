@@ -1,7 +1,7 @@
 // Pure: scripts/board-notice.test.mjs imports this file through Node's type
 // stripping, which resolves no aliases, so its imports are relative paths to
 // other import-free modules.
-import { rateLimitProvider } from "../../../lib/forge-backoff.ts";
+import { rateLimitClause } from "../../../lib/forge-backoff.ts";
 import { failedSinceLastSuccess } from "../../conversations/remote-section-state.ts";
 
 /** The slice of a card's read the board decides on. */
@@ -107,11 +107,8 @@ export function boardNotice<R extends BoardCardRead>(
   const failed = cards.filter((c) => failedSinceLastSuccess(c.read));
   if (retrying || failed.length === 0) return null;
   const reason = failed[0].read.error ?? failed[0].lastError;
-  const limited = rateLimitProvider(reason);
   const message = failed.every((c) => cardLoaded(c.read))
-    ? limited === null
-      ? "Couldn't refresh some insights — showing the last loaded ones."
-      : `Couldn't refresh some insights while ${limited}'s API rate limit is in effect — showing the last loaded ones.`
+    ? `Couldn't refresh some insights${rateLimitClause(reason)} — showing the last loaded ones.`
     : reason == null
       ? "Couldn't load some insights."
       : `Couldn't load some insights. ${summarize(reason)}`;
