@@ -5,6 +5,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import {
   ALL_MERGE_METHODS,
   type BranchProtection,
@@ -105,15 +106,17 @@ export async function saveBranchRules(
     const id = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadToleratingEmptyStore(store);
-      const key = await foldIdentityKey<BranchRulesConfig>(
-        store,
-        "branch-rules",
-        repo,
-        id,
-        (identityVal, legacyVal) => identityVal ?? legacyVal,
-      );
-      await store.set(key, config);
-      await store.save();
+      return writeWithRollback(store, async () => {
+        const key = await foldIdentityKey<BranchRulesConfig>(
+          store,
+          "branch-rules",
+          repo,
+          id,
+          (identityVal, legacyVal) => identityVal ?? legacyVal,
+        );
+        await store.set(key, config);
+        await store.save();
+      });
     });
   });
 }

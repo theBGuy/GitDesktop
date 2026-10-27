@@ -9,6 +9,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { queryClient } from "@/lib/query-client";
 import { loadAutomations } from "./store";
 import { type ActionId, ALL_ACTION_IDS, anyAutomationEnabled } from "./types";
@@ -400,8 +401,10 @@ async function appendEntry(repoPath: string, entry: NewEntry): Promise<string> {
   const id = await withAppStoreLock(STORE_FILE, async () => {
     await reloadRaw();
     const store = await getStore();
-    const key = await keyFor(repoPath, identity);
-    return appendUnder(store, key, await readByKey(key), entry);
+    return writeWithRollback(store, async () => {
+      const key = await keyFor(repoPath, identity);
+      return appendUnder(store, key, await readByKey(key), entry);
+    });
   });
   invalidateHistoryQueries();
   return id;
@@ -420,54 +423,56 @@ async function coalesceSteady(
   return withAppStoreLock(STORE_FILE, async () => {
     await reloadRaw();
     const store = await getStore();
-    const key = await keyFor(repoPath, identity);
-    const all = await readByKey(key);
-    const prior = sortNewestFirst(all).find(
-      (e) =>
-        e.targetKind === entry.targetKind &&
-        e.ref === entry.ref &&
-        // User-initiated rows always APPEND (branch 1), so they are also never
-        // coalesce TARGETS: an automatic tick bumping a re-run's row would
-        // overwrite the retry's evidence and attribute later automatic skips
-        // to the user's click.
-        e.trigger !== "run-now" &&
-        e.trigger !== "re-run" &&
-        allSteady(e.outcomes),
-    );
-    let id: string;
-    if (
-      prior &&
-      outcomeMultiset(prior.outcomes) === outcomeMultiset(entry.outcomes)
-    ) {
-      // `===` rather than `sameSha` (which lives in sync.ts — importing it here would
-      // close a history→sync→runner→history cycle), so a provider flipping between a
-      // short and a full spelling of the SAME head costs one spurious count bump and a
-      // refreshed stamp on the existing row, never a wrong row.
-      if (prior.headSha === entry.headSha) {
-        // Identical row already on disk (a fresh session's first tick) — seed the map
-        // so every later tick short-circuits, and write nothing.
-        steadySignatures.set(sigKey, sig);
-        return prior.id;
-      }
-      // Same decision, new head (a push): bump the row rather than append a near-copy.
-      const upserted: AutomationHistoryEntry = {
-        ...prior,
-        ts: new Date().toISOString(),
-        headSha: entry.headSha,
-        count: (prior.count ?? 1) + 1,
-      };
-      await store.set(
-        key,
-        prune([upserted, ...all.filter((e) => e.id !== prior.id)]),
+    return writeWithRollback(store, async () => {
+      const key = await keyFor(repoPath, identity);
+      const all = await readByKey(key);
+      const prior = sortNewestFirst(all).find(
+        (e) =>
+          e.targetKind === entry.targetKind &&
+          e.ref === entry.ref &&
+          // User-initiated rows always APPEND (branch 1), so they are also never
+          // coalesce TARGETS: an automatic tick bumping a re-run's row would
+          // overwrite the retry's evidence and attribute later automatic skips
+          // to the user's click.
+          e.trigger !== "run-now" &&
+          e.trigger !== "re-run" &&
+          allSteady(e.outcomes),
       );
-      await store.save();
-      id = prior.id;
-    } else {
-      id = await appendUnder(store, key, all, entry);
-    }
-    steadySignatures.set(sigKey, sig);
-    invalidateHistoryQueries();
-    return id;
+      let id: string;
+      if (
+        prior &&
+        outcomeMultiset(prior.outcomes) === outcomeMultiset(entry.outcomes)
+      ) {
+        // `===` rather than `sameSha` (which lives in sync.ts — importing it here would
+        // close a history→sync→runner→history cycle), so a provider flipping between a
+        // short and a full spelling of the SAME head costs one spurious count bump and a
+        // refreshed stamp on the existing row, never a wrong row.
+        if (prior.headSha === entry.headSha) {
+          // Identical row already on disk (a fresh session's first tick) — seed the map
+          // so every later tick short-circuits, and write nothing.
+          steadySignatures.set(sigKey, sig);
+          return prior.id;
+        }
+        // Same decision, new head (a push): bump the row rather than append a near-copy.
+        const upserted: AutomationHistoryEntry = {
+          ...prior,
+          ts: new Date().toISOString(),
+          headSha: entry.headSha,
+          count: (prior.count ?? 1) + 1,
+        };
+        await store.set(
+          key,
+          prune([upserted, ...all.filter((e) => e.id !== prior.id)]),
+        );
+        await store.save();
+        id = prior.id;
+      } else {
+        id = await appendUnder(store, key, all, entry);
+      }
+      steadySignatures.set(sigKey, sig);
+      invalidateHistoryQueries();
+      return id;
+    });
   });
 }
 
@@ -518,21 +523,23 @@ export async function updateAutomationActivity(
       await withAppStoreLock(STORE_FILE, async () => {
         await reloadRaw();
         const store = await getStore();
-        const key = await keyFor(repoPath, identity);
-        const all = await readByKey(key);
-        const found = all.find((e) => e.id === id);
-        if (!found) return;
-        const updated: AutomationHistoryEntry = {
-          ...found,
-          ts: new Date().toISOString(),
-          outcomes,
-        };
-        await store.set(
-          key,
-          prune([updated, ...all.filter((e) => e.id !== id)]),
-        );
-        await store.save();
-        invalidateHistoryQueries();
+        return writeWithRollback(store, async () => {
+          const key = await keyFor(repoPath, identity);
+          const all = await readByKey(key);
+          const found = all.find((e) => e.id === id);
+          if (!found) return;
+          const updated: AutomationHistoryEntry = {
+            ...found,
+            ts: new Date().toISOString(),
+            outcomes,
+          };
+          await store.set(
+            key,
+            prune([updated, ...all.filter((e) => e.id !== id)]),
+          );
+          await store.save();
+          invalidateHistoryQueries();
+        });
       });
     });
   } catch {
@@ -564,27 +571,29 @@ export async function recordAutomationPauseMarker(
       withAppStoreLock(STORE_FILE, async () => {
         await reloadRaw();
         const store = await getStore();
-        const all = await readByKey(GLOBAL_MARKERS_KEY);
-        const record: AutomationHistoryEntry = {
-          schemaVersion: 1,
-          id: crypto.randomUUID(),
-          ts: new Date().toISOString(),
-          trigger: "run-now",
-          targetKind: "none",
-          ref: "",
-          title: "",
-          headSha: "",
-          outcomes: [{ action: null, code: paused ? "paused" : "resumed" }],
-        };
-        await store.set(
-          GLOBAL_MARKERS_KEY,
-          sortNewestFirst([record, ...all]).slice(0, MAX_MARKERS),
-        );
-        await store.save();
-        // Markers merge into EVERY repo's list, so invalidate the whole family.
-        void queryClient
-          .invalidateQueries({ queryKey: ["automation-history"] })
-          .catch(() => undefined);
+        return writeWithRollback(store, async () => {
+          const all = await readByKey(GLOBAL_MARKERS_KEY);
+          const record: AutomationHistoryEntry = {
+            schemaVersion: 1,
+            id: crypto.randomUUID(),
+            ts: new Date().toISOString(),
+            trigger: "run-now",
+            targetKind: "none",
+            ref: "",
+            title: "",
+            headSha: "",
+            outcomes: [{ action: null, code: paused ? "paused" : "resumed" }],
+          };
+          await store.set(
+            GLOBAL_MARKERS_KEY,
+            sortNewestFirst([record, ...all]).slice(0, MAX_MARKERS),
+          );
+          await store.save();
+          // Markers merge into EVERY repo's list, so invalidate the whole family.
+          void queryClient
+            .invalidateQueries({ queryKey: ["automation-history"] })
+            .catch(() => undefined);
+        });
       }),
     );
   } catch {

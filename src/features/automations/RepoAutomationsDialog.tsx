@@ -25,9 +25,10 @@ import {
   type RepoOverride,
   repoEntry,
 } from "@/lib/automations/types";
+import { presentError } from "@/lib/error-summary";
 import { useRepoIdentity } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastComposedError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
   type CellPatch,
@@ -201,7 +202,15 @@ export function RepoAutomationsDialog({
     try {
       await save.mutateAsync(sanitizeOverride(draft));
     } catch (e) {
-      toastError(e);
+      toastComposedError({
+        title: `Couldn't save repository automations: ${presentError(e).summary}`,
+        // Truthful at settle: a closed session has dropped the draft.
+        description:
+          submitted !== null && session.current === submitted
+            ? "Your changes are still here. Save again to retry."
+            : "Your changes weren't saved.",
+        errors: [e],
+      });
       return;
     }
     toast.success("Repository automations saved");

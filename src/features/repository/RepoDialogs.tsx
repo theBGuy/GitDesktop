@@ -111,7 +111,7 @@ export function RemoveRepoDialog({
 }) {
   const removeRecent = useRemoveRecentRepo();
   const repoPath = useUiStore((s) => s.repoPath);
-  const closeRepo = useUiStore((s) => s.closeRepo);
+  const closeRepoUnguarded = useUiStore((s) => s.closeRepoUnguarded);
   const openRepo = useUiStore((s) => s.openRepo);
   const [moveToTrash, setMoveToTrash] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -127,7 +127,7 @@ export function RemoveRepoDialog({
       // Closing the open repo stops its git-status polling, which otherwise
       // keeps spawning subprocesses into the folder and makes the OS abort the
       // move. Removing the open repo should close it either way.
-      if (wasOpen) closeRepo();
+      if (wasOpen) closeRepoUnguarded();
       if (moveToTrash) {
         await deleteRepoFolder(repo.path);
         trashed = true;

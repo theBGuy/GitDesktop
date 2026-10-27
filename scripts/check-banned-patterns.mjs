@@ -5399,7 +5399,8 @@ export const CHECKS = [
       "src/features/repository/SubmodulesDialog.tsx",
       // Seeds the draft once `automations.data` arrives, behind its own latch.
       "src/features/automations/RepoAutomationsDialog.tsx",
-      // Same, latched per SCOPE — switching scope re-seeds deliberately.
+      // Open/close housekeeping only; the scope reseed is render-time, latched
+      // per scope in state.
       "src/features/branch-rules/BranchRulesDialog.tsx",
       // Seeds the applied set once memberships settle, behind `seededSettled`.
       "src/features/conversations/ProjectsPopover.tsx",
@@ -5670,6 +5671,10 @@ export const CHECKS = [
     appliesTo: (file) => file !== "src/lib/plugin-store.ts",
     scan: perFile(RAW_STORE_RELOAD_RE),
     allowlist: [
+      // Its catch never treats failure as an empty store: a rejected raw reload
+      // falls through to restoring the pre-write snapshot, and the original
+      // rejection is always rethrown.
+      "src/lib/plugin-store-rollback.ts",
       // Re-homing runs outside the feature modules' write queues and writes back
       // unconditionally, so a tolerate-vs-rethrow decision it does not make is not
       // the guard it needs (its own comment records the orphan-on-throw residual).

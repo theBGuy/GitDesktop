@@ -4,6 +4,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 
 /** A repo's link to a Jira project. Personal app-data — never written into the
  *  repo itself — keyed by the repo's worktree-stable identity so the link is
@@ -99,12 +100,14 @@ export async function setJiraLink(
     return withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
       const store = await getStore();
-      const key = await keyFor(repo, identity);
-      await store.set(key, link);
-      // Flush now (not on autoSave's debounce) so the next serialized reload can't
-      // drop this.
-      await store.save();
-      return link;
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        await store.set(key, link);
+        // Flush now (not on autoSave's debounce) so the next serialized reload can't
+        // drop this.
+        await store.save();
+        return link;
+      });
     });
   });
 }
@@ -117,9 +120,11 @@ export async function clearJiraLink(repo: string): Promise<void> {
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
       const store = await getStore();
-      const key = await keyFor(repo, identity);
-      await store.delete(key);
-      await store.save();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        await store.delete(key);
+        await store.save();
+      });
     });
   });
 }

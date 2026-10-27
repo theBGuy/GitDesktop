@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,9 +11,10 @@ import {
   type LifecycleConfig,
   type LifecycleEvent,
 } from "@/lib/automations/types";
+import { presentError } from "@/lib/error-summary";
 import { withForm } from "@/lib/form";
 import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
-import { toastError } from "@/lib/toast";
+import { toastComposedError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import {
   type CellPatch,
@@ -77,12 +79,18 @@ export const AutomationsSection = withForm({
   ...settingsFormOpts,
   props: {
     onDirtyChange: undefined as ((dirty: boolean) => void) | undefined,
-    /** Lets the host (Settings) fire this panel's save imperatively — e.g. from
-     *  its confirm-close "Save and close". Called with the save fn while there
-     *  are unsaved edits, and with `null` when clean or unmounted. */
+    /** Fire this panel's save. Resolves true iff the write landed; never rejects
+     *  (the panel owns the one failure toast). `quiet` suppresses the success
+     *  toast (the footer path shows "Settings saved" instead). Registered while
+     *  there are unsaved edits or a write is in flight, `null` otherwise. */
     onRegisterSave: undefined as
-      | ((save: (() => void) | null) => void)
+      | ((
+          save: ((opts?: { quiet?: boolean }) => Promise<boolean>) | null,
+        ) => void)
       | undefined,
+    /** Mirrors this panel's in-flight save so the screen's one "Saving…" state
+     *  covers it. */
+    onSavingChange: undefined as ((saving: boolean) => void) | undefined,
     /** The same for this panel's discard, so the host's confirmed footer
      *  Discard (and "Discard and close") resets the lifecycle draft too. */
     onRegisterDiscard: undefined as
@@ -93,6 +101,7 @@ export const AutomationsSection = withForm({
     form,
     onDirtyChange,
     onRegisterSave,
+    onSavingChange,
     onRegisterDiscard,
   }) {
     const automations = useAutomations();
@@ -110,7 +119,12 @@ export const AutomationsSection = withForm({
     }, [automations.data]);
 
     const saved = automations.data?.lifecycles ?? {};
-    const dirty = seeded.current && sortedJson(draft) !== sortedJson(saved);
+    // Compared as a save would write them: blank pattern rows never persist, so
+    // a draft holding one would otherwise read unsaved after every save.
+    const dirty =
+      seeded.current &&
+      sortedJson(sanitizeLifecycles(draft)) !==
+        sortedJson(sanitizeLifecycles(saved));
 
     // Surface dirtiness to the Settings screen so closing with unsaved
     // automations draft routes through its confirm-close path.
@@ -262,27 +276,75 @@ export const AutomationsSection = withForm({
       discardRef.current();
     }
 
-    function doSave() {
-      if (!automations.data) return;
+    // The write in flight, keyed by the sanitized draft it sends. Set and cleared
+    // synchronously (render state lags a press): a save of the same draft joins
+    // it, so one gesture can't write twice or toast twice. `saving` mirrors it.
+    const pendingSave = useRef<{
+      json: string;
+      promise: Promise<boolean>;
+    } | null>(null);
+    const [saving, setSaving] = useState(false);
+
+    function doSave(opts?: { quiet?: boolean }): Promise<boolean> {
+      // The live draft at press, never a pinned one: an edit since the pending
+      // write began is the user's newest intent, a new write the store queues.
+      const lifecycles = sanitizeLifecycles(draft);
+      const json = sortedJson(lifecycles);
+      const pending = pendingSave.current;
+      if (pending?.json === json) return pending.promise;
+      if (!automations.data) return Promise.resolve(false);
       // Detached: Settings' "Save and close" fires this right before unmounting
-      // the panel, so the failure toast must not depend on it staying mounted.
-      void save
-        .mutateAsync({
-          ...automations.data,
-          lifecycles: sanitizeLifecycles(draft),
-        })
-        .catch(toastError);
+      // the panel, so neither toast may depend on it staying mounted, and the
+      // failure's description reads whether the draft is still on screen (a
+      // Discard made during the save is about to put the stored rules back).
+      const promise = save
+        .mutateAsync({ ...automations.data, lifecycles })
+        .then(
+          () => true,
+          (e: unknown) => {
+            toastComposedError({
+              title: `Couldn't save automations: ${presentError(e).summary}`,
+              description:
+                mounted.current && pendingDiscard.current === null
+                  ? "Your changes are still here. Save again to retry."
+                  : "Your changes weren't saved.",
+              errors: [e],
+            });
+            return false;
+          },
+        );
+      const entry = { json, promise };
+      pendingSave.current = entry;
+      setSaving(true);
+      void promise.then((ok) => {
+        if (pendingSave.current === entry) {
+          pendingSave.current = null;
+          setSaving(false);
+        }
+        if (ok && !opts?.quiet) toast.success("Automations saved");
+      });
+      return promise;
     }
 
     // Register/deregister the imperative save with the host, so Settings' "Save
     // and close" persists this panel too. Kept in a latest-ref so the registered
     // fn always saves the current draft without re-registering on every keystroke.
+    // Held through a write in flight: the optimistic patch clears `dirty` at
+    // press, and the host must still reach (and await) that write.
     const doSaveRef = useLatestRef(doSave);
     useEffect(() => {
       if (!onRegisterSave) return;
-      onRegisterSave(dirty ? () => doSaveRef.current() : null);
+      onRegisterSave(
+        dirty || saving
+          ? (opts?: { quiet?: boolean }) => doSaveRef.current(opts)
+          : null,
+      );
       return () => onRegisterSave(null);
-    }, [dirty, onRegisterSave]);
+    }, [dirty, saving, onRegisterSave]);
+    useEffect(() => {
+      onSavingChange?.(saving);
+      return () => onSavingChange?.(false);
+    }, [saving, onSavingChange]);
     useEffect(() => {
       if (!onRegisterDiscard) return;
       onRegisterDiscard(dirty ? () => discardRef.current() : null);
@@ -338,7 +400,11 @@ export const AutomationsSection = withForm({
                   >
                     Discard
                   </DisabledReasonButton>
-                  <Button size="sm" onClick={doSave} disabled={save.isPending}>
+                  <Button
+                    size="sm"
+                    onClick={() => void doSave()}
+                    disabled={save.isPending}
+                  >
                     Save changes
                   </Button>
                 </div>

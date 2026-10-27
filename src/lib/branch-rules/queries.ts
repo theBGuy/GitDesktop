@@ -1,4 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
 import { mergeBranchRules } from "./match";
@@ -35,17 +39,64 @@ export function useBranchRules(repo: string) {
   return useQuery(branchRulesOptions(repo));
 }
 
+// Both saves patch their key at mutate time, so a dialog reopened mid-save seeds
+// the save's target. The key is built in onMutate and read back from the context;
+// `optimistic` is read BACK after the write, since structural sharing stores a
+// merged copy, and the rollback runs only while that copy is still cached, so a
+// newer save or a landed refetch keeps what replaced it.
+
+/** Patches `key` to `config`, returning what a failed save's rollback needs. */
+async function patchRules(
+  queryClient: QueryClient,
+  key: readonly unknown[],
+  config: BranchRulesConfig,
+) {
+  await queryClient.cancelQueries({ queryKey: key });
+  const snapshot = queryClient.getQueryData<BranchRulesConfig>(key);
+  queryClient.setQueryData<BranchRulesConfig>(key, config);
+  return {
+    key,
+    snapshot,
+    optimistic: queryClient.getQueryData<BranchRulesConfig>(key),
+  };
+}
+
+/** Restores the snapshot unless something newer replaced the patch. */
+function rollBackRules(
+  queryClient: QueryClient,
+  ctx: Awaited<ReturnType<typeof patchRules>> | undefined,
+) {
+  if (ctx && queryClient.getQueryData(ctx.key) === ctx.optimistic)
+    queryClient.setQueryData(ctx.key, ctx.snapshot);
+}
+
+/** A save's mutation key: its cache key under "save", so a settle can count the
+ *  saves of the same key still in flight. */
+const saveKey = (key: readonly unknown[]) => ["save", ...key];
+
+/** Whether another save of `key` is still in flight (a settling save still
+ *  counts itself). Its settle skips the refetch, which would replace that save's
+ *  patch with disk until it lands: the last save out refetches. */
+function saveQueued(queryClient: QueryClient, key: readonly unknown[]) {
+  return queryClient.isMutating({ mutationKey: saveKey(key) }) > 1;
+}
+
 export function useSaveBranchRules(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: saveKey(branchRulesKey(repo)),
     mutationFn: (config: BranchRulesConfig) => saveBranchRules(repo, config),
     // Local write — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always",
+    onMutate: (config) => patchRules(queryClient, branchRulesKey(repo), config),
+    onError: (_e, _config, ctx) => rollBackRules(queryClient, ctx),
     // Every checkout's key, not just this one's: the rules are stored by repo
     // identity, so a save here changes what each worktree of the repo reads, and
     // a never-stale key would otherwise serve the old rules from the cache.
-    onSettled: () =>
-      queryClient.invalidateQueries({ queryKey: BRANCH_RULES_FAMILY }),
+    onSettled: (_d, _e, _config, ctx) =>
+      ctx && saveQueued(queryClient, ctx.key)
+        ? undefined
+        : queryClient.invalidateQueries({ queryKey: BRANCH_RULES_FAMILY }),
   });
 }
 
@@ -72,17 +123,22 @@ export function useSharedBranchRules(repo: string) {
 export function useSaveSharedBranchRules(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
+    mutationKey: saveKey(sharedBranchRulesKey(repo)),
     mutationFn: (config: BranchRulesConfig) =>
       saveSharedBranchRules(repo, config),
     // Local write — see branchRulesOptions: "online" mode would park it offline.
     networkMode: "always",
     // Built at mutate time and read back from the context, so the settle names
     // the repo the write fired on whatever render it settles through.
-    onMutate: () => ({ key: sharedBranchRulesKey(repo) }),
+    onMutate: (config) =>
+      patchRules(queryClient, sharedBranchRulesKey(repo), config),
+    onError: (_e, _config, ctx) => rollBackRules(queryClient, ctx),
     // This checkout's key only, unlike the personal save: the file lives in each
     // working tree, so no other checkout's read changed.
     onSettled: (_d, _e, _config, ctx) =>
-      ctx && queryClient.invalidateQueries({ queryKey: ctx.key }),
+      ctx &&
+      !saveQueued(queryClient, ctx.key) &&
+      queryClient.invalidateQueries({ queryKey: ctx.key }),
   });
 }
 

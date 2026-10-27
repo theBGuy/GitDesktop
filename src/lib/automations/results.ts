@@ -11,6 +11,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { isStoredResult, pruneByCreatedAt } from "./pure";
 
 /**
@@ -110,16 +111,18 @@ async function persist(result: AutomationRunResult): Promise<void> {
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
       const store = await getStore();
-      const key = await keyFor(result.repoPath, identity);
-      const all = await readByKey(key);
-      const without = all.filter((r) => r.id !== result.id);
-      await store.set(
-        key,
-        pruneByCreatedAt([result, ...without], MAX_PER_REPO),
-      );
-      // Flush now instead of on autoSave's debounce, so the next serialized reload
-      // can't re-read a pre-write disk snapshot and drop this record.
-      await store.save();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(result.repoPath, identity);
+        const all = await readByKey(key);
+        const without = all.filter((r) => r.id !== result.id);
+        await store.set(
+          key,
+          pruneByCreatedAt([result, ...without], MAX_PER_REPO),
+        );
+        // Flush now instead of on autoSave's debounce, so the next serialized reload
+        // can't re-read a pre-write disk snapshot and drop this record.
+        await store.save();
+      });
     });
   });
 }

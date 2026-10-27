@@ -5,6 +5,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 
 // The per-repo origin|upstream lens for the Pull Requests + Issues surfaces,
 // persisted in app data (never committed). Keyed by the repo's worktree-stable
@@ -60,8 +61,10 @@ export async function saveRepoLens(
     const id = await repoIdentityStrict(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadToleratingEmptyStore(store);
-      await store.set(id, lens);
-      await store.save();
+      return writeWithRollback(store, async () => {
+        await store.set(id, lens);
+        await store.save();
+      });
     });
   });
 }
@@ -78,8 +81,10 @@ export async function deleteRepoLens(repo: string): Promise<void> {
     const id = await repoIdentityStrict(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadToleratingEmptyStore(store);
-      await store.delete(id);
-      await store.save();
+      return writeWithRollback(store, async () => {
+        await store.delete(id);
+        await store.save();
+      });
     });
   });
 }

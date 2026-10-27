@@ -3501,7 +3501,8 @@ draft readied elsewhere is picked up by the background catch-up poller within it
   a path segment, \`**\` across \`/\`, \`?\` one character, \`{a,b}\` alternation.
 - **Save / Discard.** Both surfaces edit a draft (no per-toggle autosave): the repo dialog
   behind Cancel / **Save changes**, and Settings behind **Save changes** / **Discard**, where
-  Discard asks first and closing with unsaved changes confirms too.
+  Discard asks first, and so does leaving Settings with unsaved changes through Back,
+  {{key:escape}}, the command palette, a shortcut, a notification, or opening a repository.
 - **Per-repo overrides.** The repo dialog shows the **effective** state (global defaults merged
   with this repo's overrides), badges each overridden cell as *Overridden*, and can enable an
   action that's globally off. **Reset to global defaults** drops every override so the repo

@@ -1,6 +1,7 @@
 import { load } from "@tauri-apps/plugin-store";
 import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { norm } from "@/lib/repo-key";
 import { rehomeTaskScopes } from "@/lib/scripts/store";
 import { storeName } from "@/lib/test-mode";
@@ -219,32 +220,35 @@ async function migrateIdentityStoreLocked(
   newKey: string,
 ): Promise<void> {
   await store.reload();
+  return writeWithRollback(store, async () => {
+    if (desc.nested) {
+      const { configKey, getMap } = desc.nested;
+      const config = await store.get<unknown>(configKey);
+      if (!isRecord(config)) return;
+      const map = getMap(config);
+      if (!isRecord(map)) return;
+      const oldKeys = matchingOldKeys(Object.keys(map), oldPath, newKey);
+      if (oldKeys.length === 0) return;
+      const oldVals = oldKeys.map((k) => map[k]);
+      const combined = combine(desc.merge, map[newKey], oldVals);
+      if (combined !== undefined) map[newKey] = combined;
+      for (const k of oldKeys) delete map[k];
+      await store.set(configKey, config);
+      await store.save();
+      return;
+    }
 
-  if (desc.nested) {
-    const { configKey, getMap } = desc.nested;
-    const config = await store.get<unknown>(configKey);
-    if (!isRecord(config)) return;
-    const map = getMap(config);
-    if (!isRecord(map)) return;
-    const oldKeys = matchingOldKeys(Object.keys(map), oldPath, newKey);
+    const oldKeys = matchingOldKeys(await store.keys(), oldPath, newKey);
     if (oldKeys.length === 0) return;
-    const oldVals = oldKeys.map((k) => map[k]);
-    const combined = combine(desc.merge, map[newKey], oldVals);
-    if (combined !== undefined) map[newKey] = combined;
-    for (const k of oldKeys) delete map[k];
-    await store.set(configKey, config);
+    const oldVals = await Promise.all(
+      oldKeys.map((k) => store.get<unknown>(k)),
+    );
+    const newVal = await store.get<unknown>(newKey);
+    const combined = combine(desc.merge, newVal, oldVals);
+    if (combined !== undefined) await store.set(newKey, combined);
+    for (const k of oldKeys) await store.delete(k);
     await store.save();
-    return;
-  }
-
-  const oldKeys = matchingOldKeys(await store.keys(), oldPath, newKey);
-  if (oldKeys.length === 0) return;
-  const oldVals = await Promise.all(oldKeys.map((k) => store.get<unknown>(k)));
-  const newVal = await store.get<unknown>(newKey);
-  const combined = combine(desc.merge, newVal, oldVals);
-  if (combined !== undefined) await store.set(newKey, combined);
-  for (const k of oldKeys) await store.delete(k);
-  await store.save();
+  });
 }
 
 /** Migrate one raw-path store: rewrite each item's `repoPath` from old to new. */
@@ -257,23 +261,25 @@ async function migrateRawPathStore(
   const store = await loadStore(file);
   await withAppStoreLock(file, async () => {
     await store.reload();
-    const items = await store.get<unknown>(key);
-    if (!Array.isArray(items)) return;
-    const rawOld = norm(oldPath);
-    let changed = false;
-    for (const item of items) {
-      if (
-        isRecord(item) &&
-        typeof item.repoPath === "string" &&
-        norm(item.repoPath) === rawOld
-      ) {
-        item.repoPath = newPath;
-        changed = true;
+    return writeWithRollback(store, async () => {
+      const items = await store.get<unknown>(key);
+      if (!Array.isArray(items)) return;
+      const rawOld = norm(oldPath);
+      let changed = false;
+      for (const item of items) {
+        if (
+          isRecord(item) &&
+          typeof item.repoPath === "string" &&
+          norm(item.repoPath) === rawOld
+        ) {
+          item.repoPath = newPath;
+          changed = true;
+        }
       }
-    }
-    if (!changed) return;
-    await store.set(key, items);
-    await store.save();
+      if (!changed) return;
+      await store.set(key, items);
+      await store.save();
+    });
   });
 }
 

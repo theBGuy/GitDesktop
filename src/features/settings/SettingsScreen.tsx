@@ -134,6 +134,7 @@ function focusRailItem(root: HTMLElement | null, panel: string) {
 
 export function SettingsScreen() {
   const closeSettings = useUiStore((s) => s.closeSettings);
+  const setSettingsLeaveGuard = useUiStore((s) => s.setSettingsLeaveGuard);
   const settingsTarget = useUiStore((s) => s.settingsTarget);
   const clearSettingsTarget = useUiStore((s) => s.clearSettingsTarget);
   const repoPath = useUiStore((s) => s.repoPath);
@@ -147,13 +148,27 @@ export function SettingsScreen() {
     (settingsTarget as PanelId | null) ?? "general",
   );
   const [confirmClose, setConfirmClose] = useState(false);
-  const closeAfterSave = useRef(false);
+  const confirmCloseRef = useLatestRef(confirmClose);
+  // The move the Unsaved changes dialog holds for its answer (null: Back/Esc,
+  // whose move is closing Settings).
+  const pendingLeave = useRef<(() => void) | null>(null);
+  // Where an in-flight "Save and close" continues, with the epoch it was
+  // requested at. Read live when the Save lands, so a move requested during the
+  // save replaces it and Keep editing cancels it; dropped by every Save's end.
+  const leaveAfterSave = useRef<{ run: () => void; epoch: number } | null>(
+    null,
+  );
+  // The Automations write the Save started or joined, which it waits for too.
+  const automationsAtSave = useRef<Promise<boolean> | null>(null);
   // The Automations panel edits its own draft (saved independently of the
   // settings form); track its dirtiness so closing Settings still guards it, and
   // hold its imperative save and discard so the footer's Save and Discard (and
-  // the close guard's) reach it too.
+  // the close guard's) reach it too. Its in-flight write folds into `saving`.
   const [automationsDirty, setAutomationsDirty] = useState(false);
-  const saveAutomationsRef = useRef<(() => void) | null>(null);
+  const [automationsSaving, setAutomationsSaving] = useState(false);
+  const saveAutomationsRef = useRef<
+    ((opts?: { quiet?: boolean }) => Promise<boolean>) | null
+  >(null);
   const discardAutomationsRef = useRef<(() => void) | null>(null);
   const automationsDirtyRef = useLatestRef(automationsDirty);
   // Typed MCP secret values wait here until Save, in renderer memory only. It
@@ -247,6 +262,8 @@ export function SettingsScreen() {
         const stagedAtPress = stagedRef.current;
         const baselineAtPress = mcpBaseline.current;
         const discardsAtPress = discards.current;
+        const automationsSaved = automationsAtSave.current;
+        automationsAtSave.current = null;
         const current = settings.data;
         if (!current) return;
         try {
@@ -299,8 +316,6 @@ export function SettingsScreen() {
         // Only failures still staged count: one a mid-flight Discard, prune or
         // re-type removed is no longer the user's to retry.
         const unstored = keep.filter((e) => next.includes(e)).length;
-        const andClose = closeAfterSave.current;
-        closeAfterSave.current = false;
         if (unstored > 0) {
           const title = `Settings saved, but ${unstored} secret value${unstored === 1 ? "" : "s"} couldn't be stored in your keychain. Save again to retry.`;
           // The keychain's own reason (a locked or missing keychain, a denied
@@ -318,19 +333,40 @@ export function SettingsScreen() {
           else toast.error(title);
         } else {
           toast.success("Settings saved");
-          // The flush awaited above: close only if nothing changed meanwhile,
-          // so an edit made during the save stays on screen with its Save bar.
+          // Continue once the Automations write lands too (its failure already
+          // toasted, so it stays), to wherever the move stands NOW, and only if
+          // nothing happened meanwhile: no edit (it stays on screen with its
+          // Save bar), no prompt open (this screen's or an app-scoped one, such
+          // as the footer Discard's), and no user action since the move was
+          // requested, so this late resume retires nothing newer.
           if (
-            andClose &&
-            mounted.current &&
-            useUiStore.getState().view === "settings" &&
-            stagedRef.current.length === 0 &&
-            stableStringify(form.state.values) === stableStringify(value)
-          )
-            closeSettings();
+            leaveAfterSave.current !== null &&
+            (automationsSaved === null || (await automationsSaved))
+          ) {
+            const leave = leaveAfterSave.current;
+            if (
+              leave !== null &&
+              mounted.current &&
+              useUiStore.getState().view === "settings" &&
+              useUiStore.getState().interactionEpoch === leave.epoch &&
+              !confirmCloseRef.current &&
+              pendingLeave.current === null &&
+              useConfirm.getState().request === null &&
+              stagedRef.current.length === 0 &&
+              !automationsDirtyRef.current &&
+              stableStringify(form.state.values) === stableStringify(value)
+            ) {
+              leaveAfterSave.current = null;
+              // Synchronously, or the guard would intercept the resumed move.
+              setSettingsLeaveGuard(null);
+              leave.run();
+            }
+          }
         }
         flushMcpSecretDeletes(deletes);
       } finally {
+        // Every way out of a Save drops its move: a failed Save never leaves.
+        leaveAfterSave.current = null;
         saveLock.current = false;
         setSaveLocked(false);
       }
@@ -372,7 +408,7 @@ export function SettingsScreen() {
   // store change, but the component only re-renders when dirtiness FLIPS — not
   // on every keystroke across all 13 panels.
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
-  const saving = isSubmitting || saveLocked;
+  const saving = isSubmitting || saveLocked || automationsSaving;
   const saved = settings.data ? toDraft(settings.data) : null;
   const savedStr = saved !== null ? stableStringify(saved) : null;
   const dirty = useSelector(
@@ -403,6 +439,46 @@ export function SettingsScreen() {
   // Unsaved edits in the settings form, the Automations panel or the staged
   // MCP secrets should guard closing the screen.
   const closeDirty = dirty || automationsDirty || secretsDirty;
+
+  // Every view-moving navigator asks here first while anything is unsaved: the
+  // move waits in `pendingLeave` for the Unsaved changes answer, and a later one
+  // replaces it (latest intent wins). While "Save and close" is saving, a move
+  // replaces where that save continues instead, asking nothing (the user already
+  // chose to save and leave). Nulled when clean and at unmount, since a guard
+  // left behind would hold every navigation.
+  useEffect(() => {
+    if (!closeDirty) return;
+    setSettingsLeaveGuard((resume) => {
+      if (
+        saveLock.current &&
+        leaveAfterSave.current !== null &&
+        !confirmCloseRef.current
+      ) {
+        leaveAfterSave.current = {
+          run: resume,
+          epoch: useUiStore.getState().interactionEpoch,
+        };
+        return;
+      }
+      pendingLeave.current = resume;
+      setConfirmClose(true);
+    });
+    return () => setSettingsLeaveGuard(null);
+  }, [closeDirty, setSettingsLeaveGuard]);
+
+  // A Save that lands under the open prompt leaves nothing to ask about: close
+  // it and continue to the move it held (Back's being closing Settings). Not
+  // while any write is still in flight: the Automations patch reads clean
+  // before its write lands, and a failure must still find the draft on screen.
+  useEffect(() => {
+    if (closeDirty || saving || !confirmClose) return;
+    const leave = pendingLeave.current ?? closeSettings;
+    pendingLeave.current = null;
+    setConfirmClose(false);
+    // Synchronously, or the guard would intercept the resumed move.
+    setSettingsLeaveGuard(null);
+    leave();
+  }, [closeDirty, saving, confirmClose, closeSettings, setSettingsLeaveGuard]);
 
   const footerVisible = dirty || secretsDirty;
   const footerVisibleRef = useLatestRef(footerVisible);
@@ -445,13 +521,22 @@ export function SettingsScreen() {
     );
   }
 
-  function save(andClose: boolean) {
+  // `after` runs once the Save lands (null for the footer's plain Save).
+  function save(after: (() => void) | null) {
     if (saveLock.current) return;
-    // Persist the Automations panel's own draft alongside the settings form —
-    // fire-and-forget, like the form save: the store write completes even as the
-    // screen closes. Without this, "Save and close" would silently drop it.
-    if (automationsDirty) saveAutomationsRef.current?.();
-    closeAfterSave.current = andClose;
+    // Persist the Automations panel's own draft alongside the settings form;
+    // without this, "Save and close" would silently drop it. Called whenever
+    // the panel registers a handle, never gated on `automationsDirty`: the
+    // optimistic patch clears that while an inline save is still in flight, and
+    // the handle joins that write so the continuation waits for it.
+    automationsAtSave.current =
+      saveAutomationsRef.current?.({ quiet: true }) ?? null;
+    // Stamped with the epoch of this press: the resume, which bumps at settle,
+    // runs only if no user action came since.
+    leaveAfterSave.current = after && {
+      run: after,
+      epoch: useUiStore.getState().interactionEpoch,
+    };
     form.handleSubmit();
   }
 
@@ -500,9 +585,12 @@ export function SettingsScreen() {
     applyDiscard();
   }
 
+  // Back and Esc ask about closing itself, never a move held from earlier.
   function requestClose() {
-    if (closeDirty) setConfirmClose(true);
-    else closeSettings();
+    if (closeDirty) {
+      pendingLeave.current = null;
+      setConfirmClose(true);
+    } else closeSettings();
   }
 
   // Esc closes settings (guarded). Base UI popups handle their own Esc and
@@ -513,13 +601,58 @@ export function SettingsScreen() {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape" && !e.defaultPrevented) {
-        if (dirtyRef.current) setConfirmClose(true);
-        else closeSettings();
+        if (dirtyRef.current) {
+          pendingLeave.current = null;
+          setConfirmClose(true);
+        } else closeSettings();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [closeSettings]);
+
+  // The Unsaved changes answers, one dialog for Back, Esc and every intercepted
+  // navigation: "…and close" continues to the held move, else closes Settings.
+  function takePendingLeave() {
+    const leave = pendingLeave.current ?? closeSettings;
+    pendingLeave.current = null;
+    return leave;
+  }
+
+  // Cancels the move, an in-flight "Save and close"'s included.
+  function keepEditing() {
+    pendingLeave.current = null;
+    leaveAfterSave.current = null;
+    setConfirmClose(false);
+  }
+
+  function discardAndLeave() {
+    const leave = takePendingLeave();
+    leaveAfterSave.current = null;
+    setConfirmClose(false);
+    applyDiscard();
+    // Synchronously, or the guard would intercept the resumed move.
+    setSettingsLeaveGuard(null);
+    leave();
+  }
+
+  function saveAndLeave() {
+    const leave = takePendingLeave();
+    setConfirmClose(false);
+    save(leave);
+  }
+
+  // A close that leaves focus nowhere lands it on the rail: a route that had
+  // already moved focus (the palette) leaves Base UI's return nothing to land
+  // on. That return runs from the popup's unmount, which is what fires
+  // `onOpenChangeComplete(false)`, so the frame after it sees where it landed.
+  function focusRailIfDropped() {
+    requestAnimationFrame(() => {
+      const active = document.activeElement;
+      if (mounted.current && (active === null || active === document.body))
+        focusRailItem(rootRef.current, activePanelRef.current);
+    });
+  }
 
   return (
     <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
@@ -572,6 +705,7 @@ export function SettingsScreen() {
                   onRegisterSave={(fn) => {
                     saveAutomationsRef.current = fn;
                   }}
+                  onSavingChange={setAutomationsSaving}
                   onRegisterDiscard={(fn) => {
                     discardAutomationsRef.current = fn;
                   }}
@@ -633,7 +767,7 @@ export function SettingsScreen() {
             </Button>
             <DisabledReasonButton
               size="sm"
-              onClick={() => save(false)}
+              onClick={() => save(null)}
               disabled={saving}
               reason="Saving…"
             >
@@ -644,7 +778,17 @@ export function SettingsScreen() {
         </footer>
       )}
 
-      <Dialog open={confirmClose} onOpenChange={setConfirmClose}>
+      <Dialog
+        open={confirmClose}
+        onOpenChange={(open) => {
+          // A backdrop click or Esc is Keep editing.
+          if (!open) keepEditing();
+          else setConfirmClose(true);
+        }}
+        onOpenChangeComplete={(open) => {
+          if (!open) focusRailIfDropped();
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Unsaved changes</DialogTitle>
@@ -653,24 +797,14 @@ export function SettingsScreen() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmClose(false)}>
+            <Button variant="outline" onClick={keepEditing}>
               Keep editing
             </Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setConfirmClose(false);
-                applyDiscard();
-                closeSettings();
-              }}
-            >
+            <Button variant="outline" onClick={discardAndLeave}>
               Discard and close
             </Button>
             <DisabledReasonButton
-              onClick={() => {
-                setConfirmClose(false);
-                save(true);
-              }}
+              onClick={saveAndLeave}
               disabled={saving}
               reason="Saving…"
             >

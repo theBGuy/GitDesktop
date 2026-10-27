@@ -53,7 +53,9 @@ export const repoOpenWatermark = openClaims.watermark;
  * The recents write finishes BEFORE the switch, so the row exists when
  * RepositoryView mounts and its open-time visibility probe persists onto it; a
  * superseded open still records its repo. The write is best-effort, since a
- * settings-write failure must never block opening. Resolves whether it switched.
+ * settings-write failure must never block opening. Resolves true once the switch
+ * was REQUESTED: a dirty Settings may still hold it behind its Unsaved changes
+ * prompt, whose Keep editing cancels it.
  * Callers whose own awaits are part of the open request (drop, Recents, the
  * folder picker, a submodule opened as a repo) claim before those awaits and
  * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; a caller
