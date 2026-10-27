@@ -194,7 +194,8 @@ const AUTOMATIONS_ASK_ENTRIES = {
 
 /** Problems with the Automations panel's inline Discard, `[]` when pinned:
  *  its button asks through `requestDiscard`, whose app-scoped prompt carries
- *  the confirmed copy and whose draft reset runs only after a confirmed answer. */
+ *  the confirmed copy and whose draft reset runs only after a confirmed answer,
+ *  through the latest render's discard (a refetch can land during the prompt). */
 function automationsAskProblems(text) {
   const problems = promptLiteralProblems(text, AUTOMATIONS_ASK_ENTRIES);
   const masked = maskNonCode(text, true);
@@ -203,9 +204,11 @@ function automationsAskProblems(text) {
   const body = masked.slice(request[0], request[1]);
   const guard = body.indexOf("if (!ok) {");
   const guardEnd = guard === -1 ? -1 : matchBrace(body, guard + 9);
-  const resets = [...body.matchAll(/\bdiscard\(\)/g)];
+  const resets = [...body.matchAll(/\bdiscardRef\.current\(\)/g)];
   if (guardEnd === -1 || resets.length !== 1 || resets[0].index < guardEnd)
     problems.push("the draft reset doesn't wait for a confirmed answer");
+  if (/\bdiscard\(\)/.test(body))
+    problems.push("the confirmed reset runs the click render's discard");
   if (!/onClick=\{requestDiscard\}/.test(masked))
     problems.push("the Discard button no longer asks first");
   if (/onClick=\{discard\}/.test(masked))
@@ -639,10 +642,23 @@ test("the Automations panel's Discard asks first with the confirmed copy", () =>
     (s) =>
       s
         .replace(
-          "      pendingHeadingFocus.current = true;\n      discard();\n",
+          "      pendingHeadingFocus.current = true;\n      discardRef.current();\n",
           "",
         )
-        .replace("      if (!ok) {\n", "      discard();\n      if (!ok) {\n"),
+        .replace(
+          "      if (!ok) {\n",
+          "      discardRef.current();\n      if (!ok) {\n",
+        ),
+    (s) =>
+      s.replace(
+        "      pendingHeadingFocus.current = true;\n      discardRef.current();\n",
+        "      pendingHeadingFocus.current = true;\n      discard();\n",
+      ),
+    (s) =>
+      s.replace(
+        "      pendingHeadingFocus.current = true;\n      discardRef.current();\n",
+        "      pendingHeadingFocus.current = true;\n      discard();\n      discardRef.current();\n",
+      ),
   );
 });
 

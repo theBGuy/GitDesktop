@@ -36,7 +36,7 @@ export function maxClearance(values: Iterable<number>): number {
 }
 
 // Entries are docked action bars, keyed per bar instance; the toaster clears the
-// highest. Only the Settings Save bar publishes today.
+// highest.
 const entries = new Map<string, number>();
 const listeners = new Set<() => void>();
 let aggregate = 0;

@@ -292,11 +292,10 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 - A docked action bar that a bottom-right toast can cover publishes its top
   edge through `useToastClearance(ref, active)`
   (`src/lib/use-toast-clearance.ts`), which lifts every toast above it while
-  `active` (only the Settings Save bar adopts it so far). Beyond `position`
-  and `closeButton`, only the offset props ride along on the app Toaster
-  (`AppToaster` in `src/main.tsx`): the vendored wrapper spreads caller props
-  last, so `toastOptions` would drop its `cn-toast` class, `className` its
-  `toaster group` class, and `style` its CSS variables.
+  `active`. Beyond `position` and `closeButton`, only the offset props ride
+  along on the app Toaster (`AppToaster` in `src/main.tsx`): the vendored
+  wrapper spreads caller props last, so `toastOptions` would drop its `cn-toast`
+  class, `className` its `toaster group` class, and `style` its CSS variables.
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".

@@ -174,6 +174,7 @@ export const AutomationsSection = withForm({
       pendingDiscard.current = save.isPending ? target : null;
       setDraft(target);
     }
+    const discardRef = useLatestRef(discard);
 
     // A save that fails under a Discard must not leave the discarded rules for
     // a later Save to persist: an unedited reset (still that same object)
@@ -258,7 +259,7 @@ export const AutomationsSection = withForm({
         return;
       }
       pendingHeadingFocus.current = true;
-      discard();
+      discardRef.current();
     }
 
     function doSave() {
@@ -282,7 +283,6 @@ export const AutomationsSection = withForm({
       onRegisterSave(dirty ? () => doSaveRef.current() : null);
       return () => onRegisterSave(null);
     }, [dirty, onRegisterSave]);
-    const discardRef = useLatestRef(discard);
     useEffect(() => {
       if (!onRegisterDiscard) return;
       onRegisterDiscard(dirty ? () => discardRef.current() : null);
