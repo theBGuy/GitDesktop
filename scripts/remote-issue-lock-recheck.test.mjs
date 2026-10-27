@@ -1,9 +1,10 @@
 // Pins the issue view's lock re-check (src/features/issues/RemoteIssueView.tsx):
 // opening the More-actions menu re-reads the issue while its lock state is
 // unknown, which is the held "Lock or unlock conversation" row's only retry.
-// The guard keeps the read to that case: not while it is already fetching, and
-// not while offline, where it would only park. Source shape only; the live
-// re-read needs the app.
+// The guard keeps the read to that case: only on open, only where the lock row
+// renders (lockable, not a stale issue), not while the read is fetching or
+// parked, and not while offline, where it would only park. Source shape only;
+// the live re-read needs the app.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -14,12 +15,21 @@ const FILE = new URL(
   "../src/features/issues/RemoteIssueView.tsx",
   import.meta.url,
 );
-const GUARDS = ["issue.lockUnknown", "!details.isFetching", "!isOfflineNow()"];
+/** Every conjunct of the guard, each required as written. */
+const GUARDS = [
+  "open",
+  "canLock",
+  "!detailsStale",
+  "issue.lockUnknown",
+  "!details.isFetching",
+  "!details.isPaused",
+  "!isOfflineNow()",
+];
 
 /** Throws unless the `<DropdownMenu>` holding the "More actions" trigger has an
- *  `onOpenChange` whose `if` guard names every GUARDS term and whose guarded
- *  block calls `details.refetch()`. Comments and strings are masked, so only
- *  code counts. */
+ *  `onOpenChange` whose `if` guard has every GUARDS term as a conjunct and
+ *  whose guarded block calls `details.refetch()`. Comments and strings are
+ *  masked, so only code counts. */
 function assertLockRecheck(raw) {
   const src = raw.replace(/\r\n/g, "\n");
   const masked = maskNonCode(src, true);
@@ -44,9 +54,13 @@ function assertLockRecheck(raw) {
   assert.ok(guard, "onOpenChange guards its re-read");
   const condOpen = guard.index + guard[0].length - 1;
   const condClose = matchBrace(body, condOpen);
-  const condition = body.slice(condOpen, condClose + 1).replace(/\s+/g, "");
+  // Whole conjuncts, so a term can't pass as part of another (`open`).
+  const conjuncts = body
+    .slice(condOpen + 1, condClose)
+    .replace(/\s+/g, "")
+    .split("&&");
   for (const term of GUARDS)
-    assert.ok(condition.includes(term), `the guard includes ${term}`);
+    assert.ok(conjuncts.includes(term), `the guard includes ${term}`);
   const blockOpen = body.indexOf("{", condClose);
   const block = body.slice(blockOpen, matchBrace(body, blockOpen) + 1);
   assert.match(block, /\bdetails\.refetch\(\)/, "the guard re-reads details");

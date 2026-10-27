@@ -41,8 +41,10 @@
 //      `forge::session::classify_gh_failure` only buckets the failure; the
 //      read's own outcome fn decides absence (RateLimited/Transport are an Err,
 //      and star status and the Explore README reject every failure but
-//      NotFound). An exit-0 body an outcome fn can't parse is an Err as well,
-//      which J doesn't scan: it reads exits only.
+//      NotFound). In the read outcome fns, an exit-0 body that won't parse is
+//      an Err as well, which J doesn't scan: it reads exits only. Exempt:
+//      `classify_repo_view` (github/pr.rs) keeps an unreadable repo view as
+//      Unresolved, forge-status's answered "no repository" probe.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,

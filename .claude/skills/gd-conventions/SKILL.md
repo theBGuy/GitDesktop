@@ -1124,8 +1124,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `classify_gh_failure` in a pure `*_outcome` fn (RateLimited/Transport → Err,
   NotFound/Answered → absence), never "none" on a non-zero exit (guard:
   check-rust-invariants check J). The exceptions: star status (github/pr.rs,
-  forge/github.rs) and the Explore README map Answered → Err too, and a lock
-  read is known only from a parsed answer.
+  forge/github.rs) and the Explore README map Answered → Err too. An exit-0
+  body that won't parse rejects as well, while a parsed body missing a field
+  keeps that field's meaning; the lock read needs a readable `locked`. The
+  repo view is exempt: unreadable, it stays forge-status's Unresolved.
 - **gh rate-limit hold:** `github/runner.rs` holds a gh call whose argv
   classifies to a limited (host, bucket) pair (REST core, GraphQL or search)
   and returns gh-shaped rate-limit stderr without spawning. Evidence comes

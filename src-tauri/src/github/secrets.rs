@@ -298,8 +298,8 @@ fn environments_list_outcome(
 ) -> AppResult<Vec<String>> {
     let out = result?;
     // A 404 or an empty list means no environments; other answered failures keep
-    // the empty fallback. Rate limits and transport failures reject the read
-    // because they cannot establish absence.
+    // the empty fallback. Rate limits, transport failures and an exit-0 body that
+    // won't parse reject the read because they cannot establish absence.
     if out.code != 0 {
         return match classify_gh_failure(&out.stderr) {
             GhFailure::RateLimited | GhFailure::Transport => {
