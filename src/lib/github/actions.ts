@@ -350,15 +350,18 @@ export function useRunDetail(
 }
 
 /** Every run of a pull request's head commit (GitHub-only), polled per
- *  `headRunsPollIntervalMs`: `pendingIds` are the runs the PR's checks still
- *  report pending, which keep the poll awake over a finished row. An errored
- *  read stops it. Keyed inside the `["repo", repo, "actions"]` subtree, so
- *  every Actions mutation's invalidation wakes it. */
+ *  `headRunsPollIntervalMs`. `pendingIds` are the runs the open rollup's checks
+ *  still report pending, never latch-only re-run ids: one over a finished row
+ *  wakes the poll for one short window, until its key lands in
+ *  `closedWakeKeys`. An errored read stops it.
+ *  Keyed inside the `["repo", repo, "actions"]` subtree, so every Actions
+ *  mutation's invalidation wakes it. */
 export function useHeadRuns(
   repo: string,
   headSha: string | null,
   enabled: boolean,
   pendingIds: readonly string[],
+  closedWakeKeys: ReadonlySet<string>,
 ) {
   return useQuery({
     queryKey: ["repo", repo, "actions", "head-runs", headSha] as const,
@@ -367,7 +370,12 @@ export function useHeadRuns(
     staleTime: 10_000,
     refetchInterval: (query) =>
       query.state.status !== "error" &&
-      headRunsPollIntervalMs(query.state.data, pendingIds, Date.now()),
+      headRunsPollIntervalMs(
+        query.state.data,
+        pendingIds,
+        Date.now(),
+        closedWakeKeys,
+      ),
   });
 }
 

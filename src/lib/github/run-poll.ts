@@ -130,22 +130,57 @@ export function runsPollIntervalMs(
   return best;
 }
 
-/** A PR head poll's interval: {@link runsPollIntervalMs}, except that a run the
- *  PR's checks still report pending while its row reads finished holds the poll
- *  at the mid tier at most, since a new attempt started elsewhere may be on its
- *  way. A pending id the rows don't carry changes nothing. */
+/** When a wake (below) re-reads the PR's checks, measured from its start: the
+ *  PR's checks rollup can lag the runs list, and a failed PR read isn't retried. */
+export const CHECKS_RECHECK_DELAYS_MS = [15_000, 30_000, 60_000] as const;
+/** How long one wake lasts: one mid-tier poll past the last re-check. */
+export const HEAD_WAKE_WINDOW_MS =
+  CHECKS_RECHECK_DELAYS_MS[2] + RUN_POLL_MID_MS;
+
+/** A head-list row as the wake reads it. */
+export type HeadWakeRow = PollRun & { id: number | string; updatedAt?: string };
+
+/** The pending ids whose head row reads finished: a check the open rollup still
+ *  reports pending (never a latch-only re-run id) over a finished run, which may
+ *  be a new attempt started elsewhere. Keyed by the row's `updatedAt`, so each
+ *  finished attempt wakes once. An id the rows don't carry is the per-run
+ *  fallback's, never a wake. */
+export function headWakeMismatches(
+  rows: readonly HeadWakeRow[] | undefined,
+  pendingIds: readonly string[],
+): { id: string; key: string }[] {
+  if (rows === undefined || pendingIds.length === 0) return [];
+  const pending = new Set(pendingIds);
+  return rows.flatMap((r) => {
+    const id = String(r.id);
+    return pending.has(id) && !isRunActive(r.status)
+      ? [{ id, key: `${id} ${r.updatedAt ?? ""}` }]
+      : [];
+  });
+}
+
+/** Whether a wake that started at `startedAtMs` has run its course. */
+export function headWakeWindowClosed(
+  startedAtMs: number,
+  nowMs: number,
+): boolean {
+  return nowMs - startedAtMs >= HEAD_WAKE_WINDOW_MS;
+}
+
+/** A PR head poll's interval: {@link runsPollIntervalMs}, except that an open
+ *  wake (a mismatch whose key isn't in `closedKeys`) holds the poll at the mid
+ *  tier at most, so a new attempt started elsewhere shows up. */
 export function headRunsPollIntervalMs(
-  rows: readonly (PollRun & { id: number | string })[] | undefined,
+  rows: readonly HeadWakeRow[] | undefined,
   pendingIds: readonly string[],
   nowMs: number,
+  closedKeys: ReadonlySet<string> = new Set<string>(),
 ): number | false {
   const base = runsPollIntervalMs(rows, nowMs);
-  if (rows === undefined || pendingIds.length === 0) return base;
-  const pending = new Set(pendingIds);
-  const stale = rows.some(
-    (r) => pending.has(String(r.id)) && !isRunActive(r.status),
+  const awake = headWakeMismatches(rows, pendingIds).some(
+    (m) => !closedKeys.has(m.key),
   );
-  if (!stale) return base;
+  if (!awake) return base;
   return base === false ? RUN_POLL_MID_MS : Math.min(base, RUN_POLL_MID_MS);
 }
 

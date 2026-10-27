@@ -68,7 +68,13 @@ import {
   useRunFailedLogs,
   useRunJobs,
 } from "@/lib/github/actions";
-import type { PollRun } from "@/lib/github/run-poll";
+import {
+  CHECKS_RECHECK_DELAYS_MS,
+  HEAD_WAKE_WINDOW_MS,
+  headWakeMismatches,
+  headWakeWindowClosed,
+  type PollRun,
+} from "@/lib/github/run-poll";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
@@ -527,9 +533,10 @@ function CheckRow({
  *  its jobs to the parent so each row resolves its own job (React Query dedupes
  *  by run-id key, so N rows sharing a run cost one fetch). Mounted per
  *  `mountedWatchIds` — the user's own re-runs always, plus every watched run
- *  while the rollup is open — except, on GitHub, runs the head poll answers
- *  for, and every run while that poll is pending or failed; refetches on the
- *  run-age ladder while the run stays active. */
+ *  while the rollup is open. On GitHub with a known head sha it mounts only for
+ *  runs an answered, healthy head list doesn't carry, and none while that poll
+ *  is pending or failed; with no known head sha every watched run mounts.
+ *  Refetches on the run-age ladder while the run stays active. */
 function RunDetailFetcher({
   repoPath,
   runId,
@@ -763,6 +770,13 @@ export function ChecksRollup({
   // alone would read that as the settle already reported. Dropping an id that
   // reads active again re-arms it early, belt-and-braces.
   const settledRuns = useRef(new Map<string, string>());
+  // Head-poll wakes (see `wakeKeys` below): each open wake's PR re-check and
+  // close timers by wake key, and the keys whose one window has been spent.
+  // State, not a ref, so a window closing re-renders and drops its wake.
+  const wakeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>[]>());
+  const [closedWakes, setClosedWakes] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   // The blocked runs this rollup can approve. A run GitHub holds before it starts
   // may not reach the check rollup at all — that shape is unverified — so an empty
   // list renders nothing rather than an approval offer with nothing to approve.
@@ -826,8 +840,9 @@ export function ChecksRollup({
   // pending check could miss the attempt entirely. Open additionally watches
   // every running check, for the steps UI and general freshness; collapsed, the
   // latch keys are exactly the set the click consented to poll. Bounded both
-  // ways — a settled run parks its own interval (on GitHub, once the checks stop
-  // reporting it pending), and the latch dies with the per-PR remount.
+  // ways: collapsed, a latch-only run parks once its row finishes; open, a check
+  // still pending over a finished row wakes the poll and re-reads the PR's
+  // checks for one short window, then parks. The latch dies with the remount.
   const mountedWatchIds = open
     ? [...new Set([...watchedRunIds, ...recentlyRerun.keys()])]
     : [...recentlyRerun.keys()];
@@ -836,14 +851,15 @@ export function ChecksRollup({
   // prop's default-to-github guess: anything else, a pending probe included,
   // keeps the per-run watchers below.
   const watcherProvider = forge.data?.provider;
-  // A check still pending over a finished row may be a new attempt started
-  // elsewhere, so it keeps the head poll awake. Never the latch keys: a latched
-  // run that finished must park.
+  // While open, a check still pending over a finished row may be a new attempt
+  // started elsewhere, so it wakes the head poll for one window. Never the latch
+  // keys: a latched run that finished must park.
   const headRuns = useHeadRuns(
     repoPath,
     headSha,
     watcherProvider === "github" && mountedWatchIds.length > 0,
     open ? watchedRunIds : [],
+    closedWakes,
   );
   const headRunById = new Map(
     watcherProvider === "github"
@@ -866,6 +882,64 @@ export function ChecksRollup({
   const jobsReadIds = open
     ? runningRunIds.filter((id) => headRunById.has(id))
     : [];
+  // The open wakes, keyed per finished attempt. The PR's checks can lag the runs
+  // list, and a failed PR read isn't retried, so each wake re-reads the checks
+  // on a ladder, then closes, and its attempt never wakes again. A wake ends
+  // early when its check stops reading pending or its row turns active.
+  const wakeKeys =
+    watcherProvider === "github" && open
+      ? headWakeMismatches(headRuns.data, watchedRunIds)
+          .map((m) => m.key)
+          .filter((key) => !closedWakes.has(key))
+      : [];
+  const wakeSignature = [...wakeKeys].sort().join("\n");
+  useEffect(() => {
+    const timers = wakeTimers.current;
+    return () => {
+      for (const list of timers.values()) for (const t of list) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
+  useEffect(() => {
+    const live = new Set(wakeSignature === "" ? [] : wakeSignature.split("\n"));
+    const ended: string[] = [];
+    for (const [key, list] of wakeTimers.current) {
+      if (live.has(key)) continue;
+      for (const t of list) clearTimeout(t);
+      wakeTimers.current.delete(key);
+      ended.push(key);
+    }
+    const close = (keys: string[]) =>
+      setClosedWakes((prev) => {
+        if (keys.every((k) => prev.has(k))) return prev;
+        const next = new Set(prev);
+        for (const k of keys) next.add(k);
+        return next;
+      });
+    if (ended.length > 0) close(ended);
+    for (const key of live) {
+      if (wakeTimers.current.has(key)) continue;
+      const startedAt = Date.now();
+      const list = CHECKS_RECHECK_DELAYS_MS.map((delay) =>
+        setTimeout(() => {
+          void queryClient.invalidateQueries({
+            queryKey: ["repo", repoPath, "pr"],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: repoKeys.prCi(repoPath),
+          });
+        }, delay),
+      );
+      const expire = () => {
+        const now = Date.now();
+        if (headWakeWindowClosed(startedAt, now)) close([key]);
+        else
+          list.push(setTimeout(expire, startedAt + HEAD_WAKE_WINDOW_MS - now));
+      };
+      list.push(setTimeout(expire, HEAD_WAKE_WINDOW_MS));
+      wakeTimers.current.set(key, list);
+    }
+  }, [wakeSignature, queryClient, repoPath]);
   useEffect(() => {
     let finished = false;
     const settledHeadIds: string[] = [];

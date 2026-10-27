@@ -695,7 +695,7 @@ async fn run_updated_at_probe(
 
 #[derive(Debug, Default, Deserialize)]
 struct RestJobsPage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_u64")]
     total_count: u64,
     #[serde(default, deserialize_with = "de_null_vec")]
     jobs: Vec<RestJob>,
@@ -2488,7 +2488,11 @@ mod tests {
         let counted: RestJobsPage =
             serde_json::from_str(r#"{"total_count":250,"jobs":[]}"#).unwrap();
         assert_eq!(counted.total_count, 250);
-        for body in [r#"{"jobs":[]}"#, r#"{"total_count":0,"jobs":[]}"#] {
+        for body in [
+            r#"{"jobs":[]}"#,
+            r#"{"total_count":0,"jobs":[]}"#,
+            r#"{"total_count":null,"jobs":[]}"#,
+        ] {
             let page: RestJobsPage = serde_json::from_str(body).unwrap();
             assert_eq!(page.total_count, 0);
             assert_eq!(next_jobs_page(page.total_count, 100, 100, 1), None);

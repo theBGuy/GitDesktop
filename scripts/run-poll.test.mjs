@@ -10,7 +10,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { notifyPollInterval } from "../src/features/actions/run-notify-diff.ts";
 import {
+  CHECKS_RECHECK_DELAYS_MS,
+  HEAD_WAKE_WINDOW_MS,
   headRunsPollIntervalMs,
+  headWakeMismatches,
+  headWakeWindowClosed,
   listRunsPollIntervalMs,
   newestJobStartedAt,
   RUN_POLL_FAST_MS,
@@ -468,4 +472,84 @@ test("a pending check whose head row reads finished keeps the head poll awake", 
   // Empty or unanswered rows: the base value.
   assert.equal(headRunsPollIntervalMs([], ["2"], NOW), false);
   assert.equal(headRunsPollIntervalMs(undefined, ["2"], NOW), false);
+});
+
+test("the wake re-checks at 15, 30 and 60 s and closes one mid tick later", () => {
+  assert.deepEqual([...CHECKS_RECHECK_DELAYS_MS], [15_000, 30_000, 60_000]);
+  assert.equal(HEAD_WAKE_WINDOW_MS, 75_000);
+});
+
+test("a wake mismatch is a pending id whose head row reads finished", () => {
+  const row = (id, status, updatedAt = "u1") => ({
+    id,
+    status,
+    createdAt: ago(MIN),
+    updatedAt,
+  });
+  const rows = [
+    row(1, "completed"),
+    row(2, "in_progress"),
+    row(3, "completed", "u3"),
+  ];
+  // A finished pending row is in, keyed by its attempt's updatedAt.
+  assert.deepEqual(headWakeMismatches(rows, ["1", "3"]), [
+    { id: "1", key: "1 u1" },
+    { id: "3", key: "3 u3" },
+  ]);
+  // An active pending row is out.
+  assert.deepEqual(headWakeMismatches(rows, ["2"]), []);
+  // A pending id the rows don't carry is out.
+  assert.deepEqual(headWakeMismatches(rows, ["9"]), []);
+  // Nothing pending, or nothing answered: none.
+  assert.deepEqual(headWakeMismatches(rows, []), []);
+  assert.deepEqual(headWakeMismatches(undefined, ["1"]), []);
+});
+
+test("the wake window closes exactly at its length", () => {
+  const start = NOW;
+  assert.equal(headWakeWindowClosed(start, start), false);
+  assert.equal(
+    headWakeWindowClosed(start, start + HEAD_WAKE_WINDOW_MS - 1),
+    false,
+  );
+  assert.equal(headWakeWindowClosed(start, start + HEAD_WAKE_WINDOW_MS), true);
+  assert.equal(
+    headWakeWindowClosed(start, start + HEAD_WAKE_WINDOW_MS + MIN),
+    true,
+  );
+});
+
+test("a closed wake parks the poll; a new attempt opens a new window", () => {
+  const done = (updatedAt) => [
+    { id: 2, status: "completed", createdAt: ago(MIN), updatedAt },
+  ];
+  assert.equal(
+    headRunsPollIntervalMs(done("u1"), ["2"], NOW, new Set(["2 u1"])),
+    false,
+  );
+  assert.equal(
+    headRunsPollIntervalMs(done("u2"), ["2"], NOW, new Set(["2 u1"])),
+    RUN_POLL_MID_MS,
+  );
+});
+
+test("only a finished pending row wakes the poll; active rows keep their tier", () => {
+  // A pending run held for approval is active: it keeps the slow tier.
+  assert.equal(
+    headRunsPollIntervalMs(
+      [{ id: 2, status: "waiting", createdAt: ago(MIN) }],
+      ["2"],
+      NOW,
+    ),
+    RUN_POLL_SLOW_MS,
+  );
+  // An old executing pending run is active too: its ladder gives 60 s.
+  assert.equal(
+    headRunsPollIntervalMs(
+      [{ id: 2, status: "in_progress", createdAt: ago(30 * MIN) }],
+      ["2"],
+      NOW,
+    ),
+    RUN_POLL_SLOW_MS,
+  );
 });
