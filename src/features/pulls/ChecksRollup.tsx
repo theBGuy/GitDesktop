@@ -60,12 +60,15 @@ import type { ForgeProvider, PrCheckOut } from "@/lib/git/types";
 import {
   isRunActive,
   type RunJob,
+  useHeadRuns,
   useJobLogs,
   useRerunJob,
   useRerunRun,
   useRunDetail,
   useRunFailedLogs,
+  useRunJobs,
 } from "@/lib/github/actions";
+import type { PollRun } from "@/lib/github/run-poll";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
@@ -363,7 +366,8 @@ function CheckRow({
   // The live counter is gated on `isRunning`, never on `check.completedAt`: that
   // field rides usePrDetails (focus-only refetch), so a finished check keeps it
   // empty and the counter would climb forever in a focused window. `isRunning`
-  // folds in the 5s-polled run job, the only authority that says a check stopped.
+  // folds in the polled run reads (the head list's run row, else the run job),
+  // the only authorities that say a check stopped.
   const runningSince =
     isRunning && check.startedAt ? new Date(check.startedAt).getTime() : null;
   const elapsed = formatDurationBetween(check.startedAt, check.completedAt);
@@ -523,7 +527,8 @@ function CheckRow({
  *  its jobs to the parent so each row resolves its own job (React Query dedupes
  *  by run-id key, so N rows sharing a run cost one fetch). Mounted per
  *  `mountedWatchIds` — the user's own re-runs always, plus every watched run
- *  while the rollup is open; refetches every 5s while the run stays active. */
+ *  while the rollup is open — except GitHub runs the head poll answers for;
+ *  refetches on the run-age ladder while the run stays active. */
 function RunDetailFetcher({
   repoPath,
   runId,
@@ -536,6 +541,30 @@ function RunDetailFetcher({
 }) {
   const detail = useRunDetail(repoPath, runId, true);
   const jobs = detail.data?.jobs;
+  useEffect(() => {
+    if (jobs) setJobs((prev) => ({ ...prev, [runId]: jobs }));
+  }, [jobs, runId, setJobs]);
+  return null;
+}
+
+/** Headless jobs fetcher for a running GitHub run the head poll answers for,
+ *  mounted only while the rollup is open: the step peek and the step checklist
+ *  are the jobs' only readers, so a collapsed rollup reads none. `run` is the
+ *  run's head-list row, which sets the poll's ladder tier. */
+function RunJobsFetcher({
+  repoPath,
+  runId,
+  run,
+  setJobs,
+}: {
+  repoPath: string;
+  runId: string;
+  run: PollRun;
+  /** The parent's `setJobsByRun` state updater (stable across renders). */
+  setJobs: Dispatch<SetStateAction<Record<string, RunJob[]>>>;
+}) {
+  const jobsRead = useRunJobs(repoPath, runId, true, run);
+  const jobs = jobsRead.data;
   useEffect(() => {
     if (jobs) setJobs((prev) => ({ ...prev, [runId]: jobs }));
   }, [jobs, runId, setJobs]);
@@ -563,6 +592,7 @@ export function ChecksRollup({
   onRetryChecks,
   repoPath,
   provider,
+  headSha,
   crossRepository,
   stale,
   held = false,
@@ -586,6 +616,10 @@ export function ChecksRollup({
   /** The repo's forge provider — gates the running-Actions live-steps fetch to
    *  GitHub (GitLab checks also carry run/job ids but have no steps). */
   provider: ForgeProvider;
+  /** The PR's head commit (`prHeadSha` at the call site), null when unknown.
+   *  Only GitHub's completion watch reads it: one runs list for the commit
+   *  answers for every watched run. */
+  headSha: string | null;
   /** The PR's cross-repository (fork) flag, as the caller reads it off the PR.
    *  Only the approval strip uses it: GitHub holds runs for approval on fork PRs
    *  alone, so the affordance is fork-scoped by design. */
@@ -720,37 +754,14 @@ export function ChecksRollup({
   // replaces: a second re-run inside the window re-arms the shared timer, and
   // without the set the first batch's per-run invalidations would be dropped.
   const repairRunIds = useRef(new Set<string>());
-  // PR details refetch on focus only, and the polled run detail below is the one
+  // PR details refetch on focus only, and the polled run reads below are the one
   // place the rollup learns a run finished before the PR cache does — so a run
-  // whose jobs have all settled refreshes the checks once. Keyed on the settled
-  // jobs' completion signature, not on having observed the active transition:
-  // like the re-run latch, a mount-refetch can hand back an already-finished NEW
-  // attempt, and a run id alone would read that as the settle already reported.
-  // Dropping an id that reads active again re-arms it early, belt-and-braces.
+  // that settles refreshes the checks once. Keyed on the settle's signature, not
+  // on having observed the active transition: like the re-run latch, a
+  // mount-refetch can hand back an already-finished NEW attempt, and a run id
+  // alone would read that as the settle already reported. Dropping an id that
+  // reads active again re-arms it early, belt-and-braces.
   const settledRuns = useRef(new Map<string, string>());
-  useEffect(() => {
-    let finished = false;
-    for (const [runId, jobs] of Object.entries(jobsByRun)) {
-      const settled =
-        jobs.length > 0 && jobs.every((j) => !isRunActive(j.status));
-      if (!settled) {
-        settledRuns.current.delete(runId);
-        continue;
-      }
-      const signature = jobs
-        .map((j) => j.completedAt)
-        .sort()
-        .join(" ");
-      if (settledRuns.current.get(runId) === signature) continue;
-      settledRuns.current.set(runId, signature);
-      finished = true;
-    }
-    if (!finished) return;
-    void queryClient.invalidateQueries({ queryKey: ["repo", repoPath, "pr"] });
-    void queryClient.invalidateQueries({
-      queryKey: repoKeys.prCi(repoPath),
-    });
-  }, [jobsByRun, queryClient, repoPath]);
   // The blocked runs this rollup can approve. A run GitHub holds before it starts
   // may not reach the check rollup at all — that shape is unverified — so an empty
   // list renders nothing rather than an approval offer with nothing to approve.
@@ -819,6 +830,86 @@ export function ChecksRollup({
   const mountedWatchIds = open
     ? [...new Set([...watchedRunIds, ...recentlyRerun.keys()])]
     : [...recentlyRerun.keys()];
+  // GitHub watches through ONE runs list for the PR's head commit instead of a
+  // run view per watched run. Routed on the forge probe, not the `provider`
+  // prop's default-to-github guess: anything else, a pending probe included,
+  // keeps the per-run watchers below.
+  const watcherProvider = forge.data?.provider;
+  const headRuns = useHeadRuns(
+    repoPath,
+    headSha,
+    watcherProvider === "github" && mountedWatchIds.length > 0,
+  );
+  const headRunById = new Map(
+    watcherProvider === "github"
+      ? (headRuns.data ?? []).map((r) => [String(r.id), r] as const)
+      : [],
+  );
+  // A watched run the head list doesn't carry (over 100 runs on one commit, a
+  // sha mismatch) falls back to its own run view, but only off a list that
+  // answered and is healthy: a failed refresh, a rate limit included, must not
+  // fan out a run view per watched run. A PR with no known head sha has no
+  // head poll, so every watched run takes the per-run path.
+  const runViewIds =
+    watcherProvider !== "github" || headSha === null
+      ? mountedWatchIds
+      : headRuns.data !== undefined && !headRuns.isError
+        ? mountedWatchIds.filter((id) => !headRunById.has(id))
+        : [];
+  // The running runs whose steps the open list shows, read as jobs alone. Never
+  // a run the per-run path watches: its run view already lifts its jobs.
+  const jobsReadIds = open
+    ? runningRunIds.filter((id) => headRunById.has(id))
+    : [];
+  useEffect(() => {
+    let finished = false;
+    const settledHeadIds: string[] = [];
+    // Runs the head list answers for settle on their row: `updatedAt` moves on
+    // every attempt, so a new attempt's settle reports even at the same
+    // conclusion.
+    for (const id of mountedWatchIds) {
+      const row = headRunById.get(id);
+      if (!row) continue;
+      if (isRunActive(row.status)) {
+        settledRuns.current.delete(id);
+        continue;
+      }
+      const signature = `${row.updatedAt} ${row.conclusion}`;
+      if (settledRuns.current.get(id) === signature) continue;
+      settledRuns.current.set(id, signature);
+      settledHeadIds.push(id);
+      finished = true;
+    }
+    // Every other run settles on its run view's jobs.
+    for (const [runId, jobs] of Object.entries(jobsByRun)) {
+      if (headRunById.has(runId)) continue;
+      const settled =
+        jobs.length > 0 && jobs.every((j) => !isRunActive(j.status));
+      if (!settled) {
+        settledRuns.current.delete(runId);
+        continue;
+      }
+      const signature = jobs
+        .map((j) => j.completedAt)
+        .sort()
+        .join(" ");
+      if (settledRuns.current.get(runId) === signature) continue;
+      settledRuns.current.set(runId, signature);
+      finished = true;
+    }
+    if (!finished) return;
+    void queryClient.invalidateQueries({ queryKey: ["repo", repoPath, "pr"] });
+    void queryClient.invalidateQueries({
+      queryKey: repoKeys.prCi(repoPath),
+    });
+    // The jobs read may have parked on its last active answer; the final step
+    // states land with one more read.
+    for (const id of settledHeadIds) {
+      void queryClient.invalidateQueries({
+        queryKey: ["repo", repoPath, "actions", "run", id, "jobs"],
+      });
+    }
+  }, [headRunById, jobsByRun, mountedWatchIds, queryClient, repoPath]);
   // In-flight run writes (re-runs, approvals) per run, wherever they started
   // (the run view, the runs list, this rollup), read from the mutation cache by
   // the writes' own run ids.
@@ -999,6 +1090,10 @@ export function ChecksRollup({
           queryKey: ["repo", repoPath, "actions", "run", id],
         });
       }
+      // The head poll too, which a re-run must wake the same way.
+      void queryClient.invalidateQueries({
+        queryKey: ["repo", repoPath, "actions", "head-runs"],
+      });
     }, CHECKS_REPAIR_DELAY_MS);
   }
 
@@ -1178,21 +1273,43 @@ export function ChecksRollup({
     })(e);
   };
 
-  // Headless: one run-detail query per watched run (React Query dedupes rows
-  // sharing a run). The completion watch for BOTH forges — the per-row step UI
-  // stays GitHub-only. `useRunDetail`'s 5s poll gates on the run staying active,
-  // and a manual-blocked GitLab pipeline reports run-level "completed", so it
-  // costs one fetch, not a loop. Rendered ABOVE the rollup's own markup and
-  // never conditionally: a raced-empty refetch hides the rollup, and unmounting
-  // the watchers with it would cancel the very polling that brings it back.
-  const watchers = mountedWatchIds.map((id) => (
-    <RunDetailFetcher
-      key={id}
-      repoPath={repoPath}
-      runId={id}
-      setJobs={setJobsByRun}
-    />
-  ));
+  // Headless: the head poll above, plus one run-detail query per run it doesn't
+  // answer for (React Query dedupes rows sharing a run) and one jobs read per
+  // running run the open list shows steps for. The completion watch for BOTH
+  // forges — the per-row step UI stays GitHub-only. `useRunDetail`'s poll gates
+  // on the run staying active, and a manual-blocked GitLab pipeline reports
+  // run-level "completed", so it costs one fetch, not a loop. Rendered ABOVE the
+  // rollup's own markup and never conditionally: a raced-empty refetch hides the
+  // rollup, and unmounting the watchers with it would cancel the very polling
+  // that brings it back.
+  const watchers = [
+    ...runViewIds.map((id) => (
+      <RunDetailFetcher
+        key={id}
+        repoPath={repoPath}
+        runId={id}
+        setJobs={setJobsByRun}
+      />
+    )),
+    ...jobsReadIds.flatMap((id) => {
+      const row = headRunById.get(id);
+      return row
+        ? [
+            <RunJobsFetcher
+              key={`jobs:${id}`}
+              repoPath={repoPath}
+              runId={id}
+              run={{
+                status: row.status,
+                createdAt: row.createdAt,
+                startedAt: row.startedAt,
+              }}
+              setJobs={setJobsByRun}
+            />,
+          ]
+        : [];
+    }),
+  ];
 
   const summary: {
     key: string;
@@ -1367,12 +1484,17 @@ export function ChecksRollup({
                 const runJob = running
                   ? jobForCheck(c, c.runId ? jobsByRun[c.runId] : undefined)
                   : undefined;
-                // `useRunDetail` polls at 5s but usePrDetails only refetches on
-                // focus, so a finished run keeps a stale `completedAt` (→ `running`
-                // true) until a focus event. Treat the resolved job as authoritative:
-                // once it reports a non-active status, drop the live UI immediately.
+                // The run reads poll on the run-age ladder but usePrDetails only
+                // refetches on focus, so a finished run keeps a stale `completedAt`
+                // (→ `running` true) until a focus event. Treat the head list's run
+                // row, else the resolved job, as authoritative: once either reports
+                // a non-active status, drop the live UI immediately.
                 const jobDone = runJob ? !isRunActive(runJob.status) : false;
-                const live = running && !jobDone;
+                const headRow = c.runId ? headRunById.get(c.runId) : undefined;
+                const runDone = headRow
+                  ? !isRunActive(headRow.status)
+                  : jobDone;
+                const live = running && !jobDone && !runDone;
                 const candidate = c.jobId
                   ? jobCandidateById.get(c.jobId)
                   : undefined;

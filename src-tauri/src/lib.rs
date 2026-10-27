@@ -695,6 +695,8 @@ pub fn run() {
             github::pr::gh_branch_protections,
             github::actions::gh_workflow_list,
             github::actions::gh_workflow_dispatchable,
+            github::actions::gh_runs_for_head,
+            github::actions::gh_run_jobs,
             fsops::append_to_gitignore,
             fsops::read_text_file,
             fsops::delete_repo_folder,

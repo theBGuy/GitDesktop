@@ -3748,6 +3748,7 @@ export function RemotePrView({
           onRetryChecks={() => void details.refetch()}
           repoPath={repoPath}
           provider={providerKey}
+          headSha={prHeadSha(pr) ?? null}
           crossRepository={!!pr.crossRepository}
           unmetRequiredContexts={blockedRequirements}
           // Split like the view's own controls: `stale` withdraws the offers, so

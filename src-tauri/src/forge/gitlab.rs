@@ -6922,6 +6922,8 @@ fn map_ci_status(s: &str) -> (String, String) {
         "pending" => ("pending", ""),
         "created" | "preparing" => ("queued", ""),
         "waiting_for_resource" | "scheduled" => ("waiting", ""),
+        // Canceling must stay active so polling reaches the final canceled state.
+        "canceling" => ("in_progress", ""),
         // Unknown/new GitLab state — treat as finished-neutral rather than guess.
         _ => ("completed", ""),
     };
@@ -14159,6 +14161,16 @@ mod tests {
         assert_eq!(m.id, 7495818);
         assert_eq!(m.title, "v1.0");
         assert!(issue.discussion_locked);
+    }
+
+    #[test]
+    fn canceling_stays_active_across_ci_status_maps() {
+        assert_eq!(map_job_check_status("canceling"), "PENDING");
+        assert_eq!(pipeline_status_to_ci(Some("canceling")), "pending");
+        assert_eq!(
+            map_ci_status("canceling"),
+            ("in_progress".into(), String::new())
+        );
     }
 
     #[test]

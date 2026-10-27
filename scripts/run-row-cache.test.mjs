@@ -1,5 +1,5 @@
 // Pins the run view's loading-frame seed (src/features/actions/run-row-cache.ts):
-// only the four list-shaped families under ["repo", repo, "actions"] may seed
+// only the five list-shaped families under ["repo", repo, "actions"] may seed
 // the header, every field is shape-guarded, and the freshest entry wins. The
 // `workflows` collision case is the negative control: a prefix scan without
 // per-family rejection seeds a workflow as a run and fails it.
@@ -80,6 +80,11 @@ test("notify alone seeds", () => {
 
 test("latest alone seeds", () => {
   const row = cachedRunRow([entry("latest", run(RUN_ID))], RUN_ID);
+  assert.equal(row?.id, RUN_ID);
+});
+
+test("head-runs alone seeds", () => {
+  const row = cachedRunRow([entry("head-runs", [run(1), run(RUN_ID)])], RUN_ID);
   assert.equal(row?.id, RUN_ID);
 });
 
@@ -227,7 +232,7 @@ test("the freshest dataUpdatedAt wins across families", () => {
   assert.equal(cachedRunRow(entries, RUN_ID)?.status, "completed");
 });
 
-test("equal dataUpdatedAt ties break runs-paged, runs, notify, latest", () => {
+test("equal dataUpdatedAt ties break runs-paged, runs, notify, latest, head-runs", () => {
   const at = 3000;
   const paged = entry(
     "runs-paged",
@@ -237,11 +242,13 @@ test("equal dataUpdatedAt ties break runs-paged, runs, notify, latest", () => {
   const runs = entry("runs", [run(RUN_ID, { status: "r" })], at);
   const notify = entry("notify", [run(RUN_ID, { status: "n" })], at);
   const latest = entry("latest", run(RUN_ID, { status: "l" }), at);
+  const head = entry("head-runs", [run(RUN_ID, { status: "h" })], at);
   assert.equal(
-    cachedRunRow([latest, notify, runs, paged], RUN_ID)?.status,
+    cachedRunRow([head, latest, notify, runs, paged], RUN_ID)?.status,
     "p",
   );
-  assert.equal(cachedRunRow([latest, notify, runs], RUN_ID)?.status, "r");
-  assert.equal(cachedRunRow([latest, notify], RUN_ID)?.status, "n");
-  assert.equal(cachedRunRow([latest], RUN_ID)?.status, "l");
+  assert.equal(cachedRunRow([head, latest, notify, runs], RUN_ID)?.status, "r");
+  assert.equal(cachedRunRow([head, latest, notify], RUN_ID)?.status, "n");
+  assert.equal(cachedRunRow([head, latest], RUN_ID)?.status, "l");
+  assert.equal(cachedRunRow([head], RUN_ID)?.status, "h");
 });
