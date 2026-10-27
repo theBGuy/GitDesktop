@@ -677,20 +677,69 @@ test("the footer Discard also resets a dirty Automations draft", () => {
 });
 
 /** Problems with the panel's draft reset, `[]` when pinned: `discard` resets
- *  at once, to an in-flight save's lifecycles while it is pending, and no
- *  queued reset survives to land after the save settles. */
+ *  at once, to an in-flight save's lifecycles while it is pending, remembers
+ *  that target only while a save is pending, and no queued reset survives to
+ *  land after the save settles. */
 function automationsResetTargetProblems(text) {
   const masked = maskNonCode(text, true);
   const discard = functionBody(masked, "discard");
   if (!discard) return ["discard not found"];
   const problems = [];
   if (
-    !/^\{\s*setDraft\(\s*save\.isPending && save\.variables\s*\?\s*save\.variables\.lifecycles\s*:\s*saved,?\s*\);\s*$/.test(
+    !/^\{\s*const target\s*=\s*save\.isPending && save\.variables\s*\?\s*save\.variables\.lifecycles\s*:\s*saved;\s*pendingDiscard\.current = save\.isPending \? target : null;\s*setDraft\(target\);\s*$/.test(
       masked.slice(discard[0], discard[1]),
     )
   )
-    problems.push("discard no longer resets at once to the in-flight target");
-  if (/resetQueued/i.test(text)) problems.push("a queued reset is back");
+    problems.push(
+      "discard no longer resets at once to the in-flight target, remembered while pending",
+    );
+  if (/resetQueued/i.test(masked)) problems.push("a queued reset is back");
+  return problems;
+}
+
+/** Problems with the panel's failed-save reconcile, `[]` when pinned: one
+ *  effect keyed on the save's pending and error flags waits out the save,
+ *  clears the remembered Discard target on every settle, and only on a failure
+ *  puts the stored config back, through an updater that keeps any draft other
+ *  than that target (an edit made since the reset). */
+function failedSaveReconcileProblems(text) {
+  const masked = maskNonCode(text, true);
+  const bodies = [];
+  for (const m of masked.matchAll(/useEffect\(\(\) => \{/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = matchBrace(masked, open);
+    if (close === -1) continue;
+    const deps = /^\s*,\s*\[([^\]]*)\]\s*\)/.exec(masked.slice(close + 1));
+    if (
+      deps &&
+      /\bsave\.isPending\b/.test(deps[1]) &&
+      /\bsave\.isError\b/.test(deps[1])
+    )
+      bodies.push(masked.slice(open, close + 1));
+  }
+  if (bodies.length !== 1)
+    return [`expected one save-settle effect, found ${bodies.length}`];
+  const body = bodies[0];
+  const problems = [];
+  if (!/^\{\s*if \(save\.isPending\) return;/.test(body))
+    problems.push("the reconcile no longer waits for the save to settle");
+  if (
+    !/const target = pendingDiscard\.current;\s*if \(!target\) return;/.test(
+      body,
+    )
+  )
+    problems.push("the reconcile no longer reads the remembered target");
+  const read = body.search(/const target = pendingDiscard\.current;/);
+  const clear = body.indexOf("pendingDiscard.current = null;");
+  const gate = body.search(/\bif \(save\.isError\)/);
+  if (clear === -1 || clear < read || (gate !== -1 && clear > gate))
+    problems.push("the remembered target isn't cleared on every settle");
+  if (
+    !/\bif \(save\.isError\)\s*setDraft\(\(\s*(\w+)\s*\) => \(\s*\1 === target \? saved : \1\s*\)\);/.test(
+      body,
+    )
+  )
+    problems.push("a failed save no longer restores only an unedited reset");
   return problems;
 }
 
@@ -713,21 +762,53 @@ function noOpAutomationsProblems(text) {
 }
 
 test("the Automations discard resets at once to an in-flight save's target", () => {
-  pin(automationsResetTargetProblems, source(AUTOMATIONS), (s) =>
-    s.replace(/ {4}function discard\(\) \{\n[\s\S]*?\n {4}\}\n/, () =>
-      [
-        "    const [resetQueued, setResetQueued] = useState(false);",
-        "    useEffect(() => {",
-        "      if (!resetQueued || save.isPending) return;",
-        "      setResetQueued(false);",
-        "      setDraft(saved);",
-        "    }, [resetQueued, save.isPending, saved]);",
-        "    function discard() {",
-        "      setResetQueued(true);",
-        "    }",
-        "",
-      ].join("\n"),
+  pin(
+    automationsResetTargetProblems,
+    source(AUTOMATIONS),
+    (s) =>
+      s.replace(/ {4}function discard\(\) \{\n[\s\S]*?\n {4}\}\n/, () =>
+        [
+          "    const [resetQueued, setResetQueued] = useState(false);",
+          "    useEffect(() => {",
+          "      if (!resetQueued || save.isPending) return;",
+          "      setResetQueued(false);",
+          "      setDraft(saved);",
+          "    }, [resetQueued, save.isPending, saved]);",
+          "    function discard() {",
+          "      setResetQueued(true);",
+          "    }",
+          "",
+        ].join("\n"),
+      ),
+    (s) =>
+      s.replace(
+        "pendingDiscard.current = save.isPending ? target : null;",
+        "pendingDiscard.current = target;",
+      ),
+    (s) => s.replace("      setDraft(target);\n", ""),
+  );
+});
+
+test("a failed save under a Discard puts back only an unedited reset", () => {
+  const inEffect = (from, to) => (s) =>
+    s.replace(
+      / {4}useEffect\(\(\) => \{\n {6}if \(save\.isPending\) return;[\s\S]*?\n {4}\}, \[[^\]]*\]\);\n/,
+      (effect) => effect.replace(from, () => to),
+    );
+  pin(
+    failedSaveReconcileProblems,
+    source(AUTOMATIONS),
+    inEffect(
+      "setDraft((d) => (d === target ? saved : d));",
+      "setDraft(saved);",
     ),
+    inEffect("if (save.isError) setDraft(", "setDraft("),
+    inEffect("      pendingDiscard.current = null;\n", ""),
+    inEffect(
+      "      const target = pendingDiscard.current;\n",
+      "      pendingDiscard.current = null;\n      const target = pendingDiscard.current;\n",
+    ),
+    inEffect("      if (save.isPending) return;\n", ""),
   );
 });
 

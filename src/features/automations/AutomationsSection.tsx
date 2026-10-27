@@ -99,8 +99,8 @@ export const AutomationsSection = withForm({
     const save = useSaveAutomations();
     const [draft, setDraft] = useState<LifecycleDraft>({});
 
-    // Seed the editable draft once the config loads; afterwards the draft owns
-    // the truth until Save or Discard (Save re-invalidates → this re-seeds).
+    // Seeded once, when the config first loads; afterwards only edits and
+    // Discard change the draft (a save's refetch never re-seeds it).
     const seeded = useRef(false);
     useEffect(() => {
       if (automations.data && !seeded.current) {
@@ -164,14 +164,27 @@ export const AutomationsSection = withForm({
       });
     }
 
+    const pendingDiscard = useRef<LifecycleDraft | null>(null);
     // Resets at once to what an in-flight save (its refetch included) is
     // writing, so nothing reads as unsaved once it lands and no edit made
     // after the reset is overwritten by a deferred one.
     function discard() {
-      setDraft(
-        save.isPending && save.variables ? save.variables.lifecycles : saved,
-      );
+      const target =
+        save.isPending && save.variables ? save.variables.lifecycles : saved;
+      pendingDiscard.current = save.isPending ? target : null;
+      setDraft(target);
     }
+
+    // A save that fails under a Discard must not leave the discarded rules for
+    // a later Save to persist: an unedited reset (still that same object)
+    // returns to the stored config, while any edit since makes a new draft.
+    useEffect(() => {
+      if (save.isPending) return;
+      const target = pendingDiscard.current;
+      if (!target) return;
+      pendingDiscard.current = null;
+      if (save.isError) setDraft((d) => (d === target ? saved : d));
+    }, [save.isPending, save.isError, saved]);
     const mounted = useRef(true);
     useEffect(() => {
       mounted.current = true;

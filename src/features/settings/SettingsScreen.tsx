@@ -436,9 +436,9 @@ export function SettingsScreen() {
       focusRailItem(rootRef.current, activePanelRef.current);
   }, [footerVisible]);
 
-  // For a prompt answer that flips no state: the frame outlasts the dialog's
-  // close commit and lands before Base UI's later focus return, which then
-  // leaves focus where it is.
+  // For an answer that leaves the footer where it was (nothing in it left to
+  // discard, or already gone), so no footer flip places focus: the frame
+  // outlasts the dialog's close and lands before Base UI's later focus return.
   function focusRailAfterPrompt() {
     requestAnimationFrame(() =>
       focusRailItem(rootRef.current, activePanelRef.current),
