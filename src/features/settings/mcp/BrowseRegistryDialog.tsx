@@ -648,8 +648,14 @@ export function BrowseRegistryDialog({
                     disabled={isFetchingNextPage}
                     focusableWhenDisabled
                   >
-                    {isFetchingNextPage && <Spinner data-icon="inline-start" />}
-                    Load more
+                    {isFetchingNextPage ? (
+                      <>
+                        <Spinner data-icon="inline-start" />
+                        Loading…
+                      </>
+                    ) : (
+                      "Load more"
+                    )}
                   </Button>
                 </div>
               )}
@@ -681,8 +687,8 @@ export function BrowseRegistryDialog({
           degraded={statsFailed}
           message={
             statsLimitClause === ""
-              ? "Couldn't load star counts, licenses and archived status."
-              : `Star counts, licenses and archived status aren't shown${statsLimitClause}.`
+              ? "Couldn't load stars, forks, licenses, update dates and archived status."
+              : `Stars, forks, licenses, update dates and archived status aren't shown${statsLimitClause}.`
           }
           onRetry={() => void stats.refetch()}
           className="px-0 pb-0"
