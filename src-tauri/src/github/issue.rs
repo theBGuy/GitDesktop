@@ -4,7 +4,6 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::gh_unreadable;
 use crate::github::pr::{PrAuthor, PrListLabel, PrRef, PrThreadOut, RepoLabel};
 use crate::github::repo_meta::invalidate_repo_meta_after;
@@ -293,22 +292,14 @@ struct LockState {
     active_lock_reason: Option<String>,
 }
 
-/// Preserve unknown lock state on rate limits, transport failures, or non-Gh
-/// errors so actions cannot guess a direction. A 404 or other answered failure
-/// reads as unlocked.
+/// Lock state is known only from a parsed answer. Any failure or unreadable
+/// body leaves it unknown so neither Lock nor Unlock guesses a direction.
 fn issue_lock_outcome(result: AppResult<crate::github::runner::GhOutput>) -> (LockState, bool) {
     match result {
-        Ok(out) => (
-            serde_json::from_str(&out.stdout_lossy()).unwrap_or_default(),
-            false,
-        ),
-        Err(AppError::Gh(message)) => (
-            LockState::default(),
-            matches!(
-                classify_gh_failure(&message),
-                GhFailure::RateLimited | GhFailure::Transport
-            ),
-        ),
+        Ok(out) => match serde_json::from_str(&out.stdout_lossy()) {
+            Ok(state) => (state, false),
+            Err(_) => (LockState::default(), true),
+        },
         Err(_) => (LockState::default(), true),
     }
 }
@@ -1639,20 +1630,37 @@ mod tests {
     };
     use crate::error::AppError;
     #[test]
-    fn issue_lock_preserves_unknown_state_and_camel_case_wire_key() {
+    fn issue_lock_failures_leave_state_unknown() {
         let held = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
-        for message in [
-            "gh: Not Found (HTTP 404)",
-            "HTTP 403: Resource not accessible by integration",
-            "",
+        for error in [
+            AppError::Gh("gh: Not Found (HTTP 404)".into()),
+            AppError::Gh("HTTP 403: Resource not accessible by integration".into()),
+            AppError::Gh(String::new()),
+            AppError::Gh(held.into()),
+            AppError::Gh("connection failed".into()),
+            AppError::Timeout(30),
+            AppError::GhNotFound,
         ] {
-            let (lock, unknown) = super::issue_lock_outcome(Err(AppError::Gh(message.into())));
-            assert!(!lock.locked && !unknown && lock.active_lock_reason.is_none());
+            let (lock, unknown) = super::issue_lock_outcome(Err(error));
+            assert!(unknown && !lock.locked && lock.active_lock_reason.is_none());
         }
+    }
+
+    #[test]
+    fn issue_lock_unreadable_body_leaves_state_unknown() {
+        let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
+            code: 0,
+            stdout: b"garbage".to_vec(),
+            stderr: String::new(),
+        }));
+        assert!(unknown && !lock.locked && lock.active_lock_reason.is_none());
+    }
+
+    #[test]
+    fn issue_lock_parsed_answer_is_known() {
         for body in [
             r#"{"locked":true,"active_lock_reason":"too heated"}"#,
             r#"{"locked":false}"#,
-            "garbage",
         ] {
             let (lock, unknown) = super::issue_lock_outcome(Ok(crate::github::runner::GhOutput {
                 code: 0,
@@ -1666,15 +1674,10 @@ mod tests {
                 body.contains("true").then_some("too heated")
             );
         }
-        for error in [
-            AppError::Gh(held.into()),
-            AppError::Gh("connection failed".into()),
-            AppError::Timeout(30),
-            AppError::GhNotFound,
-        ] {
-            let (lock, unknown) = super::issue_lock_outcome(Err(error));
-            assert!(unknown && !lock.locked && lock.active_lock_reason.is_none());
-        }
+    }
+
+    #[test]
+    fn issue_lock_unknown_uses_camel_case_wire_key() {
         let issue = super::IssueDetails {
             id: "I_1".into(),
             number: 1,

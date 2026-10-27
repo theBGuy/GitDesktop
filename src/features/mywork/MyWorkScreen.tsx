@@ -42,7 +42,7 @@ import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { composedErrorPresentation, presentError } from "@/lib/error-summary";
-import { rateLimitProvider } from "@/lib/forge-backoff";
+import { rateLimitSummary } from "@/lib/forge-backoff";
 import { forgePrHeadRef, repoOriginPath, validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { useForgeMyWork, useMyWorkSources } from "@/lib/git/queries";
@@ -1507,9 +1507,10 @@ function errorLines(
   return errors.map((e) => {
     const label = providerLabel(e.provider);
     const summary = presentError(e.error).summary;
-    // The outage and rate-limit lines already name their forge.
+    // The outage and rate-limit sentences already name their forge; a limit an
+    // app headline wraps reads as that headline, so it keeps the label.
     return summary.startsWith(`Couldn't reach ${label}`) ||
-      rateLimitProvider(e.error) !== null
+      rateLimitSummary(e.error) !== null
       ? summary
       : `${label}: ${summary}`;
   });

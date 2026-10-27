@@ -395,3 +395,30 @@ test("non-rate-limit errors get no rate-limit copy", () => {
     "GitLab",
   );
 });
+
+test("a limit wrapped in app prose gets no sentence, though it is still a limit", () => {
+  const wrapped = [
+    gh(
+      `The pull request was created, but applying its labels/assignees failed: ${HELD_TEXTS[0]}. Add them from the PR.`,
+    ),
+    gh(`Merged #12, but couldn't clean up the remote head branch.\n${HELD_TEXTS[0]}`),
+    gh(`${HELD_TEXTS[0]}\nThe GitHub repository acme/app may have been created.`),
+    {
+      kind: "bitbucket",
+      message:
+        "The branch was pushed, but creating the pull request failed: Bitbucket rate limit reached (429). Wait a moment and try again.",
+    },
+  ];
+  for (const error of wrapped) {
+    assert.equal(rateLimitSummary(error), null, error.message);
+    assert.notEqual(rateLimitProvider(error), null, error.message);
+  }
+  // A wrapped glab diagnostic is still glab's own text.
+  assert.equal(
+    rateLimitSummary({
+      kind: "glab",
+      message: "GET https://gitlab.com/api/v4/user:\n  429 Too Many Requests",
+    }),
+    `GitLab's API rate limit has been reached. ${LIFTS}`,
+  );
+});

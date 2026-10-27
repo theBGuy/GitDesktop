@@ -115,13 +115,47 @@ export function rateLimitProvider(error: unknown): string | null {
   return FORGE_KIND_HOSTS[kind];
 }
 
-/** One calm sentence for a rate-limit error, or null for anything else. Names
- *  the bucket only for gh's held texts, the one source that knows it, and never
- *  "this request": a caller may quote it for several reads. */
+/** Raw prefixes a forge's own diagnostic can open with, stripped in turn: gh's
+ *  `gh:` / `error:` / `GraphQL:` / `HTTP <status>:` (go-gh), and glab's
+ *  client-go `<METHOD> <url>:` or a bare `<host>:`. */
+const RAW_PREFIX =
+  /^(?:(?:gh|glab|error|graphql):\s*|http \d{3}:\s*|(?:get|post|put|patch|delete|head) https?:\/\/\S+:\s*|[\w-]+(?:\.[\w-]+)+(?::\d+)?:\s+)/;
+
+/** How a forge's own rate-limit text opens once its prefixes are gone: gh's
+ *  primary, secondary, abuse and 429 wording, glab's 429 and limit wording, the
+ *  Bitbucket and Jira clients' sentence (forge/http.rs, forge/jira.rs), and the
+ *  held texts (runner.rs). */
+const RATE_LIMIT_LEAD =
+  /^(?:429\b|(?:api |secondary )?rate limit|too many requests|you have exceeded a secondary rate limit|you have triggered an abuse detection|(?:bitbucket|jira) rate limit reached|github's (?:rest|graphql|search) api rate limit has been reached)/;
+
+/** Whether the message IS the forge's or the runner's rate-limit text, so one
+ *  sentence may stand in for it. App prose in front of the cause (a write that
+ *  already landed, a partial state) fails the lead by construction, and a
+ *  second meaningful line is app prose after it; either keeps its own words.
+ *  glab alone wraps one diagnostic over lines, so its lines are read joined. */
+function isBareRateLimit(kind: string, message: string): boolean {
+  const lines = message
+    .split(/\r\n|[\n\r]/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && l !== "ERROR");
+  if (lines.length === 0 || (kind !== "glab" && lines.length > 1)) return false;
+  let text = lines.join(" ").toLowerCase();
+  for (let m = RAW_PREFIX.exec(text); m !== null; m = RAW_PREFIX.exec(text)) {
+    if (m[0].startsWith("http 429:")) return true;
+    text = text.slice(m[0].length);
+  }
+  return RATE_LIMIT_LEAD.test(text);
+}
+
+/** One calm sentence for a bare rate-limit error, or null for anything else,
+ *  a limit wrapped in app prose included. Names the bucket only for gh's held
+ *  texts, the one source that knows it, and never "this request": a caller may
+ *  quote it for several reads. */
 export function rateLimitSummary(error: unknown): string | null {
   const provider = rateLimitProvider(error);
   if (provider === null) return null;
   const { kind, message } = error as { kind: string; message: string };
+  if (!isBareRateLimit(kind, message)) return null;
   const bucket = kind === "gh" ? heldBucket(message) : null;
   const api = bucket === null ? "API" : `${bucket} API`;
   return `${provider}'s ${api} rate limit has been reached. Try again once it lifts.`;

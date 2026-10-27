@@ -836,8 +836,10 @@ function nonEmptyLineCount(text: string): number {
 export function presentError(e: unknown): ErrorPresentation {
   if (isAppError(e)) {
     const label = KIND_LABELS[e.kind];
-    // A rate limit reads as one sentence naming the provider (and the bucket of
-    // a held call); the raw text, rewritten away, stays reachable via Details.
+    // A bare rate limit reads as one sentence naming the provider (and the
+    // bucket of a held call); the raw text stays reachable via Details. One an
+    // app headline wraps keeps that headline below, since it may say a write
+    // already landed.
     const rateLimited = rateLimitSummary(e);
     if (rateLimited !== null) {
       const message = e.message ?? "";

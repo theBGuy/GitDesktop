@@ -1001,6 +1001,157 @@ test("a rate limit reads as one sentence naming the provider and a held bucket",
   assert.equal(presentError(appError("gh", notFound)).summary, notFound);
 });
 
+/** Rate-limit causes an app-written wrapper can carry: runner.rs's held text,
+ *  gh's raw stderr, and each other forge's own limit wording. */
+const LIMIT_CAUSES = {
+  held: "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  ghRaw:
+    "HTTP 403: API rate limit exceeded for user ID 12345 (https://api.github.com/)",
+  glab: "429 Too Many Requests: retry later",
+  bitbucket: "Bitbucket rate limit reached (429). Wait a moment and try again.",
+  jira: "Jira rate limit reached (429). Wait a moment and try again.",
+};
+
+/** Each Rust format string that puts app prose around a forge error, as
+ *  [producer, kind, wrap(cause)]. */
+const LIMIT_WRAPPERS = [
+  [
+    "github/pr.rs gh_publish_create_error",
+    "gh",
+    (e) =>
+      `${e}\nThe GitHub repository acme/app may have been created before publishing failed. Check your repositories on GitHub before retrying.`,
+  ],
+  [
+    "github/pr.rs gh_publish_url_error",
+    "gh",
+    (e) =>
+      `The GitHub repository acme/app was created and pushed, but its URL could not be read back.\n${e}`,
+  ],
+  [
+    "github/pr.rs merged head-branch cleanup",
+    "gh",
+    (e) => `Merged #12, but couldn't clean up the remote head branch.\n${e}`,
+  ],
+  [
+    "github/pr.rs PR labels/assignees",
+    "gh",
+    (e) =>
+      `The pull request was created (https://github.com/acme/app/pull/7), but applying its labels/assignees failed: ${e}. Add them from the PR.`,
+  ],
+  [
+    "github/project.rs timed-out create",
+    "gh",
+    (e) =>
+      `GitHub didn't answer in time, so the item may still have been created. Check for it before trying again.\n${e}`,
+  ],
+  [
+    "github/project_views.rs view copy",
+    "gh",
+    (e) => `The view "Board" was created, but its fields could not be copied.\n${e}`,
+  ],
+  [
+    "github/release.rs updater manifest",
+    "gh",
+    (e) =>
+      `${e}\n\nThe patched latest.json was saved to C:/x/latest.json — upload it to the release by hand.`,
+  ],
+  [
+    "forge/bitbucket.rs PR create",
+    "bitbucket",
+    (e) => `The branch was pushed, but creating the pull request failed: ${e}`,
+  ],
+  [
+    "forge/bitbucket.rs request-changes comment",
+    "bitbucket",
+    (e) => `Changes were requested, but posting the comment failed: ${e}`,
+  ],
+  [
+    "forge/bitbucket.rs review summary",
+    "bitbucket",
+    (e) =>
+      `The review summary couldn't be posted, so the review was not submitted: ${e}`,
+  ],
+  [
+    "forge/bitbucket.rs merge_unconfirmed",
+    "bitbucket",
+    (e) =>
+      `Bitbucket accepted the merge, but GitDesktop couldn't confirm completion.\n${e}`,
+  ],
+  [
+    "forge/bitbucket.rs created_hint",
+    "bitbucket",
+    (e) =>
+      `The repository WAS created at https://bitbucket.org/ws/repo, but adding the 'origin' remote failed: ${e}`,
+  ],
+  [
+    "forge/bitbucket.rs created, push failed",
+    "bitbucket",
+    (e) =>
+      `The repository WAS created at https://bitbucket.org/ws/repo and origin points at it — retry the push.\n${e}`,
+  ],
+  [
+    "forge/gitlab.rs request-changes comment",
+    "glab",
+    (e) => `Changes were requested, but posting the comment failed: ${e}`,
+  ],
+];
+
+/** Master's summary for a message with no special family: its first
+ *  meaningful line, tool prefix stripped, whitespace collapsed. */
+const firstLine = (message) =>
+  message
+    .split("\n")
+    .find((l) => l.trim() !== "")
+    .replace(/^(?:error|fatal|gh):\s*/i, "")
+    .trim()
+    .replace(/\s+/g, " ");
+
+test("an app headline around a rate-limit cause stays the summary", () => {
+  for (const [producer, kind, wrap] of LIMIT_WRAPPERS) {
+    for (const [name, cause] of Object.entries(LIMIT_CAUSES)) {
+      const message = wrap(cause);
+      const p = presentError(appError(kind, message));
+      const at = `${producer} with ${name}`;
+      assert.equal(p.summary, firstLine(message), at);
+      assert.ok(!p.summary.includes("Try again once it lifts"), at);
+      assert.equal(p.fullText, message, at);
+    }
+  }
+});
+
+test("a bare rate-limit error from every forge still reads as one sentence", () => {
+  const sentence = (provider, bucket = "") =>
+    `${provider}'s ${bucket}API rate limit has been reached. Try again once it lifts.`;
+  for (const [kind, message, summary] of [
+    ["gh", LIMIT_CAUSES.held, sentence("GitHub", "REST ")],
+    ["gh", LIMIT_CAUSES.ghRaw, sentence("GitHub")],
+    ["gh", "gh: API rate limit exceeded for user ID 1 (HTTP 403)", sentence("GitHub")],
+    ["gh", "GraphQL: API rate limit exceeded for user ID 1.", sentence("GitHub")],
+    [
+      "gh",
+      "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/)",
+      sentence("GitHub"),
+    ],
+    [
+      "gh",
+      "HTTP 403: You have triggered an abuse detection mechanism. (https://ghe.example.com/api/v3/x)",
+      sentence("GitHub"),
+    ],
+    ["gh", "HTTP 429: Slow down (https://api.github.com/repos/o/r)", sentence("GitHub")],
+    ["gh", "gh: Too Many Requests (HTTP 429)", sentence("GitHub")],
+    ["glab", LIMIT_CAUSES.glab, sentence("GitLab")],
+    [
+      "glab",
+      "GET https://gitlab.com/api/v4/user: 429 rate limit exceeded",
+      sentence("GitLab"),
+    ],
+    ["bitbucket", LIMIT_CAUSES.bitbucket, sentence("Bitbucket")],
+    ["jira", LIMIT_CAUSES.jira, sentence("Jira")],
+  ]) {
+    assert.equal(presentError(appError(kind, message)).summary, summary, message);
+  }
+});
+
 test("a message Rust already wrote as Couldn't reach keeps its own words", () => {
   const message =
     "Couldn't reach github.com to check the GitHub sign-in: dial tcp: lookup github.com: no such host";
@@ -1132,17 +1283,14 @@ test("transport host positions cannot supply the masked hint scan's evidence", (
 });
 
 test("real 401 and 429 beside masked undotted and IPv6 hosts still suppress the rewrite", () => {
-  for (const [message, summary = message] of [
-    ["lookup gitlab-429: no such host; HTTP 401 unauthorized"],
-    [
-      "dial tcp proxy-401:8080: connect: connection refused; HTTP 429",
-      GITLAB_RATE_LIMITED,
-    ],
-    ["dial tcp [2001:db8::401]:443: connect: connection refused; HTTP 401"],
+  for (const message of [
+    "lookup gitlab-429: no such host; HTTP 401 unauthorized",
+    "dial tcp proxy-401:8080: connect: connection refused; HTTP 429",
+    "dial tcp [2001:db8::401]:443: connect: connection refused; HTTP 401",
   ]) {
     assert.equal(
       presentError(appError("glab", message)).summary,
-      summary,
+      message,
       message,
     );
   }

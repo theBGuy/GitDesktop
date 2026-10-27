@@ -109,6 +109,7 @@ import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
   COMMENT_DELETE_PENDING_REASON,
   COMMENT_POST_PENDING_REASON,
+  isOfflineNow,
   OFFLINE_ITEM_REASON,
   pendingItemReason,
   pendingWriteReason,
@@ -1403,7 +1404,23 @@ export function RemoteIssueView({
             {remoteLabel}
           </DisabledReasonButton>
           {(canLock || canDuplicate || canTransfer || canDelete) && (
-            <DropdownMenu>
+            <DropdownMenu
+              onOpenChange={(open) => {
+                // Opening the menu is the held lock row's retry, as the
+                // Repository menu's is for its star row: a row has no room.
+                if (
+                  open &&
+                  canLock &&
+                  !detailsStale &&
+                  issue.lockUnknown &&
+                  !details.isFetching &&
+                  !details.isPaused &&
+                  !isOfflineNow()
+                ) {
+                  void details.refetch();
+                }
+              }}
+            >
               {/* Every item but Transfer is withheld while the rendered issue is
                   the previous one, so hold the menu shut rather than open a near-
                   empty popup. */}

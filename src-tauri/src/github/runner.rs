@@ -888,7 +888,7 @@ const SECONDARY_MAX_SECS: i64 = 900;
 // The exempt GitHub rate_limit read bounds detection of terminal account switches.
 const RECHECK_SECS: i64 = 300;
 // GitHub's primary window is one hour; untrusted hints cannot hold for days.
-const MAX_HOLD_SECS: i64 = 3660;
+pub(crate) const MAX_HOLD_SECS: i64 = 3660;
 // Waiting for GitHub's reset must tolerate small backward clock corrections.
 const CLOCK_SLACK_SECS: i64 = 60;
 // GitHub's advisory rate_limit read must settle even when the network stalls.

@@ -185,9 +185,6 @@ fn graphql_reset_probe_args(
 }
 
 fn graphql_reset_at(result: AppResult<crate::github::runner::GhOutput>, now: i64) -> Option<i64> {
-    // Mirror the runner's primary-window cap: untrusted hints cannot park a
-    // displayed reset beyond one hour plus clock slack.
-    const MAX_RESET_SECS: i64 = 3660;
     let out = result.ok()?;
     if out.code != 0 {
         return None;
@@ -196,7 +193,10 @@ fn graphql_reset_at(result: AppResult<crate::github::runner::GhOutput>, now: i64
     let (_, body) = crate::github::runner::split_response(&response);
     let (remaining, reset) =
         crate::github::runner::probe_reading(body, crate::github::runner::Bucket::Graphql)?;
-    (remaining == 0 && reset > now && reset <= now.saturating_add(MAX_RESET_SECS)).then_some(reset)
+    (remaining == 0
+        && reset > now
+        && reset <= now.saturating_add(crate::github::runner::MAX_HOLD_SECS))
+    .then_some(reset)
 }
 
 /// The `(owner/repo, host)` a remote URL names, read without gh or the network — only

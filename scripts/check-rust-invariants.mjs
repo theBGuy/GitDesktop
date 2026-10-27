@@ -38,8 +38,9 @@
 //   J. gh exit read as absence — a GitHub read in github/ or forge/github.rs
 //      that turns a non-zero gh exit into "none" (false, an empty list, a
 //      default) answers a rate limit or a network failure with a false claim.
-//      `forge::session::classify_gh_failure` keeps 404/403 as the read's
-//      absence and makes RateLimited/Transport an Err.
+//      `forge::session::classify_gh_failure` only buckets the failure; the
+//      read's own outcome fn decides absence (RateLimited/Transport are an Err,
+//      and star status and the Explore README take a 403 as one too).
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -2450,7 +2451,8 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
 // Function-level: a function that calls classify_gh_failure anywhere passes,
 // since its outcome arms are what decide absence. Shapes outside the three
 // below (a match on the exit code, an absence built through a helper, an
-// `is_ok_and` over the exit) remain review concerns.
+// `is_ok_and` over the exit, and an `Err(_)` arm over `run_gh`, which turns
+// a non-zero exit into that Err) remain review concerns.
 export const GH_EXIT_ABSENCE_ALLOWLIST = [
   {
     file: "github/avatar.rs",
@@ -2507,9 +2509,11 @@ const GH_MAP_EXIT_RE =
 const GH_IF_FAILED_RE = /\bif\s+[\w.]+\.code\s*!=\s*0\s*\{/g;
 const GH_EXIT_ABSENCE_FIX =
   "check J: a non-zero gh exit is not an absence — route it through " +
-  "forge::session::classify_gh_failure in a pure *_outcome fn " +
-  "(RateLimited/Transport → Err, NotFound/Answered → the read's absence), or " +
-  "allowlist a fail-safe or decoration read with rationale";
+  "forge::session::classify_gh_failure, which only buckets the failure, and " +
+  "let a pure *_outcome fn decide absence (RateLimited/Transport → Err; " +
+  "NotFound/Answered → the read's absence, except star status and the Explore " +
+  "README, where a 403 is an Err), or allowlist a fail-safe or decoration " +
+  "read with rationale";
 
 /** Whether `file` is in check J's scope: the GitHub reads. */
 export function ghExitAbsenceScope(file) {
