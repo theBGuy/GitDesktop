@@ -117,6 +117,7 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 
 /** A discussion comment/reply shares the conversation shape minus review state. */
@@ -349,6 +350,10 @@ export function DiscussionView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // Every arm without data returns early below, so data is the full mount
+  // condition of the docked hint-and-composer block.
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(composerBarRef, d !== undefined);
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
@@ -1296,31 +1301,34 @@ export function DiscussionView({
           )}
         </div>
       </ConversationScrollArea>
-      {/* empty:hidden: the hint self-gates to null (scopes covered, non-classic
-          token, or still loading), and the wrapper must then contribute no
-          border or padding of its own. */}
-      <div className="empty:hidden shrink-0 border-t p-2">
-        {/* GitHub's scope error names write:discussion, but `repo` covers
-            repository-discussion writes — warn only when neither is present. */}
-        <ScopeRefreshHint
-          scope="write:discussion"
-          action="Writing in discussions"
-          coveredBy={["repo"]}
+      {/* One measured block: toasts clear the scope hint's copy button too. */}
+      <div ref={composerBarRef} className="shrink-0">
+        {/* empty:hidden: the hint self-gates to null (scopes covered, non-classic
+            token, or still loading), and the wrapper must then contribute no
+            border or padding of its own. */}
+        <div className="empty:hidden border-t p-2">
+          {/* GitHub's scope error names write:discussion, but `repo` covers
+              repository-discussion writes — warn only when neither is present. */}
+          <ScopeRefreshHint
+            scope="write:discussion"
+            action="Writing in discussions"
+            coveredBy={["repo"]}
+          />
+        </div>
+        <CommentComposer
+          ref={composerRef}
+          value={compose.value}
+          onChange={compose.set}
+          onSubmit={() => void submitComment()}
+          onClear={() => compose.set("")}
+          submitLabel="Comment"
+          ariaLabel="Add to the discussion"
+          placeholder="Add to the discussion…"
+          mentions={mentions}
+          busy={busy}
+          reason={busyReason}
         />
       </div>
-      <CommentComposer
-        ref={composerRef}
-        value={compose.value}
-        onChange={compose.set}
-        onSubmit={() => void submitComment()}
-        onClear={() => compose.set("")}
-        submitLabel="Comment"
-        ariaLabel="Add to the discussion"
-        placeholder="Add to the discussion…"
-        mentions={mentions}
-        busy={busy}
-        reason={busyReason}
-      />
 
       <DeleteCommentDialog
         commentId={deletingCommentId}

@@ -780,8 +780,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   close or reopen and an issue close or reopen arm the same re-read with
   lens-scoped list keys, since the forge's list membership lags the row's own
   state. Its per-repo entry holds the union of the keys owed and fires ONE
-  invalidation. Guard: `scripts/push-recheck-family.test.mjs`, keyed on the
-  api callees.
+  invalidation. Guards: `scripts/push-recheck-family.test.mjs` pins the arm
+  sites (the run rechecks, keyed on the api callees; the branch-delete and the
+  merge, close and reopen list re-reads, which no other write schedules), and
+  `scripts/push-writes.test.mjs` pins the union fire.
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`

@@ -164,6 +164,9 @@ export function LocalIssueView({
 
   const actionBarRef = useRef<HTMLDivElement>(null);
   useToastClearance(actionBarRef, issue !== undefined);
+  // The comment box docks on the action bar, so toasts clear both.
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(composerBarRef, issue !== undefined);
 
   if (!issue) {
     return <DiffPlaceholder message="This local issue no longer exists" />;
@@ -437,17 +440,19 @@ export function LocalIssueView({
         </div>
       </ConversationScrollArea>
 
-      <CommentComposer
-        ref={composerRef}
-        ariaLabel="Leave a note"
-        placeholder="Leave a note…"
-        value={comment}
-        onChange={setComment}
-        onSubmit={addComment}
-        onClear={() => setComment("")}
-        submitLabel="Comment"
-        mentions={mentions}
-      />
+      <div ref={composerBarRef}>
+        <CommentComposer
+          ref={composerRef}
+          ariaLabel="Leave a note"
+          placeholder="Leave a note…"
+          value={comment}
+          onChange={setComment}
+          onSubmit={addComment}
+          onClear={() => setComment("")}
+          submitLabel="Comment"
+          mentions={mentions}
+        />
+      </div>
 
       <div
         ref={actionBarRef}

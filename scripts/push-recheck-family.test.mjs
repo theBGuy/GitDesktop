@@ -8,6 +8,11 @@
 // a new unit naming one of these api functions must arm the recheck or join the
 // reasoned exclusions.
 //
+// It also pins the delayed list re-read (`recheckPrListAfterRemoteDelete`): the
+// units in LIST_REREAD schedule it, each under its gate, and no other unit does,
+// and of the issue lifecycle writes only close and reopen pass the helper's
+// re-read flag.
+//
 // The checker is a pure function over source text, so the suite feeds it the real
 // files (must pass) and in-memory mutants (must fail) without touching disk. It
 // fails closed: a roster callee, hook or file it can't find is a failure, never a
@@ -160,6 +165,35 @@ const EXCLUDED = {
   },
 };
 
+/** The units that schedule the delayed list re-read, because the forge's list
+ *  membership can lag the state change or deletion they make, and the condition
+ *  that must guard every such call in it (null = scheduled on every success).
+ *  Any other unit scheduling it fails the check; the helper's gate plus the
+ *  ISSUE_REREAD flag pin keep pin, lock, edit, transfer and delete out, and the
+ *  merge's gate keeps a queued merge out. */
+const LIST_REREAD = {
+  useMergePr: { file: `${Q}pr-actions.ts`, gate: "if (!data.queued)" },
+  useClosePr: { file: `${Q}pr-actions.ts`, gate: null },
+  useReopenPr: { file: `${Q}pr-actions.ts`, gate: null },
+  useDeleteRemoteBranch: { file: `${Q}branches.ts`, gate: null },
+  useIssueLifecycleMutation: {
+    file: `${Q}issues.ts`,
+    gate: "if (recheckListLater)",
+  },
+};
+const LIST_REREAD_CALL = "recheckPrListAfterRemoteDelete(";
+const LIST_REREAD_CALLS = /\brecheckPrListAfterRemoteDelete\(/g;
+
+/** The issue lifecycle helper's re-read flag (its argument at `flagIndex`): the
+ *  `armed` callers pass a literal `true`, every other caller leaves it out or
+ *  passes `false`. */
+const ISSUE_REREAD = {
+  file: `${Q}issues.ts`,
+  helper: "useIssueLifecycleMutation",
+  flagIndex: 6,
+  armed: ["useCloseIssue", "useReopenIssue"],
+};
+
 /** The second update-branch arm, which fires on the observed head move and hands
  *  the PR's checks reads along like the hook's own. */
 const SETTLE_ARM = {
@@ -168,11 +202,14 @@ const SETTLE_ARM = {
   call: /recheckRunsAfterPush\(\s*queryClient,\s*repoPath,\s*prChecksRecheck\(repoPath, lens, number\),?\s*\)/,
 };
 
-/** The argument text of every `recheckRunsAfterPush(…)` call in `body`, matched by
- *  paren depth. */
-function armCallArgs(body) {
+/** The argument text of every `recheckRunsAfterPush(…)` call in `body`. */
+const armCallArgs = (body) => callArgs(body, "recheckRunsAfterPush");
+
+/** The argument text of every `callee(…)` call in `body`, matched by paren
+ *  depth. */
+function callArgs(body, callee) {
   const out = [];
-  const opener = /\brecheckRunsAfterPush\(/g;
+  const opener = new RegExp(`\\b${callee}\\(`, "g");
   for (const m of body.matchAll(opener)) {
     const start = m.index + m[0].length;
     let depth = 1;
@@ -184,6 +221,30 @@ function armCallArgs(body) {
     }
     out.push(depth === 0 ? body.slice(start, i - 1) : body.slice(start));
   }
+  return out;
+}
+
+/** `args` split at its top-level commas, each trimmed; a trailing comma adds no
+ *  entry. Brackets nest, and string literals are skipped whole. */
+function splitArgs(args) {
+  const out = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < args.length; i++) {
+    const c = args[i];
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < args.length && args[j] !== c) j += args[j] === "\\" ? 2 : 1;
+      i = j;
+    } else if ("([{".includes(c)) depth++;
+    else if (")]}".includes(c)) depth--;
+    else if (c === "," && depth === 0) {
+      out.push(args.slice(from, i).trim());
+      from = i + 1;
+    }
+  }
+  const last = args.slice(from).trim();
+  if (last) out.push(last);
   return out;
 }
 
@@ -253,14 +314,16 @@ function topLevelUnits(text) {
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** How many arm calls sit directly under `gate` (`if (…) call` or `if (…) { call`). */
-function guardedArmCalls(body, gate) {
+/** How many `callee` calls sit directly under `gate` (`if (…) call` or
+ *  `if (…) { call`). */
+function guardedCalls(body, gate, callee = "recheckRunsAfterPush") {
   const guarded = new RegExp(
-    `${escapeRe(gate)}\\s*(?:\\{\\s*)?recheckRunsAfterPush\\(`,
+    `${escapeRe(gate)}\\s*(?:\\{\\s*)?${callee}\\(`,
     "g",
   );
   return body.match(guarded)?.length ?? 0;
 }
+const guardedArmCalls = (body, gate) => guardedCalls(body, gate);
 
 /** Problems found in `raw` (src-relative path → text: the queries package, the
  *  CORPUS_FILES, and SETTLE_ARM.file); empty means the family holds. Line endings
@@ -357,6 +420,63 @@ function checkPushRecheckFamily(raw) {
     if (!reason) problems.push(`${file} ${name}: exclusion has no reason`);
     if (mustCall && !hook.body.includes(mustCall))
       problems.push(`${file} ${name}: does not call ${mustCall.slice(0, -1)}`);
+  }
+
+  for (const [name, { file, gate }] of Object.entries(LIST_REREAD)) {
+    const hook = hooks.get(`${file}#${name}`);
+    if (!hook) {
+      problems.push(`${file} ${name}: list re-read unit not found`);
+      continue;
+    }
+    const calls = hook.body.match(LIST_REREAD_CALLS)?.length ?? 0;
+    if (calls === 0)
+      problems.push(`${file} ${name}: does not schedule the list re-read`);
+    else if (
+      gate !== null &&
+      guardedCalls(hook.body, gate, "recheckPrListAfterRemoteDelete") !== calls
+    )
+      problems.push(
+        `${file} ${name}: a list re-read is not guarded by \`${gate}\``,
+      );
+  }
+  for (const { file, name, body } of hooks.values()) {
+    const isDefinition =
+      file === `${Q}push-writes.ts` &&
+      name === "recheckPrListAfterRemoteDelete";
+    if (
+      body.includes(LIST_REREAD_CALL) &&
+      LIST_REREAD[name]?.file !== file &&
+      !isDefinition
+    )
+      problems.push(
+        `${file} ${name}: schedules the list re-read outside the set`,
+      );
+  }
+
+  const issueCallers = [...hooks.values()].filter(
+    (h) =>
+      h.file === ISSUE_REREAD.file &&
+      h.name !== ISSUE_REREAD.helper &&
+      callArgs(h.body, ISSUE_REREAD.helper).length > 0,
+  );
+  if (issueCallers.length === 0)
+    problems.push(`${ISSUE_REREAD.helper}: no callers found`);
+  for (const name of ISSUE_REREAD.armed)
+    if (!issueCallers.some((h) => h.name === name))
+      problems.push(
+        `${ISSUE_REREAD.file} ${name}: does not call ${ISSUE_REREAD.helper}`,
+      );
+  for (const { file, name, body } of issueCallers) {
+    const armed = ISSUE_REREAD.armed.includes(name);
+    for (const call of callArgs(body, ISSUE_REREAD.helper)) {
+      const flag = splitArgs(call)[ISSUE_REREAD.flagIndex];
+      if (armed && flag !== "true")
+        problems.push(`${file} ${name}: does not pass the list re-read flag`);
+      if (!armed && flag !== undefined && flag !== "false")
+        problems.push(
+          `${file} ${name}: passes the list re-read flag outside close and reopen`,
+        );
+    }
   }
 
   const view = sources[SETTLE_ARM.file];
@@ -747,4 +867,130 @@ test("a run write must arm or be a reasoned exclusion", () => {
       name,
     );
   }
+});
+
+/** `sources` with one unit's body in `file` passed through `edit`. */
+function mutateUnit(sources, file, name, edit) {
+  return mutate(sources, file, (text) => {
+    const body = topLevelUnits(text).get(name);
+    assert.ok(body, `${name} not found in ${file}`);
+    return text.replace(body, edit(body));
+  });
+}
+
+test("removing any one list re-read fails the check", () => {
+  const sources = realSources();
+  for (const [name, { file }] of Object.entries(LIST_REREAD)) {
+    const mutant = mutateUnit(sources, file, name, (body) =>
+      body.replaceAll(LIST_REREAD_CALL, "noReread("),
+    );
+    assert.ok(
+      checkPushRecheckFamily(mutant).some(
+        (p) => p.includes(name) && p.includes("does not schedule"),
+      ),
+      name,
+    );
+  }
+});
+
+test("a list re-read scheduled outside the set fails the check", () => {
+  const mutant = mutateUnit(
+    realSources(),
+    `${Q}pr-actions.ts`,
+    "useSetPrDraft",
+    (body) =>
+      body.replace(
+        "const queryClient = useQueryClient();",
+        "const queryClient = useQueryClient();\n  recheckPrListAfterRemoteDelete(queryClient, repo, []);",
+      ),
+  );
+  assert.ok(
+    checkPushRecheckFamily(mutant).some(
+      (p) => p.includes("useSetPrDraft") && p.includes("outside the set"),
+    ),
+  );
+});
+
+test("close and reopen must pass the issue re-read flag", () => {
+  for (const name of ISSUE_REREAD.armed) {
+    const mutant = mutateUnit(realSources(), ISSUE_REREAD.file, name, (body) =>
+      body.replace(/,\s*true,\s*\);/, ",\n    false,\n  );"),
+    );
+    assert.ok(
+      checkPushRecheckFamily(mutant).some(
+        (p) => p.includes(name) && p.includes("does not pass"),
+      ),
+      name,
+    );
+  }
+});
+
+test("any other issue lifecycle write passing the re-read flag fails the check", () => {
+  const { file, helper, flagIndex, armed } = ISSUE_REREAD;
+  const sources = realSources();
+  const others = [...topLevelUnits(sources[file])]
+    .filter(
+      ([name, body]) =>
+        name !== helper &&
+        !armed.includes(name) &&
+        callArgs(stripComments(body), helper).length > 0,
+    )
+    .map(([name]) => name);
+  // Pin, lock, unlock, edit, transfer and delete at the time of writing.
+  assert.ok(others.length >= 6, JSON.stringify(others));
+  for (const name of others) {
+    const mutant = mutateUnit(sources, file, name, (body) => {
+      const bare = stripComments(body);
+      let out = bare;
+      for (const call of callArgs(bare, helper)) {
+        const args = splitArgs(call);
+        while (args.length < flagIndex) args.push("undefined");
+        args[flagIndex] = "true";
+        out = out.replace(
+          `${helper}(${call})`,
+          () => `${helper}(${args.join(", ")})`,
+        );
+      }
+      return out;
+    });
+    assert.ok(
+      checkPushRecheckFamily(mutant).some(
+        (p) => p.includes(name) && p.includes("outside close and reopen"),
+      ),
+      name,
+    );
+  }
+});
+
+test("dropping a list re-read gate fails the check", () => {
+  for (const [name, { file, gate }] of Object.entries(LIST_REREAD)) {
+    if (gate === null) continue;
+    const mutant = mutateUnit(realSources(), file, name, (body) =>
+      body.replace(gate, "if (true)"),
+    );
+    assert.ok(
+      checkPushRecheckFamily(mutant).some(
+        (p) => p.includes(name) && p.includes("not guarded"),
+      ),
+      name,
+    );
+  }
+  const gates = Object.values(LIST_REREAD).filter((e) => e.gate !== null);
+  assert.equal(gates.length, 2);
+  const sidestep = mutateUnit(
+    realSources(),
+    `${Q}issues.ts`,
+    "useIssueLifecycleMutation",
+    (body) =>
+      body.replace(
+        "if (recheckListLater)",
+        "if (recheckListLater) void 0;\n      ",
+      ),
+  );
+  assert.ok(
+    checkPushRecheckFamily(sidestep).some(
+      (p) =>
+        p.includes("useIssueLifecycleMutation") && p.includes("not guarded"),
+    ),
+  );
 });

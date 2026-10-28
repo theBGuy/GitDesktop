@@ -359,6 +359,12 @@ export function LocalPrView({
   // takeover, which renders its own view in place of this bar.
   const actionBarRef = useRef<HTMLDivElement>(null);
   useToastClearance(actionBarRef, !!pr && !pr.pendingMerge?.worktreePath);
+  // The comment box docks on the action bar, so toasts clear both.
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(
+    composerBarRef,
+    !!pr && !pr.pendingMerge?.worktreePath && section === "conversation",
+  );
 
   if (!pr) {
     return (
@@ -1095,30 +1101,32 @@ export function LocalPrView({
           </ConversationScrollArea>
           {/* Shown for closed PRs too, so you can comment / quote-reply after
               closing; approving stays open-only. */}
-          <CommentComposer
-            ref={composerRef}
-            value={comment}
-            onChange={setComment}
-            onSubmit={addComment}
-            onClear={() => setComment("")}
-            submitLabel="Comment"
-            ariaLabel="Leave a note"
-            placeholder="Leave a note…"
-            mentions={mentions}
-            actions={
-              pr.status === "open" && (
-                <Button
-                  variant={pr.approved ? "secondary" : "outline"}
-                  size="sm"
-                  aria-pressed={pr.approved}
-                  onClick={toggleApprove}
-                >
-                  <CheckCircleIcon data-icon="inline-start" />
-                  {pr.approved ? "Approved" : "Approve"}
-                </Button>
-              )
-            }
-          />
+          <div ref={composerBarRef}>
+            <CommentComposer
+              ref={composerRef}
+              value={comment}
+              onChange={setComment}
+              onSubmit={addComment}
+              onClear={() => setComment("")}
+              submitLabel="Comment"
+              ariaLabel="Leave a note"
+              placeholder="Leave a note…"
+              mentions={mentions}
+              actions={
+                pr.status === "open" && (
+                  <Button
+                    variant={pr.approved ? "secondary" : "outline"}
+                    size="sm"
+                    aria-pressed={pr.approved}
+                    onClick={toggleApprove}
+                  >
+                    <CheckCircleIcon data-icon="inline-start" />
+                    {pr.approved ? "Approved" : "Approve"}
+                  </Button>
+                )
+              }
+            />
+          </div>
         </>
       )}
 

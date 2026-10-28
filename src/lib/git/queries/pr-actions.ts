@@ -537,8 +537,8 @@ export function useMergePr(repo: string) {
       // base, and Bitbucket's checks read that sha's statuses, so the PR's checks
       // are re-read too. This hook can't tell the provider, so for any other
       // merge that is a precaution of up to two reads. The run lists read
-      // origin, so an upstream-lens merge arms nothing; a queued merge has not
-      // landed yet, so its row stays where it is too.
+      // origin, so an upstream-lens merge arms no run recheck. A queued merge
+      // has not landed yet, so it arms neither: its row stays where it is.
       onSuccess: (data, args) => {
         if (!data.queued)
           recheckPrListAfterRemoteDelete(
