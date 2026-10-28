@@ -116,7 +116,6 @@ import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
-import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
 
 /** The `kind` write pending on `issueKey` (narrowed by `match`), read from the
@@ -1759,14 +1758,6 @@ export function JiraIssueView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
-  // The composer's full mount condition: the unlinked and no-data arms return
-  // early below, and the content arm renders it only with comment permission.
-  const composerShown =
-    canComment &&
-    details.data !== undefined &&
-    (link.isPending || link.data != null);
-  const composerBarRef = useRef<HTMLDivElement>(null);
-  useToastClearance(composerBarRef, composerShown);
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
@@ -2107,24 +2098,23 @@ export function JiraIssueView({
 
       {/* Below the thread AND the rail: the conversation is the widest thing on
           this surface, so the box you write in spans the same width. */}
-      {composerShown && (
-        <div ref={composerBarRef}>
-          <CommentComposer
-            ref={composerRef}
-            ariaLabel="Leave a comment"
-            placeholder="Leave a comment…"
-            value={compose.value}
-            onChange={compose.set}
-            onSubmit={submitComment}
-            onClear={() => compose.set("")}
-            submitLabel="Comment"
-            // A placeholder issue is the previously selected one, so submitting
-            // would comment on it; typing stays live through the window.
-            busy={commenting !== undefined || detailsStale}
-            reason={composerReason}
-            disabled={commenting !== undefined}
-          />
-        </div>
+      {canComment && (
+        <CommentComposer
+          toastClearance
+          ref={composerRef}
+          ariaLabel="Leave a comment"
+          placeholder="Leave a comment…"
+          value={compose.value}
+          onChange={compose.set}
+          onSubmit={submitComment}
+          onClear={() => compose.set("")}
+          submitLabel="Comment"
+          // A placeholder issue is the previously selected one, so submitting
+          // would comment on it; typing stays live through the window.
+          busy={commenting !== undefined || detailsStale}
+          reason={composerReason}
+          disabled={commenting !== undefined}
+        />
       )}
     </div>,
   );

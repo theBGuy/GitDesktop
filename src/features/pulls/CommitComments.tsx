@@ -41,7 +41,6 @@ import {
 } from "@/lib/offline-writes";
 import { toastError } from "@/lib/toast";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
-import { useToastClearance } from "@/lib/use-toast-clearance";
 
 export type DiffSections = ReturnType<typeof splitUnifiedDiff>;
 
@@ -374,11 +373,6 @@ export function CommitComments({
   // render that shows an answer; the loading edge sets the floor in a layout
   // effect, whose re-render lands before the collapsed frame paints.
   const paneRef = useRef<HTMLDivElement>(null);
-  // Measured at the composer, not the pane, whose top can sit far above it: the
-  // composer's top bounds whatever docks below it (a host's verdict row or a PR
-  // footer).
-  const composerBarRef = useRef<HTMLDivElement>(null);
-  useToastClearance(composerBarRef, enabled && canComment);
   const answeredHeight = useRef<number | null>(null);
   const [loadingFloor, setLoadingFloor] = useState<number | null>(null);
   const listLoading = enabled && comments.data === undefined && notice === null;
@@ -646,19 +640,18 @@ export function CommitComments({
       </div>
 
       {canComment && (
-        <div ref={composerBarRef}>
-          <CommentComposer
-            ariaLabel="Comment on this commit"
-            placeholder="Leave a comment…"
-            value={draft.value}
-            onChange={draft.set}
-            onSubmit={() => void submit()}
-            submitLabel="Comment"
-            mentions={mentions}
-            busy={busy}
-            reason={composerReason}
-          />
-        </div>
+        <CommentComposer
+          toastClearance
+          ariaLabel="Comment on this commit"
+          placeholder="Leave a comment…"
+          value={draft.value}
+          onChange={draft.set}
+          onSubmit={() => void submit()}
+          submitLabel="Comment"
+          mentions={mentions}
+          busy={busy}
+          reason={composerReason}
+        />
       )}
 
       <DeleteCommentDialog

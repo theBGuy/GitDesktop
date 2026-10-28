@@ -2732,12 +2732,6 @@ export function RemotePrView({
   const reopenFooterRef = useRef<HTMLDivElement>(null);
   useToastClearance(openFooterRef, loadedViewPainted && openFooterShown);
   useToastClearance(reopenFooterRef, loadedViewPainted && reopenFooterShown);
-  // The comment box is the bottom bar wherever no footer shows (a merged PR).
-  const conversationComposerRef = useRef<HTMLDivElement>(null);
-  useToastClearance(
-    conversationComposerRef,
-    loadedViewPainted && section === "conversation" && canComment,
-  );
   if (showsLoadingFrame) {
     // The loaded header's controls, held where they will stand and gated on the
     // list row's state as the loaded ones are on the PR's. With no cached row an
@@ -4200,170 +4194,167 @@ export function RemotePrView({
               the composer shows (the first MR writes), but the GitHub-only Review
               menu stays hidden; Bitbucket has neither, so the bar hides. */}
           {canComment && (
-            <div ref={conversationComposerRef}>
-              <CommentComposer
-                ref={composerRef}
-                value={compose.value}
-                onChange={compose.set}
-                onSubmit={submitComment}
-                onClear={() => compose.set("")}
-                submitLabel="Comment"
-                ariaLabel="Leave a comment"
-                placeholder="Leave a comment…"
-                mentions={mentions}
-                busy={busy}
-                // Every term of `busy` gets words, so a held Submit is never mute —
-                // including the switch, where the comment would post against the
-                // previously rendered PR.
-                reason={composerReason}
-                actions={
-                  <>
-                    {/* The Review control opens the batch submit dialog for every
-                        provider (verdict + summary + pending draft comments). GitHub
-                        rides `canWrite` via canSubmitReview; GitLab/Bitbucket enable it
-                        through the forge flag. */}
-                    {isOpen && canSubmitReview && (
+            <CommentComposer
+              toastClearance
+              ref={composerRef}
+              value={compose.value}
+              onChange={compose.set}
+              onSubmit={submitComment}
+              onClear={() => compose.set("")}
+              submitLabel="Comment"
+              ariaLabel="Leave a comment"
+              placeholder="Leave a comment…"
+              mentions={mentions}
+              busy={busy}
+              // Every term of `busy` gets words, so a held Submit is never mute —
+              // including the switch, where the comment would post against the
+              // previously rendered PR.
+              reason={composerReason}
+              actions={
+                <>
+                  {/* The Review control opens the batch submit dialog for every
+                      provider (verdict + summary + pending draft comments). GitHub
+                      rides `canWrite` via canSubmitReview; GitLab/Bitbucket enable it
+                      through the forge flag. */}
+                  {isOpen && canSubmitReview && (
+                    <DisabledReasonButton
+                      variant="outline"
+                      size="sm"
+                      disabled={busy}
+                      // `busy` folds in the placeholder window, where the review
+                      // would open against the previously rendered PR;
+                      // `composerReason` names whichever term is in flight so the
+                      // hold is never mute.
+                      reason={composerReason ?? BUSY_HOLD_FALLBACK_REASON}
+                      onClick={() => setSubmitOpen(true)}
+                      title="Submit a review (verdict, summary, and any pending comments)"
+                    >
+                      Review…
+                    </DisabledReasonButton>
+                  )}
+                  {isOpen && canApprove && (
+                    <>
                       <DisabledReasonButton
                         variant="outline"
                         size="sm"
-                        disabled={busy}
-                        // `busy` folds in the placeholder window, where the review
-                        // would open against the previously rendered PR;
-                        // `composerReason` names whichever term is in flight so the
-                        // hold is never mute.
-                        reason={composerReason ?? BUSY_HOLD_FALLBACK_REASON}
-                        onClick={() => setSubmitOpen(true)}
-                        title="Submit a review (verdict, summary, and any pending comments)"
-                      >
-                        Review…
-                      </DisabledReasonButton>
-                    )}
-                    {isOpen && canApprove && (
-                      <>
-                        <DisabledReasonButton
-                          variant="outline"
-                          size="sm"
-                          // On an approvals read-error we can't know the viewer's state,
-                          // so disable rather than present a confident (possibly wrong)
-                          // Approve that would fire the wrong direction on click. The
-                          // failed read has no other surface, so it rides `reason` —
-                          // hoverable and announced while the button is unavailable.
-                          // Every term of `disabled` gets words this way, `busy`'s via
-                          // `composerReason`, so the hold is never mute.
-                          disabled={
-                            busy || approvals.isPending || approvals.isError
-                          }
-                          reason={(() => {
-                            switch (true) {
-                              case approvals.isError:
-                                return "Couldn't load approval state";
-                              case busy:
-                                return (
-                                  composerReason ?? BUSY_HOLD_FALLBACK_REASON
-                                );
-                              case approvals.isPending:
-                                return "Checking approval state…";
-                              default:
-                                return undefined;
-                            }
-                          })()}
-                          // Unknown state is announced as unknown: a failed read
-                          // must not claim "not pressed" while the reason says the
-                          // state couldn't be loaded.
-                          aria-pressed={
-                            approvals.isError
-                              ? undefined
-                              : (approval?.viewerHasApproved ?? false)
-                          }
-                          onClick={toggleApproval}
-                          title={
-                            approval?.viewerHasApproved
-                              ? "Revoke your approval"
-                              : `Approve this ${prNoun}`
-                          }
-                          className={cn(
-                            approval?.viewerHasApproved &&
-                              "border-success/40 text-success hover:text-success",
-                          )}
-                        >
-                          <CheckCircleIcon data-icon="inline-start" />
-                          {approval?.viewerHasApproved ? "Approved" : "Approve"}
-                        </DisabledReasonButton>
-                        {approvalNote && (
-                          <span
-                            className="text-xs text-muted-foreground"
-                            title={
-                              approval && approval.approvedBy.length > 0
-                                ? `Approved by ${approval.approvedBy.join(", ")}`
-                                : undefined
-                            }
-                          >
-                            {approvalNote}
-                          </span>
-                        )}
-                      </>
-                    )}
-                    {isOpen && canRequestChanges && (
-                      <DisabledReasonButton
-                        variant="outline"
-                        size="sm"
-                        // Bitbucket: a true toggle. GitLab: one-shot — once requested
-                        // the button is the state indicator (the direct undo is
-                        // Premium-only), so it stays ENABLED with a no-op handler and
-                        // its how-to-clear title reachable. Same disable-on-unknown
-                        // posture as the approve toggle: `reason` carries the read
-                        // failure nothing else reports, and DisabledReasonButton keeps
-                        // the disabled button focusable so that reason is announced
-                        // rather than lost. Every term of `disabled` gets words this
-                        // way, `busy`'s via `composerReason`.
+                        // On an approvals read-error we can't know the viewer's state,
+                        // so disable rather than present a confident (possibly wrong)
+                        // Approve that would fire the wrong direction on click. The
+                        // failed read has no other surface, so it rides `reason` —
+                        // hoverable and announced while the button is unavailable.
+                        // Every term of `disabled` gets words this way, `busy`'s via
+                        // `composerReason`, so the hold is never mute.
                         disabled={
                           busy || approvals.isPending || approvals.isError
                         }
                         reason={(() => {
                           switch (true) {
                             case approvals.isError:
-                              return "Couldn't load review state";
+                              return "Couldn't load approval state";
                             case busy:
                               return (
                                 composerReason ?? BUSY_HOLD_FALLBACK_REASON
                               );
                             case approvals.isPending:
-                              return "Checking review state…";
+                              return "Checking approval state…";
                             default:
                               return undefined;
                           }
                         })()}
-                        // Unknown state is announced as unknown (same as approve).
+                        // Unknown state is announced as unknown: a failed read
+                        // must not claim "not pressed" while the reason says the
+                        // state couldn't be loaded.
                         aria-pressed={
                           approvals.isError
                             ? undefined
-                            : (approval?.viewerRequestedChanges ?? false)
+                            : (approval?.viewerHasApproved ?? false)
                         }
-                        onClick={requestChanges}
+                        onClick={toggleApproval}
                         title={
-                          approval?.viewerRequestedChanges
-                            ? canUnrequestChanges
-                              ? "Revoke your change request"
-                              : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
-                            : compose.value.trim()
-                              ? "Request changes, posting your draft as a comment"
-                              : `Request changes on this ${prNoun} (adds you as a reviewer)`
+                          approval?.viewerHasApproved
+                            ? "Revoke your approval"
+                            : `Approve this ${prNoun}`
                         }
                         className={cn(
-                          approval?.viewerRequestedChanges &&
-                            "border-warning/40 text-warning",
+                          approval?.viewerHasApproved &&
+                            "border-success/40 text-success hover:text-success",
                         )}
                       >
-                        <XCircleIcon data-icon="inline-start" />
-                        {approval?.viewerRequestedChanges
-                          ? "Changes requested"
-                          : "Request changes"}
+                        <CheckCircleIcon data-icon="inline-start" />
+                        {approval?.viewerHasApproved ? "Approved" : "Approve"}
                       </DisabledReasonButton>
-                    )}
-                  </>
-                }
-              />
-            </div>
+                      {approvalNote && (
+                        <span
+                          className="text-xs text-muted-foreground"
+                          title={
+                            approval && approval.approvedBy.length > 0
+                              ? `Approved by ${approval.approvedBy.join(", ")}`
+                              : undefined
+                          }
+                        >
+                          {approvalNote}
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {isOpen && canRequestChanges && (
+                    <DisabledReasonButton
+                      variant="outline"
+                      size="sm"
+                      // Bitbucket: a true toggle. GitLab: one-shot — once requested
+                      // the button is the state indicator (the direct undo is
+                      // Premium-only), so it stays ENABLED with a no-op handler and
+                      // its how-to-clear title reachable. Same disable-on-unknown
+                      // posture as the approve toggle: `reason` carries the read
+                      // failure nothing else reports, and DisabledReasonButton keeps
+                      // the disabled button focusable so that reason is announced
+                      // rather than lost. Every term of `disabled` gets words this
+                      // way, `busy`'s via `composerReason`.
+                      disabled={
+                        busy || approvals.isPending || approvals.isError
+                      }
+                      reason={(() => {
+                        switch (true) {
+                          case approvals.isError:
+                            return "Couldn't load review state";
+                          case busy:
+                            return composerReason ?? BUSY_HOLD_FALLBACK_REASON;
+                          case approvals.isPending:
+                            return "Checking review state…";
+                          default:
+                            return undefined;
+                        }
+                      })()}
+                      // Unknown state is announced as unknown (same as approve).
+                      aria-pressed={
+                        approvals.isError
+                          ? undefined
+                          : (approval?.viewerRequestedChanges ?? false)
+                      }
+                      onClick={requestChanges}
+                      title={
+                        approval?.viewerRequestedChanges
+                          ? canUnrequestChanges
+                            ? "Revoke your change request"
+                            : "You've requested changes — approve, or remove yourself as a reviewer on GitLab, to clear"
+                          : compose.value.trim()
+                            ? "Request changes, posting your draft as a comment"
+                            : `Request changes on this ${prNoun} (adds you as a reviewer)`
+                      }
+                      className={cn(
+                        approval?.viewerRequestedChanges &&
+                          "border-warning/40 text-warning",
+                      )}
+                    >
+                      <XCircleIcon data-icon="inline-start" />
+                      {approval?.viewerRequestedChanges
+                        ? "Changes requested"
+                        : "Request changes"}
+                    </DisabledReasonButton>
+                  )}
+                </>
+              }
+            />
           )}
         </>
       )}
