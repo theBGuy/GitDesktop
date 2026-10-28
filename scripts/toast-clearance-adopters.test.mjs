@@ -4,6 +4,8 @@
 //   ones pass `toastClearance`, so the composer measures its OWN root. A
 //   call-site wrapper would make the composer an only child and break its
 //   scroll-pin lookup, so no host aims useToastClearance at a composer ref;
+// - a bar standing in for the composer (STAND_IN_BARS) publishes under its
+//   full mount condition;
 // - the composer's scroll-pin lookup walks its preceding siblings nearest-first
 //   (a docked strip can sit between it and the conversation);
 // - useToastClearance re-measures when a sibling after the bar resizes or the
@@ -20,7 +22,7 @@ import { relative } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { maskNonCode, sourceFiles, tagEnd } from "./lib/ts-mask.mjs";
+import { escapeRe, maskNonCode, sourceFiles, tagEnd } from "./lib/ts-mask.mjs";
 
 /** Each file's `<CommentComposer` mounts in source order: whether it passes
  *  `toastClearance`. */
@@ -28,8 +30,7 @@ const MOUNTS = {
   "features/discussions/DiscussionView.tsx": [true],
   "features/issues/JiraIssueView.tsx": [true],
   "features/issues/LocalIssueView.tsx": [true],
-  // Deferred: the remote issue view's bottom bar is tracked separately.
-  "features/issues/RemoteIssueView.tsx": [false],
+  "features/issues/RemoteIssueView.tsx": [true],
   "features/pulls/CommitComments.tsx": [true],
   "features/pulls/LocalPrView.tsx": [true],
   // The loading frame's disabled placeholder box, then the conversation's.
@@ -38,6 +39,17 @@ const MOUNTS = {
 
 const COMPOSER = "features/conversations/CommentComposer.tsx";
 const HOOK = "lib/use-toast-clearance.ts";
+
+/** Bottom bars that stand in for a docked composer: the bar element carries
+ *  `ref`, and the hook's `active` is the bar's full mount condition (compared
+ *  with whitespace collapsed). */
+const STAND_IN_BARS = [
+  {
+    file: "features/issues/RemoteIssueView.tsx",
+    ref: "stateBarRef",
+    active: 'arm === "content" && !canComment && canChangeState',
+  },
+];
 
 const SELF_CLEARANCE =
   /\buseToastClearance\(\s*rootRef,\s*toastClearance === true\s*\)/;
@@ -142,6 +154,19 @@ function checkToastClearanceAdopters(sources) {
       problems.push(
         `${COMPOSER}: measurePinRegion does not walk the preceding siblings`,
       );
+  }
+
+  for (const { file, ref, active } of STAND_IN_BARS) {
+    if (!(file in masked)) continue;
+    const call = new RegExp(
+      `\\buseToastClearance\\(\\s*${ref},\\s*${escapeRe(active)},?\\s*\\)`,
+    );
+    if (!call.test(sources[file].replace(/\s+/g, " ")))
+      problems.push(
+        `${file}: ${ref}'s clearance is not gated on \`${active}\``,
+      );
+    if (!masked[file].includes(`ref={${ref}}`))
+      problems.push(`${file}: no element carries ${ref}`);
   }
 
   const hook = masked[HOOK];
@@ -262,6 +287,27 @@ test("a pin lookup reading only the previous sibling fails the check", () => {
       ),
     ),
     "preceding siblings",
+  );
+});
+
+test("a stand-in bar with a narrowed gate or no ref fails the check", () => {
+  const file = "features/issues/RemoteIssueView.tsx";
+  for (const [from, to] of [
+    ['arm === "content" && !canComment && canChangeState', "canChangeState"],
+    ['arm === "content" && !canComment && canChangeState', "true"],
+    ["!canComment && canChangeState,", "canChangeState,"],
+  ])
+    fails(
+      mutate(realSources(), file, (text) => text.replace(from, to)),
+      file,
+      "not gated",
+    );
+  fails(
+    mutate(realSources(), file, (text) =>
+      text.replace("<div ref={stateBarRef} ", "<div "),
+    ),
+    file,
+    "no element carries",
   );
 });
 

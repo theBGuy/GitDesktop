@@ -126,6 +126,7 @@ import { toastError, toastErrorWithNote } from "@/lib/toast";
 import { useEntityHold, useRevealGuard } from "@/lib/use-entity-hold";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { readAnswered } from "../pulls/pr-section-answered";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
@@ -582,6 +583,13 @@ export function RemoteIssueView({
           : "content";
   // Each frame episode decides afresh.
   if (arm !== "loading" && frameRow !== null) setFrameRow(null);
+  // The state-only bar renders only in the content arm, and only for a viewer who
+  // can change state but not comment (the composer carries the actions then).
+  const stateBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(
+    stateBarRef,
+    arm === "content" && !canComment && canChangeState,
+  );
   // A swap that unmounts the focused node (in-view navigation onto an issue that
   // lands without a hold, or an arm change) would drop focus to <body>; land it
   // on the host. Change-only, so a mount never takes focus from elsewhere.
@@ -1757,6 +1765,7 @@ export function RemoteIssueView({
           Bitbucket has neither, so the whole bar hides. */}
       {canComment ? (
         <CommentComposer
+          toastClearance
           ref={composerRef}
           ariaLabel="Leave a comment"
           placeholder="Leave a comment…"
@@ -1791,7 +1800,7 @@ export function RemoteIssueView({
           }
         />
       ) : canChangeState ? (
-        <div className="space-y-2 border-t p-3">
+        <div ref={stateBarRef} className="space-y-2 border-t p-3">
           <div className="flex items-center gap-2">{stateActions}</div>
         </div>
       ) : null}
