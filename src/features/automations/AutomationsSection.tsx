@@ -299,10 +299,11 @@ export const AutomationsSection = withForm({
       const pending = pendingSave.current;
       if (pending?.json === json) return pending.promise;
       if (!automations.data) return Promise.resolve(false);
-      // Detached: a rail switch or Discard and close can unmount the panel
-      // while the write runs, so neither toast may depend on it staying mounted,
-      // and the failure's description reads whether the draft is still on screen
-      // (a Discard made during the save is about to put the stored rules back).
+      // Detached: leaving Settings can unmount the panel while the write runs
+      // (a rail switch keeps it mounted while saving), so neither toast may
+      // depend on it staying mounted, and the failure's description reads
+      // whether the draft is still on screen (a Discard made during the save is
+      // about to put the stored rules back).
       const promise = save
         .mutateAsync({ ...automations.data, lifecycles })
         .then(

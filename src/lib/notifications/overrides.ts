@@ -46,8 +46,8 @@ const STORE_FILE = "notification-overrides.json";
 const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue:
-// autoSave persists on a ~100ms debounce, so two overlapping saves would both read
-// the same pre-flush disk snapshot and the later would drop the earlier's change.
+// two overlapping saves would both read the same disk snapshot before either
+// saves, and the later would drop the earlier's change.
 // Mirrors automations/store.ts, cross-instance store lock around the reload→save
 // included.
 let opChain: Promise<unknown> = Promise.resolve();
@@ -351,8 +351,8 @@ export async function overrideForRepo(
   return overrideEntry(map, identity, repoPath);
 }
 
-/** Serialized read-modify-write against fresh disk state. The force-save flushes
- *  past the autoSave debounce so the next queued op's reload sees it. */
+/** Serialized read-modify-write against fresh disk state. Autosave is off for this
+ *  store, so the force-save is what persists it for the next queued op's reload. */
 function mutateOverrides(
   mutate: (
     current: Record<string, RepoNotificationOverride>,

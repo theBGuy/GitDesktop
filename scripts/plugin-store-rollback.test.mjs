@@ -4,12 +4,22 @@
 // Source pins derive the writer roster from the lock ratchet and check returned
 // rollback coverage per writing lock site, following same-file named helpers.
 // Mutation controls cover behavior, a missing site wrap, and roster expansion.
+// Autosave pins: the plugin-store allowlist matches the ratchet's exempt stores,
+// and every opener takes storeLoadOptions; their controls mutate sources in memory.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { relative } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { writeWithRollback } from "../src/lib/plugin-store-rollback.ts";
-import { escapeRe, lineOf, maskNonCode, matchBrace } from "./lib/ts-mask.mjs";
+import {
+  escapeRe,
+  lineOf,
+  maskNonCode,
+  matchBrace,
+  sourceFiles,
+} from "./lib/ts-mask.mjs";
 
 const seed = () =>
   new Map([
@@ -653,5 +663,416 @@ test("mutation control: an imported helper without a call fails adoption", () =>
         "missing-call fixture",
       ),
     { name: "AssertionError" },
+  );
+});
+
+// Autosave pins: a debounce armed by a failed write would persist outside the
+// store's lock, so only the lock ratchet's exempt (set-without-save) stores keep it.
+const PLUGIN_STORE = "src/lib/plugin-store.ts";
+// Exempt from the JS lock (its other writers are Rust), yet its one JS writer
+// force-saves, so it keeps autosave off like the adopters.
+const FORCE_SAVING_EXEMPT = new Set(["src/lib/review-notes/store.ts"]);
+
+function stringLiterals(text, masked, from, to) {
+  return [...masked.slice(from, to).matchAll(/(["'])[^"'\r\n]*\1/g)].map(
+    (match) => ({
+      at: from + match.index,
+      value: text.slice(
+        from + match.index + 1,
+        from + match.index + match[0].length - 1,
+      ),
+    }),
+  );
+}
+
+function onlyLiterals(masked, from, to, extra = "") {
+  const rest = masked
+    .slice(from, to)
+    .replace(/(["'])[^"'\r\n]*\1/g, "")
+    .replace(new RegExp(`[\\s,${extra}]`, "g"), "");
+  assert.equal(rest, "", "a literal-only list");
+}
+
+function parseAutosaveStores(text) {
+  const masked = maskNonCode(text, false);
+  const sets = [
+    ...masked.matchAll(
+      /\bconst\s+AUTOSAVE_STORES\s*(?::[^=]*)?=\s*new\s+Set\s*\(\s*\[/g,
+    ),
+  ];
+  assert.equal(sets.length, 1, "one AUTOSAVE_STORES Set literal");
+  const open = masked.indexOf("[", sets[0].index + sets[0][0].length - 1);
+  const close = closing(masked, open);
+  onlyLiterals(masked, open + 1, close);
+  const files = stringLiterals(text, masked, open + 1, close).map(
+    (literal) => literal.value,
+  );
+  assert.ok(files.length > 0, "the allowlist must not be empty");
+  assert.equal(new Set(files).size, files.length, "unique allowlist entries");
+  return files;
+}
+
+function parseExemptModules(ratchet) {
+  const masked = maskNonCode(ratchet, false);
+  const maps = [
+    ...masked.matchAll(/\bconst\s+EXEMPT\s*=\s*new\s+Map\s*\(\s*\[/g),
+  ];
+  assert.equal(maps.length, 1, "one EXEMPT Map literal in the lock ratchet");
+  const open = masked.indexOf("[", maps[0].index + maps[0][0].length - 1);
+  const close = closing(masked, open);
+  onlyLiterals(masked, open + 1, close, "\\[\\]");
+  const modules = [];
+  for (let i = open + 1; i < close; i++) {
+    if (masked[i] !== "[") continue;
+    const end = closing(masked, i);
+    const entry = stringLiterals(ratchet, masked, i + 1, end);
+    assert.equal(entry.length, 2, "each EXEMPT entry is [module, reason]");
+    assert.match(entry[0].value, /^src\/[\w./-]+\.tsx?$/);
+    modules.push(entry[0].value);
+    i = end;
+  }
+  assert.ok(modules.length > 0, "the exemption map must not be empty");
+  return modules;
+}
+
+// The module's store file, read from its loader call's literal or the one
+// same-file `const` literal it names; zero or several openers, or an
+// unresolvable name, fail closed rather than guessing which file it owns.
+function storeFileOf(text, file) {
+  const masked = maskNonCode(text, file.endsWith(".tsx"));
+  const openers = [
+    ...masked.matchAll(
+      /(?<![\w$.])(?:memoizedStoreLoader\s*\(|load\s*\(\s*storeName\s*\()\s*(?:(["'])[^"'\r\n]*\1|([A-Za-z_$][\w$]*))\s*\)/g,
+    ),
+  ];
+  assert.equal(
+    openers.length,
+    1,
+    `${file}: exactly one literal store opener (found ${openers.length})`,
+  );
+  const [opener] = openers;
+  let from = opener.index;
+  let to = opener.index + opener[0].length;
+  if (opener[2] !== undefined) {
+    const declarations = [
+      ...masked.matchAll(
+        new RegExp(
+          `\\bconst\\s+${escapeRe(opener[2])}\\s*=\\s*(["'])[^"'\\r\\n]*\\1\\s*;`,
+          "g",
+        ),
+      ),
+    ];
+    assert.equal(
+      declarations.length,
+      1,
+      `${file}: exactly one literal store opener (${opener[2]} resolves to ${declarations.length} const literals)`,
+    );
+    from = declarations[0].index;
+    to = from + declarations[0][0].length;
+  }
+  const literal = stringLiterals(text, masked, from, to);
+  assert.equal(literal.length, 1);
+  assert.match(
+    literal[0].value,
+    /^[\w.-]+\.json$/,
+    `${file}: a bare file name`,
+  );
+  return literal[0].value;
+}
+
+function assertAutosaveAllowlist(
+  ratchet = source("scripts/app-store-lock.test.mjs"),
+  readSource = source,
+) {
+  const expected = parseExemptModules(ratchet)
+    .filter((module) => !FORCE_SAVING_EXEMPT.has(module))
+    .map((module) => storeFileOf(readSource(module), module))
+    .sort();
+  const actual = parseAutosaveStores(readSource(PLUGIN_STORE)).sort();
+  assert.deepEqual(
+    actual,
+    expected,
+    "AUTOSAVE_STORES drifted from the lock ratchet's set-without-save stores",
+  );
+}
+
+function topLevelArgs(masked, open) {
+  const close = closing(masked, open);
+  const args = [];
+  let start = open + 1;
+  let depth = 0;
+  for (let i = open + 1; i < close; i++) {
+    if ("([{".includes(masked[i])) depth++;
+    else if (")]}".includes(masked[i])) depth--;
+    else if (masked[i] === "," && depth === 0) {
+      args.push({ start, end: i });
+      start = i + 1;
+    }
+  }
+  args.push({ start, end: close });
+  return args.filter((arg) => masked.slice(arg.start, arg.end).trim() !== "");
+}
+
+// Every plugin `load(` in the file opens `storeName(X)` with `storeLoadOptions(X)`
+// over the same bare name, so options key on the pre-cold-start name.
+function assertLoadsTakeStoreOptions(text, file) {
+  const masked = maskNonCode(text, file.endsWith(".tsx"));
+  const calls = [...masked.matchAll(/(?<![\w$.])load\s*\(/g)];
+  assert.ok(calls.length > 0, `${file}: a plugin load call`);
+  for (const call of calls) {
+    const open = call.index + call[0].length - 1;
+    const args = topLevelArgs(masked, open);
+    const at = `${file}:${lineOf(masked, call.index)}`;
+    assert.equal(args.length, 2, `${at}: load takes (name, options)`);
+    const [name, options] = args.map((arg) =>
+      text.slice(arg.start, arg.end).trim(),
+    );
+    const nameArg = /^storeName\(([^()]*)\)$/.exec(name);
+    const optionsArg = /^storeLoadOptions\(([^()]*)\)$/.exec(options);
+    assert.ok(nameArg, `${at}: load opens a storeName(...) path`);
+    assert.ok(optionsArg, `${at}: load options come from storeLoadOptions`);
+    assert.equal(
+      optionsArg[1].trim(),
+      nameArg[1].trim(),
+      `${at}: options key on the same bare file name`,
+    );
+  }
+  return calls.length;
+}
+
+const OPENERS = [
+  PLUGIN_STORE,
+  "src/lib/repo-data-migration.ts",
+  "src/lib/analytics/posthog.ts",
+];
+
+// `autoSave` is spelled only in plugin-store.ts: as code, or as a quoted key
+// (a string keeps its quotes in the mask, a comment does not).
+function autoSaveHits(files) {
+  const hits = [];
+  for (const [file, text] of files) {
+    if (file === PLUGIN_STORE || !/autoSave/.test(text)) continue;
+    const masked = maskNonCode(text, file.endsWith(".tsx"));
+    for (const match of masked.matchAll(/\bautoSave\b/g)) {
+      hits.push(`${file}:${lineOf(masked, match.index)}`);
+    }
+    for (const match of text.matchAll(/(["'`])autoSave\1/g)) {
+      if (masked[match.index] === match[1]) {
+        hits.push(`${file}:${lineOf(masked, match.index)}`);
+      }
+    }
+  }
+  return hits;
+}
+
+const SRC_ROOT = fileURLToPath(new URL("../src", import.meta.url));
+function* srcFiles() {
+  for (const full of sourceFiles(SRC_ROOT)) {
+    const file = `src/${relative(SRC_ROOT, full).replace(/\\/g, "/")}`;
+    yield [file, source(file)];
+  }
+}
+
+test("the autosave allowlist is exactly the lock ratchet's set-without-save stores", () => {
+  assertAutosaveAllowlist();
+  assert.deepEqual(parseAutosaveStores(source(PLUGIN_STORE)).sort(), [
+    "analytics.json",
+    "notifications.json",
+    "plans.json",
+    "research.json",
+  ]);
+});
+
+test("every plugin store opener passes storeLoadOptions over the bare file name", () => {
+  for (const file of OPENERS) {
+    assert.ok(assertLoadsTakeStoreOptions(source(file), file) >= 1);
+  }
+});
+
+test("autoSave is spelled nowhere in src outside plugin-store.ts", () => {
+  const files = [...srcFiles()];
+  assert.ok(files.length > 100, "the src scan read the tree");
+  assert.deepEqual(autoSaveHits(files), []);
+  assert.ok(
+    /\bautoSave\b/.test(maskNonCode(source(PLUGIN_STORE), false)),
+    "plugin-store.ts still mints the option",
+  );
+});
+
+test("mutation control: an adopted store moved into EXEMPT drifts the allowlist", () => {
+  const ratchet = source("scripts/app-store-lock.test.mjs");
+  const mutant = ratchet
+    .replace('  "src/lib/jira/store.ts",\n', "")
+    .replace(
+      "const EXEMPT = new Map([",
+      'const EXEMPT = new Map([\n  ["src/lib/jira/store.ts", "fixture"],',
+    );
+  assert.notEqual(mutant, ratchet);
+  assert.ok(parseExemptModules(mutant).includes("src/lib/jira/store.ts"));
+  assert.throws(
+    () => assertAutosaveAllowlist(mutant),
+    /AUTOSAVE_STORES drifted/,
+  );
+});
+
+test("mutation control: a lock-forced-save store on the allowlist fails", () => {
+  const text = source(PLUGIN_STORE);
+  const mutant = text.replace(
+    '  "analytics.json",\n',
+    '  "analytics.json",\n  "settings.json",\n',
+  );
+  assert.notEqual(mutant, text);
+  assert.throws(
+    () =>
+      assertAutosaveAllowlist(undefined, (file) =>
+        file === PLUGIN_STORE ? mutant : source(file),
+      ),
+    /AUTOSAVE_STORES drifted/,
+  );
+});
+
+test("mutation control: inline loader options fail the opener pin", () => {
+  const text = source(PLUGIN_STORE);
+  const mutant = text.replace(
+    "load(storeName(file), storeLoadOptions(file))",
+    "load(storeName(file), { autoSave: true, defaults: {} })",
+  );
+  assert.notEqual(mutant, text);
+  assert.throws(
+    () => assertLoadsTakeStoreOptions(mutant, PLUGIN_STORE),
+    /load options come from storeLoadOptions/,
+  );
+});
+
+test("mutation control: a migration opener with literal options fails", () => {
+  const file = "src/lib/repo-data-migration.ts";
+  const text = source(file);
+  const mutant = text.replace(
+    "load(storeName(file), storeLoadOptions(file))",
+    "load(storeName(file), { autoSave: false, defaults: {} })",
+  );
+  assert.notEqual(mutant, text);
+  assert.throws(
+    () => assertLoadsTakeStoreOptions(mutant, file),
+    /load options come from storeLoadOptions/,
+  );
+  const wrapped = text.replace(
+    "load(storeName(file), storeLoadOptions(file))",
+    "load(storeName(file), storeLoadOptions(storeName(file)))",
+  );
+  assert.notEqual(wrapped, text);
+  assert.throws(
+    () => assertLoadsTakeStoreOptions(wrapped, file),
+    /load options come from storeLoadOptions/,
+  );
+});
+
+test("mutation control: a store module with zero or two literal openers fails closed", () => {
+  for (const fixture of [
+    "const getStore = memoizedStoreLoader(STORE_FILE);",
+    'const F = "a.json";\nconst F = "b.json";\nmemoizedStoreLoader(F);',
+    "memoizedStoreLoader(`a.json`);",
+    'const a = memoizedStoreLoader("a.json");\nconst b = memoizedStoreLoader("b.json");',
+    'const a = memoizedStoreLoader("a.json");\nload(storeName("b.json"), storeLoadOptions("b.json"));',
+  ]) {
+    assert.throws(
+      () => storeFileOf(fixture, "fixture.ts"),
+      /exactly one literal store opener/,
+    );
+  }
+  assert.equal(
+    storeFileOf(
+      '// memoizedStoreLoader("x.json")\nmemoizedStoreLoader("a.json");',
+      "f.ts",
+    ),
+    "a.json",
+  );
+  assert.equal(
+    storeFileOf(
+      'const STORE_FILE = "b.json";\nmemoizedStoreLoader(STORE_FILE);',
+      "f.ts",
+    ),
+    "b.json",
+  );
+});
+
+test("mutation control: an autoSave option outside plugin-store.ts fails", () => {
+  const file = "src/lib/analytics/posthog.ts";
+  const text = source(file);
+  for (const options of ["{ autoSave: true }", '{ "autoSave": true }']) {
+    const mutant = text.replace(
+      'storeLoadOptions("analytics.json")',
+      () => options,
+    );
+    assert.notEqual(mutant, text);
+    assert.equal(autoSaveHits([[file, mutant]]).length, 1, options);
+  }
+  assert.deepEqual(
+    autoSaveHits([[file, `${text}\n// autoSave is off; "autoSave" too\n`]]),
+    [],
+  );
+});
+
+// The FORCE_SAVING_EXEMPT reason: every store write in review-notes lives in
+// `writeBranchToStore`, and a `store.save()` follows its last write there.
+const FORCE_SAVING_WRITER = "writeBranchToStore";
+function assertForceSavingWriter(text, file) {
+  const masked = maskNonCode(text, false);
+  const bodies = namedFunctions(masked).get(FORCE_SAVING_WRITER) ?? [];
+  assert.equal(bodies.length, 1, `${file}: one ${FORCE_SAVING_WRITER}`);
+  const [body] = bodies;
+  const writes = [
+    ...masked.matchAll(
+      /(?<![\w$.])store\s*(?:\?\.|!\.|\.)\s*(?:set|delete|clear|reset)\s*\(/g,
+    ),
+  ].map((match) => match.index);
+  assert.ok(writes.length > 0, `${file}: the writer's store writes`);
+  for (const at of writes) {
+    assert.ok(
+      at >= body.start && at < body.end,
+      `${file}:${lineOf(masked, at)}: store write outside ${FORCE_SAVING_WRITER}`,
+    );
+  }
+  const saves = [
+    ...masked
+      .slice(body.start, body.end)
+      .matchAll(/(?<![\w$.])store\s*(?:\?\.|!\.|\.)\s*save\s*\(/g),
+  ].map((match) => body.start + match.index);
+  assert.ok(
+    saves.some((at) => at > Math.max(...writes)),
+    `${file}: ${FORCE_SAVING_WRITER} must force-save after its last write`,
+  );
+}
+
+test("each force-saving exempt store saves after every write", () => {
+  for (const file of FORCE_SAVING_EXEMPT) {
+    assertForceSavingWriter(source(file), file);
+  }
+});
+
+test("mutation control: a force-saving exempt writer without its save fails", () => {
+  const file = "src/lib/review-notes/store.ts";
+  const text = source(file);
+  const unsaved = text.replace("  await store.save();\n", "");
+  assert.notEqual(unsaved, text);
+  assert.throws(
+    () => assertForceSavingWriter(unsaved, file),
+    /must force-save after its last write/,
+  );
+  const early = text
+    .replace("  await store.save();\n", "")
+    .replace(
+      "  const branches = {",
+      "  await store.save();\n  const branches = {",
+    );
+  assert.notEqual(early, text);
+  assert.throws(
+    () => assertForceSavingWriter(early, file),
+    /must force-save after its last write/,
+  );
+  const stray = `${text}\nexport async function extra() {\n  const store = await getStore();\n  await store.set("k", 1);\n}\n`;
+  assert.throws(
+    () => assertForceSavingWriter(stray, file),
+    /store write outside writeBranchToStore/,
   );
 });

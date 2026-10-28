@@ -27,8 +27,7 @@ const getStore = memoizedStoreLoader("review-notes.json");
 
 // Serialize every read-modify-write on this store (and the reconcile reload)
 // through one in-process queue. Without it, two overlapping mutations each
-// reload the SAME pre-flush disk snapshot — autoSave persists on a ~100ms
-// debounce, so the first write isn't on disk yet — and the later write drops
+// reload the SAME disk snapshot before either saves, and the later write drops
 // the earlier one's change (a lost update; the settings-store write-race rule).
 // Running them one at a time, plus the force-save in `writeBranchToStore`,
 // guarantees each reload sees a current snapshot.
@@ -46,10 +45,9 @@ async function reloadRaw(): Promise<void> {
 
 /** Re-read `review-notes.json` from disk into the in-memory store. The MCP
  *  server (with `--allow-write`) can mutate this file externally; without a
- *  reload the autoSave store would clobber those writes on the next GUI
- *  mutation. `ignoreDefaults` fully matches the store to disk (so external
- *  deletes drop). Serialized so it can't land between another mutation's set and
- *  its flush. */
+ *  reload the next GUI mutation's save would clobber those writes.
+ *  `ignoreDefaults` fully matches the store to disk (so external deletes drop).
+ *  Serialized so it can't land between another mutation's set and its flush. */
 export async function reloadReviewNotes(): Promise<void> {
   return serialize(reloadRaw);
 }
@@ -128,8 +126,8 @@ async function writeBranchToStore(
   } else {
     await store.set(key, branches);
   }
-  // Flush now instead of on autoSave's debounce, so the next serialized reload
-  // can't re-read a pre-write disk snapshot and drop this change.
+  // Autosave is off for this store, so only this save persists the change;
+  // the next serialized reload reads it back, not a pre-write snapshot.
   await store.save();
 }
 

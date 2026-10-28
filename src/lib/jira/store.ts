@@ -24,9 +24,9 @@ const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store (and the reload) through one
 // in-process queue — mirrors the local-issue/PR stores. Without it two
-// overlapping mutations each reload the SAME pre-flush disk snapshot (autoSave
-// persists on a ~100ms debounce) and the later write drops the earlier one's
-// change. Each mutation force-saves so each reload sees a current one, and takes
+// overlapping mutations each reload the SAME disk snapshot before either saves,
+// and the later write drops the earlier one's change. Each mutation force-saves
+// (autosave is off for this store) so each reload sees a current one, and takes
 // the cross-instance store lock around its reload→save against other processes.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
@@ -103,8 +103,8 @@ export async function setJiraLink(
       return writeWithRollback(store, async () => {
         const key = await keyFor(repo, identity);
         await store.set(key, link);
-        // Flush now (not on autoSave's debounce) so the next serialized reload can't
-        // drop this.
+        // Autosave is off for this store: only this save persists, before the next
+        // serialized reload.
         await store.save();
         return link;
       });

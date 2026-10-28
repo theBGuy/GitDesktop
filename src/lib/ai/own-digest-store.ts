@@ -83,9 +83,9 @@ const STORE_FILE = "own-comments-digest.json";
 const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write through one in-process queue — without it two
-// overlapping saves each reload the same pre-flush disk snapshot (autoSave's ~100ms
-// debounce) and the later drops the earlier. Mirrors pr-reviews.json's chain,
-// cross-instance store lock around each reload→save included.
+// overlapping saves each reload the same disk snapshot before either saves, and the
+// later drops the earlier. Mirrors pr-reviews.json's chain, cross-instance store
+// lock around each reload→save included.
 let opChain: Promise<unknown> = Promise.resolve();
 function serialize<T>(op: () => Promise<T>): Promise<T> {
   const run = opChain.then(op, op);
@@ -163,8 +163,8 @@ export async function saveDigest(
         const preLens = legacyDigestKey(record.key);
         if (preLens !== undefined) delete bag[preLens];
         await store.set(key, bag);
-        // Flush now instead of on autoSave's debounce, so the next serialized reload
-        // can't re-read a pre-write disk snapshot and drop this change.
+        // Autosave is off for this store, so only this save persists the change;
+        // the next serialized reload reads it back, not a pre-write snapshot.
         await store.save();
       });
     });

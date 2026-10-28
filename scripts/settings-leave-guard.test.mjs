@@ -37,6 +37,11 @@ const source = (rel) =>
 const UI = "src/lib/stores/ui.ts";
 const SCREEN = "src/features/settings/SettingsScreen.tsx";
 const AUTOMATIONS = "src/features/automations/AutomationsSection.tsx";
+const ACTIVITY = "src/features/activity/ActivityDock.tsx";
+const OPEN_BY_PATH = "src/features/repository/useOpenRepoByPath.ts";
+
+/** The notification jumps' navigators, each re-checked by `stillValid`. */
+const JUMP_NAVIGATORS = ["openPr", "openRun", "openAgentTab", "openRepoView"];
 
 /** View writers that never leave Settings through the guard, each with why. */
 const EXEMPT = {
@@ -510,6 +515,147 @@ function sanitizedDirtyProblems(text) {
   )
     ? []
     : ["the panel's dirty compares the raw draft"];
+}
+
+/** Problems with the Automations panel's mount, `[]` when pinned: it renders
+ *  while active, unsaved or writing, hidden whenever another panel is active,
+ *  so a panel switch keeps its draft and handles, and as the first child of
+ *  `<main>` (JSX comments aside), so space-y-8's not-last-child margin never
+ *  lands on a visible panel. */
+function automationsMountProblems(text) {
+  const problems = [];
+  if (
+    !/<main\b[^>]*>\s*(?:\{\/\*(?:(?!\*\/)[\s\S])*\*\/\}\s*)*\{\(activePanel === "automations" \|\|\s*automationsDirty \|\|\s*automationsSaving\) && \(\s*<div hidden=\{activePanel !== "automations"\}>\s*<AutomationsSection\b/.test(
+      text,
+    )
+  )
+    problems.push(
+      "the Automations panel no longer stays mounted, hidden, while unsaved or writing, as <main>'s first child",
+    );
+  if ((text.match(/<AutomationsSection\b/g) ?? []).length !== 1)
+    problems.push("expected one AutomationsSection mount");
+  return problems;
+}
+
+/** Problems with the footer's condition, `[]` when pinned: an Automations
+ *  draft shows it on every other panel, never on Automations (its own bar). */
+function footerProblems(text) {
+  return /const footerVisible =\s*dirty \|\|\s*secretsDirty \|\|\s*\(automationsDirty && activePanel !== "automations"\);/.test(
+    text,
+  )
+    ? []
+    : [
+        "the footer no longer covers an Automations draft from the other panels alone",
+      ];
+}
+
+/** Problems with the landing side effects, `[]` when pinned: each jump
+ *  navigator's transition callback calls `target.onApplied?.();` once, after
+ *  its stillValid refusal and its set, openRepo's calls `opts?.onApplied?.();`
+ *  once after its set, and openRepo's resume thunk forwards its opts, so a held
+ *  open keeps its `onApplied`. */
+function onAppliedProblems(text) {
+  const masked = maskNonCode(text, false);
+  const obj = storeObject(masked);
+  if (!obj) return ["the store creator's returned object was not found"];
+  const values = new Map(
+    objectMembers(masked, obj[0], obj[1]).map((m) => [
+      m.key,
+      masked.slice(m.start, m.end),
+    ]),
+  );
+  const problems = [];
+  for (const name of [...JUMP_NAVIGATORS, "openRepo"]) {
+    const value = values.get(name);
+    if (value === undefined) {
+      problems.push(`${name} not found`);
+      continue;
+    }
+    const call =
+      name === "openRepo" ? "opts?.onApplied?.();" : "target.onApplied?.();";
+    if (value.split(call).length !== 2) {
+      problems.push(`expected one ${call} in ${name}`);
+      continue;
+    }
+    const cb = /startViewTransition\(\(\) => \{/.exec(value);
+    const close = cb ? matchBrace(value, cb.index + cb[0].length - 1) : -1;
+    if (close === -1) {
+      problems.push(`${name}'s transition callback has no block body`);
+      continue;
+    }
+    const body = value.slice(cb.index, close + 1);
+    const at = body.indexOf(call);
+    if (at === -1) {
+      problems.push(`${name}'s onApplied runs outside its transition callback`);
+      continue;
+    }
+    const set = /(?<![\w$.])set\(/.exec(body);
+    const setClose = set ? matchBrace(body, set.index + set[0].length - 1) : -1;
+    if (setClose === -1 || at < setClose)
+      problems.push(`${name}'s onApplied runs before its set`);
+    if (name === "openRepo") continue;
+    const refuse = body.indexOf(
+      "if (target.stillValid?.(epochAtRequest) === false) return;",
+    );
+    if (refuse === -1 || at < refuse)
+      problems.push(`${name}'s onApplied runs ahead of its stillValid refusal`);
+  }
+  if (
+    !/interceptSettingsLeave\(\(\) => get\(\)\.openRepo\(info, opts\)\)/.test(
+      masked,
+    )
+  )
+    problems.push("openRepo's resume thunk drops its opts");
+  return problems;
+}
+
+/** Problems with the notification read-marks, `[]` when pinned: inside
+ *  navigate(), only the two synchronous acks (automation result, no route) mark
+ *  before the routed arm, and each of the four jump navigators marks through its
+ *  `onApplied`, so a held, refused or superseded jump leaves its row unread. */
+function markReadProblems(text) {
+  const masked = maskNonCode(text, true);
+  const at = /const navigate = \(n: AppNotification\) => \{/.exec(masked);
+  if (!at) return ["navigate() not found"];
+  const open = at.index + at[0].length - 1;
+  const close = matchBrace(masked, open);
+  if (close === -1) return ["navigate()'s body was not found"];
+  const body = masked.slice(open, close + 1);
+  const routed = body.indexOf("void (async () => {");
+  if (routed === -1) return ["navigate()'s routed arm was not found"];
+  const problems = [];
+  const marks = [...body.matchAll(/(?<![\w$.])markNotificationRead\(/g)];
+  const landed = marks.filter((m) =>
+    /onApplied: \(\) =>\s*$/.test(body.slice(0, m.index)),
+  );
+  const callees = landed.map((m) => enclosingCallee(body, m.index)).sort();
+  if (JSON.stringify(callees) !== JSON.stringify([...JUMP_NAVIGATORS].sort()))
+    problems.push(
+      `the jump navigators' onApplied read-marks are [${callees}], expected one each`,
+    );
+  const bare = marks.filter((m) => !landed.includes(m));
+  if (bare.length !== 2 || bare.some((m) => m.index > routed))
+    problems.push("a routed jump marks its row read before it lands");
+  return problems;
+}
+
+/** Problems with the repo-open event, `[]` when pinned: `repo_opened` is
+ *  tracked once, from the `onApplied` the open hands `openRepo`, and the
+ *  recorded open forwards that to the navigator. */
+function repoOpenedProblems(text) {
+  const masked = maskNonCode(text, false);
+  const problems = [];
+  const tracks = [...text.matchAll(/track\(\{ name: "repo_opened"/g)].filter(
+    (m) => masked.startsWith("track(", m.index),
+  );
+  if (
+    tracks.length !== 1 ||
+    !/onApplied: \(\) =>\s*$/.test(text.slice(0, tracks[0].index))
+  )
+    problems.push("repo_opened is no longer tracked once, at the landing");
+  if ((masked.match(/(?<![\w$.])openRepo\(info, opts\);/g) ?? []).length !== 1)
+    problems.push("the recorded open no longer forwards its opts to openRepo");
+  return problems;
 }
 
 /** The navigator a call argument at `index` is passed to: the identifier before
@@ -1006,6 +1152,95 @@ test("the Automations panel reads dirty as a save would write the draft", () => 
   );
 });
 
+test("the Automations panel stays mounted, hidden, while unsaved or writing", () => {
+  const wrapper = '              {(activePanel === "automations" ||';
+  const wrapperEnd = "                </div>\n              )}\n";
+  pin(
+    automationsMountProblems,
+    source(SCREEN),
+    // Mounted only while active: a panel switch drops the draft.
+    once(
+      '{(activePanel === "automations" ||\n                automationsDirty ||\n                automationsSaving) && (',
+      '{activePanel === "automations" && (',
+    ),
+    // A switch mid-write unmounting the panel, and its join handle with it.
+    once(
+      "automationsDirty ||\n                automationsSaving) && (",
+      "automationsDirty) && (",
+    ),
+    once('<div hidden={activePanel !== "automations"}>', "<div>"),
+    // Trailing the panels: space-y-8 hands the visible panel a stray margin.
+    (s) => {
+      const start = s.indexOf(wrapper);
+      if (start === -1) return s;
+      const end = s.indexOf(wrapperEnd, start) + wrapperEnd.length;
+      const anchor =
+        "<McpServersSection form={form} secrets={secrets} />\n              )}\n";
+      return once(
+        anchor,
+        anchor + s.slice(start, end),
+      )(s.slice(0, start) + s.slice(end));
+    },
+  );
+});
+
+test("the footer covers an Automations draft from every other panel", () => {
+  pin(
+    footerProblems,
+    source(SCREEN),
+    once(
+      '    dirty ||\n    secretsDirty ||\n    (automationsDirty && activePanel !== "automations");',
+      "    dirty || secretsDirty;",
+    ),
+    // Shown on Automations too, doubling the panel's own bar.
+    once(
+      '(automationsDirty && activePanel !== "automations")',
+      "automationsDirty",
+    ),
+  );
+});
+
+test("the navigators run onApplied only once their landing applies", () => {
+  pin(
+    onAppliedProblems,
+    source(UI),
+    // Ahead of the stillValid refusal: a refused landing would still fire it.
+    (s) =>
+      once(
+        "        if (target.stillValid?.(epochAtRequest) === false) return;\n",
+        "        target.onApplied?.();\n        if (target.stillValid?.(epochAtRequest) === false) return;\n",
+      )(once("        target.onApplied?.();\n", "")(s)),
+    once("        target.onApplied?.();\n", ""),
+    once("        opts?.onApplied?.();\n", ""),
+    // A held open resumed without its opts loses its onApplied.
+    once("get().openRepo(info, opts))", "get().openRepo(info))"),
+  );
+});
+
+test("a notification jump reads its row only when the landing applies", () => {
+  pin(
+    markReadProblems,
+    source(ACTIVITY),
+    once(
+      "      openPr({\n",
+      "      markNotificationRead(n.id);\n      openPr({\n",
+    ),
+    once("          onApplied: () => markNotificationRead(n.id),\n", ""),
+  );
+});
+
+test("repo_opened is tracked when the open lands", () => {
+  pin(
+    repoOpenedProblems,
+    source(OPEN_BY_PATH),
+    once(
+      '    ) =>\n      openRecorded(info, stillCurrent, {\n        onApplied: () => track({ name: "repo_opened", properties: { source } }),\n      }),\n',
+      '    ) => {\n      const opened = await openRecorded(info, stillCurrent);\n      if (opened) track({ name: "repo_opened", properties: { source } });\n      return opened;\n    },\n',
+    ),
+    once("      openRepo(info, opts);\n", "      openRepo(info);\n"),
+  );
+});
+
 test("the guard's escapes are used at exactly the two system landings", () => {
   const files = srcFiles();
   assert.deepEqual(bypassProblems(files), []);
@@ -1022,8 +1257,8 @@ test("the guard's escapes are used at exactly the two system landings", () => {
     [
       "src/features/repository/useOpenRepoByPath.ts",
       once(
-        "      openRepo(info);\n",
-        "      openRepo(info, { bypassLeaveGuard: true });\n",
+        "      openRepo(info, opts);\n",
+        "      openRepo(info, { ...opts, bypassLeaveGuard: true });\n",
       ),
     ],
     // The failure reopen escaping again.
@@ -1038,8 +1273,8 @@ test("the guard's escapes are used at exactly the two system landings", () => {
     [
       UI,
       once(
-        "get().openRepo(info))",
-        "get().openRepo(info, { bypassLeaveGuard: true }))",
+        "get().openRepo(info, opts))",
+        "get().openRepo(info, { ...opts, bypassLeaveGuard: true }))",
       ),
     ],
     // A site dropping its escape.

@@ -521,7 +521,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   animation (`{ animate: false }`), still applying after any pending
   transition's update; the screen navigators always crossfade. A plain `set()`
   right after a navigator can be clobbered by that later apply — navigate in
-  ONE atomic action.
+  ONE atomic action. A side effect that must count only when a navigation
+  LANDS (a read-mark, an analytics event) rides the navigator's `onApplied`,
+  run inside the transition callback after the landing's set: the four jump
+  navigators skip it on a stillValid-refused landing; `openRepo` applies every
+  call that reaches its callback (a skipped view transition still runs its
+  update), so its callers gate with `claimRepoOpen`/`repoOpenWatermark` before
+  calling. `onApplied` itself never bumps the epoch.
 - Navigators that can leave Settings open with
   `if (interceptSettingsLeave(() => get().<self>(<original args>))) return;`
   ahead of their own epoch bump: the intercept bumps for the request and hands
@@ -935,7 +941,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   its pre-write snapshot instead. And the relocate migration's reloads
   (`src/lib/repo-data-migration.ts`): re-homing runs outside the feature
   modules' write queues and writes back unconditionally, so the tolerant
-  reload's tolerate-or-rethrow decision isn't the guard it needs.
+  reload's tolerate-or-rethrow decision isn't the guard it needs. Every opener
+  passes `storeLoadOptions(file)`: autosave is off unless the file is in
+  `AUTOSAVE_STORES`, so each write force-saves or its file joins that list
+  (pinned by `scripts/plugin-store-rollback.test.mjs`).
 - **Plugin-store writes take the cross-process lock** — a store a second app
   instance (or the MCP server) can write wraps its read-modify-write in
   `withAppStoreLock` (`src/lib/app-store-lock.ts`): identity/git resolution

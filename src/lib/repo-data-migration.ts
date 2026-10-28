@@ -1,6 +1,7 @@
 import { load } from "@tauri-apps/plugin-store";
 import { withAppStoreLock } from "@/lib/app-store-lock";
 import { repoIdentity } from "@/lib/git/repo-identity";
+import { storeLoadOptions } from "@/lib/plugin-store";
 import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { norm } from "@/lib/repo-key";
 import { rehomeTaskScopes } from "@/lib/scripts/store";
@@ -14,8 +15,8 @@ import { storeName } from "@/lib/test-mode";
 // TS-side, not Rust: each store is one shared `@tauri-apps/plugin-store` instance
 // app-wide, so loading it here with the same `storeName()` + options mutates the
 // instance the feature modules cache — a Rust rewrite behind the plugin's back
-// would be lost to the next autosave. `reload()` first because local-prs.json and
-// review-notes.json are also written by the Rust MCP server.
+// would be overwritten by that instance's next save. `reload()` first because
+// local-prs.json and review-notes.json are also written by the Rust MCP server.
 //
 // The old key can't be recomputed (`--git-common-dir` needs the vanished folder),
 // so we match both on-disk forms of the old path — `<oldPath>/.git` (identity) and
@@ -50,10 +51,10 @@ import { storeName } from "@/lib/test-mode";
 // and the stores' own legacy folding only re-homes the CURRENT checkout's raw-path
 // key, never the departed `<oldPath>/.git` key.
 
-/** Load a store with the exact shared-instance options every feature module uses,
- *  so we mutate the same cached instance rather than a private copy. */
+/** Load a store with the options `storeLoadOptions` mints per file, so we mutate
+ *  the same cached instance the feature modules opened rather than a private copy. */
 function loadStore(file: string) {
-  return load(storeName(file), { autoSave: true, defaults: {} });
+  return load(storeName(file), storeLoadOptions(file));
 }
 
 /** How a store's per-repo values combine when both the old and new keys hold data. */

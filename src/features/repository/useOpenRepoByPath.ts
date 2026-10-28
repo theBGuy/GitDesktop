@@ -74,6 +74,8 @@ export function useOpenRecordedRepo() {
     async (
       info: RepoInfo,
       stillCurrent: () => boolean = claimRepoOpen(),
+      // `onApplied` rides to `openRepo`, firing only when the switch lands.
+      opts?: { onApplied?: () => void },
     ): Promise<boolean> => {
       const warmed = warmRepoShell(queryClient, info.root);
       await addRecent({ path: info.root, name: info.name }).catch(
@@ -81,7 +83,7 @@ export function useOpenRecordedRepo() {
       );
       await warmed;
       if (!stillCurrent()) return false;
-      openRepo(info);
+      openRepo(info, opts);
       return true;
     },
     [addRecent, openRepo, queryClient],
@@ -112,16 +114,17 @@ export function useOpenRepoByPath() {
   const recentRepos = settings.data?.recentRepos;
   const queryClient = useQueryClient();
 
+  // Counted when the switch lands, never at the request: a dirty Settings can
+  // hold it, and Keep editing cancels it.
   const recordOpenAndTrack = useCallback(
     async (
       info: RepoInfo,
       source: "recent" | "picker" | "relocate",
       stillCurrent: () => boolean,
-    ) => {
-      const opened = await openRecorded(info, stillCurrent);
-      if (opened) track({ name: "repo_opened", properties: { source } });
-      return opened;
-    },
+    ) =>
+      openRecorded(info, stillCurrent, {
+        onApplied: () => track({ name: "repo_opened", properties: { source } }),
+      }),
     [openRecorded],
   );
 

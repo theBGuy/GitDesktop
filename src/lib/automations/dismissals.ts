@@ -177,8 +177,8 @@ export async function setDismissedHead(
           ...all,
           [cellKey(lens, kind, ref, mode)]: headSha,
         });
-        // Flush past autoSave's ~100ms debounce so the next queued reload reads this
-        // write back instead of a pre-write snapshot.
+        // Autosave is off for this store, so only this save persists the write;
+        // the next serialized reload reads it back, not a pre-write snapshot.
         await store.save();
       });
     });

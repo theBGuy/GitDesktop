@@ -136,10 +136,10 @@ const MAX_MARKERS = 10;
 const STORE_FILE = "automation-history.json";
 const getStore = memoizedStoreLoader(STORE_FILE);
 
-// Serialize every read-modify-write through one in-process queue: autoSave persists
-// on a ~100ms debounce, so two overlapping writes would both reload the same
-// pre-flush disk snapshot and the later would drop the earlier's record (two poll
-// ticks and a settling run all write this store). With the force-save below, each
+// Serialize every read-modify-write through one in-process queue: two overlapping
+// writes would both reload the same disk snapshot before either saves, and the
+// later would drop the earlier's record (two poll ticks and a settling run all write
+// this store). With the force-save below (autosave is off for this store), each
 // reload sees fresh state. Writers also take the cross-instance store lock around
 // their reload→save, so another app instance's write can't land inside it.
 let opChain: Promise<unknown> = Promise.resolve();
@@ -390,8 +390,8 @@ async function appendUnder(
     ts: new Date().toISOString(),
   };
   await store.set(key, prune([record, ...existing]));
-  // Flush now instead of on autoSave's debounce, so the next serialized reload
-  // can't re-read a pre-write disk snapshot and drop this record.
+  // Autosave is off for this store, so only this save persists the record;
+  // the next serialized reload reads it back, not a pre-write snapshot.
   await store.save();
   return record.id;
 }

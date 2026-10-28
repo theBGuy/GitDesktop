@@ -51,10 +51,10 @@ const MAX_IN_SESSION = 20;
 const STORE_FILE = "automation-results.json";
 const getStore = memoizedStoreLoader(STORE_FILE);
 
-// Serialize every read-modify-write through one in-process queue: autoSave persists
-// on a ~100ms debounce, so two overlapping writes would both reload the same
-// pre-flush disk snapshot and the later would drop the earlier's record (two review
-// modes of the same commit settle back to back). With the force-save in `persist`,
+// Serialize every read-modify-write through one in-process queue: two overlapping
+// writes would both reload the same disk snapshot before either saves, and the
+// later would drop the earlier's record (two review modes of the same commit settle
+// back to back). With the force-save in `persist` (autosave is off for this store),
 // each reload sees fresh state. Two app instances delivering DIFFERENT runs (the
 // automation claim only keeps them off the same run) are ordered by the
 // cross-instance store lock `persist` takes around its reload→save.
@@ -119,8 +119,8 @@ async function persist(result: AutomationRunResult): Promise<void> {
           key,
           pruneByCreatedAt([result, ...without], MAX_PER_REPO),
         );
-        // Flush now instead of on autoSave's debounce, so the next serialized reload
-        // can't re-read a pre-write disk snapshot and drop this record.
+        // Autosave is off for this store, so only this save persists the record;
+        // the next serialized reload reads it back, not a pre-write snapshot.
         await store.save();
       });
     });
