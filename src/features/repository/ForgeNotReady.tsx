@@ -434,7 +434,7 @@ export function ForgeNotReady({
         repoPath={repoPath}
         provider="github"
         feature={feature}
-        resetAt={null}
+        resetAt={forge.data?.resetAt ?? null}
         checkedAt={forge.dataUpdatedAt}
         landingRef={landingRef}
       />

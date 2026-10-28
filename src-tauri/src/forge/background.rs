@@ -381,6 +381,7 @@ mod tests {
             capabilities: Capabilities::for_provider(provider),
             implemented: Implemented::for_provider(provider),
             probe_error: None,
+            reset_at: None,
         }
     }
 

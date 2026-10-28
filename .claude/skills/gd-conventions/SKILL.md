@@ -1110,6 +1110,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `@lezer/highlight` drops theme coloring — neither shows in build or tests.
   Remedy is `pnpm dedupe`, then an `overrides:` pin in `pnpm-workspace.yaml`
   for a split that survives it.
+- **Rate limits and absent gh reads:** limit copy comes from `forge-backoff.ts`,
+  never a hard-coded provider: `rateLimitSummary` gives the one-sentence reason
+  and `rateLimitClause` is the one spelling of "while {Provider}'s API rate
+  limit is in effect", both over the one kind→provider map `FORGE_KIND_HOSTS`
+  and the runner-pinned `HELD_RATE_LIMIT_TEXTS`. `rateLimitSummary` answers only
+  for a bare limit, so a cause an app headline wraps keeps that headline. A Rust
+  gh read that can mean absence sends a failure through `classify_gh_failure` in
+  a pure `*_outcome` fn (RateLimited/Transport → Err, NotFound/Answered →
+  absence), never "none" on a non-zero exit (guard: check-rust-invariants check
+  J). The exceptions: star status (github/pr.rs, forge/github.rs) and the
+  Explore README map Answered → Err too. An exit-0 body that won't parse rejects
+  as well, while a parsed body missing a field keeps that field's meaning; the
+  lock read needs a readable `locked`. The repo view is exempt: unreadable, it
+  stays forge-status's Unresolved.
 - **gh rate-limit hold:** `github/runner.rs` holds a gh call whose argv
   classifies to a limited (host, bucket) pair (REST core, GraphQL or search)
   and returns gh-shaped rate-limit stderr without spawning. Evidence comes

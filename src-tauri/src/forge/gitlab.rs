@@ -90,6 +90,7 @@ fn gitlab_status(
         capabilities: Capabilities::for_provider(Provider::GitLab),
         implemented: Implemented::for_provider(Provider::GitLab),
         probe_error: None,
+        reset_at: None,
     }
 }
 
@@ -4706,6 +4707,7 @@ pub async fn view_issue(repo_path: &str, number: u64) -> AppResult<IssueDetails>
         issue_type: None,
         is_pinned: false,
         locked: issue.discussion_locked,
+        lock_unknown: false,
         active_lock_reason: None,
         confidential: issue.confidential,
         due_date: issue.due_date,
