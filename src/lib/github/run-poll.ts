@@ -10,7 +10,8 @@ import { isRunActive } from "./run-status.ts";
 export const RUN_POLL_FAST_MS = 5_000;
 /** An attempt past its first minutes is unlikely to finish in the next few seconds. */
 export const RUN_POLL_MID_MS = 15_000;
-/** Long runs and runs held for approval: completion lands within a minute. */
+/** Long runs, and a list's runs that don't drive its cadence: completion
+ *  lands within a minute. */
 export const RUN_POLL_SLOW_MS = 60_000;
 /** The attempt age where the fast tier ends. */
 export const RUN_POLL_FRESH_AGE_MS = 120_000;
@@ -36,11 +37,11 @@ const parseMs = (value: string | undefined): number | null => {
 /** One run's poll interval, or false once it has finished. The age basis is the
  *  attempt's start when readable, else the run's creation: a re-run keeps the
  *  run's old creation time while its start moves. An unreadable or future basis
- *  polls fast, never costlier than a flat fast tick. A `waiting` run polls slowly
- *  at any age, since only a human approval moves it. */
+ *  polls fast, never costlier than a flat fast tick. A `waiting` run ladders
+ *  like any active run: a resource group, a schedule or a wait timer can
+ *  release it without anyone acting. */
 export function runPollIntervalMs(run: PollRun, nowMs: number): number | false {
   if (!isRunActive(run.status)) return false;
-  if (run.status === "waiting") return RUN_POLL_SLOW_MS;
   const basis = parseMs(run.startedAt) ?? parseMs(run.createdAt);
   if (basis === null) return RUN_POLL_FAST_MS;
   const age = nowMs - basis;
@@ -71,7 +72,7 @@ export function newestJobStartedAt(
  *  right after a re-run its jobs are absent or the previous attempt's, so no
  *  job start can date the new attempt yet. Otherwise the basis is the later of
  *  the run's creation and its newest job start; a job start before the
- *  creation never ages the run past it. A `waiting` run stays slow. */
+ *  creation never ages the run past it. */
 export function runDetailPollIntervalMs(
   detail: {
     status: string;
@@ -81,7 +82,6 @@ export function runDetailPollIntervalMs(
   nowMs: number,
 ): number | false {
   if (!isRunActive(detail.status)) return false;
-  if (detail.status === "waiting") return RUN_POLL_SLOW_MS;
   if (!detail.jobs.some((j) => isRunActive(j.status))) return RUN_POLL_FAST_MS;
   const newest = newestJobStartedAt(detail.jobs);
   const startMs = parseMs(newest);

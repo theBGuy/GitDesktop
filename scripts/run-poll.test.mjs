@@ -70,8 +70,10 @@ test("the tier edges: 2 min starts the mid tier, 10 min the slow one", () => {
   );
 });
 
-test("a waiting run polls slowly at any age: only an approval moves it", () => {
-  assert.equal(runPollIntervalMs(run("waiting", ago(10 * SEC)), NOW), 60_000);
+test("a waiting run follows the age ladder: its wait can end on its own", () => {
+  // A resource group, a schedule or a wait timer releases it without a human.
+  assert.equal(runPollIntervalMs(run("waiting", ago(10 * SEC)), NOW), 5000);
+  assert.equal(runPollIntervalMs(run("waiting", ago(5 * MIN)), NOW), 15_000);
   assert.equal(runPollIntervalMs(run("waiting", ago(30 * MIN)), NOW), 60_000);
 });
 
@@ -186,10 +188,17 @@ test("listRunsPollIntervalMs: the newest run's ladder drives the fast arm", () =
     ),
     60_000,
   );
-  // A newest run held for approval no longer pins the fast cadence.
+  // A newest waiting run is active: its own ladder drives the list.
   assert.equal(
     listRunsPollIntervalMs(
       [run("waiting", ago(10 * SEC)), run("completed", ago(MIN))],
+      NOW,
+    ),
+    5000,
+  );
+  assert.equal(
+    listRunsPollIntervalMs(
+      [run("waiting", ago(30 * MIN)), run("completed", ago(MIN))],
       NOW,
     ),
     60_000,
@@ -260,8 +269,8 @@ test("listRunsPollIntervalMs: nothing active stops the poll", () => {
 // pinned by scripts/run-notify-diff.test.mjs): both modules spell the same
 // fast-arm rule, a newest active run or an executing run of the newest run's
 // push, so a change to either rule reddens this case. Every run here is fresh,
-// so the list's fast arm answers the fast tier. A newest `waiting` run is left
-// out on purpose: the list ladders it to the slow tier, the notifier does not.
+// so the list's fast arm answers the fast tier, a newest `waiting` run
+// included.
 test("the list's fast arm agrees with notifyPollInterval", () => {
   const fx = (status, headSha, id) => ({
     id,
@@ -274,6 +283,8 @@ test("the list's fast arm agrees with notifyPollInterval", () => {
     [[fx("in_progress", "abc", 2), fx("completed", "abc", 1)], true],
     [[fx("queued", "abc", 2), fx("completed", "abc", 1)], true],
     [[fx("pending", "abc", 1)], true],
+    [[fx("waiting", "abc", 2), fx("completed", "abc", 1)], true],
+    [[fx("completed", "abc", 2), fx("waiting", "abc", 1)], false],
     [[fx("completed", "abc", 2), fx("in_progress", "abc", 1)], true],
     [[fx("completed", "abc", 2), fx("queued", "abc", 1)], false],
     [[fx("completed", "abc", 2), fx("in_progress", "def", 1)], false],
@@ -311,13 +322,13 @@ test("a run detail with no active job polls fast: a re-run's new attempt", () =>
     ),
     RUN_POLL_FAST_MS,
   );
-  // A held run stays slow even with no active job.
+  // A waiting run with no active job is no exception.
   assert.equal(
     runDetailPollIntervalMs(
       { status: "waiting", createdAt: created, jobs: [] },
       NOW,
     ),
-    RUN_POLL_SLOW_MS,
+    RUN_POLL_FAST_MS,
   );
   assert.equal(
     runDetailPollIntervalMs(
@@ -419,9 +430,13 @@ test("a jobs read keeps polling while its run row is active", () => {
 });
 
 test("a head poll over active runs keeps each active run's own tier", () => {
-  // Held for approval: the slow tier, however fresh.
+  // A waiting run follows its ladder like any active run.
   assert.equal(
     runsPollIntervalMs([{ status: "waiting", createdAt: ago(MIN) }], NOW),
+    RUN_POLL_FAST_MS,
+  );
+  assert.equal(
+    runsPollIntervalMs([{ status: "waiting", createdAt: ago(30 * MIN) }], NOW),
     RUN_POLL_SLOW_MS,
   );
   // An old executing run: its ladder gives 60 s.
@@ -437,4 +452,16 @@ test("a head poll over active runs keeps each active run's own tier", () => {
     runsPollIntervalMs([{ status: "completed", createdAt: ago(MIN) }], NOW),
     false,
   );
+});
+
+test("a waiting run detail follows the age ladder", () => {
+  const waitingJob = [{ status: "waiting", startedAt: "" }];
+  const detail = (createdAt) => ({
+    status: "waiting",
+    createdAt,
+    jobs: waitingJob,
+  });
+  assert.equal(runDetailPollIntervalMs(detail(ago(10 * SEC)), NOW), 5000);
+  assert.equal(runDetailPollIntervalMs(detail(ago(5 * MIN)), NOW), 15_000);
+  assert.equal(runDetailPollIntervalMs(detail(ago(30 * MIN)), NOW), 60_000);
 });

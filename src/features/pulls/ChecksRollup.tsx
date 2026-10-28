@@ -99,6 +99,7 @@ import {
   stillLatchedRunIds,
 } from "./checks-rerun";
 import { PR_SWITCH_LOADING_REASON } from "./PrMergeabilityBanner";
+import { watchRoutes } from "./watch-routes";
 
 /** The one wording for releasing a held workflow run — this strip and the Actions
  *  run view both ask through it, so the two prompts can't drift apart. It lives
@@ -689,9 +690,11 @@ export function ChecksRollup({
   // still holds the merge — either way the PR should show it without a click.
   // Otherwise collapsed by default.
   const [open, setOpen] = useState(failed > 0 || attention > 0);
-  // The jobs of each watched run, keyed by run id. Populated by the headless
-  // `RunDetailFetcher`s (one per id in `mountedWatchIds`); each row resolves its
-  // own job from here. Empty until run detail lands.
+  // The jobs of each watched run, keyed by run id; each row resolves its own job
+  // from here. `watchRoutes` decides the source: on GitHub a `RunJobsFetcher`
+  // for each running run the head list carries, and a `RunDetailFetcher` for a
+  // run it doesn't; elsewhere a `RunDetailFetcher` per watched run. Empty until
+  // one of them lands.
   const [jobsByRun, setJobsByRun] = useState<Record<string, RunJob[]>>({});
   // …and re-open when failures FIRST appear after mount: usePrDetails refetches
   // on window focus (no remount), so a PR opened while CI is pending would
@@ -859,22 +862,18 @@ export function ChecksRollup({
       ? (headRuns.data ?? []).map((r) => [String(r.id), r] as const)
       : [],
   );
-  // A watched run the head list doesn't carry (over 100 runs on one commit, a
-  // sha mismatch) falls back to its own run view, but only off a list that
-  // answered and is healthy: a failed refresh, a rate limit included, must not
-  // fan out a run view per watched run. A PR with no known head sha has no
-  // head poll, so every watched run takes the per-run path.
-  const runViewIds =
-    watcherProvider !== "github" || headSha === null
-      ? mountedWatchIds
-      : headRuns.data !== undefined && !headRuns.isError
-        ? mountedWatchIds.filter((id) => !headRunById.has(id))
-        : [];
-  // The running runs whose steps the open list shows, read as jobs alone. Never
-  // a run the per-run path watches: its run view already lifts its jobs.
-  const jobsReadIds = open
-    ? runningRunIds.filter((id) => headRunById.has(id))
-    : [];
+  // Which watched runs get a run view of their own and which a jobs read
+  // (watch-routes.ts): a failed or pending head poll fans out no run views.
+  const { runViewIds, jobsReadIds } = watchRoutes({
+    provider: watcherProvider,
+    headSha,
+    headLoaded: headRuns.data !== undefined,
+    headError: headRuns.isError,
+    headIds: headRunById,
+    mountedWatchIds,
+    runningRunIds,
+    open,
+  });
   // Pending checks whose run's head-list row reads finished: the PR's checks can
   // lag the runs list, a failed PR read isn't retried, and a re-run started
   // elsewhere sits over the old finished row. Keyed on the check's attempt (the

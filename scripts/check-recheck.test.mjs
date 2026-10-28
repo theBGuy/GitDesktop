@@ -68,6 +68,11 @@ test("only a run whose head row exists and reads finished is a mismatch", () => 
   // Run 1 finished: in. Run 2 still active: out. Run 3 absent: the per-run
   // fallback's, out.
   // Run 2's row is active: it is reported apart, so it pauses, never resolves.
+  // A waiting row is active too: a pending check over it never rechecks.
+  assert.deepEqual(identities([check("4", "d")], rows(["4", "waiting"])), {
+    live: [],
+    active: ["4|d"],
+  });
   assert.deepEqual(
     identities(pending, rows(["1", "completed"], ["2", "in_progress"])),
     { live: ["1|a"], active: ["2|b"] },
