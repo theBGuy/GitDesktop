@@ -104,6 +104,7 @@ fn bitbucket_status(
         capabilities: Capabilities::for_provider(Provider::Bitbucket),
         implemented: Implemented::for_provider(Provider::Bitbucket),
         probe_error: None,
+        reset_at: None,
     }
 }
 

@@ -1,3 +1,4 @@
+import { FORGE_KIND_HOSTS, rateLimitSummary } from "@/lib/forge-backoff";
 import type { DroppedCommit, PullWouldDrop } from "@/lib/git/api";
 import { type AppError, errorMessage, isAppError } from "@/lib/tauri/invoke";
 
@@ -512,12 +513,8 @@ export const RUST_TRANSPORT_PHRASES = [
 /** The host a network kind's failure is named after in the summary. A kind
  *  missing here is never rewritten; `io` stays out because local filesystem
  *  errors name paths, and a path is no evidence of a network. */
-const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> = {
-  gh: "GitHub",
-  glab: "GitLab",
-  bitbucket: "Bitbucket",
-  jira: "Jira",
-};
+const NETWORK_KIND_HOSTS: Partial<Record<AppError["kind"], string>> =
+  FORGE_KIND_HOSTS;
 
 /** URLs and Jira issue keys, whose path segments and numbers (`/pullrequests/403/`,
  *  `ABC-401`) would otherwise read as an answered status. */
@@ -839,6 +836,15 @@ function nonEmptyLineCount(text: string): number {
 export function presentError(e: unknown): ErrorPresentation {
   if (isAppError(e)) {
     const label = KIND_LABELS[e.kind];
+    // A bare rate limit reads as one sentence naming the provider (and the
+    // bucket of a held call); the raw text stays reachable via Details. One an
+    // app headline wraps keeps that headline below, since it may say a write
+    // already landed.
+    const rateLimited = rateLimitSummary(e);
+    if (rateLimited !== null) {
+      const message = e.message ?? "";
+      return { label, summary: rateLimited, fullText: message, long: true };
+    }
     // Keyed on the kind rather than on `isPullWouldDrop`, so a payload too
     // malformed to open the decision dialog still gets the one human sentence
     // Rust already wrote for it instead of falling through to raw git output.

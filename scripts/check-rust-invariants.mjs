@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for nine Rust invariants that have each cost this repo a fix
+// Static gate for ten Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -35,6 +35,16 @@
 //      --no-overwrite-ignore on 3-way merges, so checkout merges check first.
 //   I. test-held update-marker branch names — process-wide root overrides
 //      require holder names no other test uses.
+//   J. gh exit read as absence — a GitHub read in github/ or forge/github.rs
+//      that turns a non-zero gh exit into "none" (false, an empty list, a
+//      default) answers a rate limit or a network failure with a false claim.
+//      `forge::session::classify_gh_failure` only buckets the failure; the
+//      read's own outcome fn decides absence (RateLimited/Transport are an Err,
+//      and star status and the Explore README reject every failure but
+//      NotFound). In the read outcome fns, an exit-0 body that won't parse is
+//      an Err as well, which J doesn't scan: it reads exits only. Exempt:
+//      `classify_repo_view` (github/pr.rs) keeps an unreadable repo view as
+//      Unresolved, forge-status's answered "no repository" probe.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -2440,6 +2450,139 @@ export function checkTestMarkerBranches(file, src, _lines, hits, corpus) {
   }
 }
 
+// ------------------------------------------------------------------- check J
+
+// Function-level: a function that calls classify_gh_failure anywhere passes,
+// since its outcome arms are what decide absence. Shapes outside the three
+// below (a match on the exit code, an absence built through a helper, an
+// `is_ok_and` over the exit, and an `Err(_)` arm over `run_gh`, which turns
+// a non-zero exit into that Err) remain review concerns.
+export const GH_EXIT_ABSENCE_ALLOWLIST = [
+  {
+    file: "github/avatar.rs",
+    fn: "gh_bot_avatar",
+    rationale:
+      'decoration by contract: an empty URL draws initials, and Ok("") keeps virtualized rows from re-spawning gh per render',
+  },
+  {
+    file: "github/insights.rs",
+    fn: "parse_items",
+    rationale:
+      "parses a fan-out read that traffic_details_outcome already classified; only its NotFound/Answered responses reach the empty tolerance",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "graphql_reset_at",
+    rationale:
+      "advisory reset hint: None omits the notice's time clause, never claims an absence",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "gh_pr_is_stacked",
+    rationale:
+      "fail-safe by contract: false runs the legacy merge, which surfaces GitHub's own error for a stacked PR",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "detect_fork_pr_for_branch",
+    rationale:
+      "the matched exit is a local git rev-parse (no such branch); the gh lookups are fail-safe by contract, so publish proceeds",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "gh_open_stack_memberships",
+    rationale:
+      "None is the unknown verdict (a failed probe), which callers keep apart from a known-empty stack map",
+  },
+  {
+    file: "github/pr.rs",
+    fn: "stack_members_from_output",
+    rationale:
+      "None is a shape failure the caller reads as unknown; hop 1 already proved membership",
+  },
+];
+
+/** Values a failed read must not answer with: no star, no rows, a default. */
+const GH_ABSENCE = String.raw`(?:false|None|vec!\s*\[\s*\]|(?:Vec|String|HashMap|HashSet|BTreeMap|BTreeSet)::new\(\s*\)|(?:[A-Z]\w*(?:::<[^>]*>)?::)?(?:Default::)?default\(\s*\))`;
+const GH_ABSENCE_ARM = new RegExp(
+  String.raw`\bOk\s*\(\s*${GH_ABSENCE}\s*\)|\breturn\s+${GH_ABSENCE}\s*;`,
+);
+const GH_OK_EXIT_RE = /\bOk\s*\(\s*[\w.]+\.code\s*==\s*0\s*\)/g;
+const GH_MAP_EXIT_RE =
+  /\|\s*(\w+)\s*\|\s*\1\.code\s*==\s*0\s*\)\s*\.unwrap_or(?:\(\s*false\s*\)|_default\(\s*\))/g;
+const GH_IF_FAILED_RE = /\bif\s+[\w.]+\.code\s*!=\s*0\s*\{/g;
+const GH_EXIT_ABSENCE_FIX =
+  "check J: a non-zero gh exit is not an absence — route it through " +
+  "forge::session::classify_gh_failure, which only buckets the failure, and " +
+  "let a pure *_outcome fn decide absence (RateLimited/Transport → Err; " +
+  "NotFound/Answered → the read's absence, except star status and the Explore " +
+  "README, which reject every failure but NotFound), or allowlist a fail-safe " +
+  "or decoration read with rationale";
+
+/** Check J reads only the GitHub files, so none in scope means it read
+ *  nothing: that fails J itself, found by its `run`, whatever its position. */
+export function reportEmptyGhScope(checks, relFiles) {
+  if (relFiles.some(ghExitAbsenceScope)) return;
+  const j = checks.find((c) => c.run === checkGhExitAbsence);
+  if (j === undefined) throw new Error("check J is missing from CHECKS");
+  j.hits.push({
+    file: "github/",
+    line: 0,
+    fn: "<empty scope>",
+    allowlisted: false,
+    fix: "check J found no src-tauri/src/github/*.rs or forge/github.rs to scan — update ghExitAbsenceScope",
+  });
+}
+
+/** Whether `file` is in check J's scope: the GitHub reads. */
+export function ghExitAbsenceScope(file) {
+  return file.startsWith("github/") || file === "forge/github.rs";
+}
+
+export function checkGhExitAbsence(
+  file,
+  _src,
+  lines,
+  hits,
+  allowlist = GH_EXIT_ABSENCE_ALLOWLIST,
+) {
+  if (!ghExitAbsenceScope(file)) return;
+  const { code, masked, unterminated } = lexRust(lines.join("\n"));
+  const lineOf = (at) => code.slice(0, at).split("\n").length;
+  if (unterminated >= 0) {
+    hits.push({
+      file,
+      line: lineOf(unterminated),
+      fn: "<unreadable>",
+      allowlisted: false,
+      fix: "check J: a literal or comment opening here never closes, so the rest of the file is unreadable to this check — fix the source, or the lexer in scripts/check-rust-invariants.mjs",
+    });
+  }
+  const tests = testModuleSpans(masked);
+  const functions = rustFunctions(masked);
+  const report = (at) => {
+    if (tests.some(([s, e]) => at > s && at < e)) return;
+    const fn = functions.filter((f) => at > f.open && at < f.close).at(-1);
+    if (fn && /\bclassify_gh_failure\b/.test(masked.slice(fn.open, fn.close)))
+      return;
+    const name = fn?.name ?? "<top level>";
+    if (hits.some((h) => h.file === file && h.line === lineOf(at))) return;
+    hits.push({
+      file,
+      line: lineOf(at),
+      fn: name,
+      allowlisted: allowlist.some((e) => e.file === file && e.fn === name),
+      fix: GH_EXIT_ABSENCE_FIX,
+    });
+  };
+  for (const m of masked.matchAll(GH_OK_EXIT_RE)) report(m.index);
+  for (const m of masked.matchAll(GH_MAP_EXIT_RE)) report(m.index);
+  for (const m of masked.matchAll(GH_IF_FAILED_RE)) {
+    const body = braceBody(masked, m.index + m[0].length - 1);
+    if (GH_ABSENCE_ARM.test(body)) report(m.index);
+  }
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -2499,9 +2642,19 @@ function main() {
       allowlist: TEST_MARKER_ALLOWLIST,
       hits: [],
     },
+    {
+      name: "J. gh exit read as absence",
+      run: checkGhExitAbsence,
+      allowlist: GH_EXIT_ABSENCE_ALLOWLIST,
+      hits: [],
+    },
   ];
 
   const files = rustFiles(SRC);
+  reportEmptyGhScope(
+    CHECKS,
+    files.map((path) => relative(SRC, path).replace(/\\/g, "/")),
+  );
   for (const path of files) {
     // Normalise CRLF: on Windows a git checkout materialises these files with
     // CRLF, and a trailing `\r` would leak into every reported line.

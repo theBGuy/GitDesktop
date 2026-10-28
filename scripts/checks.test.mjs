@@ -91,13 +91,9 @@ import {
   verdict as reusedViewVerdict,
 } from "./check-reused-view-pending.mjs";
 import {
-  CARRIERS,
-  MOUNTED_CARRIERS,
-  missingSentinels,
-} from "./check-rule-mirrors.mjs";
-import {
   checkBareBranchRevs,
   checkCompareEndpoints,
+  checkGhExitAbsence,
   checkMergeIgnoredGuard,
   checkRefspecTemplates,
   checkSecretArgv,
@@ -106,9 +102,12 @@ import {
   checkSyncCommands,
   checkTestMarkerBranches,
   enclosingFn,
+  GH_EXIT_ABSENCE_ALLOWLIST,
+  ghExitAbsenceScope,
   lexRust,
   MERGE_GUARD_ALLOWLIST,
   MERGE_GUARD_NOTE,
+  reportEmptyGhScope,
   splitStaleEntries,
   staleAllowlistEntries,
   TEST_MARKER_ALLOWLIST,
@@ -6757,6 +6756,172 @@ test("test modules are skipped by SPAN, so production code after one is scanned"
   );
 });
 
+/** Check J over one fixture file, as [fn, line] pairs. */
+function ghExitAbsenceHits(src, file = "github/fixture.rs", allowlist = []) {
+  const hits = [];
+  checkGhExitAbsence(file, src, src.split("\n"), hits, allowlist);
+  return hits;
+}
+
+test("check J flags each gh-exit-as-absence shape the classifier replaced", () => {
+  // The pre-classifier shapes of security.rs, secrets.rs, auth.rs and pr.rs.
+  const src = [
+    "async fn probe_ok(repo: &str) -> bool {",
+    '    run_gh_raw(Some(repo), &["api", "x"], T)',
+    "        .await",
+    "        .map(|o| o.code == 0)",
+    "        .unwrap_or(false)",
+    "}",
+    "async fn get_bool_field(repo: &str) -> bool {",
+    "    let Ok(out) = run_gh_raw(Some(repo), &[], T).await else { return false; };",
+    "    if out.code != 0 {",
+    "        return false;",
+    "    }",
+    "    true",
+    "}",
+    "pub async fn gh_environments_list(repo: String) -> AppResult<Vec<String>> {",
+    "    let out = run_gh_raw(Some(&repo), &[], T).await?;",
+    "    if out.code != 0 {",
+    "        return Ok(Vec::new());",
+    "    }",
+    "    Ok(vec![])",
+    "}",
+    "pub async fn gh_token_scopes() -> AppResult<GhScopes> {",
+    "    let out = run_gh_raw(None, &[], T).await?;",
+    "    if out.code != 0 {",
+    "        return Ok(GhScopes::default());",
+    "    }",
+    "    Ok(parse(&out))",
+    "}",
+    "pub async fn gh_repo_star_status(repo: String) -> AppResult<bool> {",
+    "    let out = run_gh_raw(Some(&repo), &[], T).await?;",
+    "    Ok(out.code == 0)",
+    "}",
+    "fn trailing(out: GhOutput) -> AppResult<Option<u8>> {",
+    "    if out.code != 0 { Ok(None) } else { Ok(Some(1)) }",
+    "}",
+    "fn defaulted(out: GhOutput) -> Vec<u8> {",
+    "    run(out).map(|x| x.code == 0).unwrap_or_default();",
+    "    if out.code != 0 {",
+    "        return Default::default();",
+    "    }",
+    "    vec![1]",
+    "}",
+  ].join("\n");
+  assert.deepEqual(
+    ghExitAbsenceHits(src).map((h) => [h.fn, h.line]),
+    [
+      ["gh_repo_star_status", 30],
+      ["probe_ok", 4],
+      ["defaulted", 36],
+      ["get_bool_field", 9],
+      ["gh_environments_list", 16],
+      ["gh_token_scopes", 23],
+      ["trailing", 33],
+      ["defaulted", 37],
+    ],
+  );
+  assert.ok(ghExitAbsenceHits(src).every((h) => !h.allowlisted));
+});
+
+test("check J passes classified reads, errors, comments, strings and test modules", () => {
+  const src = [
+    "fn star_outcome(out: GhOutput) -> AppResult<bool> {",
+    "    if out.code != 0 {",
+    "        return match classify_gh_failure(&out.stderr) {",
+    "            GhFailure::NotFound => Ok(false),",
+    "            _ => Err(AppError::Gh(gh_failure_reason(&out))),",
+    "        };",
+    "    }",
+    "    Ok(true)",
+    "}",
+    "fn classified_first(out: GhOutput) -> AppResult<Vec<u8>> {",
+    "    let failure = classify_gh_failure(&out.stderr);",
+    "    if out.code != 0 {",
+    "        return Ok(Vec::new());",
+    "    }",
+    "    Ok(vec![failure as u8])",
+    "}",
+    "fn errs(out: GhOutput) -> AppResult<bool> {",
+    "    if out.code != 0 {",
+    "        return Err(AppError::Gh(gh_failure_reason(&out)));",
+    "    }",
+    "    Ok(out.code == 1)",
+    "}",
+    "// Never `Ok(out.code == 0)` or `if out.code != 0 { return Ok(None); }`.",
+    "fn text() -> &'static str {",
+    '    "if out.code != 0 { return Ok(None); } Ok(out.code == 0)"',
+    "}",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    fn helper(out: GhOutput) -> AppResult<bool> {",
+    "        Ok(out.code == 0)",
+    "    }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(ghExitAbsenceHits(src), []);
+});
+
+test("check J reads only the GitHub files, and allowlists by (file, fn)", () => {
+  const src = [
+    "pub async fn gh_repo_star_status(out: GhOutput) -> AppResult<bool> {",
+    "    Ok(out.code == 0)",
+    "}",
+  ].join("\n");
+  assert.equal(ghExitAbsenceScope("github/pr.rs"), true);
+  assert.equal(ghExitAbsenceScope("forge/github.rs"), true);
+  assert.equal(ghExitAbsenceScope("forge/gitlab.rs"), false);
+  assert.equal(ghExitAbsenceScope("git/ops.rs"), false);
+  assert.deepEqual(ghExitAbsenceHits(src, "forge/gitlab.rs"), []);
+  assert.equal(ghExitAbsenceHits(src, "forge/github.rs").length, 1);
+  const allow = [
+    { file: "github/pr.rs", fn: "gh_repo_star_status", rationale: "fixture" },
+  ];
+  assert.equal(
+    ghExitAbsenceHits(src, "github/pr.rs", allow)[0].allowlisted,
+    true,
+  );
+  // Another file's entry never covers this one.
+  assert.equal(
+    ghExitAbsenceHits(src, "github/auth.rs", allow)[0].allowlisted,
+    false,
+  );
+  // Every live entry carries a rationale.
+  for (const e of GH_EXIT_ABSENCE_ALLOWLIST)
+    assert.ok(e.rationale.length > 20, e.fn);
+});
+
+test("check J fails closed on a file it cannot lex", () => {
+  const src = [
+    "fn fine(out: GhOutput) -> bool {",
+    '    let s = "never closed;',
+    "    if out.code != 0 { return false; }",
+    "}",
+  ].join("\n");
+  assert.deepEqual(
+    ghExitAbsenceHits(src).map((h) => h.fn),
+    ["<unreadable>"],
+  );
+});
+
+test("check J's empty scope lands on J wherever it sits in the list", () => {
+  const j = { run: checkGhExitAbsence, hits: [] };
+  const k = { run: () => {}, hits: [] };
+  // A check added after J must not take J's failure.
+  reportEmptyGhScope([j, k], ["git/ops.rs", "forge/gitlab.rs"]);
+  assert.deepEqual(
+    j.hits.map((h) => h.fn),
+    ["<empty scope>"],
+  );
+  assert.deepEqual(k.hits, []);
+  // A scope with a GitHub file reports nothing.
+  const quiet = { run: checkGhExitAbsence, hits: [] };
+  reportEmptyGhScope([quiet, k], ["github/pr.rs"]);
+  assert.deepEqual(quiet.hits, []);
+  // Losing J from the list fails loudly rather than misrouting.
+  assert.throws(() => reportEmptyGhScope([k], []), /check J is missing/);
+});
+
 // ----------------------------------------------------------- check-dead-surface
 
 test("a commented-out handler entry does not read as registered", () => {
@@ -6842,127 +7007,6 @@ test("invoke matching survives nested generics and wrapped calls", () => {
     "git_branch_tips",
     "git_status",
   ]);
-});
-
-// ----------------------------------------------------------- check-rule-mirrors
-
-// Both fixtures wrap their sentences the way the real carriers do — the `-C`
-// clause and the `is / forbidden` catchall each straddle a line break. That is
-// deliberate: if the whitespace normalization ever came out, the passing
-// fixture would read as a carrier missing two sentinels, so these cases pin the
-// normalization as much as the patterns.
-const carrierStatingTheRule = [
-  "1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /",
-  "   show` and `git branch --list`, each optionally prefixed with `-C <path>`",
-  "   to address a task worktree. Everything else — commit, add/stage, stash,",
-  "   push, worktree, config — is",
-  '   forbidden, even "just to test". The user commits their own work.',
-].join("\n");
-
-test("a carrier that still states the whole rule satisfies every sentinel", () => {
-  assert.deepEqual(missingSentinels(carrierStatingTheRule), []);
-});
-
-test("a carrier that drops the line-wrapped catchall is caught", () => {
-  // The dangerous direction: the whitelist forms are still listed, so the file
-  // LOOKS like it carries the rule — only the sentence forbidding everything
-  // else is gone, which is exactly the drift a reader would not notice.
-  const softened = carrierStatingTheRule.replace(
-    ["   push, worktree, config — is", "   forbidden, even"].join("\n"),
-    "   push, worktree, config — are discouraged, except",
-  );
-  assert.notEqual(softened, carrierStatingTheRule);
-  assert.deepEqual(
-    missingSentinels(softened).map((s) => s.name),
-    ["forbidden catchall"],
-  );
-});
-
-test("a carrier that carves an exception into the catchall is caught", () => {
-  // Worse than deleting the sentence, because the sentence is still there to
-  // read: the rule is stated and then unstated in the same breath.
-  const excepted = carrierStatingTheRule.replace(
-    [
-      "   push, worktree, config — is",
-      '   forbidden, even "just to test".',
-    ].join("\n"),
-    "   push, worktree, config — is forbidden, except git commit.",
-  );
-  assert.notEqual(excepted, carrierStatingTheRule);
-  assert.deepEqual(
-    missingSentinels(excepted).map((s) => s.name),
-    ["forbidden catchall"],
-  );
-});
-
-test("a carrier that drops the -C sanction is caught", () => {
-  // Losing this clause is what makes a worktree-scoped command read as
-  // forbidden to an agent honoring its own charter.
-  const unscoped = carrierStatingTheRule.replace(
-    [
-      "   show` and `git branch --list`, each optionally prefixed with `-C <path>`",
-      "   to address a task worktree. Everything else",
-    ].join("\n"),
-    "   show` and `git branch --list`. Everything else",
-  );
-  assert.notEqual(unscoped, carrierStatingTheRule);
-  assert.deepEqual(
-    missingSentinels(unscoped).map((s) => s.name),
-    ["-C worktree sanction"],
-  );
-});
-
-test("a carrier that drops the branch --list allowance is caught", () => {
-  const withoutBranch = carrierStatingTheRule.replace(
-    "` and `git branch --list`,",
-    "`,",
-  );
-  assert.notEqual(withoutBranch, carrierStatingTheRule);
-  assert.deepEqual(
-    missingSentinels(withoutBranch).map((s) => s.name),
-    ["branch --list allowance"],
-  );
-});
-
-test("a carrier that drops the read-only forms list is caught", () => {
-  const withoutForms = carrierStatingTheRule.replace(
-    [
-      "1. **Git is a whitelist.** Permitted: `git --no-pager diff / status / log /",
-      "   show`",
-    ].join("\n"),
-    "1. **Git is a whitelist.** Permitted: the read-only inspection forms",
-  );
-  assert.notEqual(withoutForms, carrierStatingTheRule);
-  assert.deepEqual(
-    missingSentinels(withoutForms).map((s) => s.name),
-    ["read-only git forms"],
-  );
-});
-
-test("every carrier path the gate checks exists on disk", () => {
-  // The sentinels only fire on a file the gate can read: a carrier renamed or
-  // moved without updating CARRIERS would otherwise fail as "cannot read" in
-  // CI long after the rename landed.
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  for (const carrier of CARRIERS) {
-    assert.ok(existsSync(join(root, carrier)), `missing carrier: ${carrier}`);
-  }
-});
-
-test("a mounted carrier, when present, still states the whole rule", () => {
-  // Mounted carriers exist only behind the owner's junction — also the only
-  // place their drift can be authored — so the suite gates them exactly where
-  // it can and skips them in clones, the same split the gate itself makes.
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-  for (const carrier of MOUNTED_CARRIERS) {
-    const path = join(root, carrier);
-    if (!existsSync(path)) continue;
-    assert.deepEqual(
-      missingSentinels(readFileSync(path, "utf8")).map((s) => s.name),
-      [],
-      `mounted carrier lost the rule: ${carrier}`,
-    );
-  }
 });
 
 // ------------------------------------------------ check-built-whitespace

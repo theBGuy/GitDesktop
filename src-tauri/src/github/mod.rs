@@ -139,6 +139,27 @@ pub(crate) fn gh_failure_reason(out: &GhOutput) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn gh_output(
+        code: i32,
+        body: &str,
+        stderr: &str,
+    ) -> crate::error::AppResult<crate::github::runner::GhOutput> {
+        Ok(crate::github::runner::GhOutput {
+            code,
+            stdout: body.as_bytes().to_vec(),
+            stderr: stderr.into(),
+        })
+    }
+
+    pub(crate) const HELD_REST_STDERR: &str = "GitHub's REST API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
+    pub(crate) const NOT_FOUND_STDERR: &str =
+        "HTTP 404: Not Found (https://api.github.com/repos/o/r)";
+    pub(crate) const ANSWERED_STDERR: &str =
+        "HTTP 403: Resource not accessible by integration (https://api.github.com/repos/o/r)";
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         fork_owner_of, gh_failure_reason, gh_unreadable, lens_remote, valid_github_slug, GhOutput,

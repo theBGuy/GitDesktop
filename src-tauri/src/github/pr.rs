@@ -12,7 +12,6 @@ use crate::forge::model::{ForgeTimelineEventOut, ForgeUserRef};
 use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::forge::{c_quote_label, c_quote_path, validate_compare_branch};
 use crate::git::runner::{run_git_raw, run_git_raw_input, DEFAULT_TIMEOUT, NETWORK_TIMEOUT};
-use crate::github::gh_unreadable;
 use crate::github::issue::{map_reaction_groups, repo_owner_name, IssueReactions};
 use crate::github::pr_search::viewer_login_core;
 use crate::github::repo_meta::{
@@ -21,6 +20,7 @@ use crate::github::repo_meta::{
 use crate::github::runner::{
     gh_auth_epoch_counter, run_gh, run_gh_input, run_gh_raw, GH_NETWORK_TIMEOUT, GH_TIMEOUT,
 };
+use crate::github::{gh_failure_reason, gh_unreadable};
 use crate::state::AppState;
 
 fn validate_branch(name: &str) -> AppResult<()> {
@@ -47,6 +47,10 @@ pub struct GhStatus {
     /// Set when the repo lookup failed on a positively-identified class.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_error: Option<crate::forge::model::ProbeError>,
+    /// The GraphQL bucket's reset in Unix epoch seconds, present only beside
+    /// `probeError: rateLimited` when the probe supplies a bounded future reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +86,7 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
                 host: None,
                 login: None,
                 probe_error: None,
+                reset_at: None,
             });
         }
         Err(e) => return Err(e),
@@ -137,6 +142,14 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
         }
     };
 
+    let reset_at = if let Some(args) = graphql_reset_probe_args(probe_error, &host_hint) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let probe = run_gh_raw(Some(&repo_path), &args, GH_TIMEOUT).await;
+        graphql_reset_at(probe, chrono::Utc::now().timestamp())
+    } else {
+        None
+    };
+
     // The active login on the repo's host (each host has its own active
     // account); the text fallback takes any active account when the host is unknown.
     // The JSON arm keys on `host_hint`, not the view-URL `host`, so under a
@@ -157,7 +170,46 @@ pub async fn gh_status(repo_path: String) -> AppResult<GhStatus> {
         host,
         login,
         probe_error,
+        reset_at,
     })
+}
+
+fn graphql_reset_probe_args(
+    probe_error: Option<crate::forge::model::ProbeError>,
+    host_hint: &str,
+) -> Option<[String; 4]> {
+    if !matches!(
+        probe_error,
+        Some(crate::forge::model::ProbeError::RateLimited)
+    ) || !crate::forge::is_safe_authority(host_hint)
+        || host_hint.starts_with('-')
+    {
+        return None;
+    }
+    // The host comes from the origin URL, so it is gated above (host charset,
+    // no leading `-`) and rides as ONE `--hostname=` argv, so its meaning never
+    // depends on how a CLI parses a dash-led value in a separate argv.
+    Some([
+        "api".into(),
+        "-i".into(),
+        "rate_limit".into(),
+        format!("--hostname={host_hint}"),
+    ])
+}
+
+fn graphql_reset_at(result: AppResult<crate::github::runner::GhOutput>, now: i64) -> Option<i64> {
+    let out = result.ok()?;
+    if out.code != 0 {
+        return None;
+    }
+    let response = out.stdout_lossy();
+    let (_, body) = crate::github::runner::split_response(&response);
+    let (remaining, reset) =
+        crate::github::runner::probe_reading(body, crate::github::runner::Bucket::Graphql)?;
+    (remaining == 0
+        && reset > now
+        && reset <= now.saturating_add(crate::github::runner::MAX_HOLD_SECS))
+    .then_some(reset)
 }
 
 /// The `(owner/repo, host)` a remote URL names, read without gh or the network — only
@@ -736,7 +788,22 @@ pub async fn gh_repo_star_status(repo_path: String) -> AppResult<bool> {
         GH_TIMEOUT,
     )
     .await?;
-    Ok(out.code == 0)
+    repo_star_status_outcome(Ok(out))
+}
+
+pub(crate) fn repo_star_status_outcome(
+    result: AppResult<crate::github::runner::GhOutput>,
+) -> AppResult<bool> {
+    let out = result?;
+    if out.code == 0 {
+        return Ok(true);
+    }
+    match classify_gh_failure(&out.stderr) {
+        GhFailure::NotFound => Ok(false),
+        GhFailure::RateLimited | GhFailure::Transport | GhFailure::Answered => {
+            Err(AppError::Gh(gh_failure_reason(&out)))
+        }
+    }
 }
 
 /// Stars (PUT) or unstars (DELETE) this repo for the signed-in user via
@@ -7592,6 +7659,99 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
+    use crate::github::test_support::{
+        gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
+    };
+    #[test]
+    fn graphql_reset_requires_current_bounded_exhaustion() {
+        let now = 1_800_000_000;
+        for (remaining, reset, expected) in [
+            (0, now + 60, Some(now + 60)),
+            (1, now + 60, None),
+            (0, now - 1, None),
+            (0, now, None),
+            (0, now + 3660, Some(now + 3660)),
+            (0, now + 3661, None),
+        ] {
+            let body = serde_json::to_string_pretty(&serde_json::json!({
+                "resources": {"graphql": {"remaining": remaining, "reset": reset}}
+            }))
+            .unwrap();
+            let response =
+                format!("HTTP/2.0 200 OK\r\ncontent-type: application/json\r\n\r\n{body}");
+            assert_eq!(
+                super::graphql_reset_at(gh_output(0, &response, ""), now),
+                expected
+            );
+        }
+        for body in [
+            "",
+            "garbage",
+            "{}",
+            r#"{"resources":{"core":{"remaining":0,"reset":1800000060}}}"#,
+            r#"{"resources":{"graphql":{"remaining":"0","reset":1800000060}}}"#,
+            r#"{"resources":{"graphql":{"remaining":0,"reset":"1800000060"}}}"#,
+        ] {
+            assert_eq!(super::graphql_reset_at(gh_output(0, body, ""), now), None);
+        }
+        let body = r#"{"resources":{"graphql":{"remaining":0,"reset":1800000060}}}"#;
+        assert_eq!(
+            super::graphql_reset_at(gh_output(1, body, HELD_REST_STDERR), now),
+            None
+        );
+        assert_eq!(
+            super::graphql_reset_at(Err(crate::error::AppError::Timeout(30)), now),
+            None
+        );
+    }
+
+    #[test]
+    fn reset_probe_is_only_rate_limited_and_host_pinned() {
+        use crate::forge::model::ProbeError;
+        assert_eq!(super::graphql_reset_probe_args(None, "ghe.example"), None);
+        for host in ["-x", "a b", "x;y", "", "host=evil"] {
+            assert!(
+                super::graphql_reset_probe_args(Some(ProbeError::RateLimited), host).is_none(),
+                "{host}"
+            );
+        }
+        for host in ["ghe.example", "ghe.acme.com:8443"] {
+            let args =
+                super::graphql_reset_probe_args(Some(ProbeError::RateLimited), host).unwrap();
+            assert_eq!(
+                args.as_slice(),
+                ["api", "-i", "rate_limit", &format!("--hostname={host}")]
+            );
+        }
+    }
+
+    #[test]
+    fn repo_star_status_treats_only_not_found_as_unstarred() {
+        let absent = super::repo_star_status_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(!absent);
+        let loaded = super::repo_star_status_outcome(gh_output(0, "", "")).unwrap();
+        assert!(loaded);
+        for stderr in [
+            "HTTP 403: API rate limit exceeded for user ID 4041234 (https://api.github.com/)",
+            "gh: Not Found",
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+            ANSWERED_STDERR,
+            "",
+        ] {
+            let error = super::repo_star_status_outcome(gh_output(1, "", stderr))
+                .expect_err("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(super::repo_star_status_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
 
     #[test]
     fn lean_pr_args_request_only_their_fields() {

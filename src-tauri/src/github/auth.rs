@@ -1,14 +1,14 @@
-//! gh auth surface that doesn't need the network: the token's OAuth scopes (so
-//! governance UI can prompt for a `gh auth refresh -s <scope>`), and a local read
-//! of gh's own config for "is an account configured at all". Read-only and
-//! tolerant — any failure reads as "no scopes" / "not configured" rather than
-//! erroring.
+//! The active gh token's OAuth scopes and local configured-account discovery.
+//! Scope reads tolerate access denials; transport failures and rate limits reject.
+//! Account discovery reads gh's local config without a network request.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
+use crate::forge::session::{classify_gh_failure, GhFailure};
+use crate::github::gh_failure_reason;
 use crate::github::runner::{response_header_line, run_gh_raw, GH_TIMEOUT};
 
 #[derive(Serialize, Default)]
@@ -36,8 +36,18 @@ pub async fn gh_token_scopes(host: Option<String>) -> AppResult<GhScopes> {
         args.push(h);
     }
     let out = run_gh_raw(None, &args, GH_TIMEOUT).await?;
+    token_scopes_outcome(Ok(out))
+}
+
+fn token_scopes_outcome(result: AppResult<crate::github::runner::GhOutput>) -> AppResult<GhScopes> {
+    let out = result?;
     if out.code != 0 {
-        return Ok(GhScopes::default());
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(GhScopes::default()),
+        };
     }
     Ok(scopes_from_response(&out.stdout_lossy()))
 }
@@ -356,6 +366,43 @@ ghe.example.com:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::test_support::{
+        gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
+    };
+    #[test]
+    fn token_scopes_preserve_denials_and_reject_transient_failures() {
+        let absent = super::token_scopes_outcome(gh_output(1, "", NOT_FOUND_STDERR)).unwrap();
+        assert!(!absent.classic && absent.scopes.is_empty());
+        let absent = super::token_scopes_outcome(gh_output(1, "", ANSWERED_STDERR)).unwrap();
+        assert!(!absent.classic && absent.scopes.is_empty());
+        let loaded = super::token_scopes_outcome(gh_output(
+            0,
+            r#"HTTP/2.0 200 OK
+x-oauth-scopes: repo
+
+{}"#,
+            "",
+        ))
+        .unwrap();
+        assert!(loaded.classic && loaded.scopes == ["repo"]);
+        for stderr in [
+            HELD_REST_STDERR,
+            "connection failed",
+            "gh: API rate limit exceeded for user ID 12345 (HTTP 403)",
+        ] {
+            let error = super::token_scopes_outcome(gh_output(1, "", stderr))
+                .err()
+                .expect("failed read must reject");
+            assert!(
+                matches!(&error, crate::error::AppError::Gh(message) if message == &crate::github::gh_failure_reason(&gh_output(1, "", stderr).unwrap())),
+                "{error}"
+            );
+            if stderr == HELD_REST_STDERR {
+                assert!(error.to_string().contains("rate limit"));
+            }
+        }
+        assert!(super::token_scopes_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
 
     #[test]
     fn empty_scopes_header_is_classic_and_first_match_wins() {

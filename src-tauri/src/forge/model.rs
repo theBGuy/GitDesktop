@@ -699,6 +699,10 @@ pub struct ForgeStatus {
     /// the UI routes on; absent on success and on every unclassified failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probe_error: Option<ProbeError>,
+    /// The GraphQL bucket's reset in Unix epoch seconds, present only beside
+    /// `probeError: rateLimited` when the probe supplies a bounded future reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<i64>,
 }
 
 /// A positively-identified repo-lookup failure on an otherwise signed-in status.
@@ -1086,11 +1090,18 @@ mod tests {
             capabilities: Capabilities::none(),
             implemented: Implemented::none(),
             probe_error,
+            reset_at: None,
         };
         let json = serde_json::to_string(&status(Some(ProbeError::RateLimited))).unwrap();
         assert!(json.contains(r#""probeError":"rateLimited""#), "{json}");
         let bare = serde_json::to_string(&status(None)).unwrap();
         assert!(!bare.contains("probeError"), "absent when unset: {bare}");
+        assert!(!bare.contains("resetAt"), "absent when unset: {bare}");
+        let mut limited = status(Some(ProbeError::RateLimited));
+        limited.reset_at = Some(1_800_000_060);
+        let value = serde_json::to_value(limited).unwrap();
+        assert_eq!(value["resetAt"], 1_800_000_060_i64);
+        assert!(value.get("reset_at").is_none());
     }
 
     /// A provider whose viewer/workspace probe failed contributes nothing to the set:

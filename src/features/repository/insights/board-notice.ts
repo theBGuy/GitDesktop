@@ -1,6 +1,7 @@
 // Pure: scripts/board-notice.test.mjs imports this file through Node's type
-// stripping, which resolves no aliases, so its one import is a relative path
-// to another import-free module.
+// stripping, which resolves no aliases, so its imports are relative paths to
+// other import-free modules.
+import { rateLimitClause } from "../../../lib/forge-backoff.ts";
 import { failedSinceLastSuccess } from "../../conversations/remote-section-state.ts";
 
 /** The slice of a card's read the board decides on. */
@@ -95,8 +96,9 @@ export function rememberCardErrors(
  *  quotes the first failed card's reason, in the cards' order: its read's
  *  error, or `lastError` while a never-loaded read's refetch has reset that
  *  error to null, so the text holds through the refetch. With no reason known
- *  it says only that some insights couldn't load. Silent only while a user's
- *  Retry is settling (`retrying`). */
+ *  it says only that some insights couldn't load. The refresh wording names a
+ *  rate limit when that same reason is one. Silent only while a user's Retry
+ *  is settling (`retrying`). */
 export function boardNotice<R extends BoardCardRead>(
   cards: readonly { read: R; lastError?: unknown }[],
   retrying: boolean,
@@ -106,7 +108,7 @@ export function boardNotice<R extends BoardCardRead>(
   if (retrying || failed.length === 0) return null;
   const reason = failed[0].read.error ?? failed[0].lastError;
   const message = failed.every((c) => cardLoaded(c.read))
-    ? "Couldn't refresh some insights — showing the last loaded ones."
+    ? `Couldn't refresh some insights${rateLimitClause(reason)} — showing the last loaded ones.`
     : reason == null
       ? "Couldn't load some insights."
       : `Couldn't load some insights. ${summarize(reason)}`;

@@ -15,12 +15,18 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  FORGE_KIND_HOSTS,
+  HELD_RATE_LIMIT_TEXTS,
+  heldBucket,
   isAuthError,
   isRateLimitError,
   RATE_LIMIT_KNOWN_RESET_RECHECK_MS,
   RATE_LIMIT_RECHECK_MS,
   RESET_GRACE_MS,
+  rateLimitClause,
+  rateLimitProvider,
   rateLimitRecheckDelayMs,
+  rateLimitSummary,
   shouldRetryQuery,
 } from "../src/lib/forge-backoff.ts";
 
@@ -267,4 +273,199 @@ test("the PR and issue list retry predicates compose shouldRetryQuery", () => {
     // CRLF is free.
     assertPredicateComposes(source.replace(/\r?\n/g, "\r\n"));
   }
+});
+
+test("each forge kind names its own provider", () => {
+  assert.deepEqual(
+    { ...FORGE_KIND_HOSTS },
+    { gh: "GitHub", glab: "GitLab", bitbucket: "Bitbucket", jira: "Jira" },
+  );
+});
+
+/** The text of each `const HELD_<NAME>: &str = "…";` in runner.rs, by name. */
+function rustHeldTexts(source) {
+  const found = {};
+  for (const m of source.matchAll(
+    /^const (HELD_[A-Z]+): &str =\s*"((?:[^"\\]|\\.)*)";/gm,
+  ))
+    found[m[1]] = m[2];
+  return found;
+}
+
+test("the held-call mirror matches runner.rs's HELD_* constants", () => {
+  const source = readFileSync(
+    join(ROOT, "src-tauri/src/github/runner.rs"),
+    "utf8",
+  );
+  const rust = rustHeldTexts(source);
+  const expected = {
+    HELD_CORE: HELD_RATE_LIMIT_TEXTS.REST,
+    HELD_GRAPHQL: HELD_RATE_LIMIT_TEXTS.GraphQL,
+    HELD_SEARCH: HELD_RATE_LIMIT_TEXTS.search,
+  };
+  assert.deepEqual(rust, expected);
+  // The fixtures above quote the same three texts.
+  assert.deepEqual(HELD_TEXTS, Object.values(expected));
+  // Mutation control: a reworded Rust constant fails the pin.
+  const reworded = source.replace(
+    "GitHub's REST API rate limit has been reached",
+    "GitHub's REST API rate limit was reached",
+  );
+  assert.notEqual(reworded, source);
+  assert.notDeepEqual(rustHeldTexts(reworded), expected);
+});
+
+test("a held text names its bucket, also behind a raw prefix", () => {
+  assert.equal(heldBucket(HELD_RATE_LIMIT_TEXTS.REST), "REST");
+  assert.equal(heldBucket(HELD_RATE_LIMIT_TEXTS.GraphQL), "GraphQL");
+  assert.equal(heldBucket(HELD_RATE_LIMIT_TEXTS.search), "search");
+  // The bare rule strips the prefix, so the sentence still names the bucket.
+  assert.equal(
+    rateLimitSummary(gh(`error: ${HELD_RATE_LIMIT_TEXTS.GraphQL}`)),
+    "GitHub's GraphQL API rate limit has been reached. Try again once it lifts.",
+  );
+  assert.equal(heldBucket("API rate limit exceeded for user ID 1."), null);
+  assert.equal(heldBucket(""), null);
+});
+
+const LIFTS = "Try again once it lifts.";
+
+test("a rate-limit summary names the provider, and the bucket for a held text", () => {
+  const table = [
+    [
+      gh(HELD_TEXTS[0]),
+      `GitHub's REST API rate limit has been reached. ${LIFTS}`,
+    ],
+    [
+      gh(HELD_TEXTS[1]),
+      `GitHub's GraphQL API rate limit has been reached. ${LIFTS}`,
+    ],
+    [
+      gh(HELD_TEXTS[2]),
+      `GitHub's search API rate limit has been reached. ${LIFTS}`,
+    ],
+    [
+      gh("gh: API rate limit exceeded for user ID 12345 (HTTP 403)"),
+      `GitHub's API rate limit has been reached. ${LIFTS}`,
+    ],
+    [
+      { kind: "glab", message: "429 Too Many Requests" },
+      `GitLab's API rate limit has been reached. ${LIFTS}`,
+    ],
+    [
+      {
+        kind: "bitbucket",
+        message:
+          "Bitbucket rate limit reached (429). Wait a moment and try again.",
+      },
+      `Bitbucket's API rate limit has been reached. ${LIFTS}`,
+    ],
+    [
+      {
+        kind: "jira",
+        message: "Jira rate limit reached (429). Wait a moment and try again.",
+      },
+      `Jira's API rate limit has been reached. ${LIFTS}`,
+    ],
+  ];
+  for (const [error, expected] of table) {
+    assert.equal(rateLimitSummary(error), expected, error.message);
+    assert.ok(!expected.includes("this request"), expected);
+  }
+  // Only gh holds calls, so a held text under another kind names no bucket.
+  assert.equal(
+    rateLimitSummary({ kind: "glab", message: HELD_TEXTS[0] }),
+    `GitLab's API rate limit has been reached. ${LIFTS}`,
+  );
+});
+
+test("non-rate-limit errors get no rate-limit copy", () => {
+  for (const error of [
+    gh("HTTP 404: Not Found (https://api.github.com/repos/o/r)"),
+    gh("HTTP 403: Resource not accessible by integration"),
+    { kind: "git", message: HELD_TEXTS[0] },
+    new Error("rate limit"),
+    null,
+    undefined,
+  ]) {
+    assert.equal(rateLimitSummary(error), null, String(error?.message));
+    assert.equal(rateLimitProvider(error), null, String(error?.message));
+  }
+  assert.equal(rateLimitProvider(gh(HELD_TEXTS[1])), "GitHub");
+  assert.equal(
+    rateLimitProvider({ kind: "glab", message: "429 Too Many Requests" }),
+    "GitLab",
+  );
+});
+
+test("the rate-limit clause names each forge, and is empty otherwise", () => {
+  const clause = (provider) =>
+    ` while ${provider}'s API rate limit is in effect`;
+  for (const [error, expected] of [
+    [gh(HELD_TEXTS[0]), clause("GitHub")],
+    [
+      gh("gh: API rate limit exceeded for user ID 1 (HTTP 403)"),
+      clause("GitHub"),
+    ],
+    [{ kind: "glab", message: "429 Too Many Requests" }, clause("GitLab")],
+    [
+      {
+        kind: "bitbucket",
+        message:
+          "Bitbucket rate limit reached (429). Wait a moment and try again.",
+      },
+      clause("Bitbucket"),
+    ],
+    [
+      {
+        kind: "jira",
+        message: "Jira rate limit reached (429). Wait a moment and try again.",
+      },
+      clause("Jira"),
+    ],
+    // A limit an app headline wraps is still a limit in effect.
+    [
+      gh(
+        `Merged #12, but couldn't clean up the remote head branch.\n${HELD_TEXTS[0]}`,
+      ),
+      clause("GitHub"),
+    ],
+    [gh("HTTP 404: Not Found (https://api.github.com/repos/o/r)"), ""],
+    [{ kind: "git", message: HELD_TEXTS[0] }, ""],
+    [new Error("rate limit"), ""],
+    [null, ""],
+    [undefined, ""],
+  ])
+    assert.equal(rateLimitClause(error), expected, String(error?.message));
+});
+
+test("a limit wrapped in app prose gets no sentence, though it is still a limit", () => {
+  const wrapped = [
+    gh(
+      `The pull request was created, but applying its labels/assignees failed: ${HELD_TEXTS[0]}. Add them from the PR.`,
+    ),
+    gh(
+      `Merged #12, but couldn't clean up the remote head branch.\n${HELD_TEXTS[0]}`,
+    ),
+    gh(
+      `${HELD_TEXTS[0]}\nThe GitHub repository acme/app may have been created.`,
+    ),
+    {
+      kind: "bitbucket",
+      message:
+        "The branch was pushed, but creating the pull request failed: Bitbucket rate limit reached (429). Wait a moment and try again.",
+    },
+  ];
+  for (const error of wrapped) {
+    assert.equal(rateLimitSummary(error), null, error.message);
+    assert.notEqual(rateLimitProvider(error), null, error.message);
+  }
+  // A wrapped glab diagnostic is still glab's own text.
+  assert.equal(
+    rateLimitSummary({
+      kind: "glab",
+      message: "GET https://gitlab.com/api/v4/user:\n  429 Too Many Requests",
+    }),
+    `GitLab's API rate limit has been reached. ${LIFTS}`,
+  );
 });

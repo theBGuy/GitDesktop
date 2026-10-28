@@ -14,30 +14,27 @@ context: the standing brief and the repo playbook of conventions and gotchas.
 
 ## Hard boundaries
 
-- **Git is a whitelist.** Permitted: `git --no-pager diff`, `git --no-pager
-  status`, `git --no-pager log`, `git --no-pager show`, `git branch --list` —
-  each may be prefixed with `-C <path>` to address a task worktree.
-  Every state-mutating git command — commit, add/stage, checkout, reset, stash,
-  rm, clean, push, pull, fetch, merge, rebase, tag, branch create/delete,
-  worktree, remote, config — is forbidden, even "just to test": the user commits
-  their own work, possibly in parallel with this run.
-  `.claude/skills/gd-conventions/SKILL.md` is the canonical playbook and
-  `.claude/rules/git-safety.md` its always-loaded excerpt; read either in the
-  tree.
-- In a task worktree the sandbox additionally denies the git commands that write
-  the git dir (measured on add, commit, checkout, rm, stash), and a denial there
-  is the policy working, not an obstacle to route around. Commands touching only
-  worktree files (`git clean`, for one) are **not** blocked, so the whitelist
-  above is the only thing protecting them.
-- **Repo files are written only when the run is executing a delegated
-  work-package spec** (CLAUDE.md's delegated-implementation section enumerates
-  the full set of sanctioned write paths). A run handed no spec treats the repo
-  as read-only.
-- **Verification claims come from command output in this run**, never from
-  memory. Quote failures verbatim.
+`.claude/skills/gd-conventions/SKILL.md` is the canonical playbook, and
+`.claude/rules/repo-safety.md` excerpts the first four rules below; read
+either in the tree.
+
 - **Never edit `src/components/ui/`** — vendored shadcn/Base UI primitives; fix
   at the feature or call site (that folder's `README.md` inventories the
   sanctioned local deltas).
+- **Never run repo-wide `cargo fmt`** in `src-tauri`; `rustfmt --edition 2021
+  <file>` on individual new files only, never on a `mod.rs` (rustfmt follows
+  its `mod` declarations into every child file).
+- **`gd/session/*` branches are filtered from every branch surface** and never
+  deleted — the user dogfoods agent sessions on them; deleting one breaks
+  Resume.
+- **`pnpm lint` is a rewrite, not a check.** It is `biome check --write` over
+  `src/` AND `site/`; the check form is `pnpm exec biome check ./src/`. In a
+  task worktree even that tree-wide check false-fails on CRLF, so the
+  trustworthy gate is the per-file LF-copy `biome ci` form (gd-conventions),
+  whose `__cigate__<name>` sibling lives beside the original for the length of
+  the check and is deleted after, or whatever the spec's Verification field
+  names. A run that must not create files reports tree-wide formatting as
+  unverified instead.
 - **A skill edited in one tree is edited in both.** The skills you load from
   `.agents/skills/<name>` have a committed twin at `.claude/skills/<name>`, and
   nothing propagates an edit between them — editing only the copy you read
@@ -47,20 +44,6 @@ context: the standing brief and the repo playbook of conventions and gotchas.
   harness-only frontmatter keys. Skills it deliberately skips are declared in
   that script with their reason, and its header states the one difference the
   path rewrite cannot see.
-- **No tree-wide rewrites.** `pnpm lint` is `biome check --write` over `src/`
-  AND `site/` — a rewrite, not a check; the check form is `pnpm exec biome check
-  ./src/`. In a task worktree even that tree-wide check false-fails on CRLF, so
-  the trustworthy gate is the per-file LF-copy `biome ci` form (gd-conventions),
-  or whatever the spec's Verification field names. Never run repo-wide
-  `cargo fmt` in `src-tauri`; `rustfmt --edition 2021 <file>` on individual
-  new files only, never on a `mod.rs` (rustfmt follows its `mod` declarations
-  into every child file).
-- **No scratch or temp files inside the repo** — working files belong in the
-  session scratchpad or `C:/temp`. The one sanctioned exception: a run that may
-  create files judges formatting with the per-file LF-copy `biome ci` gate,
-  whose `__cigate__<name>` sibling lives beside the original for the length of
-  the check and is deleted after. A read-only run creates nothing and reports
-  tree-wide formatting as unverified instead.
 
 ## Verification commands
 

@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { rateLimitClause } from "@/lib/forge-backoff";
 import {
   useForkRepoByName,
   usePendingFork,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/git/types";
 import {
   ACT_PENDING_REASON,
+  OFFLINE_WRITE_REASON,
   pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
@@ -205,6 +207,12 @@ function ExploreDetailBody({
   // would compute `star: !undefined === true` and always star.
   const starLoaded = starred.data !== undefined;
   const isStarred = starred.data ?? false;
+  const starHeldReason = (() => {
+    // A read parked offline would otherwise say it is checking until reconnect.
+    if (starred.isPaused) return OFFLINE_WRITE_REASON;
+    if (!starred.isError) return "Checking star status…";
+    return `Couldn't check star status${rateLimitClause(starred.error)}.`;
+  })();
 
   const star = starParts(repo.stars ?? null);
 
@@ -308,7 +316,7 @@ function ExploreDetailBody({
             variant="outline"
             aria-pressed={starLoaded ? isStarred : undefined}
             disabled={!starLoaded}
-            reason="Checking star state…"
+            reason={starHeldReason}
             onClick={toggleStar}
           >
             <StarIcon weight={isStarred ? "fill" : "regular"} />
