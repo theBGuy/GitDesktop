@@ -93,6 +93,7 @@ import {
 import {
   checkBareBranchRevs,
   checkCompareEndpoints,
+  checkDiffExternalDrivers,
   checkGhExitAbsence,
   checkMergeIgnoredGuard,
   checkRefspecTemplates,
@@ -4874,6 +4875,131 @@ test("stripComments blanks comments but not comment-shaped strings", () => {
 });
 
 // -------------------------------------------------------- check-rust-invariants
+
+function diffDriverHits(src, allowlist) {
+  const hits = [];
+  checkDiffExternalDrivers("git/diff.rs", src, src.split("\n"), hits, allowlist);
+  return hits;
+}
+
+test("diff drivers require a flag on patches, quiet and exit-code verdicts", () => {
+  for (const argv of [
+    '["diff", "--no-color"]',
+    'vec!("diff", "--no-color")',
+    'vec!{"diff", "--no-color"}',
+    '["diff", "--numstat", "-p", r]',
+    '["diff", "--numstat", "-U"]',
+    '["diff", "--name-only", "--patch"]',
+    '["diff", "--cached", "--quiet"]',
+    '["diff", "--exit-code"]',
+    '["-C", repo, "diff", "--no-color"]',
+    '["--git-dir=repo", "diff", "--no-color"]',
+    '["diff", "--", "--no-ext-diff"]',
+  ]) {
+    const hits = diffDriverHits(`fn patch() { run(${argv}); }`);
+    assert.equal(hits.length, 1, argv);
+    assert.equal(hits[0].allowlisted, false, argv);
+    assert.equal(hits[0].fn, "patch");
+    assert.match(hits[0].fix, /--no-ext-diff/);
+  }
+});
+
+test("diff drivers reject explicit external-driver enabling regardless of flag order", () => {
+  for (const argv of [
+    '["diff", "--no-ext-diff", "--ext-diff"]',
+    '["diff", "--ext-diff", "--no-ext-diff"]',
+    '["diff", "--numstat", "--ext-diff"]',
+  ]) {
+    const hits = diffDriverHits(`fn patch() { run(${argv}); }`);
+    assert.equal(hits.length, 1, argv);
+    assert.equal(hits[0].allowlisted, false, argv);
+    assert.match(hits[0].fix, /drop --ext-diff/);
+  }
+});
+
+test("diff drivers require protection when machine-readable output also requests a patch", () => {
+  for (const flag of ["-p", "-u", "-U", "--patch", "--patch-with-raw", "--patch-with-stat", "-U3", "--unified", "--unified=3"]) {
+    for (const output of ["--numstat", "--name-only", "--name-status"]) {
+      const argv = `"diff", "${output}", "${flag}", r`;
+      const hits = diffDriverHits(`fn patch() { run(&[${argv}]); }`);
+      assert.equal(hits.length, 1, argv);
+      assert.equal(hits[0].allowlisted, false, argv);
+      assert.deepEqual(diffDriverHits(`fn patch() { run(&[${argv}, "--no-ext-diff"]); }`), []);
+    }
+  }
+  for (const [open, close] of [["[", "]"], ["(", ")"], ["{", "}"]]) {
+    assert.deepEqual(diffDriverHits(`fn patch() { run(vec!${open}"diff", "--no-ext-diff"${close}); }`), []);
+  }
+});
+
+test("diff drivers do not treat a test-module header inside a string as a module", () => {
+  const hits = diffDriverHits('fn a() { let s = "#[cfg(test)] mod t {"; run(&["diff"]); }');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].fn, "a");
+  assert.equal(hits[0].allowlisted, false);
+});
+
+test("diff drivers accept explicit protection and machine-readable output", () => {
+  for (const flag of ["--no-ext-diff", "--numstat", "--name-only", "--name-status"]) {
+    for (const prefix of ['"diff"', '"-c", config, "diff"']) {
+      assert.deepEqual(
+        diffDriverHits(`fn patch() { run(&[${prefix}, "${flag}", path]); }`),
+        [],
+      );
+    }
+  }
+  assert.deepEqual(diffDriverHits('fn pr() { run(&["pr", "diff"]); }'), []);
+  assert.deepEqual(diffDriverHits('fn opaque() { let x = [a, b]; }'), []);
+  assert.deepEqual(diffDriverHits('fn text() { let s = "[\\\"diff\\\"]"; }'), []);
+  assert.deepEqual(diffDriverHits('// ["diff", "--quiet"]'), []);
+});
+
+test("diff drivers exclude named and visibility-qualified test modules by span", () => {
+  for (const module of ["mod tests", "mod config_tests", "pub(crate) mod tests"]) {
+    const src = `#[cfg(test)] ${module} { fn fixture() { run(&["diff", "--no-color"]); } }`;
+    assert.deepEqual(diffDriverHits(src), []);
+    const hits = diffDriverHits(`${src}\nfn production() { run(&["diff"]); }`);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].fn, "production");
+  }
+});
+
+test("diff drivers attribute const/static initializers separately from functions", () => {
+  const row = {
+    file: "git/diff.rs",
+    fn: "REQUESTED_ATTRS",
+    item: true,
+    rationale: "Attribute names passed to check-attr, never a git argv",
+  };
+  for (const kind of ["const", "pub const", "pub(crate) static"]) {
+    const src = `${kind} REQUESTED_ATTRS: [&str; 2] = ["diff", "filter"];`;
+    const hits = diffDriverHits(src);
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].fn, "REQUESTED_ATTRS");
+    assert.equal(hits[0].allowlisted, true);
+    assert.equal(diffDriverHits(src, [{ ...row, item: false }])[0].allowlisted, false);
+    assert.equal(diffDriverHits(src, [])[0].allowlisted, false);
+  }
+  const src = 'fn REQUESTED_ATTRS() { run(&["diff", "--no-color"]); }';
+  assert.equal(diffDriverHits(src, [row])[0].allowlisted, false);
+  assert.equal(diffDriverHits(src, [{ ...row, item: false }])[0].allowlisted, true);
+});
+
+test("diff drivers fail closed on unreadable literals, groups and verb slots", () => {
+  for (const [src, reason] of [
+    ['fn patch() { let s = "unterminated', /never closes/],
+    ['fn patch() { run(&["diff", "--no-color"', /cannot bound/],
+    ['fn patch() { run(&["diff", "--no-ext-diff"); }', /cannot bound/],
+    ['fn patch() { run(&[x, "diff", "--no-color"]); }', /cannot resolve/],
+  ]) {
+    const hits = diffDriverHits(src);
+    assert.equal(hits.length, 1, src);
+    assert.equal(hits[0].allowlisted, false, src);
+    assert.match(hits[0].fix, reason);
+    assert.equal(hits[0].file, "git/diff.rs");
+    assert.equal(hits[0].line, 1);
+  }
+});
 
 function markerBranchHits(src, other = "", corpus = undefined) {
   const hits = [];

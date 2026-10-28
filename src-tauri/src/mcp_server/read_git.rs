@@ -217,7 +217,7 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<WorkingDiffArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let mut a: Vec<&str> = vec!["diff", "--no-color"];
+        let mut a: Vec<&str> = vec!["diff", "--no-ext-diff", "--no-color"];
         // `git diff HEAD` = staged + unstaged vs HEAD; `git diff --cached` = staged
         // vs HEAD. Scoping with `-- <path>` keeps the same base (unlike the per-file
         // UI command, which only diffs against the index).
@@ -248,7 +248,14 @@ impl GitDesktopMcp {
         ensure_not_flag(&args.head, "head")?;
         diff_text(
             &self.repo,
-            &["diff", "--no-color", &args.base, &args.head, "--"],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                &args.base,
+                &args.head,
+                "--",
+            ],
         )
         .await
     }

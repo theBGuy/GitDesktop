@@ -404,6 +404,7 @@ pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
             None,
             &[
                 "diff",
+                "--no-ext-diff",
                 "--no-index",
                 "--no-color",
                 "--",

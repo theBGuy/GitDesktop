@@ -1328,15 +1328,22 @@ pub(crate) async fn git_revert_core(
 ) -> AppResult<()> {
     validate_hash(&hash)?;
     let mainline = mainline_arg(mainline)?;
-    let already_unmerged = unmerged_paths(&repo_path).await;
     let mut args = vec!["revert", "--no-edit"];
     if let Some(n) = &mainline {
         args.extend(["-m", n.as_str()]);
     }
     args.push(&hash);
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(&args)),
+    )
+    .await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted revert splits its report — `could not revert` on stderr,
     // the `CONFLICT (…` file list on stdout — so the error needs both halves.
-    let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         return Err(classify_failure(
             &repo_path,
@@ -1371,28 +1378,40 @@ pub(crate) async fn git_cherry_pick_core(
 ) -> AppResult<bool> {
     validate_hash(&hash)?;
     let mainline = mainline_arg(mainline)?;
-    let already_unmerged = unmerged_paths(&repo_path).await;
     let mut args = vec!["cherry-pick"];
     if let Some(n) = &mainline {
         args.extend(["-m", n.as_str()]);
     }
     args.push(&hash);
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(&args)),
+    )
+    .await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted pick splits its report — `could not apply` on stderr, the
     // `CONFLICT (…` file list on stdout — so the error needs both halves.
-    let out = run_git_mutating_raw(state, &repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code == 0 {
         return Ok(true);
     }
     // The already-applied sentence arrives on stderr (measured); gating on the raw
     // stream keeps the stdout backfill from widening what counts as "empty".
     if out.stderr.contains("is now empty") || out.stderr.contains("--allow-empty") {
-        let _ = run_git_mutating_raw(
-            state,
-            &repo_path,
-            &["cherry-pick", "--skip"],
-            DEFAULT_TIMEOUT,
-        )
-        .await;
+        let skip = run_git_raw_index_retry(&repo_path, &["cherry-pick", "--skip"], DEFAULT_TIMEOUT)
+            .await?;
+        if skip.code != 0 {
+            return Err(classify_failure(
+                &repo_path,
+                "cherry-pick",
+                &already_unmerged,
+                skip.code,
+                skip.full_failure_text(),
+            )
+            .await);
+        }
         return Ok(false);
     }
     Err(classify_failure(
@@ -2398,11 +2417,19 @@ pub async fn git_stash_pop(state: State<'_, AppState>, repo_path: String) -> App
 }
 
 pub(crate) async fn git_stash_pop_core(state: &AppState, repo_path: String) -> AppResult<()> {
+    let args = ["stash", "pop"];
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(&args)),
+    )
+    .await?;
     let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw: a conflicted pop reports entirely on stdout and leaves stderr empty
     // (measured, git 2.51.1), so a stderr-only error is blind to the whole report
     // — and to the fact that git kept the stash entry.
-    let out = run_git_mutating_raw(state, &repo_path, &["stash", "pop"], DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         return Err(classify_failure(
             &repo_path,
@@ -3012,7 +3039,15 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
     let path_spec = crate::git::pathspec::literal(file_path);
     let out = run_git(
         Some(repo),
-        &["diff", "--no-color", &base, spec, "--", &path_spec],
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--no-color",
+            &base,
+            spec,
+            "--",
+            &path_spec,
+        ],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -3022,7 +3057,15 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
         let untracked = format!("{spec}^3");
         if let Ok(o) = run_git(
             Some(repo),
-            &["diff", "--no-color", &base, &untracked, "--", &path_spec],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                &base,
+                &untracked,
+                "--",
+                &path_spec,
+            ],
             DEFAULT_TIMEOUT,
         )
         .await
@@ -3190,15 +3233,17 @@ pub(crate) async fn git_restore_orphaned_core(
     sha: String,
 ) -> AppResult<()> {
     validate_hash(&sha)?;
-    let already_unmerged = unmerged_paths(&repo_path).await;
-    // Raw, for the same stdout-only conflict report as `git_stash_pop_core`.
-    let out = run_git_mutating_raw(
-        state,
-        &repo_path,
-        &["stash", "apply", &sha],
-        DEFAULT_TIMEOUT,
+    let args = ["stash", "apply", &sha];
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(&args)),
     )
     .await?;
+    let already_unmerged = unmerged_paths(&repo_path).await;
+    // Raw, for the same stdout-only conflict report as `git_stash_pop_core`.
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         return Err(classify_failure(
             &repo_path,
@@ -3230,10 +3275,17 @@ pub(crate) async fn git_stash_apply_core(
 ) -> AppResult<()> {
     let spec = format!("stash@{{{index}}}");
     let sub = if pop { "pop" } else { "apply" };
+    let args = ["stash", sub, &spec];
+    let domain = state.working_tree_lock(&repo_path).await;
+    let _guard = acquire_repo_lock(
+        &domain,
+        LOCK_WAIT_TIMEOUT,
+        holder_label(subcommand_of(&args)),
+    )
+    .await?;
     let already_unmerged = unmerged_paths(&repo_path).await;
     // Raw, for the same stdout-only conflict report as `git_stash_pop_core`.
-    let out =
-        run_git_mutating_raw(state, &repo_path, &["stash", sub, &spec], DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(&repo_path, &args, DEFAULT_TIMEOUT).await?;
     if out.code != 0 {
         let op = if pop { "stash-pop" } else { "stash-apply" };
         return Err(classify_failure(
@@ -4424,7 +4476,7 @@ pub(crate) async fn finish_local_pr_merge(
             let merging = git_path_exists(worktree_path, "MERGE_HEAD").await;
             let staged = run_git_raw(
                 Some(worktree_path),
-                &["diff", "--cached", "--quiet"],
+                &["diff", "--no-ext-diff", "--cached", "--quiet"],
                 DEFAULT_TIMEOUT,
             )
             .await?;
@@ -5137,7 +5189,7 @@ pub(crate) async fn finish_remote_pr_resolve(
     let merging = git_path_exists(worktree_path, "MERGE_HEAD").await;
     let staged = run_git_raw(
         Some(worktree_path),
-        &["diff", "--cached", "--quiet"],
+        &["diff", "--no-ext-diff", "--cached", "--quiet"],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -13328,6 +13380,94 @@ mod tests {
             .await
             .unwrap_err();
         assert_both_streams(&err, "revert", "could not revert");
+    }
+
+    #[tokio::test]
+    async fn empty_cherry_pick_skips_under_one_hold() {
+        let (dir, repo) = setup_repo("empty-cherry-pick").await;
+        commit_file(&repo, dir.path(), "a.txt", "already applied\n", "applied").await;
+        let target = rev(&repo, "HEAD").await;
+        let state = AppState::default();
+        let created = git_cherry_pick_core(&state, repo.clone(), target.clone(), None)
+            .await
+            .expect("an already-applied pick must finish its skip");
+        assert!(!created);
+        assert_eq!(rev(&repo, "HEAD").await, target);
+        assert!(!dir.path().join(".git/CHERRY_PICK_HEAD").exists());
+        assert!(!dir.path().join(".git/sequencer").exists());
+        assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    #[test]
+    fn conflict_cores_keep_prelock_reads_under_one_hold() {
+        fn holds_conflict_baseline(body: &str) -> bool {
+            let code = body
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let Some((before_lock, _)) = code.split_once("acquire_repo_lock(") else {
+                return false;
+            };
+            let Some((_, assignment)) = before_lock.rsplit_once("let ") else {
+                return false;
+            };
+            let Some((binding, prefix)) = assignment.split_once('=') else {
+                return false;
+            };
+            if prefix.contains(';') {
+                return false;
+            }
+            let binding = binding.trim();
+            let binding = binding.strip_prefix("mut ").unwrap_or(binding).trim();
+            let named = binding != "_"
+                && binding.starts_with(|ch: char| ch == '_' || ch.is_ascii_alphabetic())
+                && binding.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric());
+            let code: String = code.chars().filter(|ch| !ch.is_whitespace()).collect();
+            let (Some(lock), Some(read), Some(op)) = (
+                code.find("acquire_repo_lock("),
+                code.find("unmerged_paths("),
+                code.find("run_git_raw_index_retry("),
+            ) else {
+                return false;
+            };
+            named
+                && lock < read
+                && read < op
+                && !code.contains("run_git_mutating")
+                && !code[..op].contains(&format!("drop({binding})"))
+        }
+        assert!(!holds_conflict_baseline(
+            "unmerged_paths(repo).await; let _guard = acquire_repo_lock(domain).await; run_git_raw_index_retry();"
+        ));
+        assert!(!holds_conflict_baseline(
+            "let _guard = acquire_repo_lock(domain).await; unmerged_paths(repo).await; run_git_mutating_raw(); run_git_raw_index_retry();"
+        ));
+        assert!(!holds_conflict_baseline(
+            "let _ = acquire_repo_lock(domain).await; unmerged_paths(repo).await; run_git_raw_index_retry();"
+        ));
+        assert!(!holds_conflict_baseline(
+            "let other = (); acquire_repo_lock(domain).await; unmerged_paths(repo).await; run_git_raw_index_retry();"
+        ));
+        assert!(!holds_conflict_baseline(
+            "let held = acquire_repo_lock(domain).await; unmerged_paths(repo).await; drop(held); run_git_raw_index_retry();"
+        ));
+        assert!(holds_conflict_baseline(
+            "let held = acquire_repo_lock(domain).await; unmerged_paths(repo).await; run_git_raw_index_retry(); drop(held);"
+        ));
+        let source = include_str!("ops.rs").replace("\r\n", "\n");
+        let production = source.split_once("\nmod tests {").unwrap().0;
+        for name in [
+            "git_revert_core",
+            "git_cherry_pick_core",
+            "git_stash_pop_core",
+            "git_restore_orphaned_core",
+            "git_stash_apply_core",
+        ] {
+            let tail = production.split_once(&format!("fn {name}(")).unwrap().1;
+            let body = tail.split_once("\n}").unwrap().0;
+            assert!(holds_conflict_baseline(body), "{name}");
+        }
     }
 
     #[tokio::test]

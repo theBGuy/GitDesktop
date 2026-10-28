@@ -357,7 +357,14 @@ pub async fn git_diff_file(
         // fails with "could not access" (measured), so this half stays raw.
         let out = run_git_raw(
             Some(&repo_path),
-            &["diff", "--no-index", "--", "/dev/null", &file_path],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                &file_path,
+            ],
             DEFAULT_TIMEOUT,
         )
         .await?;
@@ -372,7 +379,7 @@ pub async fn git_diff_file(
         // Literal pathspec: a `[slug]`-style path would otherwise splice its
         // glob-siblings' hunks into this file's diff.
         let spec = crate::git::pathspec::literal(&file_path);
-        let mut args = vec!["diff", "--no-color"];
+        let mut args = vec!["diff", "--no-ext-diff", "--no-color"];
         if staged {
             args.push("--cached");
         }
@@ -416,7 +423,7 @@ pub async fn git_session_file_diff(
     let spec = crate::git::pathspec::literal(&file_path);
     let out = run_git(
         Some(&repo_path),
-        &["diff", "--no-color", &base, "--", &spec],
+        &["diff", "--no-ext-diff", "--no-color", &base, "--", &spec],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -436,7 +443,14 @@ pub async fn git_session_file_diff(
             // git_diff_file); only the pathspec-taking probe above is literalized.
             let no_index = run_git_raw(
                 Some(&repo_path),
-                &["diff", "--no-index", "--", "/dev/null", &file_path],
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    &file_path,
+                ],
                 DEFAULT_TIMEOUT,
             )
             .await?;
@@ -486,7 +500,7 @@ pub async fn git_staged_diff(
     // concurrent edit can change between the name pass and the content pass.
     let filtered = crate::git::ai_ignore::filtered_diff(
         &repo_path,
-        &["diff", base, "--no-color"],
+        &["diff", "--no-ext-diff", base, "--no-color"],
         &["diff", base, "--numstat", "-z"],
         &exclude.unwrap_or_default(),
         true,
@@ -1326,6 +1340,112 @@ mod tests {
         std::fs::write(info.join("exclude"), "").unwrap();
         std::fs::write(info.join("attributes"), "").unwrap();
         (tmp, dir, repo)
+    }
+
+    async fn assert_ext_diff_preserves_patches(attribute_driver: bool) {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-ext-diff-").await;
+        std::fs::write(dir.join("tracked.txt"), "before\n").unwrap();
+        if attribute_driver {
+            std::fs::write(dir.join(".gitattributes"), "*.txt diff=marker\n").unwrap();
+        }
+        run_git(Some(&repo), &["add", "-A"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        run_git(Some(&repo), &["commit", "-qm", "seed"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let config = if attribute_driver {
+            "diff.marker.command"
+        } else {
+            "diff.external"
+        };
+        run_git(
+            Some(&repo),
+            &["config", config, "echo EXTDIFF-RAN"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        std::fs::write(dir.join("tracked.txt"), "after\n").unwrap();
+        std::fs::write(dir.join("untracked.txt"), "new\n").unwrap();
+
+        let control = run_git(Some(&repo), &["diff", "--no-color"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert!(control.stdout_lossy().contains("EXTDIFF-RAN"));
+        // Only repo-local diff.external fires for --no-index; attribute drivers do not (measured, git 2.51.1).
+        if !attribute_driver {
+            let untracked_control = run_git_raw(
+                Some(&repo),
+                &["diff", "--no-index", "--", "/dev/null", "untracked.txt"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert!(untracked_control.stdout_lossy().contains("EXTDIFF-RAN"));
+        }
+        for (path, untracked) in [("tracked.txt", false), ("untracked.txt", true)] {
+            let diff = git_diff_file(repo.clone(), path.into(), false, untracked)
+                .await
+                .unwrap();
+            assert!(diff.text.contains("diff --git"), "{}", diff.text);
+            assert!(!diff.text.contains("EXTDIFF-RAN"), "{}", diff.text);
+        }
+
+        run_git(Some(&repo), &["add", "tracked.txt"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let staged_control = run_git(
+            Some(&repo),
+            &["diff", "--cached", "--no-color"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert!(staged_control.stdout_lossy().contains("EXTDIFF-RAN"));
+        let staged = git_staged_diff(repo.clone(), None, None, None)
+            .await
+            .unwrap();
+        assert!(staged.text.contains("diff --git"), "{}", staged.text);
+        assert!(!staged.text.contains("EXTDIFF-RAN"), "{}", staged.text);
+        assert_eq!(staged.files.len(), 1);
+        assert_eq!(staged.files[0].path, "tracked.txt");
+
+        if attribute_driver {
+            run_git(
+                Some(&repo),
+                &["config", "diff.marker.trustExitCode", "true"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            let control = run_git_raw(
+                Some(&repo),
+                &["diff", "--cached", "--quiet"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_eq!(control.code, 0, "the driver reports equality");
+            let guarded = run_git_raw(
+                Some(&repo),
+                &["diff", "--no-ext-diff", "--cached", "--quiet"],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_eq!(guarded.code, 1, "the staged change must remain visible");
+        }
+    }
+
+    #[tokio::test]
+    async fn patches_ignore_repo_ext_diff_tool() {
+        assert_ext_diff_preserves_patches(false).await;
+    }
+
+    #[tokio::test]
+    async fn patches_ignore_attribute_ext_diff_driver() {
+        assert_ext_diff_preserves_patches(true).await;
     }
 
     /// The feature's real contract: an untracked row must already say what numstat
