@@ -3681,7 +3681,9 @@ Open **Settings** from the header gear (or {{kbd:open-settings}}). Leaving Setti
 unsaved changes asks to save or discard first, whether you leave through Back,
 {{key:escape}}, the command palette, a shortcut, a notification, or by opening a
 repository. A move made while a save is still writing waits for it and continues once it
-lands; if the save fails, Settings stays open with your changes.
+lands; if the save fails, Settings stays open with your changes. Edits wait behind a
+**Save changes** / **Discard** bar: **Discard** asks first and counts any secret values
+you typed, and a failed save says so and keeps the bar up until one succeeds.
 
 Sections:
 
