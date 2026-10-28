@@ -10,6 +10,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { useMutation } from "@/lib/started-mutation";
 import { toastError } from "@/lib/toast";
 
@@ -149,10 +150,13 @@ export async function addDraft(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const repoKey = await keyFor(repo, identity);
-      const all = foldLegacyKey(await readByKey(repoKey), lens, number);
-      const k = draftKey(lens, number);
-      await writeRepo(repoKey, { ...all, [k]: [...(all[k] ?? []), draft] });
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const repoKey = await keyFor(repo, identity);
+        const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+        const k = draftKey(lens, number);
+        await writeRepo(repoKey, { ...all, [k]: [...(all[k] ?? []), draft] });
+      });
     });
   });
 }
@@ -168,13 +172,16 @@ export async function updateDraft(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const repoKey = await keyFor(repo, identity);
-      const all = foldLegacyKey(await readByKey(repoKey), lens, number);
-      const k = draftKey(lens, number);
-      const next = (all[k] ?? []).map((d) =>
-        d.id === id ? { ...d, body } : d,
-      );
-      await writeRepo(repoKey, { ...all, [k]: next });
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const repoKey = await keyFor(repo, identity);
+        const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+        const k = draftKey(lens, number);
+        const next = (all[k] ?? []).map((d) =>
+          d.id === id ? { ...d, body } : d,
+        );
+        await writeRepo(repoKey, { ...all, [k]: next });
+      });
     });
   });
 }
@@ -189,12 +196,15 @@ export async function removeDraft(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const repoKey = await keyFor(repo, identity);
-      const all = foldLegacyKey(await readByKey(repoKey), lens, number);
-      const k = draftKey(lens, number);
-      await writeRepo(repoKey, {
-        ...all,
-        [k]: (all[k] ?? []).filter((d) => d.id !== id),
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const repoKey = await keyFor(repo, identity);
+        const all = foldLegacyKey(await readByKey(repoKey), lens, number);
+        const k = draftKey(lens, number);
+        await writeRepo(repoKey, {
+          ...all,
+          [k]: (all[k] ?? []).filter((d) => d.id !== id),
+        });
       });
     });
   });
@@ -209,14 +219,19 @@ export async function clearDrafts(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const repoKey = await keyFor(repo, identity);
-      // Fold first: a discard must take the pre-lens entry with it, or `listDrafts`
-      // would read the legacy drafts straight back after the clear. Copied before the
-      // delete — the fold passes the store's own object through when there's nothing
-      // to fold, and that must not be mutated in place.
-      const next = { ...foldLegacyKey(await readByKey(repoKey), lens, number) };
-      delete next[draftKey(lens, number)];
-      await writeRepo(repoKey, next);
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const repoKey = await keyFor(repo, identity);
+        // Fold first: a discard must take the pre-lens entry with it, or `listDrafts`
+        // would read the legacy drafts straight back after the clear. Copied before the
+        // delete — the fold passes the store's own object through when there's nothing
+        // to fold, and that must not be mutated in place.
+        const next = {
+          ...foldLegacyKey(await readByKey(repoKey), lens, number),
+        };
+        delete next[draftKey(lens, number)];
+        await writeRepo(repoKey, next);
+      });
     });
   });
 }

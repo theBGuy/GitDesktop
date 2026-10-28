@@ -6,6 +6,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import {
   type ActionConfig,
   type ActionId,
@@ -54,10 +55,14 @@ function mutateConfig(
     const store = await getStore();
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadToleratingEmptyStore(store);
-      const current = normalizeAutomations(await store.get<unknown>("config"));
-      const next = mutate(current);
-      await store.set("config", next);
-      await store.save();
+      return writeWithRollback(store, async () => {
+        const current = normalizeAutomations(
+          await store.get<unknown>("config"),
+        );
+        const next = mutate(current);
+        await store.set("config", next);
+        await store.save();
+      });
     });
   });
 }
@@ -326,10 +331,12 @@ export async function loadAutomations(): Promise<AutomationsConfigV2> {
     await serialize(() =>
       withAppStoreLock(STORE_FILE, async () => {
         await reloadToleratingEmptyStore(store);
-        const fresh = await store.get<unknown>("config");
-        if (!isV1(fresh)) return;
-        await store.set("config", config);
-        await store.save();
+        return writeWithRollback(store, async () => {
+          const fresh = await store.get<unknown>("config");
+          if (!isV1(fresh)) return;
+          await store.set("config", config);
+          await store.save();
+        });
       }),
     );
     if (collapsed > 0) {

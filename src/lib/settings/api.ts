@@ -8,6 +8,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { rehomeServerRepoKeys } from "@/lib/settings/mcp";
 import type { ThemeSetting } from "@/lib/theme";
 import {
@@ -470,9 +471,11 @@ function serializedRecentRepoWrite<T>(fn: () => Promise<T>): Promise<T> {
     withAppStoreLock("settings.json", async () => {
       const store = await getStore();
       await reloadToleratingEmptyStore(store);
-      const out = await fn();
-      await store.save();
-      return out;
+      return writeWithRollback(store, async () => {
+        const out = await fn();
+        await store.save();
+        return out;
+      });
     });
   const run = recentRepoWrites.then(locked, locked);
   recentRepoWrites = run.catch(() => undefined);

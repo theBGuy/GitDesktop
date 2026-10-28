@@ -8,6 +8,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 
 export interface LocalPrComment {
   id: string;
@@ -154,22 +155,25 @@ export async function createLocalPr(
     return withAppStoreLock(STORE_FILE, async () => {
       // Fresh disk state first, so we don't drop a concurrent external MCP write.
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const pr: LocalPr = {
-        id: crypto.randomUUID(),
-        title: input.title,
-        body: input.body,
-        base: input.base,
-        head: input.head,
-        status: "open",
-        approved: false,
-        labels: [],
-        comments: [],
-        createdAt: new Date().toISOString(),
-      };
-      const all = await readByKey(key);
-      await writeAll(key, [pr, ...all]);
-      return pr;
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const pr: LocalPr = {
+          id: crypto.randomUUID(),
+          title: input.title,
+          body: input.body,
+          base: input.base,
+          head: input.head,
+          status: "open",
+          approved: false,
+          labels: [],
+          comments: [],
+          createdAt: new Date().toISOString(),
+        };
+        const all = await readByKey(key);
+        await writeAll(key, [pr, ...all]);
+        return pr;
+      });
     });
   });
 }
@@ -188,17 +192,20 @@ export async function updateLocalPr(
     const identity = await repoIdentity(repo);
     return withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = await readByKey(key);
-      const idx = all.findIndex((p) => p.id === id);
-      if (idx === -1)
-        throw new Error(
-          `no local PR with id ${id} — it may have been deleted or belong to a different repository`,
-        );
-      const next = [...all];
-      next[idx] = mutate(all[idx]);
-      await writeAll(key, next);
-      return next[idx];
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        const idx = all.findIndex((p) => p.id === id);
+        if (idx === -1)
+          throw new Error(
+            `no local PR with id ${id} — it may have been deleted or belong to a different repository`,
+          );
+        const next = [...all];
+        next[idx] = mutate(all[idx]);
+        await writeAll(key, next);
+        return next[idx];
+      });
     });
   });
 }
@@ -209,12 +216,15 @@ export async function deleteLocalPr(repo: string, id: string): Promise<void> {
     await withAppStoreLock(STORE_FILE, async () => {
       // Fresh disk state first, so we don't drop a concurrent external MCP write.
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = await readByKey(key);
-      await writeAll(
-        key,
-        all.filter((p) => p.id !== id),
-      );
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        await writeAll(
+          key,
+          all.filter((p) => p.id !== id),
+        );
+      });
     });
   });
 }

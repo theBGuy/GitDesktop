@@ -4,6 +4,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { reconcileNumbers } from "./agent-number-reconcile";
 
 // A GitHub-style short identifier (`#N`) for every agent entry — sessions, plans,
@@ -175,20 +176,22 @@ useAgentNumbers.subscribe((state, prev) => {
       .then((store) =>
         withAppStoreLock(STORE_FILE, async () => {
           await reloadToleratingEmptyStore(store);
-          const disk =
-            (await store.get<Record<string, number>>("numbers")) ?? {};
-          const diskCounter = (await store.get<number>("counter")) ?? 1;
-          const live = useAgentNumbers.getState();
-          const { numbers, counter, changed } = reconcileNumbers(
-            disk,
-            diskCounter,
-            live.numbers,
-            live.counter,
-          );
-          if (changed) useAgentNumbers.setState({ numbers, counter });
-          await store.set("numbers", numbers);
-          await store.set("counter", counter);
-          await store.save();
+          return writeWithRollback(store, async () => {
+            const disk =
+              (await store.get<Record<string, number>>("numbers")) ?? {};
+            const diskCounter = (await store.get<number>("counter")) ?? 1;
+            const live = useAgentNumbers.getState();
+            const { numbers, counter, changed } = reconcileNumbers(
+              disk,
+              diskCounter,
+              live.numbers,
+              live.counter,
+            );
+            if (changed) useAgentNumbers.setState({ numbers, counter });
+            await store.set("numbers", numbers);
+            await store.set("counter", counter);
+            await store.save();
+          });
         }),
       )
       .catch((e: unknown) => {

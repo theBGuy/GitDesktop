@@ -31,10 +31,11 @@ import {
   MERGE_METHOD_LABEL,
   type MergeMethod,
 } from "@/lib/branch-rules/types";
+import { presentError } from "@/lib/error-summary";
 import { ghBranchProtections } from "@/lib/git/api";
 import { forgeFeatureReady, useForgeStatus } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { toastComposedError, toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
 export function BranchRulesDialog({
@@ -76,24 +77,30 @@ export function BranchRulesDialog({
 
   // Seed the editable draft from the active scope when the dialog opens or the
   // scope changes (switching scopes discards any unsaved edits in the other).
-  const seededScope = useRef<string | null>(null);
+  // During render, so a scope switch never paints the other scope's draft.
+  const [seededScope, setSeededScope] = useState<typeof scope | null>(null);
+  if (open && active.data && seededScope !== scope) {
+    setSeededScope(scope);
+    setDraft(active.data);
+  }
   // Open-session token, reminted on every reseed: the dialog stays mounted and
   // Cancel is live mid-save, so a settle closes only the draft that submitted.
-  // Dropped only in `!open`, never by a cleanup: an `<Activity>` hide runs those.
+  // Dropped only in `!open`, never by a cleanup: an `<Activity>` hide runs those
+  // (and replays this effect on show, which `sessionScope` keeps from reminting).
   const session = useRef<object | null>(null);
+  const sessionScope = useRef<typeof scope | null>(null);
   useEffect(() => {
     if (!open) {
-      seededScope.current = null;
+      setSeededScope(null);
       session.current = null;
+      sessionScope.current = null;
       return;
     }
-    if (session.current === null) session.current = {};
-    if (seededScope.current !== scope && active.data) {
-      seededScope.current = scope;
+    if (session.current === null || sessionScope.current !== seededScope) {
       session.current = {};
-      setDraft(active.data);
+      sessionScope.current = seededScope;
     }
-  }, [open, scope, active.data]);
+  }, [open, seededScope]);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(active.data ?? null);
 
@@ -231,7 +238,15 @@ export function BranchRulesDialog({
     try {
       await saving.mutateAsync(draft);
     } catch (e) {
-      toastError(e);
+      toastComposedError({
+        title: `Couldn't save ${savedShared ? "shared branch rules" : "branch rules"}: ${presentError(e).summary}`,
+        // Truthful at settle: a closed (or reseeded) session has dropped the draft.
+        description:
+          submitted !== null && session.current === submitted
+            ? "Your changes are still here. Save again to retry."
+            : "Your changes weren't saved.",
+        errors: [e],
+      });
       return;
     }
     toast.success(
@@ -556,16 +571,17 @@ export function BranchRulesDialog({
             className="w-full"
             onClick={() => void doSave()}
             disabled={!active.data || !dirty || saving.isPending}
+            // Saving first: the save's optimistic patch already reads clean.
             reason={(() => {
               switch (true) {
+                case saving.isPending:
+                  return "Saving…";
                 case !active.data && active.isError:
                   return "Couldn't load branch rules";
                 case !active.data:
                   return "Loading branch rules…";
-                case !dirty:
-                  return "No changes to save";
                 default:
-                  return "Saving…";
+                  return "No changes to save";
               }
             })()}
           >

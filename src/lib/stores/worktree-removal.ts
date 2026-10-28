@@ -510,7 +510,7 @@ async function runPromote(
     // There's no fs-watcher (status is polled), so switching away stops future
     // polls; `removeWorktreeFreeingBranch` retries once for any last in-flight
     // poll that hasn't drained (openRepo's switch can apply after it returns).
-    useUiStore.getState().openRepo(info);
+    useUiStore.getState().openRepo(info, { bypassLeaveGuard: true });
     await new Promise((resolve) => setTimeout(resolve, 80));
     // Main is the active repo now, so the removal is visible where the user is.
     // A promote is checking this branch out, not putting it away, so it never

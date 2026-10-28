@@ -424,9 +424,22 @@ interface UiState {
    *  request time, transition-backed actions included, so a continuation claims its epoch
    *  BEFORE invoking a navigator and never re-reads it after. */
   interactionEpoch: number;
+  /** Registered by SettingsScreen while it holds unsaved edits or a save is
+   *  writing. Every navigator that can leave Settings from elsewhere consults it
+   *  instead of navigating (Settings' own landings and closes are exempt; the
+   *  remove-repo close and the worktree promote's landing bypass it); `resume`
+   *  re-invokes the intercepted navigation with its original arguments. */
+  settingsLeaveGuard: ((resume: () => void) => void) | null;
+  setSettingsLeaveGuard: (guard: ((resume: () => void) => void) | null) => void;
 
-  openRepo: (info: RepoInfo) => void;
+  /** `bypassLeaveGuard` is for the worktree promote's landing only (it moves off
+   *  a folder it is about to delete), never a user's gesture. */
+  openRepo: (info: RepoInfo, opts?: { bypassLeaveGuard?: boolean }) => void;
   closeRepo: () => void;
+  /** `closeRepo` that Settings' leave guard never holds, for the
+   *  remove-open-repository close alone: it stops status polling before the
+   *  repository is removed (and its folder trashed, when asked). */
+  closeRepoUnguarded: () => void;
   /** Open a repo (if not already open) and select a PR — used by a notification
    *  row's click-through. `section` is the sub-tab to land on, or null to leave
    *  whichever tab the user is on. One atomic update so the landing target
@@ -705,6 +718,17 @@ export const useUiStore = create<UiState>()((set, get) => {
   // there double-exposes two differently laid-out headers. Read at REQUEST time.
   const repoViewMotion = () => ({ animate: get().view !== "repo" });
 
+  // Hands a move off a dirty or saving Settings to its guard. Bumps for the
+  // request first, so an older continuation (a claimed repo open) retires and
+  // any hold carries this request's epoch; resume rules live in requestLeave.
+  const interceptSettingsLeave = (resume: () => void): boolean => {
+    const { view, settingsLeaveGuard } = get();
+    if (view !== "settings" || settingsLeaveGuard === null) return false;
+    bumpEpochNow();
+    settingsLeaveGuard(resume);
+    return true;
+  };
+
   // Set while a navigator runs its caller's `beforeSelect`. That navigator bumped
   // at request time, so a note requested here (a lens switch's) is already
   // covered, and landing it now would retire a newer action claimed before the
@@ -766,8 +790,15 @@ export const useUiStore = create<UiState>()((set, get) => {
     activeDraftKey: null,
     draftKeyRemaps: {},
     interactionEpoch: 0,
+    settingsLeaveGuard: null,
+    setSettingsLeaveGuard: (guard) => set({ settingsLeaveGuard: guard }),
 
-    openRepo: (info) => {
+    openRepo: (info, opts) => {
+      if (
+        !opts?.bypassLeaveGuard &&
+        interceptSettingsLeave(() => get().openRepo(info))
+      )
+        return;
       bumpEpochNow();
       startViewTransition(
         () =>
@@ -786,6 +817,10 @@ export const useUiStore = create<UiState>()((set, get) => {
       );
     },
     closeRepo: () => {
+      if (interceptSettingsLeave(() => get().closeRepo())) return;
+      get().closeRepoUnguarded();
+    },
+    closeRepoUnguarded: () => {
       bumpEpochNow();
       startViewTransition(() =>
         set({
@@ -799,6 +834,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       );
     },
     openPr: (target) => {
+      if (interceptSettingsLeave(() => get().openPr(target))) return;
       const epochAtRequest = bumpEpochNow();
       startViewTransition(() => {
         // Nothing lands once the caller says the request has lapsed: the patch below
@@ -835,6 +871,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       }, repoViewMotion());
     },
     openIssue: (target) => {
+      if (interceptSettingsLeave(() => get().openIssue(target))) return;
       bumpEpochNow();
       startViewTransition(() => {
         runBeforeSelect(target.beforeSelect);
@@ -854,6 +891,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       }, repoViewMotion());
     },
     openRun: (target) => {
+      if (interceptSettingsLeave(() => get().openRun(target))) return;
       const epochAtRequest = bumpEpochNow();
       startViewTransition(() => {
         if (target.stillValid?.(epochAtRequest) === false) return;
@@ -871,6 +909,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       }, repoViewMotion());
     },
     openAgentTab: (target) => {
+      if (interceptSettingsLeave(() => get().openAgentTab(target))) return;
       const epochAtRequest = bumpEpochNow();
       startViewTransition(() => {
         if (target.stillValid?.(epochAtRequest) === false) return;
@@ -886,6 +925,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       }, repoViewMotion());
     },
     openRepoView: (target) => {
+      if (interceptSettingsLeave(() => get().openRepoView(target))) return;
       const epochAtRequest = bumpEpochNow();
       startViewTransition(() => {
         if (target.stillValid?.(epochAtRequest) === false) return;
@@ -1052,6 +1092,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       startViewTransition(() => set({ view: get().previousView }));
     },
     openHelp: () => {
+      if (interceptSettingsLeave(() => get().openHelp())) return;
       bumpEpochNow();
       startViewTransition(() => {
         const { view } = get();
@@ -1066,6 +1107,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       startViewTransition(() => set({ view: get().previousView }));
     },
     openExplore: () => {
+      if (interceptSettingsLeave(() => get().openExplore())) return;
       bumpEpochNow();
       startViewTransition(() => {
         const { view } = get();
@@ -1080,6 +1122,7 @@ export const useUiStore = create<UiState>()((set, get) => {
       startViewTransition(() => set({ view: get().previousView }));
     },
     openMyWork: () => {
+      if (interceptSettingsLeave(() => get().openMyWork())) return;
       bumpEpochNow();
       startViewTransition(() => {
         const { view } = get();

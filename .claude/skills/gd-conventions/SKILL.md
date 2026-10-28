@@ -505,6 +505,15 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   transition's update; the screen navigators always crossfade. A plain `set()`
   right after a navigator can be clobbered by that later apply — navigate in
   ONE atomic action.
+- Navigators that can leave Settings open with
+  `if (interceptSettingsLeave(() => get().<self>(<original args>))) return;`
+  ahead of their own epoch bump: the intercept bumps for the request and hands
+  the move to Settings' leave guard (registered while anything is unsaved or a
+  save is writing), which asks, holds the move until the write lands, or lets
+  it go; the resume re-invokes the navigator with its original arguments.
+  System landings escape only via `bypassLeaveGuard: true` (`openRepo`) or
+  `closeRepoUnguarded`. The exempt navigators and both escapes are pinned by
+  `scripts/settings-leave-guard.test.mjs`.
 - Opening a repo the user picked goes through `useOpenRecordedRepo`
   (`src/features/repository/useOpenRepoByPath.ts`): it warms the repo's shell
   reads (`warmRepoShell`, a 250 ms budget on cold keys), records it in recents,
@@ -895,11 +904,24 @@ one grep away on the named symbol. Grows via Conventions-sync.
   (`src/lib/plugin-store.ts`), never a hand-rolled `??= load(storeName(…))` or a
   bare `store.reload()`: the former memoizes a REJECTED load (store dead until
   restart), the latter swallows an unreadable file and saves the cache over it.
+  The `raw-store-reload` guard allowlists two files. `writeWithRollback`'s own
+  `reload({ ignoreDefaults: true })` (below): the tolerant reload treats a
+  missing or empty file as success without touching memory, so the failed
+  values would stay; the raw one rejects there and the helper falls back to
+  its pre-write snapshot instead. And the relocate migration's reloads
+  (`src/lib/repo-data-migration.ts`): re-homing runs outside the feature
+  modules' write queues and writes back unconditionally, so the tolerant
+  reload's tolerate-or-rethrow decision isn't the guard it needs.
 - **Plugin-store writes take the cross-process lock** — a store a second app
   instance (or the MCP server) can write wraps its read-modify-write in
   `withAppStoreLock` (`src/lib/app-store-lock.ts`): identity/git resolution
   BEFORE the lock, reload → mutate → forced `save()` inside it, all within the
   module's serialize queue. Advisory and fail-open; cold-start instances skip it.
+  Everything after the entry reload, the forced `save()` included, runs inside
+  `writeWithRollback(store, …)` (`src/lib/plugin-store-rollback.ts`), returned
+  from the lock callback: a failed write restores the store when it can (from
+  disk, else from its snapshot; when both fail, nothing is restored or saved)
+  and rethrows the original error, which callers' error handlers match on.
 - **Settings writes seed the cache** — component-started settings writes go
   through the `src/lib/settings/queries.ts` hooks, and any new settings
   `useMutation` spreads `...settingsSeedCallbacks(queryClient,

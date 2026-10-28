@@ -10,6 +10,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 
 /**
  * A finished AI review, persisted so the NEXT run of the same PR + mode can feed
@@ -346,10 +347,13 @@ export async function saveReview(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = await readByKey(key);
-      const without = all.filter((r) => r.id !== record.id);
-      await writeAll(key, prune([record, ...without]));
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        const without = all.filter((r) => r.id !== record.id);
+        await writeAll(key, prune([record, ...without]));
+      });
     });
   });
 }
@@ -365,12 +369,15 @@ export async function updateReviewText(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = await readByKey(key);
-      await writeAll(
-        key,
-        all.map((r) => (r.id === id ? { ...r, text } : r)),
-      );
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        await writeAll(
+          key,
+          all.map((r) => (r.id === id ? { ...r, text } : r)),
+        );
+      });
     });
   });
 }
@@ -380,12 +387,15 @@ export async function deleteReview(repo: string, id: string): Promise<void> {
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = await readByKey(key);
-      await writeAll(
-        key,
-        all.filter((r) => r.id !== id),
-      );
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        await writeAll(
+          key,
+          all.filter((r) => r.id !== id),
+        );
+      });
     });
   });
 }
@@ -405,14 +415,17 @@ export async function clearReviewsFor(
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = await readByKey(key);
-      await writeAll(
-        key,
-        all.filter(
-          (r) => !(lensOf(r) === lens && r.kind === kind && r.ref === ref),
-        ),
-      );
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        await writeAll(
+          key,
+          all.filter(
+            (r) => !(lensOf(r) === lens && r.kind === kind && r.ref === ref),
+          ),
+        );
+      });
     });
   });
 }

@@ -6,6 +6,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { ALL_ACTION_IDS } from "./types";
 
 /**
@@ -165,19 +166,21 @@ export async function setDismissedHead(
       // Reload before the read-modify-write: this rewrites the whole per-repo map, so
       // basing it on a launch-time cache would drop another instance's cells.
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
-      // This watermark supersedes any pre-lens cell for the same PR + mode — dropping
-      // it here is the fold, one cell at a time, never a sweep over the store.
-      const preLens = legacyCellPrefix(lens, kind, ref);
-      if (preLens !== undefined) delete all[`${preLens}${mode}`];
-      await store.set(key, {
-        ...all,
-        [cellKey(lens, kind, ref, mode)]: headSha,
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
+        // This watermark supersedes any pre-lens cell for the same PR + mode — dropping
+        // it here is the fold, one cell at a time, never a sweep over the store.
+        const preLens = legacyCellPrefix(lens, kind, ref);
+        if (preLens !== undefined) delete all[`${preLens}${mode}`];
+        await store.set(key, {
+          ...all,
+          [cellKey(lens, kind, ref, mode)]: headSha,
+        });
+        // Flush past autoSave's ~100ms debounce so the next queued reload reads this
+        // write back instead of a pre-write snapshot.
+        await store.save();
       });
-      // Flush past autoSave's ~100ms debounce so the next queued reload reads this
-      // write back instead of a pre-write snapshot.
-      await store.save();
     });
   });
 }
@@ -202,17 +205,19 @@ export async function clearDismissedHead(
     await withAppStoreLock(STORE_FILE, async () => {
       // Same reload-first rationale as setDismissedHead.
       await reloadRaw();
-      const key = await keyFor(repo, identity);
-      const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
-      delete all[cellKey(lens, kind, ref, mode)];
-      // The pre-lens cell goes too — it reads as this lens's watermark, so leaving it
-      // would keep re-blocking the re-run this call exists to unblock.
-      const preLens = legacyCellPrefix(lens, kind, ref);
-      if (preLens !== undefined) delete all[`${preLens}${mode}`];
-      await store.set(key, all);
-      // Flush for the same reason: an unflushed clear would be undone by the next
-      // queued reload, re-blocking the re-run this call exists to unblock.
-      await store.save();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = { ...((await store.get<DismissalMap>(key)) ?? {}) };
+        delete all[cellKey(lens, kind, ref, mode)];
+        // The pre-lens cell goes too — it reads as this lens's watermark, so leaving it
+        // would keep re-blocking the re-run this call exists to unblock.
+        const preLens = legacyCellPrefix(lens, kind, ref);
+        if (preLens !== undefined) delete all[`${preLens}${mode}`];
+        await store.set(key, all);
+        // Flush for the same reason: an unflushed clear would be undone by the next
+        // queued reload, re-blocking the re-run this call exists to unblock.
+        await store.save();
+      });
     });
   });
 }

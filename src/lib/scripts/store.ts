@@ -3,6 +3,7 @@ import {
   memoizedStoreLoader,
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
+import { writeWithRollback } from "@/lib/plugin-store-rollback";
 import { norm } from "@/lib/repo-key";
 import {
   foldTaskScopeKeys,
@@ -55,9 +56,11 @@ function mutateConfigPrepared(
     const store = await getStore();
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadToleratingEmptyStore(store);
-      const current = normalizeScripts(await store.get<unknown>("config"));
-      await store.set("config", mutate(current));
-      await store.save();
+      return writeWithRollback(store, async () => {
+        const current = normalizeScripts(await store.get<unknown>("config"));
+        await store.set("config", mutate(current));
+        await store.save();
+      });
     });
   });
 }
