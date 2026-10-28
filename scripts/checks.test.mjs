@@ -11130,3 +11130,231 @@ test("mcp-secret-keychain-sites: the flush module's extra code violates under ru
   assert.deepEqual(violations, [`${MCP_FLUSH}:42`]);
   assert.deepEqual(stale, []);
 });
+
+// --------------------------------------------- focusable-held-button-render
+
+const focusableHeldRender = scanner("focusable-held-button-render");
+
+test("focusable-held-button-render flags a bare focusable button", () => {
+  const bare = [
+    "<Button",
+    "  disabled={busy}",
+    "  focusableWhenDisabled",
+    "  onClick={go}",
+    ">",
+    "  Load more",
+    "</Button>",
+  ].join("\n");
+  assert.deepEqual(focusableHeldRender(bare), [1]);
+  // The prop's value form is the same attribute.
+  assert.deepEqual(
+    focusableHeldRender("<Button disabled={a} focusableWhenDisabled={!b} />"),
+    [1],
+  );
+});
+
+test("focusable-held-button-render passes the helper's render", () => {
+  assert.deepEqual(
+    focusableHeldRender(
+      [
+        "<Button",
+        "  disabled={busy}",
+        "  focusableWhenDisabled",
+        "  render={heldButtonRender(busy)}",
+        ">",
+        "  Load more",
+        "</Button>",
+      ].join("\n"),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    focusableHeldRender(
+      "<Button focusableWhenDisabled={f} render={ heldButtonRender(h, props.render) } />",
+    ),
+    [],
+  );
+});
+
+test("focusable-held-button-render reads form.SubmitButton as passing through", () => {
+  assert.deepEqual(
+    focusableHeldRender(
+      "<form.SubmitButton focusableWhenDisabled={!!blockedReason}>Save</form.SubmitButton>",
+    ),
+    [],
+  );
+});
+
+test("focusable-held-button-render ignores the prop in comments and strings", () => {
+  assert.deepEqual(
+    focusableHeldRender(
+      [
+        "// a <Button focusableWhenDisabled> keeps focus",
+        "/* <Button focusableWhenDisabled /> */",
+        'const doc = "<Button focusableWhenDisabled />";',
+        "<div>{/* <Button focusableWhenDisabled /> */}</div>",
+      ].join("\n"),
+    ),
+    [],
+  );
+});
+
+test("focusable-held-button-render reports a wrapped tag at its opening line", () => {
+  const source = [
+    "const x = 1;",
+    "return (",
+    "  <Button",
+    '    variant="ghost"',
+    '    className={cn("a", ARIA_DISABLED_CLASS)}',
+    "    disabled={fetching}",
+    "    focusableWhenDisabled",
+    "  >",
+    "    More",
+    "  </Button>",
+    ");",
+  ].join("\n");
+  assert.deepEqual(focusableHeldRender(source), [3]);
+});
+
+test("focusable-held-button-render wants the helper as the render itself", () => {
+  // Any other render, or the helper on another attribute, still fails.
+  assert.deepEqual(
+    focusableHeldRender(
+      '<Button focusableWhenDisabled render={<button type="button" />} />',
+    ),
+    [1],
+  );
+  assert.deepEqual(
+    focusableHeldRender(
+      "<Button focusableWhenDisabled data-x={heldButtonRender(a)} />",
+    ),
+    [1],
+  );
+  // A nested tag is judged on its own: the outer one carries no prop.
+  assert.deepEqual(
+    focusableHeldRender(
+      "<Trigger render={<Button disabled focusableWhenDisabled />} />",
+    ),
+    [1],
+  );
+  // A name that merely starts with the prop's is not the prop.
+  assert.deepEqual(
+    focusableHeldRender("<Button focusableWhenDisabledHint={x} />"),
+    [],
+  );
+});
+
+test("focusable-held-button-render leaves the props-object form unreached", () => {
+  // Named in the check's comment: a spread or props object is out of a JSX
+  // rule's reach (ProjectLifecycleDialogs hands its props to form.SubmitButton).
+  assert.deepEqual(
+    focusableHeldRender("<Button {...{ focusableWhenDisabled: true }} />"),
+    [],
+  );
+  // Also named there: whether `held` is right, and a spread after the helper.
+  assert.deepEqual(
+    focusableHeldRender(
+      "<Button disabled={b} focusableWhenDisabled render={heldButtonRender(false)} />",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    focusableHeldRender(
+      "<Button focusableWhenDisabled render={heldButtonRender(b)} {...rest} />",
+    ),
+    [],
+  );
+});
+
+test("focusable-held-button-render holds SubmitButton to the helper", () => {
+  const check = CHECKS.find((c) => c.name === "focusable-held-button-render");
+  const file = "src/components/form/submit-button.tsx";
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const real = readFileSync(join(root, file), "utf8");
+  assert.deepEqual(check.scan(view(real), file), []);
+  // NEGATIVE CONTROL: SubmitButton dropping the helper fails its line 1, so
+  // the form.SubmitButton pass can't outlive the pass-through it relies on.
+  const dropped = real.replace(
+    /render=\{heldButtonRender\([\s\S]*?\)\}/,
+    () => "render={props.render}",
+  );
+  assert.notEqual(dropped, real);
+  assert.deepEqual(check.scan(view(dropped), file), [1]);
+  // A call whose first argument never mentions the focusable hold is no
+  // pass-through either.
+  const unheld = real.replace(
+    /heldButtonRender\(\s*Boolean\(held && props\.focusableWhenDisabled\)/,
+    () => "heldButtonRender(false",
+  );
+  assert.notEqual(unheld, real);
+  assert.deepEqual(check.scan(view(unheld), file), [1]);
+  // Nor does the call on another element while the Button renders its own.
+  const moved = dropped.replace(
+    '<Spinner data-icon="inline-start" />',
+    () =>
+      '<Spinner data-icon="inline-start" render={heldButtonRender(Boolean(held && props.focusableWhenDisabled), props.render)} />',
+  );
+  assert.notEqual(moved, dropped);
+  assert.deepEqual(check.scan(view(moved), file), [1]);
+  // A documented limit: the first argument need only mention the prop, so a
+  // short-circuited hold still passes.
+  const shorted = real.replace(
+    /heldButtonRender\(\s*Boolean\(held && props\.focusableWhenDisabled\)/,
+    () => "heldButtonRender(false && props.focusableWhenDisabled",
+  );
+  assert.notEqual(shorted, real);
+  assert.deepEqual(check.scan(view(shorted), file), []);
+});
+
+test("focusable-held-button-render reads a generic tag past its type arguments", () => {
+  assert.deepEqual(
+    focusableHeldRender("<Held<string> disabled focusableWhenDisabled />"),
+    [1],
+  );
+  assert.deepEqual(
+    focusableHeldRender(
+      "<Held<string> focusableWhenDisabled render={heldButtonRender(h)} />",
+    ),
+    [],
+  );
+  // An arrow's `>` inside the type arguments doesn't close them.
+  assert.deepEqual(
+    focusableHeldRender("<Held<(a: A) => B> focusableWhenDisabled />"),
+    [1],
+  );
+  // A run that never closes fails closed when the prop follows it: ts-mask
+  // refuses it in a .tsx file, and the scan's own walk flags it elsewhere.
+  const unclosed = "<Held<Map<K> disabled focusableWhenDisabled";
+  assert.throws(() => focusableHeldRender(unclosed), /cannot lex/);
+  const check = CHECKS.find((c) => c.name === "focusable-held-button-render");
+  assert.deepEqual(check.scan(view(unclosed), "src/lib/x.ts"), [1]);
+});
+
+test("focusable-held-button-render is clean on the real tree, red without one site's render", () => {
+  const check = CHECKS.find((c) => c.name === "focusable-held-button-render");
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const files = readdirSync(join(root, "src"), { recursive: true })
+    .map((entry) => `src/${String(entry).split("\\").join("/")}`)
+    .filter((file) => /\.tsx?$/.test(file));
+  const views = new Map(
+    files.map((f) => [f, view(readFileSync(join(root, f), "utf8"))]),
+  );
+  const clean = runCheck(check, files, views);
+  assert.deepEqual(clean.violations, []);
+  assert.deepEqual(clean.stale, []);
+  // NEGATIVE CONTROL: one site's render removed in memory turns the tree red.
+  const site = "src/features/actions/ActionsPanel.tsx";
+  const source = readFileSync(join(root, site), "utf8");
+  const line = "render={heldButtonRender(runs.isFetchingNextPage)}";
+  assert.ok(source.includes(line));
+  const mutated = new Map(views).set(
+    site,
+    view(source.replace(line, () => "")),
+  );
+  const red = runCheck(check, files, mutated);
+  assert.equal(red.violations.length, 1);
+  assert.match(
+    red.violations[0],
+    /^src\/features\/actions\/ActionsPanel\.tsx:\d+$/,
+  );
+});

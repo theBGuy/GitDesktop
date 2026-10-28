@@ -38,7 +38,10 @@ import {
   useFileLog,
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 
 /** Commit history for one file: pick a commit to see the file's diff there. */
@@ -215,6 +218,7 @@ export function FileHistoryDialog({
                       // <body>; the button is the Load more retry too.
                       disabled={fileLog.isFetchingNextPage}
                       focusableWhenDisabled
+                      render={heldButtonRender(fileLog.isFetchingNextPage)}
                       onClick={() => fileLog.fetchNextPage()}
                     >
                       {fileLog.isFetchingNextPage && (

@@ -34,6 +34,7 @@ const FAMILY_RANK: ReadonlyMap<unknown, number> = new Map([
   ["runs", 1],
   ["notify", 2],
   ["latest", 3],
+  ["head-runs", 4],
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -83,7 +84,7 @@ function seedFrom(row: Record<string, unknown>): RunRowSeed | undefined {
 }
 
 /** The family's candidate rows: runs-paged is InfiniteData of run pages,
- *  runs and notify are run arrays, latest is one run or null. */
+ *  runs, notify and head-runs are run arrays, latest is one run or null. */
 function rowsOf(family: unknown, data: unknown): readonly unknown[] {
   if (family === "latest") return data === null ? [] : [data];
   if (family !== "runs-paged") return Array.isArray(data) ? data : [];

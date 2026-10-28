@@ -61,6 +61,15 @@ fn validate_ref(name: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_head_sha(sha: &str) -> AppResult<String> {
+    if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AppError::InvalidArgument(format!(
+            "Invalid head sha: {sha}"
+        )));
+    }
+    Ok(sha.to_ascii_lowercase())
+}
+
 /// One workflow run in the list view.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -295,7 +304,13 @@ fn from_rest_run(r: RestRun, workflow_names: &HashMap<u64, String>) -> WorkflowR
 /// `-f` and never `-F` (`-F`'s leading-`@` magic reads host files), and
 /// `exclude_pull_requests=true` — what `gh run list` itself sends — suppresses a per-run
 /// array nothing here consumes. `branch` must already be validated.
-fn run_page_args(endpoint: &str, limit: u32, page: u32, branch: Option<&str>) -> Vec<String> {
+fn run_page_args(
+    endpoint: &str,
+    limit: u32,
+    page: u32,
+    branch: Option<&str>,
+    head_sha: Option<&str>,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "api".into(),
         "--method".into(),
@@ -311,6 +326,10 @@ fn run_page_args(endpoint: &str, limit: u32, page: u32, branch: Option<&str>) ->
     if let Some(b) = branch.filter(|s| !s.is_empty()) {
         args.push("-f".into());
         args.push(format!("branch={b}"));
+    }
+    if let Some(sha) = head_sha {
+        args.push("-f".into());
+        args.push(format!("head_sha={sha}"));
     }
     args
 }
@@ -459,7 +478,7 @@ pub async fn gh_run_page(
     if let Some(b) = branch {
         validate_ref(b)?;
     }
-    let args = run_page_args(&endpoint, limit, page, branch);
+    let args = run_page_args(&endpoint, limit, page, branch, None);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let (out, workflow_names) = tokio::join!(
         run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
@@ -482,6 +501,31 @@ pub async fn gh_run_page(
         runs,
         total_count: Some(total_count),
     })
+}
+
+/// At most 100 runs for one head; callers retain per-run reads for absent watch ids.
+#[tauri::command]
+pub async fn gh_runs_for_head(repo_path: String, head_sha: String) -> AppResult<Vec<WorkflowRun>> {
+    let head_sha = validate_head_sha(&head_sha)?;
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/actions/runs");
+    let args = run_page_args(&endpoint, 100, 1, None, Some(&head_sha));
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (out, workflow_names) = tokio::join!(
+        run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT),
+        workflow_name_index(&repo_path, &slug),
+    );
+    let parsed: RestRunPage = serde_json::from_str(&out?.stdout_lossy()).map_err(|e| {
+        gh_unreadable(
+            "the workflow runs",
+            format!("could not parse the workflow runs: {e}"),
+        )
+    })?;
+    Ok(parsed
+        .workflow_runs
+        .into_iter()
+        .map(|r| from_rest_run(r, &workflow_names))
+        .collect())
 }
 
 /// Recent workflow runs, newest first; optionally scoped to one branch — the first
@@ -647,6 +691,130 @@ async fn run_updated_at_probe(
             format!("could not parse the run update timestamp: {e}"),
         )
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RestJobsPage {
+    #[serde(default, deserialize_with = "de_null_u64")]
+    total_count: u64,
+    #[serde(default, deserialize_with = "de_null_vec")]
+    jobs: Vec<RestJob>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RestJob {
+    #[serde(default, deserialize_with = "de_null_u64")]
+    id: u64,
+    #[serde(default, deserialize_with = "de_null_string")]
+    name: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    status: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    conclusion: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    started_at: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    completed_at: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    html_url: String,
+    #[serde(default, deserialize_with = "de_null_vec")]
+    steps: Vec<RestStep>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RestStep {
+    #[serde(default, deserialize_with = "de_null_string")]
+    name: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    status: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    conclusion: String,
+    #[serde(default)]
+    number: Option<i64>,
+    #[serde(default, deserialize_with = "de_null_string")]
+    started_at: String,
+    #[serde(default, deserialize_with = "de_null_string")]
+    completed_at: String,
+}
+
+fn from_rest_job(job: RestJob) -> RunJob {
+    RunJob {
+        id: job.id,
+        name: job.name,
+        status: job.status,
+        conclusion: job.conclusion,
+        started_at: job.started_at,
+        completed_at: job.completed_at,
+        url: job.html_url,
+        steps: job
+            .steps
+            .into_iter()
+            .map(|step| RunStep {
+                name: step.name,
+                status: step.status,
+                conclusion: step.conclusion,
+                number: step.number.unwrap_or_default(),
+                started_at: step.started_at,
+                completed_at: step.completed_at,
+            })
+            .collect(),
+        log_ref: None,
+    }
+}
+
+fn run_jobs_args(endpoint: &str, page: u32) -> Vec<String> {
+    let mut args = vec![
+        "api".into(),
+        "--method".into(),
+        "GET".into(),
+        endpoint.into(),
+        "-f".into(),
+        "per_page=100".into(),
+    ];
+    if page > 1 {
+        args.push("-f".into());
+        args.push(format!("page={page}"));
+    }
+    args
+}
+
+fn next_jobs_page(total: u64, fetched: usize, last_page_len: usize, page: u32) -> Option<u32> {
+    // The ten-page cap bounds a wrong total_count.
+    if fetched as u64 >= total || last_page_len < 100 || page >= 10 {
+        None
+    } else {
+        Some(page + 1)
+    }
+}
+
+/// Job reads follow every page, like `gh run view`'s job list, up to the paging cap.
+/// Each page revalidates independently; a failed page fails the whole read.
+#[tauri::command]
+pub async fn gh_run_jobs(repo_path: String, run_id: String) -> AppResult<Vec<RunJob>> {
+    let id: u64 = run_id
+        .parse()
+        .map_err(|_| AppError::InvalidArgument(format!("Invalid run id: {run_id}")))?;
+    let slug = crate::github::gh_origin_slug(&repo_path).await?;
+    let endpoint = format!("repos/{slug}/actions/runs/{id}/jobs");
+    let mut jobs = Vec::new();
+    let mut page = 1;
+    loop {
+        let args = run_jobs_args(&endpoint, page);
+        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = run_gh_cached_get(Some(&repo_path), &arg_refs, GH_NETWORK_TIMEOUT).await?;
+        let parsed: RestJobsPage = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+            gh_unreadable(
+                "the workflow run jobs",
+                format!("could not parse the workflow run jobs: {e}"),
+            )
+        })?;
+        let last_page_len = parsed.jobs.len();
+        jobs.extend(parsed.jobs.into_iter().map(from_rest_job));
+        match next_jobs_page(parsed.total_count, jobs.len(), last_page_len, page) {
+            Some(next) => page = next,
+            None => return Ok(jobs),
+        }
+    }
 }
 
 /// One run with its jobs and steps.
@@ -2212,10 +2380,201 @@ mod tests {
         }
     }
 
+    #[test]
+    fn run_page_args_scopes_head_after_branch_and_preserves_unscoped_argv() {
+        let base = vec![
+            "api",
+            "--method",
+            "GET",
+            "repos/o/r/actions/runs",
+            "-f",
+            "per_page=40",
+            "-f",
+            "page=1",
+            "-f",
+            "exclude_pull_requests=true",
+        ];
+        assert_eq!(
+            run_page_args("repos/o/r/actions/runs", 40, 1, None, None),
+            base
+        );
+        let sha = "a".repeat(40);
+        let scoped = run_page_args("repos/o/r/actions/runs", 40, 1, Some("branch"), Some(&sha));
+        assert_eq!(scoped[..base.len()], base);
+        assert_eq!(
+            scoped[base.len()..],
+            ["-f", "branch=branch", "-f", &format!("head_sha={sha}")]
+        );
+    }
+
+    #[test]
+    fn head_sha_validation_accepts_only_full_ascii_hex_and_lowercases() {
+        for sha in ["aB".repeat(20), "Ab".repeat(32)] {
+            assert_eq!(validate_head_sha(&sha).unwrap(), sha.to_ascii_lowercase());
+        }
+        for sha in [
+            String::new(),
+            "a".repeat(39),
+            "a".repeat(41),
+            "HEAD".into(),
+            "main".into(),
+            format!("{}g", "a".repeat(39)),
+            "x&y".into(),
+            format!("-{}", "a".repeat(39)),
+            "é".repeat(20),
+        ] {
+            match validate_head_sha(&sha).unwrap_err() {
+                AppError::InvalidArgument(message) => {
+                    assert_eq!(message, format!("Invalid head sha: {sha}"))
+                }
+                other => panic!("expected InvalidArgument, got {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn first_jobs_page_keeps_its_conditional_get_argv() {
+        assert_eq!(
+            run_jobs_args("repos/o/r/actions/runs/1/jobs", 1),
+            [
+                "api",
+                "--method",
+                "GET",
+                "repos/o/r/actions/runs/1/jobs",
+                "-f",
+                "per_page=100"
+            ]
+        );
+    }
+
+    #[test]
+    fn later_jobs_pages_append_a_raw_page_field() {
+        let first = run_jobs_args("repos/o/r/actions/runs/1/jobs", 1);
+        let second = run_jobs_args("repos/o/r/actions/runs/1/jobs", 2);
+        assert_eq!(second[..first.len()], first);
+        assert_eq!(second[first.len()..], ["-f", "page=2"]);
+    }
+
+    #[test]
+    fn jobs_paging_stops_when_the_reported_total_is_collected() {
+        for total in [0, 1, 99, 100] {
+            assert_eq!(next_jobs_page(total, 100, 100, 1), None);
+        }
+        assert_eq!(next_jobs_page(250, 100, 100, 1), Some(2));
+        assert_eq!(next_jobs_page(250, 200, 100, 2), Some(3));
+        assert_eq!(next_jobs_page(250, 250, 50, 3), None);
+        assert_eq!(next_jobs_page(250, 300, 100, 3), None);
+    }
+
+    #[test]
+    fn a_short_jobs_page_ends_paging_even_with_more_reported() {
+        for last_page_len in [0, 1, 99] {
+            assert_eq!(
+                next_jobs_page(250, 100 + last_page_len, last_page_len, 2),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn jobs_paging_is_bounded_at_ten_pages() {
+        assert_eq!(next_jobs_page(u64::MAX, 900, 100, 9), Some(10));
+        assert_eq!(next_jobs_page(u64::MAX, 1000, 100, 10), None);
+        assert_eq!(next_jobs_page(u64::MAX, 1100, 100, 11), None);
+    }
+
+    #[test]
+    fn jobs_page_total_parses_and_defaults_to_zero_when_missing() {
+        let counted: RestJobsPage =
+            serde_json::from_str(r#"{"total_count":250,"jobs":[]}"#).unwrap();
+        assert_eq!(counted.total_count, 250);
+        for body in [
+            r#"{"jobs":[]}"#,
+            r#"{"total_count":0,"jobs":[]}"#,
+            r#"{"total_count":null,"jobs":[]}"#,
+        ] {
+            let page: RestJobsPage = serde_json::from_str(body).unwrap();
+            assert_eq!(page.total_count, 0);
+            assert_eq!(next_jobs_page(page.total_count, 100, 100, 1), None);
+        }
+    }
+
+    #[test]
+    fn rest_jobs_mapping_preserves_nulls_steps_and_wire_precision() {
+        let body = r#"{"total_count":1,"jobs":[{"id":9007199254740993,"name":"build","status":"in_progress","conclusion":null,"started_at":"2026-10-27T10:00:00Z","completed_at":null,"html_url":"https://github.com/o/r/actions/runs/1/job/2","steps":[{"name":"Checkout","status":"completed","conclusion":"success","number":1,"started_at":"2026-10-27T10:00:01Z","completed_at":"2026-10-27T10:00:02Z"},{"name":"Build","status":"in_progress","conclusion":null,"number":2,"started_at":"2026-10-27T10:00:03Z","completed_at":null}]}]}"#;
+        let parsed: RestJobsPage = serde_json::from_str(body).unwrap();
+        let job = from_rest_job(parsed.jobs.into_iter().next().unwrap());
+        assert_eq!(job.id, 9_007_199_254_740_993);
+        assert_eq!(job.name, "build");
+        assert_eq!(job.status, "in_progress");
+        assert_eq!(job.conclusion, "");
+        assert_eq!(job.completed_at, "");
+        assert_eq!(job.started_at, "2026-10-27T10:00:00Z");
+        assert_eq!(job.url, "https://github.com/o/r/actions/runs/1/job/2");
+        assert!(job.log_ref.is_none());
+        let wire = serde_json::to_value(&job).unwrap();
+        assert_eq!(wire["id"], "9007199254740993");
+        assert_eq!(wire["startedAt"], job.started_at);
+        assert_eq!(wire["completedAt"], "");
+        assert!(wire.get("started_at").is_none());
+        assert!(wire.get("completed_at").is_none());
+        assert_eq!(
+            wire["steps"],
+            json!([
+                {"name":"Checkout","status":"completed","conclusion":"success","number":1,
+                 "startedAt":"2026-10-27T10:00:01Z","completedAt":"2026-10-27T10:00:02Z"},
+                {"name":"Build","status":"in_progress","conclusion":"","number":2,
+                 "startedAt":"2026-10-27T10:00:03Z","completedAt":""}
+            ])
+        );
+
+        let mut value: serde_json::Value = serde_json::from_str(body).unwrap();
+        value["jobs"][0]["steps"] = serde_json::Value::Null;
+        let parsed: RestJobsPage = serde_json::from_value(value).unwrap();
+        let job = from_rest_job(parsed.jobs.into_iter().next().unwrap());
+        assert!(job.steps.is_empty());
+        assert_eq!(job.conclusion, "");
+        assert_eq!(job.completed_at, "");
+        assert!(job.log_ref.is_none());
+        assert_eq!(serde_json::to_value(job).unwrap()["id"], "9007199254740993");
+
+        for body in [r#"{}"#, r#"{"jobs":null}"#] {
+            assert!(serde_json::from_str::<RestJobsPage>(body)
+                .unwrap()
+                .jobs
+                .is_empty());
+        }
+        for body in [
+            r#"{"jobs":[{}]}"#,
+            r#"{"jobs":[{"id":null,"name":null,"status":null,"conclusion":null,"started_at":null,"completed_at":null,"html_url":null,"steps":[{"name":null,"status":null,"conclusion":null,"number":null,"started_at":null,"completed_at":null}]}]}"#,
+        ] {
+            let parsed: RestJobsPage = serde_json::from_str(body).unwrap();
+            let job = from_rest_job(parsed.jobs.into_iter().next().unwrap());
+            assert_eq!(
+                (
+                    job.id,
+                    job.name.as_str(),
+                    job.status.as_str(),
+                    job.url.as_str()
+                ),
+                (0, "", "", "")
+            );
+            for step in job.steps {
+                assert_eq!(
+                    serde_json::to_value(step).unwrap(),
+                    json!({
+                        "name":"", "status":"", "conclusion":"", "number":0,
+                        "startedAt":"", "completedAt":""
+                    })
+                );
+            }
+        }
+    }
+
     /// The argv invariants `gh_run_page`'s correctness rests on, pinned without a spawn.
     #[test]
     fn run_page_argv_keeps_its_invariants() {
-        let args = run_page_args("repos/o/r/actions/runs", 40, 2, None);
+        let args = run_page_args("repos/o/r/actions/runs", 40, 2, None, None);
 
         // `gh api` with `-f` fields present defaults to POST; only under GET do they
         // become query params.
@@ -2246,13 +2605,13 @@ mod tests {
         // The branch field appears only when a branch is given, and only as a `-f`.
         assert!(!args.iter().any(|a| a.starts_with("branch=")), "{args:?}");
         for absent in [None, Some("")] {
-            let args = run_page_args("repos/o/r/actions/runs", 40, 1, absent);
+            let args = run_page_args("repos/o/r/actions/runs", 40, 1, absent, None);
             assert!(
                 !args.iter().any(|a| a.starts_with("branch=")),
                 "{absent:?} must add no branch field: {args:?}"
             );
         }
-        let scoped = run_page_args("repos/o/r/actions/runs", 40, 1, Some("feat/x"));
+        let scoped = run_page_args("repos/o/r/actions/runs", 40, 1, Some("feat/x"), None);
         let at = scoped
             .iter()
             .position(|a| a == "branch=feat/x")

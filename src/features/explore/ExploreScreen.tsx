@@ -2,9 +2,11 @@ import { ArrowLeftIcon } from "@phosphor-icons/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
   useCallback,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -22,6 +24,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { presentError } from "@/lib/error-summary";
 import {
   EMPTY_NAMESPACES,
@@ -35,6 +38,11 @@ import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
+import { cn } from "@/lib/utils";
 import {
   ExploreCloneDialog,
   type ExploreCloneTarget,
@@ -79,6 +87,7 @@ export function ExploreScreen() {
   // them regardless of which mode is on screen.
   const [flatRepos, setFlatRepos] = useState<ForgeSearchRepo[]>([]);
   const detailRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // App's repo/settings actions stay reachable from the macOS menu bar, which
   // sits outside this dialog's modal overlay — register so they refuse while
@@ -177,6 +186,7 @@ export function ExploreScreen() {
           </TabsList>
         </Tabs>
         <Input
+          ref={searchInputRef}
           value={rawQuery}
           onChange={(e) => setRawQuery(e.target.value)}
           onKeyDown={onInputKeyDown}
@@ -261,6 +271,7 @@ export function ExploreScreen() {
               selected={selected}
               onSelect={setSelected}
               onRowsChange={setFlatRepos}
+              searchInputRef={searchInputRef}
             />
           )}
         </div>
@@ -344,6 +355,7 @@ function SearchResults({
   selected,
   onSelect,
   onRowsChange,
+  searchInputRef,
 }: {
   provider: ForgeProvider;
   query: string;
@@ -351,6 +363,9 @@ function SearchResults({
   selected: ForgeSearchRepo | null;
   onSelect: (repo: ForgeSearchRepo | null) => void;
   onRowsChange: (repos: ForgeSearchRepo[]) => void;
+  /** The search box, where the list's arrow keys live: Load more's focus
+   *  rescue lands there. */
+  searchInputRef: RefObject<HTMLInputElement | null>;
 }) {
   const search = useForgeSearchRepos(provider, query, sort, true);
 
@@ -376,6 +391,20 @@ function SearchResults({
   // GitHub caps search at 1000 reachable results; when the reported total exceeds
   // what paging can reach, say so instead of implying more pages.
   const capped = total !== null && total > repos.length && !search.hasNextPage;
+  // Loading the last page unmounts Load more under the user's focus; land it on
+  // the search box, which outlives the list and drives its arrow keys. True
+  // exactly while the button is mounted.
+  const { hostRef: moreHostRef, retryRef: moreRetryRef } = useRetryFocusRescue(
+    !search.isPending &&
+      !search.isError &&
+      rows.length > 0 &&
+      search.hasNextPage,
+  );
+  // Captured once: the search Input lives in ExploreScreen, so it outlives
+  // this list.
+  useLayoutEffect(() => {
+    moreHostRef(searchInputRef.current);
+  }, [moreHostRef, searchInputRef]);
 
   if (search.isPending) return <SkeletonRows />;
   if (search.isError) {
@@ -397,11 +426,19 @@ function SearchResults({
       footer={
         <>
           {search.hasNextPage && (
-            <button
-              type="button"
-              onClick={() => search.fetchNextPage()}
+            <Button
+              ref={moreRetryRef}
+              variant="ghost"
+              size="xs"
+              className={cn(
+                "h-auto w-full justify-center gap-1.5 rounded-none border-0 py-2 font-normal text-muted-foreground hover:bg-muted/60 hover:text-muted-foreground dark:hover:bg-muted/60",
+                ARIA_DISABLED_CLASS,
+              )}
+              // Focusable while busy, so a pending press keeps focus.
               disabled={search.isFetchingNextPage}
-              className="flex w-full items-center justify-center gap-1.5 py-2 text-xs text-muted-foreground hover:bg-muted/60 disabled:opacity-60"
+              focusableWhenDisabled
+              render={heldButtonRender(search.isFetchingNextPage)}
+              onClick={() => search.fetchNextPage()}
             >
               {search.isFetchingNextPage ? (
                 <>
@@ -411,7 +448,7 @@ function SearchResults({
               ) : (
                 "Load more"
               )}
-            </button>
+            </Button>
           )}
           {capped && (
             <p className="px-3 py-2 text-center text-[11px] text-muted-foreground">

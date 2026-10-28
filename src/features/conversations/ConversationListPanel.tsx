@@ -107,12 +107,15 @@ function SectionHeader(props: {
  *  a refresh lands, a pressed retry parks offline, or a pane swaps to its
  *  loading skeleton. `retryShown` must be true exactly while the Retry carrying
  *  `retryRef` is mounted; `retryRef` may sit on the Retry itself or on a box
- *  around a caller-supplied one. `hostRef` goes on an element with
- *  `tabIndex={-1}` that survives the swap. Only the shown→hidden edge rescues,
- *  and only when focus sat inside THIS ref's node as it left (read in the ref
- *  cleanup, which React runs just before removing the node), so a sibling
- *  losing its Retry in the same commit can't claim focus it never had;
- *  preventScroll keeps the viewer's scroll position. */
+ *  around a caller-supplied one. `hostRef` goes on a focusable element that
+ *  survives the swap: a `tabIndex={-1}` box, or a persistent control such as
+ *  the list's driving search input. It is a callback, so a host handed over
+ *  imperatively (Explore's layout effect) is captured once and must outlive
+ *  the Retry's owner. Only the shown→hidden edge rescues, and only when focus
+ *  sat inside THIS ref's node as it left (read in the ref cleanup, which React
+ *  runs just before removing the node), so a sibling losing its Retry in the
+ *  same commit can't claim focus it never had; preventScroll keeps the
+ *  viewer's scroll position. */
 export function useRetryFocusRescue(retryShown: boolean) {
   const host = useRef<HTMLElement | null>(null);
   const retryWasShown = useRef(retryShown);

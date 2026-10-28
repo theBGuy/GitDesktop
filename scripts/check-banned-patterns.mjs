@@ -17,6 +17,7 @@ import {
   maskNonCode,
   matchBrace,
   ScanError,
+  tagEnd,
 } from "./lib/ts-mask.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -404,6 +405,132 @@ const conditionalDiffStat = ({ source }, file) => {
   const hits = new Set();
   for (const m of masked.matchAll(CONDITIONAL_DIFF_STAT_RE))
     hits.add(lineOf(source, m.index));
+  return [...hits];
+};
+
+// A JSX element that can sit disabled AND `focusableWhenDisabled` takes its
+// `render` from heldButtonRender (src/lib/use-disabled-reason.ts): Base UI
+// preventDefaults every key but Tab on such a button, so without the helper's
+// pass-through, listeners that skip prevented events (Explore's Escape, the
+// app's global hotkeys) die while focus sits on it. Matched per opening tag
+// on ts-mask's masked text, so comments and strings can neither trigger nor
+// hide a hit and a tag wrapped over lines is one tag: an attribute named
+// `focusableWhenDisabled` at the tag's top level, with no top-level
+// `render={heldButtonRender(` beside it. The primitives pass by construction:
+// DisabledReasonButton's Button carries the helper, and SubmitButton's Button
+// gets the prop through a spread. A `<form.SubmitButton>` tag is clean only
+// while SubmitButton's own `<Button>` tag has a top-level
+// `render={heldButtonRender(` whose first argument mentions
+// `focusableWhenDisabled`, which line 1 of its file enforces. A generic tag
+// (`<Held<T> …>`) is read past its type arguments. The unclosed-tag and
+// unclosed-type-argument fallbacks are deliberately brace-blind and fail
+// closed; formatted code never reaches them, since biome spaces a binary `<`.
+// Unreached: the prop delivered through a spread or a props object
+// (ProjectLifecycleDialogs' `submit(props)`, which lands on form.SubmitButton);
+// whether `held` is right, since any `render={heldButtonRender(` passes and
+// SubmitButton's first argument need only mention the prop
+// (`!props.focusableWhenDisabled` or `false && …` still pass), which leaves
+// `held` to review and the runtime pin; and a top-level spread placed after
+// the helper's `render=`, which can override it at runtime.
+const SUBMIT_BUTTON_FILE = "src/components/form/submit-button.tsx";
+
+/** The tag text with every brace-nested span blanked (braces included), so
+ *  only the tag's own attribute names and plain values remain. */
+function topLevelAttributes(tag) {
+  let depth = 0;
+  let out = "";
+  for (const c of tag) {
+    if (c === "{") depth++;
+    out += depth === 0 ? c : " ";
+    if (c === "}") depth--;
+  }
+  return out;
+}
+
+/** The index in `tag` just past the `(` of a top-level
+ *  `render={heldButtonRender(`, or -1. */
+function heldRenderCall(tag, top) {
+  for (const m of top.matchAll(/\srender\s*=/g)) {
+    const at = m.index + m[0].length;
+    const call = /^\s*\{\s*heldButtonRender\s*\(/.exec(tag.slice(at));
+    if (call) return at + call[0].length;
+  }
+  return -1;
+}
+
+/** The first argument of the call whose `(` ends just before `from`: the
+ *  text up to its first top-level comma or its close. */
+function firstArgument(tag, from) {
+  let depth = 0;
+  for (let i = from; i < tag.length; i++) {
+    const c = tag[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return tag.slice(from, i);
+      depth--;
+    } else if (c === "," && depth === 0) return tag.slice(from, i);
+  }
+  return tag.slice(from);
+}
+
+/** The index just past the balanced type-argument run whose `<` sits at
+ *  `open`, stepping over `=>` arrows, or -1 when it never closes. */
+function skipTypeArguments(masked, open) {
+  let depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    const c = masked[i];
+    if (c === "<") depth++;
+    else if (c === ">" && masked[i - 1] !== "=" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+/** Scanner: every opening tag carrying a top-level `focusableWhenDisabled`
+ *  attribute without a top-level `render={heldButtonRender(…)}`, plus line 1
+ *  of SubmitButton's file when its `<Button>` no longer routes its hold
+ *  through the helper. A tag whose type arguments or attributes never close
+ *  counts when the prop follows it. A file ts-mask can't lex throws with its
+ *  path. */
+const focusableHeldRender = ({ source }, file) => {
+  let masked;
+  try {
+    masked = maskNonCode(source, !file || file.endsWith(".tsx"));
+  } catch (e) {
+    if (e instanceof ScanError)
+      throw new Error(
+        `focusable-held-button-render: cannot lex ${file ?? "<input>"}: ${e.message}`,
+      );
+    throw e;
+  }
+  const hits = new Set();
+  const PROP_RE = /\sfocusableWhenDisabled(?![\w$])/;
+  let submitHolds = false;
+  for (const m of masked.matchAll(/<([A-Za-z][\w.]*)(?=[\s/>]|<)/g)) {
+    let from = m.index + m[0].length - 1;
+    if (masked[from + 1] === "<") {
+      from = skipTypeArguments(masked, from + 1) - 1;
+      if (from < 0) {
+        if (PROP_RE.test(masked.slice(m.index)))
+          hits.add(lineOf(source, m.index));
+        continue;
+      }
+    }
+    const end = tagEnd(masked, from);
+    if (end < 0) {
+      if (PROP_RE.test(masked.slice(m.index)))
+        hits.add(lineOf(source, m.index));
+      continue;
+    }
+    const tag = masked.slice(m.index, end);
+    const top = topLevelAttributes(tag);
+    const call = heldRenderCall(tag, top);
+    if (file === SUBMIT_BUTTON_FILE && m[1] === "Button" && call >= 0)
+      submitHolds ||= /focusableWhenDisabled/.test(firstArgument(tag, call));
+    if (!PROP_RE.test(top)) continue;
+    if (m[1] === "form.SubmitButton" || call >= 0) continue;
+    hits.add(lineOf(source, m.index));
+  }
+  if (file === SUBMIT_BUTTON_FILE && !submitHolds) hits.add(1);
   return [...hits];
 };
 
@@ -5473,6 +5600,16 @@ export const CHECKS = [
     ],
     message:
       "a conditionally rendered DiffStat in a JSX expression (`{x && <DiffStat …/>}`, `{x ? <DiffStat …/> : null}`, `||`/`??`, either ternary branch) — a file row whose counts can arrive after the row renders them through DiffStatSlot (src/components/diff-stat.tsx) on every row, so the cell keeps its width while counts load (and on rows that never get them) and a late stat doesn't reflow the file names; a row whose counts ship with the row itself renders DiffStat unconditionally, and a non-row total hidden on purpose needs an allowlist entry with rationale",
+  },
+  {
+    name: "focusable-held-button-render",
+    appliesTo: notVendoredUi,
+    scan: focusableHeldRender,
+    // Empty on purpose: every disabled-and-focusable button routes its render
+    // through the helper, with no exemptions.
+    allowlist: [],
+    message:
+      "a button that can sit disabled AND focusableWhenDisabled takes `render={heldButtonRender(held, render)}` (src/lib/use-disabled-reason.ts), paired with ARIA_DISABLED_CLASS, with `held` true exactly while it is disabled and focusable — Base UI preventDefaults every key but Tab on such a button, so without the helper's pass-through every Escape listener that skips prevented events (Explore's close, for one) and the app's global hotkeys (whose listener skips prevented events) stop firing while focus sits on it; DisabledReasonButton applies the helper and the class for you, and form.SubmitButton applies only the helper, so its caller passes `className={ARIA_DISABLED_CLASS}` (a form.SubmitButton tag is clean only while the <Button> in src/components/form/submit-button.tsx routes its focusableWhenDisabled hold through the helper, which line 1 there enforces)",
   },
   {
     name: "raw-copy-icon-button",

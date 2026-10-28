@@ -99,7 +99,10 @@ import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { CommitContextMenuItems } from "./CommitContextMenu";
@@ -1562,6 +1565,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                   // <body>; the button is the Load more retry too.
                   disabled={search.isFetchingNextPage}
                   focusableWhenDisabled
+                  render={heldButtonRender(search.isFetchingNextPage)}
                   onClick={() => search.fetchNextPage()}
                 >
                   {search.isFetchingNextPage && (
@@ -1605,6 +1609,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                     className={cn("text-muted-foreground", ARIA_DISABLED_CLASS)}
                     disabled={log.isFetchingNextPage}
                     focusableWhenDisabled
+                    render={heldButtonRender(log.isFetchingNextPage)}
                     onClick={() => log.fetchNextPage()}
                   >
                     {log.isFetchingNextPage && (

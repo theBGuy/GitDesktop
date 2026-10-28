@@ -203,6 +203,19 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   the same hook directly: `focusableWhenDisabled`/`aria-describedby`/
   `wrapperTitle` passed straight through, plus its own sr-only reason span
   alongside (`src/features/welcome/CloneRepoDialog.tsx` is the reference).
+  Base UI swallows every key but Tab on a disabled `focusableWhenDisabled`
+  button, so a tag carrying that prop takes its `render` from the helper
+  `heldButtonRender(held, render)` in `src/lib/use-disabled-reason.ts`, `held`
+  true exactly while it is disabled and focusable (a busy Load more: its
+  fetching flag), and a new site pairs it with `ARIA_DISABLED_CLASS`; Escape
+  and app hotkeys then still work with focus on it. DisabledReasonButton
+  applies the helper and the class itself; form.SubmitButton applies only the
+  helper, so its caller passes `className={ARIA_DISABLED_CLASS}`
+  (`src/features/welcome/CloneRepoDialog.tsx` is the reference). The
+  `focusable-held-button-render` guard fails any other tag carrying the prop
+  as a literal JSX attribute without that `render`. Out of its reach: a
+  spread or a props object, whether `held` is right (any helper call passes),
+  and a spread after the helper's `render=`, which can override it.
 - A status badge or chip whose explanation isn't visible text is a
   `StatusDetailChip` (`src/components/status-detail-chip.tsx`) — a click popover
   keyboard, touch, and AT all reach, and a plain Badge when there's no detail. A
@@ -629,11 +642,13 @@ one grep away on the named symbol. Grows via Conventions-sync.
   query never resolves.
 - **Retry focus rescue** — a Retry control whose press can unmount it (an
   error arm swapping to a skeleton or notice) rides `useRetryFocusRescue`
-  (ConversationListPanel) with a stable `tabIndex={-1}` host element; focus
-  must never fall to `<body>` on the shown→hidden edge. A detail pane's
-  error-arm Retry carries no disabled state or in-flight label (the arm
-  unmounts the moment the retry fetches), pinned by
-  `scripts/detail-pane-retry.test.mjs`.
+  (ConversationListPanel) with a host that survives the swap: a `tabIndex={-1}`
+  box, or a persistent control such as the list's driving search input. A host
+  handed to the `hostRef` callback imperatively is captured once, so it must
+  outlive the Retry's owner. Focus must never fall to `<body>` on the
+  shown→hidden edge. A detail pane's error-arm Retry carries no disabled
+  state or in-flight label (the arm unmounts the moment the retry fetches),
+  pinned by `scripts/detail-pane-retry.test.mjs`.
 - **Detail-pane retention** — a detail pane over a read renders through
   `resolveDetailPane` + `DegradedListNotice`: a failed refresh keeps the loaded
   content under the notice and its Retry, never a swap to an error on a raw
@@ -1160,6 +1175,19 @@ one grep away on the named symbol. Grows via Conventions-sync.
   unknown argv is never held. Frontend retry and backoff key on the shared
   `isRateLimitError` / `isAuthError` (`src/lib/forge-backoff.ts`), never a
   re-spelled match.
+- **CI run polling** (run lists, run details, PR rollups) takes its cadence
+  from `src/lib/github/run-poll.ts` (a run-age ladder that `waiting` runs ride
+  like any active run, and a list rule congruent with `notifyPollInterval`),
+  never a flat per-run interval; the branch badge's `useLatestRun` and the run
+  notifier keep their own cadence. GitHub PR rollups watch runs through one
+  head-sha list poll plus jobs reads only while the rollup is open
+  (`useHeadRuns` / `useRunJobs`). While open, the bounded re-check in
+  `src/features/pulls/check-recheck.ts` covers a check still pending over a
+  finished row. Keyed on the check's attempt (the run's full job-id set),
+  never the row, it reads the head list on first sight, re-reads it with the
+  PR's checks at 15/30/60 s, then parks. A row seen executing pauses it and
+  its next finish starts one fresh episode; collapsing the rollup or hiding
+  its tab pauses it without resolving it.
 
 ## Code comments
 

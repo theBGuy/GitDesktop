@@ -60,6 +60,10 @@ import { pendingItemReason } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { RunContextMenuItems } from "./RunContextMenu";
 import { RunWorkflowDialog } from "./RunWorkflowDialog";
@@ -196,6 +200,10 @@ export function ActionsPanel({
   // the card for skeletons below. Keyed on the card being mounted, a superset of
   // its Retry being mounted: the edge still rescues only a Retry that held focus.
   const forgeRescue = useRetryFocusRescue(!forge.isPending && !ghReady);
+  // Loading the last page, or a press that parks offline, unmounts Load more
+  // under the user's focus; land it on the list host. True exactly while the
+  // button is mounted.
+  const moreRescue = useRetryFocusRescue(runs.hasNextPage && !runs.isPaused);
   const queryClient = useQueryClient();
   const selectedRunId = useUiStore((s) => s.selectedRunId);
   const selectRun = useUiStore((s) => s.selectRun);
@@ -363,7 +371,10 @@ export function ActionsPanel({
           is `relative`-only) so a long list can't leak a window scrollbar. */}
       <ScrollArea
         // The host every arm below swaps inside, so a Retry's focus lands here.
-        ref={forgeRescue.hostRef}
+        ref={(node) => {
+          forgeRescue.hostRef(node);
+          moreRescue.hostRef(node);
+        }}
         tabIndex={-1}
         className="min-h-0 flex-1 overflow-hidden outline-none"
       >
@@ -563,10 +574,18 @@ export function ActionsPanel({
         )}
         {runs.hasNextPage && !runs.isPaused && (
           <Button
+            ref={moreRescue.retryRef}
             variant="ghost"
             size="xs"
-            className="h-7 w-full justify-center border-b text-muted-foreground"
+            className={cn(
+              "h-7 w-full justify-center border-b text-muted-foreground",
+              ARIA_DISABLED_CLASS,
+            )}
+            // Focusable while busy, so a press never drops focus to <body>; the
+            // button is the Load more retry too.
             disabled={runs.isFetchingNextPage}
+            focusableWhenDisabled
+            render={heldButtonRender(runs.isFetchingNextPage)}
             onClick={() => runs.fetchNextPage()}
           >
             {runs.isFetchingNextPage

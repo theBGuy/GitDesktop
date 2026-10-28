@@ -54,7 +54,10 @@ import {
 } from "@/lib/settings/mcp-registry";
 import { formatRelativeTime, parseableDate } from "@/lib/time";
 import { useDebouncedValue } from "@/lib/use-debounced-value";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { HostAllowNote } from "../HostAllowNote";
 
@@ -647,6 +650,7 @@ export function BrowseRegistryDialog({
                     // <body>.
                     disabled={isFetchingNextPage}
                     focusableWhenDisabled
+                    render={heldButtonRender(isFetchingNextPage)}
                   >
                     {isFetchingNextPage ? (
                       <>
