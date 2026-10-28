@@ -1403,14 +1403,19 @@ pub(crate) async fn git_cherry_pick_core(
         let skip = run_git_raw_index_retry(&repo_path, &["cherry-pick", "--skip"], DEFAULT_TIMEOUT)
             .await?;
         if skip.code != 0 {
-            return Err(classify_failure(
+            let err = classify_failure(
                 &repo_path,
                 "cherry-pick",
                 &already_unmerged,
                 skip.code,
                 skip.full_failure_text(),
             )
-            .await);
+            .await;
+            let short = &hash[..hash.len().min(7)];
+            return Err(match err {
+                AppError::Git { .. } => skip_failure_git(short, &skip),
+                other => other,
+            });
         }
         return Ok(false);
     }
@@ -1424,11 +1429,72 @@ pub(crate) async fn git_cherry_pick_core(
     .await)
 }
 
+fn skip_failure_git(short: &str, skip: &crate::git::runner::GitOutput) -> AppError {
+    AppError::Git {
+        code: skip.code,
+        stderr: format!(
+            "{short} is already applied, but skipping it failed.\n{}",
+            skip.full_failure_text()
+        ),
+    }
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CherryPickRangeResult {
     pub applied: usize,
     pub skipped: usize,
+}
+
+/// The failed step of an already-started pick; Skip is the empty-pick --skip.
+#[derive(Debug, Clone, Copy)]
+enum FailedStep {
+    Pick,
+    Skip,
+}
+
+/// Shapes range failures while preserving the existing pick-failure shapes.
+fn range_failure_error(
+    err: AppError,
+    step: FailedStep,
+    short: &str,
+    target_branch: &str,
+    recovery: &str,
+    stale_hints: &str,
+    rolled_back: bool,
+) -> AppError {
+    let failed_skip = matches!(step, FailedStep::Skip);
+    let failed_step = if failed_skip {
+        format!("Skipping {short}, which was already applied, failed")
+    } else {
+        format!("Pick {short} failed, usually a conflict")
+    };
+    let failing_action = if failed_skip {
+        format!("{failed_step}.")
+    } else {
+        format!("The failing pick was {short}.")
+    };
+    match err {
+        AppError::Git { code, stderr } if rolled_back => AppError::Git {
+            code,
+            stderr: format!(
+                "The cherry-pick was rolled back — {target_branch} is unchanged.\n{failed_step}; nothing from this batch was kept.\n{stderr}{stale_hints}"
+            ),
+        },
+        AppError::Git { code, stderr } => AppError::Git {
+            code,
+            stderr: format!("{recovery}\n{failing_action}\n{stderr}{stale_hints}"),
+        },
+        // Non-Git skip failures use Command so the completed rollback is visible.
+        // Pick failures keep their existing variants after rollback for compatibility.
+        other if rolled_back && failed_skip => AppError::Command(format!(
+            "The cherry-pick was rolled back — {target_branch} is unchanged.\n{failed_step}; nothing from this batch was kept.\n{other}"
+        )),
+        other if rolled_back => other,
+        // A failed rollback needs the full remedy even when the original variant
+        // cannot carry text, so every non-Git failure uses Command here.
+        other => AppError::Command(format!("{recovery}\n{failing_action}\n{other}")),
+    }
 }
 
 /// Copies the given commits (oldest-first) onto `target_branch`, then leaves
@@ -1621,10 +1687,6 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // already refused a dirty tree, so this reads empty — kept real for the same
         // reason `git_cherry_pick_core` reads it: a baseline is never assumed.
         let already_unmerged = unmerged_paths(repo_path).await;
-        enum FailedStep {
-            Pick,
-            Skip,
-        }
         // Every failure class that reaches this leaves through the one rollback funnel
         // below, so none of them exits with HEAD on `target` unless the rollback itself
         // fails, which the error then says. The exception returns before it: a
@@ -1776,44 +1838,15 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
                 ""
             };
             let short = &hash[..hash.len().min(7)];
-            let failed_skip = matches!(step, FailedStep::Skip);
-            let failed_step = if failed_skip {
-                format!("Skipping {short}, which was already applied, failed")
-            } else {
-                format!("Pick {short} failed, usually a conflict")
-            };
-            let failing_action = if failed_skip {
-                format!("Skipping {short}, which was already applied, failed.")
-            } else {
-                format!("The failing pick was {short}.")
-            };
-            return Err(match err {
-                AppError::Git { code, stderr } if rolled_back => AppError::Git {
-                    code,
-                    stderr: format!(
-                        "The cherry-pick was rolled back — {target_branch} is unchanged.\n{failed_step}; nothing from this batch was kept.\n{stderr}{stale_hints}"
-                    ),
-                },
-                AppError::Git { code, stderr } => AppError::Git {
-                    code,
-                    stderr: format!(
-                        "{recovery}\n{failing_action}\n{stderr}{stale_hints}"
-                    ),
-                },
-                AppError::Command(message) if rolled_back && failed_skip => {
-                    AppError::Command(format!(
-                        "The cherry-pick was rolled back — {target_branch} is unchanged.\n{failed_step}; nothing from this batch was kept.\n{message}"
-                    ))
-                }
-                other if rolled_back => other,
-                // Timeout carries only a u64 and GitNotFound carries nothing, so a
-                // variant-preserving wrap isn't available for every arm — one
-                // `Command` carrying the whole explanation beats a scheme where
-                // which variant survives depends on the failure class.
-                other => AppError::Command(format!(
-                    "{recovery}\n{failing_action}\n{other}"
-                )),
-            });
+            return Err(range_failure_error(
+                err,
+                step,
+                short,
+                target_branch,
+                &recovery,
+                stale_hints,
+                rolled_back,
+            ));
         }
 
         Ok(CherryPickRangeResult { applied, skipped })
@@ -13431,6 +13464,117 @@ mod tests {
         assert!(!dir.path().join(".git/CHERRY_PICK_HEAD").exists());
         assert!(!dir.path().join(".git/sequencer").exists());
         assert!(!op_state(&repo).await.unwrap().cherry_picking);
+    }
+
+    #[test]
+    fn skip_failure_git_keeps_the_code_and_both_streams() {
+        let skip = crate::git::runner::GitOutput {
+            code: 17,
+            stderr: "stderr details".into(),
+            stdout: b"stdout details".to_vec(),
+        };
+        let err = skip_failure_git("abc1234", &skip);
+        let AppError::Git { code, stderr } = err else {
+            panic!("{err:?}");
+        };
+        assert_eq!(code, 17);
+        assert_eq!(
+            stderr,
+            "abc1234 is already applied, but skipping it failed.\nstderr details\nstdout details"
+        );
+    }
+
+    #[test]
+    fn range_failure_git_messages_keep_the_exit_code() {
+        for (step, rolled_back, expected) in [
+            (
+                FailedStep::Pick,
+                true,
+                "The cherry-pick was rolled back — target is unchanged.\nPick abc1234 failed, usually a conflict; nothing from this batch was kept.\ngit details\nretired hints",
+            ),
+            (
+                FailedStep::Skip,
+                true,
+                "The cherry-pick was rolled back — target is unchanged.\nSkipping abc1234, which was already applied, failed; nothing from this batch was kept.\ngit details\nretired hints",
+            ),
+            (
+                FailedStep::Pick,
+                false,
+                "Recovery needed.\nThe failing pick was abc1234.\ngit details\nretired hints",
+            ),
+            (
+                FailedStep::Skip,
+                false,
+                "Recovery needed.\nSkipping abc1234, which was already applied, failed.\ngit details\nretired hints",
+            ),
+        ] {
+            let err = range_failure_error(
+                AppError::Git {
+                    code: 17,
+                    stderr: "git details".into(),
+                },
+                step,
+                "abc1234",
+                "target",
+                "Recovery needed.",
+                "\nretired hints",
+                rolled_back,
+            );
+            let AppError::Git { code, stderr } = err else {
+                panic!("{step:?}, rolled_back={rolled_back}: {err:?}");
+            };
+            assert_eq!(code, 17);
+            assert_eq!(stderr, expected, "{step:?}, rolled_back={rolled_back}");
+        }
+    }
+
+    #[test]
+    fn range_failure_non_git_messages_and_variants() {
+        for (step, rolled_back, prefix) in [
+            (FailedStep::Pick, true, ""),
+            (
+                FailedStep::Skip,
+                true,
+                "The cherry-pick was rolled back — target is unchanged.\nSkipping abc1234, which was already applied, failed; nothing from this batch was kept.\n",
+            ),
+            (
+                FailedStep::Pick,
+                false,
+                "Recovery needed.\nThe failing pick was abc1234.\n",
+            ),
+            (
+                FailedStep::Skip,
+                false,
+                "Recovery needed.\nSkipping abc1234, which was already applied, failed.\n",
+            ),
+        ] {
+            for (original, text) in [
+                (AppError::Command("spawn failed".into()), "spawn failed"),
+                (AppError::Timeout(7), "git operation timed out after 7s"),
+                (AppError::GitNotFound, "git executable not found"),
+            ] {
+                let original_variant = std::mem::discriminant(&original);
+                let err = range_failure_error(
+                    original,
+                    step,
+                    "abc1234",
+                    "target",
+                    "Recovery needed.",
+                    "\nretired hints",
+                    rolled_back,
+                );
+                if matches!(step, FailedStep::Pick) && rolled_back {
+                    assert_eq!(std::mem::discriminant(&err), original_variant);
+                } else {
+                    assert!(matches!(err, AppError::Command(_)), "{err:?}");
+                }
+                assert_eq!(
+                    err.to_string(),
+                    format!("{prefix}{text}"),
+                    "{step:?}, rolled_back={rolled_back}"
+                );
+            }
+        }
     }
 
     #[test]

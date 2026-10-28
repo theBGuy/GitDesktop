@@ -67,6 +67,8 @@
 //      .to_owned() and String::from(...). Other conversions (.as_str() chains,
 //      &*...to_owned(), format!, Cow::from, OsString::from, into::<String>())
 //      are opaque, so a patch flag in one beside an exempt flag passes.
+//      In-function growth of a literal vec via .push/.extend/.insert is not
+//      tracked: let mut a = vec!["diff", "--numstat"]; a.push("-p"); passes K.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
