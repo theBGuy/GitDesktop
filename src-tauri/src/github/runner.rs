@@ -888,7 +888,7 @@ const SECONDARY_MAX_SECS: i64 = 900;
 // The exempt GitHub rate_limit read bounds detection of terminal account switches.
 const RECHECK_SECS: i64 = 300;
 // GitHub's primary window is one hour; untrusted hints cannot hold for days.
-const MAX_HOLD_SECS: i64 = 3660;
+pub(crate) const MAX_HOLD_SECS: i64 = 3660;
 // Waiting for GitHub's reset must tolerate small backward clock corrections.
 const CLOCK_SLACK_SECS: i64 = 60;
 // GitHub's advisory rate_limit read must settle even when the network stalls.
@@ -899,7 +899,7 @@ const HELD_GRAPHQL: &str = "GitHub's GraphQL API rate limit has been reached, so
 const HELD_SEARCH: &str = "GitHub's search API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Bucket {
+pub(crate) enum Bucket {
     Core,
     Graphql,
     Search,
@@ -1177,7 +1177,7 @@ fn held_output(bucket: Bucket) -> GhOutput {
     }
 }
 
-fn probe_reading(body: &str, bucket: Bucket) -> Option<(u64, i64)> {
+pub(crate) fn probe_reading(body: &str, bucket: Bucket) -> Option<(u64, i64)> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     let resource = value.get("resources")?.get(bucket.resource_name())?;
     Some((

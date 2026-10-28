@@ -147,6 +147,39 @@ test("refresh wording needs every failed card loaded", () => {
   );
 });
 
+test("a rate-limited refresh names the provider's limit", () => {
+  const limited = (kind, message) =>
+    read({ error: { kind, message }, isError: true, errorUpdatedAt: 2 });
+  const held = limited(
+    "gh",
+    "GitHub's GraphQL API rate limit has been reached, so GitDesktop didn't send this request. Try again once the limit lifts.",
+  );
+  assert.equal(
+    boardNotice([card(held), card(failedWithData)], false, summarize)?.message,
+    "Couldn't refresh some insights while GitHub's API rate limit is in effect — showing the last loaded ones.",
+  );
+  assert.equal(
+    boardNotice(
+      [card(limited("glab", "429 Too Many Requests"))],
+      false,
+      summarize,
+    )?.message,
+    "Couldn't refresh some insights while GitLab's API rate limit is in effect — showing the last loaded ones.",
+  );
+  // The arm keys on the reason the board quotes (the first failed card's),
+  // so a later card's limit leaves the plain wording.
+  assert.equal(
+    boardNotice([card(failedWithData), card(held)], false, summarize)?.message,
+    "Couldn't refresh some insights — showing the last loaded ones.",
+  );
+  // A cold failure keeps quoting its reason through `summarize`.
+  const coldHeld = { ...held, data: undefined, dataUpdatedAt: 0 };
+  assert.equal(
+    boardNotice([card(coldHeld)], false, () => "the limit")?.message,
+    "Couldn't load some insights. the limit",
+  );
+});
+
 test("a card with no data: offline, failed, or loading", () => {
   // Parked, before or after a failure.
   assert.equal(

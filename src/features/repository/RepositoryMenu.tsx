@@ -28,6 +28,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { lazy, Suspense, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -64,6 +65,7 @@ import {
   effectiveActions,
 } from "@/lib/automations/types";
 import { copyText } from "@/lib/clipboard";
+import { isRateLimitError } from "@/lib/forge-backoff";
 import {
   forgeRepoUrl,
   openInTerminal,
@@ -91,6 +93,8 @@ import { useJiraLink } from "@/lib/jira/queries";
 import { useRepoNotificationsDialog } from "@/lib/notifications/matrix";
 import {
   ACT_PENDING_REASON,
+  isOfflineNow,
+  OFFLINE_ITEM_REASON,
   pendingWriteReason,
   refuseWhileOffline,
   useOfflineHold,
@@ -146,6 +150,12 @@ const RepoSettingsDialog = lazy(() =>
  *  admin probe hasn't answered: a disabled menu item can't show a tooltip. */
 const SETTINGS_ACCESS_CHECKING_ITEM_REASON = "checking access";
 const SETTINGS_ACCESS_FAILED_ITEM_REASON = "couldn't check access";
+
+/** The Star row's parenthetical reasons while the star status is unknown. The
+ *  label already names the star, and a longer reason wraps the row in the menu. */
+const STAR_CHECKING_ITEM_REASON = "checking";
+const STAR_RATE_LIMITED_ITEM_REASON = "rate limited";
+const STAR_FAILED_ITEM_REASON = "couldn't check";
 
 export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
@@ -322,7 +332,18 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const canForkHere = canGh && !ownedHere;
   const starStatus = useRepoStarStatus(repoPath, canStar);
   const setStar = useSetRepoStar(repoPath);
-  const starred = starStatus.data ?? false;
+  const starred = starStatus.data;
+  // Held while nothing is loaded: either direction would be a guess. Loaded
+  // data stays operable through a failed refresh, since a write names its
+  // direction explicitly.
+  const starHeldReason = (() => {
+    if (starred !== undefined) return undefined;
+    if (starStatus.isPaused) return OFFLINE_ITEM_REASON;
+    if (!starStatus.isError) return STAR_CHECKING_ITEM_REASON;
+    return isRateLimitError(starStatus.error)
+      ? STAR_RATE_LIMITED_ITEM_REASON
+      : STAR_FAILED_ITEM_REASON;
+  })();
   // Repo settings are admin-only, on both providers (GitHub admin / GitLab
   // Maintainer+ — the probe dispatches per provider); the menu item hides for
   // a resolved non-admin. An unanswered probe (pending, parked, or failed) is
@@ -492,6 +513,8 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   // Shared by the menu item and the hotkey so the two can't diverge, and awaited
   // for the same reason as the fork above.
   async function doStar() {
+    // A menu opened before the status turned unknown can still dispatch.
+    if (starred === undefined) return;
     try {
       await setStar.mutateAsync(!starred);
       toast.success(
@@ -562,7 +585,11 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   useHotkeyAction("submodules", () => setSubmodulesMode("list"));
   useHotkeyAction("add-submodule", () => setSubmodulesMode("add"));
   useHotkeyAction("worktrees", () => setWorktreesOpen(true));
-  useHotkeyAction("star-repository", doStar, canStar && !setStar.isPending);
+  useHotkeyAction(
+    "star-repository",
+    doStar,
+    canStar && starred !== undefined && !setStar.isPending,
+  );
   useHotkeyAction("change-remote-url", () => setRemoteUrlOpen(true));
   useHotkeyAction(
     "remove-upstream-remote",
@@ -599,6 +626,18 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         if (open && canOpenRepoSettings) {
           warmRepoSettingsDialog((dialog) => setReadyDialog(() => dialog));
         }
+        // Opening the menu is the Star row's retry: it has no room for one.
+        // Offline, a refetch would only park.
+        if (
+          open &&
+          canStar &&
+          starStatus.isError &&
+          !starStatus.isFetching &&
+          !starStatus.isPaused &&
+          !isOfflineNow()
+        ) {
+          void starStatus.refetch();
+        }
       }}
     >
       <DropdownMenuTrigger
@@ -623,12 +662,22 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
         )}
         {canGh && (
           <>
-            {canStar && (
-              <DropdownMenuItem disabled={setStar.isPending} onClick={doStar}>
-                <StarIcon weight={starred ? "fill" : "regular"} />
-                {starred ? "Unstar repository" : "Star repository"}
-              </DropdownMenuItem>
-            )}
+            {canStar &&
+              (starHeldReason === undefined ? (
+                <DropdownMenuItem
+                  className={MENU_HELD_ROW_CLASS}
+                  disabled={setStar.isPending}
+                  onClick={doStar}
+                >
+                  <StarIcon weight={starred ? "fill" : "regular"} />
+                  {starred ? "Unstar repository" : "Star repository"}
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem className={MENU_HELD_ROW_CLASS} disabled>
+                  <StarIcon weight="regular" />
+                  Star or unstar repository ({starHeldReason})
+                </DropdownMenuItem>
+              ))}
             {canCreateHostIssue && (
               <DropdownMenuItem
                 onClick={() =>
