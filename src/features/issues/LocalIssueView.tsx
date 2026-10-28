@@ -12,7 +12,7 @@ import {
   UploadSimpleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -65,6 +65,7 @@ import { useJiraLink, useJiraPermissions } from "@/lib/jira/queries";
 import { ACT_PENDING_REASON } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { PlanIssueButton } from "../plan/PlanIssueButton";
 import { SolveIssueButton } from "../sessions/SolveIssueButton";
 import { PromoteLocalIssueDialog } from "./PromoteLocalIssueDialog";
@@ -160,6 +161,9 @@ export function LocalIssueView({
     () => composerRef.current?.focus(),
     threadActive,
   );
+
+  const actionBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(actionBarRef, issue !== undefined);
 
   if (!issue) {
     return <DiffPlaceholder message="This local issue no longer exists" />;
@@ -434,6 +438,7 @@ export function LocalIssueView({
       </ConversationScrollArea>
 
       <CommentComposer
+        toastClearance
         ref={composerRef}
         ariaLabel="Leave a note"
         placeholder="Leave a note…"
@@ -445,7 +450,10 @@ export function LocalIssueView({
         mentions={mentions}
       />
 
-      <div className="flex flex-wrap items-center gap-2 border-t p-3">
+      <div
+        ref={actionBarRef}
+        className="flex flex-wrap items-center gap-2 border-t p-3"
+      >
         <Button
           variant="outline"
           size="sm"

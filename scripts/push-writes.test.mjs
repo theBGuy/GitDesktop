@@ -1,8 +1,9 @@
 // Pins the pure branch-push bookkeeping: which cache entries count as a push of a
 // repo, how their variables read back, the label a branch row's spinner shows,
-// the hold reasons, and the HEAD-push latch. A wrong answer here never errors —
-// a variables-shape change reads as "no push" and the row's holds silently drop
-// — so each shape is a case.
+// the hold reasons, the HEAD-push latch, and the delayed list re-read's
+// coalescing. A wrong answer here never errors — a variables-shape change reads
+// as "no push" and the row's holds silently drop, and a lost key leaves a list
+// stale — so each shape is a case.
 //
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6), which resolves no bundler aliases: `push-writes.ts` may
@@ -17,8 +18,10 @@ import {
   branchPushHoldReason,
   branchPushKey,
   branchPushLabel,
+  LIST_RECHECK_MS,
   nextPushLatch,
   pendingBranchPushesFor,
+  recheckListsLater,
 } from "../src/lib/git/queries/push-writes.ts";
 
 const entry = (vars, extra = {}) => ({
@@ -338,4 +341,101 @@ test("latch: a null current branch latches nothing, but still prunes", () => {
 test("latch: an id not pending in any repo is never latched", () => {
   // A snapshot that tore ahead of the id list must not latch what the prune drops.
   assert.equal(nextPushLatch({}, [headPush(4)], [], "main"), null);
+});
+
+// The delayed list re-read. The stub client records each invalidation's filter;
+// a filter's predicate is replayed over query keys to see what it covers. Each
+// test uses its own repo: the pending map is module state.
+const spyClient = () => {
+  const calls = [];
+  return { calls, invalidateQueries: (filter) => calls.push(filter) };
+};
+const covers = (filter, queryKey) => filter.predicate({ queryKey });
+
+test("list re-read: the delay is 8 s", () => {
+  assert.equal(LIST_RECHECK_MS, 8000);
+});
+
+test("list re-read: two arms in one window fire ONE invalidation over the union", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const qc = spyClient();
+  const repo = "/union";
+  // A remote-branch delete's unlensed prefixes, then a merge's lensed keys
+  // (overlapping) and an issue close's list (disjoint).
+  recheckListsLater(qc, repo, [
+    ["repo", repo, "pr-list"],
+    ["repo", repo, "pr-review-state"],
+  ]);
+  recheckListsLater(qc, repo, [
+    ["repo", repo, "pr-list", "origin"],
+    ["repo", repo, "prs", "origin"],
+    ["repo", repo, "issue-list", "origin"],
+  ]);
+  t.mock.timers.tick(LIST_RECHECK_MS);
+  assert.equal(qc.calls.length, 1);
+  const [f] = qc.calls;
+  for (const key of [
+    ["repo", repo, "pr-list", "upstream", "open", 30, null],
+    ["repo", repo, "pr-list", "origin", "closed", 30, null],
+    ["repo", repo, "pr-review-state", "origin", "digest"],
+    ["repo", repo, "prs", "origin", "feature"],
+    ["repo", repo, "issue-list", "origin", "open", 30, null],
+  ])
+    assert.equal(covers(f, key), true, JSON.stringify(key));
+  for (const key of [
+    ["repo", repo, "prs", "upstream", "feature"],
+    ["repo", repo, "issue-list", "upstream", "open", 30, null],
+    ["repo", repo, "pr-ci", "origin"],
+    ["repo", "/other", "pr-list", "origin"],
+    ["repo", repo],
+  ])
+    assert.equal(covers(f, key), false, JSON.stringify(key));
+});
+
+test("list re-read: a later arm re-arms the one timer", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const qc = spyClient();
+  const repo = "/rearm";
+  recheckListsLater(qc, repo, [["repo", repo, "pr-list"]]);
+  t.mock.timers.tick(7_000);
+  recheckListsLater(qc, repo, [["repo", repo, "issue-list"]]);
+  t.mock.timers.tick(7_000);
+  assert.equal(qc.calls.length, 0);
+  t.mock.timers.tick(1_000);
+  assert.equal(qc.calls.length, 1);
+  assert.equal(covers(qc.calls[0], ["repo", repo, "pr-list", "origin"]), true);
+  assert.equal(covers(qc.calls[0], ["repo", repo, "issue-list", "x"]), true);
+});
+
+test("list re-read: a fire drops the entry, so the next arm owes only its own keys", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const qc = spyClient();
+  const repo = "/fresh";
+  recheckListsLater(qc, repo, [["repo", repo, "pr-list"]]);
+  t.mock.timers.tick(LIST_RECHECK_MS);
+  recheckListsLater(qc, repo, [["repo", repo, "issue-list"]]);
+  t.mock.timers.tick(LIST_RECHECK_MS);
+  assert.equal(qc.calls.length, 2);
+  assert.equal(covers(qc.calls[1], ["repo", repo, "pr-list", "origin"]), false);
+  assert.equal(
+    covers(qc.calls[1], ["repo", repo, "issue-list", "origin"]),
+    true,
+  );
+  t.mock.timers.tick(60_000);
+  assert.equal(qc.calls.length, 2);
+});
+
+test("list re-read: another repo's arm keeps its own timer and keys", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const qc = spyClient();
+  recheckListsLater(qc, "/a", [["repo", "/a", "pr-list"]]);
+  t.mock.timers.tick(4_000);
+  recheckListsLater(qc, "/b", [["repo", "/b", "pr-list"]]);
+  t.mock.timers.tick(4_000);
+  assert.equal(qc.calls.length, 1);
+  assert.equal(covers(qc.calls[0], ["repo", "/a", "pr-list", "origin"]), true);
+  assert.equal(covers(qc.calls[0], ["repo", "/b", "pr-list", "origin"]), false);
+  t.mock.timers.tick(4_000);
+  assert.equal(qc.calls.length, 2);
+  assert.equal(covers(qc.calls[1], ["repo", "/b", "pr-list", "origin"]), true);
 });

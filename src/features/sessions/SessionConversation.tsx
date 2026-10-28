@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { quickTransition } from "@/lib/motion";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { AgentNarration } from "./AgentNarration";
 import { AgentTranscript } from "./AgentTranscript";
@@ -25,14 +26,21 @@ import { type AgentSession, type SessionTurn, useSessionsStore } from "./store";
 export function SessionConversation({
   session,
   repoPath,
+  terminalOpen,
 }: {
   session: AgentSession;
   repoPath: string;
+  /** The terminal dock is open below this column. */
+  terminalOpen: boolean;
 }) {
   const resume = useSessionsStore((s) => s.resume);
   const busy = useSessionsStore((s) => s.busyId === session.id);
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<SessionComposerHandle>(null);
+  // With the terminal dock open below it, the bottom bar sits mid-window, clear
+  // of the toasts' corner, so lifting them would only strand them.
+  const bottomBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(bottomBarRef, !terminalOpen);
   // Whether the view is pinned to the bottom (so streaming output keeps it
   // there). `atBottom` mirrors it for rendering the "Latest" button; `stick`
   // is read by the auto-scroll effect without a stale closure.
@@ -137,7 +145,7 @@ export function SessionConversation({
           )}
         </AnimatePresence>
       </div>
-      <div className="shrink-0 border-t p-2">
+      <div ref={bottomBarRef} className="shrink-0 border-t p-2">
         {session.kept ? (
           <div className="flex items-center gap-2 px-1 py-1">
             <span className="min-w-0 flex-1 text-[11px] text-muted-foreground">

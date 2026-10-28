@@ -2100,6 +2100,7 @@ export function JiraIssueView({
           this surface, so the box you write in spans the same width. */}
       {canComment && (
         <CommentComposer
+          toastClearance
           ref={composerRef}
           ariaLabel="Leave a comment"
           placeholder="Leave a comment…"

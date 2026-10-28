@@ -641,6 +641,7 @@ export function CommitComments({
 
       {canComment && (
         <CommentComposer
+          toastClearance
           ariaLabel="Comment on this commit"
           placeholder="Leave a comment…"
           value={draft.value}

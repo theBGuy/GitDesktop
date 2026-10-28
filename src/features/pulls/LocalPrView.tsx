@@ -15,7 +15,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
@@ -88,6 +88,7 @@ import { useAiEnabled } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
 import { PROMOTION_REASON, type PromotionKind } from "./PrMergeabilityBanner";
@@ -353,6 +354,11 @@ export function LocalPrView({
     () => composerRef.current?.focus(),
     threadActive,
   );
+
+  // Off while an early return paints instead: no PR, or a paused merge's
+  // takeover, which renders its own view in place of this bar.
+  const actionBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(actionBarRef, !!pr && !pr.pendingMerge?.worktreePath);
 
   if (!pr) {
     return (
@@ -1090,6 +1096,7 @@ export function LocalPrView({
           {/* Shown for closed PRs too, so you can comment / quote-reply after
               closing; approving stays open-only. */}
           <CommentComposer
+            toastClearance
             ref={composerRef}
             value={comment}
             onChange={setComment}
@@ -1163,7 +1170,10 @@ export function LocalPrView({
 
       {pr.status === "open" && renderMergeStatus()}
 
-      <div className="flex flex-wrap items-center gap-2 border-t p-3">
+      <div
+        ref={actionBarRef}
+        className="flex flex-wrap items-center gap-2 border-t p-3"
+      >
         {pr.status === "open" && (
           <>
             {forgeFeatureReady(ghStatus.data, "mrCreate") && (

@@ -41,7 +41,7 @@ import {
   pendingMutationEntries,
   pendingWritesFor,
 } from "./pr-writes";
-import { recheckRunsAfterPush } from "./push-writes";
+import { recheckListsLater, recheckRunsAfterPush } from "./push-writes";
 
 /** The issue-rail writes whose pending state a row reads back from the cache, so it
  *  survives the row's remount on an issue switch. */
@@ -797,11 +797,20 @@ function useIssueLifecycleMutation<TArgs, TData>(
   /** Files the write under {@link issueWriteKey} for a menu that reads its
    *  pending state back from the cache, per issue. */
   mutationKey?: ReturnType<typeof issueWriteKey>,
+  /** A state change (close/reopen): the forge's open-list membership can lag the
+   *  row's own state, so a success re-reads the lens's lists once more later. */
+  recheckListLater = false,
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey,
     mutationFn,
+    onSuccess: () => {
+      if (recheckListLater)
+        recheckListsLater(queryClient, repo, [
+          [...repoKeys.issueList(repo), lens],
+        ]);
+    },
     onSettled: (_d, _e, args) => {
       if (boardCards) invalidateProjectBoards(queryClient, repo);
       return void Promise.all([
@@ -991,6 +1000,7 @@ export function useCloseIssue(repo: string, lens: RemoteLens) {
     // State + close reason are the card glyph and its screen-reader word.
     true,
     issueWriteKey("close", repo),
+    true,
   );
 }
 
@@ -1004,6 +1014,7 @@ export function useReopenIssue(repo: string, lens: RemoteLens) {
     // Back to the open glyph, and REOPENED lands as the state reason.
     true,
     issueWriteKey("reopen", repo),
+    true,
   );
 }
 

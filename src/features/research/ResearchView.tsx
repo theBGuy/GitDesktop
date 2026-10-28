@@ -37,6 +37,7 @@ import { copyText } from "@/lib/clipboard";
 import { formatBinding } from "@/lib/hotkeys/binding";
 import { useSettings } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import {
   assembleSessionReport,
   type ResearchDepth,
@@ -239,6 +240,8 @@ export function ResearchComposer({
   const settingsPending = !settings.data && !settings.isError;
   const canRun = topic.trim().length > 0 && !settingsPending;
   const copy = INTENT_COPY[depth];
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(composerBarRef, true);
 
   const submit = () => {
     if (!canRun) return;
@@ -260,7 +263,7 @@ export function ResearchComposer({
         </div>
       </div>
 
-      <div className="shrink-0 border-t p-2">
+      <div ref={composerBarRef} className="shrink-0 border-t p-2">
         <div className="flex flex-col gap-2 border border-input bg-transparent p-3 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring/50 dark:bg-input/30">
           <textarea
             value={topic}
@@ -398,6 +401,10 @@ function ResearchResult({ run }: { run: ResearchRun }) {
     error,
     reportPath,
   } = run;
+  // Measured from the docked stack's wrapper: its top is the action row's, and it
+  // resizes as the follow-up composer below grows, which moves that row up.
+  const actionRowRef = useRef<HTMLDivElement>(null);
+  useToastClearance(actionRowRef, Boolean(report || error));
 
   // The current (latest) turn switched personas when its mode differs from the
   // turn before it — marked with a chip on its "You" message (history turns
@@ -544,80 +551,81 @@ function ResearchResult({ run }: { run: ResearchRun }) {
       </div>
 
       {(report || error) && (
-        <div className="shrink-0 border-t">
-          <div className="flex items-center gap-2 px-3 py-2.5">
-            {costUsd != null && (
-              <span
-                className="text-[11px] text-muted-foreground tabular-nums"
-                title="Estimated cost of this research run"
-              >
-                {formatUsd(costUsd)}
-              </span>
-            )}
-            {reportPath && (
-              // gap-1, not a trailing label space — flex line boxes trim those.
-              <span className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
-                <span className="shrink-0">Saved to</span>
-                <PathText path={reportPath} className="font-mono" />
-              </span>
-            )}
-            {report && (
-              <div className="ml-auto flex shrink-0 items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() =>
-                    copyText(assembleSessionReport(run), "Report copied")
-                  }
-                  title="Copy the report (with the session history) to the clipboard"
+        <div ref={actionRowRef} className="shrink-0">
+          <div className="border-t">
+            <div className="flex items-center gap-2 px-3 py-2.5">
+              {costUsd != null && (
+                <span
+                  className="text-[11px] text-muted-foreground tabular-nums"
+                  title="Estimated cost of this research run"
                 >
-                  <CopyIcon className="size-3.5" />
-                  Copy
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={save}
-                  disabled={saving}
-                >
-                  <FloppyDiskIcon className="size-3.5" />
-                  {reportPath ? "Re-save" : "Save report"}
-                </Button>
-                {/* Always rendered to reserve its slot so the row doesn't reflow
-                    when distillation starts/ends. When idle: `invisible`
-                    (visibility:hidden) already removes it from the tab order + a11y
-                    tree, and pointer-events-none makes the reserved slot unclickable
-                    — `tabIndex={-1}` + `aria-hidden` make that explicit and hold even
-                    if the hiding mechanism later changes. */}
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => cancel(run.id)}
-                  tabIndex={distilling ? undefined : -1}
-                  aria-hidden={!distilling}
-                  className={
-                    distilling ? undefined : "invisible pointer-events-none"
-                  }
-                >
-                  <StopIcon weight="fill" />
-                  Stop
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={() => void turnIntoPlan()}
-                  disabled={distilling}
-                >
-                  {distilling ? "Distilling…" : "Turn into a Plan"}
-                </Button>
-              </div>
-            )}
+                  {formatUsd(costUsd)}
+                </span>
+              )}
+              {reportPath && (
+                // gap-1, not a trailing label space — flex line boxes trim those.
+                <span className="flex min-w-0 gap-1 text-[11px] text-muted-foreground">
+                  <span className="shrink-0">Saved to</span>
+                  <PathText path={reportPath} className="font-mono" />
+                </span>
+              )}
+              {report && (
+                <div className="ml-auto flex shrink-0 items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      copyText(assembleSessionReport(run), "Report copied")
+                    }
+                    title="Copy the report (with the session history) to the clipboard"
+                  >
+                    <CopyIcon className="size-3.5" />
+                    Copy
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={save}
+                    disabled={saving}
+                  >
+                    <FloppyDiskIcon className="size-3.5" />
+                    {reportPath ? "Re-save" : "Save report"}
+                  </Button>
+                  {/* Always rendered to reserve its slot so the row doesn't reflow
+                      when distillation starts/ends. When idle: `invisible`
+                      (visibility:hidden) already removes it from the tab order + a11y
+                      tree, and pointer-events-none makes the reserved slot unclickable
+                      — `tabIndex={-1}` + `aria-hidden` make that explicit and hold even
+                      if the hiding mechanism later changes. */}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => cancel(run.id)}
+                    tabIndex={distilling ? undefined : -1}
+                    aria-hidden={!distilling}
+                    className={
+                      distilling ? undefined : "invisible pointer-events-none"
+                    }
+                  >
+                    <StopIcon weight="fill" />
+                    Stop
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => void turnIntoPlan()}
+                    disabled={distilling}
+                  >
+                    {distilling ? "Distilling…" : "Turn into a Plan"}
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
-
-      {report && !error && (
-        <div className="shrink-0 border-t p-2">
-          <ResearchFollowUp key={run.id} run={run} />
+          {report && !error && (
+            <div className="border-t p-2">
+              <ResearchFollowUp key={run.id} run={run} />
+            </div>
+          )}
         </div>
       )}
     </div>

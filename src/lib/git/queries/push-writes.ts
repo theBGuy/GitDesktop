@@ -6,7 +6,8 @@
  * delayed run-list recheck (plus any PR checks reads its arms hand it) armed by a
  * successful write whose own default trigger starts CI for the code it touches
  * (the boundary at {@link PUSH_RUN_RECHECK_MS}), or by the observed head move, and
- * the delayed PR-list re-read a remote-branch delete schedules.
+ * the delayed list re-read a remote-branch delete or a PR/issue state change
+ * schedules.
  *
  * Import-free at runtime on purpose (types only, erased): sync.ts imports this
  * file, and `scripts/push-writes.test.mjs` loads it straight from `src/` under
@@ -247,31 +248,49 @@ export function recheckRunsAfterPush(
   });
 }
 
-/** How long after a remote-branch delete the PR list is read once more: GitHub
- *  closes a PR whose head branch is deleted asynchronously, so the settle's own
- *  read can still show it open. */
-export const REMOTE_DELETE_PR_RECHECK_MS = 8_000;
+/** How long after an armed write the PR or issue lists are read once more: the
+ *  forge updates list membership asynchronously (GitHub closes a PR whose head
+ *  branch is deleted later; a search-backed list lags a merge, close or reopen),
+ *  so the settle's own read can still file the row under its old state. */
+export const LIST_RECHECK_MS = 8_000;
 
-/** The one pending PR-list re-read per repo: a later delete re-arms it. */
-const pendingPrListRechecks = new Map<string, ReturnType<typeof setTimeout>>();
+/** The one pending list re-read per repo: a later arm re-arms its timer and adds
+ *  its keys to the ones already owed (deduplicated by value); the fire drops the
+ *  entry, so the next arm owes only its own keys. */
+const pendingListRechecks = new Map<
+  string,
+  {
+    timer: ReturnType<typeof setTimeout>;
+    owed: Map<string, readonly unknown[]>;
+  }
+>();
 
-/** One delayed invalidation of exactly `keys` (the caller builds them: this file
- *  can't import repoKeys, and the PR-list families may be spelled only in core.ts).
- *  The caller owes the review-state map with the PR list (usePrReviewState's
- *  co-invalidation contract); the CI and mergeability maps key on a digest of the
- *  list's rows and re-key on their own. */
-export function recheckPrListAfterRemoteDelete(
+/** One delayed invalidation of every key prefix owed since the last fire. Armed by
+ *  a remote-branch delete (unlensed PR-list prefixes) and by a PR merge, close or
+ *  reopen and an issue close or reopen (lens-scoped list prefixes). The caller
+ *  builds the keys: this file can't import repoKeys, and the list families may be
+ *  spelled only in core.ts. A PR-list caller owes the review-state map with the
+ *  list (usePrReviewState's co-invalidation contract); the CI and mergeability
+ *  maps key on a digest of the list's rows and re-key on their own. The owed keys
+ *  fire as ONE invalidation, for the reason {@link recheckRunsAfterPush} gives. */
+export function recheckListsLater(
   queryClient: QueryClient,
   repo: string,
   keys: readonly (readonly unknown[])[],
 ): void {
-  clearTimeout(pendingPrListRechecks.get(repo));
-  pendingPrListRechecks.set(
-    repo,
-    setTimeout(() => {
-      pendingPrListRechecks.delete(repo);
-      for (const queryKey of keys)
-        void queryClient.invalidateQueries({ queryKey });
-    }, REMOTE_DELETE_PR_RECHECK_MS),
-  );
+  const pending = pendingListRechecks.get(repo);
+  clearTimeout(pending?.timer);
+  const owed = pending?.owed ?? new Map<string, readonly unknown[]>();
+  for (const key of keys) owed.set(JSON.stringify(key), key);
+  pendingListRechecks.set(repo, {
+    owed,
+    timer: setTimeout(() => {
+      pendingListRechecks.delete(repo);
+      const prefixes = [...owed.values()];
+      void queryClient.invalidateQueries({
+        predicate: (query) =>
+          prefixes.some((prefix) => startsWithKey(query.queryKey, prefix)),
+      });
+    }, LIST_RECHECK_MS),
+  });
 }

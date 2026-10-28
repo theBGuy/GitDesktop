@@ -7,14 +7,15 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { useComposerCollapsed } from "./useComposerCollapsed";
 import type { MentionSource } from "./useMentionCandidates";
 
 /**
- * The scroll region the composer docks under, searched depth-first from the
- * sibling above it (every surface lays the composer out as an in-flow sibling
- * below its scrolling conversation). Null when there is none — the anchoring it
- * feeds is best-effort.
+ * The scroll region inside `el`'s subtree, searched depth-first. Every surface
+ * lays the composer out as an in-flow sibling below its scrolling conversation,
+ * possibly with docked strips between them. Null when there is none — the
+ * anchoring it feeds is best-effort.
  */
 function findScrollRegion(el: Element | null): HTMLElement | null {
   if (!(el instanceof HTMLElement)) return null;
@@ -55,6 +56,7 @@ export function CommentComposer({
   actions,
   leadingActions,
   mentions,
+  toastClearance,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). Both methods expand a collapsed box first. */
@@ -84,6 +86,9 @@ export function CommentComposer({
   /** Opt in to `@`/`#`/`!` autocomplete — only surfaces whose forge autolinks the
    *  completed reference pass one. */
   mentions?: MentionSource;
+  /** This mount is its pane's bottom bar (or docks on one): toasts lift above
+   *  its top edge. */
+  toastClearance?: boolean;
 }) {
   const hasDraft = value.trim().length > 0;
   // Only the `busy` hold gets words: an empty draft explains itself, and a reason
@@ -95,6 +100,7 @@ export function CommentComposer({
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const editorWrapRef = useRef<HTMLDivElement>(null);
   const peekRef = useRef<HTMLButtonElement>(null);
+  useToastClearance(rootRef, toastClearance === true);
   // The scroll region measured before the box grows (an expand, or the rollback
   // of a refused collapse), when the reader was sitting at its bottom; null
   // otherwise. The ELEMENT is held rather than re-walked on the commit:
@@ -123,9 +129,15 @@ export function CommentComposer({
    *  reader isn't sitting at its bottom. Call BEFORE the flip: growing the box
    *  shrinks the region above it, carrying the last comment off-screen. */
   function measurePinRegion(): HTMLElement | null {
-    const region = findScrollRegion(
-      rootRef.current?.previousElementSibling ?? null,
-    );
+    // Nearest preceding sibling first: a docked strip (a scope hint) can sit
+    // between the box and the conversation. Never the parent's other subtrees.
+    let region: HTMLElement | null = null;
+    for (
+      let sibling = rootRef.current?.previousElementSibling ?? null;
+      sibling && !region;
+      sibling = sibling.previousElementSibling
+    )
+      region = findScrollRegion(sibling);
     if (!region) return null;
     const atBottom =
       region.scrollHeight - region.scrollTop - region.clientHeight <= 8;

@@ -117,6 +117,7 @@ import {
 } from "@/lib/use-disabled-reason";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 
 /** A discussion comment/reply shares the conversation shape minus review state. */
@@ -349,6 +350,10 @@ export function DiscussionView({
     if (document.activeElement === document.body)
       focusHost.current?.focus({ preventScroll: true });
   }, [viewFrame]);
+  // The scope hint docks on the composer, so toasts clear its copy button too.
+  // Every arm without data returns early below, so data is its mount condition.
+  const scopeHintRef = useRef<HTMLDivElement>(null);
+  useToastClearance(scopeHintRef, d !== undefined);
   const shell = (content: ReactNode) => (
     <div
       ref={(node) => {
@@ -1299,7 +1304,7 @@ export function DiscussionView({
       {/* empty:hidden: the hint self-gates to null (scopes covered, non-classic
           token, or still loading), and the wrapper must then contribute no
           border or padding of its own. */}
-      <div className="empty:hidden shrink-0 border-t p-2">
+      <div ref={scopeHintRef} className="empty:hidden shrink-0 border-t p-2">
         {/* GitHub's scope error names write:discussion, but `repo` covers
             repository-discussion writes — warn only when neither is present. */}
         <ScopeRefreshHint
@@ -1309,6 +1314,7 @@ export function DiscussionView({
         />
       </div>
       <CommentComposer
+        toastClearance
         ref={composerRef}
         value={compose.value}
         onChange={compose.set}

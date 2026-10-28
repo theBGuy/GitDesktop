@@ -1,7 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import {
+  filterRemoteRows,
+  type LocalRemoteState,
+  localStateMatches,
+} from "./remote-state-filter";
 
-export type LocalRemoteState = "open" | "closed";
+export type { LocalRemoteState };
 
 /** Minimal shape of a local PR/issue the filter needs. */
 export interface LocalLike {
@@ -18,6 +23,8 @@ export interface RemoteLike {
   title: string;
   author: { login: string } | null;
   labels: { name: string }[];
+  /** The forge's own state for the row ("OPEN" / "MERGED" / "CLOSED" / …). */
+  state: string;
 }
 
 /**
@@ -38,6 +45,9 @@ export function useLocalRemoteFilter<
   locals: L[];
   remotes: R[];
   stateFilter: LocalRemoteState;
+  /** `remotes` is the list read's placeholder (another key's rows, possibly
+   *  the other state tab's), which the state predicate must not filter. */
+  remotesArePlaceholder: boolean;
   /** The server-side author selection — excludes the local section wholesale. */
   authorFilter: Set<string>;
   /** The server-side label selection; still applied client-side to LOCAL rows,
@@ -58,6 +68,7 @@ export function useLocalRemoteFilter<
     locals,
     remotes,
     stateFilter,
+    remotesArePlaceholder,
     authorFilter,
     labelFilter,
     mineActive,
@@ -69,10 +80,15 @@ export function useLocalRemoteFilter<
   const queryClient = useQueryClient();
 
   const stateLocal = locals.filter((l) =>
-    stateFilter === "open" ? l.status === "open" : l.status !== "open",
+    localStateMatches(l.status, stateFilter),
   );
-  // The query already returns only the active-state remotes.
-  const stateRemote = remotes;
+  // The forge's state-filtered list can still carry a row that just changed
+  // state, so each row is filed by its own state.
+  const stateRemote = filterRemoteRows(
+    remotes,
+    stateFilter,
+    remotesArePlaceholder,
+  );
 
   // Options and counts read a UNION of the rows on screen, EVERY cached page of
   // this list family, and the current selection. Deriving them from the filtered
@@ -90,8 +106,10 @@ export function useLocalRemoteFilter<
         optionSourcePrefix.every((part, i) => q.queryKey[i] === part),
     });
     let rows = stateRemote;
+    // Cached pages are settled reads of this state, lagging rows included.
     for (const [, page] of pages) {
-      if (page && page !== rows) rows = mergeRows(rows, page);
+      if (page && page !== remotes)
+        rows = mergeRows(rows, filterRemoteRows(page, stateFilter, false));
     }
     return rows;
   })();

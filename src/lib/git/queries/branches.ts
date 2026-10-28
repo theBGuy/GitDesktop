@@ -8,7 +8,7 @@ import type { BranchRewriteStatus } from "../types";
 import { repoKeys } from "./core";
 import { useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
-import { recheckPrListAfterRemoteDelete } from "./push-writes";
+import { recheckListsLater } from "./push-writes";
 
 export function useBranches(repo: string) {
   return useQuery({
@@ -202,8 +202,7 @@ export function useDeleteRemoteBranch(repo: string) {
         repoKeys.branches(repo),
         ...prListKeys,
       ],
-      onSuccess: () =>
-        recheckPrListAfterRemoteDelete(queryClient, repo, prListKeys),
+      onSuccess: () => recheckListsLater(queryClient, repo, prListKeys),
     },
   );
 }

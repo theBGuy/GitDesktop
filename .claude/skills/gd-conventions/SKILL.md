@@ -302,10 +302,14 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
 - A docked action bar that a bottom-right toast can cover publishes its top
   edge through `useToastClearance(ref, active)`
   (`src/lib/use-toast-clearance.ts`), which lifts every toast above it while
-  `active`. Beyond `position` and `closeButton`, only the offset props ride
-  along on the app Toaster (`AppToaster` in `src/main.tsx`): the vendored
-  wrapper spreads caller props last, so `toastOptions` would drop its `cn-toast`
-  class, `className` its `toaster group` class, and `style` its CSS variables.
+  `active`; when several bars are active, toasts clear the highest. A docked
+  `CommentComposer` passes its `toastClearance` prop instead and measures its
+  own root: a call-site wrapper would break its scroll-pin lookup over its
+  preceding siblings (`scripts/toast-clearance-adopters.test.mjs`). Beyond
+  `position` and `closeButton`, only the offset props ride along on the app
+  Toaster (`AppToaster` in `src/main.tsx`): the vendored wrapper spreads caller
+  props last, so `toastOptions` would drop its `cn-toast` class, `className`
+  its `toaster group` class, and `style` its CSS variables.
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".
@@ -793,10 +797,15 @@ one grep away on the named symbol. Grows via Conventions-sync.
   the base, and Bitbucket's checks read that sha's statuses; for any other
   merge it is a precaution. A later arm re-arms the per-repo timer, and its
   one fire covers every coalesced arm's reads. A remote-branch delete instead
-  schedules
-  `recheckPrListAfterRemoteDelete` with keys its call site builds (GitHub
-  closes a head-deleted PR asynchronously). Guard:
-  `scripts/push-recheck-family.test.mjs`, keyed on the api callees.
+  schedules `recheckListsLater` with the keys its own call site builds
+  (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
+  close or reopen and an issue close or reopen arm the same re-read with
+  lens-scoped list keys, since the forge's list membership lags the row's own
+  state. Its per-repo entry holds the union of the keys owed and fires ONE
+  invalidation. Guards: `scripts/push-recheck-family.test.mjs` pins the arm
+  sites (the run rechecks, keyed on the api callees; the branch-delete and the
+  merge, close and reopen list re-reads, which no other write schedules), and
+  `scripts/push-writes.test.mjs` pins the union fire.
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`

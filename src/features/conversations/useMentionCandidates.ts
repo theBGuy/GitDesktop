@@ -15,6 +15,7 @@ import type {
   PrInfo,
   RemoteLens,
 } from "@/lib/git/types";
+import { remoteStateMatches } from "./remote-state-filter";
 
 export type { MentionTrigger };
 
@@ -148,24 +149,30 @@ function rankRefs(
   }));
 }
 
+// Both lists are the open reads, whose membership can lag a close or merge the
+// row's own state already shows; a completion never offers a closed ref.
 const issueRows = (list: IssueInfo[] | undefined): RefRow[] =>
-  (list ?? []).map((i) => ({
-    number: i.number,
-    title: i.title,
-    state: i.state,
-    isPr: false,
-    sortAt: i.updatedAt,
-  }));
+  (list ?? [])
+    .filter((i) => remoteStateMatches(i.state, "open"))
+    .map((i) => ({
+      number: i.number,
+      title: i.title,
+      state: i.state,
+      isPr: false,
+      sortAt: i.updatedAt,
+    }));
 
 const prRows = (list: PrInfo[] | undefined): RefRow[] =>
   // `PrInfo` carries no `updatedAt`, so PR rows order by their open date.
-  (list ?? []).map((p) => ({
-    number: p.number,
-    title: p.title,
-    state: p.state,
-    isPr: true,
-    sortAt: p.createdAt,
-  }));
+  (list ?? [])
+    .filter((p) => remoteStateMatches(p.state, "open"))
+    .map((p) => ({
+      number: p.number,
+      title: p.title,
+      state: p.state,
+      isPr: true,
+      sortAt: p.createdAt,
+    }));
 
 /**
  * The per-surface data behind the comment composers' `@`/`#`/`!` autocomplete:

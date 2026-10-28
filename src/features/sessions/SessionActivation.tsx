@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PlanComposer } from "@/features/plan/PlanView";
 import { type PlanSeed, usePlanStore } from "@/features/plan/store";
 import { ResearchComposer } from "@/features/research/ResearchView";
 import { type ResearchSeed, useResearchStore } from "@/features/research/store";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { SessionComposer } from "./SessionComposer";
 import { useSessionsStore } from "./store";
 
@@ -25,6 +26,10 @@ type Mode = "delegate" | "plan" | "research";
  */
 export function SessionActivation({ repoPath }: { repoPath: string }) {
   const [mode, setMode] = useState<Mode>("delegate");
+  // Only the delegate arm docks its composer here; the plan and research arms
+  // render composers that clear the toasts themselves.
+  const composerBarRef = useRef<HTMLDivElement>(null);
+  useToastClearance(composerBarRef, mode === "delegate");
   const [planSeed, setPlanSeed] = useState<PlanSeed | null>(null);
   const [researchSeed, setResearchSeed] = useState<ResearchSeed | null>(null);
   // Bumped when a seed is consumed, so the composer remounts and re-initializes
@@ -118,7 +123,7 @@ export function SessionActivation({ repoPath }: { repoPath: string }) {
               </p>
             </div>
           </div>
-          <div className="shrink-0 border-t p-2">
+          <div ref={composerBarRef} className="shrink-0 border-t p-2">
             <SessionComposer
               repoPath={repoPath}
               session={null}

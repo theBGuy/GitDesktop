@@ -244,6 +244,7 @@ import { useEntityHold, useRevealGuard } from "@/lib/use-entity-hold";
 import { useKeyedEntityState } from "@/lib/use-keyed-entity-state";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
+import { useToastClearance } from "@/lib/use-toast-clearance";
 import { cn } from "@/lib/utils";
 import { ChecksRollup } from "./ChecksRollup";
 import { LinkedIssuesField } from "./LinkedIssuesField";
@@ -2714,6 +2715,23 @@ export function RemotePrView({
       </HeldFrame>
     </div>
   );
+  // The footers' gates, shared by their JSX and their toast clearance. The
+  // clearance runs above every early return, so it also requires the loaded view
+  // to be the arm painted (no loading frame, offline or error arm, or resolve).
+  const openFooterShown =
+    pr?.state === "OPEN" && (canChangeState || canMerge || canWrite);
+  const reopenFooterShown =
+    pr?.state === "CLOSED" && canChangeState && provider !== "bitbucket";
+  const loadedViewPainted =
+    !showsLoadingFrame &&
+    detailPane !== "offline" &&
+    detailPane !== "error" &&
+    pr !== undefined &&
+    !resolve;
+  const openFooterRef = useRef<HTMLDivElement>(null);
+  const reopenFooterRef = useRef<HTMLDivElement>(null);
+  useToastClearance(openFooterRef, loadedViewPainted && openFooterShown);
+  useToastClearance(reopenFooterRef, loadedViewPainted && reopenFooterShown);
   if (showsLoadingFrame) {
     // The loaded header's controls, held where they will stand and gated on the
     // list row's state as the loaded ones are on the PR's. With no cached row an
@@ -4178,6 +4196,7 @@ export function RemotePrView({
               menu stays hidden; Bitbucket has neither, so the bar hides. */}
           {canComment && (
             <CommentComposer
+              toastClearance
               ref={composerRef}
               value={compose.value}
               onChange={compose.set}
@@ -4481,8 +4500,11 @@ export function RemotePrView({
       {/* The open-MR footer hosts Close + Merge alongside the shared Ready /
           Convert-to-draft pair — shown when any is available, each control gated
           individually. */}
-      {isOpen && (canChangeState || canMerge || canWrite) && (
-        <div className="flex flex-wrap items-center gap-2 border-t p-3">
+      {openFooterShown && (
+        <div
+          ref={openFooterRef}
+          className="flex flex-wrap items-center gap-2 border-t p-3"
+        >
           {/* One Ready / Convert-to-draft pair for all three providers: GitLab
               (`glab mr update`) and Bitbucket (PUT `draft`) via `canToggleDraft`;
               GitHub folds in via `canWrite` and routes the same `setDraft` mutation
@@ -4646,8 +4668,11 @@ export function RemotePrView({
 
       {/* Bitbucket declined PRs can't be reopened — no API or web affordance, so
           hide it (unlike GitHub/GitLab). */}
-      {pr.state === "CLOSED" && canChangeState && provider !== "bitbucket" && (
-        <div className="flex items-center gap-2 border-t p-3">
+      {reopenFooterShown && (
+        <div
+          ref={reopenFooterRef}
+          className="flex items-center gap-2 border-t p-3"
+        >
           <span className="flex-1" />
           <DisabledReasonButton
             variant="outline"
