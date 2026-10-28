@@ -349,14 +349,9 @@ export function SettingsScreen() {
           else toast.error(title);
         } else {
           toast.success("Settings saved");
-          // Continue once every Automations write lands too (one started after
-          // the press included; a failure already toasted, so it stays), to
-          // wherever the move stands NOW: Save and close's, or one
-          // `requestLeave` held while this Save was writing. Only if nothing
-          // happened meanwhile: no edit (it stays on screen with its Save bar),
-          // no prompt open (this screen's or an app-scoped one, such as the
-          // footer Discard's), and no user action or repository open since the
-          // move was requested, so this late resume retires nothing newer.
+          // The move is read live, after every Automations write landed (a
+          // failure stays), and runs only if nothing happened since it was
+          // requested, so this late resume never retires a newer action.
           if (
             leaveAfterSave.current !== null &&
             (await automationsLanded(automationsSaved))

@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { settingsFormOpts } from "@/features/settings/settings-form";
 import { useAutomations, useSaveAutomations } from "@/lib/automations/queries";
@@ -412,13 +411,14 @@ export const AutomationsSection = withForm({
                   >
                     Discard
                   </DisabledReasonButton>
-                  <Button
+                  <DisabledReasonButton
                     size="sm"
                     onClick={() => void doSave()}
                     disabled={save.isPending}
+                    reason="Saving…"
                   >
                     Save changes
-                  </Button>
+                  </DisabledReasonButton>
                 </div>
               </div>
             )}

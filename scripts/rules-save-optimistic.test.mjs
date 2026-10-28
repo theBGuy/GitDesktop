@@ -467,6 +467,13 @@ test("every rules save hook patches at mutate time and rolls back only its own p
     // A cancel without its refetch partner, or the refetch without the cancel.
     [
       RULES_QUERIES,
+      once(
+        "      queryClient.invalidateQueries({ queryKey: ctx.key }),",
+        "      undefined,",
+      ),
+    ],
+    [
+      RULES_QUERIES,
       once("  await queryClient.cancelQueries({ queryKey: key });\n", ""),
     ],
   ])

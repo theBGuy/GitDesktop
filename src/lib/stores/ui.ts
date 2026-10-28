@@ -718,15 +718,9 @@ export const useUiStore = create<UiState>()((set, get) => {
   // there double-exposes two differently laid-out headers. Read at REQUEST time.
   const repoViewMotion = () => ({ animate: get().view !== "repo" });
 
-  // Hands a move off a dirty or saving Settings to its guard instead of making
-  // it. The intercept bumps for the user's request before the guard runs, so an
-  // older pending continuation (a claimed repo open) retires and any hold is
-  // stamped with this request's epoch. The resume bumps when it runs: at the
-  // Discard and close press, at a held move's settle or when a Save lands under
-  // the open prompt (either only while no user action or repository open came
-  // since the move was requested: a claimed open moves no epoch, so Settings
-  // also stamps a `repoOpenWatermark`), or at once, inside the intercept, when
-  // the guard has nothing left to hold.
+  // Hands a move off a dirty or saving Settings to its guard. Bumps for the
+  // request first, so an older continuation (a claimed repo open) retires and
+  // any hold carries this request's epoch; resume rules live in requestLeave.
   const interceptSettingsLeave = (resume: () => void): boolean => {
     const { view, settingsLeaveGuard } = get();
     if (view !== "settings" || settingsLeaveGuard === null) return false;
