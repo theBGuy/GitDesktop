@@ -3,11 +3,15 @@
 // it for `aria-disabled`: focus intact, the reason announced via an sr-only node
 // joined into `aria-describedby`, hover text on a wrapper span. A reason-less
 // disable stays native rather than becoming a mute tab stop. JSX stays per-caller
-// (the vendored Button and a raw `<button>` differ); this owns the derivations.
+// (the vendored Button and a raw `<button>` differ); this owns the derivations,
+// plus the one `render` element a held focusable Button takes.
 import type { BaseUIEvent } from "@base-ui/react/types";
 import {
+  createElement,
   type MouseEventHandler,
+  type ReactElement,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   useId,
 } from "react";
 
@@ -38,6 +42,35 @@ export function passThroughNonActivationKeys(
   e: BaseUIEvent<ReactKeyboardEvent<HTMLButtonElement>>,
 ) {
   if (!isActivationKey(e)) e.preventBaseUIHandler();
+}
+
+const stopClickPropagation = (e: ReactMouseEvent) => e.stopPropagation();
+
+/** The `render` of a vendored Button that can sit disabled AND
+ *  `focusableWhenDisabled`: while `held` (exactly that state), a native
+ *  `<button>` taking {@link passThroughNonActivationKeys}, so Escape and app
+ *  hotkeys still work with focus on it; otherwise the caller's own `render`.
+ *  The element carries no `type`: render props merge last, so one would
+ *  override a caller's type="submit". Callers pair it with
+ *  {@link ARIA_DISABLED_CLASS}, whose aria-disabled:pointer-events-none keeps
+ *  pointer clicks off it; any click that still lands (a let-through modified
+ *  Enter/Space, an AT activation, a programmatic click) only has its
+ *  propagation stopped here, and useButton's disabled onClick refuses it, so
+ *  it never reaches the caller's onClick. The `focusable-held-button-render`
+ *  guard in check-banned-patterns.mjs requires it on every JSX tag that
+ *  writes `focusableWhenDisabled` as a literal attribute, except a
+ *  `<form.SubmitButton>` tag, which the helper on SubmitButton's own
+ *  `<Button>` covers. */
+export function heldButtonRender<R = undefined>(
+  held: boolean,
+  render?: R,
+): R | ReactElement | undefined {
+  return held
+    ? createElement("button", {
+        onKeyDown: passThroughNonActivationKeys,
+        onClick: stopClickPropagation,
+      })
+    : render;
 }
 
 /** The dim `aria-disabled` needs: the vendored `disabled:` variants can't see
@@ -80,7 +113,9 @@ export function useDisabledReason({
         .join(" ") || undefined,
     /** For a RAW `<button>` only. `aria-disabled` is advisory, so activation is
      *  withheld here too. The vendored Button instead takes
-     *  `focusableWhenDisabled={!!blockedReason}` and blocks activation itself. */
+     *  `focusableWhenDisabled={!!blockedReason}` with its `render` from
+     *  {@link heldButtonRender} (the guard requires it; form.SubmitButton
+     *  applies it for you), and blocks activation itself. */
     nativeProps: {
       disabled: blockedReason ? undefined : disabled,
       "aria-disabled": blockedReason ? true : undefined,

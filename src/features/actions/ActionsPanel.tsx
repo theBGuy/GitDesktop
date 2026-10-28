@@ -60,7 +60,10 @@ import { pendingItemReason } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { RunContextMenuItems } from "./RunContextMenu";
 import { RunWorkflowDialog } from "./RunWorkflowDialog";
@@ -582,6 +585,7 @@ export function ActionsPanel({
             // button is the Load more retry too.
             disabled={runs.isFetchingNextPage}
             focusableWhenDisabled
+            render={heldButtonRender(runs.isFetchingNextPage)}
             onClick={() => runs.fetchNextPage()}
           >
             {runs.isFetchingNextPage

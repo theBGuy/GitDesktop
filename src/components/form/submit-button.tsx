@@ -2,7 +2,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useFormContext } from "@/lib/form-context";
-import { passThroughNonActivationKeys } from "@/lib/use-disabled-reason";
+import { heldButtonRender } from "@/lib/use-disabled-reason";
 
 /**
  * Submit button bound to the surrounding form (use inside `<form.AppForm>`):
@@ -29,19 +29,12 @@ export function SubmitButton({
             type="submit"
             disabled={held}
             {...props}
-            // Same pass-through, and the same stop on keyboard-synthesized
-            // clicks, as DisabledReasonButton for a caller's reasoned hold; no
-            // `type` on it, which would override "submit".
-            render={
-              held && props.focusableWhenDisabled ? (
-                <button
-                  onKeyDown={passThroughNonActivationKeys}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              ) : (
-                props.render
-              )
-            }
+            // A caller's reasoned hold keeps every key but activation
+            // reaching the app, as on DisabledReasonButton.
+            render={heldButtonRender(
+              Boolean(held && props.focusableWhenDisabled),
+              props.render,
+            )}
           >
             {isSubmitting && <Spinner data-icon="inline-start" />}
             {children}

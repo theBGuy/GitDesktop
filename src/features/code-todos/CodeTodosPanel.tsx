@@ -27,7 +27,10 @@ import { useTodoScan } from "@/lib/git/queries";
 import type { TodoScanItem } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
-import { ARIA_DISABLED_CLASS } from "@/lib/use-disabled-reason";
+import {
+  ARIA_DISABLED_CLASS,
+  heldButtonRender,
+} from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
 import { MarkerChip } from "./MarkerChip";
 import { DEFAULT_MARKERS, TODO_SCAN_CAP } from "./markers";
@@ -265,6 +268,7 @@ export function CodeTodosPanel({
           // on the chip, so that state keeps a plain disabled.
           disabled={busy || noMarkers}
           focusableWhenDisabled={!noMarkers}
+          render={heldButtonRender(busy && !noMarkers)}
           onClick={() => scan.refetch()}
         >
           <ArrowClockwiseIcon className={cn(busy && "animate-spin")} />

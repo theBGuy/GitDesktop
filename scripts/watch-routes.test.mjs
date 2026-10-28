@@ -4,7 +4,8 @@
 // leaves a watched run with no watcher at all, so each arm is a case.
 //
 // The import reaches straight into `src/` under Node's type stripping; the
-// module is import-free, so this suite needs no install.
+// module's one import is type-only, which type stripping erases, so this suite
+// needs no install.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

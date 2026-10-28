@@ -16,11 +16,11 @@ const MODULE = new URL("../src/lib/use-disabled-reason.ts", import.meta.url);
 
 let isActivationKey = null;
 let passThroughNonActivationKeys = null;
+let heldButtonRender = null;
 let skip = false;
 try {
-  ({ isActivationKey, passThroughNonActivationKeys } = await import(
-    MODULE.href
-  ));
+  ({ isActivationKey, passThroughNonActivationKeys, heldButtonRender } =
+    await import(MODULE.href));
 } catch (err) {
   if (
     process.env.GD_EXPECT_DEPS ||
@@ -91,5 +91,27 @@ describe("passThroughNonActivationKeys", { skip }, () => {
       passThroughNonActivationKeys(e);
       assert.equal(e.baseUIPrevented, 1);
     }
+  });
+});
+
+describe("heldButtonRender", { skip }, () => {
+  test("held: a typeless native button carrying the key pass-through", () => {
+    const element = heldButtonRender(true);
+    assert.equal(element.type, "button");
+    assert.equal("type" in element.props, false);
+    assert.equal(element.props.onKeyDown, passThroughNonActivationKeys);
+    let stopped = 0;
+    element.props.onClick({
+      stopPropagation() {
+        stopped++;
+      },
+    });
+    assert.equal(stopped, 1);
+  });
+
+  test("not held: the caller's own render, by reference", () => {
+    const render = { mine: true };
+    assert.equal(heldButtonRender(false, render), render);
+    assert.equal(heldButtonRender(false), undefined);
   });
 });
