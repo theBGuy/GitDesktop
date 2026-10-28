@@ -12,6 +12,249 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.13.7] - 2026-10-28
+
+### Changed
+
+- When you stage the last change in the file you're reviewing, Changes opens the
+  next file in the list (the one above it, at the end of a section), and
+  unstaging the last staged change in the file you're reviewing opens the next
+  file in Staged the same way.
+- Watching CI runs uses far fewer API requests. Older runs are checked at a
+  gentler pace on every forge, and on GitHub one request now covers every run
+  on a pull request's head, with job details loading only where they're shown.
+- When one of GitHub's API rate limits runs out, GitDesktop stops sending
+  most of the requests that limit covers until it lifts, and skips retrying
+  requests GitHub refused for a rate limit or a sign-in problem.
+- GitDesktop spends far fewer GitHub API requests: reads reuse unchanged server
+  responses and share short-lived caches; window focus refreshes only data that
+  has gone stale; fetch, pull, checkout, stash and discard no longer refresh
+  GitHub data; the CI badge and run notifications share one check per branch;
+  History fetches a commit's remote comments and diff only when they are needed;
+  a finished Actions run's details are reused while unchanged, in the app and
+  through the MCP server; and the MCP server's comment, edit, label and pull
+  request description tools read only what they need (issue edits no longer
+  require GitHub CLI 2.94). Changes you make in the app still show right away.
+- The Discard confirm now says where a hunk or selected lines go back to: the
+  staged version when part of the file is staged, otherwise the last commit.
+  Staged hunks offer Unstage hunk only.
+- Rate-limit errors from GitHub, GitLab, Bitbucket and Jira now read as one
+  short sentence naming the service, with the full text under Details.
+- When GitHub's GraphQL rate limit blocks a repository's hosted panels, the
+  rate-limited notice can now say when access resumes.
+- Space on a focused file in the Changes list stages or unstages it, like the
+  row's + / − button; Enter still opens the file.
+- Discard in Settings, including the Automations panel's, asks for confirmation
+  first and counts any secret values you typed, so a stray click can't throw
+  your edits away.
+
+### Fixed
+
+- Amend, Undo, Reset to commit and Cherry-pick to branch in the History menu
+  now say why when they're unavailable, and Cherry-pick to branch says it's
+  loading branches while the list loads. The message in your commit box stays
+  put: Amend and Undo ask before replacing it.
+- Push and the other sync actions stay available while a background auto-fetch
+  runs, and auto-fetch skips its turn while a worktree removal runs.
+- The Automations panel's Save changes button confirms with an "Automations
+  saved" toast, a failed save says which save failed and whether your edits are
+  still on screen, and Settings' Save waits for a running automations save.
+- If you've bound Space to a shortcut, Space still presses a focused button or
+  scrolls whenever that shortcut has nothing to act on.
+- In dialogs with a Generate button, a Space bound to Generate toggles a focused
+  checkbox or switch, opens a focused tab, or flips a linked-issue chip, without
+  also running Generate.
+- Blame shows git's own reason when it can't run, such as a damaged or missing
+  repository, instead of guessing that the file is binary or untracked.
+- The Actions and Insights run lists pause after a failed refresh, and the
+  Actions list after a failed Load more, sparing API requests while your
+  forge is unreachable or rate limited.
+- When the app can't check whether a commit is on the remote, the commit view
+  says it couldn't check and offers Retry, rather than asking you to push a
+  commit that may already be pushed.
+- The commit shortcut works while a file or folder in the Changes list has
+  keyboard focus, so you can stage from the list and commit without leaving it.
+  Other Enter and Space shortcuts you've bound with Ctrl, ⌘, Alt or Option now
+  reach the app from those rows too.
+- The conflict pane now explains why it can't resolve a file whose path starts
+  with `-`, and keeps Accept all off for it.
+- Undo on a detached HEAD now refuses when another Git process switches what
+  is checked out during the undo.
+- Commit, stash, blame, Insights, branch compare, agent-step diff and Code
+  TODOs panes now keep what's on screen when a background refresh fails, with
+  a line saying it couldn't refresh and a Retry. A pane that fails to load
+  says why and offers Retry, as do the Jira issue and pull request commit
+  screens.
+- Dialog titles keep clear of the Close button: long names wrap before they
+  reach it, truncated titles show their ellipsis in full, and badges beside a
+  title stay visible.
+- History, Compare, stash, agent worktree and pull request diffs keep
+  the current diff on screen as you move to another file (and between
+  commits in a file's history), until it's ready or for a brief moment,
+  whichever comes first.
+- Diffs refresh in a single step when you come back to the app after editing
+  a file.
+- Discard all changes leaves everything as it was when a new file's name
+  isn't valid UTF-8, and names that file so you can rename it first.
+- Edit history: a squash or fixup group whose middle step undoes everything
+  before it in the group now applies when the plan pauses to edit a commit.
+  Continue on the conflict banner does the same for any rebase stopped that
+  way, including one started in a terminal.
+- Edit history: when a plan that pauses to edit rewords a commit, notes that
+  git copies on rewrite now land on the reworded commit, and post-rewrite
+  hooks are given the reworded commit.
+- The **Blame file…** picker and the Repository files dialog keep their loaded
+  files on screen when a refresh fails, with a note and a Retry, and a failed
+  TODO rescan keeps the last results. A list that can't load at all shows the
+  reason and a Retry, and the AI excluded tab says when your AI settings
+  couldn't be read.
+- When GitHub can't be reached or its API rate limit is in effect, the Star
+  menu item, repository security settings, secret and variable environment
+  scopes, issue lock actions, Insights cards, Explore's Star button and the MCP
+  server browser now say so. Security settings, environment scopes, Insights
+  and the MCP server browser offer a Retry, and the Star and lock menu items
+  check again each time you open their menu.
+- A GitLab pipeline that is being canceled now stays live in CI views until
+  GitLab reports it canceled.
+- In local diffs and GitHub pull requests, the diff pane now says what changed
+  for a new or deleted empty file and for a file that became executable or
+  stopped being one, and shows where a GitHub pull request moved a file it
+  renamed with no content changes.
+- History says it couldn't load the commit log, with the reason and a Retry,
+  when the repository can't be read, instead of showing the first-commit
+  welcome, and a file's history does the same instead of reporting none. A
+  failed refresh or Load more keeps the loaded commits on screen with a note,
+  and a failed search of all history says so rather than reporting no
+  matches. On a branch with no upstream, when the check for unpushed commits
+  fails, squash and Edit history say they couldn't check which commits are
+  pushed instead of treating them all as already pushed.
+- Insights board charts whose local read fails now say so, with one Retry for
+  the whole board, instead of reporting an empty window. A failed board refresh
+  says so, and while you're offline a hosted card with nothing loaded says it
+  will load once you're back online.
+- Keyboard focus now follows your intent through removals and dialogs:
+  deleting a task, hook, review record, MCP server, slash command, syntax
+  mapping, co-author, or ensemble arm hands focus to the next sensible control,
+  edit dialogs return to the row they came from, Create pull request opens on
+  the title when it's empty, and Run task keeps Enter away from Stop & run
+  while a task is already running.
+- "Load more" keeps keyboard focus while the next page loads — in the Actions
+  runs list, Explore search, and the MCP registry browser.
+- The MCP server's `stage_files`, `unstage_files`, and `stash_push` tools read
+  paths, including `literal=false` patterns, from the repository root, as
+  `repo_status` lists them, when the server is started in a subfolder.
+- The MCP `pull` tool's `expectedDropShas` accepts full commit ids from SHA-256
+  repositories (64 hex characters), as well as SHA-1 ones.
+- When a branch tracks one repository and pushes to another
+  (`branch.<name>.pushRemote` or `remote.pushDefault`), the MCP `push` tool's
+  refusal for a branch whose upstream has a different name now suggests a
+  retry that pushes to that push remote and keeps the upstream.
+- Deleting the branch after merging a GitHub pull request now works when the
+  branch name contains `#` or `%`. A branch whose name contains `{` or `}` is
+  not deleted by GitDesktop, and the merge notice says so.
+- A pull request you merge, close or reopen, or an issue you close or reopen,
+  now leaves its old tab as soon as the list refreshes, even when the forge
+  still lists it there. The list also checks once more a few seconds later, so
+  a reopened item shows up under Open without a manual Refresh.
+- Reset to commit checks that HEAD is still the commit it opened on before it
+  starts: when a commit lands or HEAD moves while the dialog is open, it resets
+  nothing and tells you why.
+- On a branch with no upstream, commits pushed from a terminal lose their
+  "Not pushed yet" markers within about 30 seconds, and History stops offering
+  them for squash and Edit history.
+- The conflict banner now says when a rebase stopped after an exec step or
+  paused at a break, and reads "no conflicts left" when a merge, cherry-pick,
+  revert or interactive rebase step is waiting with nothing to resolve.
+- After a commit, reset or rebase made outside the app, in a terminal or by
+  an agent, branches, file history, blame, stats, Insights and Compare start
+  catching up on the next status check while the window stays focused.
+- Keyboard pickers (co-author suggestions, the add-reviewer picker in
+  Bitbucket default-reviewer settings, the repository list, and the session
+  composer's @-file and /-command menus) keep the highlighted row in step with
+  the list as it loads, filters, or refreshes, so Enter always acts on the row
+  that is marked.
+- In the dialogs that create or edit a pull request, local ones included, the
+  submit shortcut with a linked-issue chip focused keeps that issue's
+  Closes/Relates choice as you set it.
+- New CI runs show up moments after you push a branch or tag, publish a
+  repository or release, run a workflow, push a conflict resolution, or create,
+  merge or reopen a pull request or update its branch. When you push to a pull
+  request's branch, create or reopen it, push its conflict resolution or update
+  its branch, its checks and the list's CI badges catch up too. Deleting a
+  branch on the remote drops the pull request GitHub closes with it from the
+  open list.
+- Deleting a branch from a remote always targets that branch, including when the
+  remote also has a tag with the same name.
+- Reset to _origin/…_ on the branch you're on checks the branch once more just
+  before it updates your files: if another Git process committed on it after
+  the reset moved it, the reset stops with your files as they were and that
+  commit kept, and the toast says where the branch points now when it can tell.
+- Reset to _origin/…_ checks your upstream branch again when you confirm, and
+  resets nothing if it moved since the menu opened or your branch moved before
+  the reset started. The Pull menu holds its rows in place while it checks.
+- Automation and branch-rule editors reopened while a save is still writing
+  show the rules being saved.
+- Run notifications also cover runs that start and finish between checks.
+- Creating a branch, checking out a remote branch, adding a worktree, or naming
+  the initial branch when creating a repository now stops with a clear message
+  when the name is under `gd/session/` in any letter case — the prefix reserved
+  for agent sessions — and the MCP server's branch tools refuse those names the
+  same way.
+- Leaving Settings with unsaved changes asks to save or discard first,
+  whether you leave from the command palette, a shortcut, a notification, or
+  by opening a repository, and leaving while a save is still writing waits for
+  it to land.
+- Settings tells you when your changes couldn't be saved, and keeps them on
+  screen with the Save bar so you can save again.
+- After a successful save, Settings holds exactly what was written, even when
+  the settings file can't be re-read right away, so Discard and the next Save
+  always start from your latest saved values.
+- Settings that fail to save keep the Save bar and the unsaved-changes prompt up
+  until a save succeeds. When a write to other app data fails, such as local pull
+  requests and issues, review drafts or automation history, those keep showing
+  what was last saved.
+- At a shallow clone's oldest commit, Undo says the commit's parent was never
+  fetched, and the Undo shortcut and command palette also say how to fetch it
+  (`git fetch --deepen=1`).
+- Staging or unstaging a file's last hunk or lines from its diff keeps the
+  diff on screen until the file list catches up.
+- State now reads in words and glyphs, not color alone: the hooks list
+  announces its selection, the commit summary counter shows a warning glyph
+  past 72 characters and tells screen readers how far over the budget you are,
+  failed cleanup rows show the reason right under the branch name, a branch's
+  pull-request chip shows an icon for the pull request's state (open, draft,
+  merged or closed), and the branch's context menu adds View pull request (View
+  merge request on GitLab).
+- Applying a review suggestion to a file that mixes Windows and Unix line endings
+  now changes only the suggested lines, and every other line keeps its original
+  ending.
+- Toasts lift above the Settings save bar while it's visible, keeping the Save
+  and Discard buttons clickable and save errors readable.
+- The pop-up messages in the bottom-right corner now sit above the bottom action
+  bar or comment box in the pull request, commit, discussion, issue, Jira issue,
+  conflict-resolve, tag, plan, research and agent-session views, so the buttons
+  there stay clickable while a message is showing.
+- After you undo the commit selected in History, the detail pane returns to
+  its resting state.
+- Removing ignore rules leaves every other line's ending as it was, including
+  in files that mix Windows and Unix line endings.
+- Discarding selected files, or selected lines of a new file, acts only on
+  what Git still sees: a new file goes to the recycle bin (or loses the
+  chosen lines) only while Git still lists it as new. If it has changed
+  state since, nothing changes and you're asked to refresh and try again.
+  On Windows, to keep discards inside the repository, a discard stops
+  before changing anything, and names the file, when a new file it would
+  recycle sits behind a junction or other link, or has a path part ending
+  in a dot, a space, or `.{GUID}`. Discard all changes checks every new file
+  Git lists first.
+  Discards also wait their turn behind GitDesktop's other Git operations on
+  the repository. The MCP server's `discard_changes` and `discard_all_changes`
+  tools read paths from the repository root, even when the server is
+  started in a subfolder.
+- Adding a worktree at a relative folder path now resolves it from the
+  repository folder, so a folder that already exists there is caught before
+  anything is created.
+
 ## [0.13.6] - 2026-10-21
 
 ### Changed
@@ -5148,7 +5391,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.6...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.7...HEAD
+[0.13.7]: https://github.com/theBGuy/GitDesktop/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/theBGuy/GitDesktop/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/theBGuy/GitDesktop/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/theBGuy/GitDesktop/compare/v0.13.3...v0.13.4
