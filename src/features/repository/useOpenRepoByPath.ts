@@ -55,7 +55,8 @@ export const repoOpenWatermark = openClaims.watermark;
  * superseded open still records its repo. The write is best-effort, since a
  * settings-write failure must never block opening. Resolves true once the switch
  * was REQUESTED: a dirty Settings may still hold it behind its Unsaved changes
- * prompt, whose Keep editing cancels it.
+ * prompt, whose Keep editing cancels it, and one with nothing unsaved but a save
+ * still writing holds it until the save lands (a failed save drops it).
  * Callers whose own awaits are part of the open request (drop, Recents, the
  * folder picker, a submodule opened as a repo) claim before those awaits and
  * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; a caller
@@ -92,8 +93,11 @@ export function useOpenRecordedRepo() {
  * toast to **Locate…** the folder's new home (moved on disk) or **Remove** the
  * stale row; a `source: "picker"` one is a folder the user just chose rather
  * than a recents row to repair, so it only reports that it isn't a repository.
- * Resolves whether the app switched: false on a failure (which toasts) and when a
- * newer open or navigation superseded this one (silent).
+ * Resolves whether the switch was requested: false on a failure (which toasts)
+ * and when a newer open or navigation superseded this one (silent); a dirty
+ * Settings may still hold the switch behind its Unsaved changes prompt, whose
+ * Keep editing cancels it, and one with nothing unsaved but a save still
+ * writing holds it until the save lands (a failed save drops it).
  * Callers: the shared recents list, macOS File → Open Recent, the folder
  * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
  * repository from the Submodules dialog.

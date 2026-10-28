@@ -1,15 +1,18 @@
 // Pins the Settings leave guard by source scans: every navigator in the ui store
 // that writes `view` (itself or through another member) consults the guard
-// before its epoch bump, or sits in a closed exempt list with its reason; the
-// guard is registered only while Settings holds unsaved edits and nulled at
-// cleanup; it is nulled before every resumed move; a "Save and close" continues
-// only from the Save's success arm, to the move as it stands when the Save lands
-// (a move intercepted meanwhile replaces it, Keep editing cancels it), after the
-// Automations write it started or joined lands, and only if no user action came
-// since its press; a Save landing under the open prompt continues the held move;
-// and the guard's escapes are used at exactly the two system landings. Each scan
-// must pass the real source and go red under every mutation listed with it, so a
-// scan that can't fail on those edits fails here instead.
+// before its epoch bump, or sits in a closed exempt list with its reason, and the
+// intercept bumps for the request before the guard runs; the guard is registered
+// while Settings holds unsaved edits or a save is writing, nulled at cleanup, and
+// routes through the one `requestLeave` that Back and Esc call too, which asks,
+// holds a move silently while a write is in flight (dropping it on a failed or
+// superseded write), or goes; it is nulled before every resumed move; a Save
+// continues only from its success arm, to the move as it stands when the Save
+// lands (a move intercepted meanwhile replaces it, Keep editing cancels it),
+// after the Automations write it started or joined lands, and only if no user
+// action came since its press; a Save landing under the open prompt continues
+// the held move; and the guard's escapes are used at exactly the two system
+// landings. Each scan must pass the real source and go red under every mutation
+// listed with it, so a scan that can't fail on those edits fails here instead.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
@@ -45,7 +48,7 @@ const EXEMPT = {
   closeExplore: "reachable only from the Explore view",
   closeMyWork: "reachable only from the My work view",
   closeRepoUnguarded:
-    "the remove-repository flow's close before it trashes the folder; its one caller is pinned in BYPASS_SITES",
+    "the remove-open-repository close, before the repository is removed (and its folder trashed, when asked); its one caller is pinned in BYPASS_SITES",
 };
 
 /** The guard's escapes allowed outside the store, by file, in source order: a
@@ -54,7 +57,8 @@ const EXEMPT = {
 const BYPASS_SITES = {
   // Moves the app off a worktree folder the promote is about to delete.
   "src/lib/stores/worktree-removal.ts": ["openRepo"],
-  // Stops status polling before the folder is trashed.
+  // Stops status polling before the open repository is removed (and its folder
+  // trashed, when asked).
   "src/features/repository/RepoDialogs.tsx": ["closeRepoUnguarded"],
 };
 
@@ -183,30 +187,144 @@ function viewWriterProblems(text) {
   const iOpen = intercept.index + intercept[0].length - 1;
   const iBody = text.slice(iOpen, matchBrace(masked, iOpen));
   if (
-    !/if \(view !== "settings" \|\| settingsLeaveGuard === null\) return false;\s*settingsLeaveGuard\(resume\);\s*return true;/.test(
+    !/if \(view !== "settings" \|\| settingsLeaveGuard === null\) return false;\s*bumpEpochNow\(\);\s*settingsLeaveGuard\(resume\);\s*return true;/.test(
       iBody,
     )
   )
     problems.push(
-      "the interceptor no longer refuses off Settings or unguarded",
+      "the interceptor no longer refuses off Settings or unguarded, or no longer bumps for the request before the guard runs",
     );
   return problems;
 }
 
 /** Problems with SettingsScreen's guard registration, `[]` when pinned: one
- *  effect keyed on `closeDirty` registers a guard that, while a "Save and close"
- *  is saving with no prompt open, replaces where it continues (stamped with
- *  this request's epoch) and asks nothing, and otherwise holds the move and
- *  opens the dialog; its cleanup (every clean flip and the unmount) nulls it. */
+ *  effect keyed on `guardOn` (unsaved edits OR a save writing) registers a
+ *  guard that hands every move to the latest `requestLeave`; its cleanup (every
+ *  flip off and the unmount) nulls it. */
 function registrationProblems(text) {
   const masked = maskNonCode(text, true);
   const effect =
-    /useEffect\(\(\) => \{\s*if \(!closeDirty\) return;\s*setSettingsLeaveGuard\(\(resume\) => \{\s*if \(\s*saveLock\.current &&\s*leaveAfterSave\.current !== null &&\s*!confirmCloseRef\.current\s*\) \{\s*leaveAfterSave\.current = \{\s*run: resume,\s*epoch: useUiStore\.getState\(\)\.interactionEpoch,?\s*\};\s*return;\s*\}\s*pendingLeave\.current = resume;\s*setConfirmClose\(true\);\s*\}\);\s*return \(\) => setSettingsLeaveGuard\(null\);\s*\}, \[closeDirty, setSettingsLeaveGuard\]\);/;
+    /const guardOn = closeDirty \|\| saving;\s*useEffect\(\(\) => \{\s*if \(!guardOn\) return;\s*setSettingsLeaveGuard\(\(resume\) => requestLeaveRef\.current\(resume\)\);\s*return \(\) => setSettingsLeaveGuard\(null\);\s*\}, \[guardOn, setSettingsLeaveGuard\]\);/;
   const problems = [];
   if (!effect.test(masked))
     problems.push("the guard registration lost its shape or its cleanup");
   if ((masked.match(/\bsetSettingsLeaveGuard\(\(/g) ?? []).length !== 1)
     problems.push("expected exactly one guard registration");
+  if (!/const requestLeaveRef = useLatestRef\(requestLeave\);/.test(masked))
+    problems.push("the guard doesn't read the latest requestLeave");
+  return problems;
+}
+
+/** `[open, close]` of `requestLeave`'s body in `masked`, or null. */
+function requestLeaveBody(masked) {
+  const at = /function requestLeave\(move: \(\(\) => void\) \| null\) \{/.exec(
+    masked,
+  );
+  if (!at) return null;
+  const open = at.index + at[0].length - 1;
+  const close = matchBrace(masked, open);
+  return close === -1 ? null : [open, close];
+}
+
+/** Problems with the one leave route, `[]` when pinned. `requestLeave` drops any
+ *  move held for an Automations write first (latest intent), bumps for Back and
+ *  Esc's own request (`move` null; an intercepted move's intercept already
+ *  bumped) BEFORE stamping the request's epoch, and decides from LIVE refs,
+ *  never render-time values: an open prompt takes the move; unsaved edits ask
+ *  unless a "Save and close" is saving; a running Save holds it in
+ *  `leaveAfterSave`; an Automations write alone holds it on the join-only
+ *  handle (never the write-starting one) and runs it only if every write
+ *  landed, it is still the held move, and the Save's resume conditions hold;
+ *  otherwise it goes. Back and Esc call it with `null` and nothing else. */
+function requestLeaveProblems(text) {
+  const masked = maskNonCode(text, true);
+  const problems = [];
+  const span = requestLeaveBody(masked);
+  if (!span) return ["requestLeave not found"];
+  const body = masked.slice(span[0], span[1] + 1);
+  const steps = [
+    [
+      /^\{\s*heldForAutomations\.current = null;\s*if \(move === null\) useUiStore\.getState\(\)\.noteUserInteraction\(\);\s*const run = move \?\? closeSettings;\s*const epoch = useUiStore\.getState\(\)\.interactionEpoch;/,
+      "a new move no longer drops the one held for an Automations write, Back/Esc no longer bump for their request before the stamp, or the stamp is gone",
+    ],
+    [
+      /if \(confirmCloseRef\.current\) \{\s*pendingLeave\.current = move;\s*return;\s*\}/,
+      "an open prompt no longer takes the move",
+    ],
+    [
+      /if \(\s*closeDirtyRef\.current &&\s*!\(saveLock\.current && leaveAfterSave\.current !== null\)\s*\) \{\s*pendingLeave\.current = move;\s*setConfirmClose\(true\);\s*return;\s*\}/,
+      "unsaved edits no longer ask (or ask during Save and close)",
+    ],
+    [
+      /if \(saveLock\.current\) \{\s*leaveAfterSave\.current = \{ run, epoch \};\s*return;\s*\}/,
+      "a running Save no longer holds the move",
+    ],
+    [
+      /const inFlight = joinAutomationsRef\.current\?\.\(\) \?\? null;\s*if \(inFlight !== null\) \{\s*const held = \{ run, epoch \};\s*heldForAutomations\.current = held;\s*void automationsLanded\(inFlight\)\.then\(\(ok\) => \{\s*if \(heldForAutomations\.current !== held\) return;\s*heldForAutomations\.current = null;/,
+      "an Automations write no longer holds the move, or a superseded hold can still run",
+    ],
+    [
+      /setSettingsLeaveGuard\(null\);\s*run\(\);\s*\}$/,
+      "with nothing writing, the move no longer goes",
+    ],
+  ];
+  let from = 0;
+  for (const [re, problem] of steps) {
+    const m = re.exec(body.slice(from));
+    if (!m) {
+      problems.push(problem);
+      continue;
+    }
+    from += m.index + m[0].length;
+  }
+  const settle = /\.then\(\(ok\) => \{/.exec(body);
+  const run = body.indexOf("held.run()");
+  if (!settle || run === -1) problems.push("the held move never runs");
+  else {
+    const cond = body.slice(settle.index, run);
+    for (const check of [
+      "ok &&",
+      "mounted.current",
+      'useUiStore.getState().view === "',
+      "useUiStore.getState().interactionEpoch === held.epoch",
+      "!confirmCloseRef.current",
+      "pendingLeave.current === null",
+      "useConfirm.getState().request === null",
+      "!saveLock.current",
+      "!automationsDirtyRef.current",
+      "!unsavedNow()",
+    ])
+      if (!cond.includes(check.replace(/"$/, "")))
+        problems.push(`the held move lost its check ${check}`);
+  }
+  if (/(?<![\w$])(?:closeDirty|automationsSaving)(?![\w$])/.test(body))
+    problems.push("requestLeave reads a render-time value");
+  if (/\bsaveAutomationsRef\b/.test(body))
+    problems.push("requestLeave can start an Automations write");
+  // The wait: the given write, then every inline one still in flight, joined
+  // through the join-only handle alone.
+  const landed =
+    /async function automationsLanded\(first: Promise<boolean> \| null\) \{\s*let ok = first === null \|\| \(await first\);\s*for \(\s*let next = joinAutomationsRef\.current\?\.\(\) \?\? null;\s*ok && next !== null;\s*next = joinAutomationsRef\.current\?\.\(\) \?\? null\s*\)\s*ok = await next;\s*return ok;\s*\}/.exec(
+      masked,
+    );
+  if (!landed)
+    problems.push(
+      "the Automations wait no longer joins every in-flight write, or can start one",
+    );
+  if (!/onClick=\{\(\) => requestLeave\(null\)\}/.test(masked))
+    problems.push("Back doesn't go through requestLeave");
+  if (
+    !/if \(e\.key === "\s*" && !e\.defaultPrevented\)\s*requestLeaveRef\.current\(null\);/.test(
+      masked,
+    )
+  )
+    problems.push("Esc doesn't go through requestLeave");
+  // Only requestLeave and the dialog's own open path may open the prompt.
+  const opens = [...masked.matchAll(/setConfirmClose\(true\)/g)].filter(
+    (m) => m.index < span[0] || m.index > span[1],
+  );
+  if (opens.length !== 1)
+    problems.push("the prompt opens outside requestLeave");
   return problems;
 }
 
@@ -224,17 +342,27 @@ function cleanUnderPromptProblems(text) {
 }
 
 /** Problems with the resumes, `[]` when pinned: every call of a held move
- *  (`leave()`, `leave.run()`) directly follows `setSettingsLeaveGuard(null);`:
- *  Discard and close and the clean-under arm each make one `leave()`, the
- *  Save's success arm the one `leave.run()`. */
+ *  (`leave()`, `leave.run()`, `held.run()`, `run()`) directly follows
+ *  `setSettingsLeaveGuard(null);`: Discard and close and the clean-under arm
+ *  each make one `leave()`, the Save's success arm the one `leave.run()`, and
+ *  `requestLeave` one `held.run()` (an Automations hold) and one `run()` (no
+ *  write in flight). */
 function resumeProblems(text) {
   const masked = maskNonCode(text, true);
   const problems = [];
-  const calls = [...masked.matchAll(/(?<![\w$.])leave(\.run)?\(\)/g)];
-  if (calls.filter((c) => !c[1]).length !== 2)
+  const calls = [
+    ...masked.matchAll(/(?<![\w$.])(leave|held|run)(\.run)?\(\)/g),
+  ];
+  const count = (name, dotted) =>
+    calls.filter((c) => c[1] === name && !!c[2] === dotted).length;
+  if (count("leave", false) !== 2)
     problems.push("expected two leave() resumes");
-  if (calls.filter((c) => c[1]).length !== 1)
+  if (count("leave", true) !== 1)
     problems.push("expected one leave.run() resume");
+  if (count("held", true) !== 1)
+    problems.push("expected one held.run() resume");
+  if (count("run", false) !== 1) problems.push("expected one run() resume");
+  if (calls.length !== 5) problems.push("an unexpected held-move call");
   for (const c of calls)
     if (!/setSettingsLeaveGuard\(null\);\s*$/.test(masked.slice(0, c.index)))
       problems.push(`${c[0]} runs without nulling the guard first`);
@@ -293,7 +421,7 @@ function continuationProblems(text) {
   const arm = /\} else \{\s*toast\.success\("[^"]*"\);/.exec(body);
   const reads = [...body.matchAll(/\bleaveAfterSave\.current\b(?!\s*=[^=])/g)];
   const live =
-    /if \(\s*leaveAfterSave\.current !== null &&\s*\(automationsSaved === null \|\| \(await automationsSaved\)\)\s*\) \{\s*const leave = leaveAfterSave\.current;/.exec(
+    /if \(\s*leaveAfterSave\.current !== null &&\s*\(await automationsLanded\(automationsSaved\)\)\s*\) \{\s*const leave = leaveAfterSave\.current;/.exec(
       body,
     );
   if (!arm || !live || live.index < arm.index)
@@ -356,9 +484,17 @@ function panelRegistrationProblems(text) {
   const masked = maskNonCode(text, true);
   const effect =
     /useEffect\(\(\) => \{\s*if \(!onRegisterSave\) return;\s*onRegisterSave\(\s*dirty \|\| saving\s*\?\s*\(opts\?: \{ quiet\?: boolean \}\) => doSaveRef\.current\(opts\)\s*:\s*null,?\s*\);\s*return \(\) => onRegisterSave\(null\);\s*\}, \[dirty, saving, onRegisterSave\]\);/;
-  return effect.test(masked)
+  const problems = effect.test(masked)
     ? []
     : ["the panel's save registration no longer holds through a write"];
+  // The join-only handle returns the write in flight and never starts one.
+  if (
+    !/useEffect\(\(\) => \{\s*if \(!onRegisterJoin\) return;\s*onRegisterJoin\(\(\) => pendingSave\.current\?\.promise \?\? null\);\s*return \(\) => onRegisterJoin\(null\);\s*\}, \[onRegisterJoin\]\);/.test(
+      masked,
+    )
+  )
+    problems.push("the panel's join handle can start a write, or isn't live");
+  return problems;
 }
 
 /** Problems with the panel's `dirty`, `[]` when pinned: it compares the draft
@@ -456,10 +592,10 @@ function srcFiles() {
 /** Asserts `check` passes the real `text` and fails every `mutate(text)`. */
 function pin(check, text, ...mutations) {
   assert.deepEqual(check(text), []);
-  for (const mutate of mutations) {
+  for (const [i, mutate] of mutations.entries()) {
     const mutant = mutate(text);
-    assert.notEqual(mutant, text, "the mutation didn't apply");
-    assert.ok(check(mutant).length > 0, "the scan passed a mutated source");
+    assert.notEqual(mutant, text, `mutation #${i} didn't apply`);
+    assert.ok(check(mutant).length > 0, `the scan passed mutated source #${i}`);
   }
 }
 
@@ -521,38 +657,141 @@ test("the exempt list is closed and every entry carries its reason", () => {
   for (const reason of Object.values(EXEMPT)) assert.ok(reason.length > 0);
 });
 
-test("Settings registers the guard only while dirty and nulls it on cleanup", () => {
+test("the intercept bumps for the request before handing the move to the guard", () => {
+  pin(
+    viewWriterProblems,
+    source(UI),
+    // Bumping after the guard ran: a hold would stamp the pre-request epoch.
+    once(
+      "    bumpEpochNow();\n    settingsLeaveGuard(resume);\n",
+      "    settingsLeaveGuard(resume);\n    bumpEpochNow();\n",
+    ),
+    // Not bumping at all: an older claimed repo open outlives this request.
+    once(
+      "    bumpEpochNow();\n    settingsLeaveGuard(resume);\n",
+      "    settingsLeaveGuard(resume);\n",
+    ),
+  );
+});
+
+test("Settings registers the guard while dirty or saving and nulls it on cleanup", () => {
   pin(
     registrationProblems,
     source(SCREEN),
     once(
-      "    return () => setSettingsLeaveGuard(null);\n  }, [closeDirty",
-      "  }, [closeDirty",
+      "    return () => setSettingsLeaveGuard(null);\n  }, [guardOn",
+      "  }, [guardOn",
     ),
     once(
-      "    if (!closeDirty) return;\n    setSettingsLeaveGuard((resume)",
+      "    if (!guardOn) return;\n    setSettingsLeaveGuard((resume)",
       "    setSettingsLeaveGuard((resume)",
     ),
+    // Registered only while dirty: a clean-but-saving Settings leaves at once.
     once(
-      "      pendingLeave.current = resume;\n      setConfirmClose(true);",
-      "      resume();",
+      "  const guardOn = closeDirty || saving;",
+      "  const guardOn = closeDirty;",
     ),
-    // A move during "Save and close" asking again instead of replacing.
     once(
-      "          epoch: useUiStore.getState().interactionEpoch,\n        };\n        return;\n",
-      "          epoch: useUiStore.getState().interactionEpoch,\n        };\n",
+      "setSettingsLeaveGuard((resume) => requestLeaveRef.current(resume));",
+      "setSettingsLeaveGuard((resume) => resume());",
     ),
-    // The replacement keeping the press's epoch, so its own request reads as
-    // a newer action and the Save never continues.
+  );
+});
+
+test("the guard, Back and Esc share one leave route that asks, holds or goes", () => {
+  pin(
+    requestLeaveProblems,
+    source(SCREEN),
+    // Back reading closeDirty alone, past the hold.
     once(
-      "          epoch: useUiStore.getState().interactionEpoch,\n        };\n        return;",
-      "          epoch: leaveAfterSave.current.epoch,\n        };\n        return;",
+      "onClick={() => requestLeave(null)}",
+      "onClick={() => (closeDirty ? setConfirmClose(true) : closeSettings())}",
     ),
-    // Replacing under an open prompt, where the answer should decide.
+    // Esc reading closeDirty alone, past the hold.
     once(
-      "        leaveAfterSave.current !== null &&\n        !confirmCloseRef.current\n",
-      "        leaveAfterSave.current !== null\n",
+      "        requestLeaveRef.current(null);",
+      "        closeDirtyRef.current ? setConfirmClose(true) : closeSettings();",
     ),
+    // A running Save no longer holding: the move leaves mid-write.
+    once(
+      "    if (saveLock.current) {\n",
+      "    if (saveLock.current && closeDirtyRef.current) {\n",
+    ),
+    // An Automations write alone no longer holding.
+    once(
+      "    const inFlight = joinAutomationsRef.current?.() ?? null;",
+      "    const inFlight = null;",
+    ),
+    // The hold calling the write-starting handle, which re-sends (or retries)
+    // the draft when the write already settled.
+    once(
+      "    const inFlight = joinAutomationsRef.current?.() ?? null;",
+      "    const inFlight = saveAutomationsRef.current?.({ quiet: true }) ?? null;",
+    ),
+    // The wait joining only the first write, past one started meanwhile.
+    once("      ok = await next;\n", "      break;\n"),
+    once(
+      "      let next = joinAutomationsRef.current?.() ?? null;",
+      "      let next = saveAutomationsRef.current?.({ quiet: true }) ?? null;",
+    ),
+    // Back/Esc without a bump of their own: an older claimed repo open still
+    // passes its check and replaces their held close.
+    once(
+      "    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+      "",
+    ),
+    // The bump after the stamp: the hold carries the pre-request epoch.
+    once(
+      "    if (move === null) useUiStore.getState().noteUserInteraction();\n    const run = move ?? closeSettings;\n    const epoch = useUiStore.getState().interactionEpoch;\n",
+      "    const run = move ?? closeSettings;\n    const epoch = useUiStore.getState().interactionEpoch;\n    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+    ),
+    // Bumping on every route: an intercepted move's intercept already bumped.
+    once(
+      "    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+      "    useUiStore.getState().noteUserInteraction();\n",
+    ),
+    // Deciding from a render-time capture instead of the live ref.
+    once(
+      "      closeDirtyRef.current &&\n      !(saveLock",
+      "      closeDirty &&\n      !(saveLock",
+    ),
+    // Unsaved edits during Save and close asking again instead of replacing.
+    once(
+      "      !(saveLock.current && leaveAfterSave.current !== null)\n",
+      "      true\n",
+    ),
+    // A later move no longer superseding a held one.
+    once(
+      "  function requestLeave(move: (() => void) | null) {\n    heldForAutomations.current = null;\n",
+      "  function requestLeave(move: (() => void) | null) {\n",
+    ),
+  );
+});
+
+test("a failed or superseded hold never navigates", () => {
+  pin(
+    requestLeaveProblems,
+    source(SCREEN),
+    // A failed Automations write still running the move.
+    once(
+      "          ok &&\n          mounted.current",
+      "          mounted.current",
+    ),
+    // A superseded hold still running.
+    once("        if (heldForAutomations.current !== held) return;\n", ""),
+    // A newer user action not retiring it.
+    once(
+      "          useUiStore.getState().interactionEpoch === held.epoch &&\n",
+      "",
+    ),
+    // A Save started since, or an edit since, not stopping it.
+    // (Leading newlines keep these off the Save's deeper-indented twins.)
+    once("\n          !saveLock.current &&\n", "\n"),
+    once("\n          !automationsDirtyRef.current &&\n", "\n"),
+    once("\n          !unsavedNow()\n", "\n          true\n"),
+    // An open prompt not stopping it.
+    once("\n          useConfirm.getState().request === null &&\n", "\n"),
+    once("\n          !confirmCloseRef.current &&\n", "\n"),
   );
 });
 
@@ -601,6 +840,14 @@ test("the guard is nulled before every resumed move", () => {
       "    leave();\n  }, [closeDirty",
     ),
     once("    save(leave);", "    leave();"),
+    once(
+      "          setSettingsLeaveGuard(null);\n          held.run();",
+      "          held.run();",
+    ),
+    once(
+      "    setSettingsLeaveGuard(null);\n    run();\n  }",
+      "    run();\n  }",
+    ),
   );
 });
 
@@ -636,8 +883,14 @@ test("a Save continues only from its success arm, live, after the Automations wr
       ),
     // The Automations await dropped.
     once(
-      "            (automationsSaved === null || (await automationsSaved))\n",
+      "            (await automationsLanded(automationsSaved))\n",
       "            automationsSaved === null\n",
+    ),
+    // Waiting only for the write captured at the press, past an inline one
+    // started after it.
+    once(
+      "            (await automationsLanded(automationsSaved))\n",
+      "            (automationsSaved === null || (await automationsSaved))\n",
     ),
     // A settle-time resume without the press epoch check.
     once(
@@ -680,6 +933,12 @@ test("the Automations panel stays registered while its write is in flight", () =
       "    }, [dirty, saving, onRegisterSave]);",
       "    }, [dirty, onRegisterSave]);",
     ),
+    // The join handle starting a write when none is in flight.
+    once(
+      "      onRegisterJoin(() => pendingSave.current?.promise ?? null);",
+      "      onRegisterJoin(() => doSaveRef.current({ quiet: true }));",
+    ),
+    once("      return () => onRegisterJoin(null);\n", ""),
   );
 });
 

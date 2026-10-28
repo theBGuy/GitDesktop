@@ -3501,8 +3501,7 @@ draft readied elsewhere is picked up by the background catch-up poller within it
   a path segment, \`**\` across \`/\`, \`?\` one character, \`{a,b}\` alternation.
 - **Save / Discard.** Both surfaces edit a draft (no per-toggle autosave): the repo dialog
   behind Cancel / **Save changes**, and Settings behind **Save changes** / **Discard**, where
-  Discard asks first, and so does leaving Settings with unsaved changes through Back,
-  {{key:escape}}, the command palette, a shortcut, a notification, or opening a repository.
+  Discard asks first.
 - **Per-repo overrides.** The repo dialog shows the **effective** state (global defaults merged
   with this repo's overrides), badges each overridden cell as *Overridden*, and can enable an
   action that's globally off. **Reset to global defaults** drops every override so the repo
@@ -3678,7 +3677,13 @@ Defaults match GitHub Desktop where there's an equivalent.`,
     label: "Settings & updates",
     body: `# Settings & updates
 
-Open **Settings** from the header gear (or {{kbd:open-settings}}). Sections:
+Open **Settings** from the header gear (or {{kbd:open-settings}}). Leaving Settings with
+unsaved changes asks to save or discard first, whether you leave through Back,
+{{key:escape}}, the command palette, a shortcut, a notification, or by opening a
+repository. A move made while a save is still writing waits for it and continues once it
+lands; if the save fails, Settings stays open with your changes.
+
+Sections:
 
 - **General** — hide AI features (which also hides finished AI activity in the activity
   dock and notification inbox, mutes AI desktop notifications, and pauses your automations

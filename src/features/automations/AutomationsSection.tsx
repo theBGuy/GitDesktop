@@ -88,6 +88,12 @@ export const AutomationsSection = withForm({
           save: ((opts?: { quiet?: boolean }) => Promise<boolean>) | null,
         ) => void)
       | undefined,
+    /** The write in flight right now, read live, or `null`. It never starts or
+     *  retries a write, so a host waiting on it can't re-send a draft that just
+     *  landed or failed. Registered while the panel is mounted. */
+    onRegisterJoin: undefined as
+      | ((join: (() => Promise<boolean> | null) | null) => void)
+      | undefined,
     /** Mirrors this panel's in-flight save so the screen's one "Saving…" state
      *  covers it. */
     onSavingChange: undefined as ((saving: boolean) => void) | undefined,
@@ -101,6 +107,7 @@ export const AutomationsSection = withForm({
     form,
     onDirtyChange,
     onRegisterSave,
+    onRegisterJoin,
     onSavingChange,
     onRegisterDiscard,
   }) {
@@ -293,10 +300,10 @@ export const AutomationsSection = withForm({
       const pending = pendingSave.current;
       if (pending?.json === json) return pending.promise;
       if (!automations.data) return Promise.resolve(false);
-      // Detached: Settings' "Save and close" fires this right before unmounting
-      // the panel, so neither toast may depend on it staying mounted, and the
-      // failure's description reads whether the draft is still on screen (a
-      // Discard made during the save is about to put the stored rules back).
+      // Detached: a rail switch or Discard and close can unmount the panel
+      // while the write runs, so neither toast may depend on it staying mounted,
+      // and the failure's description reads whether the draft is still on screen
+      // (a Discard made during the save is about to put the stored rules back).
       const promise = save
         .mutateAsync({ ...automations.data, lifecycles })
         .then(
@@ -341,6 +348,11 @@ export const AutomationsSection = withForm({
       );
       return () => onRegisterSave(null);
     }, [dirty, saving, onRegisterSave]);
+    useEffect(() => {
+      if (!onRegisterJoin) return;
+      onRegisterJoin(() => pendingSave.current?.promise ?? null);
+      return () => onRegisterJoin(null);
+    }, [onRegisterJoin]);
     useEffect(() => {
       onSavingChange?.(saving);
       return () => onSavingChange?.(false);

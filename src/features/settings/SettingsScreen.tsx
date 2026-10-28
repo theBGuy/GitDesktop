@@ -152,9 +152,10 @@ export function SettingsScreen() {
   // The move the Unsaved changes dialog holds for its answer (null: Back/Esc,
   // whose move is closing Settings).
   const pendingLeave = useRef<(() => void) | null>(null);
-  // Where an in-flight "Save and close" continues, with the epoch it was
-  // requested at. Read live when the Save lands, so a move requested during the
-  // save replaces it and Keep editing cancels it; dropped by every Save's end.
+  // Where an in-flight Save continues ("Save and close"'s move, or one held
+  // while it writes), with the epoch it was requested at. Read live when the
+  // Save lands, so a later move replaces it and Keep editing cancels it;
+  // dropped by every Save's end.
   const leaveAfterSave = useRef<{ run: () => void; epoch: number } | null>(
     null,
   );
@@ -169,6 +170,10 @@ export function SettingsScreen() {
   const saveAutomationsRef = useRef<
     ((opts?: { quiet?: boolean }) => Promise<boolean>) | null
   >(null);
+  // The panel's in-flight write, read live; never starts one.
+  const joinAutomationsRef = useRef<(() => Promise<boolean> | null) | null>(
+    null,
+  );
   const discardAutomationsRef = useRef<(() => void) | null>(null);
   const automationsDirtyRef = useLatestRef(automationsDirty);
   // Typed MCP secret values wait here until Save, in renderer memory only. It
@@ -333,15 +338,17 @@ export function SettingsScreen() {
           else toast.error(title);
         } else {
           toast.success("Settings saved");
-          // Continue once the Automations write lands too (its failure already
-          // toasted, so it stays), to wherever the move stands NOW, and only if
-          // nothing happened meanwhile: no edit (it stays on screen with its
-          // Save bar), no prompt open (this screen's or an app-scoped one, such
-          // as the footer Discard's), and no user action since the move was
-          // requested, so this late resume retires nothing newer.
+          // Continue once every Automations write lands too (one started after
+          // the press included; a failure already toasted, so it stays), to
+          // wherever the move stands NOW: Save and close's, or one
+          // `requestLeave` held while this Save was writing. Only if nothing
+          // happened meanwhile: no edit (it stays on screen with its Save bar),
+          // no prompt open (this screen's or an app-scoped one, such as the
+          // footer Discard's), and no user action since the move was requested,
+          // so this late resume retires nothing newer.
           if (
             leaveAfterSave.current !== null &&
-            (automationsSaved === null || (await automationsSaved))
+            (await automationsLanded(automationsSaved))
           ) {
             const leave = leaveAfterSave.current;
             if (
@@ -439,32 +446,97 @@ export function SettingsScreen() {
   // Unsaved edits in the settings form, the Automations panel or the staged
   // MCP secrets should guard closing the screen.
   const closeDirty = dirty || automationsDirty || secretsDirty;
+  const closeDirtyRef = useLatestRef(closeDirty);
+  // A move held for an inline Automations write alone (no Save running).
+  const heldForAutomations = useRef<{ run: () => void; epoch: number } | null>(
+    null,
+  );
 
-  // Every view-moving navigator asks here first while anything is unsaved: the
-  // move waits in `pendingLeave` for the Unsaved changes answer, and a later one
-  // replaces it (latest intent wins). While "Save and close" is saving, a move
-  // replaces where that save continues instead, asking nothing (the user already
-  // chose to save and leave). Nulled when clean and at unmount, since a guard
-  // left behind would hold every navigation.
-  useEffect(() => {
-    if (!closeDirty) return;
-    setSettingsLeaveGuard((resume) => {
-      if (
-        saveLock.current &&
-        leaveAfterSave.current !== null &&
-        !confirmCloseRef.current
-      ) {
-        leaveAfterSave.current = {
-          run: resume,
-          epoch: useUiStore.getState().interactionEpoch,
-        };
-        return;
-      }
-      pendingLeave.current = resume;
+  // Waits out the given Automations write and any inline one still in flight
+  // after it (one started meanwhile included); true iff each landed. Joins
+  // through the panel's join-only handle, so it never starts or retries a write.
+  async function automationsLanded(first: Promise<boolean> | null) {
+    let ok = first === null || (await first);
+    for (
+      let next = joinAutomationsRef.current?.() ?? null;
+      ok && next !== null;
+      next = joinAutomationsRef.current?.() ?? null
+    )
+      ok = await next;
+    return ok;
+  }
+
+  // The one leave route, for the guard's intercepts and Back/Esc (`move` null:
+  // closing Settings), deciding from live values. An open prompt takes the move
+  // as its held one, and unsaved edits ask, except during "Save and close",
+  // where the move replaces where that save continues. With nothing unsaved but
+  // a write in flight, the move waits silently and continues only if the writes
+  // land and nothing happened since. A later move replaces any held one.
+  function requestLeave(move: (() => void) | null) {
+    heldForAutomations.current = null;
+    // Back and Esc are user requests of their own, so they retire older
+    // pending continuations; every other move's intercept already bumped.
+    if (move === null) useUiStore.getState().noteUserInteraction();
+    const run = move ?? closeSettings;
+    const epoch = useUiStore.getState().interactionEpoch;
+    if (confirmCloseRef.current) {
+      pendingLeave.current = move;
+      return;
+    }
+    if (
+      closeDirtyRef.current &&
+      !(saveLock.current && leaveAfterSave.current !== null)
+    ) {
+      pendingLeave.current = move;
       setConfirmClose(true);
-    });
+      return;
+    }
+    if (saveLock.current) {
+      // The Save's success arm reads this live once every write lands.
+      leaveAfterSave.current = { run, epoch };
+      return;
+    }
+    const inFlight = joinAutomationsRef.current?.() ?? null;
+    if (inFlight !== null) {
+      const held = { run, epoch };
+      heldForAutomations.current = held;
+      void automationsLanded(inFlight).then((ok) => {
+        if (heldForAutomations.current !== held) return;
+        heldForAutomations.current = null;
+        // The Save's resume conditions, plus no Save started since.
+        if (
+          ok &&
+          mounted.current &&
+          useUiStore.getState().view === "settings" &&
+          useUiStore.getState().interactionEpoch === held.epoch &&
+          !confirmCloseRef.current &&
+          pendingLeave.current === null &&
+          useConfirm.getState().request === null &&
+          !saveLock.current &&
+          !automationsDirtyRef.current &&
+          !unsavedNow()
+        ) {
+          setSettingsLeaveGuard(null);
+          held.run();
+        }
+      });
+      return;
+    }
+    setSettingsLeaveGuard(null);
+    run();
+  }
+  const requestLeaveRef = useLatestRef(requestLeave);
+
+  // Navigators that can leave Settings from elsewhere ask here first while
+  // anything is unsaved or a save is writing (`requestLeave` decides between
+  // prompt, hold and go). Nulled otherwise and at unmount, since a guard left
+  // behind would hold every navigation.
+  const guardOn = closeDirty || saving;
+  useEffect(() => {
+    if (!guardOn) return;
+    setSettingsLeaveGuard((resume) => requestLeaveRef.current(resume));
     return () => setSettingsLeaveGuard(null);
-  }, [closeDirty, setSettingsLeaveGuard]);
+  }, [guardOn, setSettingsLeaveGuard]);
 
   // A Save that lands under the open prompt leaves nothing to ask about: close
   // it and continue to the move it held (Back's being closing Settings). Not
@@ -531,8 +603,9 @@ export function SettingsScreen() {
     // the handle joins that write so the continuation waits for it.
     automationsAtSave.current =
       saveAutomationsRef.current?.({ quiet: true }) ?? null;
-    // Stamped with the epoch of this press: the resume, which bumps at settle,
-    // runs only if no user action came since.
+    // Stamped with the epoch of this press (already past the bump of the request
+    // it continues: the intercept's, or Back's or Esc's own): the resume bumps
+    // when it runs at settle, and runs only if no user action came since.
     leaveAfterSave.current = after && {
       run: after,
       epoch: useUiStore.getState().interactionEpoch,
@@ -585,31 +658,17 @@ export function SettingsScreen() {
     applyDiscard();
   }
 
-  // Back and Esc ask about closing itself, never a move held from earlier.
-  function requestClose() {
-    if (closeDirty) {
-      pendingLeave.current = null;
-      setConfirmClose(true);
-    } else closeSettings();
-  }
-
-  // Esc closes settings (guarded). Base UI popups handle their own Esc and
-  // mark the event consumed, so this only fires when nothing else claimed it.
-  // The listener subscribes once; a latest-ref lets it read the current dirty
-  // state without re-subscribing on every render.
-  const dirtyRef = useLatestRef(closeDirty);
+  // Esc closes settings through the same route as Back. Base UI popups handle
+  // their own Esc and mark the event consumed, so this only fires when nothing
+  // else claimed it. The listener subscribes once and reads the latest route.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape" && !e.defaultPrevented) {
-        if (dirtyRef.current) {
-          pendingLeave.current = null;
-          setConfirmClose(true);
-        } else closeSettings();
-      }
+      if (e.key === "Escape" && !e.defaultPrevented)
+        requestLeaveRef.current(null);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeSettings]);
+  }, []);
 
   // The Unsaved changes answers, one dialog for Back, Esc and every intercepted
   // navigation: "…and close" continues to the held move, else closes Settings.
@@ -661,7 +720,7 @@ export function SettingsScreen() {
           variant="ghost"
           size="icon-sm"
           aria-label="Back"
-          onClick={requestClose}
+          onClick={() => requestLeave(null)}
         >
           <ArrowLeftIcon />
         </Button>
@@ -706,6 +765,9 @@ export function SettingsScreen() {
                     saveAutomationsRef.current = fn;
                   }}
                   onSavingChange={setAutomationsSaving}
+                  onRegisterJoin={(fn) => {
+                    joinAutomationsRef.current = fn;
+                  }}
                   onRegisterDiscard={(fn) => {
                     discardAutomationsRef.current = fn;
                   }}

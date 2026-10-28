@@ -1,12 +1,15 @@
 // Pins rollback before a chained writer settles: disk truth, snapshot fallback,
 // original rejection identity, and the guarded save that disarms autosave.
 // The runtime-import-free helper runs directly under Node >=24 type stripping.
-// Mutation controls pin both the behavior and the 18-module adoption roster.
+// Source pins derive the writer roster from the lock ratchet and check returned
+// rollback coverage per writing lock site, following same-file named helpers.
+// Mutation controls cover behavior, a missing site wrap, and roster expansion.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import { writeWithRollback } from "../src/lib/plugin-store-rollback.ts";
+import { escapeRe, lineOf, maskNonCode, matchBrace } from "./lib/ts-mask.mjs";
 
 const seed = () =>
   new Map([
@@ -331,32 +334,158 @@ for (const scenario of [cases[1], cases[2], cases[6]]) {
   });
 }
 
-const ADOPTERS = [
-  "src/features/sessions/agentNumber.ts",
-  "src/lib/ai/own-digest-store.ts",
-  "src/lib/automations/dismissals.ts",
-  "src/lib/automations/history.ts",
-  "src/lib/automations/results.ts",
-  "src/lib/automations/store.ts",
-  "src/lib/branch-rules/store.ts",
-  "src/lib/conversation-filters/store.ts",
-  "src/lib/issues/local.ts",
-  "src/lib/jira/store.ts",
-  "src/lib/notifications/overrides.ts",
-  "src/lib/pulls/local.ts",
-  "src/lib/pulls/review-drafts.ts",
-  "src/lib/pulls/reviews-history.ts",
-  "src/lib/repo-data-migration.ts",
-  "src/lib/repo-lens/store.ts",
-  "src/lib/scripts/store.ts",
-  "src/lib/settings/api.ts",
-];
-
 const source = (file) =>
   readFileSync(new URL(`../${file}`, import.meta.url), "utf8").replace(
     /\r\n/g,
     "\n",
   );
+
+function closing(masked, open) {
+  const close = matchBrace(masked, open);
+  assert.ok(close > open, `balanced source at line ${lineOf(masked, open)}`);
+  return close;
+}
+
+function literalPaths(text) {
+  const masked = maskNonCode(text, false);
+  const literals = /(["'])[^"'\r\n]*\1/g;
+  assert.equal(masked.replace(literals, "").replace(/[\s,]/g, ""), "");
+  const paths = [...masked.matchAll(literals)].map((match) => {
+    const path = text.slice(match.index + 1, match.index + match[0].length - 1);
+    assert.match(path, /^src\/[\w./-]+\.tsx?$/);
+    return path;
+  });
+  assert.ok(paths.length > 0, "the roster must not be empty");
+  assert.equal(new Set(paths).size, paths.length, "unique roster entries");
+  return paths;
+}
+
+function parseAdopters(text) {
+  const masked = maskNonCode(text, false);
+  const sets = [
+    ...masked.matchAll(/\bconst\s+ADOPTED\s*=\s*new\s+Set\s*\(\s*\[/g),
+  ];
+  assert.equal(sets.length, 1, "one ADOPTED Set literal in the lock ratchet");
+  const open = masked.indexOf("[", sets[0].index);
+  const close = closing(masked, open);
+  assert.match(masked.slice(close + 1), /^\s*\)\s*;/);
+  const adopted = literalPaths(text.slice(open + 1, close));
+  const migrators = [
+    ...masked.matchAll(/\bconst\s+DYNAMIC_MIGRATOR\s*=\s*(["'])[^"']*\1\s*;/g),
+  ];
+  assert.equal(migrators.length, 1, "one DYNAMIC_MIGRATOR string literal");
+  const declaration = text.slice(
+    migrators[0].index,
+    migrators[0].index + migrators[0][0].length,
+  );
+  const migrator = literalPaths(
+    declaration.slice(declaration.indexOf("=") + 1, -1),
+  );
+  assert.equal(migrator.length, 1);
+  assert.ok(!adopted.includes(migrator[0]), "separate migrator classification");
+  return [...adopted, ...migrator];
+}
+
+// Like the lock ratchet, this follows direct calls to same-file named functions;
+// aliases, computed members and cross-module helpers remain review-owned.
+function namedFunctions(masked) {
+  const functions = new Map();
+  const patterns = [
+    /\bfunction\s+([\w$]+)\s*(?:<[^{}]*>)?\s*\([^{}]*\)\s*(?::\s*[^{}=]*)?\{/g,
+    /\b(?:const|let|var)\s+([\w$]+)\s*=\s*(?:async\s*)?(?:\([^{}]*\)|[\w$]+)\s*=>\s*\{/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of masked.matchAll(pattern)) {
+      const open = match.index + match[0].lastIndexOf("{");
+      const bodies = functions.get(match[1]) ?? [];
+      bodies.push({ start: open + 1, end: closing(masked, open) });
+      functions.set(match[1], bodies);
+    }
+  }
+  return functions;
+}
+
+function arrowBody(masked, call) {
+  const open = masked.indexOf("(", call);
+  const end = closing(masked, open);
+  const arrow = masked.indexOf("=>", open);
+  assert.ok(
+    arrow > open && arrow < end,
+    "an inline arrow callback is required",
+  );
+  let start = arrow + 2;
+  while (/\s/.test(masked[start])) start++;
+  if (masked[start] === "{") {
+    return { start: start + 1, end: closing(masked, start), expression: false };
+  }
+  return { start, end, expression: true };
+}
+
+function isReturned(masked, body, call) {
+  const prefix = masked.slice(body.start, call);
+  return (
+    /\breturn\s+(?:await\s+)?$/.test(prefix) ||
+    (body.expression && /^\s*(?:await\s+)?$/.test(prefix))
+  );
+}
+
+function writingLockSites(text, file) {
+  const masked = maskNonCode(text, file.endsWith(".tsx"));
+  const functions = namedFunctions(masked);
+  // The receiver shape the lock ratchet's STORE_METHOD_PATTERN counts (`as`
+  // casts, parenthesized, `?.` and `!.`), copied: importing it would re-register
+  // that file's tests.
+  const writes =
+    /(?<![\w$.])store(?:\s+as\s+[^;,)]+)?\s*\)*\s*(?:\?\.|!\.|\.)\s*(?:set|delete|clear|save|reset)\s*\(|\bfoldIdentityKey\s*(?:<[^;]*?>)?\s*\(/g;
+
+  function inspect(body, protectedByCaller = false, seen = new Set()) {
+    const code = masked.slice(body.start, body.end);
+    const wrappers = [...code.matchAll(/\bwriteWithRollback\s*\(/g)]
+      .map((match) => body.start + match.index)
+      .filter((call) => isReturned(masked, body, call))
+      .map((call) => arrowBody(masked, call));
+    const covered = (at) =>
+      protectedByCaller ||
+      wrappers.some((wrapper) => at >= wrapper.start && at < wrapper.end);
+    const found = [...code.matchAll(writes)].map((match) => ({
+      at: body.start + match.index,
+      covered: covered(body.start + match.index),
+    }));
+    for (const [name, bodies] of functions) {
+      if (seen.has(name)) continue;
+      const calls = new RegExp(`(?<![\\w$.])${escapeRe(name)}\\s*\\(`, "g");
+      for (const match of code.matchAll(calls)) {
+        const at = body.start + match.index;
+        assert.equal(bodies.length, 1, `${file}: unambiguous helper ${name}`);
+        const inherited = covered(at);
+        const nested = inspect(bodies[0], inherited, new Set([...seen, name]));
+        for (const write of nested) {
+          found.push({
+            at: write.at,
+            covered:
+              write.covered && (inherited || isReturned(masked, body, at)),
+          });
+        }
+      }
+    }
+    return found;
+  }
+
+  let writingSites = 0;
+  for (const match of masked.matchAll(/\bwithAppStoreLock\s*\(/g)) {
+    const found = inspect(arrowBody(masked, match.index));
+    if (found.length === 0) continue;
+    writingSites++;
+    for (const write of found) {
+      assert.ok(
+        write.covered,
+        `${file}:${lineOf(masked, match.index)}: writing lock must return ` +
+          `writeWithRollback (uncovered write at ${lineOf(masked, write.at)})`,
+      );
+    }
+  }
+  return writingSites;
+}
 
 function assertAdoption(text, file) {
   assert.match(
@@ -364,16 +493,137 @@ function assertAdoption(text, file) {
     /import\s*\{\s*writeWithRollback\s*\}\s*from\s*["']@\/lib\/plugin-store-rollback["']/,
     `${file} imports the shared helper`,
   );
-  assert.match(
-    text,
-    /\bwriteWithRollback\s*\(/,
-    `${file} calls the shared helper`,
+  const sites = writingLockSites(text, file);
+  assert.ok(
+    sites > 0,
+    `${file} has a writing lock that calls the shared helper`,
+  );
+  return sites;
+}
+
+function assertRosterAdoption(ratchet, readSource = source) {
+  return parseAdopters(ratchet).reduce(
+    (sites, file) => sites + assertAdoption(readSource(file), file),
+    0,
   );
 }
 
-test("all 18 chained-writer modules adopt the helper", () => {
-  assert.equal(ADOPTERS.length, 18);
-  for (const file of ADOPTERS) assertAdoption(source(file), file);
+test("the ratchet's writer roster returns rollback at every writing lock site", () => {
+  const ratchet = source("scripts/app-store-lock.test.mjs");
+  assert.ok(parseAdopters(ratchet).length >= 18);
+  assert.ok(assertRosterAdoption(ratchet) >= 37);
+});
+
+test("roster parsing includes the migrator and ignores commented entries", () => {
+  const fixture = `
+    const ADOPTED = new Set([
+      // "src/lib/not-adopted.ts",
+      "src/lib/writer.ts",
+    ]);
+    const DYNAMIC_MIGRATOR = "src/lib/migrator.ts";
+  `;
+  assert.deepEqual(parseAdopters(fixture), [
+    "src/lib/writer.ts",
+    "src/lib/migrator.ts",
+  ]);
+  for (const mutant of [
+    fixture.replace('"src/lib/writer.ts",', "...otherWriters,"),
+    fixture.replace('"src/lib/migrator.ts"', "migratorFile"),
+    fixture.replace('"src/lib/writer.ts",', ""),
+  ]) {
+    assert.throws(() => parseAdopters(mutant), { name: "AssertionError" });
+  }
+});
+
+test("mutation control: removing one history wrap fails its lock site", () => {
+  const file = "src/lib/automations/history.ts";
+  const text = source(file);
+  assert.equal(assertAdoption(text, file), 4);
+  const masked = maskNonCode(text, false);
+  const call = masked.indexOf("writeWithRollback(");
+  const body = arrowBody(masked, call);
+  const start = masked.lastIndexOf("return", call);
+  const end = closing(masked, masked.indexOf("(", call)) + 1;
+  const mutant =
+    text.slice(0, start) +
+    text.slice(body.start, body.end) +
+    text.slice(end).replace(/^;/, "");
+  assert.throws(() => assertAdoption(mutant, file), /writing lock must return/);
+});
+
+test("mutation control: a new ratchet adopter must also adopt rollback", () => {
+  const ratchet = source("scripts/app-store-lock.test.mjs").replace(
+    "const ADOPTED = new Set([",
+    'const ADOPTED = new Set(["src/lib/new-adopter.ts",',
+  );
+  assert.ok(parseAdopters(ratchet).includes("src/lib/new-adopter.ts"));
+  assert.throws(
+    () =>
+      assertRosterAdoption(ratchet, (file) =>
+        file === "src/lib/new-adopter.ts"
+          ? 'withAppStoreLock("new.json", async () => { await store.save(); });'
+          : source(file),
+      ),
+    /new-adopter.ts imports the shared helper/,
+  );
+});
+
+test("read-only lock callbacks need no rollback wrapper", () => {
+  const file = "src/lib/automations/history.ts";
+  const text =
+    source(file) +
+    `
+    withAppStoreLock("history.json", async () => {
+      await store.reload();
+      return store.get("history");
+    });
+  `;
+  assert.equal(assertAdoption(text, file), 4);
+});
+
+test("mutation control: an extra unwrapped writer fails in an adopted file", () => {
+  const file = "src/lib/automations/history.ts";
+  const text =
+    source(file) +
+    `
+    withAppStoreLock("history.json", async () => {
+      await store.set("new", true);
+      await store.save();
+    });
+  `;
+  assert.throws(() => assertAdoption(text, file), /writing lock must return/);
+});
+
+test("mutation control: an unwrapped writer in any receiver form the ratchet counts fails", () => {
+  const file = "src/lib/automations/history.ts";
+  for (const write of [
+    "store!.save()",
+    'store?.set("new", true)',
+    '(store as Store).set("new", true)',
+    '(store).delete("new")',
+  ]) {
+    const text =
+      source(file) +
+      `
+    withAppStoreLock("history.json", async () => {
+      await ${write};
+    });
+  `;
+    assert.throws(
+      () => assertAdoption(text, file),
+      /writing lock must return/,
+      `${write} passed unwrapped`,
+    );
+  }
+});
+
+test("mutation control: an unreturned rollback call fails its lock site", () => {
+  const file = "src/lib/automations/history.ts";
+  const mutant = source(file).replace(
+    "return writeWithRollback(",
+    "writeWithRollback(",
+  );
+  assert.throws(() => assertAdoption(mutant, file), /writing lock must return/);
 });
 
 test("settings keeps reload, rollback, callback, and forced save in order", () => {

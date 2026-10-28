@@ -424,9 +424,11 @@ interface UiState {
    *  request time, transition-backed actions included, so a continuation claims its epoch
    *  BEFORE invoking a navigator and never re-reads it after. */
   interactionEpoch: number;
-  /** Registered by SettingsScreen while it holds unsaved edits. Every view-moving
-   *  navigator consults it INSTEAD of navigating; `resume` re-invokes the
-   *  intercepted navigation with its original arguments. */
+  /** Registered by SettingsScreen while it holds unsaved edits or a save is
+   *  writing. Every navigator that can leave Settings from elsewhere consults it
+   *  instead of navigating (Settings' own landings and closes are exempt; the
+   *  remove-repo close and the worktree promote's landing bypass it); `resume`
+   *  re-invokes the intercepted navigation with its original arguments. */
   settingsLeaveGuard: ((resume: () => void) => void) | null;
   setSettingsLeaveGuard: (guard: ((resume: () => void) => void) | null) => void;
 
@@ -434,8 +436,9 @@ interface UiState {
    *  a folder it is about to delete), never a user's gesture. */
   openRepo: (info: RepoInfo, opts?: { bypassLeaveGuard?: boolean }) => void;
   closeRepo: () => void;
-  /** `closeRepo` that a dirty Settings never holds, for the remove-repository
-   *  flow alone: it stops status polling before the folder is trashed. */
+  /** `closeRepo` that Settings' leave guard never holds, for the
+   *  remove-open-repository close alone: it stops status polling before the
+   *  repository is removed (and its folder trashed, when asked). */
   closeRepoUnguarded: () => void;
   /** Open a repo (if not already open) and select a PR — used by a notification
    *  row's click-through. `section` is the sub-tab to land on, or null to leave
@@ -715,12 +718,17 @@ export const useUiStore = create<UiState>()((set, get) => {
   // there double-exposes two differently laid-out headers. Read at REQUEST time.
   const repoViewMotion = () => ({ animate: get().view !== "repo" });
 
-  // Hands a move off a dirty Settings to its guard instead of making it. Called
-  // before the navigator's epoch bump: an intercepted request navigates nothing,
-  // and the resume's own bump rides the dialog press that continues it.
+  // Hands a move off a dirty or saving Settings to its guard instead of making
+  // it. The intercept bumps for the user's request before the guard runs, so an
+  // older pending continuation (a claimed repo open) retires and any hold is
+  // stamped with this request's epoch. The resume bumps when it runs: at the
+  // Discard and close press, at a held move's settle (only if the stamped epoch
+  // still holds), when a Save lands under the open prompt, or at once, inside
+  // the intercept, when the guard has nothing left to hold.
   const interceptSettingsLeave = (resume: () => void): boolean => {
     const { view, settingsLeaveGuard } = get();
     if (view !== "settings" || settingsLeaveGuard === null) return false;
+    bumpEpochNow();
     settingsLeaveGuard(resume);
     return true;
   };
