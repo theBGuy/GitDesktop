@@ -27,6 +27,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { AutomationsSection } from "@/features/automations/AutomationsSection";
+import { repoOpenWatermark } from "@/features/repository/useOpenRepoByPath";
 import { presentError } from "@/lib/error-summary";
 import { useAppForm } from "@/lib/form";
 import {
@@ -125,6 +126,15 @@ const AI_PANELS = new Set<PanelId>([
   "automations",
 ]);
 
+/** A leave that runs later, stamped when it was requested: it runs only while
+ *  the interaction epoch is unchanged and no newer repository open was claimed
+ *  (`noNewerOpen`, a `repoOpenWatermark`), since a claim moves no epoch. */
+type DeferredLeave = {
+  run: () => void;
+  epoch: number;
+  noNewerOpen: () => boolean;
+};
+
 /** Focuses `panel`'s entry in the Settings rail under `root`, if both exist. */
 function focusRailItem(root: HTMLElement | null, panel: string) {
   root
@@ -152,13 +162,14 @@ export function SettingsScreen() {
   // The move the Unsaved changes dialog holds for its answer (null: Back/Esc,
   // whose move is closing Settings).
   const pendingLeave = useRef<(() => void) | null>(null);
+  // The repository opens claimed when that move was asked about: a Save landing
+  // under the prompt runs the move only while no newer open was claimed.
+  const pendingLeaveNoNewerOpen = useRef<(() => boolean) | null>(null);
   // Where an in-flight Save continues ("Save and close"'s move, or one held
-  // while it writes), with the epoch it was requested at. Read live when the
-  // Save lands, so a later move replaces it and Keep editing cancels it;
-  // dropped by every Save's end.
-  const leaveAfterSave = useRef<{ run: () => void; epoch: number } | null>(
-    null,
-  );
+  // while it writes), with its request's stamps. Read live when the Save lands,
+  // so a later move replaces it and Keep editing cancels it; dropped by every
+  // Save's end.
+  const leaveAfterSave = useRef<DeferredLeave | null>(null);
   // The Automations write the Save started or joined, which it waits for too.
   const automationsAtSave = useRef<Promise<boolean> | null>(null);
   // The Automations panel edits its own draft (saved independently of the
@@ -344,8 +355,8 @@ export function SettingsScreen() {
           // `requestLeave` held while this Save was writing. Only if nothing
           // happened meanwhile: no edit (it stays on screen with its Save bar),
           // no prompt open (this screen's or an app-scoped one, such as the
-          // footer Discard's), and no user action since the move was requested,
-          // so this late resume retires nothing newer.
+          // footer Discard's), and no user action or repository open since the
+          // move was requested, so this late resume retires nothing newer.
           if (
             leaveAfterSave.current !== null &&
             (await automationsLanded(automationsSaved))
@@ -356,6 +367,7 @@ export function SettingsScreen() {
               mounted.current &&
               useUiStore.getState().view === "settings" &&
               useUiStore.getState().interactionEpoch === leave.epoch &&
+              leave.noNewerOpen() &&
               !confirmCloseRef.current &&
               pendingLeave.current === null &&
               useConfirm.getState().request === null &&
@@ -448,9 +460,7 @@ export function SettingsScreen() {
   const closeDirty = dirty || automationsDirty || secretsDirty;
   const closeDirtyRef = useLatestRef(closeDirty);
   // A move held for an inline Automations write alone (no Save running).
-  const heldForAutomations = useRef<{ run: () => void; epoch: number } | null>(
-    null,
-  );
+  const heldForAutomations = useRef<DeferredLeave | null>(null);
 
   // Waits out the given Automations write and any inline one still in flight
   // after it (one started meanwhile included); true iff each landed. Joins
@@ -478,9 +488,13 @@ export function SettingsScreen() {
     // pending continuations; every other move's intercept already bumped.
     if (move === null) useUiStore.getState().noteUserInteraction();
     const run = move ?? closeSettings;
+    // Both stamps after the bump above (or the intercept's), so neither counts
+    // this request against itself.
     const epoch = useUiStore.getState().interactionEpoch;
+    const noNewerOpen = repoOpenWatermark();
     if (confirmCloseRef.current) {
       pendingLeave.current = move;
+      pendingLeaveNoNewerOpen.current = noNewerOpen;
       return;
     }
     if (
@@ -488,17 +502,18 @@ export function SettingsScreen() {
       !(saveLock.current && leaveAfterSave.current !== null)
     ) {
       pendingLeave.current = move;
+      pendingLeaveNoNewerOpen.current = noNewerOpen;
       setConfirmClose(true);
       return;
     }
     if (saveLock.current) {
       // The Save's success arm reads this live once every write lands.
-      leaveAfterSave.current = { run, epoch };
+      leaveAfterSave.current = { run, epoch, noNewerOpen };
       return;
     }
     const inFlight = joinAutomationsRef.current?.() ?? null;
     if (inFlight !== null) {
-      const held = { run, epoch };
+      const held = { run, epoch, noNewerOpen };
       heldForAutomations.current = held;
       void automationsLanded(inFlight).then((ok) => {
         if (heldForAutomations.current !== held) return;
@@ -509,6 +524,7 @@ export function SettingsScreen() {
           mounted.current &&
           useUiStore.getState().view === "settings" &&
           useUiStore.getState().interactionEpoch === held.epoch &&
+          held.noNewerOpen() &&
           !confirmCloseRef.current &&
           pendingLeave.current === null &&
           useConfirm.getState().request === null &&
@@ -542,11 +558,16 @@ export function SettingsScreen() {
   // it and continue to the move it held (Back's being closing Settings). Not
   // while any write is still in flight: the Automations patch reads clean
   // before its write lands, and a failure must still find the draft on screen.
+  // A repository open claimed since the move was asked about wins instead: the
+  // prompt closes without the move, and the open proceeds on its own.
   useEffect(() => {
     if (closeDirty || saving || !confirmClose) return;
     const leave = pendingLeave.current ?? closeSettings;
+    const noNewerOpen = pendingLeaveNoNewerOpen.current;
     pendingLeave.current = null;
+    pendingLeaveNoNewerOpen.current = null;
     setConfirmClose(false);
+    if (noNewerOpen !== null && !noNewerOpen()) return;
     // Synchronously, or the guard would intercept the resumed move.
     setSettingsLeaveGuard(null);
     leave();
@@ -603,12 +624,13 @@ export function SettingsScreen() {
     // the handle joins that write so the continuation waits for it.
     automationsAtSave.current =
       saveAutomationsRef.current?.({ quiet: true }) ?? null;
-    // Stamped with the epoch of this press (already past the bump of the request
-    // it continues: the intercept's, or Back's or Esc's own): the resume bumps
-    // when it runs at settle, and runs only if no user action came since.
+    // Stamped at this press (already past the bump of the request it continues:
+    // the intercept's, or Back's or Esc's own): the resume bumps when it runs at
+    // settle, and runs only if no user action or repository open came since.
     leaveAfterSave.current = after && {
       run: after,
       epoch: useUiStore.getState().interactionEpoch,
+      noNewerOpen: repoOpenWatermark(),
     };
     form.handleSubmit();
   }

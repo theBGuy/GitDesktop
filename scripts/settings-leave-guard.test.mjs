@@ -244,23 +244,23 @@ function requestLeaveProblems(text) {
   const body = masked.slice(span[0], span[1] + 1);
   const steps = [
     [
-      /^\{\s*heldForAutomations\.current = null;\s*if \(move === null\) useUiStore\.getState\(\)\.noteUserInteraction\(\);\s*const run = move \?\? closeSettings;\s*const epoch = useUiStore\.getState\(\)\.interactionEpoch;/,
-      "a new move no longer drops the one held for an Automations write, Back/Esc no longer bump for their request before the stamp, or the stamp is gone",
+      /^\{\s*heldForAutomations\.current = null;\s*if \(move === null\) useUiStore\.getState\(\)\.noteUserInteraction\(\);\s*const run = move \?\? closeSettings;\s*const epoch = useUiStore\.getState\(\)\.interactionEpoch;\s*const noNewerOpen = repoOpenWatermark\(\);/,
+      "a new move no longer drops the one held for an Automations write, Back/Esc no longer bump for their request before the stamps, or a stamp is gone",
     ],
     [
-      /if \(confirmCloseRef\.current\) \{\s*pendingLeave\.current = move;\s*return;\s*\}/,
-      "an open prompt no longer takes the move",
+      /if \(confirmCloseRef\.current\) \{\s*pendingLeave\.current = move;\s*pendingLeaveNoNewerOpen\.current = noNewerOpen;\s*return;\s*\}/,
+      "an open prompt no longer takes the move with its open watermark",
     ],
     [
-      /if \(\s*closeDirtyRef\.current &&\s*!\(saveLock\.current && leaveAfterSave\.current !== null\)\s*\) \{\s*pendingLeave\.current = move;\s*setConfirmClose\(true\);\s*return;\s*\}/,
-      "unsaved edits no longer ask (or ask during Save and close)",
+      /if \(\s*closeDirtyRef\.current &&\s*!\(saveLock\.current && leaveAfterSave\.current !== null\)\s*\) \{\s*pendingLeave\.current = move;\s*pendingLeaveNoNewerOpen\.current = noNewerOpen;\s*setConfirmClose\(true\);\s*return;\s*\}/,
+      "unsaved edits no longer ask with the move's open watermark (or ask during Save and close)",
     ],
     [
-      /if \(saveLock\.current\) \{\s*leaveAfterSave\.current = \{ run, epoch \};\s*return;\s*\}/,
-      "a running Save no longer holds the move",
+      /if \(saveLock\.current\) \{\s*leaveAfterSave\.current = \{ run, epoch, noNewerOpen \};\s*return;\s*\}/,
+      "a running Save no longer holds the move with its stamps",
     ],
     [
-      /const inFlight = joinAutomationsRef\.current\?\.\(\) \?\? null;\s*if \(inFlight !== null\) \{\s*const held = \{ run, epoch \};\s*heldForAutomations\.current = held;\s*void automationsLanded\(inFlight\)\.then\(\(ok\) => \{\s*if \(heldForAutomations\.current !== held\) return;\s*heldForAutomations\.current = null;/,
+      /const inFlight = joinAutomationsRef\.current\?\.\(\) \?\? null;\s*if \(inFlight !== null\) \{\s*const held = \{ run, epoch, noNewerOpen \};\s*heldForAutomations\.current = held;\s*void automationsLanded\(inFlight\)\.then\(\(ok\) => \{\s*if \(heldForAutomations\.current !== held\) return;\s*heldForAutomations\.current = null;/,
       "an Automations write no longer holds the move, or a superseded hold can still run",
     ],
     [
@@ -287,6 +287,7 @@ function requestLeaveProblems(text) {
       "mounted.current",
       'useUiStore.getState().view === "',
       "useUiStore.getState().interactionEpoch === held.epoch",
+      "held.noNewerOpen()",
       "!confirmCloseRef.current",
       "pendingLeave.current === null",
       "useConfirm.getState().request === null",
@@ -331,11 +332,12 @@ function requestLeaveProblems(text) {
 /** Problems with the prompt's clean-under arm, `[]` when pinned: a Save that
  *  lands while the prompt is open closes it and continues to the held move,
  *  never while a write is still in flight (the Automations patch reads clean
- *  before its write lands). */
+ *  before its write lands), and never once a repository open was claimed since
+ *  the move was asked about (the prompt closes; the open proceeds itself). */
 function cleanUnderPromptProblems(text) {
   const masked = maskNonCode(text, true);
   const effect =
-    /useEffect\(\(\) => \{\s*if \(closeDirty \|\| saving \|\| !confirmClose\) return;\s*const leave = pendingLeave\.current \?\? closeSettings;\s*pendingLeave\.current = null;\s*setConfirmClose\(false\);\s*setSettingsLeaveGuard\(null\);\s*leave\(\);\s*\}, \[\s*closeDirty,\s*saving,\s*confirmClose,\s*closeSettings,\s*setSettingsLeaveGuard,?\s*\]\);/;
+    /useEffect\(\(\) => \{\s*if \(closeDirty \|\| saving \|\| !confirmClose\) return;\s*const leave = pendingLeave\.current \?\? closeSettings;\s*const noNewerOpen = pendingLeaveNoNewerOpen\.current;\s*pendingLeave\.current = null;\s*pendingLeaveNoNewerOpen\.current = null;\s*setConfirmClose\(false\);\s*if \(noNewerOpen !== null && !noNewerOpen\(\)\) return;\s*setSettingsLeaveGuard\(null\);\s*leave\(\);\s*\}, \[\s*closeDirty,\s*saving,\s*confirmClose,\s*closeSettings,\s*setSettingsLeaveGuard,?\s*\]\);/;
   return effect.test(masked)
     ? []
     : ["a Save landing under the prompt no longer continues its move"];
@@ -442,6 +444,7 @@ function continuationProblems(text) {
       "mounted.current",
       'useUiStore.getState().view === "',
       "useUiStore.getState().interactionEpoch === leave.epoch",
+      "leave.noNewerOpen()",
       "!confirmCloseRef.current",
       "pendingLeave.current === null",
       "useConfirm.getState().request === null",
@@ -465,12 +468,12 @@ function continuationProblems(text) {
   const sOpen = save.index + save[0].length - 1;
   const sBody = masked.slice(sOpen, matchBrace(masked, sOpen));
   if (
-    !/^\{\s*if \(saveLock\.current\) return;\s*automationsAtSave\.current =\s*saveAutomationsRef\.current\?\.\(\{ quiet: true \}\) \?\? null;\s*leaveAfterSave\.current = after && \{\s*run: after,\s*epoch: useUiStore\.getState\(\)\.interactionEpoch,?\s*\};\s*form\.handleSubmit\(\);\s*$/.test(
+    !/^\{\s*if \(saveLock\.current\) return;\s*automationsAtSave\.current =\s*saveAutomationsRef\.current\?\.\(\{ quiet: true \}\) \?\? null;\s*leaveAfterSave\.current = after && \{\s*run: after,\s*epoch: useUiStore\.getState\(\)\.interactionEpoch,\s*noNewerOpen: repoOpenWatermark\(\),?\s*\};\s*form\.handleSubmit\(\);\s*$/.test(
       sBody,
     )
   )
     problems.push(
-      "save() no longer calls the handle unconditionally or stamps the press's epoch",
+      "save() no longer calls the handle unconditionally or stamps the press's epoch and open watermark",
     );
   if (/\bautomationsDirty\b/.test(sBody))
     problems.push("save() gates the Automations handle on automationsDirty");
@@ -740,11 +743,18 @@ test("the guard, Back and Esc share one leave route that asks, holds or goes", (
       "    if (move === null) useUiStore.getState().noteUserInteraction();\n",
       "",
     ),
-    // The bump after the stamp: the hold carries the pre-request epoch.
-    once(
-      "    if (move === null) useUiStore.getState().noteUserInteraction();\n    const run = move ?? closeSettings;\n    const epoch = useUiStore.getState().interactionEpoch;\n",
-      "    const run = move ?? closeSettings;\n    const epoch = useUiStore.getState().interactionEpoch;\n    if (move === null) useUiStore.getState().noteUserInteraction();\n",
-    ),
+    // The bump after the stamps: the hold carries the pre-request epoch, and
+    // its watermark reads Back/Esc's own request as a newer navigation.
+    (s) =>
+      once(
+        "    const noNewerOpen = repoOpenWatermark();\n",
+        "    const noNewerOpen = repoOpenWatermark();\n    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+      )(
+        once(
+          "    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+          "",
+        )(s),
+      ),
     // Bumping on every route: an intercepted move's intercept already bumped.
     once(
       "    if (move === null) useUiStore.getState().noteUserInteraction();\n",
@@ -784,6 +794,33 @@ test("a failed or superseded hold never navigates", () => {
       "          useUiStore.getState().interactionEpoch === held.epoch &&\n",
       "",
     ),
+    // A newer repository open not retiring it (a claim moves no epoch).
+    once("          held.noNewerOpen() &&\n", ""),
+    once(
+      "      const held = { run, epoch, noNewerOpen };",
+      "      const held = { run, epoch, noNewerOpen: () => true };",
+    ),
+    // The same for a move held into a running Save.
+    once(
+      "      leaveAfterSave.current = { run, epoch, noNewerOpen };",
+      "      leaveAfterSave.current = { run, epoch, noNewerOpen: () => true };",
+    ),
+    // The prompt's moves recorded without their watermark.
+    once(
+      "      pendingLeave.current = move;\n      pendingLeaveNoNewerOpen.current = noNewerOpen;\n      return;",
+      "      pendingLeave.current = move;\n      return;",
+    ),
+    once(
+      "      pendingLeave.current = move;\n      pendingLeaveNoNewerOpen.current = noNewerOpen;\n      setConfirmClose(true);",
+      "      pendingLeave.current = move;\n      setConfirmClose(true);",
+    ),
+    // The watermark taken before Back/Esc's own bump: it would read their own
+    // request as a newer navigation and never run.
+    (s) =>
+      once(
+        "    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+        "    const noNewerOpen = repoOpenWatermark();\n    if (move === null) useUiStore.getState().noteUserInteraction();\n",
+      )(once("    const noNewerOpen = repoOpenWatermark();\n", "")(s)),
     // A Save started since, or an edit since, not stopping it.
     // (Leading newlines keep these off the Save's deeper-indented twins.)
     once("\n          !saveLock.current &&\n", "\n"),
@@ -804,9 +841,18 @@ test("a Save landing under the open prompt continues its held move", () => {
       "    setSettingsLeaveGuard(null);\n  }, [closeDirty, saving",
     ),
     once(
-      "    pendingLeave.current = null;\n    setConfirmClose(false);\n    // Synchronously",
-      "    pendingLeave.current = null;\n    // Synchronously",
+      "    pendingLeaveNoNewerOpen.current = null;\n    setConfirmClose(false);\n",
+      "    pendingLeaveNoNewerOpen.current = null;\n",
     ),
+    // Running the old move after a newer repository open was claimed, which
+    // closes Settings and cancels that open.
+    once("    if (noNewerOpen !== null && !noNewerOpen()) return;\n", ""),
+    once(
+      "    if (noNewerOpen !== null && !noNewerOpen()) return;\n",
+      "    if (noNewerOpen !== null && !noNewerOpen()) {\n    }\n",
+    ),
+    // The watermark left behind for the next prompt's move.
+    once("    pendingLeaveNoNewerOpen.current = null;\n", ""),
     once(
       "    if (closeDirty || saving || !confirmClose) return;",
       "    if (!closeDirty || saving || !confirmClose) return;",
@@ -899,9 +945,16 @@ test("a Save continues only from its success arm, live, after the Automations wr
     ),
     // The press stamp dropped from save().
     once(
-      "      epoch: useUiStore.getState().interactionEpoch,\n    };\n    form.handleSubmit();",
-      "      epoch: 0,\n    };\n    form.handleSubmit();",
+      "      epoch: useUiStore.getState().interactionEpoch,\n      noNewerOpen",
+      "      epoch: 0,\n      noNewerOpen",
     ),
+    // The press's open watermark dropped, or never checked at settle: a
+    // repository open claimed during the Save is cancelled by the old move.
+    once(
+      "      noNewerOpen: repoOpenWatermark(),\n",
+      "      noNewerOpen: () => true,\n",
+    ),
+    once("              leave.noNewerOpen() &&\n", ""),
     // The open-prompt backstops dropped.
     once("              !confirmCloseRef.current &&\n", ""),
     once("              pendingLeave.current === null &&\n", ""),

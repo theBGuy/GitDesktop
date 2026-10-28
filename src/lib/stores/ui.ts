@@ -722,9 +722,11 @@ export const useUiStore = create<UiState>()((set, get) => {
   // it. The intercept bumps for the user's request before the guard runs, so an
   // older pending continuation (a claimed repo open) retires and any hold is
   // stamped with this request's epoch. The resume bumps when it runs: at the
-  // Discard and close press, at a held move's settle (only if the stamped epoch
-  // still holds), when a Save lands under the open prompt, or at once, inside
-  // the intercept, when the guard has nothing left to hold.
+  // Discard and close press, at a held move's settle or when a Save lands under
+  // the open prompt (either only while no user action or repository open came
+  // since the move was requested: a claimed open moves no epoch, so Settings
+  // also stamps a `repoOpenWatermark`), or at once, inside the intercept, when
+  // the guard has nothing left to hold.
   const interceptSettingsLeave = (resume: () => void): boolean => {
     const { view, settingsLeaveGuard } = get();
     if (view !== "settings" || settingsLeaveGuard === null) return false;

@@ -56,7 +56,8 @@ export const repoOpenWatermark = openClaims.watermark;
  * settings-write failure must never block opening. Resolves true once the switch
  * was REQUESTED: a dirty Settings may still hold it behind its Unsaved changes
  * prompt, whose Keep editing cancels it, and one with nothing unsaved but a save
- * still writing holds it until the save lands (a failed save drops it).
+ * still writing holds it until the save lands (a failed save, a later move or a
+ * newer open drops it).
  * Callers whose own awaits are part of the open request (drop, Recents, the
  * folder picker, a submodule opened as a repo) claim before those awaits and
  * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; a caller
@@ -97,7 +98,8 @@ export function useOpenRecordedRepo() {
  * and when a newer open or navigation superseded this one (silent); a dirty
  * Settings may still hold the switch behind its Unsaved changes prompt, whose
  * Keep editing cancels it, and one with nothing unsaved but a save still
- * writing holds it until the save lands (a failed save drops it).
+ * writing holds it until the save lands (a failed save, a later move or a newer
+ * open drops it).
  * Callers: the shared recents list, macOS File → Open Recent, the folder
  * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
  * repository from the Submodules dialog.
