@@ -253,13 +253,14 @@ export function useOpenRepoByPath() {
  * {@link useOpenRepoByPath} this does NOT record the path in recents: worktrees
  * are child checkouts of a repo already in the switcher, not first-class repos.
  *
- * Resolves TRUE only once the app is actually in the worktree — false when the
- * open failed (which toasts), when the user switched repos, navigated, or asked
- * for another open meanwhile, or when `stillWanted` retired it; all but the
- * failure are silent. A caller that reports the navigation to the user must
- * await this and gate on it; callers that only navigate ignore the value,
- * awaited or not. The guard reads the live repo when this is CALLED, so a
- * caller that awaits something else FIRST needs its own check before calling.
+ * Resolves true once the switch was REQUESTED — false when the open failed
+ * (which toasts), when the user switched repos, navigated, or asked for another
+ * open meanwhile, or when `stillWanted` retired it; all but the failure are
+ * silent. A requested switch can still be held by a dirty Settings, whose Keep
+ * editing cancels it, so a caller that reports the navigation to the user does
+ * so from `opts.onApplied`, which runs only when the switch lands. The guard
+ * reads the live repo when this is CALLED, so a caller that awaits something
+ * else FIRST needs its own check before calling.
  *
  * @param stillWanted Re-checked after `validateRepo` and the shell warm-up, for
  * a caller that sequences several opens: a newer one can start while those run,
@@ -270,7 +271,11 @@ export function useOpenWorktree() {
   const openRepo = useUiStore((s) => s.openRepo);
   const queryClient = useQueryClient();
   return useCallback(
-    async (path: string, stillWanted?: () => boolean) => {
+    async (
+      path: string,
+      stillWanted?: () => boolean,
+      opts?: { onApplied?: () => void },
+    ) => {
       // `openRepo` writes GLOBAL navigation state, so it may only fire while the
       // app is still where this call started — the user can switch repositories,
       // open Settings, or start another open while the awaits below run, and an
@@ -289,7 +294,7 @@ export function useOpenWorktree() {
         if (useUiStore.getState().repoPath !== firedOn) return false;
         if (!stillCurrent()) return false;
         if (stillWanted && !stillWanted()) return false;
-        openRepo(info);
+        openRepo(info, opts);
         return true;
       } catch (e) {
         toastError(e);

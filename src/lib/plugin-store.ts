@@ -8,8 +8,8 @@ import { storeName } from "@/lib/test-mode";
 
 /** Stores whose writes `set` without a `save()` by design, persisted by the
  *  plugin's ~100 ms autosave debounce. Every other store's writes force-save
- *  (inside the cross-process lock where they take it), so a debounce armed by a
- *  failed write would land outside that save. */
+ *  (inside the cross-process lock where they take it) with autosave off, since a
+ *  debounce armed by a failed write would fire later, outside that lock. */
 const AUTOSAVE_STORES: ReadonlySet<string> = new Set([
   "analytics.json",
   "notifications.json",

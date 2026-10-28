@@ -523,11 +523,12 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   right after a navigator can be clobbered by that later apply — navigate in
   ONE atomic action. A side effect that must count only when a navigation
   LANDS (a read-mark, an analytics event) rides the navigator's `onApplied`,
-  run inside the transition callback after the landing's set: the four jump
-  navigators skip it on a stillValid-refused landing; `openRepo` applies every
-  call that reaches its callback (a skipped view transition still runs its
-  update), so its callers gate with `claimRepoOpen`/`repoOpenWatermark` before
-  calling. `onApplied` itself never bumps the epoch.
+  run inside the transition callback after the landing's set: `openPr`,
+  `openRun`, `openAgentTab` and `openRepoView` skip it on a stillValid-refused
+  landing (`openIssue` takes none); `openRepo` applies every call that reaches
+  its callback (a skipped view transition still runs its update), so its
+  callers gate with `claimRepoOpen`/`repoOpenWatermark` before calling.
+  `onApplied` itself never bumps the epoch.
 - Navigators that can leave Settings open with
   `if (interceptSettingsLeave(() => get().<self>(<original args>))) return;`
   ahead of their own epoch bump: the intercept bumps for the request and hands

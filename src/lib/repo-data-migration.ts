@@ -51,8 +51,9 @@ import { storeName } from "@/lib/test-mode";
 // and the stores' own legacy folding only re-homes the CURRENT checkout's raw-path
 // key, never the departed `<oldPath>/.git` key.
 
-/** Load a store with the options `storeLoadOptions` mints per file, so we mutate
- *  the same cached instance the feature modules opened rather than a private copy. */
+/** Load through `storeLoadOptions`: the plugin keeps one instance per file and the
+ *  first opener fixes its options, so this load must not arm autosave on a
+ *  force-saving store. */
 function loadStore(file: string) {
   return load(storeName(file), storeLoadOptions(file));
 }

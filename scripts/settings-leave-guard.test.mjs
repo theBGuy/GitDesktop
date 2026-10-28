@@ -39,6 +39,7 @@ const SCREEN = "src/features/settings/SettingsScreen.tsx";
 const AUTOMATIONS = "src/features/automations/AutomationsSection.tsx";
 const ACTIVITY = "src/features/activity/ActivityDock.tsx";
 const OPEN_BY_PATH = "src/features/repository/useOpenRepoByPath.ts";
+const BRANCH_SWITCHER = "src/features/repository/BranchSwitcher.tsx";
 
 /** The notification jumps' navigators, each re-checked by `stillValid`. */
 const JUMP_NAVIGATORS = ["openPr", "openRun", "openAgentTab", "openRepoView"];
@@ -612,7 +613,8 @@ function onAppliedProblems(text) {
 /** Problems with the notification read-marks, `[]` when pinned: inside
  *  navigate(), only the two synchronous acks (automation result, no route) mark
  *  before the routed arm, and each of the four jump navigators marks through its
- *  `onApplied`, so a held, refused or superseded jump leaves its row unread. */
+ *  `onApplied`, so a cancelled, refused or superseded jump leaves its row
+ *  unread. */
 function markReadProblems(text) {
   const masked = maskNonCode(text, true);
   const at = /const navigate = \(n: AppNotification\) => \{/.exec(masked);
@@ -640,8 +642,8 @@ function markReadProblems(text) {
 }
 
 /** Problems with the repo-open event, `[]` when pinned: `repo_opened` is
- *  tracked once, from the `onApplied` the open hands `openRepo`, and the
- *  recorded open forwards that to the navigator. */
+ *  tracked once, from the `onApplied` the open hands `openRepo`, and both the
+ *  recorded and the worktree open forward their opts to the navigator. */
 function repoOpenedProblems(text) {
   const masked = maskNonCode(text, false);
   const problems = [];
@@ -653,8 +655,28 @@ function repoOpenedProblems(text) {
     !/onApplied: \(\) =>\s*$/.test(text.slice(0, tracks[0].index))
   )
     problems.push("repo_opened is no longer tracked once, at the landing");
-  if ((masked.match(/(?<![\w$.])openRepo\(info, opts\);/g) ?? []).length !== 1)
-    problems.push("the recorded open no longer forwards its opts to openRepo");
+  if ((masked.match(/(?<![\w$.])openRepo\(info, opts\);/g) ?? []).length !== 2)
+    problems.push("an open no longer forwards its opts to openRepo");
+  return problems;
+}
+
+/** Problems with the branch switcher's worktree-opened toast, `[]` when
+ *  pinned: its copy is built once and shown only from the `onApplied` it hands
+ *  `openWorktree`, so a failed open, one retired before it was requested, or a
+ *  Settings-held one that Keep editing cancels never claims the app changed
+ *  folders. */
+function worktreeOpenedProblems(text) {
+  const problems = [];
+  if ((text.match(/\.opened\(/g) ?? []).length !== 1)
+    problems.push("expected the worktree-opened copy built once");
+  if ((text.match(/toast\.success\(openedCopy\)/g) ?? []).length !== 1)
+    problems.push("expected the worktree-opened toast shown once");
+  if (
+    !/await openWorktree\(\s*wtPath,[^;]*?\{\s*onApplied: \(\) => \{\s*if \(openedCopy\) toast\.success\(openedCopy\);\s*\},?\s*\},?\s*\);/.test(
+      text,
+    )
+  )
+    problems.push("the worktree-opened toast no longer waits for the landing");
   return problems;
 }
 
@@ -1238,6 +1260,25 @@ test("repo_opened is tracked when the open lands", () => {
       '    ) => {\n      const opened = await openRecorded(info, stillCurrent);\n      if (opened) track({ name: "repo_opened", properties: { source } });\n      return opened;\n    },\n',
     ),
     once("      openRepo(info, opts);\n", "      openRepo(info);\n"),
+    // The worktree open dropping its opts: its caller's toast never fires.
+    once("        openRepo(info, opts);\n", "        openRepo(info);\n"),
+  );
+});
+
+test("the worktree-opened toast waits for the open to land", () => {
+  pin(
+    worktreeOpenedProblems,
+    source(BRANCH_SWITCHER),
+    // Back to the request-time toast, gated only on the resolved verdict.
+    once(
+      "      await openWorktree(\n        wtPath,\n        () => switchRequest === switchRequestRef.current,\n        {\n          onApplied: () => {\n            if (openedCopy) toast.success(openedCopy);\n          },\n        },\n      );\n",
+      "      const navigated = await openWorktree(\n        wtPath,\n        () => switchRequest === switchRequestRef.current,\n      );\n      if (navigated && openedCopy) toast.success(openedCopy);\n",
+    ),
+    // The toast both at the landing and at the request.
+    once(
+      "      return;\n    }\n    // with work in progress",
+      "      if (openedCopy) toast.success(openedCopy);\n      return;\n    }\n    // with work in progress",
+    ),
   );
 });
 

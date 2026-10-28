@@ -436,9 +436,9 @@ interface UiState {
    *  a folder it is about to delete), never a user's gesture. `onApplied` runs
    *  inside the transition callback after the set: every call reaching that
    *  callback applies (a skipped transition still runs its update), so only a
-   *  held move that Settings cancels, replaces or drops never fires it, and callers
-   *  gate with `claimRepoOpen`/`repoOpenWatermark` before calling. It never
-   *  bumps the epoch; the request's bump counted the move. */
+   *  held move that Settings cancels, replaces or drops never fires it, and
+   *  callers gate with `claimRepoOpen`/`repoOpenWatermark` before calling. It
+   *  never bumps the epoch; the request's bump counted the move. */
   openRepo: (
     info: RepoInfo,
     opts?: { bypassLeaveGuard?: boolean; onApplied?: () => void },
@@ -478,8 +478,8 @@ interface UiState {
     /** Side effect that counts only if this landing applies (a read-mark), run
      *  inside the transition callback after `stillValid` passed, `beforeSelect`
      *  ran and the set applied: a refused landing, or a move Settings held and
-     *  then cancelled, never fires it. It never bumps the epoch; the request's
-     *  bump counted the move. */
+     *  then cancelled, replaced or dropped, never fires it. It never bumps the
+     *  epoch; the request's bump counted the move. */
     onApplied?: () => void;
   }) => void;
   /** Open a repo (if not already open) and select one of its issues — the
