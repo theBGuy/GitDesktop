@@ -45,18 +45,28 @@
 //      an Err as well, which J doesn't scan: it reads exits only. Exempt:
 //      `classify_repo_view` (github/pr.rs) keeps an unreadable repo view as
 //      Unresolved, forge-status's answered "no repository" probe.
-//   K. diff argv carry --no-ext-diff so external tools cannot replace patches.
-//      --numstat/--name-only/--name-status are exempt only without patch flags:
-//      those output modes alone never run the external diff driver.
-//      --quiet is deliberately NOT exempt: it runs a driver whose exit code
-//      is trusted via diff.trustExitCode, per git's diff-options docs.
-//      --ext-diff is refused outright; textconv remains enabled.
+//   K. external diff drivers — diff argv carry --no-ext-diff so external tools
+//      cannot replace patches or forge verdicts. An exemption requires
+//      --numstat/--name-only/--name-status and every literal option after the
+//      verb and before -- on KNOWN_NO_PATCH, or one of the =/attached value
+//      forms the matcher accepts (bare --diff-filter M is not exempt). Each
+//      member was measured beside every exempt mode, worktree and
+//      --cached/--staged, under a trusted driver, git 2.51.1. Other options
+//      require --no-ext-diff. --quiet can trust a driver via diff.trustExitCode,
+//      diff.<driver>.trustExitCode or GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE, per
+//      git's diff-options docs. --ext-diff is refused before -- in any
+//      argv-shaped group; textconv remains enabled.
 //      Not seen: builder chains (Command::new("git").arg("diff")...), argv
-//      assembled across functions, and a verb held in a variable; bundled
-//      short flags such as -pz beside an exempt output flag (git accepts them
-//      and runs the driver, measured git 2.51.1), or a patch flag held in an
-//      opaque element beside an exempt flag (["diff", "--numstat", flag]).
-//      Both of those mixed-output forms pass K.
+//      assembled across functions, a verb held in a variable, or an opaque
+//      option beside an exempt flag (["diff", "--numstat", flag]); a leading
+//      "git" program-name element, array-repeat ["diff"; N], alias verbs via
+//      -c alias.x=…, and a same-named REQUESTED_ATTRS item nested inside a fn
+//      (item rows match file+name). difftool is out of scope by design; a driver
+//      set through GIT_EXTERNAL_DIFF in a command's env is not an argv site.
+//      Only four bare owned-string forms resolve: .to_string(), .into(),
+//      .to_owned() and String::from(...). Other conversions (.as_str() chains,
+//      &*...to_owned(), format!, Cow::from, OsString::from, into::<String>())
+//      are opaque, so a patch flag in one beside an exempt flag passes.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
@@ -1059,7 +1069,7 @@ const WORD = /[\p{ID_Continue}]/u;
  *  it — and a lifetime read as an open quote revives the comment after it.
  *  `unterminated` is the offset of a literal or comment that runs off the end
  *  (everything after it is unreadable), or -1. Callers only read the views,
- *  so checks D, F, G, H, I and K share one lexing of each file. */
+ *  so checks D, F, G, H, I, J and K share one lexing of each file. */
 let lexed = { text: null, views: null };
 export function lexRust(text) {
   if (lexed.text === text) return lexed.views;
@@ -2612,18 +2622,35 @@ const DIFF_DRIVER_FLAGS = new Set([
   "--name-only",
   "--name-status",
 ]);
-const DIFF_PATCH_FLAGS = new Set([
-  "-p",
-  "-u",
-  "-U",
-  "--patch",
-  "--patch-with-raw",
-  "--patch-with-stat",
-  "--unified",
+const KNOWN_NO_PATCH = new Set([
+  ...DIFF_DRIVER_FLAGS,
+  "-z",
+  "--no-color",
+  "--cached",
+  "--staged",
+  "--no-renames",
+  "--no-relative",
+  "--find-renames",
+  "-M",
+  "--relative",
+  "--ignore-submodules",
 ]);
+const knownNoPatch = (value) =>
+  KNOWN_NO_PATCH.has(value) ||
+  /^(?:--(?:find-renames|diff-filter|relative|ignore-submodules)=[\s\S]*|-M\d+(?:\.\d+)?%?)$/.test(value);
 const DIFF_DRIVER_FIX =
-  "check K: add --no-ext-diff immediately after diff; only --numstat, " +
-  "--name-only and --name-status without patch flags bypass external drivers (--quiet does not)";
+  "check K: add --no-ext-diff immediately after diff; --numstat, --name-only " +
+  "and --name-status are the only exempt output modes, and only with no " +
+  "literal option after the verb and before -- outside the known-no-patch list";
+
+function diffArgLiteral(text) {
+  const value = literalValue(text.trim());
+  if (value !== undefined) return value;
+  const owned = /^([\s\S]*)\.\s*(?:to_string|into|to_owned)\s*\(\s*\)$/.exec(text.trim());
+  const from = /^String\s*::\s*from\s*\(([\s\S]*)\)$/.exec(text.trim());
+  const inner = owned?.[1] ?? from?.[1];
+  return inner === undefined ? undefined : literalValue(inner.trim());
+}
 
 export function checkDiffExternalDrivers(
   file,
@@ -2682,8 +2709,26 @@ export function checkDiffExternalDrivers(
     if (tests.some(([s, e]) => at > s && at < e)) continue;
     const body = bracketBody(code, at);
     const end = at + body.length + 1;
-    const values = argvElements(body).map((e) => literalValue(e.text.trim()));
-    if (!values.includes("diff")) continue;
+    const values = argvElements(body).map((e) => diffArgLiteral(e.text));
+    const globalValues = new Set();
+    let verb;
+    for (let k = 0; k < values.length; k++) {
+      const value = values[k];
+      if (value === undefined) break;
+      if (!value.startsWith("-")) {
+        verb = k;
+        break;
+      }
+      if (GIT_VALUE_OPTIONS.has(value)) globalValues.add(++k);
+    }
+    const args = verb === undefined ? values : values.slice(verb + 1);
+    const separator = args.indexOf("--");
+    const options = separator < 0 ? args : args.slice(0, separator);
+    const pathStart = separator < 0 ? values.length : (verb === undefined ? 0 : verb + 1) + separator;
+    const enablesDriver = values.slice(0, pathStart).some(
+      (value, k) => value === "--ext-diff" && !globalValues.has(k),
+    );
+    if (!values.includes("diff") && !enablesDriver) continue;
     const item = items.filter((i) => at > i.eq && at < i.end).at(-1);
     const fn = functions.filter((f) => at > f.open && at < f.close).at(-1);
     const isItem = Boolean(item && (!fn || item.eq > fn.open));
@@ -2703,20 +2748,20 @@ export function checkDiffExternalDrivers(
         at,
         name,
         isItem,
-        "check K: cannot bound this diff argv group — fix its delimiters or extend the parser",
+        "check K: cannot bound this git argv group — fix its delimiters or extend the parser",
         false,
       );
       continue;
     }
-    let verb;
-    for (let k = 0; k < values.length; k++) {
-      const value = values[k];
-      if (value === undefined) break;
-      if (!value.startsWith("-")) {
-        verb = k;
-        break;
-      }
-      if (GIT_VALUE_OPTIONS.has(value)) k++;
+    if (enablesDriver) {
+      report(
+        at,
+        name,
+        isItem,
+        "check K: drop --ext-diff; external drivers are refused before -- in any argv-shaped group",
+        false,
+      );
+      continue;
     }
     if (verb === undefined) {
       report(
@@ -2727,26 +2772,11 @@ export function checkDiffExternalDrivers(
         false,
       );
     } else if (values[verb] === "diff") {
-      const args = values.slice(verb + 1);
-      const separator = args.indexOf("--");
-      const options = separator < 0 ? args : args.slice(0, separator);
-      if (options.includes("--ext-diff")) {
-        report(
-          at,
-          name,
-          isItem,
-          "check K: drop --ext-diff; it can re-enable external drivers even alongside --no-ext-diff",
-          false,
-        );
-        continue;
-      }
-      const patch = options.some(
-        (value) => DIFF_PATCH_FLAGS.has(value) || /^(?:-U\d+|--unified=\d+)$/.test(value),
+      const exempt = options.some((value) => DIFF_DRIVER_FLAGS.has(value)) &&
+        options.every(
+          (value) => value === undefined || !value.startsWith("-") || knownNoPatch(value),
       );
-      if (
-        !options.includes("--no-ext-diff") &&
-        (patch || !options.some((value) => DIFF_DRIVER_FLAGS.has(value)))
-      )
+      if (!options.includes("--no-ext-diff") && !exempt)
         report(at, name, isItem, DIFF_DRIVER_FIX);
     }
   }

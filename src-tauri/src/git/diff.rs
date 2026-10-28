@@ -1373,7 +1373,8 @@ mod tests {
             .await
             .unwrap();
         assert!(control.stdout_lossy().contains("EXTDIFF-RAN"));
-        // Only repo-local diff.external fires for --no-index; attribute drivers do not (measured, git 2.51.1).
+        // diff.external fires for --no-index; attribute drivers do not
+        // (measured, git 2.51.1).
         if !attribute_driver {
             let untracked_control = run_git_raw(
                 Some(&repo),

@@ -1621,11 +1621,15 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
         // already refused a dirty tree, so this reads empty — kept real for the same
         // reason `git_cherry_pick_core` reads it: a baseline is never assumed.
         let already_unmerged = unmerged_paths(repo_path).await;
+        enum FailedStep {
+            Pick,
+            Skip,
+        }
         // Every failure class that reaches this leaves through the one rollback funnel
         // below, so none of them exits with HEAD on `target` unless the rollback itself
         // fails, which the error then says. The exception returns before it: a
         // single-commit conflict, which stops for the user instead.
-        let mut failure: Option<(String, AppError)> = None;
+        let mut failure: Option<(String, AppError, FailedStep)> = None;
         'picks: for hash in hashes {
             // Raw plus an explicit code check, never a mutating runner: this loop
             // runs inside the compound's own working-tree hold. A conflicted pick
@@ -1639,7 +1643,7 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             let out = match run_git_raw(Some(repo_path), &pick_args, pick_timeout).await {
                 Ok(out) => out,
                 Err(e) => {
-                    failure = Some((hash.clone(), e));
+                    failure = Some((hash.clone(), e, FailedStep::Pick));
                     break 'picks;
                 }
             };
@@ -1651,12 +1655,27 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             // the raw stream keeps the stdout half from widening what counts as
             // "empty".
             if out.stderr.contains("is now empty") || out.stderr.contains("--allow-empty") {
-                let _ = run_git(
-                    Some(repo_path),
+                let skip = match run_git_raw_index_retry(
+                    repo_path,
                     &["cherry-pick", "--skip"],
                     DEFAULT_TIMEOUT,
                 )
-                .await;
+                .await
+                {
+                    Ok(skip) => skip,
+                    Err(e) => {
+                        failure = Some((hash.clone(), e, FailedStep::Skip));
+                        break 'picks;
+                    }
+                };
+                if skip.code != 0 {
+                    let err = AppError::Git {
+                        code: skip.code,
+                        stderr: skip.full_failure_text(),
+                    };
+                    failure = Some((hash.clone(), err, FailedStep::Skip));
+                    break 'picks;
+                }
                 skipped += 1;
                 continue;
             }
@@ -1684,11 +1703,11 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
             if matches!(err, AppError::Conflict { .. }) {
                 return Err(err);
             }
-            failure = Some((hash.clone(), err));
+            failure = Some((hash.clone(), err, FailedStep::Pick));
             break 'picks;
         }
 
-        if let Some((hash, err)) = failure {
+        if let Some((hash, err, step)) = failure {
             // Roll everything back: abort the in-progress pick, drop the commits
             // already applied in this batch, and return home. Every attempt stays
             // best-effort, but the two that decide whether the repo actually came
@@ -1757,26 +1776,42 @@ pub(crate) async fn cherry_pick_onto_with_timeouts(
                 ""
             };
             let short = &hash[..hash.len().min(7)];
+            let failed_skip = matches!(step, FailedStep::Skip);
+            let failed_step = if failed_skip {
+                format!("Skipping {short}, which was already applied, failed")
+            } else {
+                format!("Pick {short} failed, usually a conflict")
+            };
+            let failing_action = if failed_skip {
+                format!("Skipping {short}, which was already applied, failed.")
+            } else {
+                format!("The failing pick was {short}.")
+            };
             return Err(match err {
                 AppError::Git { code, stderr } if rolled_back => AppError::Git {
                     code,
                     stderr: format!(
-                        "The cherry-pick was rolled back — {target_branch} is unchanged.\nPick {short} failed, usually a conflict; nothing from this batch was kept.\n{stderr}{stale_hints}"
+                        "The cherry-pick was rolled back — {target_branch} is unchanged.\n{failed_step}; nothing from this batch was kept.\n{stderr}{stale_hints}"
                     ),
                 },
                 AppError::Git { code, stderr } => AppError::Git {
                     code,
                     stderr: format!(
-                        "{recovery}\nThe failing pick was {short}.\n{stderr}{stale_hints}"
+                        "{recovery}\n{failing_action}\n{stderr}{stale_hints}"
                     ),
                 },
+                AppError::Command(message) if rolled_back && failed_skip => {
+                    AppError::Command(format!(
+                        "The cherry-pick was rolled back — {target_branch} is unchanged.\n{failed_step}; nothing from this batch was kept.\n{message}"
+                    ))
+                }
                 other if rolled_back => other,
                 // Timeout carries only a u64 and GitNotFound carries nothing, so a
                 // variant-preserving wrap isn't available for every arm — one
                 // `Command` carrying the whole explanation beats a scheme where
                 // which variant survives depends on the failure class.
                 other => AppError::Command(format!(
-                    "{recovery}\nThe failing pick was {short}.\n{other}"
+                    "{recovery}\n{failing_action}\n{other}"
                 )),
             });
         }
@@ -13399,7 +13434,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_cores_keep_prelock_reads_under_one_hold() {
+    fn conflict_cores_read_baselines_under_one_hold() {
         fn holds_conflict_baseline(body: &str) -> bool {
             let code = body
                 .lines()
@@ -13468,6 +13503,52 @@ mod tests {
             let body = tail.split_once("\n}").unwrap().0;
             assert!(holds_conflict_baseline(body), "{name}");
         }
+    }
+
+    #[test]
+    fn cherry_pick_skip_results_are_bound() {
+        fn skip_results_are_bound(source: &str) -> bool {
+            let code: String = source
+                .lines()
+                .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            let sites: Vec<_> = code.match_indices("[\"cherry-pick\",\"--skip\"]").collect();
+            !sites.is_empty()
+                && sites.iter().all(|(at, _)| {
+                    let Some(run) = code[..*at].rfind("run_git") else {
+                        return false;
+                    };
+                    let lead = &code[..run];
+                    let start = lead.rfind([';', '{', '}']).map_or(0, |pos| pos + 1);
+                    let Some(assignment) = lead[start..].strip_prefix("let") else {
+                        return false;
+                    };
+                    let Some((binding, _)) = assignment.split_once('=') else {
+                        return false;
+                    };
+                    binding.starts_with(|ch: char| ch.is_ascii_alphabetic())
+                        && binding.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+                })
+        }
+        assert!(!skip_results_are_bound(
+            "let _ = run_git(repo, &[\"cherry-pick\", \"--skip\"], timeout).await;"
+        ));
+        assert!(!skip_results_are_bound(
+            "let _skip = run_git(repo, &[\"cherry-pick\", \"--skip\"], timeout).await;"
+        ));
+        assert!(!skip_results_are_bound(
+            "run_git(repo, &[\"cherry-pick\", \"--skip\"], timeout).await;"
+        ));
+        assert!(skip_results_are_bound(
+            "let skip = run_git(repo, &[\"cherry-pick\", \"--skip\"], timeout).await?;"
+        ));
+        let source = include_str!("ops.rs").replace("\r\n", "\n");
+        let production = source.split_once("\nmod tests {").unwrap().0;
+        assert!(skip_results_are_bound(production));
     }
 
     #[tokio::test]

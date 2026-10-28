@@ -4889,6 +4889,15 @@ test("diff drivers require a flag on patches, quiet and exit-code verdicts", () 
     'vec!{"diff", "--no-color"}',
     '["diff", "--numstat", "-p", r]',
     '["diff", "--numstat", "-U"]',
+    '["diff", "--numstat", "--binary"]',
+    '["diff", "--name-only", "--quiet"]',
+    '["diff", "--numstat", "--foo"]',
+    '["diff", "--name-only", "--exit-code"]',
+    '["diff", "--numstat", "--exit-code"]',
+    '["diff", "--numstat", "-pz"]',
+    '["diff", "--numstat", "-zp"]',
+    'vec!["diff".to_string(), x]',
+    'vec![String::from("diff"), "--numstat".into(), "-p".into()]',
     '["diff", "--name-only", "--patch"]',
     '["diff", "--cached", "--quiet"]',
     '["diff", "--exit-code"]',
@@ -4909,11 +4918,69 @@ test("diff drivers reject explicit external-driver enabling regardless of flag o
     '["diff", "--no-ext-diff", "--ext-diff"]',
     '["diff", "--ext-diff", "--no-ext-diff"]',
     '["diff", "--numstat", "--ext-diff"]',
+    '["show", "--ext-diff", sha]',
+    '["log", "-p", "--ext-diff"]',
+    '["diff-tree", "--ext-diff".to_owned(), sha]',
+    '["-C", "--", "diff", "--no-ext-diff", "--ext-diff"]',
+    '["-p", "--ext-diff", "HEAD"]',
+    '["--ext-diff", "diff"]',
   ]) {
     const hits = diffDriverHits(`fn patch() { run(${argv}); }`);
     assert.equal(hits.length, 1, argv);
     assert.equal(hits[0].allowlisted, false, argv);
     assert.match(hits[0].fix, /drop --ext-diff/);
+  }
+  for (const call of [
+    'Command::new("git").arg("show").args(["--ext-diff", "HEAD"])',
+    'cmd.arg("diff").args(["--ext-diff", "HEAD"])',
+  ]) {
+    const hits = diffDriverHits(`fn patch() { ${call}; }`);
+    assert.equal(hits.length, 1, call);
+    assert.equal(hits[0].allowlisted, false, call);
+    assert.match(hits[0].fix, /drop --ext-diff/);
+  }
+  assert.deepEqual(diffDriverHits('fn log() { run(&["-c", "--ext-diff", "log"]); }'), []);
+});
+
+test("diff drivers retain every production exempt argv shape", () => {
+  for (const [site, argv] of [
+    ["diff.rs staged", '["diff", base, "--numstat", "-z"]'],
+    ["diff.rs cached stats", '["diff", "--cached", "--numstat", "-z"]'],
+    ["diff.rs working stats", '["diff", "--numstat", "-z"]'],
+    ["compare.rs branch stats", '["diff", "--numstat", "-z", &format!("{base}...{compare}")]'],
+    ["compare.rs branch compare", '["diff", "--numstat", "-z", &range]'],
+    ["compare.rs range delta", '["diff", "--numstat", "-z", &range]'],
+    ["ops.rs selected staged", '["diff", "--cached", "--no-renames", "-z", "--name-only"]'],
+    ["ops.rs selected paths", '["diff", "--cached", "--no-renames", "-z", "--name-only", "--"]'],
+    ["ops.rs conflicts", '["diff", "--name-only", "--diff-filter=U"]'],
+    ["ignored_guard.rs", '["diff", "--no-relative", "--name-only", "--no-renames", "--diff-filter=d", "-z", &format!("HEAD...{incoming_sha}")]'],
+    ["stats.rs", '["diff", "--numstat", &merge_range]'],
+  ]) {
+    assert.deepEqual(diffDriverHits(`fn stats() { run(&${argv}); }`), [], site);
+  }
+});
+
+test("diff drivers exempt only known options alongside a machine-readable mode", () => {
+  for (const option of ["-z", "--no-color", "--cached", "--staged", "--no-renames", "--no-relative", "--find-renames", "--find-renames=50%", "-M", "-M50%", "--diff-filter=U", "--relative", "--relative=src/", "--ignore-submodules", "--ignore-submodules=all"]) {
+    assert.deepEqual(diffDriverHits(`fn stats() { run(&["diff", "--numstat", "${option}"]); }`), [], option);
+  }
+  assert.deepEqual(diffDriverHits('fn stats() { run(&["diff", "--name-only", "-z", "--cached"]); }'), []);
+  assert.deepEqual(diffDriverHits('fn stats() { run(&["diff", "--numstat", "--", "--quiet"]); }'), []);
+  assert.deepEqual(diffDriverHits('fn show() { run(&["show", "--", "--ext-diff"]); }'), []);
+  for (const option of ["--quiet", "--binary", "--stat", "--stat=80", "--raw", "-W", "--word-diff", "--word-diff=plain", "--color-words"]) {
+    const hits = diffDriverHits(`fn patch() { run(&["diff", "--numstat", "${option}"]); }`);
+    assert.equal(hits.length, 1, option);
+    assert.equal(hits[0].allowlisted, false, option);
+  }
+});
+
+test("diff drivers resolve owned literal verbs and flags", () => {
+  for (const verb of ['"diff".to_string()', '"diff".into()', '"diff".to_owned()', 'String::from("diff")']) {
+    const hits = diffDriverHits(`fn patch() { run(vec![${verb}, x]); }`);
+    assert.equal(hits.length, 1, verb);
+    assert.equal(hits[0].allowlisted, false, verb);
+    assert.deepEqual(diffDriverHits(`fn patch() { run(vec![${verb}, "--no-ext-diff".into()]); }`), []);
+    assert.deepEqual(diffDriverHits(`fn stats() { run(vec![${verb}, "--numstat".to_owned(), String::from("-z")]); }`), []);
   }
 });
 
@@ -4947,6 +5014,13 @@ test("diff drivers accept explicit protection and machine-readable output", () =
         [],
       );
     }
+  }
+  for (const argv of [
+    '["-c", "core.quotepath=off", "diff", "--numstat"]',
+    '["-C", p, "diff", "--numstat"]',
+    '["--no-pager", "diff", "--name-only"]',
+  ]) {
+    assert.deepEqual(diffDriverHits(`fn stats() { run(&${argv}); }`), [], argv);
   }
   assert.deepEqual(diffDriverHits('fn pr() { run(&["pr", "diff"]); }'), []);
   assert.deepEqual(diffDriverHits('fn opaque() { let x = [a, b]; }'), []);
