@@ -41,10 +41,7 @@ import {
   pendingMutationEntries,
   pendingWritesFor,
 } from "./pr-writes";
-import {
-  recheckPrListAfterRemoteDelete,
-  recheckRunsAfterPush,
-} from "./push-writes";
+import { recheckListsLater, recheckRunsAfterPush } from "./push-writes";
 
 /** The issue-rail writes whose pending state a row reads back from the cache, so it
  *  survives the row's remount on an issue switch. */
@@ -810,7 +807,7 @@ function useIssueLifecycleMutation<TArgs, TData>(
     mutationFn,
     onSuccess: () => {
       if (recheckListLater)
-        recheckPrListAfterRemoteDelete(queryClient, repo, [
+        recheckListsLater(queryClient, repo, [
           [...repoKeys.issueList(repo), lens],
         ]);
     },

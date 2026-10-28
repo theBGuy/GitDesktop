@@ -773,7 +773,7 @@ one grep away on the named symbol. Grows via Conventions-sync.
   the base, and Bitbucket's checks read that sha's statuses; for any other
   merge it is a precaution. A later arm re-arms the per-repo timer, and its
   one fire covers every coalesced arm's reads. A remote-branch delete instead
-  schedules `recheckPrListAfterRemoteDelete` with keys its call site builds
+  schedules `recheckListsLater` with the keys its own call site builds
   (GitHub closes a head-deleted PR asynchronously); a PR merge (unless queued),
   close or reopen and an issue close or reopen arm the same re-read with
   lens-scoped list keys, since the forge's list membership lags the row's own

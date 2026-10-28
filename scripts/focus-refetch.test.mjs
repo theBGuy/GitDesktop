@@ -13,7 +13,7 @@
 // Also pins push-writes.ts `recheckRunsAfterPush`: one run-list recheck per repo,
 // 8 s after the last push-like write, skipping a list paged past page 1, and
 // covering the union of every coalesced arm's PR checks reads; and its sibling
-// `recheckPrListAfterRemoteDelete`: one list re-read per repo, re-armed by a
+// `recheckListsLater`: one list re-read per repo, re-armed by a
 // later arm rather than stacked, covering every arm's keys. And pins
 // `recheckFilterMatches`' exact, numbered-child and prefix modes against the key
 // shapes `prChecksRecheck` builds, with source pins tying those shapes to the
@@ -47,8 +47,8 @@ const {
   refetchRepoQueriesOnFocus,
   recheckRunsAfterPush,
   PUSH_RUN_RECHECK_MS,
-  recheckPrListAfterRemoteDelete,
-  REMOTE_DELETE_PR_RECHECK_MS,
+  recheckListsLater,
+  LIST_RECHECK_MS,
 } = deps ?? {};
 
 const NEEDS_DEPS =
@@ -698,7 +698,7 @@ test("recheckFilterMatches: exact, numbered-child and prefix modes", () => {
 // ── Remote-branch delete: the one delayed PR-list re-read ──────────────────
 
 /** Two arms 5 s apart must fire ONE invalidation, covering the union of both
- *  arms' keys and nothing else, `REMOTE_DELETE_PR_RECHECK_MS` after the second.
+ *  arms' keys and nothing else, `LIST_RECHECK_MS` after the second.
  *  Throws on any other shape. */
 function assertPrListRecheckReArms(t, recheck, repo) {
   const qc = new QueryClient();
@@ -714,7 +714,7 @@ function assertPrListRecheckReArms(t, recheck, repo) {
     ["repo", repo, "pr-list"],
     ["repo", repo, "prs"],
   ]);
-  t.mock.timers.tick(REMOTE_DELETE_PR_RECHECK_MS - 1);
+  t.mock.timers.tick(LIST_RECHECK_MS - 1);
   assert.deepEqual(calls, [], "the first delete's timer still fired");
   t.mock.timers.tick(1);
   assert.equal(calls.length, 1, "the owed keys fired as more than one call");
@@ -740,7 +740,7 @@ function assertPrListRecheckReArms(t, recheck, repo) {
 test("two remote deletes within 8 s fire ONE PR-list re-read, of both deletes' keys", (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  assertPrListRecheckReArms(t, recheckPrListAfterRemoteDelete, "C:/del-a");
+  assertPrListRecheckReArms(t, recheckListsLater, "C:/del-a");
 });
 
 test("NEGATIVE CONTROL: a stacking PR-list re-read fails the re-arm pin", (t) => {
@@ -750,7 +750,7 @@ test("NEGATIVE CONTROL: a stacking PR-list re-read fails the re-arm pin", (t) =>
   const stacking = (qc, _repo, keys) => {
     setTimeout(() => {
       for (const queryKey of keys) void qc.invalidateQueries({ queryKey });
-    }, REMOTE_DELETE_PR_RECHECK_MS);
+    }, LIST_RECHECK_MS);
   };
   assert.throws(
     () => assertPrListRecheckReArms(t, stacking, "C:/del-b"),

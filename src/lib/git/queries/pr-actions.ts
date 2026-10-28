@@ -39,7 +39,7 @@ import {
 import { prBaseDivergencePrefix, prReviewThreadsKey } from "./prs";
 import {
   type RecheckFilter,
-  recheckPrListAfterRemoteDelete,
+  recheckListsLater,
   recheckRunsAfterPush,
 } from "./push-writes";
 import {
@@ -541,7 +541,7 @@ export function useMergePr(repo: string) {
       // has not landed yet, so it arms neither: its row stays where it is.
       onSuccess: (data, args) => {
         if (!data.queued)
-          recheckPrListAfterRemoteDelete(
+          recheckListsLater(
             queryClient,
             repo,
             prStateRecheckKeys(repo, args.lens),
@@ -765,7 +765,7 @@ export function useClosePr(repo: string) {
     {
       identity: prWriteKey("close", repo),
       onSuccess: (_d, args) =>
-        recheckPrListAfterRemoteDelete(
+        recheckListsLater(
           queryClient,
           repo,
           prStateRecheckKeys(repo, args.lens),
@@ -786,7 +786,7 @@ export function useReopenPr(repo: string) {
     {
       identity: prWriteKey("reopen", repo),
       onSuccess: (_d, args) => {
-        recheckPrListAfterRemoteDelete(
+        recheckListsLater(
           queryClient,
           repo,
           prStateRecheckKeys(repo, args.lens),

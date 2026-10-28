@@ -252,12 +252,12 @@ export function recheckRunsAfterPush(
  *  forge updates list membership asynchronously (GitHub closes a PR whose head
  *  branch is deleted later; a search-backed list lags a merge, close or reopen),
  *  so the settle's own read can still file the row under its old state. */
-export const REMOTE_DELETE_PR_RECHECK_MS = 8_000;
+export const LIST_RECHECK_MS = 8_000;
 
 /** The one pending list re-read per repo: a later arm re-arms its timer and adds
  *  its keys to the ones already owed (deduplicated by value); the fire drops the
  *  entry, so the next arm owes only its own keys. */
-const pendingPrListRechecks = new Map<
+const pendingListRechecks = new Map<
   string,
   {
     timer: ReturnType<typeof setTimeout>;
@@ -273,24 +273,24 @@ const pendingPrListRechecks = new Map<
  *  list (usePrReviewState's co-invalidation contract); the CI and mergeability
  *  maps key on a digest of the list's rows and re-key on their own. The owed keys
  *  fire as ONE invalidation, for the reason {@link recheckRunsAfterPush} gives. */
-export function recheckPrListAfterRemoteDelete(
+export function recheckListsLater(
   queryClient: QueryClient,
   repo: string,
   keys: readonly (readonly unknown[])[],
 ): void {
-  const pending = pendingPrListRechecks.get(repo);
+  const pending = pendingListRechecks.get(repo);
   clearTimeout(pending?.timer);
   const owed = pending?.owed ?? new Map<string, readonly unknown[]>();
   for (const key of keys) owed.set(JSON.stringify(key), key);
-  pendingPrListRechecks.set(repo, {
+  pendingListRechecks.set(repo, {
     owed,
     timer: setTimeout(() => {
-      pendingPrListRechecks.delete(repo);
+      pendingListRechecks.delete(repo);
       const prefixes = [...owed.values()];
       void queryClient.invalidateQueries({
         predicate: (query) =>
           prefixes.some((prefix) => startsWithKey(query.queryKey, prefix)),
       });
-    }, REMOTE_DELETE_PR_RECHECK_MS),
+    }, LIST_RECHECK_MS),
   });
 }

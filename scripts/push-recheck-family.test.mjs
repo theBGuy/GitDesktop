@@ -8,7 +8,7 @@
 // a new unit naming one of these api functions must arm the recheck or join the
 // reasoned exclusions.
 //
-// It also pins the delayed list re-read (`recheckPrListAfterRemoteDelete`): the
+// It also pins the delayed list re-read (`recheckListsLater`): the
 // units in LIST_REREAD schedule it, each under its gate, and no other unit does,
 // and of the issue lifecycle writes only close and reopen pass the helper's
 // re-read flag.
@@ -149,7 +149,7 @@ const EXCLUDED = {
     file: `${Q}branches.ts`,
     reason:
       "pushes a deletion, which starts runs only for rare on-delete workflows; it schedules the PR-list re-read instead",
-    mustCall: "recheckPrListAfterRemoteDelete(",
+    mustCall: "recheckListsLater(",
   },
   useDeleteTagOnOrigin: {
     file: `${Q}tags-releases.ts`,
@@ -181,8 +181,8 @@ const LIST_REREAD = {
     gate: "if (recheckListLater)",
   },
 };
-const LIST_REREAD_CALL = "recheckPrListAfterRemoteDelete(";
-const LIST_REREAD_CALLS = /\brecheckPrListAfterRemoteDelete\(/g;
+const LIST_REREAD_CALL = "recheckListsLater(";
+const LIST_REREAD_CALLS = /\brecheckListsLater\(/g;
 
 /** The issue lifecycle helper's re-read flag (its argument at `flagIndex`): the
  *  `armed` callers pass a literal `true`, every other caller leaves it out or
@@ -433,7 +433,7 @@ function checkPushRecheckFamily(raw) {
       problems.push(`${file} ${name}: does not schedule the list re-read`);
     else if (
       gate !== null &&
-      guardedCalls(hook.body, gate, "recheckPrListAfterRemoteDelete") !== calls
+      guardedCalls(hook.body, gate, "recheckListsLater") !== calls
     )
       problems.push(
         `${file} ${name}: a list re-read is not guarded by \`${gate}\``,
@@ -441,8 +441,7 @@ function checkPushRecheckFamily(raw) {
   }
   for (const { file, name, body } of hooks.values()) {
     const isDefinition =
-      file === `${Q}push-writes.ts` &&
-      name === "recheckPrListAfterRemoteDelete";
+      file === `${Q}push-writes.ts` && name === "recheckListsLater";
     if (
       body.includes(LIST_REREAD_CALL) &&
       LIST_REREAD[name]?.file !== file &&
@@ -714,10 +713,7 @@ test("an exclusion that arms the recheck, or a renamed hook, fails the check", (
 
 test("the remote-branch delete must schedule the PR-list re-read", () => {
   const sources = mutate(realSources(), `${Q}branches.ts`, (text) =>
-    text.replace(
-      "recheckPrListAfterRemoteDelete(queryClient",
-      "noop(queryClient",
-    ),
+    text.replace("recheckListsLater(queryClient", "noop(queryClient"),
   );
   assert.ok(
     checkPushRecheckFamily(sources).some((p) =>
@@ -901,7 +897,7 @@ test("a list re-read scheduled outside the set fails the check", () => {
     (body) =>
       body.replace(
         "const queryClient = useQueryClient();",
-        "const queryClient = useQueryClient();\n  recheckPrListAfterRemoteDelete(queryClient, repo, []);",
+        "const queryClient = useQueryClient();\n  recheckListsLater(queryClient, repo, []);",
       ),
   );
   assert.ok(

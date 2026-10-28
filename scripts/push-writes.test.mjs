@@ -18,10 +18,10 @@ import {
   branchPushHoldReason,
   branchPushKey,
   branchPushLabel,
+  LIST_RECHECK_MS,
   nextPushLatch,
   pendingBranchPushesFor,
-  REMOTE_DELETE_PR_RECHECK_MS,
-  recheckPrListAfterRemoteDelete,
+  recheckListsLater,
 } from "../src/lib/git/queries/push-writes.ts";
 
 const entry = (vars, extra = {}) => ({
@@ -353,7 +353,7 @@ const spyClient = () => {
 const covers = (filter, queryKey) => filter.predicate({ queryKey });
 
 test("list re-read: the delay is 8 s", () => {
-  assert.equal(REMOTE_DELETE_PR_RECHECK_MS, 8000);
+  assert.equal(LIST_RECHECK_MS, 8000);
 });
 
 test("list re-read: two arms in one window fire ONE invalidation over the union", (t) => {
@@ -362,16 +362,16 @@ test("list re-read: two arms in one window fire ONE invalidation over the union"
   const repo = "/union";
   // A remote-branch delete's unlensed prefixes, then a merge's lensed keys
   // (overlapping) and an issue close's list (disjoint).
-  recheckPrListAfterRemoteDelete(qc, repo, [
+  recheckListsLater(qc, repo, [
     ["repo", repo, "pr-list"],
     ["repo", repo, "pr-review-state"],
   ]);
-  recheckPrListAfterRemoteDelete(qc, repo, [
+  recheckListsLater(qc, repo, [
     ["repo", repo, "pr-list", "origin"],
     ["repo", repo, "prs", "origin"],
     ["repo", repo, "issue-list", "origin"],
   ]);
-  t.mock.timers.tick(REMOTE_DELETE_PR_RECHECK_MS);
+  t.mock.timers.tick(LIST_RECHECK_MS);
   assert.equal(qc.calls.length, 1);
   const [f] = qc.calls;
   for (const key of [
@@ -396,9 +396,9 @@ test("list re-read: a later arm re-arms the one timer", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const qc = spyClient();
   const repo = "/rearm";
-  recheckPrListAfterRemoteDelete(qc, repo, [["repo", repo, "pr-list"]]);
+  recheckListsLater(qc, repo, [["repo", repo, "pr-list"]]);
   t.mock.timers.tick(7_000);
-  recheckPrListAfterRemoteDelete(qc, repo, [["repo", repo, "issue-list"]]);
+  recheckListsLater(qc, repo, [["repo", repo, "issue-list"]]);
   t.mock.timers.tick(7_000);
   assert.equal(qc.calls.length, 0);
   t.mock.timers.tick(1_000);
@@ -411,10 +411,10 @@ test("list re-read: a fire drops the entry, so the next arm owes only its own ke
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const qc = spyClient();
   const repo = "/fresh";
-  recheckPrListAfterRemoteDelete(qc, repo, [["repo", repo, "pr-list"]]);
-  t.mock.timers.tick(REMOTE_DELETE_PR_RECHECK_MS);
-  recheckPrListAfterRemoteDelete(qc, repo, [["repo", repo, "issue-list"]]);
-  t.mock.timers.tick(REMOTE_DELETE_PR_RECHECK_MS);
+  recheckListsLater(qc, repo, [["repo", repo, "pr-list"]]);
+  t.mock.timers.tick(LIST_RECHECK_MS);
+  recheckListsLater(qc, repo, [["repo", repo, "issue-list"]]);
+  t.mock.timers.tick(LIST_RECHECK_MS);
   assert.equal(qc.calls.length, 2);
   assert.equal(covers(qc.calls[1], ["repo", repo, "pr-list", "origin"]), false);
   assert.equal(
@@ -428,9 +428,9 @@ test("list re-read: a fire drops the entry, so the next arm owes only its own ke
 test("list re-read: another repo's arm keeps its own timer and keys", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const qc = spyClient();
-  recheckPrListAfterRemoteDelete(qc, "/a", [["repo", "/a", "pr-list"]]);
+  recheckListsLater(qc, "/a", [["repo", "/a", "pr-list"]]);
   t.mock.timers.tick(4_000);
-  recheckPrListAfterRemoteDelete(qc, "/b", [["repo", "/b", "pr-list"]]);
+  recheckListsLater(qc, "/b", [["repo", "/b", "pr-list"]]);
   t.mock.timers.tick(4_000);
   assert.equal(qc.calls.length, 1);
   assert.equal(covers(qc.calls[0], ["repo", "/a", "pr-list", "origin"]), true);
