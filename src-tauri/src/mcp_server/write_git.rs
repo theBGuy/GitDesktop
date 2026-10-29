@@ -1180,7 +1180,8 @@ impl GitDesktopMcp {
     #[tool(
         description = "Cherry-pick a commit by SHA onto the current branch in the bound \
                        repository. Returns whether a commit was created (a pick that is already \
-                       present is skipped and returns false). A merge commit needs `mainline`: \
+                       present is skipped and returns false; a skip that itself fails returns \
+                       an error). A merge commit needs `mainline`: \
                        the 1-based parent its changes are taken relative to (git's `-m`; 1 is \
                        the usual choice). Without it git refuses a merge. Requires \
                        --allow-git-write.",

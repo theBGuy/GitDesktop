@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Static gate for ten Rust invariants that have each cost this repo a fix
+// Static gate for eleven Rust invariants that have each cost this repo a fix
 // round. Text-level checks over `src-tauri/src/**/*.rs` — no compiler, no deps,
 // Node built-ins only — so they run anywhere `node` does:
 //
@@ -45,13 +45,38 @@
 //      an Err as well, which J doesn't scan: it reads exits only. Exempt:
 //      `classify_repo_view` (github/pr.rs) keeps an unreadable repo view as
 //      Unresolved, forge-status's answered "no repository" probe.
+//   K. external diff drivers — diff argv carry --no-ext-diff so external tools
+//      cannot replace patches or forge verdicts. An exemption requires
+//      --numstat/--name-only/--name-status and every literal option after the
+//      verb and before -- on KNOWN_NO_PATCH, or one of the =/attached value
+//      forms the matcher accepts (bare --diff-filter M is not exempt). Each
+//      member was measured beside every exempt mode, worktree and
+//      --cached/--staged, under a trusted driver, git 2.51.1. Other options
+//      require --no-ext-diff. --quiet can trust a driver via diff.trustExitCode,
+//      diff.<driver>.trustExitCode or GIT_EXTERNAL_DIFF_TRUST_EXIT_CODE, per
+//      git's diff-options docs. --ext-diff is refused before -- in any
+//      argv-shaped group; textconv remains enabled.
+//      Not seen: builder chains (Command::new("git").arg("diff")...), argv
+//      assembled across functions, a verb held in a variable, or an opaque
+//      option beside an exempt flag (["diff", "--numstat", flag]); a leading
+//      "git" program-name element, array-repeat ["diff"; N], alias verbs via
+//      -c alias.x=…, and a same-named REQUESTED_ATTRS item nested inside a fn
+//      (item rows match file+name). difftool is out of scope by design; a driver
+//      set through GIT_EXTERNAL_DIFF in a command's env is not an argv site.
+//      Only four bare owned-string forms resolve: .to_string(), .into(),
+//      .to_owned() and String::from(...). Other conversions (.as_str() chains,
+//      &*...to_owned(), format!, Cow::from, OsString::from, into::<String>())
+//      are opaque, so a patch flag in one beside an exempt flag passes.
+//      In-function growth of a literal vec via .push/.extend/.insert is not
+//      tracked: let mut a = vec!["diff", "--numstat"]; a.push("-p"); passes K.
 //
 // Each check carries an ALLOWLIST of `{ file, fn, rationale }` records; check
 // H's rows may add `builder: true` (the function's own argv sites are allowed,
-// and every caller or reference of it must guard instead), `item: true` (`fn`
-// names a const/static whose argv-shaped value is not a git command) or
+// and every caller or reference of it must guard instead) or
 // `guard: true` (`fn` wraps the guard: its calls count as guard calls, and the
 // check fails unless that function's own body calls ignored_files_in_the_way).
+// Checks H and K may add `item: true` (`fn` names a const/static whose
+// argv-shaped value is not a git command).
 // RATCHET RULE: the lists only shrink by default. Adding an entry is a
 // reviewed change — it needs a rationale naming the guard that makes the
 // site safe (a validator call, a trusted producer), and it lands in review
@@ -1046,7 +1071,7 @@ const WORD = /[\p{ID_Continue}]/u;
  *  it — and a lifetime read as an open quote revives the comment after it.
  *  `unterminated` is the offset of a literal or comment that runs off the end
  *  (everything after it is unreadable), or -1. Callers only read the views,
- *  so checks D, F, G, H and I share one lexing of each file. */
+ *  so checks D, F, G, H, I, J and K share one lexing of each file. */
 let lexed = { text: null, views: null };
 export function lexRust(text) {
   if (lexed.text === text) return lexed.views;
@@ -2583,6 +2608,182 @@ export function checkGhExitAbsence(
   }
 }
 
+// ---------------------------------------------------- K. external diff tools
+
+const DIFF_DRIVER_ALLOWLIST = [
+  {
+    file: "git/diff.rs",
+    fn: "REQUESTED_ATTRS",
+    item: true,
+    rationale:
+      "Attribute names passed to check-attr, never a git argv; diff selects the attribute to read",
+  },
+];
+const DIFF_DRIVER_FLAGS = new Set([
+  "--numstat",
+  "--name-only",
+  "--name-status",
+]);
+const KNOWN_NO_PATCH = new Set([
+  ...DIFF_DRIVER_FLAGS,
+  "-z",
+  "--no-color",
+  "--cached",
+  "--staged",
+  "--no-renames",
+  "--no-relative",
+  "--find-renames",
+  "-M",
+  "--relative",
+  "--ignore-submodules",
+]);
+const knownNoPatch = (value) =>
+  KNOWN_NO_PATCH.has(value) ||
+  /^(?:--(?:find-renames|diff-filter|relative|ignore-submodules)=[\s\S]*|-M\d+(?:\.\d+)?%?)$/.test(value);
+const DIFF_DRIVER_FIX =
+  "check K: add --no-ext-diff immediately after diff; --numstat, --name-only " +
+  "and --name-status are the only exempt output modes, and only with no " +
+  "literal option after the verb and before -- outside the known-no-patch list";
+
+function diffArgLiteral(text) {
+  const value = literalValue(text.trim());
+  if (value !== undefined) return value;
+  const owned = /^([\s\S]*)\.\s*(?:to_string|into|to_owned)\s*\(\s*\)$/.exec(text.trim());
+  const from = /^String\s*::\s*from\s*\(([\s\S]*)\)$/.exec(text.trim());
+  const inner = owned?.[1] ?? from?.[1];
+  return inner === undefined ? undefined : literalValue(inner.trim());
+}
+
+export function checkDiffExternalDrivers(
+  file,
+  _src,
+  lines,
+  hits,
+  allowlist = DIFF_DRIVER_ALLOWLIST,
+) {
+  const { code, masked, unterminated } = lexRust(lines.join("\n"));
+  const report = (at, fn, item, fix, readable = true) =>
+    hits.push({
+      file,
+      line: code.slice(0, at).split("\n").length,
+      fn,
+      item,
+      allowlisted:
+        readable &&
+        allowlist.some(
+          (e) => e.file === file && e.fn === fn && Boolean(e.item) === item,
+        ),
+      fix,
+    });
+  if (unterminated >= 0) {
+    report(
+      unterminated,
+      "<unreadable>",
+      false,
+      "check K: a literal or comment opening here never closes — fix the source, or the lexer in scripts/check-rust-invariants.mjs",
+      false,
+    );
+  }
+  const tests = testModuleSpans(masked);
+  const functions = rustFunctions(masked);
+  const items = [];
+  const itemRe = /\b(?:const|static)\s+(?:mut\s+|ref\s+)?(\w+)\s*:(?!:)/g;
+  for (const m of masked.matchAll(itemRe)) {
+    let depth = 0;
+    let eq = -1;
+    for (let k = m.index + m[0].length; k < masked.length; k++) {
+      const ch = masked[k];
+      if ("([{".includes(ch)) depth++;
+      else if (")]}".includes(ch)) {
+        if (--depth < 0) break;
+      } else if (depth === 0 && ch === "=" && eq < 0) eq = k;
+      else if (depth === 0 && ch === ";") {
+        if (eq >= 0) items.push({ name: m[1], eq, end: k });
+        break;
+      }
+    }
+  }
+  const opens = new Set([...masked.matchAll(/\[/g)].map((m) => m.index));
+  for (const m of masked.matchAll(/\bvec\s*!\s*[({]/g)) {
+    opens.add(m.index + m[0].length - 1);
+  }
+  for (const at of opens) {
+    if (tests.some(([s, e]) => at > s && at < e)) continue;
+    const body = bracketBody(code, at);
+    const end = at + body.length + 1;
+    const values = argvElements(body).map((e) => diffArgLiteral(e.text));
+    const globalValues = new Set();
+    let verb;
+    for (let k = 0; k < values.length; k++) {
+      const value = values[k];
+      if (value === undefined) break;
+      if (!value.startsWith("-")) {
+        verb = k;
+        break;
+      }
+      if (GIT_VALUE_OPTIONS.has(value)) globalValues.add(++k);
+    }
+    const args = verb === undefined ? values : values.slice(verb + 1);
+    const separator = args.indexOf("--");
+    const options = separator < 0 ? args : args.slice(0, separator);
+    const pathStart = separator < 0 ? values.length : (verb === undefined ? 0 : verb + 1) + separator;
+    const enablesDriver = values.slice(0, pathStart).some(
+      (value, k) => value === "--ext-diff" && !globalValues.has(k),
+    );
+    if (!values.includes("diff") && !enablesDriver) continue;
+    const item = items.filter((i) => at > i.eq && at < i.end).at(-1);
+    const fn = functions.filter((f) => at > f.open && at < f.close).at(-1);
+    const isItem = Boolean(item && (!fn || item.eq > fn.open));
+    const name = isItem ? item.name : (fn?.name ?? "<top level>");
+    // Balanced delimiters are required even when a flag would otherwise exempt.
+    const stack = [];
+    let bounded = code[end] === ")]}"["([{".indexOf(masked[at])];
+    for (let k = at; k <= end && bounded; k++) {
+      const ch = masked[k];
+      if ("([{".includes(ch)) stack.push(ch);
+      else if (")]}".includes(ch)) {
+        if (stack.pop() !== "([{"[")]}".indexOf(ch)]) bounded = false;
+      }
+    }
+    if (!bounded || stack.length) {
+      report(
+        at,
+        name,
+        isItem,
+        "check K: cannot bound this git argv group — fix its delimiters or extend the parser",
+        false,
+      );
+      continue;
+    }
+    if (enablesDriver) {
+      report(
+        at,
+        name,
+        isItem,
+        "check K: drop --ext-diff; external drivers are refused before -- in any argv-shaped group",
+        false,
+      );
+      continue;
+    }
+    if (verb === undefined) {
+      report(
+        at,
+        name,
+        isItem,
+        "check K: cannot resolve the verb of this group containing diff — use a literal git verb or extend the parser",
+        false,
+      );
+    } else if (values[verb] === "diff") {
+      const exempt = options.some((value) => DIFF_DRIVER_FLAGS.has(value)) &&
+        options.every(
+          (value) => value === undefined || !value.startsWith("-") || knownNoPatch(value),
+      );
+      if (!options.includes("--no-ext-diff") && !exempt)
+        report(at, name, isItem, DIFF_DRIVER_FIX);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------- main
 
 function main() {
@@ -2646,6 +2847,12 @@ function main() {
       name: "J. gh exit read as absence",
       run: checkGhExitAbsence,
       allowlist: GH_EXIT_ABSENCE_ALLOWLIST,
+      hits: [],
+    },
+    {
+      name: "K. diff argv bypass external drivers",
+      run: checkDiffExternalDrivers,
+      allowlist: DIFF_DRIVER_ALLOWLIST,
       hits: [],
     },
   ];

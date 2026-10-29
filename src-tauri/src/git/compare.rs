@@ -203,7 +203,7 @@ pub async fn git_branch_diff(
     // rechecks. The fast path never reads the flag, so the common case is unchanged.
     let filtered = crate::git::ai_ignore::filtered_diff(
         &repo_path,
-        &["diff", "--no-color", &range],
+        &["diff", "--no-ext-diff", "--no-color", &range],
         &["diff", "--numstat", "-z", &range],
         &exclude,
         !pinned,
@@ -239,6 +239,7 @@ pub async fn git_branch_file_diff(
         Some(&repo_path),
         &[
             "diff",
+            "--no-ext-diff",
             "--no-color",
             &format!("{base}...{compare}"),
             "--",
@@ -383,7 +384,7 @@ pub async fn git_diff_between_refs(
     let range = format!("{from_ref}..{to_ref}");
     let text_out = run_git(
         Some(&repo_path),
-        &["diff", "--no-color", &range],
+        &["diff", "--no-ext-diff", "--no-color", &range],
         DEFAULT_TIMEOUT,
     )
     .await?;

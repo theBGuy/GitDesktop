@@ -1098,6 +1098,14 @@ one grep away on the named symbol. Grows via Conventions-sync.
   MCP git write tools that take paths pass `GitDesktopMcp::toplevel()` to
   their cores, or call a core that anchors itself as the discard cores do, so
   paths resolve from the root `repo_status` reports.
+- **Patch-producing `git diff` argv carry `--no-ext-diff`; never add
+  `--no-textconv`:** external drivers replace the app's patches;
+  exemptions require `--numstat`/`--name-only`/`--name-status` and no literal
+  option after the verb and before `--` outside check K's known-no-patch
+  list, since other options may enable a patch or trust a driver's verdict.
+  Anything else, including `--quiet`, `--exit-code`, `--binary` and patch
+  flags, needs `--no-ext-diff`; `--ext-diff` is refused before `--` in any
+  argv-shaped group (guard: check-rust-invariants check K).
 - **Merges into a checkout check for ignored files first:** git's merge
   default silently replaces an ignored file the incoming side tracks, and
   merge-ort ignores `--no-overwrite-ignore` on 3-way merges (measured, git
