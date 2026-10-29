@@ -11336,6 +11336,7 @@ test("ts-mask closes a JSX element only at its own closing tag", async () => {
   // close tag in a later comment must not end it.
   for (const src of [
     'type F = <T>(a: T) => T;\nload(x, {});\n// see the </table> markup\nload("y");',
+    'type Fs = [<T>(a: T) => T];\nload(x, {});\n// see the </table> markup\nload("y");',
     'const f: <T>(a: T) => T = id;\nload(x, {});\n// see the </table> markup\nload("y");',
     "const a = <div>x</span>;",
     "const a = <>x</div>;",

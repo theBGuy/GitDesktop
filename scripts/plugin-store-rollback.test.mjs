@@ -841,7 +841,7 @@ const PLAIN_ARG = /^(?:"[^"\\]*"|'[^'\\]*'|[A-Za-z_$][\w$]*)$/;
 function moduleSpecifiers(text, masked) {
   const specs = [];
   const specifier = new RegExp(
-    `${NOT_MEMBER}(from|import)\\s*(\\(\\s*)?(["'\`])`,
+    `${NOT_MEMBER}(?<!#)(from|import)\\s*(\\(\\s*)?(["'\`])`,
     "g",
   );
   for (const m of masked.matchAll(specifier)) {
@@ -1540,6 +1540,7 @@ test("mutation control: a computed dynamic import fails in any file", () => {
     'await backup.import("https://a//b");',
     'await backup?.import("https://a//b");',
     "class B {\n  #import(s: string) {}\n  run(spec: string) { this.#import(spec); }\n}",
+    'class B {\n  #import(s: string) {}\n  run() { this.#import("https://a//b"); }\n}',
   ]) {
     assert.deepEqual(checkOpenerFixture(fixture), [], fixture);
   }

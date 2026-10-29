@@ -2,10 +2,12 @@
 // Runs in CI's installless guards job, so node built-ins ONLY.
 // Known false ambiguities: a `<const T,>` generic arrow lexes as JSX and a
 // function-typed JSX prop's type argument is unreadable; both fail closed. In
-// .tsx a generic function type after `=`, `:`, `|`, `&`, `(`, `<`, `,`, `?` or
-// `new` lexes as JSX: it fails open only when the walk reaches a same-named
-// closing tag first (an earlier different close fails closed, as a `<` between
-// can), and the text between is then blanked silently except its `{...}`.
+// .tsx a generic function type after any EXPR_OPENERS punctuator or expression
+// keyword (`new` included), so call signatures and tuple, union and
+// arrow-return positions too, lexes as JSX: it fails open only when the walk
+// reaches a same-named closing tag first (an earlier different close fails
+// closed, as a `<` between can), and the text between is then blanked silently
+// except its `{...}`.
 // Postfix `x++ / y` / `x-- / y` division lexes as a regex opener: it fails
 // closed only when nothing later on the line closes it, else the code between is
 // blanked silently. A regex right after a brace-less `if (…)`/`while (…)`/
