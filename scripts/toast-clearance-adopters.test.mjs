@@ -8,8 +8,9 @@
 //   full mount condition;
 // - the composer's scroll-pin lookup walks its preceding siblings nearest-first
 //   (a docked strip can sit between it and the conversation);
-// - useToastClearance re-measures when a sibling after the bar resizes or the
-//   parent's children change, and drops a bar that has no box.
+// - useToastClearance re-measures when a sibling after the bar resizes, the
+//   parent's children change, or the bar moves in the viewport (a re-armed
+//   IntersectionObserver), and drops a bar that has no box.
 //
 // Not testable here: the live layout (where toasts land, whether the latest
 // comment stays in view). The shape pins cover the wiring's text only. The
@@ -61,6 +62,18 @@ const CHILD_LIST =
   /const (\w+) = new MutationObserver\([\s\S]*?\1\.observe\(parent, \{ childList: true \}\)/;
 const NO_BOX =
   /getClientRects\(\)\.length === 0\)\s*\{\s*clearToastClearance\(id\);\s*return;/;
+// The move watch: a stopper that clears the clipped-retry timer and
+// disconnects the observer; a measure that runs it FIRST and arms the watch
+// only after a boxed publish; a watch derived from moveWatchOptions and
+// observing the bar; the callback's rect-drift re-measure and its
+// first-delivery arms (timer at ratio 0, re-arm at a partial ratio).
+const MOVE_STOP =
+  /const (\w+) = \(\) => \{\s*clearTimeout\((\w+)\);\s*(\w+)\?\.disconnect\(\);\s*\3 = null;\s*\};/;
+const MOVE_IMPORT = /import \{[^}]*\bmoveWatchOptions\b[^}]*\} from/;
+const MOVE_ARM =
+  /const (\w+) = \((\w+): DOMRect, (\w+): number\) => \{\s*const (\w+) = moveWatchOptions\(\{[\s\S]*?\b\3,?\s*\}\);\s*if \(!\4\) return;\s*let (\w+) = true;\s*const (\w+) = new IntersectionObserver\(\((\w+)\) => \{([\s\S]*?)\}, \4\);\s*(\w+) = \6;/;
+const RECT_DRIFT =
+  /const (\w+) = bar\.getBoundingClientRect\(\);\s*if \(\s*\1\.x !== (\w+)\.x \|\|\s*\1\.y !== \2\.y \|\|\s*\1\.width !== \2\.width \|\|\s*\1\.height !== \2\.height\s*\)\s*return (\w+)\(\);/;
 
 /** The `<CommentComposer` opening tags in masked `.tsx` text, each with its
  *  depth-0 attribute text (brace-held values blanked). */
@@ -84,6 +97,25 @@ function composerTags(masked) {
   return tags;
 }
 
+const maskCache = new Map();
+
+/** `maskNonCode` memoized per path AND exact text, so a mutant re-masks only
+ *  the file it changed and never reads another text's mask. A throw is not
+ *  cached: it re-throws on every call. */
+function maskOnce(file, text) {
+  let byText = maskCache.get(file);
+  if (!byText) {
+    byText = new Map();
+    maskCache.set(file, byText);
+  }
+  let masked = byText.get(text);
+  if (masked === undefined) {
+    masked = maskNonCode(text, file.endsWith("x"));
+    byText.set(text, masked);
+  }
+  return masked;
+}
+
 /** Problems found in `sources` (src-relative path → text: every .ts/.tsx file
  *  under src/); empty means the wiring holds. */
 function checkToastClearanceAdopters(sources) {
@@ -95,10 +127,7 @@ function checkToastClearanceAdopters(sources) {
       continue;
     }
     try {
-      masked[file] = maskNonCode(
-        text.replace(/\r\n/g, "\n"),
-        file.endsWith("x"),
-      );
+      masked[file] = maskOnce(file, text.replace(/\r\n/g, "\n"));
     } catch (err) {
       problems.push(`${file}: could not scan (${err.message})`);
     }
@@ -182,20 +211,114 @@ function checkToastClearanceAdopters(sources) {
       problems.push(`${HOOK}: watches a subtree, not just the child list`);
     if (!NO_BOX.test(hook))
       problems.push(`${HOOK}: does not drop a bar that has no box`);
+    problems.push(...checkMoveWatch(hook));
   }
+  return problems;
+}
+
+/** Problems with the hook's move watch, in masked hook text. */
+function checkMoveWatch(hook) {
+  const stop = MOVE_STOP.exec(hook);
+  if (!stop)
+    return [
+      `${HOOK}: no move-watch stopper that clears its timer and disconnects its observer`,
+    ];
+  const [, stopFn, timer, observer] = stop;
+  const problems = [];
+  if (!MOVE_IMPORT.test(hook))
+    problems.push(`${HOOK}: does not import moveWatchOptions`);
+  const arm = MOVE_ARM.exec(hook);
+  if (!arm)
+    return [
+      ...problems,
+      `${HOOK}: does not arm a move observer derived from moveWatchOptions`,
+    ];
+  const [, armFn, , , options, first, io, entries, body, assigned] = arm;
+  if (assigned !== observer)
+    problems.push(
+      `${HOOK}: the move observer is not the one the stopper disconnects`,
+    );
+  if (
+    !new RegExp(`${assigned} = ${io};\\s*${io}\\.observe\\(bar\\);`).test(hook)
+  )
+    problems.push(`${HOOK}: the move observer never observes the bar`);
+  if (!new RegExp(`^\\s*if \\(${observer} !== ${io}\\) return;`).test(body))
+    problems.push(
+      `${HOOK}: the move observer does not ignore a callback after it was replaced`,
+    );
+  const measureAt = new RegExp(
+    `const (\\w+) = \\((\\w+): number\\) => \\{[\\s\\S]*?publishToastClearance\\([\\s\\S]*?\\);\\s*${armFn}\\(\\w+, \\2\\);\\s*\\};`,
+  ).exec(hook);
+  if (!measureAt) {
+    problems.push(
+      `${HOOK}: a measure does not re-arm the move watch after a boxed publish`,
+    );
+    return problems;
+  }
+  const measureFn = measureAt[1];
+  if (
+    !new RegExp(
+      `const ${measureFn} = \\(\\w+: number\\) => \\{\\s*${stopFn}\\(\\);\\s*if \\(bar\\.getClientRects\\(\\)\\.length === 0\\)`,
+    ).test(hook)
+  )
+    problems.push(
+      `${HOOK}: a measure does not tear the move watch down before anything else`,
+    );
+  if (!new RegExp(`const measure = \\(\\) => ${measureFn}\\(1\\);`).test(hook))
+    problems.push(`${HOOK}: measure does not arm the move watch at full ratio`);
+  if (!new RegExp(`return \\(\\) => \\{\\s*${stopFn}\\(\\);`).test(hook))
+    problems.push(`${HOOK}: the effect cleanup does not stop the move watch`);
+  const drift = RECT_DRIFT.exec(body);
+  if (!drift || drift[2] !== arm[2] || drift[3] !== "measure")
+    problems.push(
+      `${HOOK}: the move observer does not re-measure a bar that moved since its entry`,
+    );
+  const newest = new RegExp(
+    `const (\\w+) = ${entries}\\[${entries}\\.length - 1\\]\\.intersectionRatio;`,
+  ).exec(body);
+  if (!newest) {
+    problems.push(
+      `${HOOK}: the move observer does not read its newest entry's ratio`,
+    );
+    return problems;
+  }
+  const ratio = newest[1];
+  if (
+    !new RegExp(
+      `if \\(${ratio} !== ${options}\\.threshold\\) \\{\\s*if \\(!${first}\\) return measure\\(\\);`,
+    ).test(body)
+  )
+    problems.push(
+      `${HOOK}: the move observer does not re-measure when a later delivery's ratio changes`,
+    );
+  if (
+    !new RegExp(
+      `if \\(${ratio} === 0\\)\\s*${timer} = setTimeout\\(\\(\\) => ${measureFn}\\(1e-7\\), 1000\\);\\s*else ${measureFn}\\(${ratio}\\);\\s*\\}\\s*${first} = false;`,
+    ).test(body)
+  )
+    problems.push(
+      `${HOOK}: the move observer's first delivery does not retry a clipped bar or re-arm at a partial ratio`,
+    );
   return problems;
 }
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
+let cachedSources;
+
+/** The src/ tree, read once per process; each call gets its own shallow copy,
+ *  so a mutant can't leak into another test. */
 function realSources() {
-  const sources = {};
-  for (const full of sourceFiles(SRC))
-    sources[relative(SRC, full).replaceAll("\\", "/")] = readFileSync(
-      full,
-      "utf8",
-    ).replace(/\r\n/g, "\n");
-  return sources;
+  if (!cachedSources) {
+    const sources = {};
+    for (const full of sourceFiles(SRC))
+      sources[relative(SRC, full).replaceAll("\\", "/")] = readFileSync(
+        full,
+        "utf8",
+      ).replace(/\r\n/g, "\n");
+    cachedSources = sources;
+  }
+  return { ...cachedSources };
 }
 
 /** `sources` with `file`'s text passed through `edit`, asserting it changed. */
@@ -356,6 +479,117 @@ test("the hook must drop a bar that has no box", () => {
       ),
     ),
     "no box",
+  );
+});
+
+test("the hook must arm a move observer from moveWatchOptions", () => {
+  for (const [line, problem] of [
+    [
+      "      watchMoves(rect, threshold);\n",
+      "re-arm the move watch after a boxed publish",
+    ],
+    ["      io.observe(bar);\n", "never observes the bar"],
+  ])
+    fails(
+      mutate(realSources(), HOOK, (text) => text.replace(line, "")),
+      problem,
+    );
+  // A derivation the hook never calls leaves its unit tests vacuous.
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("moveWatchOptions({", "watchOptions({"),
+    ),
+    "derived from moveWatchOptions",
+  );
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("  moveWatchOptions,\n", ""),
+    ),
+    "does not import moveWatchOptions",
+  );
+});
+
+test("the hook must stop the move watch in cleanup", () => {
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace(
+        "stopWatchingMoves();\n      resizes.disconnect();",
+        "resizes.disconnect();",
+      ),
+    ),
+    "cleanup does not stop",
+  );
+  for (const line of [
+    "      clearTimeout(clippedRetry);\n",
+    "      moves?.disconnect();\n",
+  ])
+    fails(
+      mutate(realSources(), HOOK, (text) => text.replace(line, "")),
+      "no move-watch stopper",
+    );
+});
+
+test("each measure must tear the move watch down before anything else", () => {
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace(
+        /(const measureAt = \(threshold: number\) => \{\n)\s*stopWatchingMoves\(\);\n/,
+        "$1",
+      ),
+    ),
+    "tear the move watch down before anything else",
+  );
+});
+
+test("the move observer must ignore a callback after it was replaced", () => {
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("        if (moves !== io) return;\n", ""),
+    ),
+    "ignore a callback after it was replaced",
+  );
+});
+
+test("the move observer must re-measure a bar that moved since its entry", () => {
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("now.y !== rect.y ||", ""),
+    ),
+    "moved since its entry",
+  );
+});
+
+test("the move observer must read its newest entry", () => {
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("entries[entries.length - 1]", "entries[0]"),
+    ),
+    "newest entry",
+  );
+});
+
+test("a later delivery with a changed ratio must re-measure", () => {
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("          if (!first) return measure();\n", ""),
+    ),
+    "later delivery's ratio changes",
+  );
+});
+
+test("the first delivery must re-arm a partly visible bar at its ratio", () => {
+  for (const to of ["", "else measure();", "else first = false;"])
+    fails(
+      mutate(realSources(), HOOK, (text) =>
+        text.replace("else measureAt(ratio);", to),
+      ),
+      "partial ratio",
+    );
+  fails(
+    mutate(realSources(), HOOK, (text) =>
+      text.replace("measureAt(1e-7), 1000", "measureAt(1e-7), 0"),
+    ),
+    "retry a clipped bar",
   );
 });
 

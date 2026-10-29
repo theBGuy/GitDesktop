@@ -267,8 +267,16 @@ export function IssuePicker({
 }) {
   const open = useIssueList(repoPath, true, "open", undefined, lens);
   const closed = useIssueList(repoPath, true, "closed", undefined, lens);
+  // Open and closed issues are both offered, unfiltered by state. The two reads
+  // lag independently, so a just-closed issue can sit in both pages: each number
+  // is listed once (the open page's row wins), since the items key by number.
+  const seen = new Set<number>();
   const candidates = [...(open.data ?? []), ...(closed.data ?? [])].filter(
-    (i) => !exclude.has(i.number),
+    (i) => {
+      if (seen.has(i.number)) return false;
+      seen.add(i.number);
+      return !exclude.has(i.number);
+    },
   );
   return (
     <Combobox

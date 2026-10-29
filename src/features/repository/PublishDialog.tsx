@@ -1,4 +1,5 @@
 import { SparkleIcon } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useEffect, useEffectEvent, useRef } from "react";
@@ -18,8 +19,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
 import {
+  isPublishActive,
   useBbWorkspaces,
   useGhPublishOwners,
+  usePendingPublishes,
   usePublishRepo,
 } from "@/lib/git/queries";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
@@ -39,6 +42,11 @@ import {
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
+import {
+  PUBLISH_PROVIDER_LABELS,
+  publishingHold,
+} from "./PublishPendingBanner";
+import { type FailedPublishDraft, keepDraftOnOpen } from "./publish-draft";
 
 /** Bitbucket repo slugs must start alphanumeric, then allow dot/underscore/hyphen.
  *  A blank name is caught by the `required` validator, so don't double-flag it. */
@@ -154,6 +162,21 @@ export function PublishDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const publish = usePublishRepo(repoPath);
+  const queryClient = useQueryClient();
+  // Any instance's publish of this repo, so the other host's dialog holds too.
+  const pendingPublish = usePendingPublishes(repoPath)[0];
+  // The draft whose publish failed, kept for a retry when the same repo's dialog
+  // reopens on the same provider. A success or an idle user close discards it,
+  // and a foreign reseed retires it. A switch's own close keeps it, but a switch
+  // that unmounts this dialog loses it with the rest of the dialog's state.
+  const failedDraftRef = useRef<FailedPublishDraft | null>(null);
+  // The user's close rule (Esc, the X, the backdrop, the footer button): an idle
+  // close discards a failed draft, while a close during a publish leaves it to
+  // that publish, whose success clears it and whose failure re-stamps it.
+  function closeOrOpen(next: boolean) {
+    if (!next && !pendingPublish) failedDraftRef.current = null;
+    onOpenChange(next);
+  }
   const aiEnabled = useAiEnabled();
   const descGen = useGenerateRepoDescription(repoPath);
   // Closing mid-generation never cancels the run: it finishes into the retained
@@ -162,6 +185,8 @@ export function PublishDialog({
   const surface = useFinishAndSurface(repoPath, open, {
     cancel: descGen.cancel,
     generating: descGen.generating,
+    // Bypasses the user's rule: navigation destroys no draft, and this runs
+    // after the switch render, where `pendingPublish` is the new repo's.
     close: () => onOpenChange(false),
     readyTitle: "Repository description ready",
     readyDescription: "It's waiting in the dialog.",
@@ -179,11 +204,7 @@ export function PublishDialog({
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
   const isGitHub = provider === "github";
-  const remoteLabel = isBitbucket
-    ? "Bitbucket"
-    : isGitLab
-      ? "GitLab"
-      : "GitHub";
+  const remoteLabel = PUBLISH_PROVIDER_LABELS[provider];
 
   // Bitbucket creates the repo under a workspace; only workspaces the viewer can
   // administer can receive a new repo, so default to the first of those (else the
@@ -237,6 +258,9 @@ export function PublishDialog({
     },
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
+      // Fire-time twin of the render gate: a submit raced past a stale render
+      // still meets the cache, which marks a publish pending at mutate.
+      if (isPublishActive(queryClient, repoPath)) return;
       const submitGen = seedGenRef.current;
       const name = value.name.trim();
       // The publish backend takes `owner/repo` in `name`; compose it only for an
@@ -272,12 +296,23 @@ export function PublishDialog({
         const ourDraft =
           draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
         if (ourDraft) onOpenChange(false);
+        if (failedDraftRef.current?.repo === repoPath) {
+          failedDraftRef.current = null;
+        }
       } catch (e) {
         // Read at the failure, not before it: a publish that fails after a repo
         // switch has to name the repo it belongs to, same as the success arm.
         const originNote = originNoteFor(repoPath);
         if (originNote) toastErrorWithNote(e, originNote);
         else toastError(e);
+        // The dialog may be closed by now; the next same-repo open keeps this
+        // draft for a retry instead of reseeding it away.
+        if (
+          draftRepoRef.current === repoPath &&
+          seedGenRef.current === submitGen
+        ) {
+          failedDraftRef.current = { repo: repoPath, gen: submitGen, provider };
+        }
       }
     },
   });
@@ -304,11 +339,24 @@ export function PublishDialog({
   const nameWarning = ghPickerActive ? ghNameWarning : NAME_WARNINGS[provider];
 
   const seedOnOpen = useEffectEvent(() => {
+    const prev = draftRepoRef.current;
     draftRepoRef.current = repoPath;
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the description and topics in form state, which this
     // reset would blank on reopen.
     if (surface.shouldSkipSeed(descGen.generating)) return;
+    if (
+      keepDraftOnOpen({
+        prevRepo: prev,
+        repo: repoPath,
+        submitting: form.state.isSubmitting,
+        failed: failedDraftRef.current,
+        gen: seedGenRef.current,
+        provider,
+      })
+    ) {
+      return;
+    }
     seedGenRef.current += 1;
     form.reset({
       name: defaultName,
@@ -392,11 +440,17 @@ export function PublishDialog({
   // Enter must submit exactly when the button would. Publishing holds offline
   // rather than park: a parked create would land after the dialog was left.
   const offlineHold = useOfflineHold();
+  // A publish of this repo from any instance blocks a second one.
   const submitBlocked =
-    descGen.generating || bbBlocked || ghBlocked || !!offlineHold;
+    descGen.generating ||
+    bbBlocked ||
+    ghBlocked ||
+    !!offlineHold ||
+    pendingPublish !== undefined;
   // The running description draft, the running publish, and offline carry a
   // reason, ranked running-first, so a flip between them never drops focus to a
   // native disable; the name refusals keep their field hints and a plain disable.
+  // This dialog's own submit keeps ACT_PENDING_REASON; another's names its publish.
   const offlineSubmit = useDisabledReason({
     disabled: submitBlocked || isSubmitting,
     reason: (() => {
@@ -405,6 +459,8 @@ export function PublishDialog({
           return AI_DRAFT_PENDING_REASON;
         case isSubmitting:
           return ACT_PENDING_REASON;
+        case pendingPublish !== undefined:
+          return publishingHold(pendingPublish);
         default:
           return offlineHold;
       }
@@ -425,7 +481,7 @@ export function PublishDialog({
   );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={closeOrOpen}>
       <DialogContent
         className="flex max-h-[85vh] flex-col"
         onKeyDown={generateChord.onKeyDown}
@@ -600,6 +656,14 @@ export function PublishDialog({
             )}
           </div>
 
+          {pendingPublish && (
+            <p className="text-xs text-muted-foreground">
+              Publishing pushes this branch's full history and can take a few
+              minutes. You can close this and keep working; it stays visible at
+              the top of the repository until it finishes.
+            </p>
+          )}
+
           <DialogFooter className="sm:items-center">
             <form.AppField name="isPrivate">
               {(field) => (
@@ -612,9 +676,11 @@ export function PublishDialog({
             <Button
               type="button"
               variant="outline"
-              onClick={() => onOpenChange(false)}
+              onClick={() => closeOrOpen(false)}
             >
-              Cancel
+              {/* Never "Cancel" while a publish runs: closing this dialog is all
+                  it does — the publish itself can't be called off. */}
+              {pendingPublish ? "Close" : "Cancel"}
             </Button>
             <form.AppForm>
               <span

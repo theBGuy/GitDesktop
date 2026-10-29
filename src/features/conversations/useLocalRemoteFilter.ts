@@ -4,7 +4,7 @@ import {
   filterRemoteRows,
   type LocalRemoteState,
   localStateMatches,
-} from "./remote-state-filter";
+} from "@/lib/remote-state-filter";
 
 export type { LocalRemoteState };
 

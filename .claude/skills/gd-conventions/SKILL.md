@@ -573,6 +573,12 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   previous data via `keepPreviousDataForKeyAxes`
   (`src/lib/git/queries/core.ts`), and callers gate derived UI on
   `!isPlaceholderData` — a disabled query still renders its placeholder.
+- The remote PR and issue list hooks file a SAME-state placeholder through
+  `filterPlaceholderRows` (another tab's page passes whole; a non-empty one
+  that files down to nothing serves none), and `remoteStateMatches`
+  (`src/lib/remote-state-filter.ts`) is the one predicate that files a remote
+  row into the Open or Closed tab (`scripts/remote-row-state-wiring.test.mjs`
+  pins the sites).
 - Virtualized lists: a variable-height first row races `measureElement` —
   mount the virtualizer in a child gated on data (`docs/list-virtualization.md`).
 - Multi-toggle settings batch behind a Save/Discard bar (draft + dirty), not
@@ -813,6 +819,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
   sites (the run rechecks, keyed on the api callees; the branch-delete and the
   merge, close and reopen list re-reads, which no other write schedules), and
   `scripts/push-writes.test.mjs` pins the union fire.
+- **Remote state re-file** — a write that changes a remote PR's or issue's
+  open/closed state (a merge unless queued, a close, a reopen) re-files that
+  row in every cached list page of its lens on success, right after arming
+  its delayed list re-read (it doesn't wait for that re-read to fire),
+  through `patchRowState` (`src/lib/remote-state-filter.ts`) via the
+  module-private twins `patchPrListState` / `patchIssueListState`: it
+  rewrites the row's state only, never inserting or removing a row, and an
+  untouched page bails so it keeps its identity. One deliberate non-member:
+  GitLab's arm-auto-merge (`useGlArmAutoMerge`) patches nothing even though
+  arming can merge at once, because its void outcome can't tell armed from
+  merged; the whole-repo invalidation covers an immediate merge. The
+  src/-wide scan in `scripts/remote-row-state-wiring.test.mjs` pins every
+  caller of the five forge state writes it can see; that test's header lists
+  the shapes the scan can't see.
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one
   review-activity read, through `createRunReads`
