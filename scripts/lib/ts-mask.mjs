@@ -1,7 +1,8 @@
 // Shared TypeScript/TSX masking and source traversal for the networkmode guards.
 // Runs in CI's installless guards job, so node built-ins ONLY.
-// Known false ambiguities: a `<const T,>` generic arrow lexes as JSX and a
-// function-typed JSX prop's type argument is unreadable; both fail closed.
+// Known false ambiguities: a `<const T,>` generic arrow and a generic function
+// type at expression start (`type F = <T>(a: T) => T`) lex as JSX, and a
+// function-typed JSX prop's type argument is unreadable; all fail closed.
 // Postfix `x++ / y` / `x-- / y` division lexes as a regex opener: it fails
 // closed only when nothing later on the line closes it, else the code between is
 // blanked silently. A regex right after a brace-less `if (…)`/`while (…)`/
@@ -237,6 +238,10 @@ export function maskNonCode(src, jsx) {
         if (src[next] === "/") {
           const end = src.indexOf(">", next);
           if (end === -1) return fail("unterminated JSX closing tag", i);
+          // Only the opener's own name closes it (`</>` only a fragment), so a
+          // misread opener can't be closed by unrelated text further on.
+          if (src.slice(next + 1, end).trim() !== name)
+            return fail("mismatched JSX closing tag", i);
           return end + 1;
         }
         i = element(i);

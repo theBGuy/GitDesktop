@@ -818,11 +818,104 @@ function topLevelArgs(masked, open) {
 // may only open (Store.load); fetching an open store goes through getStore,
 // which takes no options, and types come in through `type`.
 const OPENER_EXPORTS = new Set(["load", "Store", "LazyStore"]);
+// Not a member name: a `.` is member access unless it ends a spread's `...`.
+const NOT_MEMBER = String.raw`(?<![\w$])(?<!(?<!\.)\.\s*)`;
 const OPENING_SITES = [
-  ["load", "load", /(?<![\w$])(?<!\.\s*)load\s*\(/g],
-  ["Store", "Store.load", /(?<![\w$.])Store\s*\.\s*load\s*\(/g],
-  ["LazyStore", "new LazyStore", /(?<![\w$.])new\s+LazyStore\s*\(/g],
+  ["load", "load", new RegExp(`${NOT_MEMBER}load\\s*\\(`, "g")],
+  [
+    "Store",
+    "Store.load",
+    new RegExp(`${NOT_MEMBER}Store\\s*\\.\\s*load\\s*\\(`, "g"),
+  ],
+  [
+    "LazyStore",
+    "new LazyStore",
+    new RegExp(`${NOT_MEMBER}new\\s+LazyStore\\s*\\(`, "g"),
+  ],
 ];
+const BACKSLASH = "\\";
+const PLAIN_ARG = /^(?:"[^"\\]*"|'[^'\\]*'|[A-Za-z_$][\w$]*)$/;
+
+// Every module specifier in masked code (`from "x"`, a side-effect
+// `import "x"`, and `import("x")` in value or type position), with its raw text.
+function moduleSpecifiers(text, masked) {
+  const specs = [];
+  for (const m of masked.matchAll(/\b(from|import)\s*(\(\s*)?(["'`])/g)) {
+    if (m[1] === "from" && m[2]) continue;
+    const open = m.index + m[0].length - 1;
+    const close = masked.indexOf(m[3], open + 1);
+    assert.ok(close > open, `unterminated module specifier at ${open}`);
+    specs.push({
+      keyword: m[1],
+      index: m.index,
+      at: open,
+      end: close + 1,
+      raw: text.slice(open + 1, close),
+    });
+  }
+  return specs;
+}
+
+// storeName and storeLoadOptions are the canonical helpers: a plain named
+// import from their defining module, or that module's single declaration of
+// it; every other reference is a call, so no local binding can stand in.
+const HELPERS = [
+  ["storeName", "@/lib/test-mode", "src/lib/test-mode.ts"],
+  ["storeLoadOptions", "@/lib/plugin-store", PLUGIN_STORE],
+];
+function assertCanonicalHelpers(text, masked, file) {
+  const specs = moduleSpecifiers(text, masked);
+  for (const [name, module, home] of HELPERS) {
+    const word = new RegExp(`(?<![\\w$])${name}(?![\\w$])`);
+    const spans = [];
+    for (const spec of specs) {
+      if (spec.keyword !== "from") continue;
+      const stmt = [
+        ...masked.slice(0, spec.index).matchAll(/\b(import|export)\b/g),
+      ].pop();
+      if (!stmt) continue;
+      const clause = masked.slice(stmt.index + stmt[0].length, spec.index);
+      if (!word.test(clause)) continue;
+      const plain =
+        stmt[1] === "import" &&
+        !/^\s*type\b/.test(clause) &&
+        new RegExp(`[{,]\\s*${name}\\s*[,}]`).test(clause);
+      assert.ok(
+        plain && spec.raw === module,
+        `${file}:${lineOf(masked, stmt.index)}: ${name} must be a plain named import from ${module}`,
+      );
+      spans.push([stmt.index, spec.end]);
+    }
+    const decls =
+      file === home
+        ? [...masked.matchAll(new RegExp(`\\bfunction\\s+${name}\\s*\\(`, "g"))]
+        : [];
+    assert.equal(
+      spans.length + decls.length,
+      1,
+      `${file}: ${name} must come from ${module} exactly once`,
+    );
+    const declared = new Set(decls.map((d) => d.index + d[0].indexOf(name)));
+    const call = /\s*\(/y;
+    const ref = new RegExp(`${NOT_MEMBER}${name}(?![\\w$])`, "g");
+    for (const m of masked.matchAll(ref)) {
+      const at = m.index;
+      if (declared.has(at)) continue;
+      if (spans.some(([from, to]) => at >= from && at < to)) continue;
+      call.lastIndex = at + name.length;
+      // Comments are already blank, so any gap before the name is whitespace.
+      const before = masked.slice(0, at).trimEnd();
+      if (
+        call.test(masked) &&
+        !/\b(?:function\s*\*?|class|const|let|var)$/.test(before)
+      )
+        continue;
+      assert.fail(
+        `${file}:${lineOf(masked, at)}: ${name} is bound or referenced other than as a call to the canonical helper`,
+      );
+    }
+  }
+}
 
 // Each imported opener name, outside its import statement and not after a
 // `.`, must start an opening site of its own kind. Anything else fails closed:
@@ -836,7 +929,7 @@ function assertOnlyOpeningReferences(masked, file, imports) {
         (site) => site.index + site[0].indexOf(name),
       ),
     );
-    const ref = new RegExp(`(?<![\\w$])(?<!\\.\\s*)${name}(?![\\w$])`, "g");
+    const ref = new RegExp(`${NOT_MEMBER}${name}(?![\\w$])`, "g");
     for (const match of masked.matchAll(ref)) {
       if (sites.has(match.index)) continue;
       const at = match.index;
@@ -854,7 +947,13 @@ function assertOnlyOpeningReferences(masked, file, imports) {
 function assertLoadsTakeStoreOptions(text, file) {
   const masked = maskNonCode(text, file.endsWith(".tsx"));
   const imports = pluginStoreImports(text, file);
+  const escaped = masked.indexOf(BACKSLASH);
+  if (escaped !== -1)
+    assert.fail(
+      `${file}:${lineOf(masked, escaped)}: escaped identifier is unsupported`,
+    );
   assertOnlyOpeningReferences(masked, file, imports);
+  assertCanonicalHelpers(text, masked, file);
   const calls = OPENING_SITES.filter(([name]) => imports.names.has(name))
     .flatMap(([, kind, pattern]) =>
       [...masked.matchAll(pattern)].map((call) => ({ kind, call })),
@@ -876,6 +975,11 @@ function assertLoadsTakeStoreOptions(text, file) {
     const optionsArg = /^storeLoadOptions\(([^()]*)\)$/.exec(options);
     assert.ok(nameArg, `${at}: ${kind} opens a storeName(...) path`);
     assert.ok(optionsArg, `${at}: ${kind} options come from storeLoadOptions`);
+    for (const arg of [nameArg[1].trim(), optionsArg[1].trim()])
+      assert.ok(
+        PLAIN_ARG.test(arg),
+        `${at}: the store file argument must be a string literal or a bare identifier`,
+      );
     assert.equal(
       optionsArg[1].trim(),
       nameArg[1].trim(),
@@ -887,12 +991,12 @@ function assertLoadsTakeStoreOptions(text, file) {
 
 const PLUGIN_PACKAGE = "@tauri-apps/plugin-store";
 
-// For this package, refuses the import shapes app-store-lock.test.mjs's
-// loaderImports refuses (alias, namespace, default, dynamic), plus non-type
-// re-exports, import items that aren't plain identifiers, and any other code
-// reference to the package string; assertLoadsTakeStoreOptions then requires
-// every reference to an imported opener to be an opening site. Anchored on
-// real specifier strings and classified on masked code, so comments can't pose.
+// A drift guard for ordinary code, not a sandbox: it refuses the import,
+// specifier, identifier and argument spellings it can't read, never guessing.
+// Out of its reach by design: eval, casts to `typeof Store` or through
+// `.constructor`, writes to a store's options, raw plugin IPC (invoking the
+// plugin's command), and the mask's regex-versus-division ambiguity.
+// Classified on masked code, so a comment or string can't pose as an import.
 function pluginStoreImports(text, file) {
   const masked = maskNonCode(text, file.endsWith(".tsx"));
   const names = new Set();
@@ -958,12 +1062,28 @@ function pluginStoreImports(text, file) {
   return { names, spans, failures };
 }
 
-// Imports from @/lib/plugin-store don't count: memoizedStoreLoader passes
-// storeLoadOptions itself.
+// Specifiers are read in every file: an escape or a path into the package
+// would hide the package name from a text prefilter. Imports from
+// @/lib/plugin-store don't count: memoizedStoreLoader passes storeLoadOptions.
 function derivePluginStoreOpeners(files) {
   const openers = new Map();
   const failures = [];
   for (const [file, text] of files) {
+    const masked = maskNonCode(text, file.endsWith(".tsx"));
+    for (const spec of moduleSpecifiers(text, masked)) {
+      const at = `${file}:${lineOf(masked, spec.at)}`;
+      if (spec.raw.includes(BACKSLASH))
+        failures.push(`${at}: escaped module specifier is unsupported`);
+      else if (
+        !spec.raw.startsWith(".") &&
+        /\/\/|\/\.{1,2}(?:\/|$)|\/$/.test(spec.raw)
+      )
+        failures.push(`${at}: an unnormalized specifier is unsupported`);
+      else if (spec.raw.includes("node_modules"))
+        failures.push(`${at}: a node_modules specifier is unsupported`);
+      else if (spec.raw.includes(PLUGIN_PACKAGE) && spec.raw !== PLUGIN_PACKAGE)
+        failures.push(`${at}: a plugin-store subpath specifier is unsupported`);
+    }
     if (!text.includes(PLUGIN_PACKAGE)) continue;
     const imports = pluginStoreImports(text, file);
     failures.push(...imports.failures);
@@ -1035,8 +1155,13 @@ test("every plugin store opener passes storeLoadOptions over the bare file name"
 
 const OPENER_FIXTURE = "src/fixture.ts";
 const IMPORT_LOAD = `import { load } from "${PLUGIN_PACKAGE}";\n`;
-function checkOpenerFixture(text) {
-  const openers = derivePluginStoreOpeners([[OPENER_FIXTURE, text]]);
+// Appended so every fixture's own line numbers stay as written.
+const HELPER_IMPORTS =
+  '\nimport { storeLoadOptions } from "@/lib/plugin-store";\n' +
+  'import { storeName } from "@/lib/test-mode";\n';
+function checkOpenerFixture(text, name = OPENER_FIXTURE) {
+  const fixture = `${text}${HELPER_IMPORTS}`;
+  const openers = derivePluginStoreOpeners([[name, fixture]]);
   for (const [file, body] of openers) assertLoadsTakeStoreOptions(body, file);
   return [...openers.keys()];
 }
@@ -1154,6 +1279,139 @@ test("type-only, foreign and commented imports derive no opener", () => {
     ),
     [OPENER_FIXTURE],
   );
+});
+
+test("mutation control: escaped or non-exact specifiers fail in any file", () => {
+  const escaped = `@tauri-apps${BACKSLASH}/plugin-store`;
+  for (const [fixture, message] of [
+    [
+      `import { load } from "${escaped}";\nexport const s = await load("x.json");`,
+      /fixture\.ts:1: escaped module specifier is unsupported/,
+    ],
+    [
+      `const m = await import("${escaped}");`,
+      /fixture\.ts:1: escaped module specifier is unsupported/,
+    ],
+    [
+      `const m = await import(\`${escaped}\`);`,
+      /fixture\.ts:1: escaped module specifier is unsupported/,
+    ],
+    [
+      `export { load } from "${escaped}";`,
+      /fixture\.ts:1: escaped module specifier is unsupported/,
+    ],
+    [
+      `type T = typeof import("${escaped}");`,
+      /fixture\.ts:1: escaped module specifier is unsupported/,
+    ],
+    [
+      'import { load } from "@/../node_modules/@tauri-apps/plugin-store";',
+      /fixture\.ts:1: an unnormalized specifier is unsupported/,
+    ],
+    [
+      'import { load } from "node_modules/@tauri-apps/plugin-store";',
+      /fixture\.ts:1: a node_modules specifier is unsupported/,
+    ],
+    [
+      'import { load } from "@tauri-apps//plugin-store";',
+      /fixture\.ts:1: an unnormalized specifier is unsupported/,
+    ],
+    [
+      'import { load } from "@tauri-apps/./plugin-store";',
+      /fixture\.ts:1: an unnormalized specifier is unsupported/,
+    ],
+    [
+      `import { load } from "${PLUGIN_PACKAGE}/";`,
+      /fixture\.ts:1: an unnormalized specifier is unsupported/,
+    ],
+    [
+      `import { load } from "${PLUGIN_PACKAGE}/dist-js/index.js";`,
+      /fixture\.ts:1: a plugin-store subpath specifier is unsupported/,
+    ],
+  ]) {
+    assert.ok(!fixture.includes(`"${PLUGIN_PACKAGE}"`), fixture);
+    assert.throws(() => checkOpenerFixture(fixture), message);
+  }
+});
+
+test("mutation control: escapes, shadowed helpers and computed names fail an opener", () => {
+  const valid = `${IMPORT_LOAD}load(storeName(f), storeLoadOptions(f));\n`;
+  const bound = (name, line) =>
+    new RegExp(`fixture\\.ts:${line}: ${name} is bound or referenced other`);
+  const computed =
+    /:2: the store file argument must be a string literal or a bare identifier/;
+  for (const [fixture, message] of [
+    [
+      `${valid}export const s = await lo${BACKSLASH}u0061d("x.json");`,
+      /fixture\.ts:3: escaped identifier is unsupported/,
+    ],
+    [
+      `${valid}const storeLoadOptions = (_n: string) => ({ autoSave: 100 });`,
+      bound("storeLoadOptions", 3),
+    ],
+    [
+      `${IMPORT_LOAD}export function f(storeLoadOptions: (n: string) => object) {\n  return load(storeName(g), storeLoadOptions(g));\n}`,
+      bound("storeLoadOptions", 2),
+    ],
+    [
+      `${valid}function storeName(n: string) {\n  return n;\n}`,
+      bound("storeName", 3),
+    ],
+    [
+      `${valid}export function f() {\n  function /* scoped override for this opener only */ storeLoadOptions(_n: string) {\n    return {};\n  }\n}`,
+      bound("storeLoadOptions", 4),
+    ],
+    [
+      `${IMPORT_LOAD}import { storeLoadOptions } from "./opts";\nload(storeName(f), storeLoadOptions(f));`,
+      /fixture\.ts:2: storeLoadOptions must be a plain named import from @\/lib\/plugin-store/,
+    ],
+    [
+      `${IMPORT_LOAD}load(storeName(names[i++]), storeLoadOptions(names[i++]));`,
+      computed,
+    ],
+    [
+      `${IMPORT_LOAD}load(storeName(cfg.file), storeLoadOptions(cfg.file));`,
+      computed,
+    ],
+    [
+      `${valid}export const o = { ...load(storeName("b.json"), {}) };`,
+      /fixture\.ts:3: load options come from storeLoadOptions/,
+    ],
+  ]) {
+    assert.throws(() => checkOpenerFixture(fixture), message);
+  }
+});
+
+test("mutation control: a generic function type can't hide a .tsx opener site", () => {
+  // `<T>(a: T) => T` at expression start lexes as an element named `T`; the
+  // comment's unrelated close tag must not end it over the bad site between.
+  assert.throws(
+    () =>
+      checkOpenerFixture(
+        `${IMPORT_LOAD}await load(storeName("a.json"), storeLoadOptions("a.json"));\n` +
+          "export type Cmp = <T>(a: T, b: T) => number;\n" +
+          'export const prefs = load(storeName("prefs.json"));\n' +
+          "// keep in sync with the </table> markup\n",
+        "src/fixture.tsx",
+      ),
+    /mismatched JSX closing tag at line 5/,
+  );
+});
+
+test("canonical helpers over literal, identifier and spread sites pass", () => {
+  assert.deepEqual(
+    checkOpenerFixture(
+      'import { writeWithRollback } from "@/lib/plugin-store-rollback";',
+    ),
+    [],
+  );
+  for (const fixture of [
+    `${IMPORT_LOAD}load(storeName("a.json"), storeLoadOptions("a.json"));`,
+    `${IMPORT_LOAD}load(storeName(file), storeLoadOptions(file));`,
+    `${IMPORT_LOAD}export const o = { ...load(storeName(f), storeLoadOptions(f)) };`,
+  ]) {
+    assert.deepEqual(checkOpenerFixture(fixture), [OPENER_FIXTURE], fixture);
+  }
 });
 
 test("mutation control: a real opener rewritten to a type-only import fails the floor", () => {

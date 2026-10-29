@@ -11330,6 +11330,32 @@ test("focusable-held-button-render reads a generic tag past its type arguments",
   assert.deepEqual(check.scan(view(unclosed), "src/lib/x.ts"), [1]);
 });
 
+test("ts-mask closes a JSX element only at its own closing tag", async () => {
+  const { maskNonCode } = await import("./lib/ts-mask.mjs");
+  // A generic function type at expression start lexes as an element named
+  // `T`; an unrelated close tag in a later comment must not end it.
+  for (const src of [
+    'type F = <T>(a: T) => T;\nload(x, {});\n// see the </table> markup\nload("y");',
+    "const a = <div>x</span>;",
+    "const a = <>x</div>;",
+    "const a = <div>x</>;",
+    "const a = <a.b>x</a>;",
+  ])
+    assert.throws(() => maskNonCode(src, true), /mismatched JSX closing tag/);
+  for (const [src, masked] of [
+    [
+      "const a = <div><span>x</span>y</div>;",
+      "const a = <div><span> </span> </div>;",
+    ],
+    ["const a = <>x{b}</>;", "const a = <> {b}</>;"],
+    ["const a = <a.b>x</a.b>;", "const a = <a.b> </a.b>;"],
+    ["const a = <svg:rect>x</svg:rect>;", "const a = <svg:rect> </svg:rect>;"],
+    ["const a = <br />;", "const a = <br />;"],
+    ["const a = <p>x<br/>y</ p >;", "const a = <p> <br/> </ p >;"],
+  ])
+    assert.equal(maskNonCode(src, true), masked);
+});
+
 test("focusable-held-button-render is clean on the real tree, red without one site's render", () => {
   const check = CHECKS.find((c) => c.name === "focusable-held-button-render");
   const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
