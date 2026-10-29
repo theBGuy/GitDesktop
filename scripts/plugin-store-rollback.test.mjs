@@ -860,25 +860,18 @@ function moduleSpecifiers(text, masked) {
   return specs;
 }
 
-// Lines of each dynamic `import(x)` whose specifier isn't one string literal
-// or a `${}`-free template: a computed one names a module no specifier check
-// reads. String bodies are blank in the mask, so an escaped literal passes
-// here; a `#import` private name is never one. A method or signature named
-// `import` is skipped only when both hold: the previous significant token
-// (across lines and comments) is `{ ; } ,`, a modifier or none, and its `)`
-// is followed by a body or type. Either test alone would skip a real call.
-const MEMBER_START =
-  /(?:^|[{;},]|\b(?:async|get|set|static|public|private|protected|readonly|declare|abstract|override))$/;
+// Lines of each `import(` whose argument isn't one plain string literal or
+// `${}`-free template; a method named `import` is refused too (telling it from
+// a call needs a parser: rename it). Member calls and `#import` aren't imports;
+// an escaped literal passes here for moduleSpecifiers' backslash refusal.
+const COMPUTED_IMPORT =
+  "a computed dynamic import, or a method named import (rename it), is unsupported";
 function computedDynamicImports(masked) {
   const lines = [];
   for (const m of masked.matchAll(
     new RegExp(`${NOT_MEMBER}(?<!#)import\\s*\\(`, "g"),
   )) {
-    const open = m.index + m[0].length - 1;
-    const startsMember = MEMBER_START.test(masked.slice(0, m.index).trimEnd());
-    const after = masked.slice(closing(masked, open) + 1).trimStart();
-    if (startsMember && /^[{:]/.test(after)) continue;
-    const [first] = topLevelArgs(masked, open);
+    const [first] = topLevelArgs(masked, m.index + m[0].length - 1);
     const arg = first ? masked.slice(first.start, first.end).trim() : "";
     if (!/^(["'`])\s*\1$/.test(arg)) lines.push(lineOf(masked, m.index));
   }
@@ -1100,9 +1093,7 @@ function derivePluginStoreOpeners(files) {
   for (const [file, text] of files) {
     const masked = maskNonCode(text, file.endsWith(".tsx"));
     for (const line of computedDynamicImports(masked))
-      failures.push(
-        `${file}:${line}: a computed dynamic import is unsupported`,
-      );
+      failures.push(`${file}:${line}: ${COMPUTED_IMPORT}`);
     for (const spec of moduleSpecifiers(text, masked)) {
       const at = `${file}:${lineOf(masked, spec.at)}`;
       if (spec.raw.includes(BACKSLASH))
@@ -1437,6 +1428,8 @@ test("mutation control: a generic function type can't hide a .tsx opener site", 
 });
 
 test("mutation control: a computed dynamic import fails in any file", () => {
+  const refused = (file, line) =>
+    new RegExp(`${escapeRe(file)}:${line}: ${escapeRe(COMPUTED_IMPORT)}`);
   for (const fixture of [
     'const m = await import("@tauri-apps/" + "plugin-store");',
     "const m = await import(`@tauri-apps/${name}`);",
@@ -1446,16 +1439,60 @@ test("mutation control: a computed dynamic import fails in any file", () => {
     "const m = [import(spec)];",
     "await import(spec);",
     "x = import(spec);",
+    "cond ? a * import(spec) : b;",
+    "c ? (0, import(spec)) : null;",
   ]) {
     assert.throws(
       () => checkOpenerFixture(fixture),
-      /fixture\.ts:1: a computed dynamic import is unsupported/,
+      refused("src/fixture.ts", 1),
       fixture,
     );
   }
-  // A call on a line of its own (biome's ternary-arrow shape, a hand-broken
-  // arm) is still a call: the line start alone never makes it a member.
+  // Calls on a line of their own, after ASI, in a class field or an object
+  // value, and inside members named `interface`/`class`, are all refused.
   for (const [fixture, file, line] of [
+    ["import(spec)\n{}", "src/fixture.ts", 1],
+    ["if (x) {\n  import(spec)\n  {}\n}", "src/fixture.ts", 2],
+    ["if (el.class) {\n  import(spec)\n  {}\n}", "src/fixture.ts", 2],
+    ["class A {\n  m = import(spec);\n}", "src/fixture.ts", 2],
+    ["const o = { a: import(spec) };", "src/fixture.ts", 1],
+    ["const o = { k: c ? a * import(spec) : b };", "src/fixture.ts", 1],
+    ["const o = { k: c ? (0, import(spec)) : null };", "src/fixture.ts", 1],
+    [
+      'const routes = {\n  interface: "eth0",\n  load: async () => {\n    const m = await import(spec);\n    return m;\n  },\n};',
+      "src/fixture.ts",
+      4,
+    ],
+    [
+      "const o = {\n  interface,\n  load() {\n    return import(spec);\n  },\n};",
+      "src/fixture.ts",
+      4,
+    ],
+    [
+      "const o = { interface: a, f: (b) => { return b ? import(spec) : 0; } };",
+      "src/fixture.ts",
+      1,
+    ],
+    [
+      "class Net {\n  interface() {\n    return import(spec);\n  }\n}",
+      "src/fixture.ts",
+      3,
+    ],
+    [
+      "class Net {\n  get interface() { return import(spec); }\n}",
+      "src/fixture.ts",
+      2,
+    ],
+    [
+      'const o = {\n  class: "x",\n  load: () => {\n    import(spec)\n    {}\n  },\n};',
+      "src/fixture.ts",
+      4,
+    ],
+    [
+      "const o = {\n  class() {\n    import(spec)\n    {}\n  },\n};",
+      "src/fixture.ts",
+      3,
+    ],
     [
       "export const loadMessages = dev\n  ? (locale: string, region: string, variant: string) =>\n      import(modulePathFor(locale, region, variant, extraArgument))\n  : null;",
       "src/fixture.ts",
@@ -1472,10 +1509,27 @@ test("mutation control: a computed dynamic import fails in any file", () => {
       "src/fixture.tsx",
       2,
     ],
-  ]) {
+    // A method or signature named `import` is refused too, and renamed.
+    ["class A {\n  import(data: string) {\n    return data;\n  }\n}", 2],
+    ["interface I {\n  import(s: string): void;\n}", 2],
+    ["type L = { import(s: string): void };", 1],
+    ["const o = { import(s: string) { return s; } };", 1],
+    ["class C {\n  async import() {}\n}", 2],
+    ["class D {\n  get import() { return 1; }\n}", 2],
+    ["class E {\n  static import(s: string) {}\n}", 2],
+    ["const o = { *import(s) { yield s; } };", 1],
+    ["class F { *import(d) {} }", 1],
+    ["class G {\n  @dec()\n  import(s: string) {}\n}", 3],
+    ["interface J {\n  other(): void\n  import(s: string): void;\n}", 3],
+    ["f({ import(s) {} });", 1],
+    ["const A = class extends B {\n  import(s: string) {}\n};", 2],
+    ["export default {\n  import(s: string) {\n    return s;\n  },\n};", 2],
+  ].map((row) =>
+    row.length === 2 ? [row[0], "src/fixture.ts", row[1]] : row,
+  )) {
     assert.throws(
       () => checkOpenerFixture(fixture, file),
-      new RegExp(`${escapeRe(file)}:${line}: a computed dynamic import`),
+      refused(file, line),
       fixture,
     );
   }
@@ -1484,15 +1538,8 @@ test("mutation control: a computed dynamic import fails in any file", () => {
     "const m = await import(`./a`);",
     'type M = typeof import("./a");',
     'await backup.import("https://a//b");',
-    // Methods and signatures named `import` are definitions, not imports.
-    "class A {\n  import(data: string) {\n    return data;\n  }\n}",
-    "interface I {\n  import(s: string): void;\n}",
-    "type L = { import(s: string): void };",
-    "const o = { import(s: string) { return s; } };",
+    'await backup?.import("https://a//b");',
     "class B {\n  #import(s: string) {}\n  run(spec: string) { this.#import(spec); }\n}",
-    "class C {\n  async import() {}\n}",
-    "class D {\n  get import() { return 1; }\n}",
-    "class E {\n  static import(s: string) {}\n}",
   ]) {
     assert.deepEqual(checkOpenerFixture(fixture), [], fixture);
   }
