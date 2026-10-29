@@ -40,10 +40,10 @@ export function publishPendingReason(offlineHold: string | undefined): string {
 }
 
 /**
- * The READY publish providers for an origin-less repo, in a stable GitHub →
- * GitLab → Bitbucket order. `enabled` gates the underlying targets probe (and
- * yields `{ providers: [], settled: true }` when false) — pass `false`
- * whenever the caller's branch can't publish so the probe doesn't run. Hooks
+ * The READY publish providers, in a stable GitHub → GitLab → Bitbucket order.
+ * `enabled` gates the targets probe (`{ providers: [], settled: true }` when
+ * false): pass it exactly while the caller shows a Publish arm, which can
+ * outlast `origin` while a publish runs, so the probe runs nowhere else. Hooks
  * are called unconditionally so this is safe to invoke at the top level
  * regardless of `enabled`. `settled` is false until both probes have answered
  * (data, or a failure with nothing loaded): an empty list before then means

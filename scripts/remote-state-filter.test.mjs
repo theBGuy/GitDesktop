@@ -200,6 +200,22 @@ test("patch: an absent page stays absent", () => {
   assert.equal(patchRowState(undefined, 1, "OPEN"), undefined);
 });
 
+test("patch: a cached page that isn't an array comes back as it is, never a throw", () => {
+  // A success callback runs the patch; a throw there would report a landed
+  // close or reopen as failed.
+  const shapes = [
+    null,
+    {},
+    { length: 1, 0: row(1, "OPEN") },
+    { some: () => true, map: () => [] },
+    "rows",
+    42,
+  ];
+  for (const page of shapes) {
+    assert.equal(patchRowState(page, 1, "CLOSED"), page, String(page));
+  }
+});
+
 test("patch: a reopen re-files a closed row under Open", () => {
   const page = [row(8, "CLOSED"), row(9, "CLOSED")];
   const out = patchRowState(page, 8, "OPEN");

@@ -37,9 +37,9 @@ export function publishingHold(p: PendingPublish): string {
  * Keeps a running repository publish visible after its dialog is dismissed. A
  * publish pushes the whole history and can run for minutes, so it lives in the
  * repo view's layout flow, like the worktree-removal line. Read from the mutation
- * cache, so it follows the repo that started it across switches and clears when
- * the publish settles either way. There is nothing to press: a publish can't be
- * cancelled.
+ * cache for the open repo, so it shows only in the repo that started it, shows
+ * again on a switch back, and clears when the publish settles either way. There
+ * is nothing to press: a publish can't be cancelled.
  */
 export function PublishPendingBanner({ repoPath }: { repoPath: string }) {
   const publishes = usePendingPublishes(repoPath);

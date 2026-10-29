@@ -207,3 +207,132 @@ test("a second spelling of the hold line is caught", () => {
     assert.notDeepEqual(holdSpellingProblems(mutant), []);
   }
 });
+
+// Every provider adds `origin` before its push, so the sync bar's Publish arm
+// holds on this repo's pending publish, not on `noOrigin` alone: the providers
+// probe, the render gate and the focus rescue all key on the hold. The sync
+// bar's own work holds with it: all four sync hotkeys (the held arm shows none
+// of their buttons) and auto-fetch, which would otherwise fire at the new origin.
+const SYNC_CONTROLS = "src/features/repository/SyncControls.tsx";
+
+function syncHoldProblems(text) {
+  const problems = [];
+  const need = {
+    "reads the pending publish": /usePendingPublishes\(repoPath\)/,
+    "arm = noOrigin || pending":
+      /const publishArm = noOrigin \|\| publishPending;/,
+    "probe keyed on the arm": /usePublishProviders\(repoPath, publishArm\)/,
+    "rescue keyed on the arm":
+      /useFocusOnControlsSwap\(publishArm, controlsRef\)/,
+    "render gate on the arm": /if \(publishArm\) \{/,
+    "auto-fetch busy while publishing":
+      /useAutoFetch\(\{[^}]*busy:[^,]*\|\| publishPending,/,
+  };
+  for (const [what, re] of Object.entries(need)) {
+    if (!re.test(text)) problems.push(`missing: ${what}`);
+  }
+  for (const stale of [
+    /if \(noOrigin\) \{/,
+    /usePublishProviders\(repoPath, noOrigin\)/,
+    /useFocusOnControlsSwap\(noOrigin,/,
+  ]) {
+    if (stale.test(text)) problems.push(`keys on noOrigin: ${stale}`);
+  }
+  for (const key of ["fetch", "pull", "push", "updateFromUpstream"]) {
+    const held = new RegExp(`hotkeys\\.${key} && !publishPending`);
+    if (!held.test(text)) problems.push(`hotkey not held: ${key}`);
+  }
+  return problems;
+}
+
+test("the sync bar's Publish arm holds while the repo's publish runs", () => {
+  assert.deepEqual(syncHoldProblems(source(SYNC_CONTROLS)), []);
+});
+
+test("a sync bar keyed back on noOrigin is caught", () => {
+  const live = source(SYNC_CONTROLS);
+  const mutants = [
+    live.replace("if (publishArm) {", "if (noOrigin) {"),
+    live.replace(
+      "usePublishProviders(repoPath, publishArm)",
+      "usePublishProviders(repoPath, noOrigin)",
+    ),
+    live.replace(
+      "useFocusOnControlsSwap(publishArm, controlsRef)",
+      "useFocusOnControlsSwap(noOrigin, controlsRef)",
+    ),
+    live.replace(
+      "const publishArm = noOrigin || publishPending;",
+      "const publishArm = noOrigin;",
+    ),
+    live.replace("hotkeys.push && !publishPending", "hotkeys.push"),
+    live.replace(
+      "hotkeys.updateFromUpstream && !publishPending",
+      "hotkeys.updateFromUpstream",
+    ),
+    live.replace(
+      "removals.length > 0 || publishPending,",
+      "removals.length > 0,",
+    ),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, live);
+    assert.notDeepEqual(syncHoldProblems(mutant), []);
+  }
+});
+
+// One close rule for the user's closes (Esc, the X, the backdrop, the footer
+// button): `closeOrOpen` discards a failed draft only when no publish is
+// running. Two closes stay direct: a switch's (navigation destroys no draft,
+// and it runs after the switch render) and the success arm's settle close,
+// which clears the draft itself.
+function closeRuleProblems(text) {
+  const problems = [];
+  const need = {
+    "dialog routes through the rule":
+      /<Dialog open=\{open\} onOpenChange=\{closeOrOpen\}>/,
+    "switch close keeps the draft": /close: \(\) => onOpenChange\(false\)/,
+    "footer routes through the rule":
+      /onClick=\{\(\) => closeOrOpen\(false\)\}/,
+    "idle-only discard":
+      /function closeOrOpen\(next: boolean\) \{\s*if \(!next && !pendingPublish\) failedDraftRef\.current = null;\s*onOpenChange\(next\);\s*\}/,
+  };
+  for (const [what, re] of Object.entries(need)) {
+    if (!re.test(text)) problems.push(`missing: ${what}`);
+  }
+  // The rule's own clear and the success arm's; any other is a bypass.
+  const clears = text.split("failedDraftRef.current = null").length - 1;
+  if (clears !== 2) problems.push(`failed-draft clears: ${clears}`);
+  // Only the switch's close and the success arm's call the prop directly.
+  const direct = text.split("onOpenChange(false)").length - 1;
+  if (direct !== 2) problems.push(`direct closes: ${direct}`);
+  return problems;
+}
+
+test("the user's closes take the close rule; a switch's keeps the draft", () => {
+  assert.deepEqual(closeRuleProblems(source(HOLD_FILES.dialog)), []);
+});
+
+test("a close route that bypasses the rule is caught", () => {
+  const live = source(HOLD_FILES.dialog);
+  const mutants = [
+    live.replace("onOpenChange={closeOrOpen}", "onOpenChange={onOpenChange}"),
+    live.replace(
+      "onClick={() => closeOrOpen(false)}",
+      "onClick={() => onOpenChange(false)}",
+    ),
+    live.replace(
+      "close: () => onOpenChange(false)",
+      "close: () => closeOrOpen(false)",
+    ),
+    live.replace("if (!next && !pendingPublish)", "if (!next)"),
+    live.replace(
+      "onClick={() => closeOrOpen(false)}",
+      "onClick={() => { failedDraftRef.current = null; closeOrOpen(false); }}",
+    ),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, live);
+    assert.notDeepEqual(closeRuleProblems(mutant), []);
+  }
+});

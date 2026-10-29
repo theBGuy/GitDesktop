@@ -53,6 +53,7 @@ import {
   useFetchRemote,
   useHardResetToCommit,
   usePendingBranchPushes,
+  usePendingPublishes,
   usePull,
   usePush,
   useRemoteBranches,
@@ -344,14 +345,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     pullDescription,
     pushDescription,
   } = sync;
-  // A repo with no `origin` (e.g. created locally in GitDesktop) can't push;
-  // offer to create the hosted repo instead. Which providers can take it is
-  // probed by usePublishProviders (there's no remote to detect one from).
-  const publish = usePublishProviders(repoPath, noOrigin);
-  // The cluster → Publish swap unmounts whichever sync button held focus, and a
+  // No `origin` (a repo created locally) means Publish instead of the cluster.
+  // Every provider adds `origin` before its push, so the arm, its providers probe
+  // and its focus rescue also hold while this repo's publish runs, until it settles.
+  const publishPending = usePendingPublishes(repoPath).length > 0;
+  const publishArm = noOrigin || publishPending;
+  const publish = usePublishProviders(repoPath, publishArm);
+  // The cluster ↔ Publish swap unmounts whichever control held focus, and a
   // settle onto 2+ providers swaps Publish's button for the dropdown's trigger.
   const controlsRef = useRef<HTMLDivElement>(null);
-  useFocusOnControlsSwap(noOrigin, controlsRef);
+  useFocusOnControlsSwap(publishArm, controlsRef);
   useFocusOnControlsSwap(publish.providers.length >= 2, controlsRef);
   // The plain Push button and the mismatch menu's trigger swap whenever the
   // mismatch flips (a successful publish retracks the branch), so focus lands on
@@ -375,13 +378,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   }
 
   // Opt-out periodic background fetch (Settings → General), on its own mutation;
-  // the Fetch spinner still covers it. Ticks skip while a worktree removal runs.
+  // the Fetch spinner still covers it. Ticks skip while a worktree removal runs,
+  // and while this repo's publish runs (its `origin` appears before the push).
   useAutoFetch({
     repoPath,
     enabled: settings.data?.autoFetch ?? false,
     intervalMs: Number(settings.data?.autoFetchInterval ?? "10") * 60_000,
     hasOrigin,
-    busy: busy || autoFetch.isPending || removals.length > 0,
+    busy: busy || autoFetch.isPending || removals.length > 0 || publishPending,
     fetch: () => void doFetch(true),
   });
 
@@ -907,15 +911,24 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   }
 
   // Hotkeys mirror the buttons' own holds (sync-controls-state.ts); the routes
-  // they start refuse while another surface's push runs.
-  useHotkeyAction("fetch", () => void doFetch(false), hotkeys.fetch);
-  useHotkeyAction("pull", () => void doPull("ffOnly"), hotkeys.pull);
+  // they start refuse while another surface's push runs. The held Publish arm
+  // renders none of these four buttons, so every one of their hotkeys holds too.
+  useHotkeyAction(
+    "fetch",
+    () => void doFetch(false),
+    hotkeys.fetch && !publishPending,
+  );
+  useHotkeyAction(
+    "pull",
+    () => void doPull("ffOnly"),
+    hotkeys.pull && !publishPending,
+  );
   useHotkeyAction(
     "push",
     () => {
       if (!refuseWhilePushing()) pressPush();
     },
-    hotkeys.push,
+    hotkeys.push && !publishPending,
   );
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
   // remote existing (and not detached), so it hides itself when there's nothing
@@ -923,10 +936,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "update-from-upstream",
     () => void doUpdateFromUpstream(),
-    hotkeys.updateFromUpstream,
+    hotkeys.updateFromUpstream && !publishPending,
   );
 
-  if (noOrigin) {
+  if (publishArm) {
     return (
       // A silent landing spot for focus across the swap with the sync cluster.
       <div ref={controlsRef} tabIndex={-1} className="flex outline-none">

@@ -161,6 +161,22 @@ export function PublishDialog({
   const queryClient = useQueryClient();
   // Any instance's publish of this repo, so the other host's dialog holds too.
   const pendingPublish = usePendingPublishes(repoPath)[0];
+  // The draft whose publish failed, kept for a retry when the same repo's dialog
+  // reopens on the same provider. A success or an idle user close discards it,
+  // and a foreign reseed retires it. A switch's own close keeps it, but a switch
+  // that unmounts this dialog loses it with the rest of the dialog's state.
+  const failedDraftRef = useRef<{
+    repo: string;
+    gen: number;
+    provider: "github" | "gitlab" | "bitbucket";
+  } | null>(null);
+  // The user's close rule (Esc, the X, the backdrop, the footer button): an idle
+  // close discards a failed draft, while a close during a publish leaves it to
+  // that publish, whose success clears it and whose failure re-stamps it.
+  function closeOrOpen(next: boolean) {
+    if (!next && !pendingPublish) failedDraftRef.current = null;
+    onOpenChange(next);
+  }
   const aiEnabled = useAiEnabled();
   const descGen = useGenerateRepoDescription(repoPath);
   // Closing mid-generation never cancels the run: it finishes into the retained
@@ -169,6 +185,8 @@ export function PublishDialog({
   const surface = useFinishAndSurface(repoPath, open, {
     cancel: descGen.cancel,
     generating: descGen.generating,
+    // Bypasses the user's rule: navigation destroys no draft, and this runs
+    // after the switch render, where `pendingPublish` is the new repo's.
     close: () => onOpenChange(false),
     readyTitle: "Repository description ready",
     readyDescription: "It's waiting in the dialog.",
@@ -183,14 +201,6 @@ export function PublishDialog({
   // repo stamp can't tell drafts apart within one repo: an A→B→A round trip
   // restores the same path behind different content.
   const seedGenRef = useRef(0);
-  // The draft whose publish failed, kept for a retry when the same repo's dialog
-  // reopens on the same provider; cleared by a success, an idle Cancel, or any
-  // reseed.
-  const failedDraftRef = useRef<{
-    repo: string;
-    gen: number;
-    provider: "github" | "gitlab" | "bitbucket";
-  } | null>(null);
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
   const isGitHub = provider === "github";
@@ -477,7 +487,7 @@ export function PublishDialog({
   );
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={closeOrOpen}>
       <DialogContent
         className="flex max-h-[85vh] flex-col"
         onKeyDown={generateChord.onKeyDown}
@@ -672,12 +682,7 @@ export function PublishDialog({
             <Button
               type="button"
               variant="outline"
-              onClick={() => {
-                // An idle Cancel discards a failed draft; Close mid-publish only
-                // hides the dialog, so a draft that then fails is kept.
-                if (!pendingPublish) failedDraftRef.current = null;
-                onOpenChange(false);
-              }}
+              onClick={() => closeOrOpen(false)}
             >
               {/* Never "Cancel" while a publish runs: closing this dialog is all
                   it does — the publish itself can't be called off. */}

@@ -70,12 +70,15 @@ export function filterPlaceholderRows<R extends { state: string }>(
 
 /** `page` with `number`'s row re-filed under `state`. Returns the SAME array when
  *  no row matches or it already carries that state, so a no-op write keeps every
- *  cached page's identity (no observer notify churn). */
+ *  cached page's identity (no observer notify churn). Anything but an array comes
+ *  back as it is: the callers run in a write's success callback, where a throw
+ *  can turn a landed write into an error. */
 export function patchRowState<R extends { number: number; state: string }>(
   page: R[] | undefined,
   number: number,
   state: string,
 ): R[] | undefined {
-  if (!page?.some((r) => r.number === number && r.state !== state)) return page;
+  if (!Array.isArray(page)) return page;
+  if (!page.some((r) => r.number === number && r.state !== state)) return page;
   return page.map((r) => (r.number === number ? { ...r, state } : r));
 }

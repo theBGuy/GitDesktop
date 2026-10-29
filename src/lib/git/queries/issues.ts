@@ -811,6 +811,14 @@ function patchIssueListState(
   );
 }
 
+/** What a close or reopen re-files on success, fixed when the write starts. */
+type IssueRefile = {
+  repo: string;
+  lens: RemoteLens;
+  number: number;
+  state: "CLOSED" | "OPEN";
+};
+
 /**
  * An issue-lifecycle write (close/reopen/edit/pin/lock/transfer/delete) that reconciles
  * NARROWLY instead of whole-repo: the one issue's detail subtree (prefix-matched, so its
@@ -845,18 +853,25 @@ function useIssueLifecycleMutation<TArgs, TData>(
   return useMutation({
     mutationKey,
     mutationFn,
-    onSuccess: (_d, args) => {
+    // The re-file target is fixed HERE, at mutate time, and onSuccess reads it
+    // back from the context, so the cache write names the repo, lens and issue
+    // the write fired on. Writes with no state to re-file return nothing.
+    onMutate: (args: TArgs): IssueRefile | undefined =>
+      patchStateTo
+        ? { repo, lens, number: numberOf(args), state: patchStateTo }
+        : undefined,
+    onSuccess: (_d, _args, refile) => {
       if (recheckListLater)
         recheckListsLater(queryClient, repo, [
           [...repoKeys.issueList(repo), lens],
         ]);
-      if (patchStateTo)
+      if (refile)
         patchIssueListState(
           queryClient,
-          repo,
-          lens,
-          numberOf(args),
-          patchStateTo,
+          refile.repo,
+          refile.lens,
+          refile.number,
+          refile.state,
         );
     },
     onSettled: (_d, _e, args) => {

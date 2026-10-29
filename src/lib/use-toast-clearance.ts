@@ -83,8 +83,9 @@ export function useToastClearance(
         const ratio = entries[entries.length - 1].intersectionRatio;
         if (ratio !== options.threshold) {
           if (!first) return measure();
-          // A bar clipped in place by an ancestor reports 0 and can't fire
-          // again from 0, so retry at a throttled 1 Hz until it unclips.
+          // A bar fully clipped by an ancestor reports 0, and a move that keeps
+          // it clipped crosses no threshold, so nothing fires; re-measure at a
+          // throttled 1 Hz while it stays clipped.
           if (ratio === 0)
             clippedRetry = setTimeout(() => measureAt(1e-7), 1000);
           // Partly visible: settle at its real ratio, which 1 would never leave.

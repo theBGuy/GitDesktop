@@ -110,7 +110,6 @@ export function isPublishActive(
   queryClient: QueryClient,
   repo: string,
 ): boolean {
-  // `findAll`, never `find`: the cache's `find` matches the key exactly.
   return (
     queryClient
       .getMutationCache()

@@ -1049,8 +1049,8 @@ leaves the cached list in place.
 
 Publishing pushes the current branch's full history, so it can take a few minutes.
 Closing the dialog doesn't stop it: a status line at the top of the repository shows it
-until it finishes, and **Publish repository…** reads **Publishing…** and stays disabled
-meanwhile, so a second publish can't start.
+until it finishes, and **Publish repository…** in the sync bar reads **Publishing…** and
+stays disabled meanwhile, so a second publish can't start.
 
 ## Stash and reapply
 

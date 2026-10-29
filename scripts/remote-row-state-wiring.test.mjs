@@ -7,8 +7,8 @@
 //   cached list page of the repo's lens, inside its success callback and after
 //   the list re-read (push-recheck-family.test.mjs pins the re-read and its
 //   gate), and no other write does; of the issue lifecycle writes only close and
-//   reopen hand the helper a state, and nothing else in src/ calls the five
-//   forge state writes;
+//   reopen hand the helper a state, whose write keys from the target its
+//   onMutate fixes, and nothing else in src/ calls the five forge state writes;
 // - the issue picker offers open and closed issues unfiltered by state and
 //   lists a number once, the linked-issue chips rank off the filtered open rows
 //   alone, and the stack offer keeps its open page RAW (the detector's
@@ -114,8 +114,14 @@ const ISSUE_HELPER = {
   stateIndex: 7,
   armed: { useCloseIssue: '"CLOSED"', useReopenIssue: '"OPEN"' },
 };
-const ISSUE_PATCH =
-  "if (patchStateTo) patchIssueListState(queryClient, repo, lens, numberOf(args), patchStateTo);";
+/** The target fixed at mutate time: only a write handed `patchStateTo` gets
+ *  one, so pin, lock, edit, transfer and delete get no context at all. */
+const ISSUE_REFILE_TARGET =
+  "onMutate: (args: TArgs): IssueRefile | undefined => patchStateTo ? { repo, lens, number: numberOf(args), state: patchStateTo } : undefined,";
+/** The success callback's cache write, keyed entirely from that context (the
+ *  settle-cache-write-identity rule; the guard can't see through a helper). */
+const issuePatch = (ctx) =>
+  `if (${ctx}) patchIssueListState(queryClient, ${ctx}.repo, ${ctx}.lens, ${ctx}.number, ${ctx}.state);`;
 
 /** Every forge write that changes a remote row's open/closed state, and the one
  *  hook in all of src/ allowed to call it (beside its own definition under
@@ -420,7 +426,8 @@ function checkRemoteListState(raw) {
     }
   }
 
-  // Arm 2: the issue helper re-files on success, after its gated re-read.
+  // Arm 2: the issue helper fixes its re-file target in onMutate and writes it
+  // on success, from the context, after its gated re-read.
   const helper = unit(ISSUES, ISSUE_HELPER.name);
   if (helper) {
     const { view } = helper;
@@ -437,12 +444,21 @@ function checkRemoteListState(raw) {
       problems.push(
         `${ISSUES} ${ISSUE_HELPER.name}: patchStateTo must be parameter ${ISSUE_HELPER.stateIndex}, after the re-read flag`,
       );
-    const success = blockAfter(
-      view,
-      /onSuccess:\s*\(\w+,\s*args\)\s*=>\s*\{/,
-      helper.start,
-      helper.end,
+    if (!norm(helper.code).includes(ISSUE_REFILE_TARGET))
+      problems.push(
+        `${ISSUES} ${ISSUE_HELPER.name}: onMutate must fix the re-file target from patchStateTo alone`,
+      );
+    const successAt = /onSuccess:\s*\(\w+,\s*\w+,\s*(\w+)\)\s*=>\s*\{/.exec(
+      helper.code,
     );
+    const success = successAt
+      ? blockAfter(
+          view,
+          /onSuccess:\s*\(\w+,\s*\w+,\s*\w+\)\s*=>\s*\{/,
+          helper.start,
+          helper.end,
+        )
+      : null;
     const patches = indicesOf(
       view,
       "patchIssueListState(",
@@ -451,7 +467,7 @@ function checkRemoteListState(raw) {
     );
     if (!success)
       problems.push(
-        `${ISSUES} ${ISSUE_HELPER.name}: onSuccess block not found`,
+        `${ISSUES} ${ISSUE_HELPER.name}: onSuccess (data, variables, context) block not found`,
       );
     else {
       const body = view.code.slice(success[0], success[1] + 1);
@@ -460,9 +476,9 @@ function checkRemoteListState(raw) {
         problems.push(
           `${ISSUES} ${ISSUE_HELPER.name}: the re-read must stay directly under its gate`,
         );
-      if (!norm(body).includes(ISSUE_PATCH))
+      if (!norm(body).includes(issuePatch(successAt[1])))
         problems.push(
-          `${ISSUES} ${ISSUE_HELPER.name}: does not re-file the row under patchStateTo`,
+          `${ISSUES} ${ISSUE_HELPER.name}: the re-file must key from onSuccess's context, not hook scope`,
         );
       if (
         patches.length !== 1 ||
@@ -1048,17 +1064,42 @@ function mutateIssueHelper(sources, edit) {
 }
 
 const ISSUE_PATCH_TEXT =
-  "      if (patchStateTo)\n        patchIssueListState(\n          queryClient,\n          repo,\n          lens,\n          numberOf(args),\n          patchStateTo,\n        );\n";
+  "      if (refile)\n        patchIssueListState(\n          queryClient,\n          refile.repo,\n          refile.lens,\n          refile.number,\n          refile.state,\n        );\n";
+const ISSUE_SUCCESS_HEAD = "    onSuccess: (_d, _args, refile) => {\n";
+
+test("the issue helper's re-file keys from its onMutate context, never hook scope", () => {
+  const hookScope = mutateIssueHelper(realSources(), (body) => {
+    assert.ok(body.includes(ISSUE_PATCH_TEXT), "the patch statement moved");
+    return body.replace(
+      "          refile.repo,\n          refile.lens,\n",
+      "          repo,\n          lens,\n",
+    );
+  });
+  assertFlags(hookScope, ISSUE_HELPER.name, "not hook scope");
+  // A target built for every write would re-file rows on pin, lock or edit.
+  const unconditional = mutateIssueHelper(realSources(), (body) =>
+    body.replace(
+      "      patchStateTo\n        ? { repo, lens, number: numberOf(args), state: patchStateTo }\n        : undefined,",
+      '      ({ repo, lens, number: numberOf(args), state: "CLOSED" }),',
+    ),
+  );
+  assertFlags(unconditional, ISSUE_HELPER.name, "patchStateTo alone");
+  const noContext = mutateIssueHelper(realSources(), (body) =>
+    body.replace(ISSUE_SUCCESS_HEAD, "    onSuccess: (_d, _args) => {\n"),
+  );
+  assertFlags(
+    noContext,
+    ISSUE_HELPER.name,
+    "onSuccess (data, variables, context)",
+  );
+});
 
 test("the issue helper's patch must follow its gated re-read in onSuccess", () => {
   const ahead = mutateIssueHelper(realSources(), (body) => {
     assert.ok(body.includes(ISSUE_PATCH_TEXT), "the patch statement moved");
     return body
       .replace(ISSUE_PATCH_TEXT, "")
-      .replace(
-        "    onSuccess: (_d, args) => {\n",
-        `    onSuccess: (_d, args) => {\n${ISSUE_PATCH_TEXT}`,
-      );
+      .replace(ISSUE_SUCCESS_HEAD, `${ISSUE_SUCCESS_HEAD}${ISSUE_PATCH_TEXT}`);
   });
   assertFlags(ahead, ISSUE_HELPER.name, "after the list re-read");
   const settled = mutateIssueHelper(realSources(), (body) =>
