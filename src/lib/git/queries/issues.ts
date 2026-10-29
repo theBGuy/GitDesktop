@@ -8,6 +8,10 @@ import {
 } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
+import {
+  filterPlaceholderRows,
+  patchRowState,
+} from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -234,7 +238,15 @@ export function useIssueList(
     // change keeps the current rows instead of flashing skeletons, but lens must
     // match: a fork numbers issues independently of its parent, so another lens's
     // rows misdescribe the list and a click on one navigates to a different issue.
-    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
+    // A page kept on this tab's own state (index 4) is filed by row state; another
+    // tab's page passes whole.
+    placeholderData: (prev, prevQuery) => {
+      const rows = keepPreviousDataForKeyAxes(repo, [[3, lens]])(
+        prev,
+        prevQuery,
+      );
+      return rows && filterPlaceholderRows(rows, state, prevQuery?.queryKey[4]);
+    },
   });
 }
 
@@ -776,13 +788,38 @@ export function useSetIssueType(repo: string, lens: RemoteLens) {
   );
 }
 
+/** Re-files issue `number`'s row under `state` in every cached list page of the
+ *  repo's `lens` (a fork numbers issues independently). Untouched pages return
+ *  undefined so setQueriesData bails: no write, no notify. Twin of the PR side's
+ *  `patchPrListState` (pr-actions.ts). */
+function patchIssueListState(
+  queryClient: QueryClient,
+  repo: string,
+  lens: RemoteLens,
+  number: number,
+  state: string,
+) {
+  queryClient.setQueriesData<IssueInfo[]>(
+    {
+      queryKey: repoKeys.issueList(repo),
+      predicate: (q) => q.queryKey[3] === lens,
+    },
+    (page) => {
+      const next = patchRowState(page, number, state);
+      return next === page ? undefined : next;
+    },
+  );
+}
+
 /**
  * An issue-lifecycle write (close/reopen/edit/pin/lock/transfer/delete) that reconciles
  * NARROWLY instead of whole-repo: the one issue's detail subtree (prefix-matched, so its
  * reactions/relations/dependencies/development sub-queries refresh too) plus every
  * issue-list state variant (row fields change, and transfer/delete change list
  * membership). `numberOf` extracts the number because the arg shapes differ. No
- * optimistic patch — these change fields the details view re-reads wholesale.
+ * optimistic (mutate-time) patch — these change fields the details view re-reads
+ * wholesale; close/reopen re-file the issue's cached list rows only on success
+ * (`patchStateTo`), once the forge has answered.
  */
 function useIssueLifecycleMutation<TArgs, TData>(
   repo: string,
@@ -800,16 +837,27 @@ function useIssueLifecycleMutation<TArgs, TData>(
   /** A state change (close/reopen): the forge's open-list membership can lag the
    *  row's own state, so a success re-reads the lens's lists once more later. */
   recheckListLater = false,
+  /** The state a success re-files the issue's row under in every cached list
+   *  page, so a preset switched to before its refetch lands files it right. */
+  patchStateTo?: "CLOSED" | "OPEN",
 ) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationKey,
     mutationFn,
-    onSuccess: () => {
+    onSuccess: (_d, args) => {
       if (recheckListLater)
         recheckListsLater(queryClient, repo, [
           [...repoKeys.issueList(repo), lens],
         ]);
+      if (patchStateTo)
+        patchIssueListState(
+          queryClient,
+          repo,
+          lens,
+          numberOf(args),
+          patchStateTo,
+        );
     },
     onSettled: (_d, _e, args) => {
       if (boardCards) invalidateProjectBoards(queryClient, repo);
@@ -1001,6 +1049,7 @@ export function useCloseIssue(repo: string, lens: RemoteLens) {
     true,
     issueWriteKey("close", repo),
     true,
+    "CLOSED",
   );
 }
 
@@ -1015,6 +1064,7 @@ export function useReopenIssue(repo: string, lens: RemoteLens) {
     true,
     issueWriteKey("reopen", repo),
     true,
+    "OPEN",
   );
 }
 

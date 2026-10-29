@@ -233,6 +233,7 @@ import {
   useClearReviewDrafts,
   useReviewDrafts,
 } from "@/lib/pulls/review-drafts";
+import { remoteStateMatches } from "@/lib/remote-state-filter";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
@@ -1305,12 +1306,15 @@ export function RemotePrView({
   // explains THIS PR's missing offer when it would have been its CHILD. The mirror
   // test (a fork whose head is this PR's base) is not specific: fork PRs are
   // routinely opened from `main`, which is most PRs' base, so it would make the note
-  // permanent furniture on ordinary pull requests.
+  // permanent furniture on ordinary pull requests. The row's own state files it,
+  // as in the detector: the open list's membership can lag a merge or close.
   const forkChild =
     currentRow != null &&
     openPrs.some(
       (p) =>
-        p.crossRepository === true && p.baseRefName === currentRow.headRefName,
+        remoteStateMatches(p.state, "open") &&
+        p.crossRepository === true &&
+        p.baseRefName === currentRow.headRefName,
     );
   // Why a chain that may well exist still gets no offer. Only the ADVISORY refusals
   // are named — the detector's structural arms (no chain, ambiguity, a stacked

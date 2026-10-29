@@ -909,8 +909,24 @@ test("a list re-read scheduled outside the set fails the check", () => {
 
 test("close and reopen must pass the issue re-read flag", () => {
   for (const name of ISSUE_REREAD.armed) {
-    const mutant = mutateUnit(realSources(), ISSUE_REREAD.file, name, (body) =>
-      body.replace(/,\s*true,\s*\);/, ",\n    false,\n  );"),
+    const mutant = mutateUnit(
+      realSources(),
+      ISSUE_REREAD.file,
+      name,
+      (body) => {
+        const { helper, flagIndex } = ISSUE_REREAD;
+        const bare = stripComments(body);
+        let out = bare;
+        for (const call of callArgs(bare, helper)) {
+          const args = splitArgs(call);
+          args[flagIndex] = "false";
+          out = out.replace(
+            `${helper}(${call})`,
+            () => `${helper}(${args.join(", ")})`,
+          );
+        }
+        return out;
+      },
     );
     assert.ok(
       checkPushRecheckFamily(mutant).some(

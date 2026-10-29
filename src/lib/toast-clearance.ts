@@ -1,7 +1,7 @@
 // How far the app's toaster lifts off the window's bottom edge so toasts clear a
-// docked action bar. Free of runtime imports (type-only imports use the
-// `import type` declaration form) so scripts/toast-clearance.test.mjs imports it
-// directly under Node's type stripping, with no install.
+// docked action bar, and the observer box that watches the bar move. Free of
+// runtime imports (`import type` only) so scripts/toast-clearance.test.mjs
+// imports it directly under Node's type stripping, with no install.
 
 /** Space kept between a docked bar's top edge and the lowest toast. */
 export const TOAST_BAR_GAP = 12;
@@ -26,6 +26,46 @@ export function barClearance({
   )
     return 0;
   return Math.round(viewportHeight - barTop) + gap;
+}
+
+/** IntersectionObserver options whose root box hugs a bar's rect (insets
+ *  floored, measured against the root's client box), so any move of the bar
+ *  changes its ratio from `threshold`. `threshold` is a re-arm ratio, clamped
+ *  to (0, 1] with 0 read as 1. Null (don't arm) for a boxless rect or any
+ *  input that isn't a finite number. */
+export function moveWatchOptions({
+  left,
+  top,
+  width,
+  height,
+  rootWidth,
+  rootHeight,
+  threshold = 1,
+}: {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  rootWidth: number;
+  rootHeight: number;
+  threshold?: number;
+}): { rootMargin: string; threshold: number } | null {
+  if (
+    ![left, top, width, height, rootWidth, rootHeight, threshold].every(
+      Number.isFinite,
+    ) ||
+    !width ||
+    !height
+  )
+    return null;
+  const insetTop = Math.floor(top);
+  const insetRight = Math.floor(rootWidth - (left + width));
+  const insetBottom = Math.floor(rootHeight - (top + height));
+  const insetLeft = Math.floor(left);
+  return {
+    rootMargin: `${-insetTop}px ${-insetRight}px ${-insetBottom}px ${-insetLeft}px`,
+    threshold: Math.max(0, Math.min(1, threshold)) || 1,
+  };
 }
 
 /** The largest clearance among `values`; 0 when there are none. */

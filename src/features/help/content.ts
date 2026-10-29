@@ -1047,6 +1047,11 @@ leaves the cached list in place.
 **GitLab** publishes into your own namespace, and **Bitbucket** asks for a **workspace**
 (see *Bitbucket repositories*).
 
+Publishing pushes the current branch's full history, so it can take a few minutes.
+Closing the dialog doesn't stop it: a status line at the top of the repository shows it
+until it finishes, and **Publish repository…** reads **Publishing…** and stays disabled
+meanwhile, so a second publish can't start.
+
 ## Stash and reapply
 
 When a **Pull** would overwrite uncommitted changes, git refuses it — and GitDesktop offers

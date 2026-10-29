@@ -1,7 +1,9 @@
 // Pins the Open/Closed tab predicate the PR and issue lists share. A wrong
 // answer here never errors: a merged row lingers under Open, or a placeholder
 // page of the other tab filters to nothing and flashes the empty copy, so each
-// state and each placeholder arm is a case.
+// state and each placeholder arm is a case. The placeholder filter the list
+// hooks run and the row patch a merge, close or reopen writes into cached pages
+// are pinned here too, identity included: both feed react-query's cache.
 //
 // The import below reaches straight into `src/` and relies on Node's default type
 // stripping (>= 23.6), which resolves no bundler aliases: `remote-state-filter.ts`
@@ -10,10 +12,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  filterPlaceholderRows,
   filterRemoteRows,
   localStateMatches,
+  patchRowState,
   remoteStateMatches,
-} from "../src/features/conversations/remote-state-filter.ts";
+} from "../src/lib/remote-state-filter.ts";
 
 const row = (number, state) => ({ number, state });
 
@@ -90,4 +94,117 @@ test("rows: filtering keeps the rows' own objects and order", () => {
   const out = filterRemoteRows([b, row(3, "MERGED"), a], "open", false);
   assert.equal(out[0], b);
   assert.equal(out[1], a);
+});
+
+test("placeholder: a same-state page is filed by its rows' own state", () => {
+  // An Open page kept across Load more or a filter change still carries a row
+  // the forge merged before its open-list membership caught up.
+  const page = [row(1, "OPEN"), row(2, "MERGED"), row(3, "OPEN")];
+  assert.deepEqual(
+    filterPlaceholderRows(page, "open", "open").map((r) => r.number),
+    [1, 3],
+  );
+  const closed = [row(4, "CLOSED"), row(5, "OPEN"), row(6, "MERGED")];
+  assert.deepEqual(
+    filterPlaceholderRows(closed, "closed", "closed").map((r) => r.number),
+    [4, 6],
+  );
+});
+
+test("placeholder: a cross-state page passes whole, as the same array", () => {
+  // The Closed tab's page served while the Open tab's own read is in flight.
+  const otherTab = [row(7, "MERGED"), row(8, "CLOSED")];
+  assert.equal(filterPlaceholderRows(otherTab, "open", "closed"), otherTab);
+  const openTab = [row(9, "OPEN")];
+  assert.equal(filterPlaceholderRows(openTab, "closed", "open"), openTab);
+});
+
+test("placeholder: an unknown source state passes the page whole", () => {
+  const page = [row(10, "MERGED"), row(11, "OPEN")];
+  for (const source of [undefined, null, "OPEN", "", 4]) {
+    assert.equal(
+      filterPlaceholderRows(page, "open", source),
+      page,
+      String(source),
+    );
+  }
+});
+
+test("placeholder: the same page and tab give back the same filtered array", () => {
+  const page = [row(12, "OPEN"), row(13, "CLOSED")];
+  const first = filterPlaceholderRows(page, "open", "open");
+  assert.notEqual(first, page);
+  assert.equal(filterPlaceholderRows(page, "open", "open"), first);
+  // Another page with equal rows is its own entry, never the first page's.
+  const twin = [...page];
+  const other = filterPlaceholderRows(twin, "open", "open");
+  assert.notEqual(other, first);
+  assert.deepEqual(other, first);
+});
+
+test("placeholder: a non-empty page that files down to nothing serves no placeholder", () => {
+  // The section shows its loading state, never the empty copy its read hasn't
+  // answered with yet.
+  const page = [row(14, "MERGED"), row(15, "CLOSED")];
+  assert.equal(filterPlaceholderRows(page, "open", "open"), undefined);
+  assert.equal(filterPlaceholderRows(page, "open", "open"), undefined);
+  // The same page on the other tab still passes whole.
+  assert.equal(filterPlaceholderRows(page, "closed", "open"), page);
+});
+
+test("placeholder: an empty page stays an empty placeholder, with a stable identity", () => {
+  const empty = [];
+  const first = filterPlaceholderRows(empty, "open", "open");
+  assert.deepEqual(first, []);
+  assert.equal(filterPlaceholderRows(empty, "open", "open"), first);
+  assert.equal(filterPlaceholderRows(empty, "closed", "open"), empty);
+});
+
+test("patch: only the named row is re-filed, the rest keep their objects", () => {
+  const a = { number: 1, state: "OPEN", title: "a" };
+  const b = { number: 2, state: "OPEN", title: "b" };
+  const c = { number: 3, state: "CLOSED", title: "c" };
+  const page = [a, b, c];
+  const out = patchRowState(page, 2, "MERGED");
+  assert.notEqual(out, page);
+  assert.deepEqual(
+    out.map((r) => [r.number, r.state]),
+    [
+      [1, "OPEN"],
+      [2, "MERGED"],
+      [3, "CLOSED"],
+    ],
+  );
+  assert.equal(out[0], a);
+  assert.equal(out[2], c);
+  assert.equal(out[1].title, "b");
+  assert.equal(b.state, "OPEN", "the cached row object is never mutated");
+});
+
+test("patch: a page without the row is returned as the same array", () => {
+  const page = [row(4, "OPEN"), row(5, "CLOSED")];
+  assert.equal(patchRowState(page, 99, "CLOSED"), page);
+  const empty = [];
+  assert.equal(patchRowState(empty, 4, "CLOSED"), empty);
+});
+
+test("patch: a row already in that state leaves the page as the same array", () => {
+  const page = [row(6, "OPEN"), row(7, "MERGED")];
+  assert.equal(patchRowState(page, 7, "MERGED"), page);
+  const once = patchRowState(page, 6, "CLOSED");
+  assert.notEqual(once, page);
+  assert.equal(patchRowState(once, 6, "CLOSED"), once);
+});
+
+test("patch: an absent page stays absent", () => {
+  assert.equal(patchRowState(undefined, 1, "OPEN"), undefined);
+});
+
+test("patch: a reopen re-files a closed row under Open", () => {
+  const page = [row(8, "CLOSED"), row(9, "CLOSED")];
+  const out = patchRowState(page, 8, "OPEN");
+  assert.deepEqual(
+    filterRemoteRows(out, "open", false).map((r) => r.number),
+    [8],
+  );
 });

@@ -7,6 +7,7 @@ import { jiraIssueView } from "@/lib/jira/api";
 import { extractJiraKeys } from "@/lib/jira/keys";
 import { useJiraIssues } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
+import { remoteStateMatches } from "@/lib/remote-state-filter";
 import type { JiraMentionChip, LinkedIssueChip } from "./LinkedIssuesField";
 import {
   addExtractedIssue,
@@ -275,6 +276,12 @@ export function useLinkedIssueChips(opts: {
   // issues; its placeholder is lens-matched, so a flip never reads another
   // target's page.
   const issueList = useIssueList(repoPath, enabled, "open", 50, lens);
+  // The page's open rows by their own state: the forge's membership can lag a
+  // close. Only the candidate ranking decides by membership; the number lookups
+  // read the raw page, since a hit there only fills a chip's title and state.
+  const openRows = issueList.data?.filter((i) =>
+    remoteStateMatches(i.state, "open"),
+  );
 
   // Every target's chips + dismissals; the visible cluster is the current one.
   // Each async write carries the reset generation it was fired in, so one that
@@ -504,7 +511,7 @@ export function useLinkedIssueChips(opts: {
     const rankText = rankTokens(
       `${headBranch ?? ""} ${commitSubjects.join(" ")}`,
     );
-    const ranked = (issueList.data ?? [])
+    const ranked = (openRows ?? [])
       .filter((i) => !chipNumbers.has(i.number))
       .map((i) => ({ issue: i, score: sharedTokenScore(i.title, rankText) }))
       .sort(

@@ -113,6 +113,7 @@ import { ChangesPanel } from "./ChangesPanel";
 import { InsightsPanel } from "./insights/InsightsPanel";
 import { OpRecoveryBanner } from "./OpRecoveryBanner";
 import { PrCreateBanner } from "./PrCreateBanner";
+import { PublishPendingBanner } from "./PublishPendingBanner";
 import { RepoHeader } from "./RepoHeader";
 import { usePrNotifications } from "./usePrNotifications";
 import { useRepoVisibilityProbe } from "./useRepoVisibilityProbe";
@@ -798,6 +799,7 @@ export function RepositoryView() {
       <RepoHeader repoPath={repoPath} />
       <OpRecoveryBanner repoPath={repoPath} />
       <WorktreeRemovalBanner repoPath={repoPath} />
+      <PublishPendingBanner repoPath={repoPath} />
       <PrCreateBanner repoPath={repoPath} />
       {/* Outside every TabPanel: a hidden tab's <Activity> pauses effects, and
           the log must follow HEAD for readers on whichever tab is shown. */}

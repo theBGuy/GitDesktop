@@ -7,6 +7,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { shouldRetryQuery } from "@/lib/forge-backoff";
+import { filterPlaceholderRows } from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
@@ -95,7 +96,15 @@ export function usePrList(
     // change keeps the current rows instead of flashing skeletons, but lens must
     // match: a fork numbers PRs independently of its parent, so another lens's rows
     // misdescribe the list and a click on one navigates by number to a different PR.
-    placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
+    // A page kept on this tab's own state (index 4) is filed by row state; another
+    // tab's page passes whole.
+    placeholderData: (prev, prevQuery) => {
+      const rows = keepPreviousDataForKeyAxes(repo, [[3, lens]])(
+        prev,
+        prevQuery,
+      );
+      return rows && filterPlaceholderRows(rows, state, prevQuery?.queryKey[4]);
+    },
     refetchInterval: refetchIntervalMs,
     refetchIntervalInBackground: false,
   });

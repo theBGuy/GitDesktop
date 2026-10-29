@@ -1,16 +1,21 @@
 import { CaretDownIcon, UploadSimpleIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useForgeStatus, usePublishTargets } from "@/lib/git/queries";
+import { Spinner } from "@/components/ui/spinner";
+import {
+  useForgeStatus,
+  usePendingPublishes,
+  usePublishTargets,
+} from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { PublishDialog } from "./PublishDialog";
+import { publishingHold } from "./PublishPendingBanner";
 
 type PublishProviderId = "github" | "gitlab" | "bitbucket";
 
@@ -86,6 +91,8 @@ export function usePublishProviders(
  * disabled button carrying it as its reason when none can. The single and
  * disabled arms share one DisabledReasonButton node, so focus survives a
  * disabled → single settle; the dropdown arm is its own trigger and remounts.
+ * While the repo has a publish in flight, from any host, whichever arm shows
+ * holds as a spinning "Publishing…" carrying the publish as its reason.
  * `reserveCaret` gives every arm the dropdown's width (an invisible caret where
  * no real one shows), for a host whose neighbours must not move.
  * Owns the publish dialog itself.
@@ -112,6 +119,16 @@ export function PublishRepoControl({
   }
 
   const soleTarget = providers[0];
+  // Read from the cache, not this instance's dialog: the other host's publish
+  // holds this trigger too, and it outranks `disabledTitle`.
+  const pending = usePendingPublishes(repoPath);
+  const busyReason = pending[0] ? publishingHold(pending[0]) : undefined;
+  const lead = busyReason ? (
+    <Spinner data-icon="inline-start" aria-hidden />
+  ) : (
+    <UploadSimpleIcon data-icon="inline-start" />
+  );
+  const label = busyReason ? "Publishing…" : "Publish repository…";
   // `data-icon="inline-end"` keeps the size's trailing-icon padding, so the
   // placeholder matches the real caret's footprint exactly.
   const caretSpace = reserveCaret ? (
@@ -123,9 +140,20 @@ export function PublishRepoControl({
       {providers.length >= 2 ? (
         // Multiple CLIs/accounts are ready: the button becomes a provider choice.
         <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="outline" size="sm" />}>
-            <UploadSimpleIcon data-icon="inline-start" />
-            Publish repository…
+          <DropdownMenuTrigger
+            // Always the held composition, so a busy flip never swaps the
+            // trigger's component and remounts the focused node.
+            render={
+              <DisabledReasonButton
+                variant="outline"
+                size="sm"
+                disabled={!!busyReason}
+                reason={busyReason}
+              />
+            }
+          >
+            {lead}
+            {label}
             <CaretDownIcon data-icon="inline-end" />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
@@ -140,17 +168,19 @@ export function PublishRepoControl({
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={!soleTarget}
-          reason={soleTarget ? undefined : disabledTitle}
+          disabled={!soleTarget || !!busyReason}
+          reason={busyReason ?? (soleTarget ? undefined : disabledTitle)}
           onClick={() => soleTarget && openPublish(soleTarget.id)}
+          // No idle hint while busy: a title here would hover-show instead of
+          // the publishing reason, which rides the wrapper's title.
           title={
-            soleTarget
+            soleTarget && !busyReason
               ? `Create a ${soleTarget.label} repository and push this one`
               : undefined
           }
         >
-          <UploadSimpleIcon data-icon="inline-start" />
-          Publish repository…
+          {lead}
+          {label}
           {caretSpace}
         </DisabledReasonButton>
       ) : null}

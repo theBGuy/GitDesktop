@@ -15,7 +15,7 @@ import type {
   PrInfo,
   RemoteLens,
 } from "@/lib/git/types";
-import { remoteStateMatches } from "./remote-state-filter";
+import { remoteStateMatches } from "@/lib/remote-state-filter";
 
 export type { MentionTrigger };
 
