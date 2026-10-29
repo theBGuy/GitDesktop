@@ -814,16 +814,17 @@ one grep away on the named symbol. Grows via Conventions-sync.
   `scripts/push-writes.test.mjs` pins the union fire.
 - **Remote state re-file** — a write that changes a remote PR's or issue's
   open/closed state (a merge unless queued, a close, a reopen) re-files that
-  row in every cached list page of its lens on success, AFTER its delayed list
-  re-read, through `patchRowState` (`src/lib/remote-state-filter.ts`) via the
-  module-private twins `patchPrListState` / `patchIssueListState`: it rewrites
-  the row's state only, never inserting or removing a row, and an untouched
-  page bails so it keeps its identity. One deliberate non-member: GitLab's
-  arm-auto-merge (`useGlArmAutoMerge`) patches nothing even though arming can
-  merge at once, because its void outcome can't tell armed from merged; the
-  whole-repo invalidation covers an immediate merge.
-  `scripts/remote-row-state-wiring.test.mjs` pins every caller of the five
-  forge state writes that its src/-wide scan can see; that test's header lists
+  row in every cached list page of its lens on success, right after arming
+  its delayed list re-read (it doesn't wait for that re-read to fire),
+  through `patchRowState` (`src/lib/remote-state-filter.ts`) via the
+  module-private twins `patchPrListState` / `patchIssueListState`: it
+  rewrites the row's state only, never inserting or removing a row, and an
+  untouched page bails so it keeps its identity. One deliberate non-member:
+  GitLab's arm-auto-merge (`useGlArmAutoMerge`) patches nothing even though
+  arming can merge at once, because its void outcome can't tell armed from
+  merged; the whole-repo invalidation covers an immediate merge. The
+  src/-wide scan in `scripts/remote-row-state-wiring.test.mjs` pins every
+  caller of the five forge state writes it can see; that test's header lists
   the shapes the scan can't see.
 - **Run-scoped forge reads** — an automation pass shares its diff and each
   action's review-activity read, and an interactive review run shares its one

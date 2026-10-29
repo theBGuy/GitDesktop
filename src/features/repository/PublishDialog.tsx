@@ -42,7 +42,11 @@ import {
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
 import { useGenerateRepoDescription } from "../repo-settings/useGenerateRepoDescription";
-import { publishingHold } from "./PublishPendingBanner";
+import {
+  PUBLISH_PROVIDER_LABELS,
+  publishingHold,
+} from "./PublishPendingBanner";
+import { type FailedPublishDraft, keepDraftOnOpen } from "./publish-draft";
 
 /** Bitbucket repo slugs must start alphanumeric, then allow dot/underscore/hyphen.
  *  A blank name is caught by the `required` validator, so don't double-flag it. */
@@ -165,11 +169,7 @@ export function PublishDialog({
   // reopens on the same provider. A success or an idle user close discards it,
   // and a foreign reseed retires it. A switch's own close keeps it, but a switch
   // that unmounts this dialog loses it with the rest of the dialog's state.
-  const failedDraftRef = useRef<{
-    repo: string;
-    gen: number;
-    provider: "github" | "gitlab" | "bitbucket";
-  } | null>(null);
+  const failedDraftRef = useRef<FailedPublishDraft | null>(null);
   // The user's close rule (Esc, the X, the backdrop, the footer button): an idle
   // close discards a failed draft, while a close during a publish leaves it to
   // that publish, whose success clears it and whose failure re-stamps it.
@@ -204,11 +204,7 @@ export function PublishDialog({
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
   const isGitHub = provider === "github";
-  const remoteLabel = isBitbucket
-    ? "Bitbucket"
-    : isGitLab
-      ? "GitLab"
-      : "GitHub";
+  const remoteLabel = PUBLISH_PROVIDER_LABELS[provider];
 
   // Bitbucket creates the repo under a workspace; only workspaces the viewer can
   // administer can receive a new repo, so default to the first of those (else the
@@ -349,17 +345,15 @@ export function PublishDialog({
     // closed — leaves the description and topics in form state, which this
     // reset would blank on reopen.
     if (surface.shouldSkipSeed(descGen.generating)) return;
-    // This repo's draft survives a reopen while its publish runs, or after it
-    // failed when reopened for the same provider. Another repo's always resets:
-    // that publish's later form writes are flags only and its `ourDraft` no
-    // longer matches, so it can't touch this one.
-    const failed = failedDraftRef.current;
     if (
-      prev === repoPath &&
-      (form.state.isSubmitting ||
-        (failed?.repo === repoPath &&
-          failed.gen === seedGenRef.current &&
-          failed.provider === provider))
+      keepDraftOnOpen({
+        prevRepo: prev,
+        repo: repoPath,
+        submitting: form.state.isSubmitting,
+        failed: failedDraftRef.current,
+        gen: seedGenRef.current,
+        provider,
+      })
     ) {
       return;
     }

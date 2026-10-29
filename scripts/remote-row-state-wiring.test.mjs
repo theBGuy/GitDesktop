@@ -4,9 +4,10 @@
 //   with the previous key's state segment (index 4), so a page kept on the same
 //   tab is filed by row state while another tab's page passes whole;
 // - a merge (never a queued one), close or reopen re-files its row in every
-//   cached list page of the repo's lens, inside its success callback and after
-//   the list re-read (push-recheck-family.test.mjs pins the re-read and its
-//   gate), and no other write does; of the issue lifecycle writes only close and
+//   cached list page of the repo's lens, inside its success callback, right
+//   after the call that arms the delayed list re-read (it doesn't wait for the
+//   re-read to fire; push-recheck-family.test.mjs pins that call and its gate),
+//   and no other write does; of the issue lifecycle writes only close and
 //   reopen hand the helper a state, whose write keys from the target its
 //   onMutate fixes, and nothing else in src/ calls the five forge state writes;
 // - the issue picker offers open and closed issues unfiltered by state and
@@ -97,7 +98,7 @@ const helperWrite = ({ family, row }) =>
 
 /** The PR state writes and the state each re-files its row under; `gate` is
  *  the condition the patch must sit under, sharing the block whose FIRST
- *  statement is the list re-read. */
+ *  statement arms the list re-read. */
 const PR_HOOKS = {
   useMergePr: { state: "MERGED", gate: "if (!data.queued)" },
   useClosePr: { state: "CLOSED", gate: null },
@@ -373,7 +374,7 @@ function checkRemoteListState(raw) {
       );
   }
 
-  // Arm 2: the PR hooks re-file their row on success, after the re-read.
+  // Arm 2: in onSuccess, right after arming the re-read, re-file the PR's row.
   for (const [name, { state, gate }] of Object.entries(PR_HOOKS)) {
     const u = unit(PR_ACTIONS, name);
     if (!u) continue;
@@ -403,7 +404,7 @@ function checkRemoteListState(raw) {
     const reread = view.code.indexOf("recheckListsLater(", success[0]);
     if (reread < 0 || reread > success[1] || patches[0] < reread)
       problems.push(
-        `${PR_ACTIONS} ${name}: the patch must follow the list re-read`,
+        `${PR_ACTIONS} ${name}: the patch must follow the call that arms the list re-read`,
       );
     if (gate !== null) {
       const adjacent = new RegExp(
@@ -417,7 +418,7 @@ function checkRemoteListState(raw) {
       );
       if (!adjacent.test(body) || !gated)
         problems.push(
-          `${PR_ACTIONS} ${name}: \`${gate}\` must open a block whose first statement is the list re-read`,
+          `${PR_ACTIONS} ${name}: \`${gate}\` must open a block whose first statement arms the list re-read`,
         );
       else if (patches[0] < gated[0] || patches[0] > gated[1])
         problems.push(
@@ -427,7 +428,7 @@ function checkRemoteListState(raw) {
   }
 
   // Arm 2: the issue helper fixes its re-file target in onMutate and writes it
-  // on success, from the context, after its gated re-read.
+  // on success, from the context, right after arming its gated re-read.
   const helper = unit(ISSUES, ISSUE_HELPER.name);
   if (helper) {
     const { view } = helper;
@@ -474,7 +475,7 @@ function checkRemoteListState(raw) {
       const reread = view.code.indexOf("recheckListsLater(", success[0]);
       if (!/if \(recheckListLater\)\s*(?:\{\s*)?recheckListsLater\(/.test(body))
         problems.push(
-          `${ISSUES} ${ISSUE_HELPER.name}: the re-read must stay directly under its gate`,
+          `${ISSUES} ${ISSUE_HELPER.name}: the call that arms the re-read must stay directly under its gate`,
         );
       if (!norm(body).includes(issuePatch(successAt[1])))
         problems.push(
@@ -488,7 +489,7 @@ function checkRemoteListState(raw) {
         patches[0] < reread
       )
         problems.push(
-          `${ISSUES} ${ISSUE_HELPER.name}: expected one patch in onSuccess, after the list re-read`,
+          `${ISSUES} ${ISSUE_HELPER.name}: expected one patch in onSuccess, after the call that arms the list re-read`,
         );
     }
   }
@@ -850,7 +851,7 @@ test("an axis inserted before state, or a longer key builder, fails", () => {
   );
 });
 
-test("a merge patch outside the queued gate, or ahead of the re-read, fails", () => {
+test("a merge patch outside the queued gate, or ahead of the call arming the re-read, fails", () => {
   const outside = mutate(realSources(), PR_ACTIONS, (t) =>
     t.replace(
       '          patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");\n        }',
@@ -864,7 +865,7 @@ test("a merge patch outside the queued gate, or ahead of the re-read, fails", ()
       'if (!data.queued) {\n          patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");\n          recheckListsLater(',
     ),
   );
-  assertFlags(ahead, "useMergePr", "first statement is the list re-read");
+  assertFlags(ahead, "useMergePr", "first statement arms the list re-read");
   const dropped = mutate(realSources(), PR_ACTIONS, (t) =>
     t.replace(
       '          patchPrListState(queryClient, repo, args.lens, args.number, "MERGED");\n',
@@ -1094,14 +1095,18 @@ test("the issue helper's re-file keys from its onMutate context, never hook scop
   );
 });
 
-test("the issue helper's patch must follow its gated re-read in onSuccess", () => {
+test("the issue helper's patch must follow the call arming its gated re-read in onSuccess", () => {
   const ahead = mutateIssueHelper(realSources(), (body) => {
     assert.ok(body.includes(ISSUE_PATCH_TEXT), "the patch statement moved");
     return body
       .replace(ISSUE_PATCH_TEXT, "")
       .replace(ISSUE_SUCCESS_HEAD, `${ISSUE_SUCCESS_HEAD}${ISSUE_PATCH_TEXT}`);
   });
-  assertFlags(ahead, ISSUE_HELPER.name, "after the list re-read");
+  assertFlags(
+    ahead,
+    ISSUE_HELPER.name,
+    "after the call that arms the list re-read",
+  );
   const settled = mutateIssueHelper(realSources(), (body) =>
     body
       .replace(ISSUE_PATCH_TEXT, "")

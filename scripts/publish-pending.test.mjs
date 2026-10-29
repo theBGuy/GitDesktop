@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-
+import { keepDraftOnOpen } from "../src/features/repository/publish-draft.ts";
 import {
   PUBLISH_REPO_KEY,
   pendingMutationEntries,
@@ -334,5 +334,112 @@ test("a close route that bypasses the rule is caught", () => {
   for (const mutant of mutants) {
     assert.notEqual(mutant, live);
     assert.notDeepEqual(closeRuleProblems(mutant), []);
+  }
+});
+
+// The draft-keeping rule an opening dialog applies before it reseeds. Each arm
+// is a case: a dropped provider check hands a Bitbucket reopen a GitHub draft,
+// and a dropped generation check brings back a draft a reseed retired.
+const REPO_A = "C:/work/harbor";
+const REPO_B = "C:/work/anchor";
+const failedA = { repo: REPO_A, gen: 4, provider: "github" };
+const openArgs = (over) => ({
+  prevRepo: REPO_A,
+  repo: REPO_A,
+  submitting: false,
+  failed: null,
+  gen: 4,
+  provider: "github",
+  ...over,
+});
+
+test("a same-repo reopen keeps the draft while its publish runs", () => {
+  assert.equal(keepDraftOnOpen(openArgs({ submitting: true })), true);
+});
+
+test("a same-repo reopen keeps a failed draft for the same provider and generation", () => {
+  assert.equal(keepDraftOnOpen(openArgs({ failed: failedA })), true);
+});
+
+test("a failed draft reseeds for another provider", () => {
+  assert.equal(
+    keepDraftOnOpen(openArgs({ failed: failedA, provider: "bitbucket" })),
+    false,
+  );
+});
+
+test("a failed draft a reseed retired (generation moved on) reseeds", () => {
+  assert.equal(keepDraftOnOpen(openArgs({ failed: failedA, gen: 5 })), false);
+});
+
+test("a failed draft for another repo reseeds", () => {
+  assert.equal(
+    keepDraftOnOpen(openArgs({ failed: { ...failedA, repo: REPO_B } })),
+    false,
+  );
+});
+
+test("a draft held for another repo reseeds, whatever it carries", () => {
+  assert.equal(
+    keepDraftOnOpen(openArgs({ prevRepo: REPO_B, failed: failedA })),
+    false,
+  );
+  assert.equal(
+    keepDraftOnOpen(openArgs({ prevRepo: REPO_B, submitting: true })),
+    false,
+  );
+});
+
+test("no failed draft and nothing submitting reseeds", () => {
+  assert.equal(keepDraftOnOpen(openArgs({})), false);
+});
+
+// The dialog's seed applies that rule with its live inputs, ahead of the bump.
+function seedRuleProblems(text) {
+  const start = text.indexOf("const seedOnOpen = useEffectEvent(");
+  const end = text.indexOf("useSeedOnOpen(open, seedOnOpen)");
+  if (start < 0 || end < start) return ["seedOnOpen not found"];
+  const body = text.slice(start, end);
+  const problems = [];
+  const call = body.indexOf("keepDraftOnOpen({");
+  const bump = body.indexOf("seedGenRef.current += 1");
+  if (call < 0) problems.push("seed doesn't apply keepDraftOnOpen");
+  else if (bump < 0 || bump < call)
+    problems.push("rule applied after the bump");
+  for (const arg of [
+    "prevRepo: prev,",
+    "repo: repoPath,",
+    "submitting: form.state.isSubmitting,",
+    "failed: failedDraftRef.current,",
+    "gen: seedGenRef.current,",
+  ]) {
+    if (!body.includes(arg)) problems.push(`missing arg: ${arg}`);
+  }
+  // Shorthand: the dialog's own provider, never a stand-in.
+  if (!/^\s*provider,$/m.test(body)) problems.push("missing arg: provider");
+  return problems;
+}
+
+test("the seed applies the draft-keeping rule with its live inputs", () => {
+  assert.deepEqual(seedRuleProblems(source(HOLD_FILES.dialog)), []);
+});
+
+test("a seed that skips or misfeeds the rule is caught", () => {
+  const live = source(HOLD_FILES.dialog);
+  const mutants = [
+    live.replace("keepDraftOnOpen({", "Boolean({"),
+    live.replace(
+      "gen: seedGenRef.current,",
+      "gen: failedDraftRef.current?.gen ?? 0,",
+    ),
+    live.replace(
+      "gen: seedGenRef.current,\n        provider,",
+      'gen: seedGenRef.current,\n        provider: "github",',
+    ),
+    live.replace("prevRepo: prev,", "prevRepo: repoPath,"),
+  ];
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, live);
+    assert.notDeepEqual(seedRuleProblems(mutant), []);
   }
 });

@@ -15,7 +15,10 @@ import {
 } from "@/lib/git/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { PublishDialog } from "./PublishDialog";
-import { publishingHold } from "./PublishPendingBanner";
+import {
+  PUBLISH_PROVIDER_LABELS,
+  publishingHold,
+} from "./PublishPendingBanner";
 
 type PublishProviderId = "github" | "gitlab" | "bitbucket";
 
@@ -66,19 +69,15 @@ export function usePublishProviders(
   // still in flight, matching the pre-generalized behavior — avoids a flash of
   // disabled for the common GitHub case.
   const ghCliReady = Boolean(gh.data?.installed && gh.data?.authenticated);
-  const ready: Array<PublishProvider & { ready: boolean | undefined }> = [
-    {
-      id: "github",
-      label: "GitHub",
-      ready: ghCliReady || targets.data?.github,
-    },
-    { id: "gitlab", label: "GitLab", ready: targets.data?.gitlab },
-    { id: "bitbucket", label: "Bitbucket", ready: targets.data?.bitbucket },
+  const ready: Array<{ id: PublishProviderId; ready: boolean | undefined }> = [
+    { id: "github", ready: ghCliReady || targets.data?.github },
+    { id: "gitlab", ready: targets.data?.gitlab },
+    { id: "bitbucket", ready: targets.data?.bitbucket },
   ];
   return {
     providers: ready
       .filter((p) => p.ready)
-      .map(({ id, label }) => ({ id, label })),
+      .map(({ id }) => ({ id, label: PUBLISH_PROVIDER_LABELS[id] })),
     settled,
   };
 }
