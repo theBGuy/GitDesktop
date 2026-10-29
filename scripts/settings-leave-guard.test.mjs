@@ -25,6 +25,7 @@ import {
   matchBrace,
   OPEN,
   sourceFiles,
+  tagEnd,
 } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -535,6 +536,66 @@ function automationsMountProblems(text) {
     );
   if ((text.match(/<AutomationsSection\b/g) ?? []).length !== 1)
     problems.push("expected one AutomationsSection mount");
+  return problems;
+}
+
+/** Problems with the hidden Automations panel, `[]` when pinned: SettingsScreen
+ *  tells it whether it is the active panel; its render function returns null
+ *  while inactive, at its top level and below every hook call, so a hidden
+ *  panel paints nothing (no portal included); and an effect keyed on `active`
+ *  dismisses the panel's own open prompt, only while it is still the open one. */
+function hiddenAutomationsProblems(screen, section) {
+  const problems = [];
+  const sMasked = maskNonCode(screen, true);
+  const tags = [...sMasked.matchAll(/<AutomationsSection\b/g)];
+  if (tags.length !== 1)
+    problems.push(`expected one AutomationsSection tag, found ${tags.length}`);
+  else {
+    // The prop in code (a comment masks it), its string value on the raw text.
+    const at = tags[0].index;
+    const end = tagEnd(sMasked, at);
+    const prop =
+      end === -1
+        ? null
+        : /\sactive=\{activePanel === "/.exec(sMasked.slice(at, end));
+    if (
+      !prop ||
+      !screen.startsWith(
+        'active={activePanel === "automations"}',
+        at + prop.index + 1,
+      )
+    )
+      problems.push("SettingsScreen no longer tells the panel it is active");
+  }
+  const masked = maskNonCode(section, true);
+  const fn = /render: function AutomationsSectionRender\(/.exec(masked);
+  const params = fn ? fn.index + fn[0].length - 1 : -1;
+  const paramsClose = params === -1 ? -1 : matchBrace(masked, params);
+  const open = paramsClose === -1 ? -1 : masked.indexOf("{", paramsClose);
+  const close = open === -1 ? -1 : matchBrace(masked, open);
+  if (close === -1) return [...problems, "the render function was not found"];
+  const body = masked.slice(open, close + 1);
+  const ret = /\n\s*if \(!active\) return null;\n/.exec(body);
+  if (!ret) problems.push("the inactive panel no longer renders nothing");
+  else {
+    let depth = 0;
+    for (const c of body.slice(0, ret.index))
+      if (OPEN.has(c)) depth++;
+      else if (CLOSE.has(c)) depth--;
+    if (depth !== 1)
+      problems.push("the inactive return is not at the render's top level");
+    const hook = /\buse[A-Z][\w$]*\s*\(/;
+    if (!hook.test(body.slice(0, ret.index)))
+      problems.push("no hook call precedes the inactive return");
+    if (hook.test(body.slice(ret.index)))
+      problems.push("a hook call follows the inactive return");
+  }
+  if (
+    !/useEffect\(\(\) => \{\s*if \(!active && useConfirm\.getState\(\)\.request === promptRef\.current\)\s*promptRef\.current\?\.resolve\(false, false\);\s*\}, \[active\]\);/.test(
+      masked,
+    )
+  )
+    problems.push("hiding the panel no longer dismisses its own prompt");
   return problems;
 }
 
@@ -1203,6 +1264,87 @@ test("the Automations panel stays mounted, hidden, while unsaved or writing", ()
         anchor + s.slice(start, end),
       )(s.slice(0, start) + s.slice(end));
     },
+  );
+});
+
+test("the hidden Automations panel renders nothing and drops its own prompt", () => {
+  const screen = source(SCREEN);
+  const section = source(AUTOMATIONS);
+  const returnNull = "    if (!active) return null;\n";
+  const lastEffect =
+    "    useEffect(() => {\n      if (!onRegisterDiscard) return;\n";
+  pin(
+    (s) => hiddenAutomationsProblems(s, section),
+    screen,
+    // The panel never told it is hidden.
+    once('                    active={activePanel === "automations"}\n', ""),
+  );
+  pin(
+    (s) => hiddenAutomationsProblems(screen, s),
+    section,
+    // A hidden panel still painting, its Select portal included.
+    once(returnNull, ""),
+    once(returnNull, "    if (active) return null;\n"),
+    // A hook below the return: hiding would change the hook order.
+    (s) => once(lastEffect, returnNull + lastEffect)(once(returnNull, "")(s)),
+    once(returnNull, `${returnNull}    useLatestRef(active);\n`),
+    // The prompt left open over the next panel.
+    once(
+      "    useEffect(() => {\n      if (!active && useConfirm.getState().request === promptRef.current)\n        promptRef.current?.resolve(false, false);\n    }, [active]);\n",
+      "",
+    ),
+    // Resolving whatever prompt is open, another surface's included.
+    once(
+      "if (!active && useConfirm.getState().request === promptRef.current)",
+      "if (!active)",
+    ),
+    once("    }, [active]);\n", "    }, []);\n"),
+  );
+  // Arms one mutation could trip alongside another, each asserted by its own
+  // problem so a co-tripped arm can't stand in for it.
+  const redFor = (problem, sc, se) => {
+    assert.ok(sc !== screen || se !== section, `no mutation for: ${problem}`);
+    const found = hiddenAutomationsProblems(sc, se);
+    assert.ok(found.includes(problem), `expected "${problem}", got [${found}]`);
+  };
+  const propLine =
+    '                    active={activePanel === "automations"}\n';
+  redFor(
+    "SettingsScreen no longer tells the panel it is active",
+    once(
+      propLine,
+      '                    {/* active={activePanel === "automations"} */}\n',
+    )(screen),
+    section,
+  );
+  redFor(
+    "SettingsScreen no longer tells the panel it is active",
+    once(
+      propLine,
+      '                    active={activePanel === "automation"}\n',
+    )(screen),
+    section,
+  );
+  redFor(
+    "expected one AutomationsSection tag, found 2",
+    once(
+      '{activePanel === "general" && <GeneralSection form={form} />}',
+      '{activePanel === "general" && <AutomationsSection form={form} />}',
+    )(screen),
+    section,
+  );
+  redFor(
+    "the inactive return is not at the render's top level",
+    screen,
+    once(returnNull, `    {\n  ${returnNull}    }\n`)(section),
+  );
+  redFor(
+    "no hook call precedes the inactive return",
+    screen,
+    once(
+      "    const automations = useAutomations();\n",
+      `${returnNull}    const automations = useAutomations();\n`,
+    )(once(returnNull, "")(section)),
   );
 });
 

@@ -768,7 +768,8 @@ export function SettingsScreen() {
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
             <main className="mx-auto w-full max-w-2xl space-y-8 p-6">
               {/* Stays mounted, hidden, while its draft is unsaved or writing, so
-                  a panel switch keeps the draft and its registered handles. Not
+                  a panel switch keeps the draft and its registered handles; while
+                  hidden it renders nothing and dismisses its own open prompt. Not
                   <Activity>: its hide runs effect cleanups, nulling the handles.
                   First, since space-y-8 spaces every child but the last: a
                   hidden trailing wrapper would leave a gap under the panel. */}
@@ -778,6 +779,7 @@ export function SettingsScreen() {
                 <div hidden={activePanel !== "automations"}>
                   <AutomationsSection
                     form={form}
+                    active={activePanel === "automations"}
                     onDirtyChange={setAutomationsDirty}
                     onRegisterSave={(fn) => {
                       saveAutomationsRef.current = fn;

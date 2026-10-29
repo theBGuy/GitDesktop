@@ -77,6 +77,9 @@ function sortedJson(value: unknown): string {
 export const AutomationsSection = withForm({
   ...settingsFormOpts,
   props: {
+    /** False while Settings shows another panel, when the section stays
+     *  mounted only to keep its draft and handles. */
+    active: true as boolean,
     onDirtyChange: undefined as ((dirty: boolean) => void) | undefined,
     /** Fire this panel's save. Resolves true iff the write landed; never rejects
      *  (the panel owns the one failure toast). `quiet` suppresses the success
@@ -104,6 +107,7 @@ export const AutomationsSection = withForm({
   },
   render: function AutomationsSectionRender({
     form,
+    active,
     onDirtyChange,
     onRegisterSave,
     onRegisterJoin,
@@ -241,8 +245,8 @@ export const AutomationsSection = withForm({
       );
     }
 
-    // This panel's own open Discard prompt, dismissed if the panel unmounts
-    // under it (a hotkey can navigate away past the modal).
+    // This panel's own open Discard prompt, dismissed if the panel hides or
+    // unmounts under it (a hotkey can navigate away past the modal).
     const promptRef = useRef<ConfirmRequest | null>(null);
     useEffect(
       () => () => {
@@ -251,6 +255,10 @@ export const AutomationsSection = withForm({
       },
       [],
     );
+    useEffect(() => {
+      if (!active && useConfirm.getState().request === promptRef.current)
+        promptRef.current?.resolve(false, false);
+    }, [active]);
     async function requestDiscard() {
       const answer = useConfirm.getState().ask({
         title: "Discard unsaved changes?",
@@ -264,7 +272,7 @@ export const AutomationsSection = withForm({
       const ok = await answer;
       if (promptRef.current === mine) promptRef.current = null;
       if (!ok) {
-        // A superseding prompt or an unmounted panel keeps focus where it is.
+        // A superseding prompt or a hidden/unmounted panel leaves focus alone.
         if (
           mounted.current &&
           useConfirm.getState().request === null &&
@@ -363,6 +371,9 @@ export const AutomationsSection = withForm({
       return () => onRegisterDiscard(null);
     }, [dirty, onRegisterDiscard]);
 
+    // Hidden, it renders nothing, so no overlay in its subtree (the match-against
+    // Select's portal) outlives a panel switch. Every hook call stays above this.
+    if (!active) return null;
     return (
       <section className="space-y-3">
         <div>

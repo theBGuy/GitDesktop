@@ -117,7 +117,7 @@ export function useOpenRepoByPath() {
   // Counted when the switch lands, never at the request: a dirty Settings can
   // hold it, and Keep editing cancels it.
   const recordOpenAndTrack = useCallback(
-    async (
+    (
       info: RepoInfo,
       source: "recent" | "picker" | "relocate",
       stillCurrent: () => boolean,

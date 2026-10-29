@@ -5,7 +5,8 @@
 // rollback coverage per writing lock site, following same-file named helpers.
 // Mutation controls cover behavior, a missing site wrap, and roster expansion.
 // Autosave pins: the plugin-store allowlist matches the ratchet's exempt stores,
-// and every opener takes storeLoadOptions; their controls mutate sources in memory.
+// and every opener (derived from src's plugin imports) takes storeLoadOptions;
+// their controls mutate sources in memory or run synthetic opener fixtures.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
@@ -813,24 +814,68 @@ function topLevelArgs(masked, open) {
   return args.filter((arg) => masked.slice(arg.start, arg.end).trim() !== "");
 }
 
-// Every plugin `load(` in the file opens `storeName(X)` with `storeLoadOptions(X)`
-// over the same bare name, so options key on the pre-cold-start name.
+// The plugin's option-bearing openers, keyed by export. A value Store import
+// may only open (Store.load); fetching an open store goes through getStore,
+// which takes no options, and types come in through `type`.
+const OPENER_EXPORTS = new Set(["load", "Store", "LazyStore"]);
+const OPENING_SITES = [
+  ["load", "load", /(?<![\w$])(?<!\.\s*)load\s*\(/g],
+  ["Store", "Store.load", /(?<![\w$.])Store\s*\.\s*load\s*\(/g],
+  ["LazyStore", "new LazyStore", /(?<![\w$.])new\s+LazyStore\s*\(/g],
+];
+
+// Each imported opener name, outside its import statement and not after a
+// `.`, must start an opening site of its own kind. Anything else fails closed:
+// a binding alias or callback could open a store the site check never sees,
+// and Store.get or a type annotation has getStore or `type` instead.
+function assertOnlyOpeningReferences(masked, file, imports) {
+  for (const [name, , pattern] of OPENING_SITES) {
+    if (!imports.names.has(name)) continue;
+    const sites = new Set(
+      [...masked.matchAll(pattern)].map(
+        (site) => site.index + site[0].indexOf(name),
+      ),
+    );
+    const ref = new RegExp(`(?<![\\w$])(?<!\\.\\s*)${name}(?![\\w$])`, "g");
+    for (const match of masked.matchAll(ref)) {
+      if (sites.has(match.index)) continue;
+      const at = match.index;
+      if (imports.spans.some(([from, to]) => at >= from && at < to)) continue;
+      assert.fail(
+        `${file}:${lineOf(masked, match.index)}: ${name} is referenced other than to open a store (fetch an open store with getStore; import types with \`type\`)`,
+      );
+    }
+  }
+}
+
+// Every opening site of an imported opener opens `storeName(X)` with
+// `storeLoadOptions(X)` over the same bare name, so options key on the
+// pre-cold-start name.
 function assertLoadsTakeStoreOptions(text, file) {
   const masked = maskNonCode(text, file.endsWith(".tsx"));
-  const calls = [...masked.matchAll(/(?<![\w$.])load\s*\(/g)];
-  assert.ok(calls.length > 0, `${file}: a plugin load call`);
-  for (const call of calls) {
+  const imports = pluginStoreImports(text, file);
+  assertOnlyOpeningReferences(masked, file, imports);
+  const calls = OPENING_SITES.filter(([name]) => imports.names.has(name))
+    .flatMap(([, kind, pattern]) =>
+      [...masked.matchAll(pattern)].map((call) => ({ kind, call })),
+    )
+    .sort((a, b) => a.call.index - b.call.index);
+  assert.ok(
+    calls.length > 0,
+    `${file}: imports a store opener but opens nothing`,
+  );
+  for (const { kind, call } of calls) {
     const open = call.index + call[0].length - 1;
     const args = topLevelArgs(masked, open);
     const at = `${file}:${lineOf(masked, call.index)}`;
-    assert.equal(args.length, 2, `${at}: load takes (name, options)`);
+    assert.equal(args.length, 2, `${at}: ${kind} takes (name, options)`);
     const [name, options] = args.map((arg) =>
       text.slice(arg.start, arg.end).trim(),
     );
     const nameArg = /^storeName\(([^()]*)\)$/.exec(name);
     const optionsArg = /^storeLoadOptions\(([^()]*)\)$/.exec(options);
-    assert.ok(nameArg, `${at}: load opens a storeName(...) path`);
-    assert.ok(optionsArg, `${at}: load options come from storeLoadOptions`);
+    assert.ok(nameArg, `${at}: ${kind} opens a storeName(...) path`);
+    assert.ok(optionsArg, `${at}: ${kind} options come from storeLoadOptions`);
     assert.equal(
       optionsArg[1].trim(),
       nameArg[1].trim(),
@@ -840,11 +885,110 @@ function assertLoadsTakeStoreOptions(text, file) {
   return calls.length;
 }
 
+const PLUGIN_PACKAGE = "@tauri-apps/plugin-store";
+
+// For this package, refuses the import shapes app-store-lock.test.mjs's
+// loaderImports refuses (alias, namespace, default, dynamic), plus non-type
+// re-exports, import items that aren't plain identifiers, and any other code
+// reference to the package string; assertLoadsTakeStoreOptions then requires
+// every reference to an imported opener to be an opening site. Anchored on
+// real specifier strings and classified on masked code, so comments can't pose.
+function pluginStoreImports(text, file) {
+  const masked = maskNonCode(text, file.endsWith(".tsx"));
+  const names = new Set();
+  const spans = [];
+  const failures = [];
+  const specifier = new RegExp(`(["'\`])${escapeRe(PLUGIN_PACKAGE)}\\1`, "g");
+  for (const match of text.matchAll(specifier)) {
+    if (masked[match.index] !== match[1]) continue;
+    const at = `${file}:${lineOf(masked, match.index)}`;
+    const before = masked.slice(0, match.index);
+    if (/\bimport\s*\(\s*$/.test(before)) {
+      failures.push(`${at}: dynamic import of a store loader is unsupported`);
+      continue;
+    }
+    if (/\bimport\s*$/.test(before)) continue;
+    const from = /\bfrom\s*$/.exec(before);
+    const keyword = from
+      ? [...before.slice(0, from.index).matchAll(/\b(import|export)\b/g)].pop()
+      : undefined;
+    if (!keyword) {
+      failures.push(`${at}: unrecognized reference to ${PLUGIN_PACKAGE}`);
+      continue;
+    }
+    const clause = before
+      .slice(keyword.index + keyword[0].length, from.index)
+      .trim();
+    spans.push([keyword.index, match.index + match[0].length]);
+    if (/^type\b/.test(clause)) continue;
+    const named = clause.match(/\{([\s\S]*)\}/)?.[1];
+    const items = (named ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item && !/^type\b/.test(item));
+    if (keyword[1] === "export") {
+      if (named === undefined || items.length > 0)
+        failures.push(`${at}: re-export of a store loader is unsupported`);
+      continue;
+    }
+    const head = clause
+      .replace(/\{[\s\S]*\}/, "")
+      .replace(/,/g, " ")
+      .trim();
+    if (/^\*\s*as\b/.test(head)) {
+      failures.push(`${at}: namespace import of a store loader is unsupported`);
+      continue;
+    }
+    if (head)
+      failures.push(`${at}: default import of a store loader is unsupported`);
+    for (const item of items) {
+      const [imported, local = imported] = item.split(/\s+as\s+/);
+      if (!/^[A-Za-z_$][\w$]*$/.test(imported)) {
+        failures.push(
+          `${at}: import item that is not a plain identifier is unsupported`,
+        );
+        continue;
+      }
+      if (!OPENER_EXPORTS.has(imported)) continue;
+      if (local.trim() !== imported)
+        failures.push(`${at}: aliased import of ${imported} is unsupported`);
+      else names.add(imported);
+    }
+  }
+  return { names, spans, failures };
+}
+
+// Imports from @/lib/plugin-store don't count: memoizedStoreLoader passes
+// storeLoadOptions itself.
+function derivePluginStoreOpeners(files) {
+  const openers = new Map();
+  const failures = [];
+  for (const [file, text] of files) {
+    if (!text.includes(PLUGIN_PACKAGE)) continue;
+    const imports = pluginStoreImports(text, file);
+    failures.push(...imports.failures);
+    if (imports.names.size > 0) openers.set(file, text);
+  }
+  if (failures.length > 0)
+    assert.fail(`unreadable plugin-store imports: ${failures.join("; ")}`);
+  return openers;
+}
+
+// A floor, not the roster: a scanner that stops recognizing one fails here.
 const OPENERS = [
   PLUGIN_STORE,
   "src/lib/repo-data-migration.ts",
   "src/lib/analytics/posthog.ts",
 ];
+
+function assertPluginStoreOpeners(files) {
+  const openers = derivePluginStoreOpeners(files);
+  for (const file of OPENERS)
+    assert.ok(openers.has(file), `OPENERS floor: ${file} is not derived`);
+  for (const [file, text] of openers)
+    assert.ok(assertLoadsTakeStoreOptions(text, file) >= 1);
+  return [...openers.keys()];
+}
 
 // `autoSave` is spelled only in plugin-store.ts: as code, or as a quoted key
 // (a string keeps its quotes in the mask, a comment does not).
@@ -884,9 +1028,151 @@ test("the autosave allowlist is exactly the lock ratchet's set-without-save stor
 });
 
 test("every plugin store opener passes storeLoadOptions over the bare file name", () => {
-  for (const file of OPENERS) {
-    assert.ok(assertLoadsTakeStoreOptions(source(file), file) >= 1);
+  const files = [...srcFiles()];
+  assert.ok(files.length > 100, "the src scan read the tree");
+  assertPluginStoreOpeners(files);
+});
+
+const OPENER_FIXTURE = "src/fixture.ts";
+const IMPORT_LOAD = `import { load } from "${PLUGIN_PACKAGE}";\n`;
+function checkOpenerFixture(text) {
+  const openers = derivePluginStoreOpeners([[OPENER_FIXTURE, text]]);
+  for (const [file, body] of openers) assertLoadsTakeStoreOptions(body, file);
+  return [...openers.keys()];
+}
+
+test("mutation control: opener sites with the wrong options or arity fail", () => {
+  for (const [fixture, message] of [
+    [
+      `${IMPORT_LOAD}load(storeName("x.json"), { defaults: {} });`,
+      /:2: load options come from storeLoadOptions/,
+    ],
+    [
+      `${IMPORT_LOAD}load(storeName("x.json"));`,
+      /:2: load takes \(name, options\)/,
+    ],
+    [
+      `import { Store } from "${PLUGIN_PACKAGE}";\nStore.load(storeName("x.json"), {});`,
+      /:2: Store\.load options come from storeLoadOptions/,
+    ],
+    [
+      `import { LazyStore } from "${PLUGIN_PACKAGE}";\nnew LazyStore(storeName("x.json"));`,
+      /:2: new LazyStore takes \(name, options\)/,
+    ],
+    [
+      `${IMPORT_LOAD}export {};`,
+      /fixture\.ts: imports a store opener but opens nothing/,
+    ],
+  ]) {
+    assert.throws(() => checkOpenerFixture(fixture), message);
   }
+});
+
+test("mutation control: an imported opener referenced other than to open fails", () => {
+  const referenced = (name, line) =>
+    new RegExp(
+      `fixture\\.ts:${line}: ${name} is referenced other than to open a store`,
+    );
+  for (const [fixture, message] of [
+    [
+      `${IMPORT_LOAD}load(storeName(f), storeLoadOptions(f));\nconst open = load;\nopen(storeName(g), storeLoadOptions(g));`,
+      referenced("load", 3),
+    ],
+    [
+      `${IMPORT_LOAD}load(storeName(f), storeLoadOptions(f));\n[a].map(load);`,
+      referenced("load", 3),
+    ],
+    [
+      `import { Store } from "${PLUGIN_PACKAGE}";\nconst s = await Store.get("x.json");`,
+      referenced("Store", 2),
+    ],
+    [
+      `import { Store } from "${PLUGIN_PACKAGE}";\nlet s: Store;\ns = await Store.load(storeName(f), storeLoadOptions(f));`,
+      referenced("Store", 2),
+    ],
+  ]) {
+    assert.throws(() => checkOpenerFixture(fixture), message);
+  }
+});
+
+test("site checks apply only to the opener kinds a file imports", () => {
+  assert.deepEqual(
+    checkOpenerFixture(
+      `import { LazyStore } from "${PLUGIN_PACKAGE}";\n` +
+        "new LazyStore(storeName(f), storeLoadOptions(f));\n" +
+        "function load(x) {}\nload(1);",
+    ),
+    [OPENER_FIXTURE],
+  );
+});
+
+test("mutation control: unreadable plugin-store imports fail closed", () => {
+  for (const [fixture, message] of [
+    [
+      `import { load as openStore } from "${PLUGIN_PACKAGE}";`,
+      /aliased import of load is unsupported/,
+    ],
+    [
+      `import * as ps from "${PLUGIN_PACKAGE}";\nps.load(storeName("x.json"), {});`,
+      /namespace import of a store loader is unsupported/,
+    ],
+    [
+      `import ps from "${PLUGIN_PACKAGE}";`,
+      /default import of a store loader is unsupported/,
+    ],
+    [
+      `const m = await import("${PLUGIN_PACKAGE}");`,
+      /dynamic import of a store loader is unsupported/,
+    ],
+    [
+      `export { load } from "${PLUGIN_PACKAGE}";`,
+      /re-export of a store loader is unsupported/,
+    ],
+    [
+      `import { "load" as x } from "${PLUGIN_PACKAGE}";`,
+      /import item that is not a plain identifier is unsupported/,
+    ],
+  ]) {
+    assert.throws(() => checkOpenerFixture(fixture), message);
+  }
+});
+
+test("type-only, foreign and commented imports derive no opener", () => {
+  for (const fixture of [
+    `import type { Store } from "${PLUGIN_PACKAGE}";\nimport { load } from "./other";\nload(a, b);`,
+    `import { type Store, getStore } from "${PLUGIN_PACKAGE}";\nload(a, b);`,
+    `// import { load } from "${PLUGIN_PACKAGE}"\nload(a, b);`,
+    `import { memoizedStoreLoader } from "@/lib/plugin-store";\nload(a, b);`,
+  ]) {
+    assert.deepEqual(checkOpenerFixture(fixture), [], fixture);
+  }
+  assert.deepEqual(
+    checkOpenerFixture(
+      `import { LazyStore, Store, type StoreOptions } from "${PLUGIN_PACKAGE}";\n` +
+        "await Store.load(storeName(f), storeLoadOptions(f));\n" +
+        "new LazyStore(storeName(f), storeLoadOptions(f));",
+    ),
+    [OPENER_FIXTURE],
+  );
+});
+
+test("mutation control: a real opener rewritten to a type-only import fails the floor", () => {
+  const file = "src/lib/analytics/posthog.ts";
+  const files = [...srcFiles()];
+  const mutant = files.map(([name, text]) => [
+    name,
+    name === file
+      ? text.replace(
+          IMPORT_LOAD,
+          `import type { Store } from "${PLUGIN_PACKAGE}";\n`,
+        )
+      : text,
+  ]);
+  assert.notDeepEqual(mutant, files);
+  assert.throws(
+    () => assertPluginStoreOpeners(mutant),
+    /OPENERS floor: src\/lib\/analytics\/posthog\.ts is not derived/,
+  );
 });
 
 test("autoSave is spelled nowhere in src outside plugin-store.ts", () => {
