@@ -11332,10 +11332,11 @@ test("focusable-held-button-render reads a generic tag past its type arguments",
 
 test("ts-mask closes a JSX element only at its own closing tag", async () => {
   const { maskNonCode } = await import("./lib/ts-mask.mjs");
-  // A generic function type at expression start lexes as an element named
-  // `T`; an unrelated close tag in a later comment must not end it.
+  // A generic function type lexes as an element named `T`; an unrelated
+  // close tag in a later comment must not end it.
   for (const src of [
     'type F = <T>(a: T) => T;\nload(x, {});\n// see the </table> markup\nload("y");',
+    'const f: <T>(a: T) => T = id;\nload(x, {});\n// see the </table> markup\nload("y");',
     "const a = <div>x</span>;",
     "const a = <>x</div>;",
     "const a = <div>x</>;",

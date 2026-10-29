@@ -840,7 +840,11 @@ const PLAIN_ARG = /^(?:"[^"\\]*"|'[^'\\]*'|[A-Za-z_$][\w$]*)$/;
 // `import "x"`, and `import("x")` in value or type position), with its raw text.
 function moduleSpecifiers(text, masked) {
   const specs = [];
-  for (const m of masked.matchAll(/\b(from|import)\s*(\(\s*)?(["'`])/g)) {
+  const specifier = new RegExp(
+    `${NOT_MEMBER}(from|import)\\s*(\\(\\s*)?(["'\`])`,
+    "g",
+  );
+  for (const m of masked.matchAll(specifier)) {
     if (m[1] === "from" && m[2]) continue;
     const open = m.index + m[0].length - 1;
     const close = masked.indexOf(m[3], open + 1);
@@ -854,6 +858,31 @@ function moduleSpecifiers(text, masked) {
     });
   }
   return specs;
+}
+
+// Lines of each dynamic `import(x)` whose specifier isn't one string literal
+// or a `${}`-free template: a computed one names a module no specifier check
+// reads. String bodies are blank in the mask, so an escaped literal passes
+// here; a `#import` private name is never one. A method or signature named
+// `import` is skipped only when both hold: the previous significant token
+// (across lines and comments) is `{ ; } ,`, a modifier or none, and its `)`
+// is followed by a body or type. Either test alone would skip a real call.
+const MEMBER_START =
+  /(?:^|[{;},]|\b(?:async|get|set|static|public|private|protected|readonly|declare|abstract|override))$/;
+function computedDynamicImports(masked) {
+  const lines = [];
+  for (const m of masked.matchAll(
+    new RegExp(`${NOT_MEMBER}(?<!#)import\\s*\\(`, "g"),
+  )) {
+    const open = m.index + m[0].length - 1;
+    const startsMember = MEMBER_START.test(masked.slice(0, m.index).trimEnd());
+    const after = masked.slice(closing(masked, open) + 1).trimStart();
+    if (startsMember && /^[{:]/.test(after)) continue;
+    const [first] = topLevelArgs(masked, open);
+    const arg = first ? masked.slice(first.start, first.end).trim() : "";
+    if (!/^(["'`])\s*\1$/.test(arg)) lines.push(lineOf(masked, m.index));
+  }
+  return lines;
 }
 
 // storeName and storeLoadOptions are the canonical helpers: a plain named
@@ -1070,6 +1099,10 @@ function derivePluginStoreOpeners(files) {
   const failures = [];
   for (const [file, text] of files) {
     const masked = maskNonCode(text, file.endsWith(".tsx"));
+    for (const line of computedDynamicImports(masked))
+      failures.push(
+        `${file}:${line}: a computed dynamic import is unsupported`,
+      );
     for (const spec of moduleSpecifiers(text, masked)) {
       const at = `${file}:${lineOf(masked, spec.at)}`;
       if (spec.raw.includes(BACKSLASH))
@@ -1383,19 +1416,86 @@ test("mutation control: escapes, shadowed helpers and computed names fail an ope
 });
 
 test("mutation control: a generic function type can't hide a .tsx opener site", () => {
-  // `<T>(a: T) => T` at expression start lexes as an element named `T`; the
-  // comment's unrelated close tag must not end it over the bad site between.
-  assert.throws(
-    () =>
-      checkOpenerFixture(
-        `${IMPORT_LOAD}await load(storeName("a.json"), storeLoadOptions("a.json"));\n` +
-          "export type Cmp = <T>(a: T, b: T) => number;\n" +
-          'export const prefs = load(storeName("prefs.json"));\n' +
-          "// keep in sync with the </table> markup\n",
-        "src/fixture.tsx",
-      ),
-    /mismatched JSX closing tag at line 5/,
-  );
+  // In .tsx a generic function type (an alias's right-hand side or an
+  // annotation) lexes as an element named `T`; the comment's unrelated close
+  // tag must not end it over the bad site between, so the mask fails closed.
+  const valid = `${IMPORT_LOAD}await load(storeName("a.json"), storeLoadOptions("a.json"));\n`;
+  const bad = 'export const prefs = load(storeName("prefs.json"));\n';
+  for (const type of [
+    "export type Cmp = <T>(a: T, b: T) => number;",
+    "export const cmp: <T>(a: T, b: T) => number = by;",
+  ]) {
+    assert.throws(
+      () =>
+        checkOpenerFixture(
+          `${valid}${type}\n${bad}// keep in sync with the </table> markup\n`,
+          "src/fixture.tsx",
+        ),
+      /mismatched JSX closing tag at line 5/,
+    );
+  }
+});
+
+test("mutation control: a computed dynamic import fails in any file", () => {
+  for (const fixture of [
+    'const m = await import("@tauri-apps/" + "plugin-store");',
+    "const m = await import(`@tauri-apps/${name}`);",
+    "const m = await import(spec);",
+    "const m = await import(/* c */ spec);",
+    "const m = c ? import(spec) : 0;",
+    "const m = [import(spec)];",
+    "await import(spec);",
+    "x = import(spec);",
+  ]) {
+    assert.throws(
+      () => checkOpenerFixture(fixture),
+      /fixture\.ts:1: a computed dynamic import is unsupported/,
+      fixture,
+    );
+  }
+  // A call on a line of its own (biome's ternary-arrow shape, a hand-broken
+  // arm) is still a call: the line start alone never makes it a member.
+  for (const [fixture, file, line] of [
+    [
+      "export const loadMessages = dev\n  ? (locale: string, region: string, variant: string) =>\n      import(modulePathFor(locale, region, variant, extraArgument))\n  : null;",
+      "src/fixture.ts",
+      3,
+    ],
+    [
+      "export const loadMessages = dev\n  ? (locale: string, region: string, variant: string) =>\n      import(`./locales/${locale}/${region}/${variant}/messages.json`)\n  : null;",
+      "src/fixture.ts",
+      3,
+    ],
+    ["const m = dev ?\n  import(spec) :\n  other;", "src/fixture.ts", 2],
+    [
+      "export const X = () => <div>{dev ?\n  import(spec) : null}</div>;",
+      "src/fixture.tsx",
+      2,
+    ],
+  ]) {
+    assert.throws(
+      () => checkOpenerFixture(fixture, file),
+      new RegExp(`${escapeRe(file)}:${line}: a computed dynamic import`),
+      fixture,
+    );
+  }
+  for (const fixture of [
+    'const m = await import("./a");',
+    "const m = await import(`./a`);",
+    'type M = typeof import("./a");',
+    'await backup.import("https://a//b");',
+    // Methods and signatures named `import` are definitions, not imports.
+    "class A {\n  import(data: string) {\n    return data;\n  }\n}",
+    "interface I {\n  import(s: string): void;\n}",
+    "type L = { import(s: string): void };",
+    "const o = { import(s: string) { return s; } };",
+    "class B {\n  #import(s: string) {}\n  run(spec: string) { this.#import(spec); }\n}",
+    "class C {\n  async import() {}\n}",
+    "class D {\n  get import() { return 1; }\n}",
+    "class E {\n  static import(s: string) {}\n}",
+  ]) {
+    assert.deepEqual(checkOpenerFixture(fixture), [], fixture);
+  }
 });
 
 test("canonical helpers over literal, identifier and spread sites pass", () => {
