@@ -1,5 +1,6 @@
 import { load } from "@tauri-apps/plugin-store";
 import type { PostHog } from "posthog-js";
+import { storeLoadOptions } from "@/lib/plugin-store";
 import { COLD_START, storeName } from "@/lib/test-mode";
 
 /**
@@ -15,7 +16,7 @@ let initialized = false;
 let posthog: PostHog | null = null;
 
 function analyticsStore() {
-  return load(storeName("analytics.json"), { autoSave: true, defaults: {} });
+  return load(storeName("analytics.json"), storeLoadOptions("analytics.json"));
 }
 
 async function getDistinctId(): Promise<string> {

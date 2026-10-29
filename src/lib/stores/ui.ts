@@ -433,8 +433,16 @@ interface UiState {
   setSettingsLeaveGuard: (guard: ((resume: () => void) => void) | null) => void;
 
   /** `bypassLeaveGuard` is for the worktree promote's landing only (it moves off
-   *  a folder it is about to delete), never a user's gesture. */
-  openRepo: (info: RepoInfo, opts?: { bypassLeaveGuard?: boolean }) => void;
+   *  a folder it is about to delete), never a user's gesture. `onApplied` runs
+   *  inside the transition callback after the set: every call reaching that
+   *  callback applies (a skipped transition still runs its update), so only a
+   *  held move that Settings cancels, replaces or drops never fires it, and
+   *  callers gate with `claimRepoOpen`/`repoOpenWatermark` before calling. It
+   *  never bumps the epoch; the request's bump counted the move. */
+  openRepo: (
+    info: RepoInfo,
+    opts?: { bypassLeaveGuard?: boolean; onApplied?: () => void },
+  ) => void;
   closeRepo: () => void;
   /** `closeRepo` that Settings' leave guard never holds, for the
    *  remove-open-repository close alone: it stops status polling before the
@@ -467,6 +475,12 @@ interface UiState {
      *  correct only against it — against any snapshot taken before the call, the
      *  request-time bump makes the check always refuse. */
     stillValid?: (epochAtRequest: number) => boolean;
+    /** Side effect that counts only if this landing applies (a read-mark), run
+     *  inside the transition callback after `stillValid` passed, `beforeSelect`
+     *  ran and the set applied: a refused landing, or a move Settings held and
+     *  then cancelled, replaced or dropped, never fires it. It never bumps the
+     *  epoch; the request's bump counted the move. */
+    onApplied?: () => void;
   }) => void;
   /** Open a repo (if not already open) and select one of its issues — the
    *  cross-repo path the work inbox navigates by. ONE atomic update: a repo
@@ -489,6 +503,8 @@ interface UiState {
     runId: number;
     /** Deferred-apply re-check; openPr's field of the same name carries the contract. */
     stillValid?: (epochAtRequest: number) => boolean;
+    /** Landing side effect; openPr's field of the same name carries the contract. */
+    onApplied?: () => void;
   }) => void;
   /** Open a repo (if not already) and land on its Agent tab. Atomic. */
   openAgentTab: (target: {
@@ -496,6 +512,8 @@ interface UiState {
     repoName: string;
     /** Deferred-apply re-check; openPr's field of the same name carries the contract. */
     stillValid?: (epochAtRequest: number) => boolean;
+    /** Landing side effect; openPr's field of the same name carries the contract. */
+    onApplied?: () => void;
   }) => void;
   /** Open a repo (if not already) and, when `tab` is given, land on that tab;
    *  otherwise the current tab stands. Atomic. Unlike openRepo, staying in the
@@ -506,6 +524,8 @@ interface UiState {
     tab?: RepoTab;
     /** Deferred-apply re-check; openPr's field of the same name carries the contract. */
     stillValid?: (epochAtRequest: number) => boolean;
+    /** Landing side effect; openPr's field of the same name carries the contract. */
+    onApplied?: () => void;
   }) => void;
   /** Jump to a commit in the History tab (e.g. from the blame gutter). ONE atomic set of
    *  `repoTab` + `selectedCommitHash` — a follow-up `set()` gets clobbered by the deferred
@@ -796,25 +816,24 @@ export const useUiStore = create<UiState>()((set, get) => {
     openRepo: (info, opts) => {
       if (
         !opts?.bypassLeaveGuard &&
-        interceptSettingsLeave(() => get().openRepo(info))
+        interceptSettingsLeave(() => get().openRepo(info, opts))
       )
         return;
       bumpEpochNow();
-      startViewTransition(
-        () =>
-          set({
-            view: "repo",
-            previousView: "repo",
-            repoPath: info.root,
-            repoName: info.name,
-            repoTab: "changes",
-            // Clear the live fields; the previous repo's draft stays in
-            // commitDrafts (keyed by repo+branch) and CommitBox reloads the new
-            // repo's draft once its branch is known.
-            ...CROSS_REPO_RESET,
-          }),
-        repoViewMotion(),
-      );
+      startViewTransition(() => {
+        set({
+          view: "repo",
+          previousView: "repo",
+          repoPath: info.root,
+          repoName: info.name,
+          repoTab: "changes",
+          // Clear the live fields; the previous repo's draft stays in
+          // commitDrafts (keyed by repo+branch) and CommitBox reloads the new
+          // repo's draft once its branch is known.
+          ...CROSS_REPO_RESET,
+        });
+        opts?.onApplied?.();
+      }, repoViewMotion());
     },
     closeRepo: () => {
       if (interceptSettingsLeave(() => get().closeRepo())) return;
@@ -868,6 +887,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           // the PR's real state.
           pendingPrAlign: true,
         });
+        target.onApplied?.();
       }, repoViewMotion());
     },
     openIssue: (target) => {
@@ -906,6 +926,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           // After the reset (which nulls it) so the run stays selected.
           selectedRunId: target.runId,
         });
+        target.onApplied?.();
       }, repoViewMotion());
     },
     openAgentTab: (target) => {
@@ -922,6 +943,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           repoTab: "agent",
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
+        target.onApplied?.();
       }, repoViewMotion());
     },
     openRepoView: (target) => {
@@ -938,6 +960,7 @@ export const useUiStore = create<UiState>()((set, get) => {
           ...(target.tab ? { repoTab: target.tab } : {}),
           ...(switchingRepo ? CROSS_REPO_RESET : {}),
         });
+        target.onApplied?.();
       }, repoViewMotion());
     },
     setRepoTab: (tab) =>

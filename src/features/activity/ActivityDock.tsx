@@ -418,7 +418,6 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         );
         return;
       }
-      markNotificationRead(n.id);
       // The check above covers SCHEDULING this landing; `stillValid` re-checks when
       // the navigator applies it, which can be after the call returns (crossfaded
       // or not) — generation for a later notification click, epoch for any OTHER
@@ -428,12 +427,24 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       const stillValid = (epochAtRequest: number) =>
         gen === clickGen &&
         useUiStore.getState().interactionEpoch === epochAtRequest;
+      // The row reads only once its landing applies (`onApplied`, on every arm
+      // below): a dirty Settings can hold the jump and Keep editing cancel it,
+      // and a superseded landing never applies, so the row stays the retry.
       if (t.type === "run") {
-        openRun({ ...target, runId: t.runId, stillValid });
+        openRun({
+          ...target,
+          runId: t.runId,
+          stillValid,
+          onApplied: () => markNotificationRead(n.id),
+        });
         return;
       }
       if (t.type === "agent") {
-        openAgentTab({ ...target, stillValid });
+        openAgentTab({
+          ...target,
+          stillValid,
+          onApplied: () => markNotificationRead(n.id),
+        });
         return;
       }
       if (t.type === "repo") {
@@ -441,6 +452,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
           ...target,
           tab: isRepoTab(t.tab) ? t.tab : undefined,
           stillValid,
+          onApplied: () => markNotificationRead(n.id),
         });
         return;
       }
@@ -480,6 +492,7 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
         // early and fetch the new lens against the OLD number.
         beforeSelect: applyLens,
         stillValid,
+        onApplied: () => markNotificationRead(n.id),
       });
     })().catch(() => {
       // best-effort — an unexpected throw degrades the click to a no-op

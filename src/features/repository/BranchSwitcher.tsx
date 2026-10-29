@@ -1081,23 +1081,26 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         )
       )
         return;
-      // Awaited for its verdict: it resolves false both when the open failed
-      // (it toasts that itself) and, silently, when the user switched repos,
-      // navigated elsewhere, or started another open during its `validateRepo`
-      // and shell warm-up (useOpenWorktree's doc) — a success toast over any of
-      // those would claim a navigation that never happened.
-      // The attempt check rides INTO the open: those two awaits sit downstream
-      // of this function's guard, and a newer pick during them leaves the repo
-      // unchanged, so only the attempt identity can retire this one.
-      const navigated = await openWorktree(
-        wtPath,
-        () => switchRequest === switchRequestRef.current,
-      );
       // Only when this call resolved the worktree itself: that state is exactly
       // the one where the map was empty, so the row carried no chip and the whole
       // app just changed folders with no prior signal. Say so after the fact.
-      if (navigated && resolvedHere)
-        toast.success(rowCheckoutCopy(resolvedHere.isMain).opened(wtPath));
+      const openedCopy =
+        resolvedHere && rowCheckoutCopy(resolvedHere.isMain).opened(wtPath);
+      // The attempt check rides INTO the open: its `validateRepo` and shell
+      // warm-up sit downstream of this function's guard, and a newer pick during
+      // them leaves the repo unchanged, so only the attempt identity can retire
+      // this one. The toast waits for the landing: a failed open, one retired
+      // before it was requested, or a Settings-held one that Keep editing
+      // cancels never moved the app.
+      await openWorktree(
+        wtPath,
+        () => switchRequest === switchRequestRef.current,
+        {
+          onApplied: () => {
+            if (openedCopy) toast.success(openedCopy);
+          },
+        },
+      );
       return;
     }
     // with work in progress, let the user choose to bring or stash it

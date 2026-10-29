@@ -6,6 +6,30 @@ import { storeName } from "@/lib/test-mode";
 // Both used to be copy-pasted per store, and both had a failure mode the copies got
 // wrong in the same way — see each helper.
 
+/** Stores whose writes `set` without a `save()` by design, persisted by the
+ *  plugin's ~100 ms autosave debounce. Every other store's writes force-save
+ *  (inside the cross-process lock where they take it) with autosave off, since a
+ *  debounce armed by a failed write would fire later, outside that lock. */
+const AUTOSAVE_STORES: ReadonlySet<string> = new Set([
+  "analytics.json",
+  "notifications.json",
+  "plans.json",
+  "research.json",
+]);
+
+/**
+ * The load options for one store file, keyed on its BARE name (before `storeName`
+ * wraps it). The plugin keeps one instance per file and a later `load` returns it
+ * ignoring its options, so every opener of a file passes these. Autosave must be an
+ * explicit `false`: an omitted or `true` value keeps the plugin's debounce.
+ */
+export function storeLoadOptions(file: string): {
+  autoSave: boolean;
+  defaults: Record<string, never>;
+} {
+  return { autoSave: AUTOSAVE_STORES.has(file), defaults: {} };
+}
+
 /**
  * A memoized opener for one app-data store file, routed through `storeName` so a
  * cold-start/test instance never reads or writes real data.
@@ -17,16 +41,11 @@ import { storeName } from "@/lib/test-mode";
  * the memo is safe against its own assignment because rejection handlers run in a
  * later microtask: `??=` has already stored the promise by the time `.catch` runs,
  * so the reset can never erase a NEWER memo, and the next call retries the load.
- *
- * Options are fixed rather than per-caller: the plugin keys one shared instance per
- * FILE, so every opener of a file must agree on them (`repo-data-migration.ts`
- * re-loads each file with this exact shape precisely to mutate the instance the
- * feature modules cached, rather than a private copy the next autosave would lose).
  */
 export function memoizedStoreLoader(file: string): () => Promise<Store> {
   let opened: Promise<Store> | null = null;
   return () => {
-    opened ??= load(storeName(file), { autoSave: true, defaults: {} }).catch(
+    opened ??= load(storeName(file), storeLoadOptions(file)).catch(
       (e: unknown) => {
         opened = null;
         throw e;

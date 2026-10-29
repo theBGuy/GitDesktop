@@ -106,10 +106,10 @@ const STORE_FILE = "pr-reviews.json";
 const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue:
-// autoSave persists on a ~100ms debounce, so two overlapping mutations would both
-// reload the same pre-flush disk snapshot and the later would drop the earlier's
-// change (e.g. an automation's review finishing while the user edits another's text).
-// With the force-save in writeAll, each reload sees fresh state. A second app
+// two overlapping mutations would both reload the same disk snapshot before either
+// saves, and the later would drop the earlier's change (e.g. an automation's review
+// finishing while the user edits another's text). With the force-save in writeAll
+// (autosave is off for this store), each reload sees fresh state. A second app
 // instance is kept out of the reload→save window by the cross-instance store lock
 // each mutation takes; the MCP server never writes this file.
 let opChain: Promise<unknown> = Promise.resolve();
@@ -163,8 +163,8 @@ async function writeAll(
 ): Promise<void> {
   const store = await getStore();
   await store.set(key, records);
-  // Flush now instead of on autoSave's debounce, so the next serialized reload can't
-  // re-read a pre-write disk snapshot and drop this change.
+  // Autosave is off for this store, so only this save persists the change;
+  // the next serialized reload reads it back, not a pre-write snapshot.
   await store.save();
 }
 

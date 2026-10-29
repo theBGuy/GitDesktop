@@ -453,7 +453,7 @@ async function saveSettings(settings: AppSettings): Promise<void> {
  * in-process by this module-level promise chain, and across app instances and windows
  * by the advisory `withAppStoreLock` on the file. Inside it the store is reloaded from
  * disk (so `loadSettings` reads current state, not this runtime's launch-time cache) and
- * force-saved after `fn` (the autosave debounce would otherwise land outside the lock).
+ * force-saved after `fn` (autosave is off for this store, so only that save persists).
  *
  * The no-op-when-unchanged guards inside each helper MUST stay inside this critical
  * section (they read the reloaded state) — do not hoist them out. The lock is held for

@@ -46,9 +46,8 @@ const STORE_FILE = "pr-review-drafts.json";
 const getStore = memoizedStoreLoader(STORE_FILE);
 
 // Serialize every read-modify-write on this store through one in-process queue.
-// Without it, two overlapping mutations each reload the SAME pre-flush disk
-// snapshot — autoSave persists on a ~100ms debounce, so the first write isn't on
-// disk yet — and the later write drops the earlier one's change (a lost update).
+// Without it, two overlapping mutations each reload the SAME disk snapshot before
+// either saves, and the later write drops the earlier one's change (a lost update).
 // The queue plus writeRepo's force-save keep each reload current within this
 // process; each mutation reloads under the cross-instance store lock, so another
 // app instance's saved drafts are read back rather than overwritten.
@@ -107,8 +106,8 @@ async function readByKey(key: string): Promise<PrDrafts> {
 async function writeRepo(key: string, drafts: PrDrafts): Promise<void> {
   const store = await getStore();
   await store.set(key, drafts);
-  // Flush now instead of on autoSave's debounce, so the next serialized read can't
-  // re-read a pre-write disk snapshot and drop this change.
+  // Autosave is off for this store, so only this save persists the change;
+  // the next serialized reload reads it back, not a pre-write snapshot.
   await store.save();
 }
 

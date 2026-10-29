@@ -568,7 +568,12 @@ export function SettingsScreen() {
     leave();
   }, [closeDirty, saving, confirmClose, closeSettings, setSettingsLeaveGuard]);
 
-  const footerVisible = dirty || secretsDirty;
+  // An Automations draft held on another panel shows here too; the panel
+  // itself keeps its own bar.
+  const footerVisible =
+    dirty ||
+    secretsDirty ||
+    (automationsDirty && activePanel !== "automations");
   const footerVisibleRef = useLatestRef(footerVisible);
   useToastClearance(footerRef, footerVisible);
 
@@ -762,6 +767,33 @@ export function SettingsScreen() {
               `relative`-only) so a tall settings panel can't leak a window scrollbar. */}
           <ScrollArea className="min-h-0 flex-1 overflow-hidden">
             <main className="mx-auto w-full max-w-2xl space-y-8 p-6">
+              {/* Stays mounted, hidden, while its draft is unsaved or writing, so
+                  a panel switch keeps the draft and its registered handles; while
+                  hidden it renders nothing and dismisses its own open prompt. Not
+                  <Activity>: its hide runs effect cleanups, nulling the handles.
+                  First, since space-y-8 spaces every child but the last: a
+                  hidden trailing wrapper would leave a gap under the panel. */}
+              {(activePanel === "automations" ||
+                automationsDirty ||
+                automationsSaving) && (
+                <div hidden={activePanel !== "automations"}>
+                  <AutomationsSection
+                    form={form}
+                    active={activePanel === "automations"}
+                    onDirtyChange={setAutomationsDirty}
+                    onRegisterSave={(fn) => {
+                      saveAutomationsRef.current = fn;
+                    }}
+                    onSavingChange={setAutomationsSaving}
+                    onRegisterJoin={(fn) => {
+                      joinAutomationsRef.current = fn;
+                    }}
+                    onRegisterDiscard={(fn) => {
+                      discardAutomationsRef.current = fn;
+                    }}
+                  />
+                </div>
+              )}
               {activePanel === "general" && <GeneralSection form={form} />}
               {activePanel === "appearance" && <AppearanceSection />}
               {activePanel === "ai" && (
@@ -773,22 +805,6 @@ export function SettingsScreen() {
               {activePanel === "commands" && <CommandsSection form={form} />}
               {activePanel === "mcp-servers" && (
                 <McpServersSection form={form} secrets={secrets} />
-              )}
-              {activePanel === "automations" && (
-                <AutomationsSection
-                  form={form}
-                  onDirtyChange={setAutomationsDirty}
-                  onRegisterSave={(fn) => {
-                    saveAutomationsRef.current = fn;
-                  }}
-                  onSavingChange={setAutomationsSaving}
-                  onRegisterJoin={(fn) => {
-                    joinAutomationsRef.current = fn;
-                  }}
-                  onRegisterDiscard={(fn) => {
-                    discardAutomationsRef.current = fn;
-                  }}
-                />
               )}
               {activePanel === "notifications" && (
                 <NotificationsSection form={form} />
