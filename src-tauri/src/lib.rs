@@ -132,6 +132,13 @@ pub fn run() {
                 tauri::async_runtime::spawn_blocking(|| {
                     git::compare::sweep_stale_persistent_review_worktrees();
                 });
+                // Capture the login shell's PATH for git children (a Finder/Dock
+                // launch inherits launchd's minimal one). Fire-and-forget: spawns use
+                // the inherited PATH until it lands.
+                #[cfg(not(windows))]
+                tauri::async_runtime::spawn(async {
+                    agent::prime_shell_path().await;
+                });
             }
             Ok(())
         })
@@ -767,6 +774,16 @@ pub fn run() {
             tray::quit_app,
             app_menu::set_recent_repos_menu,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app, event| {
+            // A Dock click (or a Finder relaunch) on a close-to-tray-hidden window must
+            // bring it back; show/unminimize/focus is harmless when it's already shown.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                tray::show_main_window(app);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, &event);
+        });
 }
