@@ -115,8 +115,8 @@ const DELETION_COPY = {
 const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
 
 // conflict.rs's CONFLICT_LINKED_LEAF: a symbolic link AT the path, which git's
-// side checkout replaces itself. Matched with its dash, period and closing
-// sentence, so the linked-ancestor reason can never read as this one.
+// side checkout replaces or removes itself. Matched with its dash, period and
+// closing sentence, so the linked-ancestor reason can never read as this one.
 const LINKED_LEAF_REASON = "it's a symbolic link";
 const LINKED_LEAF_TAIL = ` — ${LINKED_LEAF_REASON}. Nothing was changed.`;
 
@@ -400,6 +400,19 @@ export function ConflictFileView({
   const linkedLeaf = pathRefusal?.endsWith(LINKED_LEAF_TAIL) === true;
   // The whole-file accepts' hold: every path refusal but a leaf link.
   const sideRefusal = linkedLeaf ? null : pathRefusal;
+  const readErrorBody = (() => {
+    switch (true) {
+      case linkedLeaf:
+        return `${pathRefusal} Accept all current or incoming can still resolve it: git replaces or removes the link itself, not what it points to.`;
+      case pathRefusal !== null:
+        return `${pathRefusal} Resolve it in your editor or a terminal.`;
+      default:
+        return (
+          (isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
+          READ_ERROR_FALLBACK
+        );
+    }
+  })();
   // The working file alone: per-region accepts rebuild from it, so a clean
   // working file over a non-UTF-8 stage blob stays lossless for them. The AI
   // button holds on it too, but deliberately leaves that blob-only case to
@@ -638,8 +651,9 @@ export function ConflictFileView({
           </Button>
           {/* Held on a path git calls merged: Accept all re-checks the file out
               from the index, over any edits made after an outside `git add`. Side
-              checkout shares the path gate and refuses a linked directory, but git
-              replaces a leaf link itself, so that refusal alone leaves both on. */}
+              checkout shares the path gate and refuses a linked ancestor or Windows
+              folder link, but git replaces or removes any other leaf link itself, so
+              that refusal alone leaves both on. */}
           <DisabledReasonButton
             size="xs"
             variant="outline"
@@ -687,14 +701,7 @@ export function ConflictFileView({
             Reading the conflict…
           </p>
         ) : file.isError ? (
-          <p className="p-4 text-xs text-muted-foreground">
-            {pathRefusal
-              ? linkedLeaf
-                ? `${pathRefusal} Accept all current or incoming can still resolve it: git replaces the link itself, not the file it points to.`
-                : `${pathRefusal} Resolve it in your editor or a terminal.`
-              : (isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
-                READ_ERROR_FALLBACK}
-          </p>
+          <p className="p-4 text-xs text-muted-foreground">{readErrorBody}</p>
         ) : segments === null ? (
           <ConflictFallback
             path={path}

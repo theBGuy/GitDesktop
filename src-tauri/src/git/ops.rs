@@ -2191,7 +2191,15 @@ pub(crate) fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std:
         match std::fs::symlink_metadata(spelling) {
             Ok(m) if m.file_type().is_symlink() => return Ok(true),
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            // Nothing below a missing path or a non-directory can be a link.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false)
+            }
             Err(e) => return Err(e),
         }
     }
@@ -18193,6 +18201,10 @@ detached
         assert!(!linked_component(top, "link", false).unwrap());
         assert!(linked_component(top, "link", true).unwrap());
         assert!(!linked_component(top, "missing/x", false).unwrap());
+        std::fs::write(root.path().join("a"), "a regular file").unwrap();
+        for include_leaf in [false, true] {
+            assert!(!linked_component(top, "a/b/c.txt", include_leaf).unwrap());
+        }
     }
 
     #[cfg(any(windows, unix))]

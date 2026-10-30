@@ -560,7 +560,8 @@ test("the header's whole-file actions explain their notConflicted and path-gate 
       );
     } else {
       // `sideRefusal` is every path refusal but a leaf link, which git's side
-      // checkout replaces itself (pinned below and in conflict-path-refusal).
+      // checkout replaces or removes itself (pinned below and in
+      // conflict-path-refusal).
       assert.match(
         prop("disabled"),
         /(?<![\w$.])sideRefusal\s*!==\s*null/,

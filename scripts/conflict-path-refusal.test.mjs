@@ -1,9 +1,9 @@
 // The conflict pane identifies path refusals by the backend's opening sentence,
 // so both sides must keep the same prefix. It also lifts the whole-file
 // accepts' hold for one reason alone (a symbolic link at the leaf, which git's
-// side checkout replaces itself), so that reason's text must match on both
-// sides too. Runs in CI's installless guards job using only Node built-ins; a
-// missing or reworded string must fail by side.
+// side checkout replaces or removes itself), so that reason's text must match
+// on both sides too. Runs in CI's installless guards job using only Node
+// built-ins; a missing or reworded string must fail by side.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

@@ -18,9 +18,9 @@ export const stashRowKey = (stash: Pick<StashEntry, "sha" | "index">) =>
   `${stash.sha}:${stash.index}`;
 
 /** Each row's React key, by list position: `${sha}#${n}`, where n counts the
- *  earlier rows holding the same sha. A push on top or a drop elsewhere shifts
- *  the slots but keeps every key, so a focused row keeps its DOM node; only a
- *  duplicate of the same sha landing above a row re-keys it. */
+ *  earlier rows holding the same sha. A stack shift moves the slots but not the
+ *  keys, so a focused row keeps its DOM node; only a row of the same sha appearing
+ *  or leaving above it re-keys it. */
 export function stashRowReactKeys(
   list: readonly Pick<StashEntry, "sha">[],
 ): string[] {

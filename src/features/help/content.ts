@@ -1166,10 +1166,10 @@ per-region accepts and resolves through the whole-file accepts or your editor, k
 bytes exact. If the file changed on disk after the editor read it (saved from another
 editor, say), **Accept current**, **Accept incoming**, and **Both** write nothing: a message
 says so, and the editor re-reads the file so its regions match what's on disk. A conflicted
-file that is itself a symbolic link resolves only through the whole-file accepts, which
-replace the link rather than what it points to; a file under a linked folder (a symbolic
-link or junction) or a Windows folder link is left to an editor or a terminal. Files mark
-themselves resolved as you go — the \`!\` badge clears — and the finish control stays
+file that is itself a symbolic link skips the per-region accepts{{ai}} and
+**Resolve with AI**{{/ai}}; its whole-file accepts replace or remove the link, not what it
+points to. A file under a linked folder, or a Windows folder link, refuses them too. Files
+mark themselves resolved as you go — the \`!\` badge clears — and the finish control stays
 disabled, saying so, until every conflict is resolved. When one side of a conflict removed
 a file, the editor names the removal instead of showing regions, and the same whole-file
 accept actions choose between keeping the file and taking the deletion; when you've edited

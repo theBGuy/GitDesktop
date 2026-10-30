@@ -160,7 +160,8 @@ fn conflict_rel_path(path: &str) -> AppResult<String> {
 
 /// The refusal reason for a symbolic link AT the conflicted path. Distinct from
 /// `DISCARD_LINKED` (a linked ancestor): the conflict pane keeps Accept all
-/// offered for this one, keyed on scripts/conflict-path-refusal.test.mjs's pin.
+/// offered for this one, keyed on this string, pinned by
+/// scripts/conflict-path-refusal.test.mjs.
 const CONFLICT_LINKED_LEAF: &str = "it's a symbolic link";
 
 /// Whether the leaf is a Windows directory link (a junction or directory
@@ -174,7 +175,14 @@ fn leaf_is_directory_link(base: &str, rel: &str) -> std::io::Result<bool> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no verbatim form"))?;
     match std::fs::symlink_metadata(spelling) {
         Ok(m) => Ok(m.file_type().is_symlink_dir()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            Ok(false)
+        }
         Err(e) => Err(e),
     }
 }
@@ -505,8 +513,9 @@ pub(crate) async fn git_checkout_conflict_side_core(
     // held (see `run_git_mutating`).
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a conflict resolution").await?;
-    // Not a file link at the leaf, which git replaces itself: a linked directory
-    // could carry the checkout or removal outside the repository.
+    // Not a leaf link, which git replaces or removes itself (a Windows directory
+    // link stays refused): a linked ancestor could carry the checkout or removal
+    // outside the repository.
     refuse_linked_path(&repo_path, &path, false).await?;
 
     // A side that removed the file (deleted it, or renamed it away) has no stage

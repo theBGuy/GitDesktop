@@ -91,8 +91,8 @@ test("dropping an unrelated row keeps the remaining rows' React keys", () => {
 
 const DIALOG = "src/features/repository/StashesDialog.tsx";
 
-/** View stashes imports both helpers from ./stash-pick and defines neither name
- *  itself; a private copy under another name is out of this pin's reach. An
+/** View stashes imports its helpers from ./stash-pick and defines none of those
+ *  names itself; a private copy under another name is out of this pin's reach. An
  *  empty or unreadable source fails rather than passing. */
 function dialogPickProblems(source) {
   if (typeof source !== "string" || source.trim() === "")
