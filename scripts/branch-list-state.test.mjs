@@ -12,7 +12,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { branchListState } from "../src/features/repository/branch-list-state.ts";
+import {
+  branchListRetrying,
+  branchListState,
+} from "../src/features/repository/branch-list-state.ts";
 import { maskNonCode } from "./lib/ts-mask.mjs";
 
 /** The sticky case: a first read failed and a retry is now in flight, which the
@@ -68,6 +71,41 @@ test("negative control: an absence-first classifier fails the sticky case", () =
   };
   assert.throws(() => assert.equal(naive(FAILED_RETRYING), "failed"));
   assert.equal(branchListState(FAILED_RETRYING).mode, "failed");
+});
+
+test("only a failed list being fetched counts as retrying", () => {
+  // [hasData, errorUpdateCount, isFetching, retrying]
+  const shapes = [
+    [false, 1, false, false], // failed, idle
+    [false, 1, true, true], // failed, fetching
+    [false, 0, true, false], // pending, first read in flight
+    [true, 0, false, false], // ready
+    [true, 0, true, false], // ready, refreshing
+    [true, 2, false, false], // failed refresh over data
+    [true, 2, true, false], // failed refresh over data, refreshing again
+  ];
+  for (const [hasData, errorUpdateCount, isFetching, retrying] of shapes) {
+    const { mode } = branchListState({ errorUpdateCount, hasData });
+    assert.equal(branchListRetrying(mode, { isFetching }), retrying);
+  }
+  // Negative control: a read of the fetch flag alone must fail this table.
+  const naive = (_mode, q) => q.isFetching;
+  assert.throws(() =>
+    assert.equal(naive("pending", { isFetching: true }), false),
+  );
+});
+
+test("a list that hasn't failed never reads the fetch flag", () => {
+  // react-query re-renders on the fields a render read, so reading it here would
+  // re-render the switcher on every refetch of a healthy list.
+  const untouched = {
+    get isFetching() {
+      throw new Error("read isFetching");
+    },
+  };
+  assert.equal(branchListRetrying("ready", untouched), false);
+  assert.equal(branchListRetrying("pending", untouched), false);
+  assert.throws(() => branchListRetrying("failed", untouched));
 });
 
 // An unread list resolves "Update from default" to the local default, so the

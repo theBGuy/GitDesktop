@@ -167,7 +167,11 @@ import {
   type MergeRunOptions,
   type PickerMode,
 } from "./BranchMergePickerDialog";
-import { type BranchListMode, branchListState } from "./branch-list-state";
+import {
+  type BranchListMode,
+  branchListRetrying,
+  branchListState,
+} from "./branch-list-state";
 import {
   isLocalUpstream,
   presenceUnderUrls,
@@ -314,6 +318,46 @@ function BranchRowSkeletons() {
         </div>
       ))}
     </div>
+  );
+}
+
+/** The failure line's retry, held by `aria-disabled` while the read runs so it
+ *  keeps focus for the rescue when rows land. Not ARIA_DISABLED_CLASS: its
+ *  pointer-events-none lets a press fall through and take focus off the button,
+ *  and 50% opacity on primary misses AA (2.26:1 light, 3.13:1 slate; the muted
+ *  token used instead measures 5.18:1 or better, computed from App.css). */
+function BranchListRetry({
+  retrying,
+  retryRef,
+  onRetry,
+}: {
+  retrying: boolean;
+  retryRef: (node: HTMLElement | null) => () => void;
+  onRetry: () => void;
+}) {
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({
+      disabled: retrying,
+      reason: BRANCH_LIST_LOADING,
+      onClick: onRetry,
+    });
+  return (
+    <span className="flex shrink-0" title={wrapperTitle}>
+      <button
+        {...nativeProps}
+        ref={retryRef}
+        type="button"
+        aria-describedby={describedBy}
+        className="cursor-pointer font-medium text-primary hover:underline aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground aria-disabled:hover:no-underline"
+      >
+        Try again
+      </button>
+      {blockedReason ? (
+        <span id={reasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -796,6 +840,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // The Try again line unmounts under focus when the rows land; the filter input
   // survives every list state, so it takes the focus back.
   const listRescue = useRetryFocusRescue(open && listState.mode === "failed");
+  // One string for the failure line and the status region, so they can't disagree.
+  const listRetrying = branchListRetrying(listState.mode, branches);
+  const listLine = listRetrying
+    ? BRANCH_LIST_LOADING
+    : BRANCH_LIST_STATUS[listState.mode];
   const bq = branchFilter.trim().toLowerCase();
   const visibleBranches = useMemo(
     () =>
@@ -3804,16 +3853,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 {listState.mode === "failed" && (
                   <div className="flex items-center gap-2 px-3 py-4 text-xs">
                     <span className="min-w-0 flex-1 text-muted-foreground">
-                      {BRANCH_LIST_READ_FAILED}
+                      {listLine}
                     </span>
-                    <button
-                      ref={listRescue.retryRef}
-                      type="button"
-                      className="shrink-0 cursor-pointer font-medium text-primary hover:underline"
-                      onClick={() => void branches.refetch()}
-                    >
-                      Try again
-                    </button>
+                    <BranchListRetry
+                      retrying={listRetrying}
+                      retryRef={listRescue.retryRef}
+                      onRetry={() => void branches.refetch()}
+                    />
                   </div>
                 )}
                 {listState.mode === "ready" &&
@@ -4091,9 +4137,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       {/* The list's live region, outside the portal so it stays mounted: text
           a region already holds when it enters the a11y tree is never announced,
           and the popup remounts on every open. Each open of a loading or failed
-          list changes this text. */}
+          list changes this text, and so do a retry and its repeat failure. */}
       <span role="status" className="sr-only">
-        {open ? BRANCH_LIST_STATUS[listState.mode] : ""}
+        {open ? listLine : ""}
       </span>
 
       <CreateBranchDialog

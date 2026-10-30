@@ -697,7 +697,7 @@ export function registerRepoShellWarmup(fn: RepoShellWarmup): void {
  *  callers land immediately then (fail open). */
 export function claimWarmRepoShell(
   root: string,
-): { settled: Promise<void>; stillCurrent: () => boolean } | null {
+): ReturnType<RepoShellWarmup> | null {
   return repoShellWarmup ? repoShellWarmup(root) : null;
 }
 

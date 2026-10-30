@@ -1657,7 +1657,7 @@ test("the guard's escapes are used at exactly the two system landings", () => {
     ],
     [
       "src/features/repository/RepoDialogs.tsx",
-      once("if (wasOpen) closeRepoUnguarded();", "if (wasOpen) closeRepo();"),
+      once("closeRepoUnguarded();", "closeRepo();"),
     ],
     // Something other than a literal true.
     [

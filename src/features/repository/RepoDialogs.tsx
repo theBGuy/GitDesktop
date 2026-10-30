@@ -131,8 +131,10 @@ export function RemoveRepoDialog({
       // Closing the open repo stops its git-status polling, which otherwise
       // keeps spawning subprocesses into the folder and makes the OS abort the
       // move. Removing the open repo should close it either way.
-      if (wasOpen) closeRepoUnguarded();
-      if (wasOpen) noNewerOpen = repoOpenWatermark();
+      if (wasOpen) {
+        closeRepoUnguarded();
+        noNewerOpen = repoOpenWatermark();
+      }
       if (moveToTrash) {
         await deleteRepoFolder(repo.path);
         trashed = true;

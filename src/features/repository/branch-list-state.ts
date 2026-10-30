@@ -18,3 +18,15 @@ export function branchListState(q: {
     return { mode: "failed", remoteGroupMayRender: false };
   return { mode: "pending", remoteGroupMayRender: false };
 }
+
+/** Whether a failed list's read is being retried, by Try again or any other fetch:
+ *  the mode stays "failed" through it, so this is what tells the two apart. Takes
+ *  the query and reads `isFetching` only for a failed list, because react-query
+ *  re-renders on just the fields a render read, and a healthy list's refetches
+ *  shouldn't re-render the whole switcher. */
+export function branchListRetrying(
+  mode: BranchListMode,
+  q: { isFetching: boolean },
+): boolean {
+  return mode === "failed" && q.isFetching;
+}
