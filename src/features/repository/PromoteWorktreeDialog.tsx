@@ -84,9 +84,15 @@ function PromoteBody({
   // status cache (same query key): the worktree must be clean, and we detect the
   // main workspace's own WIP so we can offer to stash it first. Main is gated on
   // its path resolving from the worktree list.
-  const wStatus = useQuery(repoStatusOptions(worktree.path));
+  // `staleTime: 0` on all three reads: "checked fresh" means read on open, never
+  // served from the shell factories' warm window.
+  const wStatus = useQuery({
+    ...repoStatusOptions(worktree.path),
+    staleTime: 0,
+  });
   const mStatus = useQuery({
     ...repoStatusOptions(mainPath ?? "__pending__"),
+    staleTime: 0,
     enabled: Boolean(mainPath),
   });
   // Main's in-progress merge/rebase/cherry-pick/revert: the backend refuses to
@@ -96,6 +102,7 @@ function PromoteBody({
   // resolves a tick later from the worktree list.
   const mOpState = useQuery({
     ...opStateOptions(mainPath ?? "__pending__"),
+    staleTime: 0,
     enabled: Boolean(mainPath),
   });
 

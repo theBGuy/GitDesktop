@@ -525,10 +525,13 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   LANDS (a read-mark, an analytics event) rides the navigator's `onApplied`,
   run inside the transition callback after the landing's set: `openPr`,
   `openRun`, `openAgentTab` and `openRepoView` skip it on a stillValid-refused
-  landing (`openIssue` takes none); `openRepo` applies every call that reaches
-  its callback (a skipped view transition still runs its update), so its
-  callers gate with `claimRepoOpen`/`repoOpenWatermark` before calling.
-  `onApplied` itself never bumps the epoch.
+  landing and on a cross-repo landing superseded during its warm-up
+  (`openIssue` takes none). Those five navigators' cross-repo arms hold on that
+  warm-up, so they apply up to its budget (250 ms) after the request.
+  `openRepo` applies every call that reaches its callback (a skipped view
+  transition still runs its update), so its callers gate with
+  `claimRepoOpen`/`repoOpenWatermark` before calling. `onApplied` itself never
+  bumps the epoch.
 - Navigators that can leave Settings open with
   `if (interceptSettingsLeave(() => get().<self>(<original args>))) return;`
   ahead of their own epoch bump: the intercept bumps for the request and hands
@@ -546,17 +549,25 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   the request claims first (`claimRepoOpen`); one whose pre-open await may end
   in something other than an open (BranchSwitcher's worktree lookups) takes
   `repoOpenWatermark()` and yields to a newer open instead. The known bypasses
-  call `openRepo` directly (RepoDialogs' failure reopen, a worktree promote's
-  landing), warm without recording (`useOpenWorktree`), or switch without
-  warming (the store navigators' cross-repo arms: notification and My work
-  jumps). The reads that paint the repo view stay cached `REPO_SHELL_GC_TIME`
+  hold on the same warm-up: RepoDialogs' failure reopen and a worktree
+  promote's landing call `openRepo` after awaiting `claimWarmRepoShell`
+  (ui.ts), `useOpenWorktree` warms without recording, and the store
+  navigators' cross-repo arms (notification and My work jumps) hold through the
+  provider `useOpenRepoByPath` registers (`registerRepoShellWarmup`). The
+  reads that paint the repo view stay cached `REPO_SHELL_GC_TIME`
   (`src/lib/query-cache-times.ts`) through curated `<thing>Options` factories:
   the local ones are spread by their hook and the warm-up, the network-backed
   ones (`publishTargetsOptions`, `latestRunOptions`) by their hook only. A
-  warmed read nothing on the first paint shows (`remoteBranchesOptions`, the
-  closed branch menu's Remote group) warms unheld (`into: []`), so it never
-  spends the budget; BranchSwitcher prefetches it once per repo for the
-  switches that skip the warm-up, and its hook stays open-gated. Never a
+  warmed read nothing on the first paint shows warms unheld (`into: []`), so
+  it never spends the budget: `remoteBranchesOptions` and `branchesOptions`
+  (the closed branch menu's Remote group and its local list). The shell
+  factories without a window of their own carry `REPO_SHELL_WARM_STALE_MS`
+  (src/lib/query-cache-times.ts), so the mount right after a warm-up serves
+  the prefetched answer instead of respawning git; an observer that must
+  re-check on open (PromoteWorktreeDialog's status and op-state
+  preconditions) passes `staleTime: 0` explicitly. BranchSwitcher still prefetches remote branches
+  once per repo for a same-repo remount from a non-repo view, and its hook
+  stays open-gated. Never a
   `["repo"]` prefix default (it would catch the notification baselines).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module
@@ -619,8 +630,11 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   request instead, re-checks the epoch and live repo after the await, and
   lands through a non-bumping write (`useAmendCommit` + `landAmend` is the
   reference); the guarded post-await writes in the bullet above still bump
-  late, a tracked follow-up. Review-enforced, not guarded: a regex over effect
-  and continuation bodies would fail open.
+  late, a tracked follow-up. The store's one sanctioned late bump: a held
+  cross-repo navigator's settle-time Settings re-check, up to the warm-up
+  budget after the request and only while it raises the leave prompt.
+  Review-enforced, not guarded: a regex over effect and continuation bodies
+  would fail open.
 - A follow-up that needs the DOM from a state flip (focus a just-revealed
   input, re-pin a grown scroll region) never rides a bare
   `requestAnimationFrame` from the event handler: when the state lives in
@@ -646,6 +660,20 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Repo-identity keying** — per-repo state keys on the repo IDENTITY
   (`useRepoIdentity` / the shared `--git-common-dir` resolver), never a raw
   checkout path; a raw-path key diverges across worktrees of one repo.
+- **Held repo navigation** — every route that changes the active repo warms
+  the shell first and, except the worktree promote's landing (a system move
+  off a folder it is deleting), yields to newer intent: picked opens via
+  `useOpenRecordedRepo` / `useOpenWorktree`, the ui-store navigators'
+  cross-repo arms via the `registerRepoShellWarmup` provider (registered in
+  useOpenRepoByPath.ts; same-repo arms stay synchronous), and the two direct
+  `openRepo` sites via `claimWarmRepoShell` (ui.ts). A new route that opens a
+  repo goes through one of these, never a bare `openRepo`. A held landing's
+  supersession check is a `claimRepoOpen` claim (plus RepoDialogs'
+  request-time `repoOpenWatermark`), and it re-runs
+  `interceptSettingsLeave` at settle — the guard can be registered during the
+  hold without an epoch bump. A caller whose own awaits precede the navigator
+  call claims (`claimRepoOpen`) before them, so a newer click retires an older
+  held landing (My work's `openItem`).
 - **View lens** — a PR/issue number or blob is valid only in the lens that
   produced it (origin vs upstream vs local match); navigation and dock entry
   points thread the lens (`beforeSelect`), never pass a bare number across.

@@ -5,7 +5,10 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
@@ -24,6 +27,7 @@ export function remotesOptions(repo: string) {
     // Local reads must not park on react-query's default "online" mode offline;
     // the same holds for every `networkMode` in this file.
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }

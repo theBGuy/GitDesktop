@@ -8,6 +8,7 @@ import { track } from "@/lib/analytics";
 import { presentError } from "@/lib/error-summary";
 import { validateRepo } from "@/lib/git/api";
 import type { RepoInfo } from "@/lib/git/types";
+import { queryClient as appQueryClient } from "@/lib/query-client";
 import { migrateRepoData } from "@/lib/repo-data-migration";
 import { scriptsKeys } from "@/lib/scripts/queries";
 import { repoDisplayName } from "@/lib/settings/api";
@@ -19,15 +20,18 @@ import {
 } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { repoNameFromPath } from "@/lib/stores/notifications";
-import { useUiStore } from "@/lib/stores/ui";
+import { registerRepoShellWarmup, useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { createOpenClaims } from "./open-claims";
 import { warmRepoShell } from "./repo-shell-prefetch";
 
-/** Every open this module makes, recorded or worktree, numbered against the
- *  store's `interactionEpoch` (its settle-late contract). Direct `openRepo`
- *  callers aren't numbered: they retire pending opens through the epoch bump. */
+/** Every open this module makes, recorded or worktree, and every held repo
+ *  switch the store makes through the warm-up registered below, numbered against
+ *  the store's `interactionEpoch` (its settle-late contract). The two direct
+ *  `openRepo` sites retire pending opens through the epoch bump; both also claim
+ *  through `claimWarmRepoShell`, which RepoDialogs' failure reopen honours and a
+ *  worktree promote's landing ignores. */
 const openClaims = createOpenClaims(
   () => useUiStore.getState().interactionEpoch,
 );
@@ -40,15 +44,22 @@ export const claimRepoOpen = openClaims.claim;
  *  open or any navigation arrives. */
 export const repoOpenWatermark = openClaims.watermark;
 
+// The store's cross-repo landings hold on this (src/lib can't import it). Below
+// `openClaims`, which it closes over; the module-level client is the app's.
+registerRepoShellWarmup((root) => {
+  const stillCurrent = claimRepoOpen();
+  return { settled: warmRepoShell(appQueryClient, root), stillCurrent };
+});
+
 /**
  * The shared tail for opening a repo the user picked, once its path has
  * validated: warm the repo's shell reads, record it in recents, wait out the
  * warm-up budget, then switch, unless a newer open or navigation arrived meanwhile
- * (silently: that newer action is what the user sees). The paths that bypass it
- * are the failure reopen in RepoDialogs, a promote's landing in worktree-removal
- * (both call `openRepo` directly), {@link useOpenWorktree}, which warms without
- * recording, and the store navigators' cross-repo arms (notification and My work
- * jumps), which switch without warming.
+ * (silently: that newer action is what the user sees). The other repo switches
+ * warm too: {@link useOpenWorktree} without recording, the store navigators'
+ * cross-repo arms (notification and My work jumps) through the warm-up
+ * registered above, and the failure reopen in RepoDialogs and a promote's
+ * landing in worktree-removal by awaiting `claimWarmRepoShell` before `openRepo`.
  *
  * The recents write finishes BEFORE the switch, so the row exists when
  * RepositoryView mounts and its open-time visibility probe persists onto it; a

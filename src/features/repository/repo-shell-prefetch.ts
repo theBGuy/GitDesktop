@@ -9,6 +9,7 @@ import {
 } from "@/lib/branch-rules/queries";
 import {
   branchAheadCountOptions,
+  branchesOptions,
   defaultBranchOptions,
   oplogCheckOptions,
   opStateOptions,
@@ -32,7 +33,8 @@ import { REPO_SHELL_BUDGET_MS, settleWithin } from "./repo-shell-budget";
  * with cached data doesn't hold the switch, with one exception: invalidated
  * personal branch rules hold like a missing read (see below). Otherwise a stale or
  * invalidated key revalidates in the background, and a fresh one (the personal
- * rules until invalidated, the 30 s reads) is served as cached. Every prefetch
+ * rules until invalidated, the 30 s reads, and any shell factory's read inside its
+ * REPO_SHELL_WARM_STALE_MS window) is served as cached. Every prefetch
  * spreads its hook's own factory — fetch options are per call, and a prefetch
  * missing the factory's `networkMode: "always"` would park offline with the
  * mounted observer joined to it. Forge reads are never prefetched here.
@@ -96,6 +98,9 @@ export function warmRepoShell(
     },
     { into: [] },
   );
+  // Unheld too: its cost scales with the branch count, and the branch menu it
+  // fills is never on the first paint.
+  warm(branchesOptions(root), { into: [] });
   warm(stashCountOptions(root));
 
   // The Changes panel's reads keyed by what status and default-branch answer, under

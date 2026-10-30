@@ -1,7 +1,10 @@
 import { type QueryClient, useQuery } from "@tanstack/react-query";
 import { usePanelActive } from "@/components/panel-portal";
 import { ignoreLines } from "@/lib/ai/ignore";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import {
@@ -134,6 +137,7 @@ export function opStateOptions(repo: string) {
     queryKey: repoKeys.opState(repo),
     queryFn: () => api.gitOpState(repo),
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }

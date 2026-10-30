@@ -1,5 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import * as api from "../api";
 import { keepPreviousDataForRepo, repoKeys } from "./core";
 
@@ -40,6 +43,7 @@ export function branchAheadCountOptions(
     queryKey: repoKeys.branchAheadCount(repo, base, compare),
     queryFn: () => api.gitBranchAheadCount(repo, base, compare),
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }

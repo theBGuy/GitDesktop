@@ -38,6 +38,7 @@ import {
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
+import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -720,6 +721,9 @@ export function MyWorkScreen() {
     // view change), so a continuation from a previous mount stays superseded;
     // the view is read live because the screen can be gone entirely.
     const gen = ++openGen;
+    // Claimed at the click too: an older open still held on its warm-up checks
+    // the open claims, not `openGen`, and would otherwise land over this one.
+    claimRepoOpen();
     const superseded = () =>
       gen !== openGen || useUiStore.getState().view !== "mywork";
     // The same set the row's affordances render from, so a local-looking row is

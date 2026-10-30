@@ -6,7 +6,10 @@ import {
 import { resolveReviewerNotesContext } from "@/lib/ai/notes-context";
 import { useForgeStatus } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
 import {
   createLocalPr,
@@ -37,6 +40,7 @@ export function localPrsOptions(repo: string) {
     // Local app-data reads must not park on the default "online" mode; applies
     // to every networkMode in this file (the forge-backed queries carry none).
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }

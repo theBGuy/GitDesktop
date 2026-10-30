@@ -1,5 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import * as api from "../api";
 import { keepPreviousDataForRepo } from "./core";
 import { useRepoMutation } from "./internal";
@@ -11,6 +14,7 @@ export function stashCountOptions(repo: string) {
     // Local reads must not park on react-query's default "online" mode offline;
     // the same holds for every `networkMode` in this file.
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }

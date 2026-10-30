@@ -1,7 +1,9 @@
 // Pins the Settings leave guard by source scans: every navigator in the ui store
 // that writes `view` (itself or through another member) consults the guard
 // before its epoch bump, or sits in a closed exempt list with its reason, and the
-// intercept bumps for the request before the guard runs; the guard is registered
+// intercept bumps for the request before the guard runs; a cross-repo jump held on
+// the repo-shell warm-up consults the guard again before it lands, since the
+// guard can be registered during the hold without a bump; the guard is registered
 // while Settings holds unsaved edits or a save is writing, nulled at cleanup, and
 // routes through the one `requestLeave` that Back and Esc call too, which asks,
 // holds a move silently while a write is in flight (dropping it on a failed or
@@ -44,6 +46,9 @@ const BRANCH_SWITCHER = "src/features/repository/BranchSwitcher.tsx";
 
 /** The notification jumps' navigators, each re-checked by `stillValid`. */
 const JUMP_NAVIGATORS = ["openPr", "openRun", "openAgentTab", "openRepoView"];
+
+/** The navigators that hold a cross-repo landing on the repo-shell warm-up. */
+const HELD_NAVIGATORS = [...JUMP_NAVIGATORS, "openIssue"];
 
 /** View writers that never leave Settings through the guard, each with why. */
 const EXEMPT = {
@@ -668,6 +673,70 @@ function onAppliedProblems(text) {
     )
   )
     problems.push("openRepo's resume thunk drops its opts");
+  return problems;
+}
+
+/** Problems with the held landings, `[]` when pinned: each cross-repo navigator
+ *  claims the warm-up only when the target repo differs from the open one, lands
+ *  at once without one, and otherwise makes one `holdNavigation(warm, () => {…})`
+ *  call whose callback is exactly
+ *  `if (interceptSettingsLeave(() => get().<itself>(target))) return; land();`:
+ *  typing into a clean Settings registers the guard without an epoch bump, so
+ *  only this re-check stops a held landing leaving unsaved edits unprompted. */
+function heldLandingProblems(text) {
+  const masked = maskNonCode(text, false);
+  const obj = storeObject(masked);
+  if (!obj) return ["the store creator's returned object was not found"];
+  const values = new Map(
+    objectMembers(masked, obj[0], obj[1]).map((m) => [
+      m.key,
+      masked.slice(m.start, m.end),
+    ]),
+  );
+  const problems = [];
+  for (const name of HELD_NAVIGATORS) {
+    const value = values.get(name);
+    if (value === undefined) {
+      problems.push(`${name} not found`);
+      continue;
+    }
+    if (
+      !/const warm =\s*get\(\)\.repoPath !== target\.repoPath\s*\?\s*claimWarmRepoShell\(target\.repoPath\)\s*:\s*null;\s*if \(!warm\) \{\s*land\(\);\s*return;\s*\}\s*holdNavigation\(/.test(
+        value,
+      )
+    )
+      problems.push(
+        `${name} no longer holds only a cross-repo landing, or a same-repo one no longer lands at once`,
+      );
+    const holds = [...value.matchAll(/(?<![\w$.])holdNavigation\(/g)];
+    if (holds.length !== 1) {
+      problems.push(`expected one holdNavigation( in ${name}`);
+      continue;
+    }
+    const callOpen = holds[0].index + holds[0][0].length - 1;
+    const callClose = matchBrace(value, callOpen);
+    const cb = /^\s*warm,\s*\(\)\s*=>\s*\{/.exec(value.slice(callOpen + 1));
+    if (callClose === -1 || !cb) {
+      problems.push(`${name}'s hold doesn't land through a block callback`);
+      continue;
+    }
+    const bodyOpen = callOpen + cb[0].length;
+    const bodyClose = matchBrace(value, bodyOpen);
+    if (
+      bodyClose === -1 ||
+      !/^\s*,?\s*$/.test(value.slice(bodyClose + 1, callClose))
+    ) {
+      problems.push(`${name}'s hold callback has no block body`);
+      continue;
+    }
+    const guard = new RegExp(
+      `^\\{\\s*if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*land\\(\\);\\s*\\}$`,
+    );
+    if (!guard.test(value.slice(bodyOpen, bodyClose + 1)))
+      problems.push(
+        `${name}'s held landing doesn't re-run the leave guard for itself before it lands`,
+      );
+  }
   return problems;
 }
 
@@ -1378,6 +1447,35 @@ test("the navigators run onApplied only once their landing applies", () => {
     once("        opts?.onApplied?.();\n", ""),
     // A held open resumed without its opts loses its onApplied.
     once("get().openRepo(info, opts))", "get().openRepo(info))"),
+  );
+});
+
+test("a held cross-repo jump re-runs the leave guard before it lands", () => {
+  pin(
+    heldLandingProblems,
+    source(UI),
+    // Dropping the settle-time re-check: typing into Settings during the hold
+    // would be left unprompted.
+    once(
+      "        if (interceptSettingsLeave(() => get().openPr(target))) return;\n        land();\n",
+      "        land();\n",
+    ),
+    // Landing ahead of the re-check.
+    once(
+      "        if (interceptSettingsLeave(() => get().openRun(target))) return;\n        land();\n",
+      "        land();\n        if (interceptSettingsLeave(() => get().openRun(target))) return;\n",
+    ),
+    // A resume that re-requests a different navigator.
+    once(
+      "get().openIssue(target))) return;\n        land();",
+      "get().openPr(target))) return;\n        land();",
+    ),
+    // A same-repo jump held, or one without a warm-up no longer landing at once.
+    once(
+      "        get().repoPath !== target.repoPath\n          ? claimWarmRepoShell(target.repoPath)\n          : null;\n",
+      "        claimWarmRepoShell(target.repoPath);\n",
+    ),
+    once("      if (!warm) {\n        land();\n        return;\n      }\n", ""),
   );
 });
 

@@ -16,9 +16,10 @@ import { deleteRepoFolder } from "@/lib/git/api";
 import { isWindows } from "@/lib/hotkeys/binding";
 import { type RecentRepo, repoDisplayName } from "@/lib/settings/api";
 import { useRemoveRecentRepo, useSetRepoAlias } from "@/lib/settings/queries";
-import { useUiStore } from "@/lib/stores/ui";
+import { claimWarmRepoShell, useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { repoOpenWatermark } from "./useOpenRepoByPath";
 
 /** OS-accurate name for the system trash: "Recycle Bin" on Windows, else "Trash". */
 const trashName = isWindows ? "Recycle Bin" : "Trash";
@@ -123,11 +124,15 @@ export function RemoveRepoDialog({
     setBusy(true);
     const wasOpen = repo.path === repoPath;
     let trashed = false;
+    // Taken at the close, so an open or navigation made during the awaits below
+    // retires the failure reopen.
+    let noNewerOpen: (() => boolean) | null = null;
     try {
       // Closing the open repo stops its git-status polling, which otherwise
       // keeps spawning subprocesses into the folder and makes the OS abort the
       // move. Removing the open repo should close it either way.
       if (wasOpen) closeRepoUnguarded();
+      if (wasOpen) noNewerOpen = repoOpenWatermark();
       if (moveToTrash) {
         await deleteRepoFolder(repo.path);
         trashed = true;
@@ -141,15 +146,27 @@ export function RemoveRepoDialog({
       setMoveToTrash(false);
       onClose();
     } catch (e) {
-      // Removal didn't complete and the folder still exists — reopen so the
-      // user isn't stranded on the welcome screen. The `!trashed` guard is
-      // deliberate and must stay: once the trash succeeds the folder is gone,
-      // so reopening it would fail. (In the rare case the trash succeeds but
-      // the subsequent removeRecent write throws, we intentionally leave the
-      // stale recents entry rather than reopen a deleted folder — the entry is
-      // harmless and self-heals next time the recents list is opened.)
-      if (wasOpen && !trashed) openRepo({ root: repo.path, name: repo.name });
       toastError(e);
+      // Removal didn't complete and the folder still exists — reopen so the
+      // user isn't stranded on the welcome screen, unless they moved on since
+      // the close. The `!trashed` guard is deliberate and must stay: once the
+      // trash succeeds the folder is gone, so reopening it would fail. (In the
+      // rare case the trash succeeds but the subsequent removeRecent write
+      // throws, we intentionally leave the stale recents entry rather than
+      // reopen a deleted folder — the entry is harmless and self-heals next
+      // time the recents list is opened.)
+      if (wasOpen && !trashed && noNewerOpen?.()) {
+        // Watermark first: claimWarmRepoShell claims, which increments the
+        // claims counter, so a watermark read after it always fails.
+        const warm = claimWarmRepoShell(repo.path);
+        if (warm) {
+          await warm.settled;
+          if (warm.stillCurrent())
+            openRepo({ root: repo.path, name: repo.name });
+        } else {
+          openRepo({ root: repo.path, name: repo.name });
+        }
+      }
     } finally {
       setBusy(false);
     }

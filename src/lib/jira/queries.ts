@@ -9,7 +9,10 @@ import {
   usePendingRepoWrites,
 } from "@/lib/git/queries";
 import type { ForgeUserRef } from "@/lib/git/types";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import { useMutation } from "@/lib/started-mutation";
 import {
   jiraAccount,
@@ -139,6 +142,7 @@ export function jiraLinkOptions(repo: string) {
     // Local reads (the link store, the OS keychain) must not park on react-query's
     // default "online" mode offline; the same holds for every `networkMode` here.
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }
