@@ -11,9 +11,26 @@ export interface StashPick {
   index: number;
 }
 
-/** Two slots can hold the same commit, so a row is keyed by both. */
+/** A row's identity: its sha plus its current slot, since two slots can hold the
+ *  same commit. The highlight, `data-stash` and keyboard nav read it; it shifts
+ *  with the stack, so it is not the row's React key (see stashRowReactKeys). */
 export const stashRowKey = (stash: Pick<StashEntry, "sha" | "index">) =>
   `${stash.sha}:${stash.index}`;
+
+/** Each row's React key, by list position: `${sha}#${n}`, where n counts the
+ *  earlier rows holding the same sha. A push on top or a drop elsewhere shifts
+ *  the slots but keeps every key, so a focused row keeps its DOM node; only a
+ *  duplicate of the same sha landing above a row re-keys it. */
+export function stashRowReactKeys(
+  list: readonly Pick<StashEntry, "sha">[],
+): string[] {
+  const seen = new Map<string, number>();
+  return list.map((stash) => {
+    const n = seen.get(stash.sha) ?? 0;
+    seen.set(stash.sha, n + 1);
+    return `${stash.sha}#${n}`;
+  });
+}
 
 /** The row picked exactly; else the first row holding the picked sha (the stack
  *  shifted under it); else the row now at its slot, clamped to the last; the

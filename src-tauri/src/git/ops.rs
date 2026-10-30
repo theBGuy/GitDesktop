@@ -2029,7 +2029,7 @@ pub struct DiscardPath {
 
 const DISCARD_OUTSIDE: &str = "it isn't inside this repository's working tree";
 const DISCARD_GIT_DIR: &str = "it's inside the repository's .git folder";
-const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
+pub(crate) const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
 const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and try again";
 const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try again";
 const DISCARD_WIN_TRAILING: &str =
@@ -2176,7 +2176,7 @@ fn discard_all_untracked(stdout: &[u8]) -> AppResult<Vec<String>> {
 }
 
 /// Probe below the root without following links; line rewrites also probe the leaf.
-fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std::io::Result<bool> {
+pub(crate) fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std::io::Result<bool> {
     let segments: Vec<_> = rel.strip_suffix('/').unwrap_or(rel).split('/').collect();
     let count = segments.len().saturating_sub(usize::from(!include_leaf));
     let mut p = Path::new(top).to_path_buf();

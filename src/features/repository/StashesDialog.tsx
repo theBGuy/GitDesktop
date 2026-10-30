@@ -47,8 +47,6 @@ import type { ImageRevs } from "@/features/diff/ImageDiff";
 import { presentError } from "@/lib/error-summary";
 import {
   useDropStashAtAnyDepth,
-  useListedStashFileDiff,
-  useListedStashFiles,
   useOrphanedStashes,
   useOrphanedStashFileDiff,
   useOrphanedStashFiles,
@@ -73,12 +71,17 @@ import {
   STASH_DROP_MOVED,
   stashDropRestoreFailed,
 } from "./stash-drop-copy";
-import { resolveStashPick, type StashPick, stashRowKey } from "./stash-pick";
+import {
+  resolveStashPick,
+  type StashPick,
+  stashRowKey,
+  stashRowReactKeys,
+} from "./stash-pick";
 
 /** Which source the left list is drawn from. */
 type StashesView = "stashes" | "recoverable";
 
-/** Picks the hooks for the inner file browser. Both kinds address the stash
+/** Which list the inner file browser was opened from. Both kinds read the stash
  *  commit by its sha, never a live stash's `stash@{N}` slot, which shifts. */
 type FileSource =
   | { kind: "stash"; sha: string }
@@ -178,6 +181,7 @@ export function StashesDialog({
   const list = stashes.data ?? [];
   const effective = resolveStashPick(list, selected);
   const effectiveKey = effective ? stashRowKey(effective) : null;
+  const rowReactKeys = stashRowReactKeys(list);
   const busy = apply.isPending || drop.isPending;
   const onError = (e: unknown) => toastError(e);
 
@@ -343,10 +347,10 @@ export function StashesDialog({
             <aside className="flex w-56 shrink-0 flex-col border-r">
               <ScrollArea className="min-h-0 flex-1">
                 <div onKeyDown={onStashesKeyDown}>
-                  {list.map((stash) => (
+                  {list.map((stash, i) => (
                     <button
                       type="button"
-                      key={stashRowKey(stash)}
+                      key={rowReactKeys[i]}
                       data-stash={stashRowKey(stash)}
                       className={cn(
                         "block w-full border-b px-3 py-2 text-left",
@@ -619,14 +623,10 @@ function StashFiles({
   repoPath: string;
   source: FileSource;
 }) {
-  const listedSha = source.kind === "stash" ? source.sha : null;
-  const orphanSha = source.kind === "orphaned" ? source.sha : null;
   // The commit-ish the file lives under.
   const base = source.sha;
 
-  const stashFilesQuery = useListedStashFiles(repoPath, listedSha);
-  const orphanFilesQuery = useOrphanedStashFiles(repoPath, orphanSha);
-  const files = source.kind === "stash" ? stashFilesQuery : orphanFilesQuery;
+  const files = useOrphanedStashFiles(repoPath, base);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const effectivePath =
@@ -782,7 +782,6 @@ function StashFiles({
             view.kind === "file" ? (
               <StashFileDiffSlot
                 repoPath={repoPath}
-                source={source}
                 base={base}
                 path={view.file}
                 untracked={
@@ -803,26 +802,20 @@ function StashFiles({
 /** One stashed file's diff in the pane's slot, on its own read. */
 function StashFileDiffSlot({
   repoPath,
-  source,
   base,
   path,
   untracked,
   reportRead,
 }: {
   repoPath: string;
-  source: FileSource;
-  /** The commit-ish the file lives under. */
+  /** The stash commit's sha: the diff reads by it, and the revs hang off it. */
   base: string;
   path: string;
   /** The file list's flag for this path; absent while the list lacks it. */
   untracked: boolean | undefined;
   reportRead: (read: SlotRead) => void;
 }) {
-  const listedSha = source.kind === "stash" ? source.sha : null;
-  const orphanSha = source.kind === "orphaned" ? source.sha : null;
-  const stashDiffQuery = useListedStashFileDiff(repoPath, listedSha, path);
-  const orphanDiffQuery = useOrphanedStashFileDiff(repoPath, orphanSha, path);
-  const diff = source.kind === "stash" ? stashDiffQuery : orphanDiffQuery;
+  const diff = useOrphanedStashFileDiff(repoPath, base, path);
   useSlotRead(reportRead, diff);
   // Image/SVG previews need the file's content on each side. Tracked changes
   // read from the stash commit; untracked files from its ^3 parent.

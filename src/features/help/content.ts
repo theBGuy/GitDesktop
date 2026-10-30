@@ -875,7 +875,7 @@ stashes** lists them to apply, pop, or drop (each asks first, and the apply and 
 prompts say whether the stash stays in the list afterwards), and **Pop latest stash**
 restores the most recent. A drop only ever targets the stash you picked, even when another
 tool adds or drops a stash while the list is open; if the list changes mid-drop, a message
-says what happened. Setting changes aside is refused while conflicts are still
+reports the result. Setting changes aside is refused while conflicts are still
 unresolved, or while a merge, rebase, cherry-pick or revert is in progress — finish or abort
 it first, so a resolution you've already staged can't be swept out of the operation.
 
@@ -1165,7 +1165,10 @@ already settled by hand included. A conflicted file that isn't UTF-8 text skips 
 per-region accepts and resolves through the whole-file accepts or your editor, keeping its
 bytes exact. If the file changed on disk after the editor read it (saved from another
 editor, say), **Accept current**, **Accept incoming**, and **Both** write nothing: a message
-says so, and the editor re-reads the file so its regions match what's on disk. Files mark
+says so, and the editor re-reads the file so its regions match what's on disk. A conflicted
+file that is itself a symbolic link resolves only through the whole-file accepts, which
+replace the link rather than what it points to; a file under a linked folder (a symbolic
+link or junction) or a Windows folder link is left to an editor or a terminal. Files mark
 themselves resolved as you go — the \`!\` badge clears — and the finish control stays
 disabled, saying so, until every conflict is resolved. When one side of a conflict removed
 a file, the editor names the removal instead of showing regions, and the same whole-file

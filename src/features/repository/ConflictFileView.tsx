@@ -114,6 +114,12 @@ const DELETION_COPY = {
 // scripts/conflict-path-refusal.test.mjs pins both sides.
 const PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
 
+// conflict.rs's CONFLICT_LINKED_LEAF: a symbolic link AT the path, which git's
+// side checkout replaces itself. Matched with its dash, period and closing
+// sentence, so the linked-ancestor reason can never read as this one.
+const LINKED_LEAF_REASON = "it's a symbolic link";
+const LINKED_LEAF_TAIL = ` — ${LINKED_LEAF_REASON}. Nothing was changed.`;
+
 /** The backend refuses binary or oversized files as invalidArgument; a path-gate
  *  refusal shares that kind but renders its own sentence instead. `io` covers a
  *  lock, a permission change, or a directory at the path (a conflicted submodule),
@@ -378,7 +384,7 @@ export function ConflictFileView({
     awaitingRead;
   // A conflict the backend wouldn't read (binary, too large, or unreadable)
   // can't be text-merged: it offers whole-file resolution + the editor, and a
-  // path-gate refusal leaves only the editor.
+  // path-gate refusal leaves only the editor (a leaf link also keeps Accept all).
   const textResolvable = !file.isError;
   const pathRefusal: string | null = (() => {
     if (
@@ -391,6 +397,9 @@ export function ConflictFileView({
     const summary = presentError(file.error).summary;
     return summary.startsWith(PATH_REFUSAL_PREFIX) ? summary : null;
   })();
+  const linkedLeaf = pathRefusal?.endsWith(LINKED_LEAF_TAIL) === true;
+  // The whole-file accepts' hold: every path refusal but a leaf link.
+  const sideRefusal = linkedLeaf ? null : pathRefusal;
   // The working file alone: per-region accepts rebuild from it, so a clean
   // working file over a non-UTF-8 stage blob stays lossless for them. The AI
   // button holds on it too, but deliberately leaves that blob-only case to
@@ -628,13 +637,14 @@ export function ConflictFileView({
             Open in editor
           </Button>
           {/* Held on a path git calls merged: Accept all re-checks the file out
-              from the index, over any edits made after an outside `git add`.
-              A path-gate refusal disables both: side checkout uses the same gate. */}
+              from the index, over any edits made after an outside `git add`. Side
+              checkout shares the path gate and refuses a linked directory, but git
+              replaces a leaf link itself, so that refusal alone leaves both on. */}
           <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy || notConflicted || pathRefusal !== null}
-            reason={notConflicted ? NOT_CONFLICTED_COPY : pathRefusal}
+            disabled={busy || notConflicted || sideRefusal !== null}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : sideRefusal}
             onClick={() => acceptAll("ours")}
           >
             Accept all current
@@ -642,8 +652,8 @@ export function ConflictFileView({
           <DisabledReasonButton
             size="xs"
             variant="outline"
-            disabled={busy || notConflicted || pathRefusal !== null}
-            reason={notConflicted ? NOT_CONFLICTED_COPY : pathRefusal}
+            disabled={busy || notConflicted || sideRefusal !== null}
+            reason={notConflicted ? NOT_CONFLICTED_COPY : sideRefusal}
             onClick={() => acceptAll("theirs")}
           >
             Accept all incoming
@@ -679,7 +689,9 @@ export function ConflictFileView({
         ) : file.isError ? (
           <p className="p-4 text-xs text-muted-foreground">
             {pathRefusal
-              ? `${pathRefusal} Resolve it in your editor or a terminal.`
+              ? linkedLeaf
+                ? `${pathRefusal} Accept all current or incoming can still resolve it: git replaces the link itself, not the file it points to.`
+                : `${pathRefusal} Resolve it in your editor or a terminal.`
               : (isAppError(file.error) && READ_ERROR_COPY[file.error.kind]) ||
                 READ_ERROR_FALLBACK}
           </p>

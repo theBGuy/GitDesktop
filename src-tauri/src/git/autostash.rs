@@ -598,20 +598,32 @@ pub(crate) async fn git_drop_stash_by_sha_core(
     if tip != sha {
         return Ok(StashDropOutcome::Moved);
     }
-    // Read before the drop: the compensation arm needs the entry's message.
-    let listing = run_git(
+    let listing = pre_drop_listing(repo).await?;
+    let out = run_git(Some(repo), &["stash", "drop", "stash@{0}"], DEFAULT_TIMEOUT).await?;
+    Ok(drop_verdict(repo, &sha, &listing, &out).await)
+}
+
+/// The pre-drop `stash list --format=%H%x09%gs` read: the compensation arm needs a
+/// raced entry's message to store it back under.
+async fn pre_drop_listing(repo: &str) -> AppResult<String> {
+    Ok(run_git(
         Some(repo),
         &["stash", "list", "--format=%H%x09%gs"],
         DEFAULT_TIMEOUT,
     )
     .await?
-    .stdout_lossy();
-    let out = run_git(Some(repo), &["stash", "drop", "stash@{0}"], DEFAULT_TIMEOUT).await?;
+    .stdout_lossy())
+}
+
+/// The verdict on a drop that exited 0: a printed id other than `sha` means the
+/// drop took a raced entry, which is stored back from `listing`.
+async fn drop_verdict(repo: &str, sha: &str, listing: &str, out: &GitOutput) -> StashDropOutcome {
     let printed = dropped_sha(&out.stdout_lossy()).or_else(|| dropped_sha(&out.stderr));
     match printed {
-        Some(printed) if printed != sha => Ok(restore_dropped(repo, &listing, printed).await),
-        // A missing confirmation is fail-open; the real-repo test pins its format.
-        _ => Ok(StashDropOutcome::Dropped),
+        Some(printed) if printed != sha => restore_dropped(repo, listing, printed).await,
+        // No readable id is fail-open; real-repo tests pin git's `Dropped … (<id>)`
+        // line for both a top and a deeper slot.
+        _ => StashDropOutcome::Dropped,
     }
 }
 
@@ -623,22 +635,15 @@ async fn drop_stash_at_any_depth(repo: &str, sha: &str) -> AppResult<StashDropOu
     let Some(slot) = stash_slot_of(repo, sha).await? else {
         return Ok(StashDropOutcome::Gone);
     };
-    // Read before the drop: the compensation arm needs the entry's message.
-    let listing = run_git(
-        Some(repo),
-        &["stash", "list", "--format=%H%x09%gs"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?
-    .stdout_lossy();
+    let listing = pre_drop_listing(repo).await?;
     #[cfg(test)]
     let _ = STASH_SLOT_LOCATED_HOOK.try_with(|hook| hook());
     let target = format!("stash@{{{slot}}}");
     let out = match run_git(Some(repo), &["stash", "drop", &target], DEFAULT_TIMEOUT).await {
         Ok(out) => out,
         // A failed drop reads Moved only when the sha is now listed at another slot.
-        // A sha still at `slot`, or absent, keeps git's own error: Moved's "retry by
-        // sha" would mislead there, and absence after our own failed drop is
+        // A sha still at `slot` keeps git's own error, as Moved's "the list changed"
+        // would be false; so does an absent sha, which after our own failed drop is
         // ambiguous (an external drop, or a killed git that still finished).
         Err(err) => {
             return match stash_slot_of(repo, sha).await {
@@ -647,12 +652,7 @@ async fn drop_stash_at_any_depth(repo: &str, sha: &str) -> AppResult<StashDropOu
             }
         }
     };
-    let printed = dropped_sha(&out.stdout_lossy()).or_else(|| dropped_sha(&out.stderr));
-    match printed {
-        Some(printed) if printed != sha => Ok(restore_dropped(repo, &listing, printed).await),
-        // A missing confirmation is fail-open, as on the top-only arm.
-        _ => Ok(StashDropOutcome::Dropped),
-    }
+    Ok(drop_verdict(repo, sha, &listing, &out).await)
 }
 
 #[cfg(test)]

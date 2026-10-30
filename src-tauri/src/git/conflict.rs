@@ -158,6 +158,60 @@ fn conflict_rel_path(path: &str) -> AppResult<String> {
     crate::git::ops::discard_rel_path(path).map_err(|why| conflict_path_refusal(path, why))
 }
 
+/// The refusal reason for a symbolic link AT the conflicted path. Distinct from
+/// `DISCARD_LINKED` (a linked ancestor): the conflict pane keeps Accept all
+/// offered for this one, keyed on scripts/conflict-path-refusal.test.mjs's pin.
+const CONFLICT_LINKED_LEAF: &str = "it's a symbolic link";
+
+/// Whether the leaf is a Windows directory link (a junction or directory
+/// symlink). Git for Windows may lstat a junction as a directory and clear it
+/// recursively, reaching through it, so this leaf is refused like an ancestor.
+#[cfg(windows)]
+fn leaf_is_directory_link(base: &str, rel: &str) -> std::io::Result<bool> {
+    use std::os::windows::fs::FileTypeExt;
+    let full = Path::new(base).join(rel);
+    let spelling = crate::fsops::verbatim_path(&full)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no verbatim form"))?;
+    match std::fs::symlink_metadata(spelling) {
+        Ok(m) => Ok(m.file_type().is_symlink_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(not(windows))]
+fn leaf_is_directory_link(_base: &str, _rel: &str) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Refuses `path` when a component below `base` is a symbolic link or junction:
+/// an ancestor or a Windows directory-link leaf always (`DISCARD_LINKED`), any
+/// other leaf link when `include_leaf` (`CONFLICT_LINKED_LEAF`). `base` must be
+/// the root the caller's read or write joins, so the walk covers exactly the
+/// path that gets opened.
+async fn refuse_linked_path(base: &str, path: &str, include_leaf: bool) -> AppResult<()> {
+    let (walk_base, walk_rel) = (base.to_string(), path.to_string());
+    let why = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<_> {
+        use crate::git::ops::linked_component;
+        let carrier = linked_component(&walk_base, &walk_rel, false)?
+            || leaf_is_directory_link(&walk_base, &walk_rel)?;
+        Ok(if carrier {
+            Some(crate::git::ops::DISCARD_LINKED)
+        } else if include_leaf && linked_component(&walk_base, &walk_rel, true)? {
+            Some(CONFLICT_LINKED_LEAF)
+        } else {
+            None
+        })
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+    .map_err(AppError::Io)?;
+    match why {
+        Some(why) => Err(conflict_path_refusal(path, why)),
+        None => Ok(()),
+    }
+}
+
 /// Reads a blob from an unmerged index stage (1 = base, 2 = ours, 3 = theirs).
 /// `present` is the caller's `unmerged_stages` listing: a stage missing from it
 /// (a side added or deleted the file) is `None` without a spawn. A listed stage
@@ -259,6 +313,9 @@ pub async fn git_conflict_sides(
     exclude: Vec<String>,
 ) -> AppResult<ConflictSides> {
     let path = conflict_rel_path(&path)?;
+    // Ahead of every read: a link on the path would feed a file outside the
+    // repository to the hash, the editor and the AI prompt.
+    refuse_linked_path(&repo_path, &path, true).await?;
 
     let ai_ignored = is_ai_ignored(&repo_path, &path, &exclude).await?;
 
@@ -371,6 +428,9 @@ async fn git_resolve_conflict_core(
     // held (see `run_git_mutating`).
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a conflict resolution").await?;
+    // Under the hold, before the live read: a link on the path would compare
+    // and overwrite (or, dangling, create) a file outside the repository.
+    refuse_linked_path(&repo_path, &path, true).await?;
 
     // Any read failure but NotFound is an error, never a defaulted verdict.
     let live = match tokio::fs::read(&full).await {
@@ -445,6 +505,9 @@ pub(crate) async fn git_checkout_conflict_side_core(
     // held (see `run_git_mutating`).
     let domain = state.working_tree_lock(&repo_path).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a conflict resolution").await?;
+    // Not a file link at the leaf, which git replaces itself: a linked directory
+    // could carry the checkout or removal outside the repository.
+    refuse_linked_path(&repo_path, &path, false).await?;
 
     // A side that removed the file (deleted it, or renamed it away) has no stage
     // entry, and `checkout --ours|--theirs` then exits 1 ("does not have our
@@ -1564,7 +1627,10 @@ mod tests {
         let json = serde_json::to_value(sides_of(&repo, "file.txt").await).unwrap();
         let disk = std::fs::read(Path::new(&repo).join("file.txt")).unwrap();
         assert_eq!(json["workingHash"], serde_json::json!(sha1_hex(&disk)));
-        assert_eq!(json["workingMatchesSurvivor"], serde_json::Value::Null);
+        assert_eq!(
+            json.get("workingMatchesSurvivor"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     /// The refusal contract: an outside edit landing after the read (UTF-8 or
@@ -1794,5 +1860,295 @@ mod tests {
             sides_of(&both, "file.txt").await.working_matches_survivor,
             None
         );
+    }
+
+    fn linked_refusal(path: &str) -> String {
+        let shown = crate::git::ops::discard_shown(path);
+        format!(
+            "invalid argument: Can't resolve the conflict in {shown} — it's reached through a symbolic link or junction. Nothing was changed."
+        )
+    }
+
+    #[cfg(unix)]
+    fn leaf_refusal(path: &str) -> String {
+        let shown = crate::git::ops::discard_shown(path);
+        format!(
+            "invalid argument: Can't resolve the conflict in {shown} — it's a symbolic link. Nothing was changed."
+        )
+    }
+
+    /// A directory link: a junction on Windows (no privilege needed), a symlink
+    /// elsewhere.
+    fn directory_link(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &target.to_string_lossy(),
+                ])
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    /// A conflicted path reached through a linked directory refuses both the
+    /// read and the write, and the file it points at keeps its bytes.
+    #[tokio::test]
+    async fn conflict_commands_refuse_a_linked_ancestor() {
+        let (dir, repo) = conflicted_repo("link-ancestor", "sub/file.txt", &[]).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("file.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::remove_dir_all(dir.path().join("sub")).unwrap();
+        directory_link(&dir.path().join("sub"), outside.path());
+
+        let read = git_conflict_sides(repo.clone(), "sub/file.txt".into(), vec![])
+            .await
+            .err()
+            .expect("a linked ancestor must refuse the read");
+        assert_eq!(read.to_string(), linked_refusal("sub/file.txt"));
+        let write = git_resolve_conflict_core(
+            &AppState::default(),
+            repo,
+            "sub/file.txt".into(),
+            "resolved\n".into(),
+            true,
+            Some(sha1_hex(b"precious\n")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(write.to_string(), linked_refusal("sub/file.txt"));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conflict_sides_refuse_a_linked_survivor() {
+        let (dir, repo) = modify_delete_repo("link-read", "file.txt", "ours").await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::remove_file(dir.path().join("file.txt")).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("file.txt")).unwrap();
+        let error = git_conflict_sides(repo, "file.txt".into(), vec![])
+            .await
+            .err()
+            .expect("a linked survivor must refuse the read");
+        assert_eq!(error.to_string(), leaf_refusal("file.txt"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_refuses_a_linked_survivor() {
+        let (dir, repo) = modify_delete_repo("link-write", "file.txt", "ours").await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::remove_file(dir.path().join("file.txt")).unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("file.txt")).unwrap();
+        let before = stdout_of(&repo, &["ls-files", "-u"]).await;
+        let error = git_resolve_conflict_core(
+            &AppState::default(),
+            repo.clone(),
+            "file.txt".into(),
+            "resolved\n".into(),
+            true,
+            Some(sha1_hex(b"precious\n")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), leaf_refusal("file.txt"));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert_eq!(stdout_of(&repo, &["ls-files", "-u"]).await, before);
+    }
+
+    /// A dangling link reads as absent through the link, which a `None` hash
+    /// would accept: the write would create its target outside the repository.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolve_refuses_a_dangling_link() {
+        let (dir, repo) = modify_delete_repo("link-dangling", "file.txt", "ours").await;
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("created.txt");
+        std::fs::remove_file(dir.path().join("file.txt")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("file.txt")).unwrap();
+        let read = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
+            .await
+            .err()
+            .expect("a dangling link must refuse the read");
+        assert_eq!(read.to_string(), leaf_refusal("file.txt"));
+        let error = git_resolve_conflict_core(
+            &AppState::default(),
+            repo,
+            "file.txt".into(),
+            "resolved\n".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), leaf_refusal("file.txt"));
+        assert!(!target.exists(), "the write created the link's target");
+    }
+
+    /// Taking a side refuses a linked ancestor before any git call, so neither
+    /// the stages nor the file it points at change.
+    #[tokio::test]
+    async fn checkout_side_refuses_a_linked_ancestor() {
+        let (dir, repo) = conflicted_repo("link-ancestor-side", "sub/file.txt", &[]).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("file.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::remove_dir_all(dir.path().join("sub")).unwrap();
+        directory_link(&dir.path().join("sub"), outside.path());
+        let before = stdout_of(&repo, &["ls-files", "-u"]).await;
+        assert!(
+            before.contains("sub/file.txt"),
+            "fixture not conflicted: {before}"
+        );
+
+        for side in ["ours", "theirs"] {
+            let error = git_checkout_conflict_side_core(
+                &AppState::default(),
+                repo.clone(),
+                "sub/file.txt".into(),
+                side.into(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), linked_refusal("sub/file.txt"), "{side}");
+            assert_eq!(std::fs::read(&victim).unwrap(), b"precious\n", "{side}");
+            assert_eq!(
+                stdout_of(&repo, &["ls-files", "-u"]).await,
+                before,
+                "{side}"
+            );
+        }
+    }
+
+    /// Taking the surviving side over a leaf link: git replaces the link with a
+    /// regular file holding that side, and the file it pointed at keeps its bytes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkout_side_replaces_a_leaf_link_with_the_side() {
+        let (dir, repo) = modify_delete_repo("link-side-keep", "file.txt", "ours").await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&victim, &file).unwrap();
+
+        git_checkout_conflict_side_core(
+            &AppState::default(),
+            repo.clone(),
+            "file.txt".into(),
+            "theirs".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert!(std::fs::symlink_metadata(&file)
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "theirs\n"
+        );
+        let unmerged = stdout_of(&repo, &["ls-files", "-u"]).await;
+        assert!(
+            unmerged.trim().is_empty(),
+            "conflict left behind: {unmerged}"
+        );
+    }
+
+    /// Taking the deleting side over a leaf link removes the link, never the file
+    /// it pointed at.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checkout_side_removes_a_leaf_link_for_the_deletion() {
+        let (dir, repo) = modify_delete_repo("link-side-delete", "file.txt", "ours").await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&victim, &file).unwrap();
+
+        git_checkout_conflict_side_core(
+            &AppState::default(),
+            repo.clone(),
+            "file.txt".into(),
+            "ours".into(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert!(
+            std::fs::symlink_metadata(&file).is_err(),
+            "the link survived"
+        );
+        assert_deleted_and_resolved(&repo, "file.txt").await;
+    }
+
+    /// A junction AT the conflicted path is refused like a linked ancestor by
+    /// every command, side checkout included, and the directory it points at
+    /// keeps its contents.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn conflict_commands_refuse_a_junction_leaf() {
+        let (dir, repo) = conflicted_repo("link-junction-leaf", "file.txt", &[]).await;
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::remove_file(dir.path().join("file.txt")).unwrap();
+        directory_link(&dir.path().join("file.txt"), outside.path());
+        let before = stdout_of(&repo, &["ls-files", "-u"]).await;
+
+        let read = git_conflict_sides(repo.clone(), "file.txt".into(), vec![])
+            .await
+            .err()
+            .expect("a junction leaf must refuse the read");
+        assert_eq!(read.to_string(), linked_refusal("file.txt"));
+        let write = git_resolve_conflict_core(
+            &AppState::default(),
+            repo.clone(),
+            "file.txt".into(),
+            "resolved\n".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(write.to_string(), linked_refusal("file.txt"));
+        for side in ["ours", "theirs"] {
+            let error = git_checkout_conflict_side_core(
+                &AppState::default(),
+                repo.clone(),
+                "file.txt".into(),
+                side.into(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), linked_refusal("file.txt"), "{side}");
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious\n");
+        assert_eq!(stdout_of(&repo, &["ls-files", "-u"]).await, before);
     }
 }

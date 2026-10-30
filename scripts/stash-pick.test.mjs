@@ -11,6 +11,7 @@ import { test } from "node:test";
 import {
   resolveStashPick,
   stashRowKey,
+  stashRowReactKeys,
 } from "../src/features/repository/stash-pick.ts";
 
 const A = "a".repeat(40);
@@ -68,6 +69,26 @@ test("row keys carry both the sha and the slot", () => {
   );
 });
 
+test("duplicate shas get distinct React keys", () => {
+  const keys = stashRowReactKeys(rows(A, B, A, A));
+  assert.deepEqual(keys, [`${A}#0`, `${B}#0`, `${A}#1`, `${A}#2`]);
+  assert.equal(new Set(keys).size, 4);
+  assert.deepEqual(stashRowReactKeys([]), []);
+});
+
+test("a push on top keeps every pre-existing row's React key", () => {
+  const before = stashRowReactKeys(rows(A, B, A));
+  const after = stashRowReactKeys(rows(C, A, B, A));
+  assert.deepEqual(after.slice(1), before);
+});
+
+test("dropping an unrelated row keeps the remaining rows' React keys", () => {
+  const before = stashRowReactKeys(rows(A, B, C, A));
+  // B dropped: A, C and the second A shift up a slot but keep their keys.
+  const after = stashRowReactKeys(rows(A, C, A));
+  assert.deepEqual(after, [before[0], before[2], before[3]]);
+});
+
 const DIALOG = "src/features/repository/StashesDialog.tsx";
 
 /** View stashes imports both helpers from ./stash-pick and defines neither name
@@ -80,7 +101,7 @@ function dialogPickProblems(source) {
   const imports = [
     ...source.matchAll(/import\s*\{([^}]*)\}\s*from\s*"\.\/stash-pick";/g),
   ].flatMap((m) => m[1].split(",").map((s) => s.trim()));
-  for (const name of ["resolveStashPick", "stashRowKey"]) {
+  for (const name of ["resolveStashPick", "stashRowKey", "stashRowReactKeys"]) {
     if (!imports.includes(name)) problems.push(`${name} is not imported`);
     const local = new RegExp(
       String.raw`(?:function\s+${name}\b|(?:const|let|var)\s+${name}\b)`,
@@ -89,6 +110,52 @@ function dialogPickProblems(source) {
   }
   return problems;
 }
+
+/** The row's React key comes from stashRowReactKeys (a per-list array indexed by
+ *  the row's position), never stashRowKey, whose slot shifts with the stack and
+ *  would remount a focused row; `data-stash` keeps stashRowKey, which keyboard
+ *  nav and the highlight read. */
+function dialogKeyProblems(source) {
+  if (typeof source !== "string" || source.trim() === "")
+    return ["the dialog source is empty or unreadable"];
+  const problems = [];
+  const keys = source.match(/const\s+(\w+)\s*=\s*stashRowReactKeys\(/);
+  if (!keys) problems.push("no list of row keys from stashRowReactKeys");
+  else if (!new RegExp(String.raw`\bkey=\{${keys[1]}\[\w+\]\}`).test(source))
+    problems.push("no row takes its key from the stashRowReactKeys list");
+  if (/\bkey=\{stashRowKey\(/.test(source))
+    problems.push("a row is keyed by stashRowKey");
+  if (!/\bdata-stash=\{stashRowKey\(\w+\)\}/.test(source))
+    problems.push("data-stash does not read stashRowKey");
+  return problems;
+}
+
+test("StashesDialog keys rows by stashRowReactKeys and marks them by stashRowKey", () => {
+  const source = readFileSync(new URL(`../${DIALOG}`, import.meta.url), "utf8");
+  assert.deepEqual(dialogKeyProblems(source), []);
+});
+
+test("the key check fails on a stashRowKey key, a lost data-stash, or no source", () => {
+  const source = readFileSync(new URL(`../${DIALOG}`, import.meta.url), "utf8");
+  const slotKeyed = source.replace(
+    /\bkey=\{rowReactKeys\[i\]\}/,
+    () => "key={stashRowKey(stash)}",
+  );
+  assert.notEqual(slotKeyed, source, "the fixture found the row key");
+  assert.deepEqual(dialogKeyProblems(slotKeyed), [
+    "no row takes its key from the stashRowReactKeys list",
+    "a row is keyed by stashRowKey",
+  ]);
+  const unmarked = source.replace(
+    /\bdata-stash=\{stashRowKey\(stash\)\}/,
+    () => "data-stash={stash.sha}",
+  );
+  assert.notEqual(unmarked, source, "the fixture found data-stash");
+  assert.deepEqual(dialogKeyProblems(unmarked), [
+    "data-stash does not read stashRowKey",
+  ]);
+  assert.equal(dialogKeyProblems("").length, 1);
+});
 
 test("StashesDialog reads its selection from ./stash-pick", () => {
   const source = readFileSync(new URL(`../${DIALOG}`, import.meta.url), "utf8");
@@ -110,6 +177,7 @@ test("the source check fails on an inlined copy, a dropped import, or no source"
   assert.deepEqual(dialogPickProblems(unimported), [
     "resolveStashPick is not imported",
     "stashRowKey is not imported",
+    "stashRowReactKeys is not imported",
   ]);
   assert.equal(dialogPickProblems("").length, 1);
   assert.equal(dialogPickProblems(undefined).length, 1);
