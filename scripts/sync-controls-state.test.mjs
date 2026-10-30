@@ -762,3 +762,91 @@ test("no mismatch without the backend's verdict, a live upstream, and both names
     null,
   );
 });
+
+test("a push git sends somewhere other than the upstream names that destination", () => {
+  const facts = {
+    upstream: "origin/main",
+    upstreamRemote: "origin",
+    upstreamBranch: "main",
+  };
+  // Resolved and different: the destination, with no upstream-relative count,
+  // at any count (the push still sends at zero).
+  for (const ahead of [0, 1, 3]) {
+    const s = deriveSyncControls(
+      input({
+        head: head({
+          ...facts,
+          ahead,
+          pushRemote: "fork",
+          pushBranch: "feature",
+        }),
+      }),
+    );
+    assert.equal(s.pushName, "Push to fork/feature", String(ahead));
+    assert.ok(s.pushName.startsWith(s.pushLabel), "starts with the label");
+    assert.deepEqual(s.push, { disabled: false, reason: s.pushName });
+  }
+  // Same remote, another branch.
+  assert.equal(
+    deriveSyncControls(
+      input({
+        head: head({
+          ...facts,
+          ahead: 2,
+          pushRemote: "origin",
+          pushBranch: "feature",
+        }),
+      }),
+    ).pushName,
+    "Push to origin/feature",
+  );
+  // Resolved to the upstream itself, or unresolved (null or absent): unchanged.
+  for (const dest of [
+    { pushRemote: "origin", pushBranch: "main" },
+    { pushRemote: null, pushBranch: null },
+    { pushRemote: "fork", pushBranch: null },
+    {},
+  ]) {
+    const s = deriveSyncControls(
+      input({ head: head({ ...facts, ahead: 2, ...dest }) }),
+    );
+    assert.equal(
+      s.pushName,
+      "Push — 2 commits to push to origin/main",
+      JSON.stringify(dest),
+    );
+    const zero = deriveSyncControls(
+      input({ head: head({ ...facts, ...dest }) }),
+    );
+    assert.equal(zero.pushName, "Push", JSON.stringify(dest));
+  }
+  // Force push keeps its own copy, destination or not.
+  const diverged = deriveSyncControls(
+    input({
+      head: head({
+        ...facts,
+        ahead: 1,
+        behind: 1,
+        pushRemote: "fork",
+        pushBranch: "feature",
+      }),
+    }),
+  );
+  assert.equal(
+    diverged.pushName,
+    "Force push — 1 commit to push to origin/main",
+  );
+  // A gone upstream publishes, whatever a stale destination says.
+  const gone = deriveSyncControls(
+    input({
+      head: head({
+        ...facts,
+        upstreamGone: true,
+        pushRemote: "fork",
+        pushBranch: "feature",
+      }),
+    }),
+  );
+  assert.equal(gone.pushLabel, "Publish branch");
+  assert.equal(gone.pushName, "Publish branch");
+});

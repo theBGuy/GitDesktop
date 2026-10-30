@@ -34,6 +34,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
   forgeDetectForkPrForBranch,
+  gitRemotePushUrl,
+  gitRemoteUrl,
   type PullMode,
   type PushGuard,
 } from "@/lib/git/api";
@@ -48,6 +50,7 @@ import {
   branchRewriteStatusOptions,
   carriesAllLocalCommits,
   refuseWhilePushRuns,
+  remoteBranchesOptions,
   repoStatusOptions,
   useBranchRewriteStatus,
   useFetchRemote,
@@ -74,7 +77,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { useSettings } from "@/lib/settings/queries";
-import { useConfirm } from "@/lib/stores/confirm";
+import { type ConfirmRequest, useConfirm } from "@/lib/stores/confirm";
 import {
   landedIn,
   originNoteFor,
@@ -86,6 +89,14 @@ import {
 } from "@/lib/stores/worktree-removal";
 import { formatRelativeTime } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import {
+  presenceUnderUrls,
+  pushWouldCreate,
+  remoteHasBranch,
+  visibilityApplies,
+  willCreateOnRemote,
+  willPublish,
+} from "./branch-sync-state";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import {
@@ -93,6 +104,12 @@ import {
   publishPendingReason,
   usePublishProviders,
 } from "./PublishRepoControl";
+import {
+  askPublishConfirm,
+  recordedVisibility,
+  useCloseSettled,
+  withdrawPublishConfirm,
+} from "./publish-confirm";
 import { statusReadFailed } from "./StatusReadError";
 import {
   deriveSyncControls,
@@ -226,6 +243,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // it too. Its destinations are pinned when it opens, with the repo they belong
   // to: a status poll under the open menu can't change what a click pushes.
   const [pushMenuOpen, setPushMenuOpen] = useState(false);
+  const pushMenuClose = useCloseSettled(pushMenuOpen);
+  // The publish prompt this bar asked last, so it withdraws only its own.
+  const publishAsk = useRef<ConfirmRequest | null>(null);
   const [pushMenuCapture, setPushMenuCapture] = useState<{
     repo: string;
     menu: MismatchMenu;
@@ -764,14 +784,36 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // Publishing an untracked branch that is really a local copy of a fork PR's
   // head pushes a separate copy to origin and leaves the PR untouched — check
   // for that before publishing, and let the guard offer the fork instead. Purely
-  // advisory: a detection failure is indistinguishable from no match and just
-  // publishes. Pushes to a tracked upstream (and force pushes, which need one)
-  // are correct as they stand and never ask.
+  // advisory: a detection failure is indistinguishable from no match and falls
+  // through to the publish confirm. Pushes to a tracked upstream (and force
+  // pushes, which need one) are correct as they stand and never ask.
   async function beginPush(force: boolean) {
     if (refuseWhileOffline()) return;
     const branch = head?.name;
-    if (force || hasUpstream || !branch) {
-      void doPush(force);
+    const facts = {
+      upstream: head?.upstream ?? null,
+      upstreamGone: head?.upstreamGone === true,
+    };
+    if (force || !branch || !willPublish(facts)) {
+      // A bare push lands where git's push config sends it, which can be a
+      // branch the remote doesn't have yet. The everyday push goes to its own
+      // upstream, which exists, so it pays no read at all.
+      const pushRemote = head?.pushRemote ?? null;
+      const pushBranch = head?.pushBranch ?? null;
+      const toUpstream =
+        pushRemote === (head?.upstreamRemote ?? null) &&
+        pushBranch === (head?.upstreamBranch ?? null);
+      if (
+        force ||
+        !branch ||
+        toUpstream ||
+        pushRemote === null ||
+        pushBranch === null
+      ) {
+        void doPush(force);
+        return;
+      }
+      void beginBarePush(branch, pushRemote, pushBranch);
       return;
     }
     const pushedIn = repoPath;
@@ -796,6 +838,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // Every route from here pushes `branch` by name, so a HEAD that moved
     // during the round-trip changes nothing: the match still describes it.
     if (match) {
+      // A repeat press can match while this bar's own publish prompt is still
+      // up; the guard replaces it rather than stacking over it.
+      withdrawPublishConfirm(publishAsk);
       forkGuardSeq.current += 1;
       setForkGuard({
         token: forkGuardSeq.current,
@@ -804,7 +849,135 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         branch,
         open: true,
       });
-    } else void doPush(false, branch);
+      return;
+    }
+    // A push that started during the detection refuses before any prompt.
+    if (refuseWhilePushing()) return;
+    // The HEAD arm publishes to origin. A branch origin already has (as of the
+    // last fetch) only fast-forwards and tracks, so only a create asks first;
+    // the list mirrors origin's FETCH side, so a differing push URL asks too.
+    const [list, fetchUrl, pushUrl] = await Promise.all([
+      queryClient
+        .fetchQuery(remoteBranchesOptions(pushedIn))
+        .catch(() => undefined),
+      gitRemoteUrl(pushedIn, "origin").catch(() => null),
+      gitRemotePushUrl(pushedIn, "origin").catch(() => null),
+    ]);
+    // The prompt stamps whichever repo is live when it asks.
+    if (
+      refuseIfSwitched(
+        pushedIn,
+        "nothing was published",
+        "before the push started",
+      )
+    )
+      return;
+    const create = willCreateOnRemote({
+      ...facts,
+      remoteHasSameName: presenceUnderUrls(
+        remoteHasBranch(list, "origin", branch),
+        fetchUrl,
+        pushUrl,
+      ),
+    });
+    if (create) {
+      const ok = await askPublishConfirm(
+        {
+          branch,
+          remote: "origin",
+          pushUrl,
+          visibility: visibilityApplies("origin", fetchUrl, pushUrl)
+            ? recordedVisibility(settings.data?.recentRepos, pushedIn)
+            : null,
+          goneUpstream: facts.upstreamGone,
+          upstreamRemote: head?.upstreamRemote ?? null,
+          upstreamBranch: head?.upstreamBranch ?? null,
+        },
+        publishAsk,
+      );
+      if (!ok) return;
+    }
+    // Pushes `branch` by name: a HEAD that moved under the prompt publishes the
+    // branch it named. doPush re-checks offline and running pushes itself.
+    void doPush(false, branch);
+  }
+
+  // A tracked branch whose bare push git sends somewhere other than its upstream
+  // (push.default=current on a differently named upstream, a pushRemote or
+  // remote.pushDefault): asks first when that destination doesn't exist yet. A
+  // confirmed push names branch, remote and destination outright, so a HEAD move
+  // or a config edit under the prompt can't change what the prompt described.
+  async function beginBarePush(
+    branch: string,
+    pushRemote: string,
+    pushBranch: string,
+  ) {
+    const pushedIn = repoPath;
+    const switchedAway = () =>
+      refuseIfSwitched(
+        pushedIn,
+        "nothing was pushed",
+        "before the push started",
+      );
+    const [list, fetchUrl, pushUrl] = await Promise.all([
+      queryClient
+        .fetchQuery(remoteBranchesOptions(pushedIn))
+        .catch(() => undefined),
+      gitRemoteUrl(pushedIn, pushRemote).catch(() => null),
+      gitRemotePushUrl(pushedIn, pushRemote).catch(() => null),
+    ]);
+    if (switchedAway()) return;
+    const create = pushWouldCreate({
+      pushRemote,
+      pushBranch,
+      presence: presenceUnderUrls(
+        remoteHasBranch(list, pushRemote, pushBranch),
+        fetchUrl,
+        pushUrl,
+      ),
+    });
+    if (create !== true) {
+      // doPush pushes HEAD, and the destination was read for `branch`.
+      if (headNameRef.current !== branch) {
+        toast.info("HEAD moved — nothing was pushed.");
+        return;
+      }
+      void doPush(false);
+      return;
+    }
+    // A push that started during the reads refuses before any prompt.
+    if (refuseWhilePushing()) return;
+    const ok = await askPublishConfirm(
+      {
+        branch,
+        remote: pushRemote,
+        pushUrl,
+        visibility: visibilityApplies(pushRemote, fetchUrl, pushUrl)
+          ? recordedVisibility(settings.data?.recentRepos, pushedIn)
+          : null,
+        goneUpstream: false,
+        upstreamRemote: null,
+        upstreamBranch: null,
+        ...(pushBranch === branch ? {} : { createdBranch: pushBranch }),
+      },
+      publishAsk,
+    );
+    if (!ok) return;
+    if (switchedAway()) return;
+    if (refuseWhileOffline() || refuseWhilePushing()) return;
+    try {
+      // Sets no upstream, exactly like the bare push it stands in for.
+      await push.mutateAsync({
+        setUpstream: false,
+        branch,
+        remote: pushRemote,
+        remoteBranch: pushBranch,
+        source: "header",
+      });
+      toast.success(`Pushed ${branch} to ${pushRemote}/${pushBranch}`);
+    } catch (e) {
+      onError(e);
+    }
   }
 
   function openPushMenu() {
@@ -846,6 +1019,56 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         });
         toast.success(`Pushed ${branch} to ${remote}/${remoteBranch}`);
       } else {
+        // A same-named branch the remote already has (as of the last fetch) is
+        // only fast-forwarded and tracked; an unloaded list asks, and so does a
+        // remote whose push URL differs from the fetch side the list mirrors.
+        const listed = remoteHasBranch(remoteBranches.data, remote, branch);
+        const [fetchUrl, pushUrl] = await Promise.all([
+          gitRemoteUrl(capture.repo, remote).catch(() => null),
+          gitRemotePushUrl(capture.repo, remote).catch(() => null),
+        ]);
+        const switchedAway = () =>
+          refuseIfSwitched(
+            capture.repo,
+            "nothing was pushed",
+            "before the push started",
+          );
+        if (switchedAway()) return;
+        const create = willCreateOnRemote({
+          upstream: head?.upstream ?? null,
+          upstreamGone: head?.upstreamGone === true,
+          setUpstream: true,
+          remoteHasSameName: presenceUnderUrls(listed, fetchUrl, pushUrl),
+        });
+        if (create) {
+          // The prompt stamps whichever repo is live when it asks, and Base UI
+          // returns focus to the menu's trigger once its close finishes.
+          await pushMenuClose.waitClosed();
+          if (switchedAway()) return;
+          const ok = await askPublishConfirm(
+            {
+              branch,
+              remote,
+              pushUrl,
+              visibility: visibilityApplies(remote, fetchUrl, pushUrl)
+                ? recordedVisibility(settings.data?.recentRepos, capture.repo)
+                : null,
+              goneUpstream: false,
+              upstreamRemote: null,
+              upstreamBranch: null,
+            },
+            publishAsk,
+          );
+          if (!ok) return;
+        }
+        // This route pushes directly, so the window its reads (and any prompt)
+        // opened re-runs the checks doPush would: a push started meanwhile, or
+        // a HEAD move.
+        if (refuseWhileOffline() || refuseWhilePushing()) return;
+        if (headNameRef.current !== branch) {
+          toast.info("HEAD moved — nothing was pushed.");
+          return;
+        }
         await push.mutateAsync({
           setUpstream: true,
           branch,
@@ -1122,6 +1345,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
               if (o) openPushMenu();
               else setPushMenuOpen(false);
             }}
+            onOpenChangeComplete={pushMenuClose.onOpenChangeComplete}
           >
             <DropdownMenuTrigger
               render={

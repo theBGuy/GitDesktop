@@ -56,6 +56,10 @@ export interface SyncHead {
   pushNameMismatch: boolean;
   /** Whether `upstreamBranch` is its remote's default branch; null = unknown. */
   upstreamIsRemoteDefault: boolean | null;
+  /** Where a bare push lands, when the status resolved it; null or absent =
+   *  unresolved. */
+  pushRemote?: string | null;
+  pushBranch?: string | null;
 }
 
 export interface SyncControlsInput {
@@ -126,6 +130,8 @@ export function headFacts(head: SyncHead | undefined): {
   detached: boolean;
 } {
   return {
+    // The negation of branch-sync-state.ts's `willPublish` for a push without an
+    // explicit retrack (`setUpstream`); keep the two in step.
     hasUpstream: Boolean(head?.upstream) && !head?.upstreamGone,
     diverged: Boolean(head && head.ahead > 0 && head.behind > 0),
     detached: Boolean(head?.detached),
@@ -222,10 +228,30 @@ export function deriveSyncControls(input: SyncControlsInput) {
   // One description per button feeds both its tooltip and its accessible name;
   // each starts with the visible label (WCAG 2.5.3) and, while disabled,
   // carries the reason and the count. Undefined = the bare label suffices.
-  const aheadLabel =
-    aheadCount > 0
-      ? `${pushLabel} — ${aheadCount} commit${plural(aheadCount)} to push to ${upstream}`
-      : undefined;
+  // A plain push that git sends somewhere other than the upstream names where it
+  // goes, whatever the count: the count is upstream-relative, and the push still
+  // sends at zero. The same resolved-and-differs test SyncControls' beginPush uses.
+  const pushElsewhere =
+    statusKnown &&
+    hasUpstream &&
+    !mismatch &&
+    !diverged &&
+    head.pushRemote != null &&
+    head.pushBranch != null &&
+    (head.pushRemote !== head.upstreamRemote ||
+      head.pushBranch !== head.upstreamBranch)
+      ? `${head.pushRemote}/${head.pushBranch}`
+      : null;
+  const aheadLabel = (() => {
+    switch (true) {
+      case pushElsewhere !== null:
+        return `${pushLabel} to ${pushElsewhere}`;
+      case aheadCount > 0:
+        return `${pushLabel} — ${aheadCount} commit${plural(aheadCount)} to push to ${upstream}`;
+      default:
+        return undefined;
+    }
+  })();
   const behindLabel =
     behindCount > 0
       ? `Pull — ${behindCount} commit${plural(behindCount)} to pull from ${upstream}`

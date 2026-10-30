@@ -26,6 +26,18 @@ export interface BranchHead {
   /** Whether `upstreamBranch` is its remote's default branch; probed only while
    *  `pushNameMismatch`, null = unknown. */
   upstreamIsRemoteDefault: boolean | null;
+  /** The remote a BARE push lands on: `%(push…)` read with the push config
+   *  where that changes the answer (matching, triangular `simple`), so a git
+   *  without the atoms may still carry a config-derived destination. null when
+   *  unresolvable (a push remote with its own push refspecs or
+   *  `remote.<r>.mirror` set among them: git's bare push runs as configured) or
+   *  there is no upstream. A destination that is the branch's own same-named
+   *  live upstream reads no config, so it stays set even on a mirror remote.
+   *  Set together with `pushBranch`. */
+  pushRemote: string | null;
+  /** The branch a bare push would create or update on `pushRemote`; null when
+   *  unresolvable. */
+  pushBranch: string | null;
 }
 
 export interface Branch {
