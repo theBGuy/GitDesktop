@@ -11,7 +11,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { presentError } from "@/lib/error-summary";
 import { gitStatus, openWithDefault, openWithProgram } from "@/lib/git/api";
-import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import {
+  type ConflictSides,
+  changedOnDiskCopy,
+  conflictSides,
+} from "@/lib/git/conflict";
 import {
   type ConflictChoice,
   deletedSide,
@@ -423,7 +427,7 @@ export function ConflictFileView({
   }
 
   async function acceptRegion(index: number, choice: ConflictChoice) {
-    if (inFlightRef.current || !segments) return;
+    if (inFlightRef.current || !segments || !file.data) return;
     if (workingUndecodableRef.current) {
       toast.info(CONFLICT_UNDECODABLE_NOTE);
       return;
@@ -431,9 +435,22 @@ export function ConflictFileView({
     const content = resolveBlock(segments, index, choice);
     // Stage once the last marker is gone — same end state as the AI flow.
     const stage = !hasConflictMarkers(content);
+    // From the same `file.data` the segments were parsed from.
+    const expectedHash = file.data.workingHash;
     inFlightRef.current = true;
     try {
-      await resolve.mutateAsync({ path, content, stage });
+      const outcome = await resolve.mutateAsync({
+        path,
+        content,
+        stage,
+        expectedHash,
+      });
+      // A success to the mutation, so its awaited re-read already re-keyed the
+      // regions to disk; no error-path refresh.
+      if (outcome.kind === "changedOnDisk") {
+        toast.info(changedOnDiskCopy(baseName(path)));
+        return;
+      }
       if (stage) toast.success(`Resolved ${baseName(path)}`);
     } catch (e) {
       toastError(e);

@@ -548,9 +548,9 @@ struct StashApplyArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-struct StashIndexArgs {
-    /// Which stash, by index (0 = most recent; see list_stashes).
-    index: u32,
+struct StashShaArgs {
+    /// The stash's commit sha, exactly as `list_stashes` returns it (`sha`).
+    sha: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1242,9 +1242,10 @@ impl GitDesktopMcp {
     // ---- UNGATED READS (git-ops domain; no gate, no write annotations) ---
 
     #[tool(
-        description = "List the stash entries in the bound repository (index, message, date), \
-                       most recent first. The index is what stash_apply/stash_pop/drop_stash \
-                       address."
+        description = "List the stash entries in the bound repository (index, sha, message, \
+                       date), most recent first. The index is what stash_apply/stash_pop \
+                       address; it shifts as stashes are pushed and dropped. The sha is the \
+                       stash's stable identity and what drop_stash takes."
     )]
     async fn list_stashes(&self) -> Result<CallToolResult, McpError> {
         let stashes = crate::git::ops::git_stash_list(self.repo.clone())
@@ -1434,21 +1435,53 @@ impl GitDesktopMcp {
     }
 
     #[tool(
-        description = "Drop a stash by index (0 = most recent; see list_stashes) in the bound \
-                       repository — the stashed changes are LOST. Requires --allow-git-write AND \
+        description = "Drop the stash with this commit sha (see list_stashes' `sha`) wherever \
+                       it sits in the stack, in the bound repository — the stashed changes are \
+                       LOST. Refuses when no stash has that sha. Requires --allow-git-write AND \
                        --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn drop_stash(
         &self,
-        Parameters(args): Parameters<StashIndexArgs>,
+        Parameters(args): Parameters<StashShaArgs>,
     ) -> Result<CallToolResult, McpError> {
+        use crate::git::autostash::StashDropOutcome;
         self.ensure_destructive()?;
         let _promote = self.promote_gate().await?;
-        crate::git::ops::git_stash_drop_core(&self.state, self.repo.clone(), args.index)
-            .await
-            .map_err(app_err)?;
-        ok_text(format!("stash@{{{}}} dropped", args.index))
+        let outcome = crate::git::autostash::git_drop_stash_by_sha_core(
+            &self.state,
+            self.repo.clone(),
+            args.sha.clone(),
+            true,
+        )
+        .await
+        .map_err(app_err)?;
+        match outcome {
+            StashDropOutcome::Dropped => ok_text(format!("stash dropped: {}", args.sha)),
+            StashDropOutcome::Gone => Err(McpError::invalid_request(
+                format!(
+                    "No stash with sha {} exists; it may already be dropped. Run list_stashes \
+                     for the current entries.",
+                    args.sha
+                ),
+                None,
+            )),
+            StashDropOutcome::Moved => Err(McpError::invalid_request(
+                "The stash list changed while dropping: nothing was dropped (if the drop took \
+                 a different stash, it was stored back at stash@{0}, so slots may have \
+                 shifted). Re-run list_stashes and retry by sha.",
+                None,
+            )),
+            StashDropOutcome::RestoreFailed { dropped_sha } => Err(McpError::invalid_request(
+                format!(
+                    "A concurrent stash operation raced this drop: a different stash \
+                     ({dropped_sha}) was dropped and could not be restored. Recover it with \
+                     `git stash store {dropped_sha}` or under GitDesktop's View stashes → \
+                     Recoverable."
+                ),
+                None,
+            )),
+        }
     }
 
     #[tool(
@@ -1776,7 +1809,9 @@ mod tests {
             "--allow-git-write"
         );
         assert_gated!(
-            h.drop_stash(Parameters(StashIndexArgs { index: 0 })),
+            h.drop_stash(Parameters(StashShaArgs {
+                sha: "a".repeat(40)
+            })),
             "--allow-git-write"
         );
         assert_gated!(
@@ -1825,7 +1860,9 @@ mod tests {
             remote: "origin".into(),
             name: "b".into(),
         })));
-        assert_destructive_gated!(h.drop_stash(Parameters(StashIndexArgs { index: 0 })));
+        assert_destructive_gated!(h.drop_stash(Parameters(StashShaArgs {
+            sha: "a".repeat(40)
+        })));
         assert_destructive_gated!(h.delete_tag(Parameters(DeleteTagArgs {
             name: "v1".into(),
             remote: false
@@ -2234,6 +2271,73 @@ mod tests {
             .expect("the tool returns one text block")
             .text
             .clone()
+    }
+
+    /// The schema an agent reads names the stash by `sha` alone, never by slot.
+    #[test]
+    fn drop_stash_schema_takes_a_required_sha_and_no_index() {
+        let tool = GitDesktopMcp::write_git_router()
+            .list_all()
+            .into_iter()
+            .find(|t| t.name == "drop_stash")
+            .expect("drop_stash is listed");
+        let schema = serde_json::Value::Object((*tool.input_schema).clone());
+        assert_eq!(schema["required"], serde_json::json!(["sha"]), "{schema}");
+        let props = schema["properties"].as_object().expect("properties");
+        assert!(props.contains_key("sha"), "{schema}");
+        assert!(!props.contains_key("index"), "{schema}");
+    }
+
+    /// End to end: list_stashes rows carry the sha, drop_stash drops exactly that
+    /// entry from mid-stack, and a sha no longer listed refuses toward list_stashes.
+    #[tokio::test]
+    async fn drop_stash_drops_by_sha_and_refuses_a_gone_one() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-drop-stash-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init", "-q", "-b", "main"]).await;
+        configure(&repo).await;
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "base"]).await;
+        for body in ["one\n", "two\n", "three\n"] {
+            std::fs::write(dir.path().join("a.txt"), body).unwrap();
+            git(&repo, &["stash", "push", "-q"]).await;
+        }
+        let h = GitDesktopMcp::with_options(repo.clone(), false, false, true, true);
+        let listed: serde_json::Value =
+            serde_json::from_str(&text_of(&h.list_stashes().await.unwrap())).unwrap();
+        let shas: Vec<String> = listed
+            .as_array()
+            .expect("an array of stashes")
+            .iter()
+            .map(|row| row["sha"].as_str().expect("a sha on every row").to_string())
+            .collect();
+        assert_eq!(shas.len(), 3, "{listed}");
+        let middle = shas[1].clone();
+
+        let result = h
+            .drop_stash(Parameters(StashShaArgs {
+                sha: middle.clone(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(text_of(&result), format!("stash dropped: {middle}"));
+        let left: Vec<String> = git(&repo, &["stash", "list", "--format=%H"])
+            .await
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(left, vec![shas[0].clone(), shas[2].clone()]);
+
+        let err = h
+            .drop_stash(Parameters(StashShaArgs { sha: middle }))
+            .await
+            .expect_err("a dropped sha refuses");
+        assert!(err.message.contains("No stash with sha"), "{}", err.message);
+        assert!(err.message.contains("list_stashes"), "{}", err.message);
     }
 
     /// A repo holding commits A then B; returns their oids.
@@ -3335,9 +3439,11 @@ mod tests {
             h.stash_apply(Parameters(StashApplyArgs { index: 0 }))
                 .await
                 .expect_err("stash apply refuses mid-promote"),
-            h.drop_stash(Parameters(StashIndexArgs { index: 0 }))
-                .await
-                .expect_err("stash drop refuses mid-promote"),
+            h.drop_stash(Parameters(StashShaArgs {
+                sha: "a".repeat(40),
+            }))
+            .await
+            .expect_err("stash drop refuses mid-promote"),
             h.merge_branch(Parameters(MergeBranchArgs {
                 branch: "feature".into(),
                 squash: false,

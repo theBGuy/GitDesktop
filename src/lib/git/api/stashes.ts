@@ -19,15 +19,24 @@ export const gitStashApply = (repoPath: string, index: number, pop: boolean) =>
 export const gitStashDrop = (repoPath: string, index: number) =>
   invoke<void>("git_stash_drop", { repoPath, index });
 
-/** Verdict of a SHA-verified backup-stash drop (git_drop_stash_by_sha). */
+/** Verdict of a SHA-verified stash drop (git_drop_stash_by_sha). */
 export type StashDropOutcome =
   | { kind: "dropped" }
   | { kind: "moved" }
   | { kind: "gone" }
   | { kind: "restoreFailed"; droppedSha: string };
 
-export const gitDropStashBySha = (repoPath: string, sha: string) =>
-  invoke<StashDropOutcome>("git_drop_stash_by_sha", { repoPath, sha });
+/** Drops the stash with this sha: only while it is `stash@{0}` by default, or
+ *  wherever it sits with `anyDepth`. An omitted `anyDepth` stays off the wire. */
+export const gitDropStashBySha = (
+  repoPath: string,
+  sha: string,
+  anyDepth?: boolean,
+) =>
+  invoke<StashDropOutcome>(
+    "git_drop_stash_by_sha",
+    anyDepth === undefined ? { repoPath, sha } : { repoPath, sha, anyDepth },
+  );
 
 export const gitOrphanedStashes = (repoPath: string) =>
   invoke<OrphanedStash[]>("git_orphaned_stashes", { repoPath });

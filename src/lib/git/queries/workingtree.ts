@@ -221,12 +221,24 @@ export async function refreshConflictFile(
  *  mounted or shown later holds its buttons through its own first read, so they
  *  never act on pre-write segments; the working tree refreshes behind it. On
  *  error nothing is invalidated: ConflictFileView re-reads itself, and the AI
- *  resolve view renders its own proposal, not the disk. */
+ *  resolve view renders its own proposal, not the disk. A `changedOnDisk`
+ *  outcome is a success here (the awaited re-read runs); the caller shows it. */
 export function useResolveConflict(repo: string) {
   return useRepoMutation(
     repo,
-    (args: { path: string; content: string; stage: boolean }) =>
-      resolveConflict(repo, args.path, args.content, args.stage),
+    (args: {
+      path: string;
+      content: string;
+      stage: boolean;
+      expectedHash: string | null;
+    }) =>
+      resolveConflict(
+        repo,
+        args.path,
+        args.content,
+        args.stage,
+        args.expectedHash,
+      ),
     {
       invalidate: [conflictFileKey(repo)],
       invalidateAfter: workingTreeKeys(repo),

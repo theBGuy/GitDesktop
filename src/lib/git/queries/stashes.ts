@@ -77,31 +77,31 @@ export function useStashList(repo: string, enabled = false) {
   });
 }
 
-export function useStashFiles(repo: string, index: number | null) {
+/** A listed stash's files, keyed AND fetched by its commit sha, never its slot:
+ *  a slot-keyed read would serve one stash's files under another once the stack
+ *  shifts. The sha readers work on any stash-shaped commit, live or dangling. */
+export function useListedStashFiles(repo: string, sha: string | null) {
   return useQuery({
-    queryKey: ["repo", repo, "stash-files", index ?? -1] as const,
-    queryFn: () => api.gitStashFiles(repo, index ?? 0),
-    enabled: index !== null,
+    queryKey: ["repo", repo, "stash-files", sha ?? ""] as const,
+    queryFn: () => api.gitOrphanedStashFiles(repo, sha ?? ""),
+    enabled: sha !== null,
     placeholderData: keepPreviousDataForRepo(repo),
     networkMode: "always",
   });
 }
 
-export function useStashFileDiff(
+/** One file's diff from a listed stash, keyed and fetched by sha (see
+ *  {@link useListedStashFiles}). */
+export function useListedStashFileDiff(
   repo: string,
-  index: number | null,
+  sha: string | null,
   filePath: string | null,
 ) {
   return useQuery({
-    queryKey: [
-      "repo",
-      repo,
-      "stash-diff",
-      index ?? -1,
-      filePath ?? "",
-    ] as const,
-    queryFn: () => api.gitStashFileDiff(repo, index ?? 0, filePath ?? ""),
-    enabled: index !== null && filePath !== null,
+    queryKey: ["repo", repo, "stash-diff", sha ?? "", filePath ?? ""] as const,
+    queryFn: () =>
+      api.gitOrphanedStashFileDiff(repo, sha ?? "", filePath ?? ""),
+    enabled: sha !== null && filePath !== null,
     placeholderData: keepPreviousDataForRepo(repo),
     networkMode: "always",
   });
@@ -120,10 +120,12 @@ export function useStashApply(repo: string) {
   );
 }
 
-export function useStashDrop(repo: string) {
+/** SHA-verified drop of the autostash backup. The local-only invalidation
+ *  refreshes status and stash-count, which the banner's freshness gate reads. */
+export function useDropStashBySha(repo: string) {
   return useRepoMutation(
     repo,
-    (index: number) => api.gitStashDrop(repo, index),
+    (sha: string) => api.gitDropStashBySha(repo, sha),
     {
       // Local stash write — never park it offline.
       networkMode: "always",
@@ -132,12 +134,11 @@ export function useStashDrop(repo: string) {
   );
 }
 
-/** SHA-verified drop of the autostash backup. The local-only invalidation
- *  refreshes status and stash-count, which the banner's freshness gate reads. */
-export function useDropStashBySha(repo: string) {
+/** SHA-verified drop of a listed stash wherever it sits in the stack. */
+export function useDropStashAtAnyDepth(repo: string) {
   return useRepoMutation(
     repo,
-    (sha: string) => api.gitDropStashBySha(repo, sha),
+    (sha: string) => api.gitDropStashBySha(repo, sha, true),
     {
       // Local stash write — never park it offline.
       networkMode: "always",

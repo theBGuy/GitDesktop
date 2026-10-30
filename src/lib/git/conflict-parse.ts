@@ -266,7 +266,13 @@ export function fallbackArm(sides: ConflictSides): FallbackArm {
   const deleted = deletedSide(sides);
   if (deleted !== null) {
     const survivor = sides.ours ?? sides.theirs ?? "";
-    const edited = sides.workingExists && nlf(sides.working) !== nlf(survivor);
+    // Byte truth when the backend could compute it: lossy decodes collide on
+    // distinct bytes. The string compare covers only a null verdict.
+    const edited =
+      sides.workingExists &&
+      (sides.workingMatchesSurvivor != null
+        ? !sides.workingMatchesSurvivor
+        : nlf(sides.working) !== nlf(survivor));
     return edited ? "deletionEdited" : "deletion";
   }
 

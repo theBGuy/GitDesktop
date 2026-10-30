@@ -1,5 +1,8 @@
 export interface StashEntry {
   index: number;
+  /** The stash commit's id: the stable identity. `index` is its current slot,
+   *  which shifts as stashes are pushed and dropped. */
+  sha: string;
   message: string;
   date: string;
 }

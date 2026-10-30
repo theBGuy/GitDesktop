@@ -2995,7 +2995,7 @@ pub async fn git_stash_count(repo_path: String) -> AppResult<u32> {
 pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
     let out = run_git(
         Some(&repo_path),
-        &["stash", "list", "--format=%gd%x00%s%x00%cI"],
+        &["stash", "list", "--format=%gd%x00%H%x00%s%x00%cI"],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -3003,9 +3003,9 @@ pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
     let entries = text
         .lines()
         .filter_map(|line| {
-            let mut parts = line.splitn(3, '\0');
-            let (Some(refname), Some(message), Some(date)) =
-                (parts.next(), parts.next(), parts.next())
+            let mut parts = line.splitn(4, '\0');
+            let (Some(refname), Some(sha), Some(message), Some(date)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
             else {
                 return None;
             };
@@ -3018,6 +3018,7 @@ pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
                 .ok()?;
             Some(StashEntry {
                 index,
+                sha: sha.to_string(),
                 message: message.to_string(),
                 date: date.to_string(),
             })

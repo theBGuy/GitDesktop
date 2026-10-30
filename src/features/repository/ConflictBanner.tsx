@@ -42,6 +42,11 @@ import {
   opInfoTone,
   opPhrase,
 } from "./conflict-banner-state";
+import {
+  STASH_DROP_GONE,
+  STASH_DROP_MOVED,
+  stashDropRestoreFailed,
+} from "./stash-drop-copy";
 
 /** The finish control's label, per op. */
 const OP_LABELS: Record<RepoOp, string> = {
@@ -106,7 +111,7 @@ const dialogClosed = () =>
   });
 
 function toastStashMoved() {
-  toast.info("The stash list changed — nothing was dropped.", {
+  toast.info(STASH_DROP_MOVED, {
     action: {
       label: "View stashes",
       onClick: (event) => {
@@ -120,7 +125,7 @@ function toastStashMoved() {
 }
 
 function toastStashGone() {
-  toast.info("The backup stash is already gone, so there was nothing to drop.");
+  toast.info(STASH_DROP_GONE.banner);
 }
 
 /** The conflicted tail with its branch name in mono, wrapping anywhere: a long
@@ -346,20 +351,17 @@ export function ConflictBanner({
         toastStashGone();
         break;
       case "restoreFailed":
-        toast.error(
-          `The stash list changed — a different stash (${outcome.droppedSha.slice(0, 7)}) was dropped and couldn't be restored. Recover it under View stashes → Recoverable.`,
-          {
-            // The only place the lost entry's sha appears: it stays until closed.
-            duration: Infinity,
-            action: {
-              label: "Recover",
-              onClick: (event) => {
-                event.currentTarget.blur();
-                dispatchAction("recover-lost-work");
-              },
+        toast.error(stashDropRestoreFailed(outcome.droppedSha), {
+          // The only place the lost entry's sha appears: it stays until closed.
+          duration: Infinity,
+          action: {
+            label: "Recover",
+            onClick: (event) => {
+              event.currentTarget.blur();
+              dispatchAction("recover-lost-work");
             },
           },
-        );
+        });
         break;
     }
     // Every verdict retires this offer: a refusal would only refuse again. The

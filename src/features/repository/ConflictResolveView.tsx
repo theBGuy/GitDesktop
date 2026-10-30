@@ -31,6 +31,7 @@ import { useAiTextStream } from "@/lib/ai/stream";
 import { readRepoInstructions } from "@/lib/git/api";
 import {
   type ConflictSides,
+  changedOnDiskCopy,
   conflictSides,
   diffContents,
 } from "@/lib/git/conflict";
@@ -285,6 +286,10 @@ export function ConflictResolveView({
     // resolved) lives in the conflict editor, which this view has no counterpart to.
     const clean = !hasConflictMarkers(proposed);
     try {
+      // Phase "ready" implies `sides`. Its hash, never the re-read's below, is
+      // the expected value: the proposal was built from this read.
+      if (!sides) return;
+      const expected = sides.workingHash;
       // `sides` is the start-time read; the write refuses on the LIVE bytes, so a
       // file that stopped being UTF-8 since then never takes a lossy proposal.
       let fresh: ConflictSides;
@@ -314,7 +319,18 @@ export function ConflictResolveView({
         );
         return;
       }
-      await resolve.mutateAsync({ path, content: proposed, stage: clean });
+      const outcome = await resolve.mutateAsync({
+        path,
+        content: proposed,
+        stage: clean,
+        expectedHash: expected,
+      });
+      // The proposal and Regenerate stay; only a Regenerate re-reads the sides
+      // and refreshes the expected hash.
+      if (outcome.kind === "changedOnDisk") {
+        toast.info(changedOnDiskCopy(baseName(path)));
+        return;
+      }
       // This continuation can outlive the walk that armed it (another surface armed
       // its own walk, or the repo-switch clear fired) during the mutation, so both
       // the wording and the advance come from a fresh read gated on it still

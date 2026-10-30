@@ -873,8 +873,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 **Stash all changes** ({{kbd:stash-all}}) sets your working changes aside; **View
 stashes** lists them to apply, pop, or drop (each asks first, and the apply and pop
 prompts say whether the stash stays in the list afterwards), and **Pop latest stash**
-restores the most recent. Setting changes aside is refused while conflicts are still
-unresolved, or while a merge, rebase, cherry-pick or revert is in progress — finish or abort it first, so a
+restores the most recent. A drop removes exactly the stash you picked, even when another
+tool adds or drops a stash while the list is open. Setting changes aside is refused while
+conflicts are still unresolved, or while a merge, rebase, cherry-pick or revert is in
+progress — finish or abort it first, so a
 resolution you've already staged can't be swept out of the operation.
 
 **Recover lost work** (in the branch ⋮ menu, or the command palette) opens the
@@ -1161,7 +1163,9 @@ editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)
 accepts ask first, since taking a side replaces the file wholesale, conflict regions you
 already settled by hand included. A conflicted file that isn't UTF-8 text skips the
 per-region accepts and resolves through the whole-file accepts or your editor, keeping its
-bytes exact. Files mark
+bytes exact. If the file changed on disk after the editor read it (saved from another
+editor, say), **Accept current**, **Accept incoming**, and **Both** write nothing: a message
+says so, and the editor re-reads the file so its regions match what's on disk. Files mark
 themselves resolved as you go — the \`!\` badge clears — and the finish control stays
 disabled, saying so, until every conflict is resolved. When one side of a conflict removed
 a file, the editor names the removal instead of showing regions, and the same whole-file
@@ -1184,7 +1188,9 @@ on the file's context menu, and in the command palette ({{kbd:command-palette}})
 **Resolve conflict with AI**). Your configured **Review** model (Settings → AI) merges the
 file's sides and streams a proposal; you review it as a diff against your side, flip to the
 proposed file or the *ours* / *theirs* / *base* versions, then **Accept & stage** to apply
-it — nothing is written until you accept. **Regenerate** for another attempt, or
+it — nothing is written until you accept. If the file changed on disk after the proposal
+started, accepting writes nothing and the proposal stays on screen until you regenerate it
+from the file as it is now. **Regenerate** for another attempt, or
 **Discard** to drop the proposal. When a proposal still has conflict markers, a warning
 says so and the button reads **Accept**: it writes the file but leaves it unstaged and
 moves on. The file stays listed as conflicted: finish it in the conflict editor, or
@@ -3275,8 +3281,8 @@ revert, cherry-pick, and tags — plus two always-on reads it pairs with: list s
 preview a merge's outcome. On top of that, **Allow destructive** (\`--allow-destructive\`,
 which requires \`--allow-git-write\` too — on its own it grants nothing) unlocks the
 **irreversible** operations: delete a branch, discard changes, reset, force-push (with
-lease), delete a remote branch, drop a stash, delete a tag, and drop commits on a guarded
-rebase pull. Agent-session branches (\`gd/session/*\`) are refused by the branch-mutating
+lease), delete a remote branch, drop a stash (by the sha that list stashes reports), delete
+a tag, and drop commits on a guarded rebase pull. Agent-session branches (\`gd/session/*\`) are refused by the branch-mutating
 tools, so an in-flight agent session is never broken.
 
 The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):

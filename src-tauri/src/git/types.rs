@@ -271,6 +271,9 @@ pub struct RewriteStep {
 #[serde(rename_all = "camelCase")]
 pub struct StashEntry {
     pub index: u32,
+    /// The stash commit's id: the stable identity. `index` is its current slot,
+    /// which shifts as stashes are pushed and dropped.
+    pub sha: String,
     pub message: String,
     pub date: String,
 }
