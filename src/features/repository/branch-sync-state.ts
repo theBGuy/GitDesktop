@@ -41,10 +41,11 @@ export function remoteHasBranch(
 
 // The create decision is out of reach by design for: narrow or remapped fetch
 // refspecs and a git without the %(push) atoms (no destination git resolves), a
-// push remote with its own push refspecs (git's bare push runs as configured),
-// several pushurls (the first is named; the push goes to all), force pushes
-// (their own confirm), and presence, which is remote-tracking refs as of the
-// last fetch. It claims a create only from facts git reports, with no network read.
+// push remote with its own push refspecs or a mirror one (git's bare push runs
+// as configured, and git refuses an explicit refspec to a mirror), several
+// pushurls (the first is named; the push goes to all), force pushes (their own
+// confirm), and presence, which is remote-tracking refs as of the last fetch. It
+// claims a create only from facts git reports, with no network read.
 
 /** The bare-push create decision. A resolved destination that the remote is
  *  not known to have → true (ask); known present → false; an UNRESOLVED

@@ -4,6 +4,7 @@ use crate::error::AppResult;
 use crate::git::branches::{
     push_destination_fields, read_refs_with_push_destination, validate_ref_name,
 };
+use crate::git::diff::git_config_bool;
 use crate::git::remote::{
     is_named_remote, parse_upstream_tracking, remote_head_branch, Upstream,
     UPSTREAM_TRACKING_FORMAT,
@@ -200,6 +201,17 @@ fn config_last<'a>(entries: &'a [ConfigEntry], key: &str) -> Option<&'a str> {
     config_values(entries, key).last()
 }
 
+/// Whether `remote.<r>.mirror` may make a bare push to `r` a mirror push (git-config:
+/// "as if --mirror was given"). Read off the raw entry, since a valueless key is true; a
+/// value git can't read as a bool counts too, so only a definite false clears it.
+fn remote_is_mirror(config: &[ConfigEntry], remote: &str) -> bool {
+    let key = canonical_config_key(&format!("remote.{remote}.mirror"));
+    config
+        .iter()
+        .rfind(|(k, _)| *k == key)
+        .is_some_and(|(_, v)| git_config_bool(v.as_deref()) != Some(false))
+}
+
 /// The one config listing the push decisions read; `None` when it failed, which callers
 /// treat as "not refused" and "no destination claimed".
 async fn push_config(repo_path: &str) -> Option<Vec<ConfigEntry>> {
@@ -238,7 +250,8 @@ fn bare_push_refused(config: &[ConfigEntry], name: &str, upstream_remote: &str) 
 /// upstream's: `simple` then acts as `current` (git-config push.default), landing the
 /// branch under its own name there, yet `%(push)` resolves nothing for it (measured
 /// empty, git 2.51.1, in `push_destination_matrix`). A push remote with its own push
-/// refspecs claims nothing: git's bare push sends every one of them, as configured.
+/// refspecs claims nothing: git's bare push sends every one of them, as configured. A
+/// mirror push remote is left to [`configured_destination`], which clears it on both paths.
 fn triangular_simple_destination(
     config: &[ConfigEntry],
     name: &str,
@@ -262,7 +275,8 @@ fn triangular_simple_destination(
 /// `push.default=matching` resolves `%(push)` like `current` but only updates branches
 /// both ends already have, so it never creates one; triangular `simple` lands where the
 /// atoms resolve nothing. The remote must be a configured one (a pushRemote can name a
-/// URL); a failed listing claims nothing.
+/// URL) and no mirror (`remote.<r>.mirror`: git's bare push mirrors every ref there, as
+/// configured); a failed listing claims nothing.
 fn configured_destination(
     config: Option<&[ConfigEntry]>,
     name: &str,
@@ -283,6 +297,7 @@ fn configured_destination(
         config_values(c, &format!("remote.{r}.url"))
             .next()
             .is_some()
+            && !remote_is_mirror(c, r)
     });
     if configured {
         dest
@@ -850,6 +865,45 @@ mod tests {
         );
         assert_eq!(dest("remote.pushDefault\nghost\0", (None, None)), none);
         assert_eq!(dest("", (Some("ghost"), Some("topic"))), none);
+        // A mirror push remote is unresolved on both paths, valueless and junk values
+        // included; the last entry wins, and a definite false or another remote's mirror
+        // leaves the claim.
+        for mirror in [
+            "remote.second.mirror\ntrue\0",
+            "remote.second.mirror\nYes\0",
+            "remote.second.mirror\n2\0",
+            "remote.second.mirror\0",
+            "remote.second.mirror\nmaybe\0",
+            "remote.second.mirror\nfalse\0remote.second.mirror\non\0",
+        ] {
+            assert_eq!(
+                dest(mirror, (Some("second"), Some("topic"))),
+                none,
+                "{mirror:?}"
+            );
+            assert_eq!(
+                dest(
+                    &format!("remote.pushDefault\nsecond\0{mirror}"),
+                    (None, None)
+                ),
+                none,
+                "{mirror:?}"
+            );
+        }
+        for not_mirror in [
+            "remote.second.mirror\nfalse\0",
+            "remote.second.mirror\nOFF\0",
+            "remote.second.mirror\n\0",
+            "remote.second.mirror\non\0remote.second.mirror\n0\0",
+            "remote.origin.mirror\ntrue\0",
+            "remote.Second.mirror\ntrue\0",
+        ] {
+            assert_eq!(
+                dest(not_mirror, (Some("second"), Some("topic"))),
+                some("second", "topic"),
+                "{not_mirror:?}"
+            );
+        }
         assert_eq!(
             configured_destination(
                 None,
@@ -1112,26 +1166,41 @@ mod tests {
     }
 
     /// Where a bare `git push` from `work` actually landed: every `<remote>:<branch>`
-    /// created or moved on the fixture's two bare remotes. A refused or empty push
-    /// lands nowhere.
+    /// created or moved on the fixture's two bare remotes, then any it deleted (a mirror
+    /// push can), suffixed ` deleted`. A refused or empty push lands nowhere.
     async fn bare_push_landing(work: &str, dir: &std::path::Path) -> Vec<String> {
+        push_landing(work, dir, &["push", "-q"]).await.1
+    }
+
+    /// [`bare_push_landing`] for any push argv, with git's exit code and stderr.
+    async fn push_landing(
+        work: &str,
+        dir: &std::path::Path,
+        args: &[&str],
+    ) -> ((i32, String), Vec<String>) {
         let remotes = [("origin", "origin.git"), ("second", "second.git")];
         let mut before = Vec::new();
         for (_, bare) in remotes {
             before.push(remote_heads(&dir.join(bare).to_string_lossy()).await);
         }
-        run_git_raw(Some(work), &["push", "-q"], DEFAULT_TIMEOUT)
+        let out = run_git_raw(Some(work), args, DEFAULT_TIMEOUT)
             .await
             .unwrap();
         let mut landed = Vec::new();
+        let mut deleted = Vec::new();
         for ((name, bare), before) in remotes.into_iter().zip(before) {
-            for (branch, sha) in remote_heads(&dir.join(bare).to_string_lossy()).await {
-                if before.get(&branch) != Some(&sha) {
+            let after = remote_heads(&dir.join(bare).to_string_lossy()).await;
+            for (branch, sha) in &after {
+                if before.get(branch) != Some(sha) {
                     landed.push(format!("{name}:{branch}"));
                 }
             }
+            for branch in before.keys().filter(|b| !after.contains_key(*b)) {
+                deleted.push(format!("{name}:{branch} deleted"));
+            }
         }
-        landed
+        landed.extend(deleted);
+        ((out.code, out.stderr), landed)
     }
 
     /// One measured row of [`push_destination_matrix`].
@@ -1174,6 +1243,8 @@ mod tests {
         let remote_pd = "remote.pushDefault";
         let origin_push = "remote.origin.push";
         let second_push = "remote.second.push";
+        let origin_mirror = "remote.origin.mirror";
+        let second_mirror = "remote.second.mirror";
         let all = [
             pd,
             push_remote,
@@ -1181,7 +1252,12 @@ mod tests {
             remote_pd,
             origin_push,
             second_push,
+            origin_mirror,
+            second_mirror,
         ];
+        // `git config` can't write a valueless key, so a row value of this sentinel is
+        // appended to the config file as a bare `<var>` line instead.
+        const VALUELESS: &str = "<valueless>";
         let s = |v: &str| v.to_string();
         let o = |v: &str| Some(v.to_string());
         let atoms = |r: &str, rr: &str, p: &str| [s(r), s(rr), s(p)];
@@ -1468,6 +1544,76 @@ mod tests {
                     landed: vec![s("origin:feat/y")],
                 },
             ),
+            // A mirror push remote: git's bare push mirrors every ref there (deleting
+            // what the clone lacks), and git refuses the app's explicit push to it
+            // (`an_explicit_push_to_a_mirror_remote_is_refused`), so none is claimed on
+            // either config path.
+            (
+                "q-mirror-triangular-simple",
+                vec![
+                    (pd, "simple"),
+                    (push_remote, "second"),
+                    (second_mirror, "true"),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", "refs/remotes/second/feat/y"),
+                    status: None,
+                    landed: vec![s("second:feat/y")],
+                },
+            ),
+            (
+                "r-mirror-current",
+                vec![
+                    (pd, "current"),
+                    (push_remote, "second"),
+                    (second_mirror, "true"),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", "refs/remotes/second/feat/y"),
+                    status: None,
+                    landed: vec![s("second:feat/y")],
+                },
+            ),
+            (
+                "s-mirror-valueless",
+                vec![
+                    (pd, "simple"),
+                    (push_remote, "second"),
+                    (second_mirror, VALUELESS),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", "refs/remotes/second/feat/y"),
+                    status: None,
+                    landed: vec![s("second:feat/y")],
+                },
+            ),
+            // The upstream's own remote as a mirror, off the upstream's name: the
+            // atoms differ from the upstream, so the config is read and clears them.
+            (
+                "z-mirror-upstream-remote",
+                vec![(origin_mirror, "true")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
+                    status: None,
+                    landed: vec![s("origin:feat/y"), s("origin:feat/x deleted")],
+                },
+            ),
+            // The same, on a same-named branch: the atoms are the live upstream, so no
+            // config is read and the claim is the upstream itself.
+            (
+                "za-same-mirror-upstream",
+                vec![(origin_mirror, "true")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/x"),
+                    status: o("origin:feat/x"),
+                    landed: vec![s("origin:feat/x")],
+                },
+            ),
         ];
         let mut measured = 0;
         for (tag, config, refetch, want) in rows {
@@ -1498,7 +1644,14 @@ mod tests {
             }
             // A key repeated in a row is multi-valued: its later values are added.
             for (i, (key, value)) in config.iter().enumerate() {
-                if config[..i].iter().any(|(k, _)| k == key) {
+                if *value == VALUELESS {
+                    let (section, var) = key.rsplit_once('.').unwrap();
+                    let (section, sub) = section.split_once('.').unwrap();
+                    let file = std::path::Path::new(&work).join(".git").join("config");
+                    let mut text = std::fs::read_to_string(&file).unwrap();
+                    text.push_str(&format!("[{section} \"{sub}\"]\n\t{var}\n"));
+                    std::fs::write(&file, text).unwrap();
+                } else if config[..i].iter().any(|(k, _)| k == key) {
                     git(&work, &["config", "--add", key, value]).await;
                 } else {
                     git(&work, &["config", key, value]).await;
@@ -1791,6 +1944,52 @@ mod tests {
         }
         if measured == 0 {
             eprintln!("skipping the off-upstream rows: every row met leaked config");
+        }
+    }
+
+    /// What git does with the app's explicit push (a named destination refspec, with and
+    /// without `-u`) to a mirror remote: it refuses outright, landing nothing, which is
+    /// why a mirror push remote stays unresolved. A `false` mirror is the control.
+    #[tokio::test]
+    async fn an_explicit_push_to_a_mirror_remote_is_refused() {
+        let (_guard, base) = temp_base("push-mirror");
+        let explicit: &[&str] = &["push", "second", "refs/heads/feat/y:refs/heads/feat/y"];
+        let with_u: &[&str] = &[
+            "push",
+            "-u",
+            "second",
+            "refs/heads/feat/y:refs/heads/feat/y",
+        ];
+        // (row tag, remote.second.mirror, push argv, whether git refuses it)
+        let rows = [
+            ("explicit", "true", explicit, true),
+            ("explicit-u", "true", with_u, true),
+            ("explicit-not-mirror", "false", explicit, false),
+        ];
+        let mut measured = 0;
+        for (tag, mirror, args, refused) in rows {
+            let work = renamed_branch_fixture(&base, tag).await;
+            if !all_unset(&work, &format!("row {tag}"), &["remote.second.push"]).await {
+                continue;
+            }
+            git(&work, &["config", "remote.second.mirror", mirror]).await;
+            let ((code, stderr), landed) = push_landing(&work, &base.join(tag), args).await;
+            eprintln!("measured {tag}: exit {code}, landed {landed:?}, stderr {stderr:?}");
+            if refused {
+                assert_ne!(code, 0, "row {tag}");
+                assert!(
+                    stderr.contains("--mirror can't be combined with refspecs"),
+                    "row {tag}: {stderr}"
+                );
+                assert!(landed.is_empty(), "row {tag}: {landed:?}");
+            } else {
+                assert_eq!(code, 0, "row {tag}: {stderr}");
+                assert_eq!(landed, ["second:feat/y"], "row {tag}");
+            }
+            measured += 1;
+        }
+        if measured == 0 {
+            eprintln!("skipping the mirror push rows: every row met leaked config");
         }
     }
 

@@ -562,11 +562,10 @@ enum DiffAttr {
 
 /// git's config-bool alphabet, case-insensitive: the named spellings, a VALUELESS key
 /// (`None`) as true, an empty value as false, and any DECIMAL integer, where non-zero
-/// is true (git also reads `0x` hex via strtoimax base 0; that spelling drops to the
-/// sniff here). A junk value is not a bool git can parse either — git FATALS the diff
-/// rather than choosing — so dropping the entry and letting the content sniff decide
-/// is strictly more graceful than what git itself does.
-fn git_config_bool(value: Option<&str>) -> Option<bool> {
+/// is true (git also reads `0x` hex via strtoimax base 0; that spelling reads as junk
+/// here). Junk is `None`, a bool git can't parse either (git fatals rather than
+/// choosing), so each caller's fallback for it is strictly more graceful than git's.
+pub(crate) fn git_config_bool(value: Option<&str>) -> Option<bool> {
     let Some(value) = value else {
         return Some(true);
     };

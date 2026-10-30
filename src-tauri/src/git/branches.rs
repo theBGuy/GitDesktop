@@ -309,7 +309,8 @@ pub(crate) fn push_destination_fields(
 /// upstream's own tracking ref on the same remote (the upstream's branch) or the
 /// standard `refs/remotes/<remote>/<local>` (the same name). Any other shape (a
 /// remapped fetch refspec, `team/…`) is unresolved: a wrong branch name is never an
-/// answer.
+/// answer. A mirror push remote (`remote.<r>.mirror`) resolves here like any other; the
+/// atoms can't tell it apart, so the status read clears it from the push config.
 fn push_destination(
     local: &str,
     push_remote: &str,
