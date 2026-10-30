@@ -2229,6 +2229,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (!currentName)
       return headUnread ?? "HEAD is detached — there's no branch to update.";
     if (defaultName === currentName) return `You're already on ${defaultName}.`;
+    // Without the list, the default's upstream is unknown, and so is the base. A
+    // promotion rule holds whether or not the list lands, so it isn't displaced.
+    if (branchesUnread && !currentPromotion) return branchesUnread;
     // An in-place update waits on the network lock a push holds.
     if (pushActive) return branchPushHoldReason(pushPaused);
     if (busy) return "Another git operation is running.";
@@ -2540,6 +2543,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     Boolean(
       defaultName &&
         defaultName !== currentName &&
+        // An unread list would resolve the base to the local default.
+        !branchesUnread &&
         !busy &&
         currentName &&
         !currentPromotion,
@@ -3991,6 +3996,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     !defaultName ||
                     !currentName ||
                     defaultName === currentName ||
+                    branchesUnread !== null ||
                     pushActive ||
                     busy ||
                     currentPromotion

@@ -12,5 +12,7 @@ export const REPO_SHELL_GC_TIME = 30 * 60_000;
 
 /** staleTime of the shell factories without a window of their own: each read is
  *  fresh for 1 s, sized to cover the warm-up→mount gap (4 × the 250 ms budget,
- *  restated since lib/ can't import features/). Polls and invalidations refetch. */
+ *  restated since lib/ can't import features/). Polls and invalidations refetch,
+ *  except that an invalidation doesn't restart a read in flight with no observer:
+ *  that read resolves fresh, holding its older data. */
 export const REPO_SHELL_WARM_STALE_MS = 1000;
