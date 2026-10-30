@@ -311,7 +311,7 @@ pub(crate) fn push_destination_fields(
 /// remapped fetch refspec, `team/…`) is unresolved: a wrong branch name is never an
 /// answer. A mirror push remote (`remote.<r>.mirror`) resolves here like any other; the
 /// atoms can't tell it apart, so the status read clears it from the push config, except
-/// for a destination that is the branch's own live upstream, where it reads no config.
+/// for the branch's own same-named live upstream, where it reads no config.
 fn push_destination(
     local: &str,
     push_remote: &str,
