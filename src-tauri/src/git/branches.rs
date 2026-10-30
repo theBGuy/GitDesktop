@@ -225,7 +225,7 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
 /// after a read's own fields: the push remote, its explicit destination ref (filled only
 /// under a `remote.<r>.push` refspec), the destination's remote-tracking ref, and the
 /// upstream's tracking ref it is compared with.
-pub(crate) const PUSH_DESTINATION_ATOMS: &str =
+const PUSH_DESTINATION_ATOMS: &str =
     "%(push:remotename)%00%(push:remoteref)%00%(push)%00%(upstream)";
 
 /// Runs `for-each-ref <pattern>` with `base_format` extended by
@@ -273,7 +273,7 @@ async fn read_refs_with_fallback(
 /// Whether for-each-ref refused a format atom: git's ref-filter says `unknown field
 /// name: <atom>` for an atom it lacks and `unrecognized %(push) argument: <arg>` for a
 /// known atom's unknown argument. The runner pins `LC_ALL=C`, so neither localizes.
-pub(crate) fn is_unknown_format_atom(stderr: &str) -> bool {
+fn is_unknown_format_atom(stderr: &str) -> bool {
     stderr.contains("unknown field name") || stderr.contains("unrecognized %(push) argument")
 }
 
@@ -310,7 +310,7 @@ pub(crate) fn push_destination_fields(
 /// standard `refs/remotes/<remote>/<local>` (the same name). Any other shape (a
 /// remapped fetch refspec, `team/…`) is unresolved: a wrong branch name is never an
 /// answer.
-pub(crate) fn push_destination(
+fn push_destination(
     local: &str,
     push_remote: &str,
     push_remoteref: &str,
@@ -3635,6 +3635,9 @@ mod tests {
         run(&repo_s, &["update-ref", &tracking, "HEAD"]).await;
         let upstream = format!("--set-upstream-to=origin/{main}");
         run(&repo_s, &["branch", "-q", &upstream]).await;
+        // Pinned, so a global remote.pushDefault can't move the push remote read below.
+        let push_remote = format!("branch.{main}.pushRemote");
+        run(&repo_s, &["config", &push_remote, "origin"]).await;
         let fmt = UPSTREAM_TRACKING_FORMAT;
         let base_text = run(&repo_s, &["for-each-ref", &refname, fmt]).await;
         let tracked = Some((Upstream::Branch(main.clone()), "origin".to_string(), false));
@@ -3668,6 +3671,8 @@ mod tests {
             .unwrap();
         assert_eq!(parse_upstream_tracking(&text, &refname), tracked);
         let line = text.lines().next().unwrap();
+        // The base format's 4 fields plus the 4 atoms, whatever their values.
+        assert_eq!(line.split('\0').count(), 8, "{line:?}");
         assert_eq!(line.split('\0').nth(4), Some("origin"), "{line:?}");
         // Not a format refusal: no retry, an error.
         let missing = base.join("not-a-repo");

@@ -1862,9 +1862,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // doUpdateFromUpstream. Whether this publishes (-u) or plain pushes is decided
   // backend-side from the branch's tracking state. The publish arms pass an
   // explicit `remote` (the chosen destination); a tracked push passes none and
-  // the backend resolves to the branch's own upstream remote. The list stays
-  // open: a push holds only the network lock, so the row shows its progress and
-  // the rest of the list stays usable.
+  // the backend resolves to the branch's own upstream remote. A tracked push or
+  // a publish the remote already has leaves the list open: a push holds only the
+  // network lock, so the row shows its progress and the rest of the list stays
+  // usable. A publish that would create the branch closes it for its prompt.
   function doPushBranch(branch: Branch, remote?: string) {
     if (refuseWhileOffline() || pushAlreadyActive()) return;
     if (willPublish(branch)) void beginPublishBranch(branch, remote);
