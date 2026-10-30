@@ -53,9 +53,9 @@ pub async fn git_status(_state: State<'_, AppState>, repo_path: String) -> AppRe
 /// Fills the upstream's remote/branch split, the bare push's destination and the
 /// mismatch facts the porcelain's short `branch.upstream` can't carry. Advisory, failing
 /// toward inaction: any failed read leaves its facts None/false. One spawn per upstream
-/// (two on a git without the push atoms); a cross-name upstream or a push remote other
-/// than the upstream's adds one config listing, and a refused bare push the remote-HEAD
-/// probe.
+/// (two on a git without the push atoms); a cross-name upstream, a push remote other
+/// than the upstream's, or a destination other than a live upstream adds one config
+/// listing, and a refused bare push the remote-HEAD probe.
 async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     let (Some(name), Some(_)) = (head.name.clone(), head.upstream.as_ref()) else {
         return;
@@ -68,7 +68,7 @@ async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     let refname = format!("refs/heads/{name}");
     // The shared tracking format plus the push-destination atoms, in this one spawn;
     // the shared constant stays as the push path parses it.
-    let Ok((text, _)) =
+    let Ok(text) =
         read_refs_with_push_destination(repo_path, &refname, UPSTREAM_TRACKING_FORMAT).await
     else {
         return;
@@ -82,15 +82,21 @@ async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     head.upstream_remote.clone_from(&split.remote);
     head.upstream_branch.clone_from(&split.branch);
     (head.push_remote, head.push_branch) = atoms.clone();
+    // Atoms that name somewhere other than a live upstream (a non-branch or gone
+    // upstream, a push remote of its own) may describe a push git won't make, such as
+    // `matching`'s, so the config decides those; the everyday push to its own live
+    // upstream reads none.
+    let off_upstream = atoms.0.is_some()
+        && (atoms != (split.remote.clone(), split.branch.clone()) || head.upstream_gone);
     let remote = match split.remote {
         Some(remote) => remote,
         None if local_upstream => ".".to_string(),
         None => return,
     };
-    // Only these two shapes can push anywhere but the upstream itself, so only they pay
-    // the config listing (a triangular repo: its push remote isn't the upstream's).
+    // A triangular repo pushes to a remote that isn't the upstream's, even where the
+    // atoms resolve nothing (`simple` there).
     let triangular = is_named_remote(&push_remotename) && push_remotename != remote;
-    if !split.candidate && !triangular {
+    if !split.candidate && !triangular && !off_upstream {
         return;
     }
     let config = push_config(repo_path).await;
@@ -1135,8 +1141,6 @@ mod tests {
         atoms: [String; 3],
         /// The status read's destination, `remote:branch`.
         status: Option<String>,
-        /// The branch list's destination for the same branch.
-        listed: Option<String>,
         landed: Vec<String>,
     }
 
@@ -1144,7 +1148,7 @@ mod tests {
         Some(format!("{}:{}", remote.as_deref()?, branch.as_deref()?))
     }
 
-    /// The row's expectation, as `Err` naming the first field that differs.
+    /// The row's expectation, as `Err` carrying the whole measured and expected rows.
     fn check_row(tag: &str, got: &PushRow, want: &PushRow) -> Result<(), String> {
         if got == want {
             Ok(())
@@ -1156,7 +1160,7 @@ mod tests {
     /// Where a bare push lands, measured per push-config row on a branch (`feat/y`)
     /// tracking a differently named upstream (`origin/feat/x`), or for the `-same-`
     /// rows on that branch renamed to `feat/x`: the raw `%(push…)`
-    /// atoms, the destination the status and branch-list reads derive from them, and
+    /// atoms, the destination the status read derives from them, and
     /// the refs a real `git push` then created or moved. Every axis a row relies on is
     /// written to the repo-local config; the ones it needs unset are checked unset
     /// first. The rule under test: a destination the status read claims is exactly
@@ -1197,7 +1201,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", ""),
                     status: None,
-                    listed: None,
                     landed: vec![],
                 },
             ),
@@ -1208,7 +1211,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", ""),
                     status: None,
-                    listed: None,
                     landed: vec![],
                 },
             ),
@@ -1220,7 +1222,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
                     status: o("origin:feat/y"),
-                    listed: o("origin:feat/y"),
                     landed: vec![s("origin:feat/y")],
                 },
             ),
@@ -1231,13 +1232,11 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/feat/x"),
                     status: o("origin:feat/x"),
-                    listed: o("origin:feat/x"),
                     landed: vec![s("origin:feat/x")],
                 },
             ),
             // matching resolves %(push) like current but only updates branches both
-            // ends have: nothing is created, so the status read claims nothing. The
-            // list (no config read) still names the destination a push would target.
+            // ends have: nothing is created, so the status read claims nothing.
             (
                 "e-matching",
                 vec![(pd, "matching")],
@@ -1245,7 +1244,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
                     status: None,
-                    listed: o("origin:feat/y"),
                     landed: vec![],
                 },
             ),
@@ -1256,7 +1254,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", ""),
                     status: None,
-                    listed: None,
                     landed: vec![],
                 },
             ),
@@ -1269,7 +1266,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("second", "", ""),
                     status: o("second:feat/y"),
-                    listed: None,
                     landed: vec![s("second:feat/y")],
                 },
             ),
@@ -1280,7 +1276,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("second", "", ""),
                     status: o("second:feat/y"),
-                    listed: None,
                     landed: vec![s("second:feat/y")],
                 },
             ),
@@ -1300,7 +1295,6 @@ mod tests {
                         "refs/remotes/origin/pushed/y",
                     ),
                     status: None,
-                    listed: None,
                     landed: vec![s("origin:pushed/y")],
                 },
             ),
@@ -1320,7 +1314,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", ""),
                     status: None,
-                    listed: None,
                     landed: vec![s("origin:feat/y")],
                 },
             ),
@@ -1333,7 +1326,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/team/feat/y"),
                     status: None,
-                    listed: None,
                     landed: vec![s("origin:feat/y")],
                 },
             ),
@@ -1345,7 +1337,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/team/feat/x"),
                     status: o("origin:feat/x"),
-                    listed: o("origin:feat/x"),
                     landed: vec![s("origin:feat/x")],
                 },
             ),
@@ -1358,7 +1349,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("second", "", "refs/remotes/origin/feat/x"),
                     status: None,
-                    listed: None,
                     landed: vec![],
                 },
             ),
@@ -1371,7 +1361,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/feat/x"),
                     status: o("origin:feat/x"),
-                    listed: o("origin:feat/x"),
                     landed: vec![s("origin:feat/x")],
                 },
             ),
@@ -1383,7 +1372,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("second", "", ""),
                     status: o("second:feat/x"),
-                    listed: None,
                     landed: vec![s("second:feat/x")],
                 },
             ),
@@ -1395,7 +1383,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("second", "", "refs/remotes/second/feat/x"),
                     status: None,
-                    listed: o("second:feat/x"),
                     landed: vec![],
                 },
             ),
@@ -1414,7 +1401,6 @@ mod tests {
                         "refs/remotes/origin/pushed/y",
                     ),
                     status: None,
-                    listed: None,
                     landed: vec![s("origin:pushed/y")],
                 },
             ),
@@ -1432,7 +1418,6 @@ mod tests {
                         "refs/remotes/origin/published/feat/y",
                     ),
                     status: None,
-                    listed: None,
                     landed: vec![s("origin:published/feat/y"), s("origin:published/main")],
                 },
             ),
@@ -1448,7 +1433,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", ""),
                     status: None,
-                    listed: None,
                     landed: vec![],
                 },
             ),
@@ -1461,7 +1445,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
                     status: None,
-                    listed: o("origin:feat/y"),
                     landed: vec![],
                 },
             ),
@@ -1472,7 +1455,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", ""),
                     status: o("origin:feat/y"),
-                    listed: None,
                     landed: vec![s("origin:feat/y")],
                 },
             ),
@@ -1483,7 +1465,6 @@ mod tests {
                 PushRow {
                     atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
                     status: o("origin:feat/y"),
-                    listed: o("origin:feat/y"),
                     landed: vec![s("origin:feat/y")],
                 },
             ),
@@ -1534,14 +1515,9 @@ mod tests {
             let mut fields = raw.trim_end_matches(['\r', '\n']).split('\0').map(s);
             let atoms = [(); 3].map(|()| fields.next().unwrap_or_default());
             let head = status_core(&work).await.unwrap().branch;
-            let rows = crate::git::branches::git_branches(work.clone())
-                .await
-                .unwrap();
-            let row = rows.iter().find(|b| b.name == local).unwrap();
             let got = PushRow {
                 atoms,
                 status: joined(&head.push_remote, &head.push_branch),
-                listed: joined(&row.push_remote, &row.push_branch),
                 landed: bare_push_landing(&work, &base.join(tag)).await,
             };
             eprintln!("measured {tag}: {got:?}");
@@ -1559,7 +1535,6 @@ mod tests {
                 let wrong = PushRow {
                     atoms: got.atoms.clone(),
                     status: got.status.clone(),
-                    listed: got.listed.clone(),
                     landed: vec![s("origin:never")],
                 };
                 assert!(
@@ -1704,6 +1679,112 @@ mod tests {
         git(&work, &["switch", "-q", "--detach"]).await;
         let head = status_core(&work).await.unwrap().branch;
         assert_eq!((head.upstream_remote, head.upstream_branch), (None, None));
+    }
+
+    /// `pr-7` tracking a fetch-mapped `refs/pull/7/head` on origin, one commit ahead of
+    /// it, in a fresh [`renamed_branch_fixture`] under `base/<tag>`. Returns the clone.
+    async fn pull_request_branch_fixture(base: &std::path::Path, tag: &str) -> String {
+        let work = renamed_branch_fixture(base, tag).await;
+        let origin = base
+            .join(tag)
+            .join("origin.git")
+            .to_string_lossy()
+            .into_owned();
+        git(
+            &origin,
+            &["update-ref", "refs/pull/7/head", "refs/heads/main"],
+        )
+        .await;
+        git(
+            &work,
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/pull/*/head:refs/remotes/origin/pr/*",
+            ],
+        )
+        .await;
+        git(&work, &["fetch", "-q", "origin"]).await;
+        git(
+            &work,
+            &["switch", "-q", "--no-track", "-c", "pr-7", "origin/pr/7"],
+        )
+        .await;
+        git(&work, &["config", "branch.pr-7.remote", "origin"]).await;
+        git(&work, &["config", "branch.pr-7.merge", "refs/pull/7/head"]).await;
+        commit_one(&work, "pr.txt").await;
+        work
+    }
+
+    /// Destinations other than a live upstream, measured against a real push: a
+    /// pull-request upstream and a gone one. `matching` resolves `%(push)` like `current`
+    /// yet creates nothing, so the status read claims a destination only where the push
+    /// landed (`push_destination_matrix`'s rule).
+    #[tokio::test]
+    async fn push_destination_off_upstream_rows() {
+        let (_guard, base) = temp_base("push-off-up");
+        // (row tag, push.default, gone same-name branch rather than pr-7, expected
+        // status destination, expected landing)
+        type Row<'a> = (&'a str, &'a str, bool, Option<&'a str>, &'a [&'a str]);
+        let rows: [Row<'_>; 4] = [
+            ("pr-matching", "matching", false, None, &[]),
+            (
+                "pr-current",
+                "current",
+                false,
+                Some("origin:pr-7"),
+                &["origin:pr-7"],
+            ),
+            ("gone-matching", "matching", true, None, &[]),
+            (
+                "gone-current",
+                "current",
+                true,
+                Some("origin:feat/x"),
+                &["origin:feat/x"],
+            ),
+        ];
+        let mut measured = 0;
+        for (tag, mode, gone, want_status, want_landed) in rows {
+            let (work, local) = if gone {
+                let work = renamed_branch_fixture(&base, tag).await;
+                git(&work, &["branch", "-m", "feat/y", "feat/x"]).await;
+                let origin = base
+                    .join(tag)
+                    .join("origin.git")
+                    .to_string_lossy()
+                    .into_owned();
+                git(&origin, &["update-ref", "-d", "refs/heads/feat/x"]).await;
+                git(&work, &["fetch", "-q", "--prune", "origin"]).await;
+                (work, "feat/x")
+            } else {
+                (pull_request_branch_fixture(&base, tag).await, "pr-7")
+            };
+            let unset = [
+                "push.default".to_string(),
+                format!("branch.{local}.pushRemote"),
+                "remote.pushDefault".to_string(),
+                "remote.origin.push".to_string(),
+            ];
+            let unset: Vec<&str> = unset.iter().map(String::as_str).collect();
+            if !all_unset(&work, &format!("row {tag}"), &unset).await {
+                continue;
+            }
+            git(&work, &["config", "push.default", mode]).await;
+            let head = status_core(&work).await.unwrap().branch;
+            assert_eq!(head.upstream_gone, gone, "row {tag}");
+            let status = joined(&head.push_remote, &head.push_branch);
+            let landed = bare_push_landing(&work, &base.join(tag)).await;
+            eprintln!("measured {tag}: status {status:?}, landed {landed:?}");
+            assert_eq!(status.as_deref(), want_status, "row {tag}: status");
+            assert_eq!(landed, want_landed, "row {tag}: landed");
+            if let Some(dest) = &status {
+                assert_eq!(landed.as_slice(), std::slice::from_ref(dest), "row {tag}");
+            }
+            measured += 1;
+        }
+        assert!(measured > 0, "every row skipped on leaked config");
     }
 
     #[test]

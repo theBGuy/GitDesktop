@@ -64,15 +64,6 @@ export interface Branch {
    *  `refs/heads/main`); null when untracked. Cross-name decisions read this,
    *  never the short `upstream` string (remote names may contain `/`). */
   upstreamRemoteRef: string | null;
-  /** `%(push)`'s resolution for this branch, read without the push config:
-   *  where git maps a bare push, not a guarantee it lands there (matching and
-   *  triangular `simple` differ; the status read is authoritative). null when
-   *  unresolvable, a push remote with its own push refspecs included. Row
-   *  pushes name their remote and refspec outright, so no row action reads it.
-   *  Set together with `pushBranch`. */
-  pushRemote: string | null;
-  /** The branch on `pushRemote` that resolution names. */
-  pushBranch: string | null;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so

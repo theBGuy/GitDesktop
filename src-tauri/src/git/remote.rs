@@ -235,9 +235,10 @@ const REMOTE_URL_TTL: Duration = Duration::from_secs(5);
 /// `(fetch time, resolved url)`.
 type RemoteUrlCache = Mutex<HashMap<(String, String, bool), (Instant, String)>>;
 
-/// Per-`(repo_path, remote_name)` cache of the last resolved remote URL and when it was
-/// fetched. Bounded by (#repos × #remote names) — tiny, so a stale entry is simply
-/// overwritten on the next fetch rather than evicted. Only successful lookups are cached.
+/// Per-`(repo_path, remote_name, push)` cache of the last resolved remote URL and when it
+/// was fetched. Bounded by (#repos × #remote names × 2, the fetch and push variants) —
+/// tiny, so a stale entry is simply overwritten on the next fetch rather than evicted.
+/// Only successful lookups are cached.
 /// A poisoned lock is recovered rather than propagated: every entry is TTL-bounded, so
 /// a value a panicking holder left behind ages out on its own.
 static REMOTE_URL_CACHE: OnceLock<RemoteUrlCache> = OnceLock::new();

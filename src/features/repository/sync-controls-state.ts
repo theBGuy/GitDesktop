@@ -242,12 +242,16 @@ export function deriveSyncControls(input: SyncControlsInput) {
       head.pushBranch !== head.upstreamBranch)
       ? `${head.pushRemote}/${head.pushBranch}`
       : null;
-  const aheadLabel =
-    pushElsewhere !== null
-      ? `${pushLabel} to ${pushElsewhere}`
-      : aheadCount > 0
-        ? `${pushLabel} — ${aheadCount} commit${plural(aheadCount)} to push to ${upstream}`
-        : undefined;
+  const aheadLabel = (() => {
+    switch (true) {
+      case pushElsewhere !== null:
+        return `${pushLabel} to ${pushElsewhere}`;
+      case aheadCount > 0:
+        return `${pushLabel} — ${aheadCount} commit${plural(aheadCount)} to push to ${upstream}`;
+      default:
+        return undefined;
+    }
+  })();
   const behindLabel =
     behindCount > 0
       ? `Pull — ${behindCount} commit${plural(behindCount)} to pull from ${upstream}`

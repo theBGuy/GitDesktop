@@ -2490,26 +2490,14 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   async function updateDefaultFromUpstream() {
     const row = defaultBranchRow;
     if (!row?.upstream || row.upstreamGone) return;
-    if (row.upstreamAhead > 0 && row.upstreamBehind > 0) {
-      const updateIn = repoPath;
-      const status = await queryClient
-        .fetchQuery(branchRewriteStatusOptions(repoPath, row.name))
-        .catch(() => null);
-      // The update builds from the live repo's options once the probe resolves,
-      // while the row belongs to this one: a switch during it refuses instead.
-      if (
-        refuseIfSwitched(
-          updateIn,
-          `${row.name} wasn't updated`,
-          "before the update started",
-        )
-      )
-        return;
-      if (status && rewrittenUpstream(status)) {
-        warnRewrittenUpstream(row, status);
-        return;
-      }
-    }
+    // The update builds from the live repo's options once the probe resolves,
+    // while the row belongs to this one: a switch during it refuses instead.
+    if (
+      row.upstreamAhead > 0 &&
+      row.upstreamBehind > 0 &&
+      (await withheldForRewrite([row], row.name))
+    )
+      return;
     void doUpdateFromUpstream(row.name, row.upstream);
   }
   // `patchEqual > 0` is strong evidence, not proof — two sides can apply the

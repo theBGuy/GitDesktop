@@ -169,40 +169,40 @@ pub(crate) fn unborn_head_error() -> AppError {
 /// hands it back as a rev, which its disambiguated form resolves correctly.
 #[tauri::command]
 pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
-    let text = read_refs_with_push_destination(&repo_path, "refs/heads", BRANCH_LIST_FORMAT)
-        .await?
-        .0;
+    let out = run_git(
+        Some(&repo_path),
+        &[
+            "for-each-ref",
+            "refs/heads",
+            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)",
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let text = out.stdout_lossy();
     let archived = read_archived_set(&repo_path).await?;
-    Ok(parse_branch_list(&text, &archived))
-}
-
-/// The branch list's own fields; [`read_refs_with_push_destination`] appends the push
-/// atoms after them.
-const BRANCH_LIST_FORMAT: &str = "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)";
-
-/// Parses [`BRANCH_LIST_FORMAT`] lines, with or without the push atoms after them; a
-/// line without them (the old-git retry) carries no push destination.
-fn parse_branch_list(text: &str, archived: &HashSet<String>) -> Vec<Branch> {
     let mut branches = Vec::new();
     for line in text.lines() {
-        let fields: Vec<&str> = line.split('\0').collect();
-        let field = |i: usize| fields.get(i).copied();
-        let Some(name) = field(0)
-            .and_then(|r| r.strip_prefix("refs/heads/"))
+        let mut parts = line.split('\0');
+        let (Some(refname), upstream, head, date, track, upstream_remote, upstream_remote_ref) = (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) else {
+            continue;
+        };
+        let Some(name) = refname
+            .strip_prefix("refs/heads/")
             .filter(|n| !n.is_empty())
         else {
             continue;
         };
-        let (upstream, head, date, track) = (field(1), field(2), field(3), field(4));
-        let (upstream_remote, upstream_remote_ref) = (field(5), field(6));
         let (upstream_ahead, upstream_behind, upstream_gone) =
             parse_upstream_track(track.unwrap_or(""));
-        let (push_remote, push_branch) = push_destination_fields(
-            name,
-            fields.get(7..).unwrap_or(&[]),
-            upstream_remote.unwrap_or(""),
-            upstream_remote_ref.unwrap_or(""),
-        );
         branches.push(Branch {
             name: name.to_string(),
             is_current: head == Some("*"),
@@ -212,17 +212,13 @@ fn parse_branch_list(text: &str, archived: &HashSet<String>) -> Vec<Branch> {
             upstream_ahead,
             upstream_behind,
             upstream_gone,
-            upstream_remote: upstream_remote
-                .filter(|r| !r.is_empty())
-                .map(str::to_string),
+            upstream_remote: upstream_remote.filter(|r| !r.is_empty()).map(str::to_string),
             upstream_remote_ref: upstream_remote_ref
                 .filter(|r| !r.is_empty())
                 .map(str::to_string),
-            push_remote,
-            push_branch,
         });
     }
-    branches
+    Ok(branches)
 }
 
 /// The for-each-ref atoms [`push_destination_fields`] reads, appended NUL-separated
@@ -233,15 +229,15 @@ pub(crate) const PUSH_DESTINATION_ATOMS: &str =
     "%(push:remotename)%00%(push:remoteref)%00%(push)%00%(upstream)";
 
 /// Runs `for-each-ref <pattern>` with `base_format` extended by
-/// [`PUSH_DESTINATION_ATOMS`]; the bool says whether the atoms rode along. A git that
-/// rejects one of them fails the whole command, so that failure re-runs `base_format`
-/// once and the atoms' destination reads as unknown, never a broken read (the status
-/// read may still derive one from the push config).
+/// [`PUSH_DESTINATION_ATOMS`]. A git that rejects one of them fails the whole command,
+/// so that failure re-runs `base_format` once and the lines carry no atoms: the
+/// destination reads as unknown, never a broken read (the status read may still derive
+/// one from the push config).
 pub(crate) async fn read_refs_with_push_destination(
     repo_path: &str,
     pattern: &str,
     base_format: &str,
-) -> AppResult<(String, bool)> {
+) -> AppResult<String> {
     let extended = format!("{base_format}%00{PUSH_DESTINATION_ATOMS}");
     read_refs_with_fallback(repo_path, pattern, &extended, base_format).await
 }
@@ -251,7 +247,7 @@ async fn read_refs_with_fallback(
     pattern: &str,
     extended: &str,
     base_format: &str,
-) -> AppResult<(String, bool)> {
+) -> AppResult<String> {
     let out = run_git_raw(
         Some(repo_path),
         &["for-each-ref", pattern, extended],
@@ -259,7 +255,7 @@ async fn read_refs_with_fallback(
     )
     .await?;
     if out.code == 0 {
-        return Ok((out.stdout_lossy(), true));
+        return Ok(out.stdout_lossy());
     }
     // Any other failure surfaces exactly as `run_git` would have reported it.
     if !is_unknown_format_atom(&out.stderr) {
@@ -271,7 +267,7 @@ async fn read_refs_with_fallback(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok((out.stdout_lossy(), false))
+    Ok(out.stdout_lossy())
 }
 
 /// Whether for-each-ref refused a format atom: git's ref-filter says `unknown field
@@ -2986,8 +2982,8 @@ mod tests {
         worktree_holding_branch, HolderMerge, UpdateBranchOutcome,
     };
     use super::{
-        is_unknown_format_atom, parse_branch_list, push_destination, read_refs_with_fallback,
-        read_refs_with_push_destination, BRANCH_LIST_FORMAT,
+        is_unknown_format_atom, push_destination, read_refs_with_fallback,
+        read_refs_with_push_destination,
     };
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
     use crate::error::AppError;
@@ -3599,65 +3595,6 @@ mod tests {
         }
     }
 
-    /// The branch list's parser with and without the push atoms: identical upstream
-    /// facts, and the destination only when the atoms rode along.
-    #[test]
-    fn parse_branch_list_with_and_without_push_atoms() {
-        let base = "refs/heads/topic\0origin/main\0*\x002026-10-01T00:00:00+00:00\0[ahead 1]\0origin\0refs/heads/main";
-        let extended = format!(
-            "{base}\0origin\0\0refs/remotes/origin/topic\0refs/remotes/origin/main\nrefs/heads/plain\0\0 \x002026-09-01T00:00:00+00:00\0\0\0\0\0\0\0\n"
-        );
-        let archived = HashSet::new();
-        let with = parse_branch_list(&extended, &archived);
-        let without = parse_branch_list(&format!("{base}\n"), &archived);
-        assert_eq!(with.len(), 2);
-        assert_eq!(with[0].push_remote.as_deref(), Some("origin"));
-        assert_eq!(with[0].push_branch.as_deref(), Some("topic"));
-        assert_eq!(with[1].name, "plain");
-        assert_eq!(
-            (with[1].push_remote.clone(), with[1].push_branch.clone()),
-            (None, None)
-        );
-        let degraded = &without[0];
-        assert_eq!(
-            (degraded.push_remote.clone(), degraded.push_branch.clone()),
-            (None, None)
-        );
-        // Every other field is byte-identical between the two reads.
-        let mut stripped = serde_json::to_value(&with[0]).unwrap();
-        stripped["pushRemote"] = serde_json::Value::Null;
-        stripped["pushBranch"] = serde_json::Value::Null;
-        assert_eq!(stripped, serde_json::to_value(degraded).unwrap());
-        assert_eq!(degraded.upstream.as_deref(), Some("origin/main"));
-        assert_eq!(degraded.upstream_ahead, 1);
-        assert!(degraded.is_current);
-    }
-
-    /// The camelCase keys the TS `Branch` mirror reads, none of the snake_case
-    /// spellings, and an unresolved destination as present-and-null.
-    #[test]
-    fn branch_serializes_the_push_destination_in_camel_case() {
-        let line = "refs/heads/topic\0origin/main\0*\x00d\0\0origin\0refs/heads/main\0origin\0\0refs/remotes/origin/topic\0refs/remotes/origin/main\n";
-        let row = &parse_branch_list(line, &HashSet::new())[0];
-        let wire = serde_json::to_value(row).unwrap();
-        assert_eq!(wire["pushRemote"], "origin");
-        assert_eq!(wire["pushBranch"], "topic");
-        let keys = wire.as_object().unwrap();
-        for snake in ["push_remote", "push_branch"] {
-            assert!(!keys.contains_key(snake), "{snake}");
-        }
-        let unresolved = serde_json::to_value(
-            &parse_branch_list("refs/heads/x\0\0 \x00d\0\0\0\n", &HashSet::new())[0],
-        )
-        .unwrap();
-        for key in ["pushRemote", "pushBranch"] {
-            assert!(
-                unresolved.get(key).is_some_and(serde_json::Value::is_null),
-                "{key}"
-            );
-        }
-    }
-
     /// git's two real phrasings for a refused format atom (measured live below) are the
     /// retry's trigger; any other failure is not.
     #[test]
@@ -3672,23 +3609,41 @@ mod tests {
         ));
     }
 
-    /// The retry-once, live: an extended format this git rejects (an unknown atom, and
-    /// a known atom with an unknown argument) re-runs the base format, so the read
-    /// still answers with the base fields and no push atoms. A failure of any other
-    /// kind is an error, not a retry.
+    /// The retry-once, live, over the status read's own format: an extended format this
+    /// git rejects (an unknown atom, and a known atom with an unknown argument) re-runs
+    /// the base format, so the read still answers with the tracking fields and no push
+    /// atoms. A failure of any other kind is an error, not a retry.
     #[tokio::test]
     async fn a_rejected_push_atom_falls_back_to_the_base_read() {
+        use crate::git::remote::{parse_upstream_tracking, Upstream, UPSTREAM_TRACKING_FORMAT};
         let (_base, base) = temp_base("push-atom-retry");
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let repo_s = repo.to_string_lossy().into_owned();
         init_repo(&repo_s, "r.txt").await;
-        let base_text = run(&repo_s, &["for-each-ref", "refs/heads", BRANCH_LIST_FORMAT]).await;
+        // A tracked branch, so the tracking fields have something to say.
+        let main = run(&repo_s, &["symbolic-ref", "--short", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let refname = run(&repo_s, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        let tracking = format!("refs/remotes/origin/{main}");
+        run(&repo_s, &["update-ref", &tracking, "HEAD"]).await;
+        let upstream = format!("--set-upstream-to=origin/{main}");
+        run(&repo_s, &["branch", "-q", &upstream]).await;
+        let fmt = UPSTREAM_TRACKING_FORMAT;
+        let base_text = run(&repo_s, &["for-each-ref", &refname, fmt]).await;
+        let tracked = Some((Upstream::Branch(main.clone()), "origin".to_string(), false));
+        assert_eq!(parse_upstream_tracking(&base_text, &refname), tracked);
         for bogus in ["%(nosuchatom)", "%(push:bogus)"] {
             // The premise: git itself rejects it with a phrasing the matcher knows.
             let raw = run_git_raw(
                 Some(&repo_s),
-                &["for-each-ref", "refs/heads", &format!("--format={bogus}")],
+                &["for-each-ref", &refname, &format!("--format={bogus}")],
                 DEFAULT_TIMEOUT,
             )
             .await
@@ -3699,36 +3654,27 @@ mod tests {
                 "{bogus}: {}",
                 raw.stderr
             );
-            let extended = format!("{BRANCH_LIST_FORMAT}%00{bogus}");
-            let (text, with_atoms) =
-                read_refs_with_fallback(&repo_s, "refs/heads", &extended, BRANCH_LIST_FORMAT)
-                    .await
-                    .expect("the fallback answers");
-            assert!(!with_atoms, "{bogus}");
-            assert_eq!(text, base_text, "{bogus}");
-            let rows = parse_branch_list(&text, &HashSet::new());
-            assert_eq!(rows.len(), 1);
-            assert_eq!(
-                (rows[0].push_remote.clone(), rows[0].push_branch.clone()),
-                (None, None)
-            );
-        }
-        // The real extended read answers with the atoms on this git.
-        let (_, with_atoms) =
-            read_refs_with_push_destination(&repo_s, "refs/heads", BRANCH_LIST_FORMAT)
+            let extended = format!("{fmt}%00{bogus}");
+            let text = read_refs_with_fallback(&repo_s, &refname, &extended, fmt)
                 .await
-                .unwrap();
-        assert!(with_atoms);
+                .expect("the fallback answers");
+            assert_eq!(text, base_text, "{bogus}");
+            assert_eq!(parse_upstream_tracking(&text, &refname), tracked, "{bogus}");
+        }
+        // The real extended read answers with the atoms on this git: the tracking
+        // fields unchanged, the push remote after them.
+        let text = read_refs_with_push_destination(&repo_s, &refname, fmt)
+            .await
+            .unwrap();
+        assert_eq!(parse_upstream_tracking(&text, &refname), tracked);
+        let line = text.lines().next().unwrap();
+        assert_eq!(line.split('\0').nth(4), Some("origin"), "{line:?}");
         // Not a format refusal: no retry, an error.
         let missing = base.join("not-a-repo");
         std::fs::create_dir_all(&missing).unwrap();
-        read_refs_with_push_destination(
-            &missing.to_string_lossy(),
-            "refs/heads",
-            BRANCH_LIST_FORMAT,
-        )
-        .await
-        .expect_err("a broken repository is an error");
+        read_refs_with_push_destination(&missing.to_string_lossy(), &refname, fmt)
+            .await
+            .expect_err("a broken repository is an error");
     }
 
     /// `git_branches` must surface git's authoritative `%(upstream:remotename)`
