@@ -31,7 +31,25 @@ export interface ConflictSides {
   /** `workingUndecodable`, or any stage blob isn't valid UTF-8 — an AI
    *  resolution would splice and write back lossy text, so it is blocked. */
   undecodable: boolean;
+  /** Lowercase hex SHA-1 of the working file's raw bytes at this read; null
+   *  when the file is absent. Pass it back to `resolveConflict` as the
+   *  expected hash of the read the written content was built from. */
+  workingHash: string | null;
+  /** Byte truth for the deletion arms: whether the raw working bytes match the
+   *  single surviving side's raw blob bytes after CRLF→LF normalization; null
+   *  unless exactly one side survives and the working file exists. */
+  workingMatchesSurvivor: boolean | null;
 }
+
+/** Verdict of a hash-guarded `resolveConflict` write. `changedOnDisk`: the
+ *  working file changed after the caller's read; nothing was written or staged. */
+export type ResolveConflictOutcome =
+  | { kind: "written" }
+  | { kind: "changedOnDisk" };
+
+/** The hash-guard refusal, worded identically at both Accepts. */
+export const changedOnDiskCopy = (fileName: string) =>
+  `${fileName} changed on disk after it was read — nothing was written.`;
 
 /** Reads a conflicted file's base/ours/theirs blobs + the marked working file,
  *  plus whether it's AI-ignored. `exclude` is the combined (repo + global)
@@ -45,13 +63,25 @@ export const conflictSides = (
 
 /** Writes a resolution to the file, staging it when `stage` (which marks the
  *  conflict resolved). Per-region accepts pass `stage: false` while markers
- *  remain and `true` on the final region; the AI flow stages immediately. */
+ *  remain and `true` on the final region; the AI flow stages unless its
+ *  proposal still carries markers.
+ *  `expectedHash` is the `workingHash` of the read `content` was built from
+ *  (null: that read found no file); the write refuses when disk moved since,
+ *  unless disk already holds exactly `content`. */
 export const resolveConflict = (
   repoPath: string,
   path: string,
   content: string,
   stage: boolean,
-) => invoke<void>("git_resolve_conflict", { repoPath, path, content, stage });
+  expectedHash: string | null,
+) =>
+  invoke<ResolveConflictOutcome>("git_resolve_conflict", {
+    repoPath,
+    path,
+    content,
+    stage,
+    expectedHash,
+  });
 
 /** Resolves a whole conflicted file by taking one side: "ours" (current/HEAD)
  *  or "theirs" (incoming). Writes that side + stages it, or removes the file when

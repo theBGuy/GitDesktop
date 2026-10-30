@@ -77,53 +77,11 @@ export function useStashList(repo: string, enabled = false) {
   });
 }
 
-export function useStashFiles(repo: string, index: number | null) {
-  return useQuery({
-    queryKey: ["repo", repo, "stash-files", index ?? -1] as const,
-    queryFn: () => api.gitStashFiles(repo, index ?? 0),
-    enabled: index !== null,
-    placeholderData: keepPreviousDataForRepo(repo),
-    networkMode: "always",
-  });
-}
-
-export function useStashFileDiff(
-  repo: string,
-  index: number | null,
-  filePath: string | null,
-) {
-  return useQuery({
-    queryKey: [
-      "repo",
-      repo,
-      "stash-diff",
-      index ?? -1,
-      filePath ?? "",
-    ] as const,
-    queryFn: () => api.gitStashFileDiff(repo, index ?? 0, filePath ?? ""),
-    enabled: index !== null && filePath !== null,
-    placeholderData: keepPreviousDataForRepo(repo),
-    networkMode: "always",
-  });
-}
-
 export function useStashApply(repo: string) {
   return useRepoMutation(
     repo,
     (args: { index: number; pop: boolean }) =>
       api.gitStashApply(repo, args.index, args.pop),
-    {
-      // Local stash write — never park it offline.
-      networkMode: "always",
-      localOnly: true,
-    },
-  );
-}
-
-export function useStashDrop(repo: string) {
-  return useRepoMutation(
-    repo,
-    (index: number) => api.gitStashDrop(repo, index),
     {
       // Local stash write — never park it offline.
       networkMode: "always",
@@ -138,6 +96,23 @@ export function useDropStashBySha(repo: string) {
   return useRepoMutation(
     repo,
     (sha: string) => api.gitDropStashBySha(repo, sha),
+    {
+      // Local stash write — never park it offline.
+      networkMode: "always",
+      localOnly: true,
+    },
+  );
+}
+
+/** SHA-verified drop of a listed stash wherever it sits in the stack. No
+ *  `identity` on purpose: View stashes' busy state and in-flight ref are
+ *  per-instance re-entry guards, and without a mutation key the observer keeps
+ *  the pending drop, so the dialog stays busy until it settles, across a repo
+ *  switch too. */
+export function useDropStashAtAnyDepth(repo: string) {
+  return useRepoMutation(
+    repo,
+    (sha: string) => api.gitDropStashBySha(repo, sha, true),
     {
       // Local stash write — never park it offline.
       networkMode: "always",
@@ -163,6 +138,9 @@ export function useOrphanedStashes(repo: string, enabled = false) {
   });
 }
 
+/** A stash's files, keyed AND fetched by its commit sha, never its slot: a
+ *  slot-keyed read would serve one stash's files under another once the stack
+ *  shifts. Works on any stash commit, live (View stashes) or dangling. */
 export function useOrphanedStashFiles(repo: string, sha: string | null) {
   return useQuery({
     queryKey: ["repo", repo, "orphaned-stash-files", sha ?? ""] as const,
@@ -173,6 +151,8 @@ export function useOrphanedStashFiles(repo: string, sha: string | null) {
   });
 }
 
+/** One file's diff from a stash, keyed and fetched by sha (see
+ *  {@link useOrphanedStashFiles}). */
 export function useOrphanedStashFileDiff(
   repo: string,
   sha: string | null,

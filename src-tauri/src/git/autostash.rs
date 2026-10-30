@@ -530,7 +530,7 @@ pub(crate) async fn git_switch_autostash_core(
     settle(&repo_path, "merge", stashed, reapply, op).await
 }
 
-/// Verdict of a SHA-verified backup-stash drop.
+/// Verdict of a SHA-verified stash drop, top-only (the backup) or at any depth.
 #[derive(Debug, serde::Serialize)]
 #[serde(
     tag = "kind",
@@ -538,11 +538,16 @@ pub(crate) async fn git_switch_autostash_core(
     rename_all_fields = "camelCase"
 )]
 pub enum StashDropOutcome {
-    /// `refs/stash` matched the recorded sha and the entry was dropped.
+    /// The entry with the given sha was dropped, or git's output carried no
+    /// readable id (fail-open: exit 0 without a parseable `Dropped … (<id>)` line).
     Dropped,
-    /// `refs/stash` resolves but points elsewhere; nothing was dropped.
+    /// Nothing was dropped. Top-only: `refs/stash` resolves but points elsewhere.
+    /// Any depth: the drop printed a different entry's id, and that entry was
+    /// stored back on top (`stash@{0}`); or the drop command failed and the sha is
+    /// now listed at another slot.
     Moved,
-    /// `refs/stash` does not resolve, so there is nothing to drop.
+    /// Nothing to drop. Top-only: `refs/stash` does not resolve. Any depth: a
+    /// successful `git stash list` read does not hold the sha.
     Gone,
     /// The drop removed a DIFFERENT entry (an external push raced the window) and
     /// restoring it failed. `dropped_sha` is the removed entry, recoverable via
@@ -550,8 +555,9 @@ pub enum StashDropOutcome {
     RestoreFailed { dropped_sha: String },
 }
 
-/// Drop the autostash backup the UI recorded, but only while it is still
-/// `stash@{0}`: a backup that moved deeper or vanished is refused, never re-resolved.
+/// Drop the stash entry with this sha. By default only while it is still
+/// `stash@{0}` (the autostash backup): a backup that moved deeper or vanished is
+/// refused, never re-resolved. With `any_depth`, wherever it sits in the stack.
 ///
 /// The pre-check under the working-tree lock covers this process's writers on this
 /// checkout; the post-drop verify plus a `git stash store` restore covers the rest
@@ -561,14 +567,16 @@ pub async fn git_drop_stash_by_sha(
     state: State<'_, AppState>,
     repo_path: String,
     sha: String,
+    any_depth: Option<bool>,
 ) -> AppResult<StashDropOutcome> {
-    git_drop_stash_by_sha_core(&state, repo_path, sha).await
+    git_drop_stash_by_sha_core(&state, repo_path, sha, any_depth.unwrap_or(false)).await
 }
 
 pub(crate) async fn git_drop_stash_by_sha_core(
     state: &AppState,
     repo_path: String,
     sha: String,
+    any_depth: bool,
 ) -> AppResult<StashDropOutcome> {
     // The sha's fixed grammar is its argv chokepoint: nothing else reaches git.
     if !is_full_object_id(&sha) {
@@ -579,6 +587,9 @@ pub(crate) async fn git_drop_stash_by_sha_core(
     let repo = repo_path.as_str();
     let domain = state.working_tree_lock(repo).await;
     let _guard = acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a stash drop").await?;
+    if any_depth {
+        return drop_stash_at_any_depth(repo, &sha).await;
+    }
 
     // A failed read propagates: only a confirmed absence may report Gone.
     let Some(tip) = stash_tip(repo).await? else {
@@ -587,21 +598,105 @@ pub(crate) async fn git_drop_stash_by_sha_core(
     if tip != sha {
         return Ok(StashDropOutcome::Moved);
     }
-    // Read before the drop: the compensation arm needs the entry's message.
-    let listing = run_git(
+    let listing = pre_drop_listing(repo).await?;
+    let out = run_git(Some(repo), &["stash", "drop", "stash@{0}"], DEFAULT_TIMEOUT).await?;
+    Ok(drop_verdict(repo, &sha, &listing, &out).await)
+}
+
+/// The pre-drop `stash list --format=%H%x09%gs` read: the compensation arm needs a
+/// raced entry's message to store it back under.
+async fn pre_drop_listing(repo: &str) -> AppResult<String> {
+    Ok(run_git(
         Some(repo),
         &["stash", "list", "--format=%H%x09%gs"],
         DEFAULT_TIMEOUT,
     )
     .await?
-    .stdout_lossy();
-    let out = run_git(Some(repo), &["stash", "drop", "stash@{0}"], DEFAULT_TIMEOUT).await?;
+    .stdout_lossy())
+}
+
+/// The verdict on a drop that exited 0: a printed id other than `sha` means the
+/// drop took a raced entry, which is stored back from `listing`.
+async fn drop_verdict(repo: &str, sha: &str, listing: &str, out: &GitOutput) -> StashDropOutcome {
     let printed = dropped_sha(&out.stdout_lossy()).or_else(|| dropped_sha(&out.stderr));
     match printed {
-        Some(printed) if printed != sha => Ok(restore_dropped(repo, &listing, printed).await),
-        // A missing confirmation is fail-open; the real-repo test pins its format.
-        _ => Ok(StashDropOutcome::Dropped),
+        Some(printed) if printed != sha => restore_dropped(repo, listing, printed).await,
+        // No readable id is fail-open; real-repo tests pin git's `Dropped … (<id>)`
+        // line for both a top and a deeper slot.
+        _ => StashDropOutcome::Dropped,
     }
+}
+
+/// The any-depth arm; the caller holds the working-tree lock. The sha never reaches
+/// `git stash drop`: its CURRENT slot is read under that lock, and the printed id
+/// verifies the drop took it, with a raced wrong entry stored back on top.
+async fn drop_stash_at_any_depth(repo: &str, sha: &str) -> AppResult<StashDropOutcome> {
+    // A failed read propagates: only a confirmed absence may report Gone.
+    let Some(slot) = stash_slot_of(repo, sha).await? else {
+        return Ok(StashDropOutcome::Gone);
+    };
+    let listing = pre_drop_listing(repo).await?;
+    #[cfg(test)]
+    let _ = STASH_SLOT_LOCATED_HOOK.try_with(|hook| hook());
+    let target = format!("stash@{{{slot}}}");
+    let out = match run_git(Some(repo), &["stash", "drop", &target], DEFAULT_TIMEOUT).await {
+        Ok(out) => out,
+        // A failed drop reads Moved only when the sha is now listed at another slot.
+        // A sha still at `slot` keeps git's own error, as Moved's "the list changed"
+        // would be false; so does an absent sha, which after our own failed drop is
+        // ambiguous (an external drop, or a killed git that still finished).
+        Err(err) => {
+            return match stash_slot_of(repo, sha).await {
+                Ok(Some(now)) if now != slot => Ok(StashDropOutcome::Moved),
+                _ => Err(err),
+            }
+        }
+    };
+    Ok(drop_verdict(repo, sha, &listing, &out).await)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Runs just after the any-depth drop's last pre-drop read, so a test can move
+    /// the stack between the slot lookup and the drop.
+    static STASH_SLOT_LOCATED_HOOK: std::sync::Arc<dyn Fn() + Send + Sync>;
+}
+
+/// The lowest `stash@{N}` holding `sha`, from one `git stash list` read.
+async fn stash_slot_of(repo: &str, sha: &str) -> AppResult<Option<u32>> {
+    let out = run_git(
+        Some(repo),
+        &["stash", "list", "--format=%gd%x09%H"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    stash_slot_in(&out.stdout_lossy(), sha)
+}
+
+/// The slot comes from each line's `%gd`, never its position. Two slots can hold
+/// the same commit (an entry stored back twice); they are the same stash, so the
+/// lowest is taken. A matching line whose slot doesn't parse fails the read rather
+/// than reading as absent.
+fn stash_slot_in(listing: &str, sha: &str) -> AppResult<Option<u32>> {
+    let mut lowest: Option<u32> = None;
+    for line in listing.lines() {
+        let Some((refname, id)) = line.split_once('\t') else {
+            continue;
+        };
+        if id != sha {
+            continue;
+        }
+        let slot = refname
+            .strip_prefix("stash@{")
+            .and_then(|rest| rest.strip_suffix('}'))
+            .and_then(|n| n.parse::<u32>().ok())
+            .ok_or_else(|| AppError::Git {
+                code: 0,
+                stderr: format!("couldn't read the stash slot from {refname:?}"),
+            })?;
+        lowest = Some(lowest.map_or(slot, |l| l.min(slot)));
+    }
+    Ok(lowest)
 }
 
 /// Stores back an entry a racing drop removed, under the message `listing` (a
@@ -2063,7 +2158,7 @@ mod tests {
         };
         assert_eq!(stash_shas(&repo).await, vec![backup.clone(), older.clone()]);
 
-        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup)
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup, false)
             .await
             .unwrap();
         assert!(matches!(verdict, StashDropOutcome::Dropped), "{verdict:?}");
@@ -2128,7 +2223,7 @@ mod tests {
         let newer = push_stash(dir.path(), &repo, "newer\n").await;
 
         let state = AppState::default();
-        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup.clone())
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup.clone(), false)
             .await
             .unwrap();
         assert!(matches!(verdict, StashDropOutcome::Moved), "{verdict:?}");
@@ -2162,7 +2257,7 @@ mod tests {
         assert!(stash_shas(&repo).await.is_empty());
 
         let state = AppState::default();
-        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup)
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), backup, false)
             .await
             .unwrap();
         assert!(matches!(verdict, StashDropOutcome::Gone), "{verdict:?}");
@@ -2186,14 +2281,332 @@ mod tests {
             "--output=0123456789abcdef0123456789abcdef01",
             "0123456789abcdef0123456789abcdef01234567 ",
         ] {
-            let err = git_drop_stash_by_sha_core(&state, missing.clone(), bad.into())
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(err, AppError::InvalidArgument(_)),
-                "{bad:?}: {err:?}"
-            );
+            for any_depth in [false, true] {
+                let err =
+                    git_drop_stash_by_sha_core(&state, missing.clone(), bad.into(), any_depth)
+                        .await
+                        .unwrap_err();
+                assert!(
+                    matches!(err, AppError::InvalidArgument(_)),
+                    "{bad:?} (any_depth {any_depth}): {err:?}"
+                );
+            }
         }
+    }
+
+    // ---- SHA-verified drop at any depth ------------------------------------
+
+    /// Stashes a fresh edit of `b.txt` under `message` with a pinned author and
+    /// committer date, so two entries can tie on everything the list shows but the
+    /// sha. Returns the new entry's sha.
+    async fn push_dated_stash(
+        dir: &std::path::Path,
+        repo: &str,
+        content: &str,
+        message: &str,
+    ) -> String {
+        write(dir, "b.txt", content);
+        let status = std::process::Command::new("git")
+            .args(["stash", "push", "-m", message])
+            .current_dir(repo)
+            .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+            .status()
+            .expect("spawn git stash push");
+        assert!(status.success(), "git stash push failed: {status}");
+        git(repo, &["rev-parse", "refs/stash"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// The middle of three entries that share a message and a date goes, and only
+    /// it: a drop that addressed the list by message, date or line would miss.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_drops_only_the_named_stash() {
+        let (dir, repo) = setup_repo("drop-any-exact").await;
+        let oldest = push_dated_stash(dir.path(), &repo, "one\n", "same").await;
+        let middle = push_dated_stash(dir.path(), &repo, "two\n", "same").await;
+        let newest = push_dated_stash(dir.path(), &repo, "three\n", "same").await;
+        let listed = crate::git::ops::git_stash_list(repo.clone()).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert!(
+            listed
+                .iter()
+                .all(|s| s.message == listed[0].message && s.date == listed[0].date),
+            "the fixture must tie on message and date: {listed:?}"
+        );
+
+        let state = AppState::default();
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), middle, true)
+            .await
+            .unwrap();
+        assert!(matches!(verdict, StashDropOutcome::Dropped), "{verdict:?}");
+        assert_eq!(stash_shas(&repo).await, vec![newest, oldest]);
+    }
+
+    /// The headline: a sha read before a push still names its own stash, one slot
+    /// deeper. Dropping the slot it was listed at would take `pushed` instead.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_survives_a_push_after_the_caller_listed() {
+        let (dir, repo) = setup_repo("drop-any-after-push").await;
+        let oldest = push_stash(dir.path(), &repo, "one\n").await;
+        let target = push_stash(dir.path(), &repo, "two\n").await;
+        let newest = push_stash(dir.path(), &repo, "three\n").await;
+        assert_eq!(
+            stash_shas(&repo).await[1],
+            target,
+            "target listed at stash@{{1}}"
+        );
+        let pushed = push_stash(dir.path(), &repo, "four\n").await;
+
+        let state = AppState::default();
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), target, true)
+            .await
+            .unwrap();
+        assert!(matches!(verdict, StashDropOutcome::Dropped), "{verdict:?}");
+        assert_eq!(stash_shas(&repo).await, vec![pushed, newest, oldest]);
+    }
+
+    /// The format pin for a deeper slot: git confirms `stash@{1}` on STDOUT in the
+    /// same `Dropped <rev> (<sha>)` shape the verify parses.
+    #[tokio::test]
+    async fn dropped_sha_parses_a_deeper_slot_drop() {
+        let (dir, repo) = setup_repo("drop-any-format").await;
+        let older = push_stash(dir.path(), &repo, "one\n").await;
+        let newer = push_stash(dir.path(), &repo, "two\n").await;
+        let out = run_git(
+            Some(&repo),
+            &["stash", "drop", "stash@{1}"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            dropped_sha(&out.stdout_lossy()).as_deref(),
+            Some(older.as_str()),
+            "stdout: {:?} stderr: {:?}",
+            out.stdout_lossy(),
+            out.stderr
+        );
+        assert_eq!(stash_shas(&repo).await, vec![newer]);
+    }
+
+    /// Gone only from a list that answered without the sha: a well-formed id with
+    /// no entry leaves the stack as it was, and an empty stack answers the same.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_reports_gone_for_an_unlisted_sha() {
+        let (dir, repo) = setup_repo("drop-any-gone").await;
+        let state = AppState::default();
+        let unlisted = "f".repeat(40);
+
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), unlisted.clone(), true)
+            .await
+            .unwrap();
+        assert!(
+            matches!(verdict, StashDropOutcome::Gone),
+            "empty: {verdict:?}"
+        );
+
+        let older = push_stash(dir.path(), &repo, "one\n").await;
+        let newer = push_stash(dir.path(), &repo, "two\n").await;
+        let verdict = git_drop_stash_by_sha_core(&state, repo.clone(), unlisted, true)
+            .await
+            .unwrap();
+        assert!(matches!(verdict, StashDropOutcome::Gone), "{verdict:?}");
+        assert_eq!(stash_shas(&repo).await, vec![newer, older], "untouched");
+    }
+
+    /// A push landing inside the drop's own window, after the slot lookup: the
+    /// drop takes the wrong entry, the verify catches it and stores that entry back
+    /// on top. The target survives; the stack has reordered.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_compensates_a_push_between_list_and_drop() {
+        let (dir, repo) = setup_repo("drop-any-race").await;
+        let oldest = push_stash(dir.path(), &repo, "one\n").await;
+        let target = push_stash(dir.path(), &repo, "two\n").await;
+        let newest = push_stash(dir.path(), &repo, "three\n").await;
+        write(dir.path(), "b.txt", "raced\n");
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = {
+            let repo = repo.clone();
+            let ran = std::sync::Arc::clone(&ran);
+            std::sync::Arc::new(move || {
+                let status = std::process::Command::new("git")
+                    .args(["stash", "push", "-m", "raced push"])
+                    .current_dir(&repo)
+                    .status()
+                    .expect("spawn git stash push");
+                assert!(status.success(), "git stash push failed: {status}");
+                ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+
+        let state = AppState::default();
+        let verdict = STASH_SLOT_LOCATED_HOOK
+            .scope(
+                hook,
+                git_drop_stash_by_sha_core(&state, repo.clone(), target.clone(), true),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the hook never ran"
+        );
+        assert!(matches!(verdict, StashDropOutcome::Moved), "{verdict:?}");
+        let after = stash_shas(&repo).await;
+        assert_eq!(after.len(), 4, "nothing lost: {after:?}");
+        assert_eq!(after[0], newest, "the raced drop's entry is back on top");
+        assert_eq!(after[2..], [target, oldest], "the target survives");
+        let raced_subject = git(&repo, &["log", "-1", "--format=%s", &after[1]]).await;
+        assert_eq!(raced_subject.trim(), "On main: raced push");
+    }
+
+    /// A drop that fails because an external drop emptied the located slot: a
+    /// target still listed at ANOTHER slot reads Moved (nothing was dropped), while
+    /// one gone too keeps the drop's own error, since absence after our failed drop
+    /// is ambiguous.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_reads_a_failed_drop_against_a_fresh_list() {
+        for (external, expect_moved) in [("stash@{0}", true), ("stash@{1}", false)] {
+            let (dir, repo) = setup_repo("drop-any-failed").await;
+            let target = push_stash(dir.path(), &repo, "one\n").await;
+            let other = push_stash(dir.path(), &repo, "two\n").await;
+            assert_eq!(stash_shas(&repo).await, vec![other.clone(), target.clone()]);
+            let hook: std::sync::Arc<dyn Fn() + Send + Sync> = {
+                let repo = repo.clone();
+                std::sync::Arc::new(move || {
+                    let status = std::process::Command::new("git")
+                        .args(["stash", "drop", external])
+                        .current_dir(&repo)
+                        .status()
+                        .expect("spawn git stash drop");
+                    assert!(status.success(), "git stash drop failed: {status}");
+                })
+            };
+
+            let state = AppState::default();
+            let verdict = STASH_SLOT_LOCATED_HOOK
+                .scope(
+                    hook,
+                    git_drop_stash_by_sha_core(&state, repo.clone(), target.clone(), true),
+                )
+                .await;
+            if expect_moved {
+                assert!(
+                    matches!(verdict, Ok(StashDropOutcome::Moved)),
+                    "{external}: {verdict:?}"
+                );
+                assert_eq!(stash_shas(&repo).await, vec![target]);
+            } else {
+                assert!(
+                    matches!(verdict, Err(AppError::Git { .. })),
+                    "{external}: {verdict:?}"
+                );
+                assert_eq!(stash_shas(&repo).await, vec![other]);
+            }
+        }
+    }
+
+    /// A drop that fails with the sha still at its slot (a held `refs/stash.lock`)
+    /// keeps git's own error rather than reporting a stack that never moved.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_keeps_the_error_when_the_slot_did_not_move() {
+        let (dir, repo) = setup_repo("drop-any-locked").await;
+        let target = push_stash(dir.path(), &repo, "one\n").await;
+        let other = push_stash(dir.path(), &repo, "two\n").await;
+        let lock = dir.path().join(".git").join("refs").join("stash.lock");
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = {
+            let lock = lock.clone();
+            std::sync::Arc::new(move || std::fs::write(&lock, "").unwrap())
+        };
+
+        let state = AppState::default();
+        let verdict = STASH_SLOT_LOCATED_HOOK
+            .scope(
+                hook,
+                git_drop_stash_by_sha_core(&state, repo.clone(), target.clone(), true),
+            )
+            .await;
+        assert!(lock.exists(), "the hook never ran");
+        std::fs::remove_file(&lock).unwrap();
+        let Err(AppError::Git { stderr, .. }) = &verdict else {
+            panic!("expected git's error, got {verdict:?}");
+        };
+        assert!(stderr.contains("stash.lock"), "{stderr}");
+        assert_eq!(stash_shas(&repo).await, vec![other, target]);
+    }
+
+    /// The slot comes from `%gd`, the lowest of duplicate entries wins, and a
+    /// matching line whose slot can't be read fails instead of reading as absent.
+    #[test]
+    fn stash_slot_in_reads_the_slot_from_gd() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        let listing = format!("stash@{{3}}\t{a}\nstash@{{1}}\t{b}\nstash@{{2}}\t{a}\n");
+        assert_eq!(stash_slot_in(&listing, &a).unwrap(), Some(2));
+        assert_eq!(stash_slot_in(&listing, &b).unwrap(), Some(1));
+        assert_eq!(stash_slot_in(&listing, &"c".repeat(40)).unwrap(), None);
+        assert_eq!(stash_slot_in("", &a).unwrap(), None);
+        assert!(stash_slot_in(&format!("stash@{{x}}\t{a}\n"), &a).is_err());
+    }
+
+    /// `git_stash_list` carries each entry's full commit id, the one its slot
+    /// resolves to.
+    #[tokio::test]
+    async fn stash_list_carries_the_commit_sha() {
+        let (dir, repo) = setup_repo("stash-list-sha").await;
+        push_stash(dir.path(), &repo, "one\n").await;
+        push_stash(dir.path(), &repo, "two\n").await;
+        let listed = crate::git::ops::git_stash_list(repo.clone()).await.unwrap();
+        assert_eq!(listed.len(), 2);
+        for entry in &listed {
+            let slot = format!("stash@{{{}}}", entry.index);
+            let expected = git(&repo, &["rev-parse", &slot]).await;
+            assert_eq!(entry.sha, expected.trim(), "{slot}");
+            assert!(is_full_object_id(&entry.sha), "{:?}", entry.sha);
+        }
+    }
+
+    /// The sha-addressed readers serve a LIVE stash too: its files list (the
+    /// untracked one flagged, read from `^3`) and a file's diff.
+    #[tokio::test]
+    async fn stash_files_by_sha_sees_a_live_stash_and_its_untracked_file() {
+        let (dir, repo) = setup_repo("stash-files-sha").await;
+        write(dir.path(), "b.txt", "tracked edit\n");
+        write(dir.path(), "new.txt", "untracked body\n");
+        git(&repo, &["stash", "push", "--include-untracked"]).await;
+        let sha = git(&repo, &["rev-parse", "refs/stash"])
+            .await
+            .trim()
+            .to_string();
+        assert_eq!(stash_shas(&repo).await, vec![sha.clone()], "still listed");
+
+        let files = crate::git::ops::git_orphaned_stash_files(repo.clone(), sha.clone())
+            .await
+            .unwrap();
+        let tracked = files.iter().find(|f| f.path == "b.txt").expect("b.txt");
+        assert!(!tracked.untracked);
+        let untracked = files.iter().find(|f| f.path == "new.txt").expect("new.txt");
+        assert!(untracked.untracked);
+
+        for path in ["b.txt", "new.txt"] {
+            let diff = crate::git::ops::git_orphaned_stash_file_diff(
+                repo.clone(),
+                sha.clone(),
+                path.into(),
+            )
+            .await
+            .unwrap();
+            assert!(!diff.text.trim().is_empty(), "{path}: empty diff");
+        }
+        let untracked_diff =
+            crate::git::ops::git_orphaned_stash_file_diff(repo.clone(), sha, "new.txt".into())
+                .await
+                .unwrap();
+        assert!(untracked_diff.text.contains("untracked body"));
     }
 
     #[test]

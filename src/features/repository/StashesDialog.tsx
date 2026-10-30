@@ -2,6 +2,7 @@ import { TrashIcon } from "@phosphor-icons/react";
 import {
   type ReactNode,
   useDeferredValue,
+  useEffect,
   useEffectEvent,
   useLayoutEffect,
   useRef,
@@ -45,31 +46,45 @@ import {
 import type { ImageRevs } from "@/features/diff/ImageDiff";
 import { presentError } from "@/lib/error-summary";
 import {
+  useDropStashAtAnyDepth,
   useOrphanedStashes,
   useOrphanedStashFileDiff,
   useOrphanedStashFiles,
   useRepoStatus,
   useRestoreOrphaned,
   useStashApply,
-  useStashDrop,
-  useStashFileDiff,
-  useStashFiles,
   useStashList,
 } from "@/lib/git/queries";
+import type { StashEntry } from "@/lib/git/types";
+import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
+import {
+  STASH_DROP_GONE,
+  STASH_DROP_MOVED,
+  stashDropRestoreFailed,
+} from "./stash-drop-copy";
+import {
+  resolveStashPick,
+  type StashPick,
+  stashRowKey,
+  stashRowReactKeys,
+} from "./stash-pick";
 
 /** Which source the left list is drawn from. */
 type StashesView = "stashes" | "recoverable";
 
-/** Picks the right rev base + hooks for the inner file browser: a live stash by
- *  its `stash@{index}` slot, or an orphaned stash by its raw commit sha. */
+/** Which list the inner file browser was opened from. Both kinds read the stash
+ *  commit by its sha, never a live stash's `stash@{N}` slot, which shifts. */
 type FileSource =
-  | { kind: "stash"; index: number }
+  | { kind: "stash"; sha: string }
   | { kind: "orphaned"; sha: string };
 
 /** Apply and pop differ only in what becomes of the stash afterward. The pop
@@ -88,13 +103,20 @@ const STASH_APPLY_COPY = {
   },
 } as const;
 
-/** A pending apply/pop, plus the stash's identity as it was when the prompt
- *  opened — `stash@{n}` is a SLOT, not an identity. */
+/** A pending apply/pop: the slot it addresses, plus the sha of the stash that
+ *  sat there when the prompt opened — `stash@{n}` is a SLOT, not an identity. */
 interface PendingApply {
   index: number;
   pop: boolean;
+  sha: string;
+}
+
+/** A pending drop: the stash the prompt names, and the repo it was asked in. */
+interface PendingDrop {
+  sha: string;
   message: string;
   date: string;
+  repo: string;
 }
 
 const stashApplyPrompt = ({ index, pop }: PendingApply) => {
@@ -126,19 +148,30 @@ export function StashesDialog({
 }) {
   const stashes = useStashList(repoPath, open);
   const apply = useStashApply(repoPath);
-  const drop = useStashDrop(repoPath);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const [confirmDrop, setConfirmDrop] = useState<number | null>(null);
+  const drop = useDropStashAtAnyDepth(repoPath);
+  const [selected, setSelected] = useState<StashPick | null>(null);
+  const [confirmDrop, setConfirmDrop] = useState<PendingDrop | null>(null);
+  // Two presses inside one render both pass the button's `drop.isPending`
+  // gate; the ref refuses the second, so one confirm fires one drop.
+  const droppingRef = useRef(false);
   // Apply/pop confirm as a NESTED dialog, like the drop confirm below. The
   // app-root confirm host is a SIBLING dialog, and Base UI only suppresses a
   // parent's Escape for dialogs nested in its React tree — Esc over a sibling
   // would close this dialog underneath it too.
   const [confirmApply, setConfirmApply] = useState<PendingApply | null>(null);
   const shownApply = useRetained(confirmApply);
-  // The hook's nullish retain condition is load-bearing here rather than a
-  // truthiness one: stash@{0} is a valid index.
   const shownDrop = useRetained(confirmDrop);
   const [view, setView] = useState<StashesView>(initialView);
+  // A toast's Recover reads these at click time: switch this dialog's view while
+  // it is up, or open View stashes on Recoverable once it is closed or gone.
+  const openNow = useLatestRef(open);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // The dialog can be opened straight to either view; seed `view` from the
   // caller's intent each time it opens (mirrors the seed-on-open idiom).
@@ -146,31 +179,28 @@ export function StashesDialog({
   useSeedOnOpen(open, seedOnOpen);
 
   const list = stashes.data ?? [];
-  // Default to the newest stash; fall back when the selected one is gone.
-  const effectiveIndex =
-    selectedIndex !== null && list.some((s) => s.index === selectedIndex)
-      ? selectedIndex
-      : (list[0]?.index ?? null);
+  const effective = resolveStashPick(list, selected);
+  const effectiveKey = effective ? stashRowKey(effective) : null;
+  const rowReactKeys = stashRowReactKeys(list);
   const busy = apply.isPending || drop.isPending;
   const onError = (e: unknown) => toastError(e);
 
   function askApply(index: number, pop: boolean) {
     const stash = list.find((s) => s.index === index);
     if (!stash) return;
-    setConfirmApply({ index, pop, message: stash.message, date: stash.date });
+    setConfirmApply({ index, pop, sha: stash.sha });
   }
 
   async function runApply() {
     if (!confirmApply) return;
-    const { index, pop, message, date } = confirmApply;
+    const { index, pop, sha } = confirmApply;
     setConfirmApply(null);
-    // The list can refetch (or another surface push or drop a stash) while the
-    // prompt is open, sliding a different stash into the confirmed slot. Apply
-    // only the one the prompt described. message + date is the strongest key
-    // StashEntry exposes — two same-second stashes off one HEAD tie, so a sha
-    // on the entry is the real identity if this guard ever needs tightening.
+    // A refetch or another surface's push or drop can slide a different stash
+    // into the slot while the prompt is open. This runs only while the loaded
+    // list still shows the prompt's sha at that slot; the apply itself still
+    // addresses the slot.
     const current = list.find((s) => s.index === index);
-    if (!current || current.message !== message || current.date !== date) {
+    if (!current || current.sha !== sha) {
       toast.info("The stash list changed — nothing was applied.");
       return;
     }
@@ -186,12 +216,86 @@ export function StashesDialog({
 
   const applyPrompt = shownApply ? stashApplyPrompt(shownApply) : null;
 
+  function askDrop(stash: StashEntry) {
+    setConfirmDrop({
+      sha: stash.sha,
+      message: stash.message,
+      date: stash.date,
+      repo: repoPath,
+    });
+  }
+
+  // The sha captured at ask time pins the target, so no list re-check: the drop
+  // only ever aims at the stash the prompt named, wherever it now sits. A race
+  // that makes it take another entry stores that one back, and the outcome toast
+  // names an entry it could not restore.
+  async function runDrop() {
+    if (!confirmDrop || droppingRef.current) return;
+    const { sha, repo } = confirmDrop;
+    if (refuseIfSwitched(repo, "nothing was dropped")) {
+      setConfirmDrop(null);
+      return;
+    }
+    droppingRef.current = true;
+    // The settle closes the prompt only while it still names this drop's stash
+    // and repo (a backstop: new asks are held while the drop is busy).
+    const closeOwnPrompt = () =>
+      setConfirmDrop((cur) =>
+        cur?.sha === sha && cur.repo === repo ? null : cur,
+      );
+    let outcome: Awaited<ReturnType<typeof drop.mutateAsync>>;
+    try {
+      outcome = await drop.mutateAsync(sha);
+    } catch (e) {
+      closeOwnPrompt();
+      onError(e);
+      return;
+    } finally {
+      droppingRef.current = false;
+    }
+    closeOwnPrompt();
+    switch (outcome.kind) {
+      case "dropped": {
+        // The banner must not offer to drop a backup that is gone now.
+        const { marker, clearFor } = useStashReapplyMarker.getState();
+        if (marker?.repoPath === repo && marker.stashSha === sha)
+          clearFor(repo);
+        toast.success("Stash dropped");
+        break;
+      }
+      case "moved":
+        toast.info(STASH_DROP_MOVED);
+        break;
+      case "gone":
+        toast.info(STASH_DROP_GONE.dialog);
+        break;
+      case "restoreFailed":
+        toast.error(stashDropRestoreFailed(outcome.droppedSha), {
+          // The only place the lost entry's sha appears: it stays until closed.
+          duration: Infinity,
+          action: {
+            label: "Recover",
+            onClick: (event) => {
+              event.currentTarget.blur();
+              if (openNow.current && mounted.current) setView("recoverable");
+              else dispatchAction("recover-lost-work");
+            },
+          },
+        });
+        break;
+      default: {
+        const exhaustive: never = outcome;
+        return exhaustive;
+      }
+    }
+  }
+
   // Arrow keys walk the stash list, mirroring the app's other lists.
   const onStashesKeyDown = listKeyboardNav({
     items: list,
-    activeIndex: list.findIndex((s) => s.index === effectiveIndex),
-    onActivate: (stash) => setSelectedIndex(stash.index),
-    rowKey: (stash) => String(stash.index),
+    activeIndex: effective ? list.indexOf(effective) : -1,
+    onActivate: (stash) => setSelected({ sha: stash.sha, index: stash.index }),
+    rowKey: stashRowKey,
     rowAttr: "data-stash",
   });
 
@@ -243,18 +347,20 @@ export function StashesDialog({
             <aside className="flex w-56 shrink-0 flex-col border-r">
               <ScrollArea className="min-h-0 flex-1">
                 <div onKeyDown={onStashesKeyDown}>
-                  {list.map((stash) => (
+                  {list.map((stash, i) => (
                     <button
                       type="button"
-                      key={stash.index}
-                      data-stash={stash.index}
+                      key={rowReactKeys[i]}
+                      data-stash={stashRowKey(stash)}
                       className={cn(
                         "block w-full border-b px-3 py-2 text-left",
-                        effectiveIndex === stash.index
+                        effectiveKey === stashRowKey(stash)
                           ? "bg-accent text-accent-foreground"
                           : "hover:bg-muted/60",
                       )}
-                      onClick={() => setSelectedIndex(stash.index)}
+                      onClick={() =>
+                        setSelected({ sha: stash.sha, index: stash.index })
+                      }
                     >
                       <p className="truncate text-xs font-medium">
                         {stash.message}
@@ -268,7 +374,7 @@ export function StashesDialog({
                   ))}
                 </div>
               </ScrollArea>
-              {effectiveIndex !== null && (
+              {effective !== null && (
                 <div className="flex items-center gap-1.5 border-t p-2">
                   {busy && <Spinner className="size-3" />}
                   <span className="flex-1" />
@@ -278,7 +384,7 @@ export function StashesDialog({
                     className="text-destructive"
                     aria-label="Drop stash"
                     disabled={busy}
-                    onClick={() => setConfirmDrop(effectiveIndex)}
+                    onClick={() => askDrop(effective)}
                   >
                     <TrashIcon data-icon="inline-start" />
                     Drop…
@@ -287,25 +393,25 @@ export function StashesDialog({
                     variant="outline"
                     size="xs"
                     disabled={busy}
-                    onClick={() => askApply(effectiveIndex, false)}
+                    onClick={() => askApply(effective.index, false)}
                   >
                     Apply
                   </Button>
                   <Button
                     size="xs"
                     disabled={busy}
-                    onClick={() => askApply(effectiveIndex, true)}
+                    onClick={() => askApply(effective.index, true)}
                   >
                     Pop
                   </Button>
                 </div>
               )}
             </aside>
-            {effectiveIndex !== null ? (
+            {effective !== null ? (
               <StashFiles
-                key={effectiveIndex}
+                key={effective.sha}
                 repoPath={repoPath}
-                source={{ kind: "stash", index: effectiveIndex }}
+                source={{ kind: "stash", sha: effective.sha }}
               />
             ) : null}
           </div>
@@ -331,10 +437,14 @@ export function StashesDialog({
           <DialogContent>
             <DialogHeader>
               <DialogTitle>Drop this stash?</DialogTitle>
-              <DialogDescription>
-                Permanently deletes stash@{"{"}
-                {shownDrop}
-                {"}"} and the changes it holds. This cannot be undone.
+              <DialogDescription className="wrap-anywhere">
+                Permanently deletes the stash "{shownDrop?.message}"
+                {shownDrop && parseableDate(shownDrop.date) && (
+                  <>
+                    , saved <RelativeTime date={shownDrop.date} />,
+                  </>
+                )}{" "}
+                and the changes it holds. This cannot be undone.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
@@ -344,17 +454,7 @@ export function StashesDialog({
               <Button
                 variant="destructive"
                 disabled={drop.isPending}
-                onClick={async () => {
-                  if (confirmDrop === null) return;
-                  try {
-                    await drop.mutateAsync(confirmDrop);
-                    setConfirmDrop(null);
-                    toast.success("Stash dropped");
-                  } catch (e) {
-                    setConfirmDrop(null);
-                    onError(e);
-                  }
-                }}
+                onClick={runDrop}
               >
                 {drop.isPending && <Spinner data-icon="inline-start" />}
                 Drop stash
@@ -514,9 +614,8 @@ function RecoverableView({
   );
 }
 
-/** File list + selected file diff for one stash (live or orphaned). The rev base
- *  differs by source (`stash@{index}` vs the raw sha); the `^1`/`^3` structure
- *  and hook wiring are otherwise identical. */
+/** File list + selected file diff for one stash (live or orphaned), both read
+ *  by the stash commit's sha; the `^1`/`^3` structure is identical. */
 function StashFiles({
   repoPath,
   source,
@@ -524,14 +623,10 @@ function StashFiles({
   repoPath: string;
   source: FileSource;
 }) {
-  const stashIndex = source.kind === "stash" ? source.index : null;
-  const orphanSha = source.kind === "orphaned" ? source.sha : null;
-  // The commit-ish the file lives under: a live stash's slot, or the raw sha.
-  const base = source.kind === "stash" ? `stash@{${source.index}}` : source.sha;
+  // The commit-ish the file lives under.
+  const base = source.sha;
 
-  const stashFilesQuery = useStashFiles(repoPath, stashIndex);
-  const orphanFilesQuery = useOrphanedStashFiles(repoPath, orphanSha);
-  const files = source.kind === "stash" ? stashFilesQuery : orphanFilesQuery;
+  const files = useOrphanedStashFiles(repoPath, base);
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const effectivePath =
@@ -542,9 +637,7 @@ function StashFiles({
   // file; the highlight stays on effectivePath.
   const deferredPath = useDeferredValue(effectivePath);
   // The file's diff swaps through the pane's two-slot hold. Its entity is the
-  // rev base: an orphan's sha, or a live stash's `stash@{N}` slot, so a drop or
-  // pop of this stash, or of a newer one, moves the next stash into the slot
-  // under this same view.
+  // stash's sha, so a drop or pop elsewhere in the stack never re-targets it.
   const diffTarget = deferredPath
     ? keyedPaneView(repoPath, base, deferredPath, deferredPath)
     : placeholderPaneView(base);
@@ -689,7 +782,6 @@ function StashFiles({
             view.kind === "file" ? (
               <StashFileDiffSlot
                 repoPath={repoPath}
-                source={source}
                 base={base}
                 path={view.file}
                 untracked={
@@ -710,26 +802,20 @@ function StashFiles({
 /** One stashed file's diff in the pane's slot, on its own read. */
 function StashFileDiffSlot({
   repoPath,
-  source,
   base,
   path,
   untracked,
   reportRead,
 }: {
   repoPath: string;
-  source: FileSource;
-  /** The commit-ish the file lives under. */
+  /** The stash commit's sha: the diff reads by it, and the revs hang off it. */
   base: string;
   path: string;
   /** The file list's flag for this path; absent while the list lacks it. */
   untracked: boolean | undefined;
   reportRead: (read: SlotRead) => void;
 }) {
-  const stashIndex = source.kind === "stash" ? source.index : null;
-  const orphanSha = source.kind === "orphaned" ? source.sha : null;
-  const stashDiffQuery = useStashFileDiff(repoPath, stashIndex, path);
-  const orphanDiffQuery = useOrphanedStashFileDiff(repoPath, orphanSha, path);
-  const diff = source.kind === "stash" ? stashDiffQuery : orphanDiffQuery;
+  const diff = useOrphanedStashFileDiff(repoPath, base, path);
   useSlotRead(reportRead, diff);
   // Image/SVG previews need the file's content on each side. Tracked changes
   // read from the stash commit; untracked files from its ^3 parent.

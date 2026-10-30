@@ -31,6 +31,7 @@ import { useAiTextStream } from "@/lib/ai/stream";
 import { readRepoInstructions } from "@/lib/git/api";
 import {
   type ConflictSides,
+  changedOnDiskCopy,
   conflictSides,
   diffContents,
 } from "@/lib/git/conflict";
@@ -70,7 +71,7 @@ const BLOCKED_COPY: Record<BlockedReason, (fileName: string) => ReactNode> = {
   undecodable: () =>
     "This file isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
   blobUndecodable: () =>
-    "Part of this conflict isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
+    "Part of this conflict isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Resolve it in the conflict editor, whose accepts keep the file's bytes exact, or in your own editor.",
   unreadableName: () =>
     "This file's name can't be read as text, so it isn't sent to a model. Resolve it by hand in your editor, then stage it.",
   ignored: (fileName) => (
@@ -285,6 +286,10 @@ export function ConflictResolveView({
     // resolved) lives in the conflict editor, which this view has no counterpart to.
     const clean = !hasConflictMarkers(proposed);
     try {
+      // Phase "ready" implies `sides`. Its hash, never the re-read's below, is
+      // the expected value: the proposal was built from this read.
+      if (!sides) return;
+      const expected = sides.workingHash;
       // `sides` is the start-time read; the write refuses on the LIVE bytes, so a
       // file that stopped being UTF-8 since then never takes a lossy proposal.
       let fresh: ConflictSides;
@@ -309,12 +314,29 @@ export function ConflictResolveView({
       )
         return;
       if (fresh.undecodable) {
+        // A moved working file reads as changed on disk. An unmoved one was
+        // decodable at the start read, so a stage version turned non-UTF-8.
         toast.info(
-          `${baseName(path)} changed to text that isn't UTF-8, so the proposal wasn't applied. Use Accept all current or Accept all incoming in the conflict editor to keep its bytes exact.`,
+          fresh.workingHash !== expected
+            ? changedOnDiskCopy(baseName(path))
+            : `Part of the conflict in ${baseName(path)} isn't UTF-8 text, so the proposal wasn't applied. Resolve it in the conflict editor instead; its accepts keep the file's bytes exact.`,
         );
         return;
       }
-      await resolve.mutateAsync({ path, content: proposed, stage: clean });
+      // A hash mismatch alone still goes to the backend, whose guard lets a
+      // retry over its own landed write through.
+      const outcome = await resolve.mutateAsync({
+        path,
+        content: proposed,
+        stage: clean,
+        expectedHash: expected,
+      });
+      // The proposal and Regenerate stay; only a Regenerate re-reads the sides
+      // and refreshes the expected hash.
+      if (outcome.kind === "changedOnDisk") {
+        toast.info(changedOnDiskCopy(baseName(path)));
+        return;
+      }
       // This continuation can outlive the walk that armed it (another surface armed
       // its own walk, or the repo-switch clear fired) during the mutation, so both
       // the wording and the advance come from a fresh read gated on it still

@@ -559,10 +559,13 @@ test("the header's whole-file actions explain their notConflicted and path-gate 
         `"${label}" must be disabled while the working file isn't UTF-8 text`,
       );
     } else {
+      // `sideRefusal` is every path refusal but a leaf link, which git's side
+      // checkout replaces or removes itself (pinned below and in
+      // conflict-path-refusal).
       assert.match(
         prop("disabled"),
-        /(?<![\w$.])pathRefusal\s*!==\s*null/,
-        `"${label}" must be disabled on a path-gate refusal`,
+        /(?<![\w$.])sideRefusal\s*!==\s*null/,
+        `"${label}" must be disabled on a path-gate refusal other than a leaf link`,
       );
     }
     // The AI button holds for a second cause too (a non-UTF-8 working file), so
@@ -571,12 +574,17 @@ test("the header's whole-file actions explain their notConflicted and path-gate 
       prop("reason"),
       label === "Resolve with AI"
         ? /^\s*aiHeldReason\s*$/
-        : /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*pathRefusal\s*$/,
+        : /^\s*notConflicted\s*\?\s*NOT_CONFLICTED_COPY\s*:\s*sideRefusal\s*$/,
       label === "Resolve with AI"
         ? `"${label}" must explain its notConflicted hold`
         : `"${label}" must explain its notConflicted and path-refusal holds`,
     );
   }
+  assert.match(
+    src.masked,
+    /\bconst\s+sideRefusal\s*=\s*linkedLeaf\s*\?\s*null\s*:\s*pathRefusal\s*;/,
+    "sideRefusal must be pathRefusal with only the leaf-link refusal lifted",
+  );
   // The AI reason's first case is the no-longer-conflicted one, so that reason
   // wins and stays the shared copy; the non-UTF-8 hold has its own arm.
   const held =

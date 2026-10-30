@@ -2029,7 +2029,7 @@ pub struct DiscardPath {
 
 const DISCARD_OUTSIDE: &str = "it isn't inside this repository's working tree";
 const DISCARD_GIT_DIR: &str = "it's inside the repository's .git folder";
-const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
+pub(crate) const DISCARD_LINKED: &str = "it's reached through a symbolic link or junction";
 const DISCARD_NOT_NEW: &str = "Git doesn't list it as a new file, so refresh and try again";
 const DISCARD_NOW_NEW: &str = "Git lists it as a new file, so refresh and try again";
 const DISCARD_WIN_TRAILING: &str =
@@ -2176,7 +2176,7 @@ fn discard_all_untracked(stdout: &[u8]) -> AppResult<Vec<String>> {
 }
 
 /// Probe below the root without following links; line rewrites also probe the leaf.
-fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std::io::Result<bool> {
+pub(crate) fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std::io::Result<bool> {
     let segments: Vec<_> = rel.strip_suffix('/').unwrap_or(rel).split('/').collect();
     let count = segments.len().saturating_sub(usize::from(!include_leaf));
     let mut p = Path::new(top).to_path_buf();
@@ -2191,7 +2191,15 @@ fn linked_component(top: &str, rel: &str, include_leaf: bool) -> std::io::Result
         match std::fs::symlink_metadata(spelling) {
             Ok(m) if m.file_type().is_symlink() => return Ok(true),
             Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            // Nothing below a missing path or a non-directory can be a link.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false)
+            }
             Err(e) => return Err(e),
         }
     }
@@ -2995,7 +3003,7 @@ pub async fn git_stash_count(repo_path: String) -> AppResult<u32> {
 pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
     let out = run_git(
         Some(&repo_path),
-        &["stash", "list", "--format=%gd%x00%s%x00%cI"],
+        &["stash", "list", "--format=%gd%x00%H%x00%s%x00%cI"],
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -3003,9 +3011,9 @@ pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
     let entries = text
         .lines()
         .filter_map(|line| {
-            let mut parts = line.splitn(3, '\0');
-            let (Some(refname), Some(message), Some(date)) =
-                (parts.next(), parts.next(), parts.next())
+            let mut parts = line.splitn(4, '\0');
+            let (Some(refname), Some(sha), Some(message), Some(date)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
             else {
                 return None;
             };
@@ -3018,6 +3026,7 @@ pub async fn git_stash_list(repo_path: String) -> AppResult<Vec<StashEntry>> {
                 .ok()?;
             Some(StashEntry {
                 index,
+                sha: sha.to_string(),
                 message: message.to_string(),
                 date: date.to_string(),
             })
@@ -3051,7 +3060,7 @@ pub struct OrphanedStash {
 }
 
 /// The files a stash-shaped ref holds, including untracked ones, keyed by a
-/// ref spec (`stash@{N}` for a live stash, or a raw sha for a dangling one).
+/// ref spec: `stash@{N}`, or any stash commit's sha, live or dangling.
 async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
     let out = run_git(
         Some(repo),
@@ -3099,7 +3108,8 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
 /// One file's diff from a stash-shaped ref. Tracked changes diff the stash
 /// against its base (`^1`); untracked files live in the stash's third parent
 /// (`^3`, created by `--include-untracked`), so an empty tracked diff falls
-/// back to that. `spec` is `stash@{N}` for a live stash or a raw sha.
+/// back to that. `spec` is `stash@{N}`, or any stash commit's sha, live or
+/// dangling.
 async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResult<FileDiff> {
     let base = format!("{spec}^1");
     // Literal pathspec: the path comes from the stash's own file list, so a
@@ -3259,7 +3269,7 @@ pub async fn git_orphaned_stashes(repo_path: String) -> AppResult<Vec<OrphanedSt
     Ok(out)
 }
 
-/// The files a dangling (orphaned) stash holds, browsed by sha.
+/// The files any stash commit holds, live or dangling, browsed by sha.
 #[tauri::command]
 pub async fn git_orphaned_stash_files(
     repo_path: String,
@@ -3269,7 +3279,7 @@ pub async fn git_orphaned_stash_files(
     stash_files_at(&repo_path, &sha).await
 }
 
-/// One file's diff from a dangling (orphaned) stash, by sha.
+/// One file's diff from any stash commit, live or dangling, by sha.
 #[tauri::command]
 pub async fn git_orphaned_stash_file_diff(
     repo_path: String,
@@ -18191,6 +18201,10 @@ detached
         assert!(!linked_component(top, "link", false).unwrap());
         assert!(linked_component(top, "link", true).unwrap());
         assert!(!linked_component(top, "missing/x", false).unwrap());
+        std::fs::write(root.path().join("a"), "a regular file").unwrap();
+        for include_leaf in [false, true] {
+            assert!(!linked_component(top, "a/b/c.txt", include_leaf).unwrap());
+        }
     }
 
     #[cfg(any(windows, unix))]
