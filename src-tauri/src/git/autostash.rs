@@ -538,12 +538,13 @@ pub(crate) async fn git_switch_autostash_core(
     rename_all_fields = "camelCase"
 )]
 pub enum StashDropOutcome {
-    /// The entry with the given sha was dropped.
+    /// The entry with the given sha was dropped, or git's output carried no
+    /// readable id (fail-open: exit 0 without a parseable `Dropped … (<id>)` line).
     Dropped,
     /// Nothing was dropped. Top-only: `refs/stash` resolves but points elsewhere.
-    /// Any depth: the stack changed under the drop. Either the drop took a
-    /// different entry, which was stored back on top (`stash@{0}`) and may have
-    /// reordered the stack, or the drop command failed with the sha still listed.
+    /// Any depth: the drop printed a different entry's id, and that entry was
+    /// stored back on top (`stash@{0}`); or the drop command failed and the sha is
+    /// now listed at another slot.
     Moved,
     /// Nothing to drop. Top-only: `refs/stash` does not resolve. Any depth: a
     /// successful `git stash list` read does not hold the sha.
@@ -635,12 +636,13 @@ async fn drop_stash_at_any_depth(repo: &str, sha: &str) -> AppResult<StashDropOu
     let target = format!("stash@{{{slot}}}");
     let out = match run_git(Some(repo), &["stash", "drop", &target], DEFAULT_TIMEOUT).await {
         Ok(out) => out,
-        // A slot an external drop removed fails the command. Absence after our own
-        // failed drop is ambiguous (a killed git can still finish), so only a sha
-        // still listed refines the error.
+        // A failed drop reads Moved only when the sha is now listed at another slot.
+        // A sha still at `slot`, or absent, keeps git's own error: Moved's "retry by
+        // sha" would mislead there, and absence after our own failed drop is
+        // ambiguous (an external drop, or a killed git that still finished).
         Err(err) => {
             return match stash_slot_of(repo, sha).await {
-                Ok(Some(_)) => Ok(StashDropOutcome::Moved),
+                Ok(Some(now)) if now != slot => Ok(StashDropOutcome::Moved),
                 _ => Err(err),
             }
         }
@@ -2463,8 +2465,9 @@ mod tests {
     }
 
     /// A drop that fails because an external drop emptied the located slot: a
-    /// target still listed reads Moved (nothing was dropped), while one gone too
-    /// keeps the drop's own error, since absence after our failed drop is ambiguous.
+    /// target still listed at ANOTHER slot reads Moved (nothing was dropped), while
+    /// one gone too keeps the drop's own error, since absence after our failed drop
+    /// is ambiguous.
     #[tokio::test]
     async fn drop_by_sha_any_depth_reads_a_failed_drop_against_a_fresh_list() {
         for (external, expect_moved) in [("stash@{0}", true), ("stash@{1}", false)] {
@@ -2505,6 +2508,35 @@ mod tests {
                 assert_eq!(stash_shas(&repo).await, vec![other]);
             }
         }
+    }
+
+    /// A drop that fails with the sha still at its slot (a held `refs/stash.lock`)
+    /// keeps git's own error rather than reporting a stack that never moved.
+    #[tokio::test]
+    async fn drop_by_sha_any_depth_keeps_the_error_when_the_slot_did_not_move() {
+        let (dir, repo) = setup_repo("drop-any-locked").await;
+        let target = push_stash(dir.path(), &repo, "one\n").await;
+        let other = push_stash(dir.path(), &repo, "two\n").await;
+        let lock = dir.path().join(".git").join("refs").join("stash.lock");
+        let hook: std::sync::Arc<dyn Fn() + Send + Sync> = {
+            let lock = lock.clone();
+            std::sync::Arc::new(move || std::fs::write(&lock, "").unwrap())
+        };
+
+        let state = AppState::default();
+        let verdict = STASH_SLOT_LOCATED_HOOK
+            .scope(
+                hook,
+                git_drop_stash_by_sha_core(&state, repo.clone(), target.clone(), true),
+            )
+            .await;
+        assert!(lock.exists(), "the hook never ran");
+        std::fs::remove_file(&lock).unwrap();
+        let Err(AppError::Git { stderr, .. }) = &verdict else {
+            panic!("expected git's error, got {verdict:?}");
+        };
+        assert!(stderr.contains("stash.lock"), "{stderr}");
+        assert_eq!(stash_shas(&repo).await, vec![other, target]);
     }
 
     /// The slot comes from `%gd`, the lowest of duplicate entries wins, and a

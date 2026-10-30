@@ -4,9 +4,13 @@ import type { FileDiff, OrphanedStash, StashEntry, StashFile } from "../types";
 export const gitStashList = (repoPath: string) =>
   invoke<StashEntry[]>("git_stash_list", { repoPath });
 
+// Slot-addressed: kept only so check-dead-surface sees an invoke for a command
+// that is still registered. Never call it; read by sha (gitOrphanedStashFiles).
 export const gitStashFiles = (repoPath: string, index: number) =>
   invoke<StashFile[]>("git_stash_files", { repoPath, index });
 
+// Slot-addressed: kept only so check-dead-surface sees an invoke for a command
+// that is still registered. Never call it; read by sha (gitOrphanedStashFileDiff).
 export const gitStashFileDiff = (
   repoPath: string,
   index: number,
@@ -16,6 +20,8 @@ export const gitStashFileDiff = (
 export const gitStashApply = (repoPath: string, index: number, pop: boolean) =>
   invoke<void>("git_stash_apply", { repoPath, index, pop });
 
+// Slot-addressed: kept only so check-dead-surface sees an invoke for a command
+// that is still registered. Never call it; drop by sha (gitDropStashBySha).
 export const gitStashDrop = (repoPath: string, index: number) =>
   invoke<void>("git_stash_drop", { repoPath, index });
 

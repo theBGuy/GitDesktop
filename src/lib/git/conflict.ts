@@ -63,9 +63,11 @@ export const conflictSides = (
 
 /** Writes a resolution to the file, staging it when `stage` (which marks the
  *  conflict resolved). Per-region accepts pass `stage: false` while markers
- *  remain and `true` on the final region; the AI flow stages immediately.
+ *  remain and `true` on the final region; the AI flow stages unless its
+ *  proposal still carries markers.
  *  `expectedHash` is the `workingHash` of the read `content` was built from
- *  (null: that read found no file); the write refuses when disk moved since. */
+ *  (null: that read found no file); the write refuses when disk moved since,
+ *  unless disk already holds exactly `content`. */
 export const resolveConflict = (
   repoPath: string,
   path: string,

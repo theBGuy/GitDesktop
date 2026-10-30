@@ -3052,7 +3052,7 @@ pub struct OrphanedStash {
 }
 
 /// The files a stash-shaped ref holds, including untracked ones, keyed by a
-/// ref spec (`stash@{N}` for a live stash, or a raw sha for a dangling one).
+/// ref spec: `stash@{N}`, or any stash commit's sha, live or dangling.
 async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
     let out = run_git(
         Some(repo),
@@ -3100,7 +3100,8 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
 /// One file's diff from a stash-shaped ref. Tracked changes diff the stash
 /// against its base (`^1`); untracked files live in the stash's third parent
 /// (`^3`, created by `--include-untracked`), so an empty tracked diff falls
-/// back to that. `spec` is `stash@{N}` for a live stash or a raw sha.
+/// back to that. `spec` is `stash@{N}`, or any stash commit's sha, live or
+/// dangling.
 async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResult<FileDiff> {
     let base = format!("{spec}^1");
     // Literal pathspec: the path comes from the stash's own file list, so a
@@ -3260,7 +3261,7 @@ pub async fn git_orphaned_stashes(repo_path: String) -> AppResult<Vec<OrphanedSt
     Ok(out)
 }
 
-/// The files a dangling (orphaned) stash holds, browsed by sha.
+/// The files any stash commit holds, live or dangling, browsed by sha.
 #[tauri::command]
 pub async fn git_orphaned_stash_files(
     repo_path: String,
@@ -3270,7 +3271,7 @@ pub async fn git_orphaned_stash_files(
     stash_files_at(&repo_path, &sha).await
 }
 
-/// One file's diff from a dangling (orphaned) stash, by sha.
+/// One file's diff from any stash commit, live or dangling, by sha.
 #[tauri::command]
 pub async fn git_orphaned_stash_file_diff(
     repo_path: String,

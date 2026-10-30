@@ -363,6 +363,9 @@ export function ConflictBanner({
           },
         });
         break;
+      default:
+        // No return: an unknown kind still runs the retire-and-rescue tail.
+        outcome satisfies never;
     }
     // Every verdict retires this offer: a refusal would only refuse again. The
     // clear waits out the confirm's exit so Base UI returns focus to a mounted

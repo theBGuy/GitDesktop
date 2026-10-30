@@ -873,11 +873,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
 **Stash all changes** ({{kbd:stash-all}}) sets your working changes aside; **View
 stashes** lists them to apply, pop, or drop (each asks first, and the apply and pop
 prompts say whether the stash stays in the list afterwards), and **Pop latest stash**
-restores the most recent. A drop removes exactly the stash you picked, even when another
-tool adds or drops a stash while the list is open. Setting changes aside is refused while
-conflicts are still unresolved, or while a merge, rebase, cherry-pick or revert is in
-progress — finish or abort it first, so a
-resolution you've already staged can't be swept out of the operation.
+restores the most recent. A drop only ever targets the stash you picked, even when another
+tool adds or drops a stash while the list is open; if the list changes mid-drop, a message
+says what happened. Setting changes aside is refused while conflicts are still
+unresolved, or while a merge, rebase, cherry-pick or revert is in progress — finish or abort
+it first, so a resolution you've already staged can't be swept out of the operation.
 
 **Recover lost work** (in the branch ⋮ menu, or the command palette) opens the
 **Recoverable** tab in the stashes dialog. It scans your repository (with \`git fsck\`) for
@@ -3282,8 +3282,9 @@ preview a merge's outcome. On top of that, **Allow destructive** (\`--allow-dest
 which requires \`--allow-git-write\` too — on its own it grants nothing) unlocks the
 **irreversible** operations: delete a branch, discard changes, reset, force-push (with
 lease), delete a remote branch, drop a stash (by the sha that list stashes reports), delete
-a tag, and drop commits on a guarded rebase pull. Agent-session branches (\`gd/session/*\`) are refused by the branch-mutating
-tools, so an in-flight agent session is never broken.
+a tag, and drop commits on a guarded rebase pull. Agent-session branches
+(\`gd/session/*\`) are refused by the branch-mutating tools, so an in-flight agent session
+is never broken.
 
 The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):
 \`generate_commit_message\`, \`generate_pr_description\`, and \`generate_branch_name\` each hand

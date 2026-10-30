@@ -134,7 +134,10 @@ export function useDropStashBySha(repo: string) {
   );
 }
 
-/** SHA-verified drop of a listed stash wherever it sits in the stack. */
+/** SHA-verified drop of a listed stash wherever it sits in the stack. Not
+ *  repo-pinned on purpose: View stashes' busy state and in-flight ref are
+ *  per-instance re-entry guards, so a drop holds the dialog busy until it
+ *  settles, across a repo switch too. */
 export function useDropStashAtAnyDepth(repo: string) {
   return useRepoMutation(
     repo,

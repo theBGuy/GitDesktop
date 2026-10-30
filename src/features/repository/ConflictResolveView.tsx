@@ -71,7 +71,7 @@ const BLOCKED_COPY: Record<BlockedReason, (fileName: string) => ReactNode> = {
   undecodable: () =>
     "This file isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
   blobUndecodable: () =>
-    "Part of this conflict isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
+    "Part of this conflict isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Resolve it in the conflict editor, whose accepts keep the file's bytes exact, or in your own editor.",
   unreadableName: () =>
     "This file's name can't be read as text, so it isn't sent to a model. Resolve it by hand in your editor, then stage it.",
   ignored: (fileName) => (
@@ -314,11 +314,17 @@ export function ConflictResolveView({
       )
         return;
       if (fresh.undecodable) {
+        // A moved working file reads as changed on disk. An unmoved one was
+        // decodable at the start read, so a stage version turned non-UTF-8.
         toast.info(
-          `${baseName(path)} changed to text that isn't UTF-8, so the proposal wasn't applied. Use Accept all current or Accept all incoming in the conflict editor to keep its bytes exact.`,
+          fresh.workingHash !== expected
+            ? changedOnDiskCopy(baseName(path))
+            : `Part of the conflict in ${baseName(path)} isn't UTF-8 text, so the proposal wasn't applied. Resolve it in the conflict editor instead; its accepts keep the file's bytes exact.`,
         );
         return;
       }
+      // A hash mismatch alone still goes to the backend, whose guard lets a
+      // retry over its own landed write through.
       const outcome = await resolve.mutateAsync({
         path,
         content: proposed,

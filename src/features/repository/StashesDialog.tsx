@@ -62,6 +62,7 @@ import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
+import { parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
@@ -72,6 +73,7 @@ import {
   STASH_DROP_MOVED,
   stashDropRestoreFailed,
 } from "./stash-drop-copy";
+import { resolveStashPick, type StashPick, stashRowKey } from "./stash-pick";
 
 /** Which source the left list is drawn from. */
 type StashesView = "stashes" | "recoverable";
@@ -81,30 +83,6 @@ type StashesView = "stashes" | "recoverable";
 type FileSource =
   | { kind: "stash"; sha: string }
   | { kind: "orphaned"; sha: string };
-
-/** A picked stash: the sha is its identity; the index is the slot it was picked
- *  at, where the selection lands once that sha is gone. */
-interface StashPick {
-  sha: string;
-  index: number;
-}
-
-/** Two slots can hold the same commit, so a row is keyed by both. */
-const stashRowKey = (stash: StashEntry) => `${stash.sha}:${stash.index}`;
-
-/** The first row holding the picked sha; else the row now at its slot, clamped
- *  to the last; the newest with no pick; null for an empty list. */
-function resolveStashPick(
-  list: StashEntry[],
-  pick: StashPick | null,
-): StashEntry | null {
-  if (list.length === 0) return null;
-  if (pick === null) return list[0];
-  return (
-    list.find((s) => s.sha === pick.sha) ??
-    list[Math.min(pick.index, list.length - 1)]
-  );
-}
 
 /** Apply and pop differ only in what becomes of the stash afterward. The pop
  *  wording is kept in step BY HAND with the branch menu's "Pop latest stash"
@@ -122,19 +100,19 @@ const STASH_APPLY_COPY = {
   },
 } as const;
 
-/** A pending apply/pop, plus the stash's identity as it was when the prompt
- *  opened — `stash@{n}` is a SLOT, not an identity. */
+/** A pending apply/pop: the slot it addresses, plus the sha of the stash that
+ *  sat there when the prompt opened — `stash@{n}` is a SLOT, not an identity. */
 interface PendingApply {
   index: number;
   pop: boolean;
-  message: string;
-  date: string;
+  sha: string;
 }
 
 /** A pending drop: the stash the prompt names, and the repo it was asked in. */
 interface PendingDrop {
   sha: string;
   message: string;
+  date: string;
   repo: string;
 }
 
@@ -206,19 +184,19 @@ export function StashesDialog({
   function askApply(index: number, pop: boolean) {
     const stash = list.find((s) => s.index === index);
     if (!stash) return;
-    setConfirmApply({ index, pop, message: stash.message, date: stash.date });
+    setConfirmApply({ index, pop, sha: stash.sha });
   }
 
   async function runApply() {
     if (!confirmApply) return;
-    const { index, pop, message, date } = confirmApply;
+    const { index, pop, sha } = confirmApply;
     setConfirmApply(null);
-    // Apply still addresses a slot, and the list can refetch (or another
-    // surface push or drop a stash) while the prompt is open, sliding a
-    // different stash into it. So apply re-checks message + date and runs only
-    // on the stash the prompt described; moving apply to the sha is separate.
+    // A refetch or another surface's push or drop can slide a different stash
+    // into the slot while the prompt is open. This runs only while the loaded
+    // list still shows the prompt's sha at that slot; the apply itself still
+    // addresses the slot.
     const current = list.find((s) => s.index === index);
-    if (!current || current.message !== message || current.date !== date) {
+    if (!current || current.sha !== sha) {
       toast.info("The stash list changed — nothing was applied.");
       return;
     }
@@ -235,11 +213,18 @@ export function StashesDialog({
   const applyPrompt = shownApply ? stashApplyPrompt(shownApply) : null;
 
   function askDrop(stash: StashEntry) {
-    setConfirmDrop({ sha: stash.sha, message: stash.message, repo: repoPath });
+    setConfirmDrop({
+      sha: stash.sha,
+      message: stash.message,
+      date: stash.date,
+      repo: repoPath,
+    });
   }
 
   // The sha captured at ask time pins the target, so no list re-check: the drop
-  // takes exactly the stash the prompt named, wherever it now sits, or nothing.
+  // only ever aims at the stash the prompt named, wherever it now sits. A race
+  // that makes it take another entry stores that one back, and the outcome toast
+  // names an entry it could not restore.
   async function runDrop() {
     if (!confirmDrop || droppingRef.current) return;
     const { sha, repo } = confirmDrop;
@@ -248,17 +233,23 @@ export function StashesDialog({
       return;
     }
     droppingRef.current = true;
+    // The settle closes the prompt only while it still names this drop's stash
+    // and repo (a backstop: new asks are held while the drop is busy).
+    const closeOwnPrompt = () =>
+      setConfirmDrop((cur) =>
+        cur?.sha === sha && cur.repo === repo ? null : cur,
+      );
     let outcome: Awaited<ReturnType<typeof drop.mutateAsync>>;
     try {
       outcome = await drop.mutateAsync(sha);
     } catch (e) {
-      setConfirmDrop(null);
+      closeOwnPrompt();
       onError(e);
       return;
     } finally {
       droppingRef.current = false;
     }
-    setConfirmDrop(null);
+    closeOwnPrompt();
     switch (outcome.kind) {
       case "dropped": {
         // The banner must not offer to drop a backup that is gone now.
@@ -288,6 +279,10 @@ export function StashesDialog({
           },
         });
         break;
+      default: {
+        const exhaustive: never = outcome;
+        return exhaustive;
+      }
     }
   }
 
@@ -439,8 +434,13 @@ export function StashesDialog({
             <DialogHeader>
               <DialogTitle>Drop this stash?</DialogTitle>
               <DialogDescription className="wrap-anywhere">
-                Permanently deletes the stash "{shownDrop?.message}" and the
-                changes it holds. This cannot be undone.
+                Permanently deletes the stash "{shownDrop?.message}"
+                {shownDrop && parseableDate(shownDrop.date) && (
+                  <>
+                    , saved <RelativeTime date={shownDrop.date} />,
+                  </>
+                )}{" "}
+                and the changes it holds. This cannot be undone.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>

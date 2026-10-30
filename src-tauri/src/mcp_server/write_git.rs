@@ -1243,9 +1243,10 @@ impl GitDesktopMcp {
 
     #[tool(
         description = "List the stash entries in the bound repository (index, sha, message, \
-                       date), most recent first. The index is what stash_apply/stash_pop \
-                       address; it shifts as stashes are pushed and dropped. The sha is the \
-                       stash's stable identity and what drop_stash takes."
+                       date), most recent first. The index is what stash_apply addresses \
+                       (stash_pop takes none and pops the most recent); it shifts as stashes \
+                       are pushed and dropped. The sha is the stash's stable identity and what \
+                       drop_stash takes."
     )]
     async fn list_stashes(&self) -> Result<CallToolResult, McpError> {
         let stashes = crate::git::ops::git_stash_list(self.repo.clone())
@@ -1437,8 +1438,10 @@ impl GitDesktopMcp {
     #[tool(
         description = "Drop the stash with this commit sha (see list_stashes' `sha`) wherever \
                        it sits in the stack, in the bound repository — the stashed changes are \
-                       LOST. Refuses when no stash has that sha. Requires --allow-git-write AND \
-                       --allow-destructive.",
+                       LOST. Refuses, dropping nothing, when no stash has that sha or when the \
+                       stash list shifted under the drop. If a racing stash write made the drop \
+                       remove a different stash that could not be stored back, the error names \
+                       that stash's sha. Requires --allow-git-write AND --allow-destructive.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn drop_stash(
@@ -1467,9 +1470,9 @@ impl GitDesktopMcp {
                 None,
             )),
             StashDropOutcome::Moved => Err(McpError::invalid_request(
-                "The stash list changed while dropping: nothing was dropped (if the drop took \
-                 a different stash, it was stored back at stash@{0}, so slots may have \
-                 shifted). Re-run list_stashes and retry by sha.",
+                "The stash list changed while dropping: nothing was dropped, and slots have \
+                 shifted (if the drop took a different stash, it was stored back at \
+                 stash@{0}). Re-run list_stashes and retry by sha.",
                 None,
             )),
             StashDropOutcome::RestoreFailed { dropped_sha } => Err(McpError::invalid_request(

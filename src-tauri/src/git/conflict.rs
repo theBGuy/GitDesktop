@@ -58,7 +58,7 @@ pub struct ConflictSides {
     /// Lowercase hex SHA-1 of the working file's raw bytes at this read; `None`
     /// when the file is absent (`working_exists` false). The write guard's
     /// expected value: `git_resolve_conflict` refuses when the live bytes no
-    /// longer hash to it.
+    /// longer hash to it, unless they already equal the content being written.
     pub working_hash: Option<String>,
     /// Whether the raw working bytes match the single surviving side's raw
     /// blob bytes after CRLF→LF normalization (the byte-truth twin of the
@@ -336,12 +336,13 @@ tokio::task_local! {
 /// conflict resolved (drops it from the conflict count and lets the
 /// merge/rebase/cherry-pick Continue). Per-region resolution writes without
 /// staging while markers remain, then stages on the final region; the AI flow
-/// and whole-file accepts stage immediately. The UI only reaches this after the
-/// user reviews and accepts.
+/// stages unless its proposal still carries markers. The UI only reaches this
+/// after the user reviews and accepts.
 ///
 /// `expected_hash` is the `working_hash` of the read the content was built
 /// from; `None` means that read found no file, so a missing key fails closed
-/// for any file that exists now.
+/// for any file that exists now. Either way, live bytes that already equal the
+/// content being written proceed, since rewriting them loses nothing.
 #[tauri::command]
 pub async fn git_resolve_conflict(
     state: State<'_, AppState>,
@@ -534,7 +535,8 @@ pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
 }
 
 /// `git_resolve_conflict_core`'s write-then-add without the path gate, the literal
-/// pathspec, `State`, or the expected-hash guard.
+/// pathspec, `State`, the working-tree lock, the expected-hash guard, or the
+/// add's one-shot index.lock retry.
 #[cfg(test)]
 pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
     use crate::git::runner::run_git;
