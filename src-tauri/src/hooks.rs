@@ -202,8 +202,24 @@ pub async fn git_run_hook_manager(
             )));
         }
     };
-    let mut cmd = tokio::process::Command::new(&manager);
+    let not_installed =
+        || AppError::Command(format!("{manager} isn't installed or isn't on your PATH."));
+    // Retries a failed startup capture here, where a stale PATH would show as
+    // "isn't installed"; after the allowlist, so a rejected action never waits on it.
+    crate::agent::prime_shell_path().await;
+    // The merged shell PATH decides first: the dialog must run the same install that
+    // git hooks will find, not whichever copy the inherited PATH reaches.
+    let binary = match crate::agent::find_on_shell_path(&manager) {
+        Some(found) => found,
+        None => crate::agent::resolve_named(&[manager.as_str()], None)
+            .await
+            .ok_or_else(not_installed)?,
+    };
+    let mut cmd = tokio::process::Command::new(&binary);
     crate::agent::sanitize_child_env(&mut cmd);
+    if let Some(path) = crate::agent::merged_shell_path() {
+        cmd.env("PATH", path);
+    }
     cmd.args(args)
         .current_dir(&repo_path)
         .stdin(std::process::Stdio::null());
@@ -215,10 +231,9 @@ pub async fn git_run_hook_manager(
         .await
         .map_err(|_| AppError::Timeout(timeout.as_secs()))?
         .map_err(|e| {
+            // The resolved path went stale between the lookup and the spawn.
             if e.kind() == std::io::ErrorKind::NotFound {
-                AppError::Command(format!(
-                    "{manager} isn't installed or isn't on your PATH."
-                ))
+                not_installed()
             } else {
                 AppError::Io(e)
             }

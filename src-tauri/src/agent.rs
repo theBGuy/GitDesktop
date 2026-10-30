@@ -377,19 +377,24 @@ fn compute_child_env_overrides(
     plan
 }
 
-/// The process-wide override plan, computed once from the live environment.
-/// Empty (so every applier is a no-op) unless we're running from an AppImage.
-fn child_env_overrides() -> &'static [(&'static str, Option<String>)] {
+/// The AppImage mount this process runs from (`$APPDIR`), or None off-AppImage.
+fn appimage_appdir() -> Option<String> {
     // AppImage is Linux-only, and `APPDIR` alone gates it: an extracted run
     // (`--appimage-extract`, the no-FUSE path) sets `APPDIR` but never `APPIMAGE`.
     if !cfg!(all(unix, not(target_os = "macos"))) {
-        return &[];
+        return None;
     }
+    std::env::var("APPDIR").ok().filter(|dir| !dir.is_empty())
+}
+
+/// The process-wide override plan, computed once from the live environment.
+/// Empty (so every applier is a no-op) unless we're running from an AppImage.
+fn child_env_overrides() -> &'static [(&'static str, Option<String>)] {
     static PLAN: std::sync::OnceLock<Vec<(&'static str, Option<String>)>> =
         std::sync::OnceLock::new();
-    PLAN.get_or_init(|| {
-        let appdir = std::env::var("APPDIR").unwrap_or_default();
-        compute_child_env_overrides(&appdir, |key| std::env::var(key).ok())
+    PLAN.get_or_init(|| match appimage_appdir() {
+        Some(appdir) => compute_child_env_overrides(&appdir, |key| std::env::var(key).ok()),
+        None => Vec::new(),
     })
 }
 
@@ -723,6 +728,235 @@ pub(crate) async fn resolve_named(names: &[&str], bin_path: Option<&str>) -> Opt
         // handled inside `find_executable` via the live registry PATH instead.
         None
     }
+}
+
+// --- login-shell PATH --------------------------------------------------------
+//
+// A Finder/Dock launch inherits launchd's minimal PATH, so hooks, filter drivers,
+// ssh and by-name credential helpers that git runs miss the user's tools. The login
+// shell's PATH is captured once and merged into git, gh and hook-manager children.
+
+/// The login shell's PATH; set only by a capture that succeeded, so a failed one is
+/// retried by the next `prime_shell_path` caller.
+#[cfg(not(windows))]
+static SHELL_PATH: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+
+/// Most bytes a capture reads; reaching it is a failed capture.
+#[cfg(not(windows))]
+const SHELL_PATH_CAPTURE_CAP: usize = 1024 * 1024;
+
+/// Captures the login shell's PATH once (single-flight; a failure caches nothing).
+/// Tests never call this: the cell is process-global, so a captured PATH would leak
+/// into every later git spawn in the test binary.
+#[cfg(not(windows))]
+pub(crate) async fn prime_shell_path() {
+    // Boxed: a `#[tauri::command]` awaits this, and command futures must stay small.
+    let _ = SHELL_PATH
+        .get_or_try_init(|| Box::pin(async { capture_shell_path().await.ok_or(()) }))
+        .await;
+}
+
+/// Windows children keep the inherited PATH; the stub keeps call sites cfg-free.
+#[cfg(windows)]
+pub(crate) async fn prime_shell_path() {}
+
+/// The PATH to set on a git, gh or hook-manager child: the captured shell PATH merged
+/// with the one the child would otherwise get. None (leave the child's PATH as is)
+/// until a capture lands, or when the inherited PATH is not valid UTF-8.
+#[cfg(not(windows))]
+pub(crate) fn merged_shell_path() -> Option<String> {
+    let shell = SHELL_PATH.get()?;
+    let plan_path = plan_path_entry(child_env_overrides());
+    let env_path = std::env::var_os("PATH");
+    let inherited = inherited_path_value(plan_path, env_path.as_deref())?;
+    Some(merge_path_lists(shell, &inherited))
+}
+
+/// The PATH value an AppImage override plan sets, if it carries one.
+#[cfg(any(not(windows), test))]
+fn plan_path_entry<'a>(plan: &'a [(&'static str, Option<String>)]) -> Option<&'a str> {
+    plan.iter()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value.as_deref())
+}
+
+/// Windows children keep the inherited PATH; the stub keeps call sites cfg-free.
+#[cfg(windows)]
+pub(crate) fn merged_shell_path() -> Option<String> {
+    None
+}
+
+/// The first executable regular file named `name` on the merged login-shell PATH, so
+/// a tool run on git's behalf is the same install git's own children find. None
+/// before a capture lands or when no entry has it.
+#[cfg(unix)]
+pub(crate) fn find_on_shell_path(name: &str) -> Option<PathBuf> {
+    let path = merged_shell_path()?;
+    first_on_path(&path, name, executable_by_us).map(PathBuf::from)
+}
+
+/// Whether `path` is a regular file (symlinks followed) this process may execute.
+/// `access` checks the REAL ids, which match the effective ones in a GUI app; a mode
+/// bit test would accept a file only its owner or group can run.
+#[cfg(unix)]
+fn executable_by_us(path: &str) -> bool {
+    let Ok(c_path) = std::ffi::CString::new(path) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+        && unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0
+}
+
+/// No merged PATH off unix; the stub keeps call sites cfg-free.
+#[cfg(not(unix))]
+pub(crate) fn find_on_shell_path(_name: &str) -> Option<PathBuf> {
+    None
+}
+
+/// The first `<entry>/<name>` that `is_exe` accepts, walking the `:`-separated `path`
+/// in order. Empty and relative entries are skipped, as the merge drops them.
+#[cfg(any(not(windows), test))]
+fn first_on_path(path: &str, name: &str, is_exe: impl Fn(&str) -> bool) -> Option<String> {
+    path.split(':')
+        .filter(|entry| entry.starts_with('/'))
+        .map(|entry| format!("{}/{name}", entry.trim_end_matches('/')))
+        .find(|candidate| is_exe(candidate))
+}
+
+/// Shell entries first, then inherited ones not already present (exact-string
+/// dedupe, first occurrence wins). Empty and relative entries are dropped from both
+/// sides: git runs in the open repo, where a relative entry would resolve inside it.
+#[cfg(any(not(windows), test))]
+fn merge_path_lists(shell: &str, inherited: &str) -> String {
+    let mut seen = HashSet::new();
+    shell
+        .split(':')
+        .chain(inherited.split(':'))
+        // A unix absolute path; `Path::is_absolute` would misread it on Windows tests.
+        .filter(|entry| entry.starts_with('/') && seen.insert(*entry))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The PATH between the first `marker` pair in a capture's stdout, minus printenv's
+/// trailing newline, AppImage-stripped when `appdir` is set. None (a failed capture)
+/// for a missing pair, a non-UTF-8 value, any control character, or no absolute
+/// entry. Only the value is decoded, so non-UTF-8 rc noise around it never fails it.
+#[cfg(any(not(windows), test))]
+fn finalize_capture(stdout: &[u8], marker: &str, appdir: Option<&str>) -> Option<String> {
+    let marker = marker.as_bytes();
+    let after_open = &stdout[find_bytes(stdout, marker)? + marker.len()..];
+    let value = std::str::from_utf8(&after_open[..find_bytes(after_open, marker)?]).ok()?;
+    let value = value
+        .strip_suffix("\r\n")
+        .or_else(|| value.strip_suffix('\n'))
+        .unwrap_or(value);
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let value = match appdir {
+        Some(appdir) => strip_appdir_pathlist(value, appdir).0?,
+        None => value.to_string(),
+    };
+    value
+        .split(':')
+        .any(|entry| entry.starts_with('/'))
+        .then_some(value)
+}
+
+/// The inherited side of the merge: the AppImage override plan's PATH when it carries
+/// one, else the process PATH. None (no merge) when that value is not valid UTF-8.
+#[cfg(any(not(windows), test))]
+fn inherited_path_value(
+    plan_path: Option<&str>,
+    env_path: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    match (plan_path, env_path) {
+        (Some(plan), _) => Some(plan.to_string()),
+        (None, Some(env)) => env.to_str().map(str::to_string),
+        (None, None) => Some(String::new()),
+    }
+}
+
+/// Whether `buf` holds both halves of the `marker` pair, so reading can stop.
+#[cfg(any(not(windows), test))]
+fn capture_pair_closed(buf: &[u8], marker: &[u8]) -> bool {
+    find_bytes(buf, marker)
+        .is_some_and(|open| find_bytes(&buf[open + marker.len()..], marker).is_some())
+}
+
+/// Offset of the first `needle` in `hay`; `needle` is a non-empty capture marker.
+#[cfg(any(not(windows), test))]
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Runs `$SHELL -lic` to print PATH between random markers, so rc-file banners can't
+/// corrupt it. Each marker is printed split across printf arguments, so an xtrace
+/// echo of the command line never contains it whole.
+#[cfg(not(windows))]
+async fn capture_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let marker = format!("GDPATH{:x}x{nanos:x}", std::process::id());
+    let (head, tail) = marker.split_at(marker.len() / 2);
+    let print_marker = format!("printf '%s%s' '{head}' '{tail}'");
+    // `printenv` is an external program, so the line parses alike in sh, bash, zsh
+    // and fish (fish rejects `${PATH}`); `command` skips aliases an -i shell defines.
+    let script = format!("{print_marker}; command printenv PATH; {print_marker}");
+    let mut cmd = Command::new(&shell);
+    sanitize_child_env(&mut cmd);
+    cmd.arg("-lic")
+        .arg(script)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // A new session: an interactive shell must never take over a launching terminal
+    // (`tauri dev`, an AppImage run from one), and this runs on every startup.
+    #[cfg(unix)]
+    // SAFETY: the hook runs between fork and exec and calls only `setsid`, which is
+    // async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Reads only until the closing marker: an rc-started background process can hold
+    // the pipe open long past the shell's exit, so waiting for EOF could time out.
+    let read = async {
+        let mut buf = Vec::new();
+        let mut chunk = vec![0u8; 8192];
+        loop {
+            let room = SHELL_PATH_CAPTURE_CAP - buf.len();
+            if room == 0 {
+                return None;
+            }
+            let take = chunk.len().min(room);
+            let n = stdout.read(&mut chunk[..take]).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if capture_pair_closed(&buf, marker.as_bytes()) {
+                return Some(buf);
+            }
+        }
+    };
+    let buf = tokio::time::timeout(DETECT_TIMEOUT, read).await.ok()??;
+    finalize_capture(&buf, &marker, appimage_appdir().as_deref())
 }
 
 /// One cache slot per [`AgentKind`].
@@ -1778,11 +2012,7 @@ fn codex_command_kind(cmd: &str) -> &'static str {
 /// Parses one line of Codex `exec --json` (JSONL). Accumulates the latest
 /// `agent_message` into `last_message` (the final one is the review) and emits
 /// `Done` at the terminal `turn.completed`.
-fn parse_codex_line(
-    line: &str,
-    saw_terminal: &mut bool,
-    last_message: &mut String,
-) -> Option<ReviewEvent> {
+fn parse_codex_line(line: &str, last_message: &mut String) -> Option<ReviewEvent> {
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -1817,28 +2047,19 @@ fn parse_codex_line(
             }
             None // codex emits whole messages, not deltas; surface at turn end
         }
-        "turn.completed" => {
-            *saw_terminal = true;
-            Some(ReviewEvent::Done {
-                text: std::mem::take(last_message),
-                is_error: false,
-                cost_usd: None,
-            })
-        }
-        "turn.failed" => {
-            *saw_terminal = true;
-            Some(ReviewEvent::error(
-                "Codex review failed — see the Codex CLI for details.",
-            ))
-        }
-        "error" => {
-            *saw_terminal = true;
-            Some(ReviewEvent::error(
-                v.get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Codex reported an error."),
-            ))
-        }
+        "turn.completed" => Some(ReviewEvent::Done {
+            text: std::mem::take(last_message),
+            is_error: false,
+            cost_usd: None,
+        }),
+        "turn.failed" => Some(ReviewEvent::error(
+            "Codex review failed — see the Codex CLI for details.",
+        )),
+        "error" => Some(ReviewEvent::error(
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Codex reported an error."),
+        )),
         _ => None,
     }
 }
@@ -1854,7 +2075,6 @@ fn parse_codex_line(
 /// success path only; an errored `Done` carries the failure reason instead).
 fn parse_copilot_line(
     line: &str,
-    saw_terminal: &mut bool,
     last_message: &mut String,
     emitted_text: &mut bool,
     pending_sep: &mut bool,
@@ -1932,7 +2152,6 @@ fn parse_copilot_line(
             None // surfaced at the terminal `result`
         }
         "result" => {
-            *saw_terminal = true;
             // An errored `Done` carries the REASON, not the prose (which stays in the
             // delta stream): the buffer-ends-with-`Done.text` peel runs only on a
             // successful settle — both frontend consumers reject on `is_error` first.
@@ -1963,7 +2182,6 @@ fn parse_copilot_line(
 /// with no text. The `sessionID` is surfaced as `NativeSession` (store de-dups).
 fn parse_opencode_line(
     line: &str,
-    saw_terminal: &mut bool,
     last_message: &mut String,
     step_text: &mut String,
 ) -> Option<ReviewEvent> {
@@ -2028,7 +2246,6 @@ fn parse_opencode_line(
             if reason == "tool-calls" {
                 return None;
             }
-            *saw_terminal = true;
             // Final step's text is the answer; fall back to the accumulation only when
             // the final step produced none (never emit an empty Done when text existed).
             let text = std::mem::take(step_text);
@@ -2043,23 +2260,20 @@ fn parse_opencode_line(
                 cost_usd: None,
             })
         }
-        "error" => {
-            *saw_terminal = true;
-            Some(ReviewEvent::error(
-                v.get("error")
-                    .and_then(|e| e.get("message").or(Some(e)))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("opencode reported an error."),
-            ))
-        }
+        "error" => Some(ReviewEvent::error(
+            v.get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .and_then(|m| m.as_str())
+                .unwrap_or("opencode reported an error."),
+        )),
         _ => None,
     }
 }
 
-/// Parses one NDJSON line of Claude `--output-format stream-json`. Sets
-/// `saw_result` at the terminal `result`. `tool_inputs` accumulates each
-/// in-flight tool call's streamed input JSON by block index (input arrives as
-/// `input_json_delta` fragments); the block's stop emits one `Tool` event.
+/// Parses one NDJSON line of Claude `--output-format stream-json`; the terminal
+/// `result` emits `Done`. `tool_inputs` accumulates each in-flight tool call's
+/// streamed input JSON by block index (input arrives as `input_json_delta`
+/// fragments); the block's stop emits one `Tool` event.
 ///
 /// A `\n\n` is lazily PREPENDED to the first non-empty `text_delta` after a
 /// completed TEXT block, so the delta buffer still ENDS WITH `Done.text` (the
@@ -2071,7 +2285,6 @@ fn parse_opencode_line(
 /// own `is_error` flag can't be trusted alone.
 fn parse_claude_line(
     line: &str,
-    saw_result: &mut bool,
     tool_inputs: &mut std::collections::HashMap<i64, (String, String)>,
     emitted_text: &mut bool,
     pending_sep: &mut bool,
@@ -2184,7 +2397,6 @@ fn parse_claude_line(
             None
         }
         "result" => {
-            *saw_result = true;
             let text = v
                 .get("result")
                 .and_then(|s| s.as_str())
@@ -2296,9 +2508,26 @@ const CHILD_EXIT_GRACE: Duration = Duration::from_secs(10);
 /// Second, shorter grace after a tree-kill: the child is being force-killed, so this
 /// only covers reaping it.
 const CHILD_REAP_GRACE: Duration = Duration::from_secs(5);
-/// How often the non-reaping exit wait re-probes the leader.
-#[cfg(unix)]
+/// The non-reaping exit wait's first re-probe delay: a leader that exits just after
+/// EOF is caught within a few ms instead of a whole poll interval.
+#[cfg(any(unix, test))]
+const CHILD_EXIT_POLL_START: Duration = Duration::from_millis(2);
+/// The longest the non-reaping exit wait sleeps between re-probes of the leader.
+#[cfg(any(unix, test))]
 const CHILD_EXIT_POLL: Duration = Duration::from_millis(100);
+
+/// The re-probe delay after `prev`: doubling, held at `CHILD_EXIT_POLL`.
+#[cfg(any(unix, test))]
+fn next_exit_poll(prev: Duration) -> Duration {
+    prev.saturating_mul(2).min(CHILD_EXIT_POLL)
+}
+
+/// Whether a `waitid` `si_code` reports a terminated child. `WEXITED` alone should
+/// exclude stops, but older macOS returned on a stopped child too.
+#[cfg(unix)]
+fn si_code_is_exit(code: libc::c_int) -> bool {
+    matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED)
+}
 
 /// Whether process `pid` (our unreaped child) has exited, probed WITHOUT reaping it
 /// (`WNOWAIT`), so its pid and process group stay pinned for a following `killpg`.
@@ -2322,15 +2551,17 @@ fn exited_unreaped(pid: u32) -> bool {
     // Under WNOHANG a child that hasn't exited leaves `si_pid` zero. The accessor, not
     // the field: linux-gnu keeps `si_pid` inside a union.
     // SAFETY: `info` was zeroed above and filled by a successful `waitid`.
-    unsafe { info.si_pid() != 0 }
+    unsafe { info.si_pid() != 0 && si_code_is_exit(info.si_code) }
 }
 
 /// Waits up to `grace` for our child `pid` to exit, leaving it unreaped.
 #[cfg(unix)]
 async fn wait_exit_unreaped(pid: u32, grace: Duration) {
     let deadline = tokio::time::Instant::now() + grace;
+    let mut poll = CHILD_EXIT_POLL_START;
     while !exited_unreaped(pid) && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(CHILD_EXIT_POLL).await;
+        tokio::time::sleep(poll).await;
+        poll = next_exit_poll(poll);
     }
 }
 
@@ -2473,7 +2704,6 @@ async fn stream_agent(
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut lines = BufReader::new(stdout).lines();
 
-    let mut saw_result = false;
     let mut last_message = String::new(); // codex: accumulates the final message
     // claude: per-tool-call streamed input JSON, keyed by content-block index.
     let mut claude_tool_inputs: std::collections::HashMap<i64, (String, String)> =
@@ -2513,29 +2743,22 @@ async fn stream_agent(
                         let ev = match kind {
                             AgentKind::Claude => parse_claude_line(
                                 &l,
-                                &mut saw_result,
                                 &mut claude_tool_inputs,
                                 &mut emitted_text,
                                 &mut pending_sep,
                                 &mut claude_synthetic_error,
                             ),
-                            AgentKind::Codex => {
-                                parse_codex_line(&l, &mut saw_result, &mut last_message)
-                            }
+                            AgentKind::Codex => parse_codex_line(&l, &mut last_message),
                             AgentKind::Copilot => parse_copilot_line(
                                 &l,
-                                &mut saw_result,
                                 &mut last_message,
                                 &mut emitted_text,
                                 &mut pending_sep,
                                 &mut copilot_error,
                             ),
-                            AgentKind::Opencode => parse_opencode_line(
-                                &l,
-                                &mut saw_result,
-                                &mut last_message,
-                                &mut opencode_step_text,
-                            ),
+                            AgentKind::Opencode => {
+                                parse_opencode_line(&l, &mut last_message, &mut opencode_step_text)
+                            }
                         };
                         if let Some(ev) = ev {
                             send_noting_terminal(on_event, &mut terminal, ev);
@@ -3681,11 +3904,358 @@ mod child_env_tests {
             "portable-pty must drop inherited vars, not just caller overrides"
         );
     }
+
+    /// A capture marker shaped like the production one.
+    const MARK: &str = "GDPATH1fx2e";
+
+    /// `value` between a marker pair, the way the capture's stdout frames it.
+    fn framed(value: &str) -> Vec<u8> {
+        format!("{MARK}{value}{MARK}").into_bytes()
+    }
+
+    #[test]
+    fn login_path_merge_puts_shell_entries_first() {
+        // Shell list a superset of inherited, the reverse, and disjoint lists.
+        assert_eq!(merge_path_lists("/a:/b:/c", "/b"), "/a:/b:/c");
+        assert_eq!(merge_path_lists("/b", "/a:/b:/c"), "/b:/a:/c");
+        assert_eq!(merge_path_lists("/a", "/b"), "/a:/b");
+    }
+
+    #[test]
+    fn login_path_merge_of_identical_lists_is_idempotent() {
+        let list = "/opt/homebrew/bin:/usr/bin:/bin";
+        let once = merge_path_lists(list, list);
+        assert_eq!(once, list);
+        assert_eq!(merge_path_lists(&once, list), list);
+    }
+
+    #[test]
+    fn login_path_merge_collapses_duplicates_within_each_side() {
+        // The first occurrence keeps its position.
+        assert_eq!(merge_path_lists("/a:/b:/a", "/c:/c:/b"), "/a:/b:/c");
+    }
+
+    #[test]
+    fn login_path_merge_drops_relative_entries_on_both_sides() {
+        // git runs in the open repo, where a relative entry would resolve.
+        assert_eq!(
+            merge_path_lists(
+                "./ssh:/a:node_modules/.bin:bin",
+                "bin:/b:./x:node_modules/.bin"
+            ),
+            "/a:/b"
+        );
+    }
+
+    #[test]
+    fn login_path_merge_dedupes_by_exact_string_so_trailing_slash_twins_survive() {
+        // `/usr/bin/` and `/usr/bin` name one dir, but the dedupe is exact-string.
+        assert_eq!(
+            merge_path_lists("/usr/bin/", "/usr/bin"),
+            "/usr/bin/:/usr/bin"
+        );
+    }
+
+    #[test]
+    fn login_path_merge_keeps_entries_containing_spaces() {
+        assert_eq!(
+            merge_path_lists(
+                "/Applications/My Tools/bin",
+                "/usr/bin:/Applications/My Tools/bin"
+            ),
+            "/Applications/My Tools/bin:/usr/bin"
+        );
+    }
+
+    #[test]
+    fn login_path_merge_drops_empty_entries_and_tolerates_empty_sides() {
+        assert_eq!(merge_path_lists(":/a::", "::/b:"), "/a:/b");
+        assert_eq!(merge_path_lists("", "/b:/c"), "/b:/c");
+        assert_eq!(merge_path_lists("/a", ""), "/a");
+        assert_eq!(merge_path_lists("", ""), "");
+    }
+
+    #[test]
+    fn login_path_capture_reads_between_markers_despite_banner_noise() {
+        let mut out = b"Welcome back!\nnvm: using node 22\n".to_vec();
+        out.extend(framed("/usr/local/bin:/usr/bin:/bin\n"));
+        out.extend_from_slice(b"\nlogout banner\n");
+        assert_eq!(
+            finalize_capture(&out, MARK, None).as_deref(),
+            Some("/usr/local/bin:/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn login_path_capture_without_a_marker_pair_fails() {
+        // The negative control: no marker at all, then only the opening one.
+        assert_eq!(finalize_capture(b"/usr/bin:/bin\n", MARK, None), None);
+        let opened = format!("{MARK}/usr/bin:/bin\n");
+        assert_eq!(finalize_capture(opened.as_bytes(), MARK, None), None);
+    }
+
+    #[test]
+    fn login_path_capture_skips_a_partial_marker_prefix_in_the_noise() {
+        let mut out = format!("banner {} more\n", &MARK[..6]).into_bytes();
+        out.extend(framed("/usr/bin:/bin\n"));
+        assert_eq!(
+            finalize_capture(&out, MARK, None).as_deref(),
+            Some("/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn login_path_capture_trims_exactly_one_trailing_newline() {
+        let lf = framed("/usr/bin:/bin\n");
+        assert_eq!(
+            finalize_capture(&lf, MARK, None).as_deref(),
+            Some("/usr/bin:/bin")
+        );
+        let crlf = framed("/usr/bin:/bin\r\n");
+        assert_eq!(
+            finalize_capture(&crlf, MARK, None).as_deref(),
+            Some("/usr/bin:/bin")
+        );
+        // A second newline survives the trim and is rejected as a control character.
+        assert_eq!(finalize_capture(&framed("/usr/bin\n\n"), MARK, None), None);
+    }
+
+    #[test]
+    fn login_path_capture_of_an_empty_value_fails() {
+        assert_eq!(finalize_capture(&framed(""), MARK, None), None);
+        // Empty only after the newline trim: still a failed capture.
+        assert_eq!(finalize_capture(&framed("\n"), MARK, None), None);
+        assert_eq!(finalize_capture(&framed("\r\n"), MARK, None), None);
+    }
+
+    #[test]
+    fn login_path_capture_with_only_relative_entries_fails() {
+        assert_eq!(
+            finalize_capture(&framed("bin:./ssh:node_modules/.bin\n"), MARK, None),
+            None
+        );
+    }
+
+    #[test]
+    fn login_path_capture_rejects_control_characters() {
+        for value in [
+            "/usr/bin:\x1b[0m/bin\n",
+            "/usr/bin\x07:/bin\n",
+            "/usr/bin\r:/bin\n",
+        ] {
+            assert_eq!(
+                finalize_capture(&framed(value), MARK, None),
+                None,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_path_capture_rejects_a_non_utf8_value_rather_than_decoding_lossily() {
+        let mut out = MARK.as_bytes().to_vec();
+        out.extend_from_slice(b"/usr/bin:/opt/\xff/bin\n");
+        out.extend_from_slice(MARK.as_bytes());
+        assert_eq!(finalize_capture(&out, MARK, None), None);
+    }
+
+    #[test]
+    fn login_path_capture_tolerates_non_utf8_noise_outside_the_markers() {
+        // A Latin-1 motd before the pair and after it.
+        let mut out = b"Bienvenue \xe0 bord\n".to_vec();
+        out.extend(framed("/usr/bin:/bin\n"));
+        out.extend_from_slice(b"\xff\xfe bye\n");
+        assert_eq!(
+            finalize_capture(&out, MARK, None).as_deref(),
+            Some("/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn login_path_capture_strips_only_true_appdir_entries() {
+        let captured = framed(
+            "/tmp/.mount_gdAbc/usr/bin:/usr/local/bin:/tmp/.mount_gdAbcde/bin:/tmp/.mount_gdAbc:/usr/bin\n",
+        );
+        assert_eq!(
+            finalize_capture(&captured, MARK, Some(APPDIR)).as_deref(),
+            Some("/usr/local/bin:/tmp/.mount_gdAbcde/bin:/usr/bin")
+        );
+        // Nothing but bundle entries leaves nothing to cache.
+        let all_bundle = framed("/tmp/.mount_gdAbc/usr/bin:/tmp/.mount_gdAbc/bin\n");
+        assert_eq!(finalize_capture(&all_bundle, MARK, Some(APPDIR)), None);
+    }
+
+    #[test]
+    fn login_path_inherited_side_prefers_the_plan_entry() {
+        let env = std::ffi::OsStr::new("/env/bin");
+        assert_eq!(
+            inherited_path_value(Some("/plan/bin"), Some(env)).as_deref(),
+            Some("/plan/bin")
+        );
+        assert_eq!(
+            inherited_path_value(None, Some(env)).as_deref(),
+            Some("/env/bin")
+        );
+        // Both absent: an empty inherited side, so the merge is the shell list alone.
+        assert_eq!(inherited_path_value(None, None).as_deref(), Some(""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_path_inherited_side_refuses_a_non_utf8_process_path() {
+        use std::os::unix::ffi::OsStrExt;
+        let env = std::ffi::OsStr::from_bytes(b"/usr/bin:\xff");
+        assert_eq!(inherited_path_value(None, Some(env)), None);
+        // The plan's entry still wins over an unreadable process value.
+        assert_eq!(
+            inherited_path_value(Some("/usr/bin"), Some(env)).as_deref(),
+            Some("/usr/bin")
+        );
+    }
+
+    #[test]
+    fn login_path_appimage_merge_never_carries_a_bundle_entry() {
+        const ENV_PATH: &str = "/tmp/.mount_gdAbc/usr/bin:/usr/bin:/bin";
+        let plan = compute_child_env_overrides(APPDIR, lookup(&[("PATH", ENV_PATH)]));
+        let plan_path = plan_path_entry(&plan);
+        let shell = finalize_capture(
+            &framed("/tmp/.mount_gdAbc/usr/bin:/home/u/.nvm/bin:/usr/bin\n"),
+            MARK,
+            Some(APPDIR),
+        )
+        .expect("a host entry survives the strip");
+        let inherited = inherited_path_value(plan_path, Some(std::ffi::OsStr::new(ENV_PATH)))
+            .expect("the plan's PATH is UTF-8");
+        assert_eq!(
+            inherited, "/usr/bin:/bin",
+            "the inherited side is the plan's stripped PATH"
+        );
+        let merged = merge_path_lists(&shell, &inherited);
+        assert_eq!(merged, "/home/u/.nvm/bin:/usr/bin:/bin");
+        assert!(merged
+            .split(':')
+            .all(|entry| !is_under_appdir(entry, APPDIR)));
+    }
+
+    #[test]
+    fn login_path_capture_reading_stops_only_once_the_pair_closes() {
+        let open = format!("noise{MARK}/usr/bin");
+        assert!(!capture_pair_closed(open.as_bytes(), MARK.as_bytes()));
+        let partial = format!("{MARK}/usr/bin\n{}", &MARK[..4]);
+        assert!(!capture_pair_closed(partial.as_bytes(), MARK.as_bytes()));
+        assert!(capture_pair_closed(&framed("/usr/bin\n"), MARK.as_bytes()));
+    }
+
+    #[test]
+    fn login_path_lookup_takes_the_first_match_in_path_order() {
+        // A shim earlier on the shell PATH beats an older copy later on it.
+        let installed = [
+            "/usr/local/bin/pre-commit",
+            "/home/u/.pyenv/shims/pre-commit",
+        ];
+        let is_exe = |c: &str| installed.contains(&c);
+        assert_eq!(
+            first_on_path("/home/u/.pyenv/shims:/usr/local/bin", "pre-commit", is_exe).as_deref(),
+            Some("/home/u/.pyenv/shims/pre-commit")
+        );
+        assert_eq!(
+            first_on_path("/usr/local/bin:/home/u/.pyenv/shims", "pre-commit", is_exe).as_deref(),
+            Some("/usr/local/bin/pre-commit")
+        );
+    }
+
+    #[test]
+    fn login_path_lookup_skips_relative_and_empty_entries() {
+        // Every candidate "exists", so only the entry filter decides.
+        let any = |_: &str| true;
+        assert_eq!(
+            first_on_path(":bin:./x:node_modules/.bin:/opt/bin", "lefthook", any).as_deref(),
+            Some("/opt/bin/lefthook")
+        );
+        assert_eq!(first_on_path("bin::./x", "lefthook", any), None);
+        assert_eq!(first_on_path("", "lefthook", any), None);
+    }
+
+    #[test]
+    fn login_path_lookup_joins_a_trailing_slash_entry_and_misses_cleanly() {
+        let is_exe = |c: &str| c == "/opt/bin/lefthook";
+        assert_eq!(
+            first_on_path("/usr/bin:/opt/bin/", "lefthook", is_exe).as_deref(),
+            Some("/opt/bin/lefthook")
+        );
+        assert_eq!(first_on_path("/usr/bin:/bin", "lefthook", is_exe), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_path_lookup_passes_over_a_copy_we_cannot_execute() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root passes access(X_OK) whenever any execute bit is set, so the
+        // owner-cannot-run fixture proves nothing there.
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("gd-login-path-exec-{}", std::process::id()));
+        let (first, second) = (root.join("a"), root.join("b"));
+        for (dir, mode) in [(&first, 0o011), (&second, 0o755)] {
+            std::fs::create_dir_all(dir).unwrap();
+            let tool = dir.join("gd-tool");
+            std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let path = format!("{}:{}", first.display(), second.display());
+        let found = first_on_path(&path, "gd-tool", executable_by_us);
+        // Negative control: an any-execute-bit test would have taken the first copy.
+        let by_mode_bits = first_on_path(&path, "gd-tool", |c| {
+            std::fs::metadata(c).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        let expected = |dir: &PathBuf| format!("{}/gd-tool", dir.display());
+        assert_eq!(found, Some(expected(&second)));
+        assert_eq!(by_mode_bits, Some(expected(&first)));
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a parser's returned event ends the run: the parsers return
+    /// `Done`/`Error` on exactly the lines that are terminal.
+    fn ends_turn(ev: &ReviewEvent) -> bool {
+        matches!(ev, ReviewEvent::Done { .. } | ReviewEvent::Error { .. })
+    }
+
+    #[test]
+    fn exit_poll_ramp_doubles_from_its_start_up_to_the_cap() {
+        let mut seq = vec![CHILD_EXIT_POLL_START];
+        while *seq.last().unwrap() < CHILD_EXIT_POLL {
+            seq.push(next_exit_poll(*seq.last().unwrap()));
+        }
+        let ms: Vec<u128> = seq.iter().map(Duration::as_millis).collect();
+        assert_eq!(ms, [2, 4, 8, 16, 32, 64, 100]);
+    }
+
+    #[test]
+    fn exit_poll_ramp_holds_at_the_cap() {
+        let mut poll = CHILD_EXIT_POLL;
+        for _ in 0..200 {
+            poll = next_exit_poll(poll);
+            assert_eq!(poll, CHILD_EXIT_POLL);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exit_poll_si_code_counts_only_a_terminated_child() {
+        for code in [libc::CLD_EXITED, libc::CLD_KILLED, libc::CLD_DUMPED] {
+            assert!(si_code_is_exit(code), "{code}");
+        }
+        for code in [libc::CLD_STOPPED, libc::CLD_TRAPPED, libc::CLD_CONTINUED] {
+            assert!(!si_code_is_exit(code), "{code}");
+        }
+    }
 
     #[test]
     fn every_agent_kind_owns_a_distinct_cache_slot() {
@@ -4174,32 +4744,33 @@ opencode/x-preview-f-free
 
     #[test]
     fn opencode_step_start_yields_native_session_id() {
-        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
-        let ev = parse_opencode_line(STEP_START, &mut term, &mut msg, &mut step).unwrap();
+        let (mut msg, mut step) = (String::new(), String::new());
+        let ev = parse_opencode_line(STEP_START, &mut msg, &mut step).unwrap();
+        assert!(!ends_turn(&ev));
         match ev {
             ReviewEvent::NativeSession { id } => assert_eq!(id, "ses_abc"),
             other => panic!("expected NativeSession, got {other:?}"),
         }
-        assert!(!term);
     }
 
     #[test]
     fn opencode_text_parts_stream_as_separated_deltas() {
-        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let (mut msg, mut step) = (String::new(), String::new());
         // First segment: emitted verbatim, no leading separator.
-        let ev = parse_opencode_line(TEXT_A, &mut term, &mut msg, &mut step).unwrap();
+        let ev = parse_opencode_line(TEXT_A, &mut msg, &mut step).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "First."));
         // Second segment: separated so multi-step narration stays readable, and the
         // delta mirrors exactly what we appended (buffer == last_message).
-        let ev = parse_opencode_line(TEXT_B, &mut term, &mut msg, &mut step).unwrap();
+        let ev = parse_opencode_line(TEXT_B, &mut msg, &mut step).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "\n\nSecond."));
         assert_eq!(msg, "First.\n\nSecond.");
     }
 
     #[test]
     fn opencode_tool_use_emits_a_tool_step() {
-        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
-        let ev = parse_opencode_line(TOOL, &mut term, &mut msg, &mut step).unwrap();
+        let (mut msg, mut step) = (String::new(), String::new());
+        let ev = parse_opencode_line(TOOL, &mut msg, &mut step).unwrap();
+        assert!(!ends_turn(&ev), "a tool call doesn't end the turn");
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "write");
@@ -4207,15 +4778,14 @@ opencode/x-preview-f-free
             }
             other => panic!("expected Tool, got {other:?}"),
         }
-        assert!(!term, "a tool call doesn't end the turn");
     }
 
     const OC_TOOL_WITH_INPUT: &str = r#"{"type":"tool_use","sessionID":"s","part":{"type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"src/main.rs"}}}}"#;
 
     #[test]
     fn opencode_tool_use_extracts_target_from_input() {
-        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
-        let ev = parse_opencode_line(OC_TOOL_WITH_INPUT, &mut term, &mut msg, &mut step).unwrap();
+        let (mut msg, mut step) = (String::new(), String::new());
+        let ev = parse_opencode_line(OC_TOOL_WITH_INPUT, &mut msg, &mut step).unwrap();
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "read");
@@ -4267,7 +4837,6 @@ opencode/x-preview-f-free
     fn claude_tool_input_accumulates_across_blocks() {
         // The three-line lifecycle of a Claude tool call: start (name), input
         // fragments, stop — only the stop emits a Tool, carrying the joined input.
-        let mut saw = false;
         let mut acc = std::collections::HashMap::new();
         let (mut emitted, mut pending) = (false, false);
         let mut syn = None;
@@ -4275,20 +4844,10 @@ opencode/x-preview-f-free
         let d1 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_pa"}}}"#;
         let d2 = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"th\":\"src/x.ts\"}"}}}"#;
         let stop = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
-        assert!(
-            parse_claude_line(start, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
-                .is_none()
-        );
-        assert!(
-            parse_claude_line(d1, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
-                .is_none()
-        );
-        assert!(
-            parse_claude_line(d2, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
-                .is_none()
-        );
-        let ev = parse_claude_line(stop, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
-            .unwrap();
+        assert!(parse_claude_line(start, &mut acc, &mut emitted, &mut pending, &mut syn).is_none());
+        assert!(parse_claude_line(d1, &mut acc, &mut emitted, &mut pending, &mut syn).is_none());
+        assert!(parse_claude_line(d2, &mut acc, &mut emitted, &mut pending, &mut syn).is_none());
+        let ev = parse_claude_line(stop, &mut acc, &mut emitted, &mut pending, &mut syn).unwrap();
         match ev {
             ReviewEvent::Tool { tool, target } => {
                 assert_eq!(tool, "read");
@@ -4307,7 +4866,6 @@ opencode/x-preview-f-free
         // prefixed `\n\n`; the first block's first delta is NOT. `Done.text` is the raw
         // `result` string, with no separator prepended — and the delta buffer, once
         // concatenated, ENDS WITH `Done.text` (the frontend's suffix-strip invariant).
-        let mut saw = false;
         let mut acc = std::collections::HashMap::new();
         let (mut emitted, mut pending) = (false, false);
         let mut syn = None;
@@ -4330,8 +4888,7 @@ opencode/x-preview-f-free
             (t1b, Some("the code.")),
         ] {
             let ev =
-                parse_claude_line(line, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
-                    .unwrap();
+                parse_claude_line(line, &mut acc, &mut emitted, &mut pending, &mut syn).unwrap();
             match ev {
                 ReviewEvent::Delta { text } => {
                     assert_eq!(text, expect.unwrap());
@@ -4341,15 +4898,14 @@ opencode/x-preview-f-free
             }
         }
         // Block-1 stop arms the separator; the tool block's stop leaves it armed.
-        parse_claude_line(stop1, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
+        parse_claude_line(stop1, &mut acc, &mut emitted, &mut pending, &mut syn);
         assert!(pending, "a text block's stop arms the separator");
-        parse_claude_line(tstart, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
-        parse_claude_line(tstop, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
+        parse_claude_line(tstart, &mut acc, &mut emitted, &mut pending, &mut syn);
+        parse_claude_line(tstop, &mut acc, &mut emitted, &mut pending, &mut syn);
         assert!(pending, "a tool block's stop leaves the pending separator intact");
 
         // Block-2's first delta is prefixed `\n\n`.
-        let ev =
-            parse_claude_line(t2, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn).unwrap();
+        let ev = parse_claude_line(t2, &mut acc, &mut emitted, &mut pending, &mut syn).unwrap();
         match ev {
             ReviewEvent::Delta { text } => {
                 assert_eq!(text, "\n\nThe fix is X.");
@@ -4357,15 +4913,14 @@ opencode/x-preview-f-free
             }
             other => panic!("expected Delta, got {other:?}"),
         }
-        parse_claude_line(stop2, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
+        parse_claude_line(stop2, &mut acc, &mut emitted, &mut pending, &mut syn);
 
         let done =
-            parse_claude_line(result, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn)
-                .unwrap();
+            parse_claude_line(result, &mut acc, &mut emitted, &mut pending, &mut syn).unwrap();
+        assert!(ends_turn(&done));
         match done {
             ReviewEvent::Done { text, .. } => {
                 assert_eq!(text, "The fix is X.", "Done.text is the raw result, no separator");
-                assert!(saw);
                 // Load-bearing: concatenated deltas END WITH Done.text.
                 assert_eq!(buffer, "Looking at the code.\n\nThe fix is X.");
                 assert!(buffer.ends_with(&text));
@@ -4382,15 +4937,13 @@ opencode/x-preview-f-free
 
     /// Feeds fixture lines through one parser state and returns the terminal `Done`.
     fn claude_done(lines: &[&str]) -> (String, bool) {
-        let mut saw = false;
         let mut acc = std::collections::HashMap::new();
         let (mut emitted, mut pending) = (false, false);
         let mut syn = None;
         let mut last = None;
         for line in lines {
-            last = parse_claude_line(line, &mut saw, &mut acc, &mut emitted, &mut pending, &mut syn);
+            last = parse_claude_line(line, &mut acc, &mut emitted, &mut pending, &mut syn);
         }
-        assert!(saw, "the fixture must end with a terminal result");
         match last.expect("the terminal result emits Done") {
             ReviewEvent::Done { text, is_error, .. } => (text, is_error),
             other => panic!("expected Done, got {other:?}"),
@@ -4601,24 +5154,19 @@ opencode/x-preview-f-free
     #[test]
     fn copilot_lazy_separator_between_assistant_messages() {
         // Deltas across two assistant messages get exactly one `\n\n` between them.
-        let (mut term, mut msg) = (false, String::new());
+        let mut msg = String::new();
         let (mut emitted, mut pending) = (false, false);
         let mut err: Option<String> = None;
         let d1 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"First."}}"#;
         let m1 = r#"{"type":"assistant.message","data":{"content":"First."}}"#;
         let d2 = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Second."}}"#;
 
-        let ev = parse_copilot_line(d1, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
-            .unwrap();
+        let ev = parse_copilot_line(d1, &mut msg, &mut emitted, &mut pending, &mut err).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "First."));
         // A completed message arms the separator; the next delta is prefixed once.
-        assert!(
-            parse_copilot_line(m1, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
-                .is_none()
-        );
+        assert!(parse_copilot_line(m1, &mut msg, &mut emitted, &mut pending, &mut err).is_none());
         assert!(pending);
-        let ev = parse_copilot_line(d2, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
-            .unwrap();
+        let ev = parse_copilot_line(d2, &mut msg, &mut emitted, &mut pending, &mut err).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "\n\nSecond."));
         assert!(!pending, "the separator is consumed by the first following delta");
     }
@@ -4626,13 +5174,11 @@ opencode/x-preview-f-free
     #[test]
     fn copilot_first_delta_has_no_separator() {
         // The very first delta of a run must not be prefixed (nothing emitted before).
-        let (mut term, mut msg) = (false, String::new());
+        let mut msg = String::new();
         let (mut emitted, mut pending) = (false, false);
         let mut err: Option<String> = None;
         let d = r#"{"type":"assistant.message_delta","data":{"deltaContent":"Hello."}}"#;
-        let ev =
-            parse_copilot_line(d, &mut term, &mut msg, &mut emitted, &mut pending, &mut err)
-                .unwrap();
+        let ev = parse_copilot_line(d, &mut msg, &mut emitted, &mut pending, &mut err).unwrap();
         assert!(matches!(ev, ReviewEvent::Delta { text } if text == "Hello."));
         assert!(emitted);
     }
@@ -4645,30 +5191,21 @@ opencode/x-preview-f-free
     fn copilot_session_error_fails_the_run_despite_exit_zero() {
         // The CLI exits 0 after a session error, so exit code alone would report the
         // error text as a successful answer; the stash makes `result` report failure.
-        let (mut term, mut msg) = (false, String::new());
+        let mut msg = String::new();
         let (mut emitted, mut pending) = (false, false);
         let mut err: Option<String> = None;
-        assert!(
-            parse_copilot_line(
-                CP_SESSION_ERROR,
-                &mut term,
-                &mut msg,
-                &mut emitted,
-                &mut pending,
-                &mut err
-            )
-            .is_none()
-        );
-        assert_eq!(err.as_deref(), Some("API rate limit exceeded for this session."));
-        let ev = parse_copilot_line(
-            CP_RESULT_OK,
-            &mut term,
+        assert!(parse_copilot_line(
+            CP_SESSION_ERROR,
             &mut msg,
             &mut emitted,
             &mut pending,
-            &mut err,
+            &mut err
         )
-        .unwrap();
+        .is_none());
+        assert_eq!(err.as_deref(), Some("API rate limit exceeded for this session."));
+        let ev = parse_copilot_line(CP_RESULT_OK, &mut msg, &mut emitted, &mut pending, &mut err)
+            .unwrap();
+        assert!(ends_turn(&ev));
         match ev {
             ReviewEvent::Done { text, is_error, .. } => {
                 assert!(is_error, "a session.error fails the run whatever the exit code");
@@ -4677,7 +5214,6 @@ opencode/x-preview-f-free
             }
             other => panic!("expected Done, got {other:?}"),
         }
-        assert!(term);
     }
 
     #[test]
@@ -4685,29 +5221,21 @@ opencode/x-preview-f-free
         // Prose already streamed when the session errors: `Done.text` must still be the
         // REASON — the frontend refuses run output as an error message, and the prose
         // survives in the delta stream regardless.
-        let (mut term, mut msg) = (false, String::new());
+        let mut msg = String::new();
         let (mut emitted, mut pending) = (false, false);
         let mut err: Option<String> = None;
         let prose = r#"{"type":"assistant.message","data":{"content":"Here is my review of the retry path."}}"#;
-        parse_copilot_line(prose, &mut term, &mut msg, &mut emitted, &mut pending, &mut err);
+        parse_copilot_line(prose, &mut msg, &mut emitted, &mut pending, &mut err);
         assert_eq!(msg, "Here is my review of the retry path.");
         parse_copilot_line(
             CP_SESSION_ERROR,
-            &mut term,
             &mut msg,
             &mut emitted,
             &mut pending,
             &mut err,
         );
-        let ev = parse_copilot_line(
-            CP_RESULT_OK,
-            &mut term,
-            &mut msg,
-            &mut emitted,
-            &mut pending,
-            &mut err,
-        )
-        .unwrap();
+        let ev = parse_copilot_line(CP_RESULT_OK, &mut msg, &mut emitted, &mut pending, &mut err)
+            .unwrap();
         match ev {
             ReviewEvent::Done { text, is_error, .. } => {
                 assert!(is_error);
@@ -4719,20 +5247,13 @@ opencode/x-preview-f-free
 
     #[test]
     fn copilot_clean_run_stays_successful() {
-        let (mut term, mut msg) = (false, String::new());
+        let mut msg = String::new();
         let (mut emitted, mut pending) = (false, false);
         let mut err: Option<String> = None;
         let m = r#"{"type":"assistant.message","data":{"content":"All good."}}"#;
-        parse_copilot_line(m, &mut term, &mut msg, &mut emitted, &mut pending, &mut err);
-        let ev = parse_copilot_line(
-            CP_RESULT_OK,
-            &mut term,
-            &mut msg,
-            &mut emitted,
-            &mut pending,
-            &mut err,
-        )
-        .unwrap();
+        parse_copilot_line(m, &mut msg, &mut emitted, &mut pending, &mut err);
+        let ev = parse_copilot_line(CP_RESULT_OK, &mut msg, &mut emitted, &mut pending, &mut err)
+            .unwrap();
         match ev {
             ReviewEvent::Done { text, is_error, .. } => {
                 assert!(!is_error);
@@ -4746,12 +5267,12 @@ opencode/x-preview-f-free
     fn opencode_tool_calls_finish_is_not_terminal_but_stop_is() {
         // Degenerate: the final step produced no text (step accumulator empty), so
         // `Done` falls back to the full accumulation rather than emitting empty.
-        let (mut term, mut msg, mut step) = (false, "hello".to_string(), String::new());
+        let (mut msg, mut step) = ("hello".to_string(), String::new());
         // `reason: tool-calls` means another step follows — not the turn's end.
-        assert!(parse_opencode_line(FINISH_TOOLS, &mut term, &mut msg, &mut step).is_none());
-        assert!(!term);
+        assert!(parse_opencode_line(FINISH_TOOLS, &mut msg, &mut step).is_none());
         // `reason: stop` ends the turn and carries the fallback text.
-        let ev = parse_opencode_line(FINISH_STOP, &mut term, &mut msg, &mut step).unwrap();
+        let ev = parse_opencode_line(FINISH_STOP, &mut msg, &mut step).unwrap();
+        assert!(ends_turn(&ev));
         match ev {
             ReviewEvent::Done { text, is_error, .. } => {
                 assert_eq!(text, "hello");
@@ -4759,7 +5280,6 @@ opencode/x-preview-f-free
             }
             other => panic!("expected Done, got {other:?}"),
         }
-        assert!(term);
     }
 
     #[test]
@@ -4767,7 +5287,7 @@ opencode/x-preview-f-free
         // A run of [step1 text "A", tool, step2 text "B"]: both stream as deltas ("A"
         // then "\n\nB"), but `Done.text` is the FINAL step's text only — the step-1
         // narration is stripped off the body.
-        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let (mut msg, mut step) = (String::new(), String::new());
         let s1 = r#"{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}"#;
         let a = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"A"}}"#;
         let tool = r#"{"type":"tool_use","sessionID":"s","part":{"type":"tool","tool":"read","state":{"status":"completed"}}}"#;
@@ -4777,21 +5297,17 @@ opencode/x-preview-f-free
         let fin_stop = r#"{"type":"step_finish","sessionID":"s","part":{"type":"step-finish","reason":"stop"}}"#;
 
         let mut buffer = String::new();
-        parse_opencode_line(s1, &mut term, &mut msg, &mut step); // NativeSession
-        if let Some(ReviewEvent::Delta { text }) =
-            parse_opencode_line(a, &mut term, &mut msg, &mut step)
-        {
+        parse_opencode_line(s1, &mut msg, &mut step); // NativeSession
+        if let Some(ReviewEvent::Delta { text }) = parse_opencode_line(a, &mut msg, &mut step) {
             buffer.push_str(&text);
         }
-        parse_opencode_line(tool, &mut term, &mut msg, &mut step); // Tool
-        parse_opencode_line(fin_tool, &mut term, &mut msg, &mut step); // not terminal
-        parse_opencode_line(s2, &mut term, &mut msg, &mut step); // NativeSession, clears step
-        if let Some(ReviewEvent::Delta { text }) =
-            parse_opencode_line(b, &mut term, &mut msg, &mut step)
-        {
+        parse_opencode_line(tool, &mut msg, &mut step); // Tool
+        parse_opencode_line(fin_tool, &mut msg, &mut step); // not terminal
+        parse_opencode_line(s2, &mut msg, &mut step); // NativeSession, clears step
+        if let Some(ReviewEvent::Delta { text }) = parse_opencode_line(b, &mut msg, &mut step) {
             buffer.push_str(&text);
         }
-        let done = parse_opencode_line(fin_stop, &mut term, &mut msg, &mut step).unwrap();
+        let done = parse_opencode_line(fin_stop, &mut msg, &mut step).unwrap();
         match done {
             ReviewEvent::Done { text, .. } => {
                 assert_eq!(text, "B");
@@ -4807,15 +5323,15 @@ opencode/x-preview-f-free
     fn opencode_final_step_joins_multiple_text_parts() {
         // A final step with several text parts joins them with `\n\n` — so Done.text
         // (the buffer tail) matches exactly what streamed within the final step.
-        let (mut term, mut msg, mut step) = (false, String::new(), String::new());
+        let (mut msg, mut step) = (String::new(), String::new());
         let s = r#"{"type":"step_start","sessionID":"s","part":{"type":"step-start"}}"#;
         let p1 = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"one"}}"#;
         let p2 = r#"{"type":"text","sessionID":"s","part":{"type":"text","text":"two"}}"#;
         let fin_stop = r#"{"type":"step_finish","sessionID":"s","part":{"type":"step-finish","reason":"stop"}}"#;
-        parse_opencode_line(s, &mut term, &mut msg, &mut step);
-        parse_opencode_line(p1, &mut term, &mut msg, &mut step);
-        parse_opencode_line(p2, &mut term, &mut msg, &mut step);
-        let done = parse_opencode_line(fin_stop, &mut term, &mut msg, &mut step).unwrap();
+        parse_opencode_line(s, &mut msg, &mut step);
+        parse_opencode_line(p1, &mut msg, &mut step);
+        parse_opencode_line(p2, &mut msg, &mut step);
+        let done = parse_opencode_line(fin_stop, &mut msg, &mut step).unwrap();
         match done {
             ReviewEvent::Done { text, .. } => assert_eq!(text, "one\n\ntwo"),
             other => panic!("expected Done, got {other:?}"),
