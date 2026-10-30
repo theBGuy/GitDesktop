@@ -4192,6 +4192,7 @@ mod child_env_tests {
         use std::os::unix::fs::PermissionsExt;
         // Root passes access(X_OK) whenever any execute bit is set, so the
         // owner-cannot-run fixture proves nothing there.
+        // SAFETY: geteuid has no preconditions and cannot fail.
         if unsafe { libc::geteuid() } == 0 {
             return;
         }
