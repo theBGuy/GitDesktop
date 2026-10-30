@@ -575,11 +575,11 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   factories without a window of their own carry `REPO_SHELL_WARM_STALE_MS`
   (src/lib/query-cache-times.ts), so the mount right after a warm-up serves
   the prefetched answer instead of respawning git; an observer that must
-  re-check on open (PromoteWorktreeDialog's status and op-state
-  preconditions) passes `staleTime: 0` explicitly. BranchSwitcher still prefetches remote branches
-  once per repo for a same-repo remount from a non-repo view, and its hook
-  stays open-gated. Never a
-  `["repo"]` prefix default (it would catch the notification baselines).
+  re-check on open (PromoteWorktreeDialog's status and op-state preconditions)
+  passes `staleTime: 0` explicitly. BranchSwitcher still prefetches remote
+  branches once per repo for a same-repo remount from a non-repo view, and
+  its hook stays open-gated. Never a `["repo"]` prefix default (it would
+  catch the notification baselines).
 - React Compiler already memoizes call results — don't add `useMemo` for perf
   reflexively (~40% false-positive rate); render reads of mutable module
   state go stale under it.
@@ -643,9 +643,10 @@ build-order lottery (tailwind-merge 3.6.0; in-repo: `data-open:animate-none!`).
   reference); the guarded post-await writes in the bullet above still bump
   late, a tracked follow-up. The store's one sanctioned late bump: a held
   cross-repo navigator's settle-time Settings re-check, up to the warm-up
-  budget after the request and only while it raises the leave prompt.
-  Review-enforced, not guarded: a regex over effect and continuation bodies
-  would fail open.
+  budget after the request and only while Settings' leave guard is
+  registered (it asks about unsaved edits, or holds the move while a save is
+  writing). Review-enforced, not guarded: a regex over effect and
+  continuation bodies would fail open.
 - A follow-up that needs the DOM from a state flip (focus a just-revealed
   input, re-pin a grown scroll region) never rides a bare
   `requestAnimationFrame` from the event handler: when the state lives in
@@ -671,20 +672,22 @@ one grep away on the named symbol. Grows via Conventions-sync.
 - **Repo-identity keying** — per-repo state keys on the repo IDENTITY
   (`useRepoIdentity` / the shared `--git-common-dir` resolver), never a raw
   checkout path; a raw-path key diverges across worktrees of one repo.
-- **Held repo navigation** — every route that changes the active repo warms
-  the shell first and, except the worktree promote's landing (a system move
-  off a folder it is deleting), yields to newer intent: picked opens via
+- **Held repo navigation** — every route that opens a repo warms the shell
+  first and, except the worktree promote's landing (a system move off a
+  folder it is deleting), yields to newer intent: picked opens via
   `useOpenRecordedRepo` / `useOpenWorktree`, the ui-store navigators'
   cross-repo arms via the `registerRepoShellWarmup` provider (registered in
   useOpenRepoByPath.ts; same-repo arms stay synchronous), and the two direct
   `openRepo` sites via `claimWarmRepoShell` (ui.ts). A new route that opens a
-  repo goes through one of these, never a bare `openRepo`. A held landing's
-  supersession check is a `claimRepoOpen` claim (plus RepoDialogs'
-  request-time `repoOpenWatermark`), and it re-runs
-  `interceptSettingsLeave` at settle — the guard can be registered during the
-  hold without an epoch bump. A caller whose own awaits precede the navigator
-  call claims (`claimRepoOpen`) before them, so a newer click retires an older
-  held landing (My work's `openItem`).
+  repo goes through one of these, never a bare `openRepo`. Except at the
+  promote's landing, which ignores its claim and keeps `bypassLeaveGuard`, a
+  held landing checks a `claimRepoOpen` claim (plus RepoDialogs' request-time
+  `repoOpenWatermark`) for supersession and re-runs `interceptSettingsLeave` at
+  settle — the guard can be registered during the hold without an epoch bump. A
+  caller whose own awaits precede the navigator call claims (`claimRepoOpen`)
+  before them and checks that claim before calling, so a newer click retires an
+  older held landing and a newer open retires the click (My work's `openItem`,
+  the Activity dock's `navigate`).
 - **View lens** — a PR/issue number or blob is valid only in the lens that
   produced it (origin vs upstream vs local match); navigation and dock entry
   points thread the lens (`beforeSelect`), never pass a bare number across.

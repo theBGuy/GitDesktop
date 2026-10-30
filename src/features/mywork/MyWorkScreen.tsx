@@ -721,11 +721,6 @@ export function MyWorkScreen() {
     // view change), so a continuation from a previous mount stays superseded;
     // the view is read live because the screen can be gone entirely.
     const gen = ++openGen;
-    // Claimed at the click too: an older open still held on its warm-up checks
-    // the open claims, not `openGen`, and would otherwise land over this one.
-    claimRepoOpen();
-    const superseded = () =>
-      gen !== openGen || useUiStore.getState().view !== "mywork";
     // The same set the row's affordances render from, so a local-looking row is
     // never one this refuses over a provider. Both open arms below start here,
     // so PRs and issues are gated alike.
@@ -734,6 +729,14 @@ export function MyWorkScreen() {
       openUrl(item.url);
       return;
     }
+    // Claimed here, before the first await but after the browser-only arm, so
+    // only a click that may open a repo retires a pending open: an older one
+    // still held on its warm-up checks the open claims, not `openGen`. A newer
+    // open claimed elsewhere (a held notification jump) retires this one. Read
+    // only before the navigator call, whose own claim would retire it.
+    const claimed = claimRepoOpen();
+    const superseded = () =>
+      gen !== openGen || !claimed() || useUiStore.getState().view !== "mywork";
     // EVERY row is proven below, whatever its provider: the key's host and owner
     // are STORED values, so a re-pointed origin leaves any provider's key naming
     // a checkout that is no longer this project. GitLab carries a second reason —

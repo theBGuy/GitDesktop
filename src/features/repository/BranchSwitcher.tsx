@@ -765,6 +765,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // open before the first read lands holds no snapshot (an empty one would
   // freeze nothing), and the effect below takes it when the rows arrive.
   const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
+  // This instance outlives repo switches, and a held cross-repo landing can switch
+  // under an open menu: drop the old repo's snapshot and arrow cursor (both name
+  // its rows) so the effect below re-snapshots the new list. The filter stays: it
+  // is the user's visible input, and the switch can land mid-keystroke.
+  const [orderRepo, setOrderRepo] = useState(repoPath);
+  if (orderRepo !== repoPath) {
+    setOrderRepo(repoPath);
+    setFrozenOrder(null);
+    setActiveBranch(null);
+  }
   const snapshotOrder = () =>
     setFrozenOrder(
       branches.data === undefined ? null : sortedBranches.map((b) => b.name),

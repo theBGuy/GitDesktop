@@ -1,92 +1,265 @@
-// Pins My work's click-time open claim: `openItem` in
-// src/features/mywork/MyWorkScreen.tsx calls `claimRepoOpen()` once, ahead of
-// its first `return` and its first `await`. An older row's jump can still be
-// held on its repo-shell warm-up, and that hold checks the open claims, not
-// `openGen`, so a click that claimed only after an early exit or an await would
-// let the older target land over the newer one. A narrow pin on this one
-// function, not a src-wide scanner; each check must also go red on the in-memory
-// mutants below, so a scan that can't fail on those edits fails here instead.
+// Pins the click-time open claim of the two clicks that await before calling a
+// ui-store navigator: My work's `openItem` (MyWorkScreen.tsx) and the Activity
+// dock's `navigate` (ActivityDock.tsx). Each declares
+// `const claimed = claimRepoOpen();` once, as a top-level statement of its body,
+// ahead of its first `await`, `throw` and navigator call, and after its early
+// returns (the arms that never open a repo, which must not retire a pending
+// open); its `superseded` reads `!claimed()`, and nothing else does (never the
+// navigator's `stillValid`, which runs after the navigator's own claim and would
+// retire it); and before EVERY navigator call, an `if (superseded()) return;`
+// runs after the last await preceding that call, at a depth no deeper than it.
+// An older jump still held on its repo-shell warm-up checks the open claims, so
+// a click that claimed late, or never read its claim, lets an older target land
+// over a newer one, or lets a newer open be retired by an older click. A narrow
+// pin on these two functions, not a src-wide scanner; each check must go red on
+// the in-memory mutants below, so a scan that can't fail on those edits fails
+// here instead.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { maskNonCode, matchBrace } from "./lib/ts-mask.mjs";
+import { CLOSE, maskNonCode, matchBrace, OPEN } from "./lib/ts-mask.mjs";
 
-const FILE = "src/features/mywork/MyWorkScreen.tsx";
-const source = readFileSync(
-  new URL(`../${FILE}`, import.meta.url),
-  "utf8",
-).replace(/\r\n/g, "\n");
+const read = (rel) =>
+  readFileSync(new URL(`../${rel}`, import.meta.url), "utf8").replace(
+    /\r\n/g,
+    "\n",
+  );
 
-/** Problems with openItem's claim, `[]` when pinned. Fails closed when the
- *  function, its body, an early return or an await can't be found, so a rename
- *  or reshape never passes vacuously. Nested callbacks count: a `return` or
- *  `await` anywhere ahead of the claim fails. */
-function openClaimProblems(text) {
-  const masked = maskNonCode(text, true);
-  const heads = [...masked.matchAll(/\basync function openItem\s*\(/g)];
+const NAVIGATOR =
+  /(?<![\w$.])(?:openPr|openIssue|openRun|openAgentTab|openRepoView)\(/g;
+
+const SITES = {
+  openItem: {
+    file: "src/features/mywork/MyWorkScreen.tsx",
+    // The parameter list is matched as a group, then the body must follow it.
+    head: /\basync function openItem\s*\(/g,
+    params: true,
+  },
+  navigate: {
+    file: "src/features/activity/ActivityDock.tsx",
+    head: /\bconst navigate = \(n: AppNotification\) => \{/g,
+    params: false,
+  },
+};
+
+/** `[open, close]` of the site's function body in `masked`, or a problem. */
+function siteBody(masked, name, site) {
+  const heads = [...masked.matchAll(site.head)];
   if (heads.length !== 1)
-    return [`expected one async function openItem, found ${heads.length}`];
-  const paramsOpen = heads[0].index + heads[0][0].length - 1;
-  const paramsClose = matchBrace(masked, paramsOpen);
-  if (paramsClose === -1) return ["openItem's parameter list was not found"];
-  const open = /^\s*\{/.exec(masked.slice(paramsClose + 1));
-  if (!open) return ["openItem has no block body"];
-  const bodyOpen = paramsClose + open[0].length;
-  const bodyClose = matchBrace(masked, bodyOpen);
-  if (bodyClose === -1) return ["openItem's body was not closed"];
-  const body = masked.slice(bodyOpen, bodyClose + 1);
-  const claims = [...body.matchAll(/(?<![\w$.])claimRepoOpen\(\)\s*;/g)];
-  const firstReturn = /(?<![\w$.])return(?![\w$])/.exec(body);
-  const firstAwait = /(?<![\w$.])await(?![\w$])/.exec(body);
+    return `expected one ${name} definition, found ${heads.length}`;
+  let open = heads[0].index + heads[0][0].length - 1;
+  if (site.params) {
+    const paramsClose = matchBrace(masked, open);
+    if (paramsClose === -1) return `${name}'s parameter list was not found`;
+    const brace = /^\s*\{/.exec(masked.slice(paramsClose + 1));
+    if (!brace) return `${name} has no block body`;
+    open = paramsClose + brace[0].length;
+  }
+  const close = matchBrace(masked, open);
+  return close === -1 ? `${name}'s body was not closed` : [open, close];
+}
+
+/** Bracket depth at `at` inside `body`, whose index 0 is the body's `{`. */
+function depthAt(body, at) {
+  let depth = 0;
+  for (let i = 1; i < at; i++) {
+    if (OPEN.has(body[i])) depth++;
+    else if (CLOSE.has(body[i])) depth--;
+  }
+  return depth;
+}
+
+const wordAt = (word) => new RegExp(`(?<![\\w$.])${word}(?![\\w$])`, "g");
+
+/** Problems with `name`'s claim in `text`, `[]` when pinned. Fails closed when
+ *  the function, its body, its claim, its `superseded`, an await or a
+ *  navigator call can't be found, so a rename or reshape never passes
+ *  vacuously. Nested callbacks count: an await, throw or navigator call
+ *  anywhere ahead of the claim fails, as does a return between the claim and
+ *  the first await. */
+function claimProblems(name, text) {
+  const site = SITES[name];
+  const masked = maskNonCode(text, true);
+  const span = siteBody(masked, name, site);
+  if (typeof span === "string") return [span];
+  const body = masked.slice(span[0], span[1] + 1);
   const problems = [];
-  if (!firstReturn) problems.push("openItem has no return to order against");
-  if (!firstAwait) problems.push("openItem has no await to order against");
-  if (claims.length !== 1) {
+  const calls = [...body.matchAll(/(?<![\w$.])claimRepoOpen\s*\(/g)];
+  const decl = /(?<![\w$.])const claimed = claimRepoOpen\(\);/.exec(body);
+  if (calls.length !== 1 || !decl) {
     problems.push(
-      `expected one claimRepoOpen(); in openItem, found ${claims.length}`,
+      `expected one \`const claimed = claimRepoOpen();\` in ${name}, found ${calls.length} claim call(s)`,
     );
     return problems;
   }
-  const at = claims[0].index;
-  if (firstReturn && firstReturn.index < at)
-    problems.push("openItem can return before it claims the open");
-  if (firstAwait && firstAwait.index < at)
-    problems.push("openItem awaits before it claims the open");
+  const before = body.slice(0, decl.index).trimEnd();
+  if (depthAt(body, decl.index) !== 0 || !/[;{}]$/.test(before))
+    problems.push(`${name}'s claim isn't a top-level statement of its body`);
+  const navs = [...body.matchAll(NAVIGATOR)];
+  const firstAwait = wordAt("await").exec(body)?.index ?? -1;
+  const firstThrow = wordAt("throw").exec(body)?.index ?? -1;
+  if (firstAwait === -1)
+    problems.push(`${name} has no await to order the claim against`);
+  if (navs.length === 0) {
+    problems.push(`${name} calls no ui-store navigator`);
+    return problems;
+  }
+  if (firstAwait !== -1 && firstAwait < decl.index)
+    problems.push(`${name} can await before it claims the open`);
+  if (firstThrow !== -1 && firstThrow < decl.index)
+    problems.push(`${name} can throw before it claims the open`);
+  if (navs[0].index < decl.index)
+    problems.push(`${name} can navigate before it claims the open`);
+  // A return between the claim and the first await is an arm that claimed
+  // without a chance to open anything, retiring a pending open for nothing.
+  if (
+    firstAwait > decl.index &&
+    [...body.slice(decl.index, firstAwait).matchAll(wordAt("return"))].length >
+      0
+  )
+    problems.push(`${name} can return after it claims, before its first await`);
+  const reads = [...body.matchAll(/(?<![\w$.])claimed(?![\w$])/g)];
+  const sup = /(?<![\w$.])const superseded = \(\) =>/.exec(body);
+  let supEnd = -1;
+  if (sup) {
+    for (let i = sup.index, depth = 0; i < body.length; i++) {
+      if (OPEN.has(body[i])) depth++;
+      else if (CLOSE.has(body[i])) depth--;
+      else if (depth === 0 && body[i] === ";") {
+        supEnd = i;
+        break;
+      }
+    }
+  }
+  if (supEnd === -1) problems.push(`${name}'s superseded was not found`);
+  else if (
+    reads.length !== 2 ||
+    !/(?<![\w$.])!claimed\(\)/.test(body.slice(sup.index, supEnd))
+  )
+    problems.push(
+      `${name}'s claim isn't read by its superseded, and only there`,
+    );
+  for (const nav of navs) {
+    const awaits = [...body.slice(0, nav.index).matchAll(wordAt("await"))];
+    const lastAwait = awaits.at(-1)?.index ?? 0;
+    const navDepth = depthAt(body, nav.index);
+    const checked = [
+      ...body
+        .slice(lastAwait, nav.index)
+        .matchAll(/(?<![\w$.])if \(superseded\(\)\) return;/g),
+    ].some((m) => depthAt(body, lastAwait + m.index) <= navDepth);
+    if (!checked)
+      problems.push(
+        `${name}'s ${nav[0].slice(0, -1)} call isn't preceded by a superseded() check after its last await`,
+      );
+  }
   return problems;
 }
 
 /** `s` with `from` replaced exactly once (the mutation fails closed if absent). */
 const once = (from, to) => (s) => s.replace(from, () => to);
 
-const CLAIM = "    claimRepoOpen();\n";
-const EARLY_RETURN = "      openUrl(item.url);\n      return;\n    }\n";
-const FIRST_AWAIT = "      await validateRepo(match.path);\n";
+const CLAIM = "    const claimed = claimRepoOpen();\n";
 
+/** Each mutant breaks one clause of the contract. */
 const MUTANTS = {
-  "the claim removed": once(CLAIM, ""),
-  "the claim below the first early return": (s) =>
-    once(EARLY_RETURN, `${EARLY_RETURN}${CLAIM}`)(once(CLAIM, "")(s)),
-  "the claim below the first await": (s) =>
-    once(FIRST_AWAIT, `${FIRST_AWAIT}  ${CLAIM}`)(once(CLAIM, "")(s)),
-  "an await ahead of the claim": once(CLAIM, `    await null;\n${CLAIM}`),
-  "openItem renamed": once(
-    "async function openItem(",
-    "async function openRow(",
-  ),
+  openItem: {
+    "the claim removed": once(CLAIM, ""),
+    "the claim inside a block": once(CLAIM, `    {\n  ${CLAIM}    }\n`),
+    "the claim inside a conditional": once(
+      CLAIM,
+      `    if (gen > 0) {\n  ${CLAIM}    }\n`,
+    ),
+    "the claim inside a callback": once(
+      CLAIM,
+      `    queueMicrotask(() => {\n  ${CLAIM}    });\n`,
+    ),
+    "the claim after the first await": once(CLAIM, `    await null;\n${CLAIM}`),
+    "a throw ahead of the claim": once(
+      CLAIM,
+      `    if (!item) throw new Error("no item");\n${CLAIM}`,
+    ),
+    "a navigator call ahead of the claim": once(
+      CLAIM,
+      `    openIssue({ repoPath: "", repoName: "", number: 0 });\n${CLAIM}`,
+    ),
+    "the claim above the browser-only arm": (s) =>
+      once(
+        "    const candidates = openableMatches(item, recents);\n",
+        `${CLAIM}    const candidates = openableMatches(item, recents);\n`,
+      )(once(CLAIM, "")(s)),
+    "superseded no longer reads the claim": once("!claimed() || ", ""),
+    "the last superseded check before the navigators removed": once(
+      "      if (superseded()) return;\n    }\n",
+      "    }\n",
+    ),
+    "an await just before openIssue without a re-check": once(
+      "      openIssue({\n",
+      "      await null;\n      openIssue({\n",
+    ),
+    "openItem renamed": once(
+      "async function openItem(",
+      "async function openRow(",
+    ),
+  },
+  navigate: {
+    "the claim removed": once(CLAIM, ""),
+    "the claim inside a conditional": once(
+      CLAIM,
+      `    if (gen > 0) {\n  ${CLAIM}    }\n`,
+    ),
+    "the claim after the first await": once(CLAIM, `    await null;\n${CLAIM}`),
+    "a throw ahead of the claim": once(
+      CLAIM,
+      `    if (!n) throw new Error("no row");\n${CLAIM}`,
+    ),
+    "a navigator call ahead of the claim": once(
+      CLAIM,
+      `    openRepoView({ repoPath: "", repoName: "" });\n${CLAIM}`,
+    ),
+    "the claim above the arms that never open a repo": (s) =>
+      once(
+        '    onClose();\n    if (t?.type === "automation-result") {\n',
+        `${CLAIM}    onClose();\n    if (t?.type === "automation-result") {\n`,
+      )(once(CLAIM, "")(s)),
+    "superseded no longer reads the claim": once(
+      "      useUiStore.getState().interactionEpoch !== startEpoch ||\n      !claimed();\n",
+      "      useUiStore.getState().interactionEpoch !== startEpoch;\n",
+    ),
+    "the claim read inside stillValid": once(
+      "        gen === clickGen &&\n",
+      "        gen === clickGen &&\n        claimed() &&\n",
+    ),
+    "no superseded check after the resolve": once(
+      "      const target = await resolveLiveTarget(n, superseded);\n      if (superseded()) return;\n",
+      "      const target = await resolveLiveTarget(n, superseded);\n",
+    ),
+    "an await just before openPr without a re-check": once(
+      "      openPr({\n",
+      "      await null;\n      openPr({\n",
+    ),
+    "navigate renamed": once(
+      "const navigate = (n: AppNotification) => {",
+      "const go = (n: AppNotification) => {",
+    ),
+  },
 };
 
-test("My work's openItem claims the open before any return or await", () => {
-  assert.deepEqual(openClaimProblems(source), []);
-});
+for (const name of Object.keys(SITES)) {
+  test(`${name} claims the open at the click and reads it before navigating`, () => {
+    assert.deepEqual(claimProblems(name, read(SITES[name].file)), []);
+  });
 
-test("negative control: every mutant of the claim fails the pin", () => {
-  for (const [name, mutate] of Object.entries(MUTANTS)) {
-    const mutant = mutate(source);
-    assert.notEqual(mutant, source, `mutant "${name}" didn't apply`);
-    assert.ok(
-      openClaimProblems(mutant).length > 0,
-      `the pin passed mutant "${name}"`,
-    );
-  }
-});
+  test(`negative control: every mutant of ${name}'s claim fails the pin`, () => {
+    const source = read(SITES[name].file);
+    for (const [label, mutate] of Object.entries(MUTANTS[name])) {
+      const mutant = mutate(source);
+      assert.notEqual(mutant, source, `mutant "${label}" didn't apply`);
+      assert.ok(
+        claimProblems(name, mutant).length > 0,
+        `the pin passed mutant "${label}"`,
+      );
+    }
+  });
+}

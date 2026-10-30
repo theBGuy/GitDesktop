@@ -425,7 +425,8 @@ interface UiState {
    *  request time, transition-backed actions included, so a continuation claims its epoch
    *  BEFORE invoking a navigator and never re-reads it after. The one exception: a held
    *  cross-repo navigator's settle-time Settings re-check can bump up to the warm-up
-   *  budget late, only while it raises the leave prompt (see `openPr`'s hold). */
+   *  budget late, only while Settings' leave guard is registered (it asks about unsaved
+   *  edits, or holds the move while a save is writing; see `openPr`'s hold). */
   interactionEpoch: number;
   /** Registered by SettingsScreen while it holds unsaved edits or a save is
    *  writing. Every navigator that can leave Settings from elsewhere consults it
@@ -933,12 +934,13 @@ export const useUiStore = create<UiState>()((set, get) => {
         return;
       }
       holdNavigation(warm, () => {
-        // Settings' guard can be registered during the hold without a bump
-        // (typing into a clean Settings), so re-check before leaving; the resume
-        // re-requests this jump. This bump is the epoch contract's one late bump,
-        // only while a prompt is raised: a second click that snapshotted the epoch
-        // without bumping is dropped, and this resume's own `stillValid` then
-        // refuses too, so both clicks can be lost.
+        // A jump its caller retired (`stillValid`) yields first, silently.
+        // Settings' guard can be registered during the hold without a bump, so
+        // re-check before leaving; the resume re-requests this jump. That bump
+        // is the epoch contract's one late bump, made only while Settings' guard
+        // is registered: a later action that snapshotted the epoch without
+        // bumping or claiming is dropped.
+        if (target.stillValid?.(epochAtRequest) === false) return;
         if (interceptSettingsLeave(() => get().openPr(target))) return;
         land();
       });
@@ -1008,6 +1010,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         return;
       }
       holdNavigation(warm, () => {
+        if (target.stillValid?.(epochAtRequest) === false) return;
         if (interceptSettingsLeave(() => get().openRun(target))) return;
         land();
       });
@@ -1040,6 +1043,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         return;
       }
       holdNavigation(warm, () => {
+        if (target.stillValid?.(epochAtRequest) === false) return;
         if (interceptSettingsLeave(() => get().openAgentTab(target))) return;
         land();
       });
@@ -1072,6 +1076,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         return;
       }
       holdNavigation(warm, () => {
+        if (target.stillValid?.(epochAtRequest) === false) return;
         if (interceptSettingsLeave(() => get().openRepoView(target))) return;
         land();
       });

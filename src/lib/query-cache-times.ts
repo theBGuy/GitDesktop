@@ -10,9 +10,7 @@
  *  primes only from polls fetched after it enabled. */
 export const REPO_SHELL_GC_TIME = 30 * 60_000;
 
-/** How long a local shell read the repo-shell warm-up prefetched stays fresh, so
- *  the view mounting right after it serves that answer instead of respawning git.
- *  Covers the warm-up→mount gap: 4 × the 250 ms REPO_SHELL_BUDGET_MS in
- *  repo-shell-budget.ts, restated here because lib/ must not import features/ and
- *  that module is import-free by pin. Invalidations and polls still refetch. */
+/** staleTime of the shell factories without a window of their own: each read is
+ *  fresh for 1 s, sized to cover the warm-up→mount gap (4 × the 250 ms budget,
+ *  restated since lib/ can't import features/). Polls and invalidations refetch. */
 export const REPO_SHELL_WARM_STALE_MS = 1000;

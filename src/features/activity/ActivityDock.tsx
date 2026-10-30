@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/popover";
 import { Spinner } from "@/components/ui/spinner";
 import { useAutomationHistoryDialog } from "@/features/automations/AutomationHistoryDialog";
+import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
 import { openAutomationResult } from "@/lib/automations/results";
 import { presentError } from "@/lib/error-summary";
 import { validateRepo } from "@/lib/git/api";
@@ -378,8 +379,6 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
     // user action, counted once.
     const gen = ++clickGen;
     const startEpoch = useUiStore.getState().interactionEpoch;
-    const superseded = () =>
-      gen !== clickGen || useUiStore.getState().interactionEpoch !== startEpoch;
     // Synchronous, ahead of the awaits: the popover closes on the click itself,
     // never a resolution later.
     onClose();
@@ -407,6 +406,16 @@ function ActivityPanel({ onClose }: { onClose: () => void }) {
       markNotificationRead(n.id);
       return;
     }
+    // Claimed here, before the first await but after the arms that never open
+    // a repo, so only a navigating click retires a pending open (the picker, a
+    // held jump); one claimed during the resolve retires this click in turn.
+    // Read only ahead of the navigator call, never in its `stillValid`: the
+    // navigator claims again, which would retire this one.
+    const claimed = claimRepoOpen();
+    const superseded = () =>
+      gen !== clickGen ||
+      useUiStore.getState().interactionEpoch !== startEpoch ||
+      !claimed();
     void (async () => {
       const target = await resolveLiveTarget(n, superseded);
       if (superseded()) return;

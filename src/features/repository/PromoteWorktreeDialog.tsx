@@ -80,12 +80,13 @@ function PromoteBody({
 
   const mainPath = (worktrees.data ?? []).find((w) => w.isMain)?.path ?? null;
 
-  // Preconditions, checked fresh while the dialog is open and sharing the app's
-  // status cache (same query key): the worktree must be clean, and we detect the
-  // main workspace's own WIP so we can offer to stash it first. Main is gated on
-  // its path resolving from the worktree list.
-  // `staleTime: 0` on all three reads: "checked fresh" means read on open, never
-  // served from the shell factories' warm window.
+  // Preconditions, refetched on every open and sharing the app's status cache
+  // (same query key): the worktree must be clean, and we detect the main
+  // workspace's own WIP so we can offer to stash it first. Main is gated on its
+  // path resolving from the worktree list.
+  // `staleTime: 0` on all three so the shell factories' warm window can't skip
+  // that refetch; `checking` gates on `isPending` only, so a cached answer can
+  // enable Promote before the refetch lands.
   const wStatus = useQuery({
     ...repoStatusOptions(worktree.path),
     staleTime: 0,
