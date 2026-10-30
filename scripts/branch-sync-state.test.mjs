@@ -406,6 +406,29 @@ test("repoIdentity / sameRepository: one repository across URL schemes", () => {
   assert.equal(sameRepository("C:/repos/r.git", https), false);
 });
 
+test("sameRepository: ports matter only between URLs of the same scheme", () => {
+  for (const [a, b, same] of [
+    ["https://h/x", "ssh://git@h:2222/x", true],
+    ["https://h:3000/x", "https://h:4000/x", false],
+    ["https://h:443/x", "https://h/x", true],
+    ["http://h:80/x", "http://h/x", true],
+    ["ssh://git@h:22/x", "git@h:x", true],
+    ["ssh://git@h:2222/x", "git@h:x", true],
+    ["ssh://h:2222/x", "ssh://h:2200/x", false],
+    ["http://h/x", "https://h/x", true],
+  ]) {
+    assert.equal(sameRepository(a, b), same, `${a} vs ${b}`);
+    assert.equal(sameRepository(b, a), same, `${b} vs ${a}`);
+  }
+  // A non-default port against the default, same scheme: another server.
+  assert.equal(sameRepository("https://h:8443/x", "https://h/x"), false);
+  // Both sides read the port, so the repository identity alone carries none.
+  assert.equal(
+    repoIdentity("https://h:3000/x"),
+    repoIdentity("https://h:4000/x"),
+  );
+});
+
 test("presenceUnderUrls: a push URL for another repository makes presence unknown", () => {
   const a = "https://github.com/o/r.git";
   const b = "https://github.com/me/r.git";

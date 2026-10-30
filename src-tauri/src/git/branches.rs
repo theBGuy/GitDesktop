@@ -305,12 +305,15 @@ pub(crate) fn push_destination_fields(
 }
 
 /// Where a BARE push of `local` lands, as `(remote, branch on it)`: both Some or both
-/// None. `%(push:remoteref)` names the branch outright under a push refspec. Otherwise
-/// `%(push)` is the destination's LOCAL remote-tracking ref, which depends on the fetch
-/// refspec's mapping, so it is only read back when it is the upstream's own tracking
-/// ref on the same remote (the upstream's branch) or the standard
-/// `refs/remotes/<remote>/<local>` (the same name). Any other shape (a remapped fetch
-/// refspec, `team/…`) is unresolved: a wrong branch name is never an answer.
+/// None. A push remote with its own push refspecs is unresolved: git's bare push sends
+/// every configured refspec, which no single destination describes, and
+/// `%(push:remoteref)` fills only then (one that doesn't map the branch leaves `%(push)`
+/// empty). Otherwise `%(push)` is the destination's LOCAL remote-tracking ref, which
+/// depends on the fetch refspec's mapping, so it is only read back when it is the
+/// upstream's own tracking ref on the same remote (the upstream's branch) or the
+/// standard `refs/remotes/<remote>/<local>` (the same name). Any other shape (a
+/// remapped fetch refspec, `team/…`) is unresolved: a wrong branch name is never an
+/// answer.
 pub(crate) fn push_destination(
     local: &str,
     push_remote: &str,
@@ -320,12 +323,10 @@ pub(crate) fn push_destination(
     upstream_remote: &str,
     upstream_remoteref: &str,
 ) -> (Option<String>, Option<String>) {
-    if !crate::git::remote::is_named_remote(push_remote) {
+    if !crate::git::remote::is_named_remote(push_remote) || !push_remoteref.is_empty() {
         return (None, None);
     }
-    let branch = if !push_remoteref.is_empty() {
-        push_remoteref.strip_prefix("refs/heads/")
-    } else if push_track.is_empty() {
+    let branch = if push_track.is_empty() {
         None
     } else if push_track == upstream_track && upstream_remote == push_remote {
         upstream_remoteref.strip_prefix("refs/heads/")
@@ -3457,7 +3458,8 @@ mod tests {
         // (local, push remote, push remoteref, %(push), %(upstream), upstream remote,
         //  upstream remoteref) → destination
         let cases = [
-            // A push refspec names the destination outright.
+            // A push remote with its own push refspecs sends them all, as configured:
+            // no single destination describes that push.
             (
                 (
                     "topic",
@@ -3468,9 +3470,8 @@ mod tests {
                     "origin",
                     "refs/heads/main",
                 ),
-                both("origin", "pushed/t"),
+                none.clone(),
             ),
-            // A push refspec into a non-branch ref is no branch.
             (
                 (
                     "topic",

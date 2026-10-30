@@ -75,16 +75,21 @@ async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     };
     let tracking = parse_upstream_tracking(&text, &refname);
     let (atoms, push_remotename) = tracking_line_push_destination(&text, &refname, &name);
+    // A local upstream's remote reads `.`, which the split drops; a named push remote
+    // beside it is the same triangular shape as any other.
+    let local_upstream = matches!(&tracking, Some((Upstream::Branch(_), r, _)) if r == ".");
     let split = upstream_split(&name, tracking);
     head.upstream_remote.clone_from(&split.remote);
     head.upstream_branch.clone_from(&split.branch);
     (head.push_remote, head.push_branch) = atoms.clone();
-    let Some(remote) = split.remote else {
-        return;
+    let remote = match split.remote {
+        Some(remote) => remote,
+        None if local_upstream => ".".to_string(),
+        None => return,
     };
     // Only these two shapes can push anywhere but the upstream itself, so only they pay
     // the config listing (a triangular repo: its push remote isn't the upstream's).
-    let triangular = !push_remotename.is_empty() && push_remotename != remote;
+    let triangular = is_named_remote(&push_remotename) && push_remotename != remote;
     if !split.candidate && !triangular {
         return;
     }
@@ -226,8 +231,8 @@ fn bare_push_refused(config: &[ConfigEntry], name: &str, upstream_remote: &str) 
 /// Where push.default unset/`simple` sends a bare push whose push remote is not the
 /// upstream's: `simple` then acts as `current` (git-config push.default), landing the
 /// branch under its own name there, yet `%(push)` resolves nothing for it (measured
-/// empty, git 2.51.1, in `push_destination_matrix`). A push refspec on that remote
-/// decides by its own mapping, which `%(push:remoteref)` already reads.
+/// empty, git 2.51.1, in `push_destination_matrix`). A push remote with its own push
+/// refspecs claims nothing: git's bare push sends every one of them, as configured.
 fn triangular_simple_destination(
     config: &[ConfigEntry],
     name: &str,
@@ -1279,6 +1284,8 @@ mod tests {
                     landed: vec![s("second:feat/y")],
                 },
             ),
+            // A push remote with its own push refspecs: git pushes them all as
+            // configured, which no single destination describes, so none is claimed.
             (
                 "i-push-refspec",
                 vec![
@@ -1292,8 +1299,8 @@ mod tests {
                         "refs/heads/pushed/y",
                         "refs/remotes/origin/pushed/y",
                     ),
-                    status: o("origin:pushed/y"),
-                    listed: o("origin:pushed/y"),
+                    status: None,
+                    listed: None,
                     landed: vec![s("origin:pushed/y")],
                 },
             ),
@@ -1392,6 +1399,94 @@ mod tests {
                     landed: vec![],
                 },
             ),
+            (
+                "t-push-list-two",
+                vec![
+                    (pd, "simple"),
+                    (origin_push, "refs/heads/main:refs/heads/main"),
+                    (origin_push, "refs/heads/feat/y:refs/heads/pushed/y"),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms(
+                        "origin",
+                        "refs/heads/pushed/y",
+                        "refs/remotes/origin/pushed/y",
+                    ),
+                    status: None,
+                    listed: None,
+                    landed: vec![s("origin:pushed/y")],
+                },
+            ),
+            (
+                "u-push-wildcard",
+                vec![
+                    (pd, "simple"),
+                    (origin_push, "refs/heads/*:refs/heads/published/*"),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms(
+                        "origin",
+                        "refs/heads/published/feat/y",
+                        "refs/remotes/origin/published/feat/y",
+                    ),
+                    status: None,
+                    listed: None,
+                    landed: vec![s("origin:published/feat/y"), s("origin:published/main")],
+                },
+            ),
+            // A push refspec that maps another branch leaves this one with no
+            // destination at all.
+            (
+                "v-push-refspec-unmapped",
+                vec![
+                    (pd, "simple"),
+                    (origin_push, "refs/heads/main:refs/heads/main"),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", ""),
+                    status: None,
+                    listed: None,
+                    landed: vec![],
+                },
+            ),
+            // Rows on a LOCAL upstream (`feat/y` tracking `main` here, remote `.`) with
+            // origin as its push remote: the same triangular shape as any other.
+            (
+                "w-local-matching",
+                vec![(pd, "matching"), (push_remote, "origin")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
+                    status: None,
+                    listed: o("origin:feat/y"),
+                    landed: vec![],
+                },
+            ),
+            (
+                "x-local-simple",
+                vec![(pd, "simple"), (push_remote, "origin")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", ""),
+                    status: o("origin:feat/y"),
+                    listed: None,
+                    landed: vec![s("origin:feat/y")],
+                },
+            ),
+            (
+                "y-local-current",
+                vec![(pd, "current"), (push_remote, "origin")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
+                    status: o("origin:feat/y"),
+                    listed: o("origin:feat/y"),
+                    landed: vec![s("origin:feat/y")],
+                },
+            ),
         ];
         let mut measured = 0;
         for (tag, config, refetch, want) in rows {
@@ -1404,6 +1499,9 @@ mod tests {
             if local != "feat/y" {
                 git(&work, &["branch", "-m", "feat/y", local]).await;
             }
+            if tag.contains("-local-") {
+                git(&work, &["branch", "-q", "--set-upstream-to=main", local]).await;
+            }
             let written: Vec<&str> = config.iter().map(|(k, _)| *k).collect();
             let unset: Vec<&str> = all
                 .iter()
@@ -1413,8 +1511,13 @@ mod tests {
             if !all_unset(&work, &format!("row {tag}"), &unset).await {
                 continue;
             }
-            for (key, value) in &config {
-                git(&work, &["config", key, value]).await;
+            // A key repeated in a row is multi-valued: its later values are added.
+            for (i, (key, value)) in config.iter().enumerate() {
+                if config[..i].iter().any(|(k, _)| k == key) {
+                    git(&work, &["config", "--add", key, value]).await;
+                } else {
+                    git(&work, &["config", key, value]).await;
+                }
             }
             if refetch {
                 git(&work, &["fetch", "-q", "origin"]).await;

@@ -56,6 +56,10 @@ export interface SyncHead {
   pushNameMismatch: boolean;
   /** Whether `upstreamBranch` is its remote's default branch; null = unknown. */
   upstreamIsRemoteDefault: boolean | null;
+  /** Where a bare push lands, when the status resolved it; null or absent =
+   *  unresolved. */
+  pushRemote?: string | null;
+  pushBranch?: string | null;
 }
 
 export interface SyncControlsInput {
@@ -224,10 +228,26 @@ export function deriveSyncControls(input: SyncControlsInput) {
   // One description per button feeds both its tooltip and its accessible name;
   // each starts with the visible label (WCAG 2.5.3) and, while disabled,
   // carries the reason and the count. Undefined = the bare label suffices.
+  // A plain push that git sends somewhere other than the upstream names where it
+  // goes, whatever the count: the count is upstream-relative, and the push still
+  // sends at zero. The same resolved-and-differs test SyncControls' beginPush uses.
+  const pushElsewhere =
+    statusKnown &&
+    hasUpstream &&
+    !mismatch &&
+    !diverged &&
+    head.pushRemote != null &&
+    head.pushBranch != null &&
+    (head.pushRemote !== head.upstreamRemote ||
+      head.pushBranch !== head.upstreamBranch)
+      ? `${head.pushRemote}/${head.pushBranch}`
+      : null;
   const aheadLabel =
-    aheadCount > 0
-      ? `${pushLabel} — ${aheadCount} commit${plural(aheadCount)} to push to ${upstream}`
-      : undefined;
+    pushElsewhere !== null
+      ? `${pushLabel} to ${pushElsewhere}`
+      : aheadCount > 0
+        ? `${pushLabel} — ${aheadCount} commit${plural(aheadCount)} to push to ${upstream}`
+        : undefined;
   const behindLabel =
     behindCount > 0
       ? `Pull — ${behindCount} commit${plural(behindCount)} to pull from ${upstream}`

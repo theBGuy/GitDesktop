@@ -29,7 +29,9 @@ export interface BranchHead {
   /** The remote a BARE push lands on: `%(push…)` read with the push config
    *  where that changes the answer (matching, triangular `simple`), so a git
    *  without the atoms may still carry a config-derived destination. null when
-   *  unresolvable or there is no upstream. Set together with `pushBranch`. */
+   *  unresolvable (a push remote with its own push refspecs among them: git's
+   *  bare push sends them all, as configured) or there is no upstream. Set
+   *  together with `pushBranch`. */
   pushRemote: string | null;
   /** The branch a bare push would create or update on `pushRemote`; null when
    *  unresolvable. */
@@ -65,8 +67,9 @@ export interface Branch {
   /** `%(push)`'s resolution for this branch, read without the push config:
    *  where git maps a bare push, not a guarantee it lands there (matching and
    *  triangular `simple` differ; the status read is authoritative). null when
-   *  unresolvable. Row pushes name their remote and refspec outright, so no row
-   *  action reads it. Set together with `pushBranch`. */
+   *  unresolvable, a push remote with its own push refspecs included. Row
+   *  pushes name their remote and refspec outright, so no row action reads it.
+   *  Set together with `pushBranch`. */
   pushRemote: string | null;
   /** The branch on `pushRemote` that resolution names. */
   pushBranch: string | null;
