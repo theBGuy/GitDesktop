@@ -786,6 +786,36 @@ pub(crate) fn merged_shell_path() -> Option<String> {
     None
 }
 
+/// The first executable regular file named `name` on the merged login-shell PATH, so
+/// a tool run on git's behalf is the same install git's own children find. None
+/// before a capture lands or when no entry has it.
+#[cfg(unix)]
+pub(crate) fn find_on_shell_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = merged_shell_path()?;
+    first_on_path(&path, name, |candidate| {
+        std::fs::metadata(candidate)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
+    .map(PathBuf::from)
+}
+
+/// No merged PATH off unix; the stub keeps call sites cfg-free.
+#[cfg(not(unix))]
+pub(crate) fn find_on_shell_path(_name: &str) -> Option<PathBuf> {
+    None
+}
+
+/// The first `<entry>/<name>` that `is_exe` accepts, walking the `:`-separated `path`
+/// in order. Empty and relative entries are skipped, as the merge drops them.
+#[cfg(any(not(windows), test))]
+fn first_on_path(path: &str, name: &str, is_exe: impl Fn(&str) -> bool) -> Option<String> {
+    path.split(':')
+        .filter(|entry| entry.starts_with('/'))
+        .map(|entry| format!("{}/{name}", entry.trim_end_matches('/')))
+        .find(|candidate| is_exe(candidate))
+}
+
 /// Shell entries first, then inherited ones not already present (exact-string
 /// dedupe, first occurrence wins). Empty and relative entries are dropped from both
 /// sides: git runs in the open repo, where a relative entry would resolve inside it.
@@ -4106,6 +4136,46 @@ mod child_env_tests {
         let partial = format!("{MARK}/usr/bin\n{}", &MARK[..4]);
         assert!(!capture_pair_closed(partial.as_bytes(), MARK.as_bytes()));
         assert!(capture_pair_closed(&framed("/usr/bin\n"), MARK.as_bytes()));
+    }
+
+    #[test]
+    fn login_path_lookup_takes_the_first_match_in_path_order() {
+        // A shim earlier on the shell PATH beats an older copy later on it.
+        let installed = [
+            "/usr/local/bin/pre-commit",
+            "/home/u/.pyenv/shims/pre-commit",
+        ];
+        let is_exe = |c: &str| installed.contains(&c);
+        assert_eq!(
+            first_on_path("/home/u/.pyenv/shims:/usr/local/bin", "pre-commit", is_exe).as_deref(),
+            Some("/home/u/.pyenv/shims/pre-commit")
+        );
+        assert_eq!(
+            first_on_path("/usr/local/bin:/home/u/.pyenv/shims", "pre-commit", is_exe).as_deref(),
+            Some("/usr/local/bin/pre-commit")
+        );
+    }
+
+    #[test]
+    fn login_path_lookup_skips_relative_and_empty_entries() {
+        // Every candidate "exists", so only the entry filter decides.
+        let any = |_: &str| true;
+        assert_eq!(
+            first_on_path(":bin:./x:node_modules/.bin:/opt/bin", "lefthook", any).as_deref(),
+            Some("/opt/bin/lefthook")
+        );
+        assert_eq!(first_on_path("bin::./x", "lefthook", any), None);
+        assert_eq!(first_on_path("", "lefthook", any), None);
+    }
+
+    #[test]
+    fn login_path_lookup_joins_a_trailing_slash_entry_and_misses_cleanly() {
+        let is_exe = |c: &str| c == "/opt/bin/lefthook";
+        assert_eq!(
+            first_on_path("/usr/bin:/opt/bin/", "lefthook", is_exe).as_deref(),
+            Some("/opt/bin/lefthook")
+        );
+        assert_eq!(first_on_path("/usr/bin:/bin", "lefthook", is_exe), None);
     }
 }
 

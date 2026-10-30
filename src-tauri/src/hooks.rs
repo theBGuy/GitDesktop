@@ -207,8 +207,13 @@ pub async fn git_run_hook_manager(
     // Retries a failed startup capture here, where a stale PATH would show as
     // "isn't installed"; after the allowlist, so a rejected action never waits on it.
     crate::agent::prime_shell_path().await;
-    let Some(binary) = crate::agent::resolve_named(&[manager.as_str()], None).await else {
-        return Err(not_installed());
+    // The merged shell PATH decides first: the dialog must run the same install that
+    // git hooks will find, not whichever copy the inherited PATH reaches.
+    let binary = match crate::agent::find_on_shell_path(&manager) {
+        Some(found) => found,
+        None => crate::agent::resolve_named(&[manager.as_str()], None)
+            .await
+            .ok_or_else(not_installed)?,
     };
     let mut cmd = tokio::process::Command::new(&binary);
     crate::agent::sanitize_child_env(&mut cmd);
