@@ -68,6 +68,14 @@ pub struct BranchHead {
     /// Whether `upstream_branch` is the upstream remote's default branch (its
     /// `refs/remotes/<R>/HEAD`). Only probed while `push_name_mismatch`; None = unknown.
     pub upstream_is_remote_default: Option<bool>,
+    /// The remote a BARE push of this branch lands on: `%(push…)` read with the push
+    /// config where that changes the answer (matching, triangular `simple`), so a
+    /// git without the atoms may still carry a config-derived destination. None when
+    /// unresolvable or there is no upstream (the read only runs beside one).
+    pub push_remote: Option<String>,
+    /// The branch a bare push creates or updates on `push_remote`. Both Some or both
+    /// None.
+    pub push_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,6 +112,13 @@ pub struct Branch {
     /// `refs/heads/main`); None when untracked. Cross-name decisions read this,
     /// never the short `upstream` string (remote names may contain `/`).
     pub upstream_remote_ref: Option<String>,
+    /// `%(push)`'s resolution for this branch, read without the push config: where
+    /// git maps a bare push, not a guarantee it lands there (matching and triangular
+    /// `simple` differ; the status read is authoritative). None when unresolvable.
+    /// Named row pushes pass their remote and refspec outright, so no row reads it.
+    pub push_remote: Option<String>,
+    /// The branch on `push_remote` that resolution names. Both Some or both None.
+    pub push_branch: Option<String>,
 }
 
 /// A branch that exists on a remote but not (yet) as a local branch — offered in

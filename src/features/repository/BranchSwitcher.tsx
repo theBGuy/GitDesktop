@@ -44,6 +44,7 @@ import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import {
   forgeDetectForkPrForBranch,
   gitBranches,
+  gitRemotePushUrl,
   gitRemoteUrl,
 } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
@@ -165,9 +166,11 @@ import {
 } from "./BranchMergePickerDialog";
 import {
   isLocalUpstream,
+  presenceUnderUrls,
   remoteHasBranch,
   resolveUpdateFromDefault,
   type UpdateSource,
+  visibilityApplies,
   willCreateOnRemote,
   willPublish,
 } from "./branch-sync-state";
@@ -1923,7 +1926,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (pushAlreadyActive()) return;
     // A named publish with no remote goes to origin (the backend's default). A
     // branch the destination already has (as of the last fetch) only
-    // fast-forwards and tracks, so only a create asks first.
+    // fast-forwards and tracks, so only a create asks first; the list mirrors the
+    // destination's FETCH side, so a differing push URL asks too.
     const destination = remote ?? "origin";
     const switchedAway = () =>
       refuseIfSwitched(
@@ -1931,17 +1935,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         "nothing was published",
         "before the push started",
       );
-    const list = await queryClient
-      .fetchQuery(remoteBranchesOptions(publishIn))
-      .catch(() => undefined);
+    const [list, fetchUrl, pushUrl] = await Promise.all([
+      queryClient
+        .fetchQuery(remoteBranchesOptions(publishIn))
+        .catch(() => undefined),
+      gitRemoteUrl(publishIn, destination).catch(() => null),
+      gitRemotePushUrl(publishIn, destination).catch(() => null),
+    ]);
     if (switchedAway()) return;
     const create = willCreateOnRemote({
       upstream: branch.upstream,
       upstreamGone: branch.upstreamGone,
-      remoteHasSameName: remoteHasBranch(list, destination, branch.name),
+      remoteHasSameName: presenceUnderUrls(
+        remoteHasBranch(list, destination, branch.name),
+        fetchUrl,
+        pushUrl,
+      ),
     });
     if (create) {
-      const url = await gitRemoteUrl(publishIn, destination).catch(() => null);
       // The prompt takes over from the list; it opens once the list's close
       // has returned focus to its trigger, and it stamps whichever repo is live
       // when it asks. Without a prompt the list stays open while the row pushes.
@@ -1952,11 +1963,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         {
           branch: branch.name,
           remote: destination,
-          url,
-          visibility:
-            destination === "origin"
-              ? recordedVisibility(settings.data?.recentRepos, publishIn)
-              : null,
+          pushUrl,
+          visibility: visibilityApplies(destination, fetchUrl, pushUrl)
+            ? recordedVisibility(settings.data?.recentRepos, publishIn)
+            : null,
           goneUpstream: branch.upstreamGone,
           upstreamRemote: branch.upstreamRemote,
           upstreamBranch: branch.upstreamRemoteRef?.startsWith("refs/heads/")

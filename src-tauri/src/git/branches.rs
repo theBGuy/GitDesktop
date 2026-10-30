@@ -169,40 +169,40 @@ pub(crate) fn unborn_head_error() -> AppError {
 /// hands it back as a rev, which its disambiguated form resolves correctly.
 #[tauri::command]
 pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
-    let out = run_git(
-        Some(&repo_path),
-        &[
-            "for-each-ref",
-            "refs/heads",
-            "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)",
-        ],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    let text = out.stdout_lossy();
+    let text = read_refs_with_push_destination(&repo_path, "refs/heads", BRANCH_LIST_FORMAT)
+        .await?
+        .0;
     let archived = read_archived_set(&repo_path).await?;
+    Ok(parse_branch_list(&text, &archived))
+}
+
+/// The branch list's own fields; [`read_refs_with_push_destination`] appends the push
+/// atoms after them.
+const BRANCH_LIST_FORMAT: &str = "--format=%(refname)%00%(upstream:short)%00%(HEAD)%00%(committerdate:iso8601-strict)%00%(upstream:track)%00%(upstream:remotename)%00%(upstream:remoteref)";
+
+/// Parses [`BRANCH_LIST_FORMAT`] lines, with or without the push atoms after them; a
+/// line without them (the old-git retry) carries no push destination.
+fn parse_branch_list(text: &str, archived: &HashSet<String>) -> Vec<Branch> {
     let mut branches = Vec::new();
     for line in text.lines() {
-        let mut parts = line.split('\0');
-        let (Some(refname), upstream, head, date, track, upstream_remote, upstream_remote_ref) = (
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-            parts.next(),
-        ) else {
-            continue;
-        };
-        let Some(name) = refname
-            .strip_prefix("refs/heads/")
+        let fields: Vec<&str> = line.split('\0').collect();
+        let field = |i: usize| fields.get(i).copied();
+        let Some(name) = field(0)
+            .and_then(|r| r.strip_prefix("refs/heads/"))
             .filter(|n| !n.is_empty())
         else {
             continue;
         };
+        let (upstream, head, date, track) = (field(1), field(2), field(3), field(4));
+        let (upstream_remote, upstream_remote_ref) = (field(5), field(6));
         let (upstream_ahead, upstream_behind, upstream_gone) =
             parse_upstream_track(track.unwrap_or(""));
+        let (push_remote, push_branch) = push_destination_fields(
+            name,
+            fields.get(7..).unwrap_or(&[]),
+            upstream_remote.unwrap_or(""),
+            upstream_remote_ref.unwrap_or(""),
+        );
         branches.push(Branch {
             name: name.to_string(),
             is_current: head == Some("*"),
@@ -212,13 +212,132 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
             upstream_ahead,
             upstream_behind,
             upstream_gone,
-            upstream_remote: upstream_remote.filter(|r| !r.is_empty()).map(str::to_string),
+            upstream_remote: upstream_remote
+                .filter(|r| !r.is_empty())
+                .map(str::to_string),
             upstream_remote_ref: upstream_remote_ref
                 .filter(|r| !r.is_empty())
                 .map(str::to_string),
+            push_remote,
+            push_branch,
         });
     }
-    Ok(branches)
+    branches
+}
+
+/// The for-each-ref atoms [`push_destination_fields`] reads, appended NUL-separated
+/// after a read's own fields: the push remote, its explicit destination ref (filled only
+/// under a `remote.<r>.push` refspec), the destination's remote-tracking ref, and the
+/// upstream's tracking ref it is compared with.
+pub(crate) const PUSH_DESTINATION_ATOMS: &str =
+    "%(push:remotename)%00%(push:remoteref)%00%(push)%00%(upstream)";
+
+/// Runs `for-each-ref <pattern>` with `base_format` extended by
+/// [`PUSH_DESTINATION_ATOMS`]; the bool says whether the atoms rode along. A git that
+/// rejects one of them fails the whole command, so that failure re-runs `base_format`
+/// once and the atoms' destination reads as unknown, never a broken read (the status
+/// read may still derive one from the push config).
+pub(crate) async fn read_refs_with_push_destination(
+    repo_path: &str,
+    pattern: &str,
+    base_format: &str,
+) -> AppResult<(String, bool)> {
+    let extended = format!("{base_format}%00{PUSH_DESTINATION_ATOMS}");
+    read_refs_with_fallback(repo_path, pattern, &extended, base_format).await
+}
+
+async fn read_refs_with_fallback(
+    repo_path: &str,
+    pattern: &str,
+    extended: &str,
+    base_format: &str,
+) -> AppResult<(String, bool)> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["for-each-ref", pattern, extended],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code == 0 {
+        return Ok((out.stdout_lossy(), true));
+    }
+    // Any other failure surfaces exactly as `run_git` would have reported it.
+    if !is_unknown_format_atom(&out.stderr) {
+        out.exit_verdict()?;
+    }
+    let out = run_git(
+        Some(repo_path),
+        &["for-each-ref", pattern, base_format],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok((out.stdout_lossy(), false))
+}
+
+/// Whether for-each-ref refused a format atom: git's ref-filter says `unknown field
+/// name: <atom>` for an atom it lacks and `unrecognized %(push) argument: <arg>` for a
+/// known atom's unknown argument. The runner pins `LC_ALL=C`, so neither localizes.
+pub(crate) fn is_unknown_format_atom(stderr: &str) -> bool {
+    stderr.contains("unknown field name") || stderr.contains("unrecognized %(push) argument")
+}
+
+/// `(push_remote, push_branch)` from a line's [`PUSH_DESTINATION_ATOMS`] fields (empty
+/// when the read fell back without them), via [`push_destination`].
+pub(crate) fn push_destination_fields(
+    local: &str,
+    atoms: &[&str],
+    upstream_remote: &str,
+    upstream_remoteref: &str,
+) -> (Option<String>, Option<String>) {
+    let [push_remote, push_remoteref, push_track, upstream_track] = match atoms {
+        [a, b, c, d, ..] => [*a, *b, *c, *d],
+        _ => return (None, None),
+    };
+    push_destination(
+        local,
+        push_remote,
+        push_remoteref,
+        push_track,
+        upstream_track,
+        upstream_remote,
+        upstream_remoteref,
+    )
+}
+
+/// Where a BARE push of `local` lands, as `(remote, branch on it)`: both Some or both
+/// None. `%(push:remoteref)` names the branch outright under a push refspec. Otherwise
+/// `%(push)` is the destination's LOCAL remote-tracking ref, which depends on the fetch
+/// refspec's mapping, so it is only read back when it is the upstream's own tracking
+/// ref on the same remote (the upstream's branch) or the standard
+/// `refs/remotes/<remote>/<local>` (the same name). Any other shape (a remapped fetch
+/// refspec, `team/…`) is unresolved: a wrong branch name is never an answer.
+pub(crate) fn push_destination(
+    local: &str,
+    push_remote: &str,
+    push_remoteref: &str,
+    push_track: &str,
+    upstream_track: &str,
+    upstream_remote: &str,
+    upstream_remoteref: &str,
+) -> (Option<String>, Option<String>) {
+    if !crate::git::remote::is_named_remote(push_remote) {
+        return (None, None);
+    }
+    let branch = if !push_remoteref.is_empty() {
+        push_remoteref.strip_prefix("refs/heads/")
+    } else if push_track.is_empty() {
+        None
+    } else if push_track == upstream_track && upstream_remote == push_remote {
+        upstream_remoteref.strip_prefix("refs/heads/")
+    } else if push_track == format!("refs/remotes/{push_remote}/{local}") {
+        Some(local)
+    } else {
+        None
+    };
+    match branch.filter(|b| !b.is_empty()) {
+        Some(b) => (Some(push_remote.to_string()), Some(b.to_string())),
+        None => (None, None),
+    }
 }
 
 /// Parses git's `%(upstream:track)` field into `(ahead, behind, gone)`.
@@ -2865,6 +2984,10 @@ mod tests {
         branch_tip_sha, current_branch_name, is_session_holder, name_paths, update_in_holder,
         worktree_holding_branch, HolderMerge, UpdateBranchOutcome,
     };
+    use super::{
+        is_unknown_format_atom, parse_branch_list, push_destination, read_refs_with_fallback,
+        read_refs_with_push_destination, BRANCH_LIST_FORMAT,
+    };
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
     use crate::error::AppError;
     use crate::git::runner::LOCK_WAIT_TIMEOUT;
@@ -3321,6 +3444,290 @@ mod tests {
             run(&repo_s, &["rev-parse", "refs/tags/origin/x"]).await,
             "fixture sanity: the tag sits on another commit"
         );
+    }
+
+    /// The destination derivation's arms: an explicit push ref, the upstream's own
+    /// tracking ref, the standard same-name tracking ref, and everything that stays
+    /// unresolved rather than naming a wrong branch.
+    #[test]
+    fn push_destination_arms() {
+        let both = |r: &str, b: &str| (Some(r.to_string()), Some(b.to_string()));
+        let none = (None, None);
+        let up = "refs/remotes/origin/main";
+        // (local, push remote, push remoteref, %(push), %(upstream), upstream remote,
+        //  upstream remoteref) → destination
+        let cases = [
+            // A push refspec names the destination outright.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "refs/heads/pushed/t",
+                    "refs/remotes/origin/pushed/t",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("origin", "pushed/t"),
+            ),
+            // A push refspec into a non-branch ref is no branch.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "refs/tags/t",
+                    "",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            // The upstream's own tracking ref on the same remote: the upstream branch.
+            (
+                ("topic", "origin", "", up, up, "origin", "refs/heads/main"),
+                both("origin", "main"),
+            ),
+            // The upstream's tracking ref named for ANOTHER push remote (upstream
+            // mode, triangular): git refuses that push.
+            (
+                ("topic", "second", "", up, up, "origin", "refs/heads/main"),
+                none.clone(),
+            ),
+            // The standard same-name tracking ref.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/topic",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("origin", "topic"),
+            ),
+            (
+                (
+                    "a/b",
+                    "fork",
+                    "",
+                    "refs/remotes/fork/a/b",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("fork", "a/b"),
+            ),
+            // A remapped fetch refspec's tracking name is never read as the branch.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/team/topic",
+                    "refs/remotes/origin/team/main",
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            // Remapped, but the destination IS the upstream: read back through it.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/team/main",
+                    "refs/remotes/origin/team/main",
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("origin", "main"),
+            ),
+            // No destination (simple's cross-name refusal, nothing, a narrow fetch).
+            (
+                ("topic", "origin", "", "", up, "origin", "refs/heads/main"),
+                none.clone(),
+            ),
+            // No remote, or a local one.
+            (
+                (
+                    "topic",
+                    "",
+                    "",
+                    "refs/remotes/origin/topic",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            (
+                (
+                    "topic",
+                    ".",
+                    "",
+                    "refs/heads/main",
+                    "",
+                    ".",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            // An upstream that is no branch can't name the destination.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/pr",
+                    "refs/remotes/origin/pr",
+                    "origin",
+                    "refs/pull/1/head",
+                ),
+                none.clone(),
+            ),
+        ];
+        for ((local, pr, prr, p, u, ur, urr), want) in cases {
+            assert_eq!(
+                push_destination(local, pr, prr, p, u, ur, urr),
+                want,
+                "{local} {pr} {prr} {p} {u}"
+            );
+        }
+    }
+
+    /// The branch list's parser with and without the push atoms: identical upstream
+    /// facts, and the destination only when the atoms rode along.
+    #[test]
+    fn parse_branch_list_with_and_without_push_atoms() {
+        let base = "refs/heads/topic\0origin/main\0*\x002026-10-01T00:00:00+00:00\0[ahead 1]\0origin\0refs/heads/main";
+        let extended = format!(
+            "{base}\0origin\0\0refs/remotes/origin/topic\0refs/remotes/origin/main\nrefs/heads/plain\0\0 \x002026-09-01T00:00:00+00:00\0\0\0\0\0\0\0\n"
+        );
+        let archived = HashSet::new();
+        let with = parse_branch_list(&extended, &archived);
+        let without = parse_branch_list(&format!("{base}\n"), &archived);
+        assert_eq!(with.len(), 2);
+        assert_eq!(with[0].push_remote.as_deref(), Some("origin"));
+        assert_eq!(with[0].push_branch.as_deref(), Some("topic"));
+        assert_eq!(with[1].name, "plain");
+        assert_eq!(
+            (with[1].push_remote.clone(), with[1].push_branch.clone()),
+            (None, None)
+        );
+        let degraded = &without[0];
+        assert_eq!(
+            (degraded.push_remote.clone(), degraded.push_branch.clone()),
+            (None, None)
+        );
+        // Every other field is byte-identical between the two reads.
+        let mut stripped = serde_json::to_value(&with[0]).unwrap();
+        stripped["pushRemote"] = serde_json::Value::Null;
+        stripped["pushBranch"] = serde_json::Value::Null;
+        assert_eq!(stripped, serde_json::to_value(degraded).unwrap());
+        assert_eq!(degraded.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(degraded.upstream_ahead, 1);
+        assert!(degraded.is_current);
+    }
+
+    /// The camelCase keys the TS `Branch` mirror reads, none of the snake_case
+    /// spellings, and an unresolved destination as present-and-null.
+    #[test]
+    fn branch_serializes_the_push_destination_in_camel_case() {
+        let line = "refs/heads/topic\0origin/main\0*\x00d\0\0origin\0refs/heads/main\0origin\0\0refs/remotes/origin/topic\0refs/remotes/origin/main\n";
+        let row = &parse_branch_list(line, &HashSet::new())[0];
+        let wire = serde_json::to_value(row).unwrap();
+        assert_eq!(wire["pushRemote"], "origin");
+        assert_eq!(wire["pushBranch"], "topic");
+        let keys = wire.as_object().unwrap();
+        for snake in ["push_remote", "push_branch"] {
+            assert!(!keys.contains_key(snake), "{snake}");
+        }
+        let unresolved = serde_json::to_value(
+            &parse_branch_list("refs/heads/x\0\0 \x00d\0\0\0\n", &HashSet::new())[0],
+        )
+        .unwrap();
+        for key in ["pushRemote", "pushBranch"] {
+            assert!(
+                unresolved.get(key).is_some_and(serde_json::Value::is_null),
+                "{key}"
+            );
+        }
+    }
+
+    /// git's two real phrasings for a refused format atom (measured live below) are the
+    /// retry's trigger; any other failure is not.
+    #[test]
+    fn unknown_format_atom_phrasings() {
+        assert!(is_unknown_format_atom("fatal: unknown field name: pushx"));
+        assert!(is_unknown_format_atom(
+            "fatal: unrecognized %(push) argument: bogus"
+        ));
+        assert!(!is_unknown_format_atom("fatal: not a git repository"));
+        assert!(!is_unknown_format_atom(
+            "fatal: unrecognized %(upstream) argument: bogus"
+        ));
+    }
+
+    /// The retry-once, live: an extended format this git rejects (an unknown atom, and
+    /// a known atom with an unknown argument) re-runs the base format, so the read
+    /// still answers with the base fields and no push atoms. A failure of any other
+    /// kind is an error, not a retry.
+    #[tokio::test]
+    async fn a_rejected_push_atom_falls_back_to_the_base_read() {
+        let (_base, base) = temp_base("push-atom-retry");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        let base_text = run(&repo_s, &["for-each-ref", "refs/heads", BRANCH_LIST_FORMAT]).await;
+        for bogus in ["%(nosuchatom)", "%(push:bogus)"] {
+            // The premise: git itself rejects it with a phrasing the matcher knows.
+            let raw = run_git_raw(
+                Some(&repo_s),
+                &["for-each-ref", "refs/heads", &format!("--format={bogus}")],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_ne!(raw.code, 0, "{bogus}");
+            assert!(
+                is_unknown_format_atom(&raw.stderr),
+                "{bogus}: {}",
+                raw.stderr
+            );
+            let extended = format!("{BRANCH_LIST_FORMAT}%00{bogus}");
+            let (text, with_atoms) =
+                read_refs_with_fallback(&repo_s, "refs/heads", &extended, BRANCH_LIST_FORMAT)
+                    .await
+                    .expect("the fallback answers");
+            assert!(!with_atoms, "{bogus}");
+            assert_eq!(text, base_text, "{bogus}");
+            let rows = parse_branch_list(&text, &HashSet::new());
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                (rows[0].push_remote.clone(), rows[0].push_branch.clone()),
+                (None, None)
+            );
+        }
+        // The real extended read answers with the atoms on this git.
+        let (_, with_atoms) =
+            read_refs_with_push_destination(&repo_s, "refs/heads", BRANCH_LIST_FORMAT)
+                .await
+                .unwrap();
+        assert!(with_atoms);
+        // Not a format refusal: no retry, an error.
+        let missing = base.join("not-a-repo");
+        std::fs::create_dir_all(&missing).unwrap();
+        read_refs_with_push_destination(
+            &missing.to_string_lossy(),
+            "refs/heads",
+            BRANCH_LIST_FORMAT,
+        )
+        .await
+        .expect_err("a broken repository is an error");
     }
 
     /// `git_branches` must surface git's authoritative `%(upstream:remotename)`

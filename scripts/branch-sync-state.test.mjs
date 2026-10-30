@@ -15,11 +15,16 @@ import {
   destinationSlug,
   forgeShapedUrl,
   isLocalUpstream,
+  presenceUnderUrls,
   publishConfirmBody,
   publishConfirmTitle,
+  pushWouldCreate,
   remoteHasBranch,
+  repoIdentity,
   resolveUpdateFromDefault,
+  sameRepository,
   segmentsText,
+  visibilityApplies,
   willCreateOnRemote,
   willPublish,
 } from "../src/features/repository/branch-sync-state.ts";
@@ -332,4 +337,121 @@ test("isLocalUpstream: git's '.' (measured, git 2.51) and null are local", () =>
 
 test("publishConfirmTitle: plain text, so a cancel notice can name it", () => {
   assert.equal(publishConfirmTitle("feature/x"), "Publish feature/x?");
+});
+
+test("pushWouldCreate: a resolved destination the remote lacks creates; unresolved keeps today", () => {
+  for (const [presence, want] of [
+    [true, false],
+    [false, true],
+    [undefined, true],
+  ])
+    assert.equal(
+      pushWouldCreate({ pushRemote: "origin", pushBranch: "topic", presence }),
+      want,
+      String(presence),
+    );
+  // Unresolved (null, half-resolved, or the fields omitted, as untyped
+  // fixtures do) never claims a create, whatever the presence.
+  for (const presence of [true, false, undefined]) {
+    for (const dest of [
+      { pushRemote: null, pushBranch: null },
+      { pushRemote: "origin", pushBranch: null },
+      { pushRemote: null, pushBranch: "topic" },
+      {},
+      { pushRemote: undefined, pushBranch: "topic" },
+    ])
+      assert.equal(
+        pushWouldCreate({ ...dest, presence }),
+        undefined,
+        JSON.stringify({ ...dest, presence }),
+      );
+  }
+});
+
+test("NEGATIVE CONTROL: a destination known present never creates", () => {
+  assert.equal(
+    pushWouldCreate({ pushRemote: "fork", pushBranch: "x", presence: true }),
+    false,
+  );
+});
+
+test("repoIdentity / sameRepository: one repository across URL schemes", () => {
+  const https = "https://github.com/o/r.git";
+  for (const same of [
+    "git@github.com:o/r.git",
+    "git@github.com:o/r",
+    "ssh://git@github.com/o/r.git",
+    "ssh://git@github.com:22/o/r",
+    "https://user@GitHub.com/o/r/",
+    "http://github.com:8080/o/r.git",
+  ])
+    assert.equal(sameRepository(https, same), true, same);
+  assert.equal(repoIdentity(https), "github.com/o/r");
+  for (const other of [
+    "git@github.com:me/r.git",
+    "https://gitlab.com/o/r.git",
+    "https://github.com/o/r2.git",
+  ])
+    assert.equal(sameRepository(https, other), false, other);
+  // Unparseable spellings (local paths, file://) compare as exact text.
+  for (const local of [
+    "C:/repos/r.git",
+    "/srv/git/r.git",
+    "file:///srv/r.git",
+  ]) {
+    assert.equal(repoIdentity(local), null, local);
+    assert.equal(sameRepository(local, local), true, local);
+  }
+  assert.equal(sameRepository("/srv/git/r.git", "/srv/git/r"), false);
+  assert.equal(sameRepository("C:/repos/r.git", https), false);
+});
+
+test("presenceUnderUrls: a push URL for another repository makes presence unknown", () => {
+  const a = "https://github.com/o/r.git";
+  const b = "https://github.com/me/r.git";
+  // pushInsteadOf: the same repository read as https for fetch, ssh for push.
+  const aSsh = "git@github.com:o/r.git";
+  for (const presence of [true, false, undefined]) {
+    assert.equal(presenceUnderUrls(presence, a, a), presence, "equal");
+    assert.equal(presenceUnderUrls(presence, a, aSsh), presence, "same repo");
+    assert.equal(presenceUnderUrls(presence, a, b), undefined, "differ");
+    // One URL unreadable: nothing proves they match, so presence is unknown.
+    assert.equal(presenceUnderUrls(presence, null, b), undefined, "no fetch");
+    assert.equal(presenceUnderUrls(presence, a, null), undefined, "no push");
+    // Neither read: no URL evidence either way.
+    assert.equal(presenceUnderUrls(presence, null, null), presence, "neither");
+  }
+});
+
+test("visibilityApplies: origin, with both URLs naming one repository", () => {
+  const a = "https://github.com/o/r.git";
+  assert.equal(visibilityApplies("origin", a, a), true);
+  assert.equal(visibilityApplies("origin", a, "git@github.com:o/r.git"), true);
+  assert.equal(
+    visibilityApplies("origin", a, "git@github.com:me/r.git"),
+    false,
+  );
+  assert.equal(visibilityApplies("origin", null, a), false);
+  assert.equal(visibilityApplies("origin", a, null), false);
+  assert.equal(visibilityApplies("origin", null, null), false);
+  assert.equal(visibilityApplies("fork", a, a), false);
+});
+
+test("publishConfirmBody: a bare push names the branch it creates on the remote", () => {
+  const body = publishConfirmBody({
+    branch: "topic",
+    remote: "origin",
+    slug: null,
+    visibility: null,
+    goneUpstream: false,
+    upstreamRemote: null,
+    upstreamBranch: null,
+    createdBranch: "pushed/topic",
+  });
+  assert.equal(
+    segmentsText(body),
+    `Creates pushed/topic on origin. ${EXPOSURE}`,
+  );
+  assert.equal(body.find((s) => s.text === "pushed/topic")?.mono, true);
+  assert.equal(publishConfirmTitle("topic"), "Publish topic?");
 });

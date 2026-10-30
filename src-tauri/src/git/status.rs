@@ -1,7 +1,9 @@
 use tauri::State;
 
 use crate::error::AppResult;
-use crate::git::branches::validate_ref_name;
+use crate::git::branches::{
+    push_destination_fields, read_refs_with_push_destination, validate_ref_name,
+};
 use crate::git::remote::{
     is_named_remote, parse_upstream_tracking, remote_head_branch, Upstream,
     UPSTREAM_TRACKING_FORMAT,
@@ -48,14 +50,12 @@ pub async fn git_status(_state: State<'_, AppState>, repo_path: String) -> AppRe
     status_core(&repo_path).await
 }
 
-/// Fills the upstream's remote/branch split and the bare-push mismatch facts, which the
-/// porcelain's short `branch.upstream` can't carry (remote names may contain `/`).
-/// Advisory, failing toward inaction, as [`BranchHead`] documents: a failed tracking read
-/// leaves the remote/branch split None; a failed push-config read keeps the split but
-/// leaves `push_name_mismatch` false and `upstream_is_remote_default` None; a failed
-/// remote-HEAD probe leaves `upstream_is_remote_default` None (unknown). One spawn when
-/// there is an upstream; a live, differently-named branch upstream adds one config listing,
-/// plus the remote-HEAD probe when that listing says a bare push is refused.
+/// Fills the upstream's remote/branch split, the bare push's destination and the
+/// mismatch facts the porcelain's short `branch.upstream` can't carry. Advisory, failing
+/// toward inaction: any failed read leaves its facts None/false. One spawn per upstream
+/// (two on a git without the push atoms); a cross-name upstream or a push remote other
+/// than the upstream's adds one config listing, and a refused bare push the remote-HEAD
+/// probe.
 async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
     let (Some(name), Some(_)) = (head.name.clone(), head.upstream.as_ref()) else {
         return;
@@ -66,25 +66,35 @@ async fn fill_upstream_facts(repo_path: &str, head: &mut BranchHead) {
         return;
     }
     let refname = format!("refs/heads/{name}");
-    let Ok(out) = run_git(
-        Some(repo_path),
-        &["for-each-ref", &refname, UPSTREAM_TRACKING_FORMAT],
-        DEFAULT_TIMEOUT,
-    )
-    .await
+    // The shared tracking format plus the push-destination atoms, in this one spawn;
+    // the shared constant stays as the push path parses it.
+    let Ok((text, _)) =
+        read_refs_with_push_destination(repo_path, &refname, UPSTREAM_TRACKING_FORMAT).await
     else {
         return;
     };
-    let split = upstream_split(
-        &name,
-        parse_upstream_tracking(&out.stdout_lossy(), &refname),
-    );
+    let tracking = parse_upstream_tracking(&text, &refname);
+    let (atoms, push_remotename) = tracking_line_push_destination(&text, &refname, &name);
+    let split = upstream_split(&name, tracking);
     head.upstream_remote.clone_from(&split.remote);
     head.upstream_branch.clone_from(&split.branch);
-    let (true, Some(remote), Some(up)) = (split.candidate, split.remote, split.branch) else {
+    (head.push_remote, head.push_branch) = atoms.clone();
+    let Some(remote) = split.remote else {
         return;
     };
-    if bare_push_refused(repo_path, &name, &remote).await != Some(true) {
+    // Only these two shapes can push anywhere but the upstream itself, so only they pay
+    // the config listing (a triangular repo: its push remote isn't the upstream's).
+    let triangular = !push_remotename.is_empty() && push_remotename != remote;
+    if !split.candidate && !triangular {
+        return;
+    }
+    let config = push_config(repo_path).await;
+    (head.push_remote, head.push_branch) =
+        configured_destination(config.as_deref(), &name, &remote, atoms);
+    let (true, Some(c), Some(up)) = (split.candidate, config, split.branch) else {
+        return;
+    };
+    if !bare_push_refused(&c, &name, &remote) {
         return;
     }
     head.push_name_mismatch = true;
@@ -179,10 +189,9 @@ fn config_last<'a>(entries: &'a [ConfigEntry], key: &str) -> Option<&'a str> {
     config_values(entries, key).last()
 }
 
-/// Reads the push config [`bare_push_would_be_refused`] decides on from one config listing;
-/// `None` when the listing failed, which the caller treats as "not refused". The branch's
-/// own remote is the upstream's, which exists only while `branch.<n>.remote` is set.
-async fn bare_push_refused(repo_path: &str, name: &str, upstream_remote: &str) -> Option<bool> {
+/// The one config listing the push decisions read; `None` when it failed, which callers
+/// treat as "not refused" and "no destination claimed".
+async fn push_config(repo_path: &str) -> Option<Vec<ConfigEntry>> {
     let out = run_git(
         Some(repo_path),
         &["config", "-z", "--list"],
@@ -190,23 +199,108 @@ async fn bare_push_refused(repo_path: &str, name: &str, upstream_remote: &str) -
     )
     .await
     .ok()?;
-    let config = parse_config_list(&out.stdout_lossy());
-    let push_default = config_last(&config, "push.default");
-    let branch_push_remote = config_last(&config, &format!("branch.{name}.pushRemote"));
-    let remote_push_default = config_last(&config, "remote.pushDefault");
+    Some(parse_config_list(&out.stdout_lossy()))
+}
+
+/// Reads the push config [`bare_push_would_be_refused`] decides on. The branch's own
+/// remote is the upstream's, which exists only while `branch.<n>.remote` is set.
+fn bare_push_refused(config: &[ConfigEntry], name: &str, upstream_remote: &str) -> bool {
+    let push_default = config_last(config, "push.default");
+    let branch_push_remote = config_last(config, &format!("branch.{name}.pushRemote"));
+    let remote_push_default = config_last(config, "remote.pushDefault");
     let push_remote = branch_push_remote
         .or(remote_push_default)
         .unwrap_or(upstream_remote);
-    let remote_has_push_refspec = config_values(&config, &format!("remote.{push_remote}.push"))
+    let remote_has_push_refspec = config_values(config, &format!("remote.{push_remote}.push"))
         .any(|refspec| !refspec.trim().is_empty());
-    Some(bare_push_would_be_refused(
+    bare_push_would_be_refused(
         push_default,
         branch_push_remote,
         remote_push_default,
         Some(upstream_remote),
         upstream_remote,
         remote_has_push_refspec,
-    ))
+    )
+}
+
+/// Where push.default unset/`simple` sends a bare push whose push remote is not the
+/// upstream's: `simple` then acts as `current` (git-config push.default), landing the
+/// branch under its own name there, yet `%(push)` resolves nothing for it (measured
+/// empty, git 2.51.1, in `push_destination_matrix`). A push refspec on that remote
+/// decides by its own mapping, which `%(push:remoteref)` already reads.
+fn triangular_simple_destination(
+    config: &[ConfigEntry],
+    name: &str,
+    upstream_remote: &str,
+) -> (Option<String>, Option<String>) {
+    if !matches!(config_last(config, "push.default"), None | Some("simple")) {
+        return (None, None);
+    }
+    let push_remote = config_last(config, &format!("branch.{name}.pushRemote"))
+        .or(config_last(config, "remote.pushDefault"))
+        .unwrap_or(upstream_remote);
+    let has_refspec = config_values(config, &format!("remote.{push_remote}.push"))
+        .any(|refspec| !refspec.trim().is_empty());
+    if push_remote == upstream_remote || !is_named_remote(push_remote) || has_refspec {
+        return (None, None);
+    }
+    (Some(push_remote.to_string()), Some(name.to_string()))
+}
+
+/// Where a bare push lands once the push config is read, from the atoms' destination:
+/// `push.default=matching` resolves `%(push)` like `current` but only updates branches
+/// both ends already have, so it never creates one; triangular `simple` lands where the
+/// atoms resolve nothing. The remote must be a configured one (a pushRemote can name a
+/// URL); a failed listing claims nothing.
+fn configured_destination(
+    config: Option<&[ConfigEntry]>,
+    name: &str,
+    upstream_remote: &str,
+    atoms: (Option<String>, Option<String>),
+) -> (Option<String>, Option<String>) {
+    let Some(c) = config else {
+        return (None, None);
+    };
+    if config_last(c, "push.default") == Some("matching") {
+        return (None, None);
+    }
+    let dest = match atoms {
+        (Some(r), Some(b)) => (Some(r), Some(b)),
+        _ => triangular_simple_destination(c, name, upstream_remote),
+    };
+    let configured = dest.0.as_deref().is_some_and(|r| {
+        config_values(c, &format!("remote.{r}.url"))
+            .next()
+            .is_some()
+    });
+    if configured {
+        dest
+    } else {
+        (None, None)
+    }
+}
+
+/// The push destination off the first line of a tracking read, its atoms after the
+/// shared format's four fields, plus the raw `%(push:remotename)`; None/None and empty
+/// when the line is missing, names another ref, or the read fell back without the atoms.
+fn tracking_line_push_destination(
+    text: &str,
+    refname: &str,
+    name: &str,
+) -> ((Option<String>, Option<String>), String) {
+    let none = ((None, None), String::new());
+    let Some(line) = text.lines().next() else {
+        return none;
+    };
+    let fields: Vec<&str> = line.split('\0').collect();
+    if fields.first() != Some(&refname) {
+        return none;
+    }
+    let upstream_remoteref = fields.get(1).copied().unwrap_or("");
+    let upstream_remote = fields.get(2).copied().unwrap_or("");
+    let atoms = fields.get(4..).unwrap_or(&[]);
+    let dest = push_destination_fields(name, atoms, upstream_remote, upstream_remoteref);
+    (dest, atoms.first().copied().unwrap_or("").to_string())
 }
 
 /// push.default unset/`simple` refuses a bare push when the upstream's name differs
@@ -253,6 +347,8 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
         upstream_branch: None,
         push_name_mismatch: false,
         upstream_is_remote_default: None,
+        push_remote: None,
+        push_branch: None,
     };
     let mut entries = Vec::new();
     // Porcelain v2 has no `[gone]` token. When the upstream ref is gone git still
@@ -636,22 +732,160 @@ mod tests {
         head.upstream_branch = Some("feat/x".into());
         head.push_name_mismatch = true;
         head.upstream_is_remote_default = Some(false);
+        head.push_remote = Some("second".into());
+        head.push_branch = Some("feat/y".into());
         let wire = serde_json::to_value(&head).unwrap();
         assert_eq!(wire["upstreamRemote"], "origin");
         assert_eq!(wire["upstreamBranch"], "feat/x");
         assert_eq!(wire["pushNameMismatch"], true);
         assert_eq!(wire["upstreamIsRemoteDefault"], false);
+        assert_eq!(wire["pushRemote"], "second");
+        assert_eq!(wire["pushBranch"], "feat/y");
         let keys = wire.as_object().unwrap();
         for snake in [
             "upstream_remote",
             "upstream_branch",
             "push_name_mismatch",
             "upstream_is_remote_default",
+            "push_remote",
+            "push_branch",
         ] {
             assert!(!keys.contains_key(snake), "{snake}");
         }
         let unknown = serde_json::to_value(parse_status_v2(&text).branch).unwrap();
         assert!(unknown["upstreamIsRemoteDefault"].is_null());
+        // Unresolved serializes as present-and-null, the shape the TS mirror types.
+        let unknown = unknown.as_object().unwrap();
+        for key in ["pushRemote", "pushBranch"] {
+            assert!(unknown.get(key).is_some_and(|v| v.is_null()), "{key}");
+        }
+    }
+
+    /// `simple` off the upstream's remote lands under the branch's own name there; any
+    /// other mode, the upstream's own remote, or a push refspec claims nothing here.
+    #[test]
+    fn triangular_simple_destination_arms() {
+        let dest = |listing: &str| {
+            triangular_simple_destination(&parse_config_list(listing), "feat/y", "origin")
+        };
+        let second = (Some("second".to_string()), Some("feat/y".to_string()));
+        assert_eq!(dest("branch.feat/y.pushRemote\nsecond\0"), second);
+        assert_eq!(
+            dest("remote.pushDefault\nsecond\0push.default\nsimple\0"),
+            second
+        );
+        // The branch's own pushRemote outranks remote.pushDefault.
+        assert_eq!(
+            dest("remote.pushDefault\nsecond\0branch.feat/y.pushRemote\norigin\0"),
+            (None, None)
+        );
+        assert_eq!(dest(""), (None, None));
+        assert_eq!(
+            dest("push.default\ncurrent\0branch.feat/y.pushRemote\nsecond\0"),
+            (None, None)
+        );
+        assert_eq!(
+            dest("branch.feat/y.pushRemote\nsecond\0remote.second.push\nrefs/heads/*:refs/heads/x/*\0"),
+            (None, None)
+        );
+        assert_eq!(dest("branch.feat/y.pushRemote\n.\0"), (None, None));
+    }
+
+    /// The config-read arms: matching claims nothing, triangular `simple` fills in where
+    /// the atoms resolved nothing, the remote must be configured, and a failed listing
+    /// claims nothing.
+    #[test]
+    fn configured_destination_arms() {
+        let remotes = "remote.origin.url\nhttps://h/o/r\0remote.second.url\nhttps://h/s/r\0";
+        let dest = |extra: &str, atoms: (Option<&str>, Option<&str>)| {
+            let config = parse_config_list(&format!("{remotes}{extra}"));
+            configured_destination(
+                Some(&config),
+                "topic",
+                "origin",
+                (atoms.0.map(str::to_string), atoms.1.map(str::to_string)),
+            )
+        };
+        let some = |r: &str, b: &str| (Some(r.to_string()), Some(b.to_string()));
+        let none = (None, None);
+        // Atoms that resolved pass through; matching claims nothing either way.
+        assert_eq!(
+            dest("", (Some("origin"), Some("topic"))),
+            some("origin", "topic")
+        );
+        assert_eq!(
+            dest("push.default\nmatching\0", (Some("second"), Some("topic"))),
+            none
+        );
+        // Triangular simple, same name: the push remote under the local name.
+        assert_eq!(
+            dest("remote.pushDefault\nsecond\0", (None, None)),
+            some("second", "topic")
+        );
+        assert_eq!(
+            dest(
+                "branch.topic.pushRemote\nsecond\0push.default\nmatching\0",
+                (None, None)
+            ),
+            none
+        );
+        // A pushRemote that is a URL, or names no configured remote, is never claimed.
+        assert_eq!(
+            dest(
+                "branch.topic.pushRemote\nhttps://elsewhere/x.git\0",
+                (None, None)
+            ),
+            none
+        );
+        assert_eq!(dest("remote.pushDefault\nghost\0", (None, None)), none);
+        assert_eq!(dest("", (Some("ghost"), Some("topic"))), none);
+        assert_eq!(
+            configured_destination(
+                None,
+                "topic",
+                "origin",
+                (Some("origin".into()), Some("topic".into()))
+            ),
+            none
+        );
+    }
+
+    /// A read that fell back without the push atoms keeps every upstream fact and
+    /// carries no destination. The shared tracking format's line is what the fallback
+    /// reads, so it is fed straight in (the status read's own format can't be swapped
+    /// for one with an unknown atom; the live fallback is pinned in branches.rs).
+    #[test]
+    fn a_tracking_line_without_push_atoms_keeps_the_upstream_facts() {
+        let refname = "refs/heads/feat/y";
+        let base = format!("{refname}\0refs/heads/feat/x\0origin\0[ahead 1]\n");
+        assert_eq!(
+            parse_upstream_tracking(&base, refname),
+            Some((Upstream::Branch("feat/x".into()), "origin".into(), false))
+        );
+        assert_eq!(
+            tracking_line_push_destination(&base, refname, "feat/y"),
+            ((None, None), String::new())
+        );
+        // The same line WITH the atoms: identical upstream facts, plus the destination.
+        let extended = format!(
+            "{refname}\0refs/heads/feat/x\0origin\0[ahead 1]\0origin\0\0refs/remotes/origin/feat/y\0refs/remotes/origin/feat/x\n"
+        );
+        assert_eq!(
+            parse_upstream_tracking(&extended, refname),
+            parse_upstream_tracking(&base, refname)
+        );
+        assert_eq!(
+            tracking_line_push_destination(&extended, refname, "feat/y"),
+            (
+                (Some("origin".into()), Some("feat/y".into())),
+                "origin".into()
+            )
+        );
+        // A line for another ref (for-each-ref's prefix match) carries nothing.
+        assert_eq!(
+            tracking_line_push_destination(&extended, "refs/heads/feat", "feat"),
+            ((None, None), String::new())
+        );
     }
 
     // --- Real-repo tests: the predicate pinned against git's own verdict. ---
@@ -845,6 +1079,395 @@ mod tests {
                 "git's verdict, row {tag}"
             );
         }
+    }
+
+    /// Every `refs/heads/*` of a bare remote, name → sha.
+    async fn remote_heads(bare: &str) -> std::collections::BTreeMap<String, String> {
+        git(
+            bare,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+            ],
+        )
+        .await
+        .lines()
+        .filter_map(|l| {
+            let (r, sha) = l.split_once(' ')?;
+            Some((r.strip_prefix("refs/heads/")?.to_string(), sha.to_string()))
+        })
+        .collect()
+    }
+
+    /// Where a bare `git push` from `work` actually landed: every `<remote>:<branch>`
+    /// created or moved on the fixture's two bare remotes. A refused or empty push
+    /// lands nowhere.
+    async fn bare_push_landing(work: &str, dir: &std::path::Path) -> Vec<String> {
+        let remotes = [("origin", "origin.git"), ("second", "second.git")];
+        let mut before = Vec::new();
+        for (_, bare) in remotes {
+            before.push(remote_heads(&dir.join(bare).to_string_lossy()).await);
+        }
+        run_git_raw(Some(work), &["push", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let mut landed = Vec::new();
+        for ((name, bare), before) in remotes.into_iter().zip(before) {
+            for (branch, sha) in remote_heads(&dir.join(bare).to_string_lossy()).await {
+                if before.get(&branch) != Some(&sha) {
+                    landed.push(format!("{name}:{branch}"));
+                }
+            }
+        }
+        landed
+    }
+
+    /// One measured row of [`push_destination_matrix`].
+    #[derive(Debug, PartialEq)]
+    struct PushRow {
+        /// `%(push:remotename)`, `%(push:remoteref)`, `%(push)`, raw.
+        atoms: [String; 3],
+        /// The status read's destination, `remote:branch`.
+        status: Option<String>,
+        /// The branch list's destination for the same branch.
+        listed: Option<String>,
+        landed: Vec<String>,
+    }
+
+    fn joined(remote: &Option<String>, branch: &Option<String>) -> Option<String> {
+        Some(format!("{}:{}", remote.as_deref()?, branch.as_deref()?))
+    }
+
+    /// The row's expectation, as `Err` naming the first field that differs.
+    fn check_row(tag: &str, got: &PushRow, want: &PushRow) -> Result<(), String> {
+        if got == want {
+            Ok(())
+        } else {
+            Err(format!("row {tag}: measured {got:?}, expected {want:?}"))
+        }
+    }
+
+    /// Where a bare push lands, measured per push-config row on a branch (`feat/y`)
+    /// tracking a differently named upstream (`origin/feat/x`), or for the `-same-`
+    /// rows on that branch renamed to `feat/x`: the raw `%(push…)`
+    /// atoms, the destination the status and branch-list reads derive from them, and
+    /// the refs a real `git push` then created or moved. Every axis a row relies on is
+    /// written to the repo-local config; the ones it needs unset are checked unset
+    /// first. The rule under test: a destination the status read claims is exactly
+    /// where the push landed; an unresolved one (None) never names a wrong branch.
+    #[tokio::test]
+    async fn push_destination_matrix() {
+        let (_guard, base) = temp_base("push-dest");
+        let pd = "push.default";
+        let push_remote = "branch.feat/y.pushRemote";
+        let push_remote_x = "branch.feat/x.pushRemote";
+        let remote_pd = "remote.pushDefault";
+        let origin_push = "remote.origin.push";
+        let second_push = "remote.second.push";
+        let all = [
+            pd,
+            push_remote,
+            push_remote_x,
+            remote_pd,
+            origin_push,
+            second_push,
+        ];
+        let s = |v: &str| v.to_string();
+        let o = |v: &str| Some(v.to_string());
+        let atoms = |r: &str, rr: &str, p: &str| [s(r), s(rr), s(p)];
+        // (row tag, config to write, refetch after it, expected row)
+        type Row<'a> = (&'a str, Vec<(&'a str, &'a str)>, bool, PushRow);
+        let remap = (
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/team/*",
+        );
+        let rows: Vec<Row<'_>> = vec![
+            // simple refuses the cross-name push; %(push) cannot resolve a single
+            // destination.
+            (
+                "a-unset",
+                vec![],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", ""),
+                    status: None,
+                    listed: None,
+                    landed: vec![],
+                },
+            ),
+            (
+                "b-simple",
+                vec![(pd, "simple")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", ""),
+                    status: None,
+                    listed: None,
+                    landed: vec![],
+                },
+            ),
+            // current creates the same-named branch.
+            (
+                "c-current",
+                vec![(pd, "current")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
+                    status: o("origin:feat/y"),
+                    listed: o("origin:feat/y"),
+                    landed: vec![s("origin:feat/y")],
+                },
+            ),
+            (
+                "d-upstream",
+                vec![(pd, "upstream")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/x"),
+                    status: o("origin:feat/x"),
+                    listed: o("origin:feat/x"),
+                    landed: vec![s("origin:feat/x")],
+                },
+            ),
+            // matching resolves %(push) like current but only updates branches both
+            // ends have: nothing is created, so the status read claims nothing. The
+            // list (no config read) still names the destination a push would target.
+            (
+                "e-matching",
+                vec![(pd, "matching")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/y"),
+                    status: None,
+                    listed: o("origin:feat/y"),
+                    landed: vec![],
+                },
+            ),
+            (
+                "f-nothing",
+                vec![(pd, "nothing")],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", ""),
+                    status: None,
+                    listed: None,
+                    landed: vec![],
+                },
+            ),
+            // simple off the upstream's remote acts as current, which %(push) does
+            // not resolve; the status read derives it from the push config it lists.
+            (
+                "g-push-remote",
+                vec![(pd, "simple"), (push_remote, "second")],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", ""),
+                    status: o("second:feat/y"),
+                    listed: None,
+                    landed: vec![s("second:feat/y")],
+                },
+            ),
+            (
+                "h-remote-push-default",
+                vec![(pd, "simple"), (remote_pd, "second")],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", ""),
+                    status: o("second:feat/y"),
+                    listed: None,
+                    landed: vec![s("second:feat/y")],
+                },
+            ),
+            (
+                "i-push-refspec",
+                vec![
+                    (pd, "simple"),
+                    (origin_push, "refs/heads/feat/y:refs/heads/pushed/y"),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms(
+                        "origin",
+                        "refs/heads/pushed/y",
+                        "refs/remotes/origin/pushed/y",
+                    ),
+                    status: o("origin:pushed/y"),
+                    listed: o("origin:pushed/y"),
+                    landed: vec![s("origin:pushed/y")],
+                },
+            ),
+            // A single-branch fetch refspec maps no tracking ref for the upstream or
+            // the destination: nothing resolves (the accepted gap), and current still
+            // creates the branch.
+            (
+                "j-narrow-fetch",
+                vec![
+                    (pd, "current"),
+                    (
+                        "remote.origin.fetch",
+                        "+refs/heads/main:refs/remotes/origin/main",
+                    ),
+                ],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", ""),
+                    status: None,
+                    listed: None,
+                    landed: vec![s("origin:feat/y")],
+                },
+            ),
+            // A remapped fetch refspec: `team/feat/y` is the tracking name, never the
+            // branch, so the destination stays unresolved rather than wrong.
+            (
+                "k-remapped-current",
+                vec![(pd, "current"), remap],
+                true,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/team/feat/y"),
+                    status: None,
+                    listed: None,
+                    landed: vec![s("origin:feat/y")],
+                },
+            ),
+            // Remapped, but the destination IS the upstream: read back through it.
+            (
+                "l-remapped-upstream",
+                vec![(pd, "upstream"), remap],
+                true,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/team/feat/x"),
+                    status: o("origin:feat/x"),
+                    listed: o("origin:feat/x"),
+                    landed: vec![s("origin:feat/x")],
+                },
+            ),
+            // upstream mode pushing to a remote other than the upstream's: git
+            // refuses, and the upstream's tracking ref names no destination there.
+            (
+                "m-upstream-triangular",
+                vec![(pd, "upstream"), (push_remote, "second")],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", "refs/remotes/origin/feat/x"),
+                    status: None,
+                    listed: None,
+                    landed: vec![],
+                },
+            ),
+            // Rows on a SAME-name branch (`feat/x` tracking origin/feat/x): the everyday push
+            // lands on its own upstream, which the push flow takes without a read.
+            (
+                "n-same-everyday",
+                vec![],
+                false,
+                PushRow {
+                    atoms: atoms("origin", "", "refs/remotes/origin/feat/x"),
+                    status: o("origin:feat/x"),
+                    listed: o("origin:feat/x"),
+                    landed: vec![s("origin:feat/x")],
+                },
+            ),
+            // The fork workflow: simple to another remote lands the branch there.
+            (
+                "o-same-push-default",
+                vec![(pd, "simple"), (remote_pd, "second")],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", ""),
+                    status: o("second:feat/x"),
+                    listed: None,
+                    landed: vec![s("second:feat/x")],
+                },
+            ),
+            // matching to a remote that lacks the branch creates nothing.
+            (
+                "p-same-push-remote-matching",
+                vec![(pd, "matching"), (push_remote_x, "second")],
+                false,
+                PushRow {
+                    atoms: atoms("second", "", "refs/remotes/second/feat/x"),
+                    status: None,
+                    listed: o("second:feat/x"),
+                    landed: vec![],
+                },
+            ),
+        ];
+        let mut measured = 0;
+        for (tag, config, refetch, want) in rows {
+            let work = renamed_branch_fixture(&base, tag).await;
+            let (local, refname) = if tag.contains("-same-") {
+                ("feat/x", "refs/heads/feat/x")
+            } else {
+                ("feat/y", "refs/heads/feat/y")
+            };
+            if local != "feat/y" {
+                git(&work, &["branch", "-m", "feat/y", local]).await;
+            }
+            let written: Vec<&str> = config.iter().map(|(k, _)| *k).collect();
+            let unset: Vec<&str> = all
+                .iter()
+                .copied()
+                .filter(|k| !written.contains(k))
+                .collect();
+            if !all_unset(&work, &format!("row {tag}"), &unset).await {
+                continue;
+            }
+            for (key, value) in &config {
+                git(&work, &["config", key, value]).await;
+            }
+            if refetch {
+                git(&work, &["fetch", "-q", "origin"]).await;
+            }
+            let raw = git(
+                &work,
+                &[
+                    "for-each-ref",
+                    refname,
+                    "--format=%(push:remotename)%00%(push:remoteref)%00%(push)",
+                ],
+            )
+            .await;
+            let mut fields = raw.trim_end_matches(['\r', '\n']).split('\0').map(s);
+            let atoms = [(); 3].map(|()| fields.next().unwrap_or_default());
+            let head = status_core(&work).await.unwrap().branch;
+            let rows = crate::git::branches::git_branches(work.clone())
+                .await
+                .unwrap();
+            let row = rows.iter().find(|b| b.name == local).unwrap();
+            let got = PushRow {
+                atoms,
+                status: joined(&head.push_remote, &head.push_branch),
+                listed: joined(&row.push_remote, &row.push_branch),
+                landed: bare_push_landing(&work, &base.join(tag)).await,
+            };
+            eprintln!("measured {tag}: {got:?}");
+            // The invariant first: a claimed destination is exactly where it landed.
+            if let Some(dest) = &got.status {
+                assert_eq!(
+                    got.landed.as_slice(),
+                    std::slice::from_ref(dest),
+                    "row {tag}: claimed vs landed"
+                );
+            }
+            // Negative control, on the first fully measured row: the comparison has
+            // to reject a landing it was not shown.
+            if measured == 0 {
+                let wrong = PushRow {
+                    atoms: got.atoms.clone(),
+                    status: got.status.clone(),
+                    listed: got.listed.clone(),
+                    landed: vec![s("origin:never")],
+                };
+                assert!(
+                    check_row(tag, &got, &wrong).is_err(),
+                    "the harness accepted a wrong landing"
+                );
+            }
+            check_row(tag, &got, &want).unwrap();
+            measured += 1;
+        }
+        assert!(measured > 0, "every row skipped on leaked config");
     }
 
     /// A branch tracking the remote's DEFAULT branch under another name (`checkout -b x

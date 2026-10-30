@@ -39,6 +39,85 @@ export function remoteHasBranch(
   return list?.some((r) => r.remote === remote && r.name === branch);
 }
 
+// The create decision is out of reach by design for: narrow or remapped fetch
+// refspecs and a git without the %(push) atoms (no destination git resolves),
+// several pushurls (the first is named; the push goes to all), force pushes
+// (their own confirm), and presence, which is remote-tracking refs as of the
+// last fetch. It claims a create only from facts git itself reports, never a
+// guess, and asks no network read before a push.
+
+/** The bare-push create decision. A resolved destination that the remote is
+ *  not known to have → true (ask); known present → false; an UNRESOLVED
+ *  destination → undefined, and the push goes ahead unasked: only a destination
+ *  git resolved can be claimed as created. Unresolved is a loose null check, so
+ *  an object that omits the fields never reads as resolved. */
+export function pushWouldCreate(dest: {
+  pushRemote?: string | null;
+  pushBranch?: string | null;
+  /** Whether refs/remotes/<pushRemote>/<pushBranch> is known present. */
+  presence: boolean | undefined;
+}): boolean | undefined {
+  if (dest.pushRemote == null || dest.pushBranch == null) return undefined;
+  return dest.presence !== true;
+}
+
+/** A remote URL's repository identity (lowercased host + path, no trailing
+ *  `.git` or `/`; user and port ignored) for http(s)://, ssh:// and scp-like
+ *  `user@host:path`; null for anything else (a local path, file://). git
+ *  expands insteadOf and pushInsteadOf in `get-url`, so one repository commonly
+ *  reads as https for fetch and ssh for push. */
+export function repoIdentity(url: string): string | null {
+  const u = url.trim();
+  const m =
+    u.match(/^(?:https?|ssh):\/\/(?:[^@/]+@)?([^/:]+)(?::\d*)?\/(.+)$/i) ??
+    u.match(/^[^@/\\]+@([^:/\\]+):(.+)$/);
+  if (!m) return null;
+  const path = m[2]
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/, "");
+  return path === "" ? null : `${m[1].toLowerCase()}/${path}`;
+}
+
+/** Whether two URLs name the same repository: by identity when both parse,
+ *  else (a local path, file://) by exact text. */
+export function sameRepository(a: string, b: string): boolean {
+  const ia = repoIdentity(a);
+  const ib = repoIdentity(b);
+  return ia !== null && ib !== null ? ia === ib : a === b;
+}
+
+/** The remote-tracking list mirrors a remote's FETCH side, so when its push URL
+ *  names another repository the list says nothing about the push destination:
+ *  presence becomes unknown, as it does when only one of the two could be read.
+ *  Both URLs are the push remote's own (`get-url` and `--push`). */
+export function presenceUnderUrls(
+  presence: boolean | undefined,
+  fetchUrl: string | null,
+  pushUrl: string | null,
+): boolean | undefined {
+  if (fetchUrl === null && pushUrl === null) return presence;
+  if (fetchUrl === null || pushUrl === null) return undefined;
+  return sameRepository(fetchUrl, pushUrl) ? presence : undefined;
+}
+
+/** Whether the visibility recorded for origin describes this push: the probe
+ *  that records it reads origin's fetch URL, so only an origin push to that
+ *  same repository may show it. */
+export function visibilityApplies(
+  remote: string,
+  fetchUrl: string | null,
+  pushUrl: string | null,
+): boolean {
+  return (
+    remote === "origin" &&
+    fetchUrl !== null &&
+    pushUrl !== null &&
+    sameRepository(fetchUrl, pushUrl)
+  );
+}
+
 export interface UpdateSource {
   base: string;
   label: string;
@@ -162,6 +241,9 @@ export function publishConfirmBody(o: {
   /** The gone upstream's branch name on that remote (its merge ref without
    *  `refs/heads/`); null when unknown or not a branch. */
   upstreamBranch: string | null;
+  /** The name the push creates on the remote when it differs from `branch` (a
+   *  bare push to a configured destination); absent = the same name. */
+  createdBranch?: string;
 }): CopySegment[] {
   const dest = destinationPhrase(o.remote, o.slug, o.visibility);
   const branch: CopySegment = { text: o.branch, mono: true };
@@ -180,7 +262,7 @@ export function publishConfirmBody(o: {
     ];
   return [
     { text: "Creates " },
-    branch,
+    { text: o.createdBranch ?? o.branch, mono: true },
     { text: " on " },
     ...dest,
     { text: `.${EXPOSURE}` },

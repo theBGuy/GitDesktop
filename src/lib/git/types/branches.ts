@@ -26,6 +26,14 @@ export interface BranchHead {
   /** Whether `upstreamBranch` is its remote's default branch; probed only while
    *  `pushNameMismatch`, null = unknown. */
   upstreamIsRemoteDefault: boolean | null;
+  /** The remote a BARE push lands on: `%(push…)` read with the push config
+   *  where that changes the answer (matching, triangular `simple`), so a git
+   *  without the atoms may still carry a config-derived destination. null when
+   *  unresolvable or there is no upstream. Set together with `pushBranch`. */
+  pushRemote: string | null;
+  /** The branch a bare push would create or update on `pushRemote`; null when
+   *  unresolvable. */
+  pushBranch: string | null;
 }
 
 export interface Branch {
@@ -54,6 +62,14 @@ export interface Branch {
    *  `refs/heads/main`); null when untracked. Cross-name decisions read this,
    *  never the short `upstream` string (remote names may contain `/`). */
   upstreamRemoteRef: string | null;
+  /** `%(push)`'s resolution for this branch, read without the push config:
+   *  where git maps a bare push, not a guarantee it lands there (matching and
+   *  triangular `simple` differ; the status read is authoritative). null when
+   *  unresolvable. Row pushes name their remote and refspec outright, so no row
+   *  action reads it. Set together with `pushBranch`. */
+  pushRemote: string | null;
+  /** The branch on `pushRemote` that resolution names. */
+  pushBranch: string | null;
 }
 
 /** A branch that exists on a remote but not locally — offered in the switcher so

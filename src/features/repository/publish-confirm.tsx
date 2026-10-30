@@ -23,26 +23,31 @@ export function askPublishConfirm(
     /** The CAPTURED branch name the push will send. */
     branch: string;
     remote: string;
-    /** The destination remote's URL; null = unknown. */
-    url: string | null;
-    /** `RecentRepo.visibility`, passed only for origin; absent never means public. */
+    /** The destination remote's PUSH URL (`get-url --push`), where the branch
+     *  is created; null = unknown. */
+    pushUrl: string | null;
+    /** `RecentRepo.visibility`, passed only when it was verified for that push
+     *  URL (`visibilityApplies`); absent never means public. */
     visibility: string | null;
     goneUpstream: boolean;
     /** The gone upstream's remote; null when there is none. */
     upstreamRemote: string | null;
     /** The gone upstream's branch name on that remote; null when unknown. */
     upstreamBranch: string | null;
+    /** The name created on the remote when it differs from `branch`. */
+    createdBranch?: string;
   },
   slot: PublishAskSlot,
 ): Promise<boolean> {
   const segments = publishConfirmBody({
     branch: opts.branch,
     remote: opts.remote,
-    slug: destinationSlug(opts.url, slugFromRemoteUrl),
+    slug: destinationSlug(opts.pushUrl, slugFromRemoteUrl),
     visibility: opts.visibility,
     goneUpstream: opts.goneUpstream,
     upstreamRemote: opts.upstreamRemote,
     upstreamBranch: opts.upstreamBranch,
+    createdBranch: opts.createdBranch,
   });
   const answer = useConfirm.getState().ask({
     title: publishConfirmTitle(opts.branch),

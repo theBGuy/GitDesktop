@@ -7,6 +7,11 @@ export const gitRemotes = (repoPath: string) =>
 export const gitRemoteUrl = (repoPath: string, name: string) =>
   invoke<string>("git_remote_url", { repoPath, name });
 
+/** Where a push to `name` goes (`git remote get-url --push`): its pushurl when
+ *  set, else its fetch URL. */
+export const gitRemotePushUrl = (repoPath: string, name: string) =>
+  invoke<string>("git_remote_push_url", { repoPath, name });
+
 export const gitRemoteSetUrl = (repoPath: string, name: string, url: string) =>
   invoke<void>("git_remote_set_url", { repoPath, name, url });
 
