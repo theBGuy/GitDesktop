@@ -126,6 +126,8 @@ export function headFacts(head: SyncHead | undefined): {
   detached: boolean;
 } {
   return {
+    // The negation of branch-sync-state.ts's `willPublish` for a push without an
+    // explicit retrack (`setUpstream`); keep the two in step.
     hasUpstream: Boolean(head?.upstream) && !head?.upstreamGone,
     diverged: Boolean(head && head.ahead > 0 && head.behind > 0),
     detached: Boolean(head?.detached),

@@ -6049,6 +6049,195 @@ mod tests {
         );
     }
 
+    // --- "Update from <default>" sends the default's `%(upstream:short)` as `base`
+    // when the local default is behind it, so a remote-tracking base reaches every arm.
+
+    /// Mints `refs/remotes/origin/<main>` one commit AHEAD of local `main` (a new
+    /// `remote.txt`), as a fetch would, leaving `main` where it is. Returns its sha.
+    async fn mint_origin_ahead(repo: &std::path::Path, repo_s: &str, main: &str) -> String {
+        run(repo_s, &["switch", "-qc", "remote-tip", main]).await;
+        std::fs::write(repo.join("remote.txt"), "remote\n").unwrap();
+        run(repo_s, &["add", "-A"]).await;
+        run(repo_s, &["commit", "-qm", "remote work"]).await;
+        let sha = run(repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+        run(
+            repo_s,
+            &["update-ref", &format!("refs/remotes/origin/{main}"), &sha],
+        )
+        .await;
+        run(repo_s, &["switch", "-q", main]).await;
+        run(repo_s, &["branch", "-qD", "remote-tip"]).await;
+        sha
+    }
+
+    /// The fast-forward arm (`fetch .`) of a branch that is NOT checked out takes a
+    /// remote-tracking base, and the local default stays where it was.
+    #[tokio::test]
+    async fn update_branch_from_accepts_a_remote_tracking_base() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-remote-ff").await;
+        run(&repo_s, &["branch", "behind", "HEAD~1"]).await;
+        let main_tip = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let remote = mint_origin_ahead(&repo, &repo_s, &main).await;
+
+        let state = AppState::default();
+        let base = format!("origin/{main}");
+        let outcome = update_branch_from(&state, &repo_s, "behind", &base, &HashSet::new(), None)
+            .await
+            .expect("the update succeeds");
+        assert_eq!(outcome.outcome, "fast-forward");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/behind"])
+                .await
+                .trim(),
+            remote,
+            "the branch lands on the remote-tracking tip"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", &main]).await.trim(),
+            main_tip,
+            "the local default is never moved"
+        );
+    }
+
+    /// The in-place arm merges the remote-tracking tip into the checked-out branch.
+    #[tokio::test]
+    async fn update_branch_from_remote_tracking_base_merges_in_place() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-remote-in-place").await;
+        let remote = mint_origin_ahead(&repo, &repo_s, &main).await;
+        run(&repo_s, &["switch", "-q", "feature"]).await;
+
+        let state = AppState::default();
+        let base = format!("origin/{main}");
+        let outcome = update_branch_from(&state, &repo_s, "feature", &base, &HashSet::new(), None)
+            .await
+            .expect("the in-place merge succeeds");
+        assert_eq!(outcome.outcome, "merge");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature^2"])
+                .await
+                .trim(),
+            remote,
+            "the merge's second parent is the remote-tracking tip"
+        );
+        assert!(repo.join("remote.txt").exists(), "its work is merged in");
+    }
+
+    /// The up-to-date probe reads the remote-tracking ref: a branch that contains it
+    /// is up to date even though it lacks the local default's newer commit.
+    #[tokio::test]
+    async fn update_branch_from_up_to_date_against_remote_tracking_base() {
+        let (_guard, _repo, repo_s, main) = diverged_repo("update-remote-uptodate").await;
+        let seed = run(&repo_s, &["rev-parse", "HEAD~1"])
+            .await
+            .trim()
+            .to_string();
+        run(
+            &repo_s,
+            &["update-ref", &format!("refs/remotes/origin/{main}"), &seed],
+        )
+        .await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        let base = format!("origin/{main}");
+        let outcome = update_branch_from(&state, &repo_s, "feature", &base, &HashSet::new(), None)
+            .await
+            .expect("the update succeeds");
+        assert_eq!(outcome.outcome, "up-to-date");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"])
+                .await
+                .trim(),
+            feature_tip
+        );
+    }
+
+    /// A LOCAL branch literally named `origin/<main>` would capture the short form, so
+    /// git reports the upstream disambiguated (`remotes/origin/<main>`) and the UI
+    /// sends that string verbatim. Exercises the fast-forward arm of a branch that is
+    /// not checked out: the branch lands on the remote-tracking tip, never on the
+    /// local look-alike's (which it could fast-forward to as well).
+    #[tokio::test]
+    async fn update_branch_from_base_is_not_captured_by_a_local_branch() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-remote-shadowed").await;
+        let remote = mint_origin_ahead(&repo, &repo_s, &main).await;
+        // Never contacted: the remote exists only so the upstream resolves.
+        let nowhere = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("origin.git");
+        run(
+            &repo_s,
+            &["remote", "add", "origin", &nowhere.to_string_lossy()],
+        )
+        .await;
+        run(&repo_s, &["branch", "tracker", "HEAD~1"]).await;
+        run(
+            &repo_s,
+            &[
+                "branch",
+                "-q",
+                &format!("--set-upstream-to=origin/{main}"),
+                "tracker",
+            ],
+        )
+        .await;
+        async fn upstream_short(repo_s: &str) -> String {
+            run(
+                repo_s,
+                &[
+                    "for-each-ref",
+                    "--format=%(upstream:short)",
+                    "refs/heads/tracker",
+                ],
+            )
+            .await
+            .trim()
+            .to_string()
+        }
+        assert_eq!(upstream_short(&repo_s).await, format!("origin/{main}"));
+        run(
+            &repo_s,
+            &["branch", &format!("origin/{main}"), "refs/heads/feature"],
+        )
+        .await;
+        let lookalike = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        // The premise: the short form git reports once the local branch exists.
+        let base = upstream_short(&repo_s).await;
+        assert_eq!(base, format!("remotes/origin/{main}"));
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, "tracker", &base, &HashSet::new(), None)
+            .await
+            .expect("the update succeeds");
+        assert_eq!(outcome.outcome, "fast-forward");
+        let tip = run(&repo_s, &["rev-parse", "refs/heads/tracker"])
+            .await
+            .trim()
+            .to_string();
+        assert_eq!(tip, remote, "the remote-tracking tip is what lands");
+        assert_ne!(tip, lookalike, "never the local look-alike's tip");
+        assert_eq!(
+            run(
+                &repo_s,
+                &["rev-parse", &format!("refs/heads/origin/{main}")]
+            )
+            .await
+            .trim(),
+            lookalike,
+            "the look-alike branch is never moved"
+        );
+    }
+
     /// [`diverged_repo`]'s conflicting twin: both branches rewrite the SAME line of the
     /// seed file, so their merge stops with unmerged entries instead of succeeding.
     async fn conflicting_repo(tag: &str) -> (tempfile::TempDir, std::path::PathBuf, String, String) {
