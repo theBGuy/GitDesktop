@@ -791,13 +791,21 @@ pub(crate) fn merged_shell_path() -> Option<String> {
 /// before a capture lands or when no entry has it.
 #[cfg(unix)]
 pub(crate) fn find_on_shell_path(name: &str) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
     let path = merged_shell_path()?;
-    first_on_path(&path, name, |candidate| {
-        std::fs::metadata(candidate)
-            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-    })
-    .map(PathBuf::from)
+    first_on_path(&path, name, executable_by_us).map(PathBuf::from)
+}
+
+/// Whether `path` is a regular file (symlinks followed) this process may execute.
+/// `access` checks the REAL ids, which match the effective ones in a GUI app; a mode
+/// bit test would accept a file only its owner or group can run.
+#[cfg(unix)]
+fn executable_by_us(path: &str) -> bool {
+    let Ok(c_path) = std::ffi::CString::new(path) else {
+        return false;
+    };
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call.
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+        && unsafe { libc::access(c_path.as_ptr(), libc::X_OK) } == 0
 }
 
 /// No merged PATH off unix; the stub keeps call sites cfg-free.
@@ -4176,6 +4184,35 @@ mod child_env_tests {
             Some("/opt/bin/lefthook")
         );
         assert_eq!(first_on_path("/usr/bin:/bin", "lefthook", is_exe), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_path_lookup_passes_over_a_copy_we_cannot_execute() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root passes access(X_OK) whenever any execute bit is set, so the
+        // owner-cannot-run fixture proves nothing there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("gd-login-path-exec-{}", std::process::id()));
+        let (first, second) = (root.join("a"), root.join("b"));
+        for (dir, mode) in [(&first, 0o011), (&second, 0o755)] {
+            std::fs::create_dir_all(dir).unwrap();
+            let tool = dir.join("gd-tool");
+            std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let path = format!("{}:{}", first.display(), second.display());
+        let found = first_on_path(&path, "gd-tool", executable_by_us);
+        // Negative control: an any-execute-bit test would have taken the first copy.
+        let by_mode_bits = first_on_path(&path, "gd-tool", |c| {
+            std::fs::metadata(c).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        });
+        let _ = std::fs::remove_dir_all(&root);
+        let expected = |dir: &PathBuf| format!("{}/gd-tool", dir.display());
+        assert_eq!(found, Some(expected(&second)));
+        assert_eq!(by_mode_bits, Some(expected(&first)));
     }
 }
 
