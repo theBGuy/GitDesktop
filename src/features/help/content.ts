@@ -789,9 +789,13 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   (see *Stash and reapply*).
 - {{Secondaryclick}} a branch to **merge**, **squash and merge**, **rebase**, or **update it
   from the default branch** ({{kbd:update-from-default}}) — the last *without* checking it
-  out. On a branch listed under **Promotion branches** in *Branch rules*, that update offer
-  is withheld, since a promotion branch takes its changes through promotions; the reason
-  rides the menu item's label, and its own **Update from _origin/…_** is unaffected.
+  out. The update brings in the newest base: when your local default branch is behind its
+  own upstream (**_origin/…_** in the common case), it merges that upstream tip instead,
+  and the menu item and the toast name the tip that was merged. When the local default has
+  commits its upstream lacks, the item says how many, and a second item offers the
+  upstream. On a branch listed under **Promotion branches** in *Branch rules*, that update
+  offer is withheld, since a promotion branch takes its changes through promotions; the
+  reason rides the menu item's label, and its own **Update from _origin/…_** is unaffected.
 - **Change base…** — from the switcher's menu or the command palette — rebases the current
   branch onto a *different* branch, for the "I branched off the wrong one" case: pick the
   branch you meant to base on and the branch you actually did, and only your branch's own
@@ -837,7 +841,11 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   upstream-deleted branch offers **Publish**; on a repo with several remotes you pick the
   destination (one **Publish to _…_** item per remote). Neither checks the branch out or
   touches your working tree, so it works even for a branch checked out in another worktree.
-  The list stays open while the push runs, so you can keep switching and browsing, and the
+  A publish that would create the branch on the remote asks first, from these items and
+  from {{kbd:push-to-origin}} alike: a prompt names the branch and its destination, with
+  **Cancel** focused, and the list closes for it if it was open. A branch the remote
+  already has (as of the last fetch) just pushes and starts tracking it. Otherwise the
+  list stays open while the push runs, so you can keep switching and browsing, and the
   branch's row shows a spinner naming where the push is going. A push from the sync bar
   may not name one, since git's own push settings decide where it lands.
   {{kbd:push-to-origin}} is the keyboard shortcut for pushing to **origin** specifically:
@@ -1022,13 +1030,17 @@ right on the **Push** and **Pull** buttons.
 - **Pull** ({{kbd:pull}}) is fast-forward only by design — it won't create surprise merge
   commits; the menu's caret offers rebase and merge for reconciling a diverged branch.
 - **Push** ({{kbd:push}}) sends your commits. For a branch with no upstream yet, you'll
-  see **Publish branch** instead. When the branch tracks a remote branch with a different
-  name (after renaming a pushed branch, say) and Git would refuse a plain push, **Push**
-  opens a small menu: push to the branch it tracks, or publish under its own name and
-  track that. When Git knows the tracked branch is the remote's default branch, only the
-  publish item appears. While the names differ there's no force push: a diverged branch
-  is reconciled from the **Pull** menu first. Setups that route pushes elsewhere keep a
-  plain **Push**.
+  see **Publish branch** instead. A push that would create the branch on the remote asks
+  first, naming the branch and where it's going: **Cancel** has the focus, so
+  {{key:enter}} backs out, and **Publish** sends it. A branch the remote already has (as
+  of the last fetch) just pushes, without asking. When the branch tracks a remote branch
+  with a different name (after renaming a pushed branch, say) and Git would refuse a
+  plain push, **Push** opens a small menu: push to the branch it tracks, or publish under
+  its own name and track that, which asks the same question when it would create the
+  branch there. When Git knows the tracked branch is the remote's default branch, only
+  the publish item appears. While the names differ there's no force push: a diverged
+  branch is reconciled from the **Pull** menu first. Setups that route pushes elsewhere
+  keep a plain **Push**.
 
 ## Publish a local repo
 

@@ -230,12 +230,15 @@ async fn repair_lost_upstream(repo_path: &str, remote: &str, branch: &str, out: 
 /// out-of-band `git remote set-url` promptly; in-app changes invalidate eagerly.
 const REMOTE_URL_TTL: Duration = Duration::from_secs(5);
 
-/// Cache map keyed by `(repo_path, remote_name)`; value is `(fetch time, resolved url)`.
-type RemoteUrlCache = Mutex<HashMap<(String, String), (Instant, String)>>;
+/// Cache map keyed by `(repo_path, remote_name, push)` — `push` picks the
+/// `get-url --push` variant, so the two never answer for each other; value is
+/// `(fetch time, resolved url)`.
+type RemoteUrlCache = Mutex<HashMap<(String, String, bool), (Instant, String)>>;
 
-/// Per-`(repo_path, remote_name)` cache of the last resolved remote URL and when it was
-/// fetched. Bounded by (#repos × #remote names) — tiny, so a stale entry is simply
-/// overwritten on the next fetch rather than evicted. Only successful lookups are cached.
+/// Per-`(repo_path, remote_name, push)` cache of the last resolved remote URL and when it
+/// was fetched. Bounded by (#repos × #remote names × 2, the fetch and push variants) —
+/// tiny, so a stale entry is simply overwritten on the next fetch rather than evicted.
+/// Only successful lookups are cached.
 /// A poisoned lock is recovered rather than propagated: every entry is TTL-bounded, so
 /// a value a panicking holder left behind ages out on its own.
 static REMOTE_URL_CACHE: OnceLock<RemoteUrlCache> = OnceLock::new();
@@ -244,12 +247,12 @@ fn remote_url_cache() -> &'static RemoteUrlCache {
     REMOTE_URL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Return the cached URL for `(repo, name)` only if an entry exists AND it was fetched less
-/// than `ttl` ago. Pure over the module-level cache; the lock is held only long enough to
-/// clone the value out.
-fn cache_get(repo: &str, name: &str, ttl: Duration) -> Option<String> {
+/// Return the cached URL for `(repo, name, push)` only if an entry exists AND it was
+/// fetched less than `ttl` ago. Pure over the module-level cache; the lock is held only
+/// long enough to clone the value out.
+fn cache_get(repo: &str, name: &str, push: bool, ttl: Duration) -> Option<String> {
     let guard = remote_url_cache().lock().unwrap_or_else(|p| p.into_inner());
-    let (fetched_at, url) = guard.get(&(repo.to_string(), name.to_string()))?;
+    let (fetched_at, url) = guard.get(&(repo.to_string(), name.to_string(), push))?;
     if fetched_at.elapsed() < ttl {
         Some(url.clone())
     } else {
@@ -257,23 +260,26 @@ fn cache_get(repo: &str, name: &str, ttl: Duration) -> Option<String> {
     }
 }
 
-/// Record `url` as the current value for `(repo, name)`, stamped with the fetch time.
-fn cache_put(repo: &str, name: &str, url: &str) {
+/// Record `url` as the current value for `(repo, name, push)`, stamped with the fetch
+/// time.
+fn cache_put(repo: &str, name: &str, push: bool, url: &str) {
     remote_url_cache()
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .insert(
-            (repo.to_string(), name.to_string()),
+            (repo.to_string(), name.to_string(), push),
             (Instant::now(), url.to_string()),
         );
 }
 
-/// Drop any cached entry for `(repo, name)` so the next read re-resolves immediately.
+/// Drop both cached variants for `(repo, name)` so the next read re-resolves immediately:
+/// `set-url` moves what `--push` resolves too (git falls back to the fetch URL when no
+/// pushurl is set), so every URL write invalidates the pair.
 fn cache_invalidate(repo: &str, name: &str) {
-    remote_url_cache()
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(&(repo.to_string(), name.to_string()));
+    let mut guard = remote_url_cache().lock().unwrap_or_else(|p| p.into_inner());
+    for push in [false, true] {
+        guard.remove(&(repo.to_string(), name.to_string(), push));
+    }
 }
 
 /// Invalidate the cached URL for `(repo, name)` from another module. Call this after any
@@ -287,18 +293,32 @@ pub(crate) fn invalidate_remote_url_cache(repo: &str, name: &str) {
 
 #[tauri::command]
 pub async fn git_remote_url(repo_path: String, name: String) -> AppResult<String> {
-    validate_remote_arg(&name, "remote name")?;
-    if let Some(url) = cache_get(&repo_path, &name, REMOTE_URL_TTL) {
+    remote_url(&repo_path, &name, false).await
+}
+
+/// Where a push to `name` goes (`git remote get-url --push`): the remote's pushurl when
+/// one is set, else its fetch URL. A sibling of [`git_remote_url`], whose signature its
+/// many in-crate callers pin.
+#[tauri::command]
+pub async fn git_remote_push_url(repo_path: String, name: String) -> AppResult<String> {
+    remote_url(&repo_path, &name, true).await
+}
+
+/// The shared core of the two URL commands; `push` selects `get-url --push` and its own
+/// cache entry.
+async fn remote_url(repo_path: &str, name: &str, push: bool) -> AppResult<String> {
+    validate_remote_arg(name, "remote name")?;
+    if let Some(url) = cache_get(repo_path, name, push, REMOTE_URL_TTL) {
         return Ok(url);
     }
-    let out = run_git(
-        Some(&repo_path),
-        &["remote", "get-url", &name],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    let argv: &[&str] = if push {
+        &["remote", "get-url", "--push", name]
+    } else {
+        &["remote", "get-url", name]
+    };
+    let out = run_git(Some(repo_path), argv, DEFAULT_TIMEOUT).await?;
     let url = out.stdout_lossy().trim().to_string();
-    cache_put(&repo_path, &name, &url);
+    cache_put(repo_path, name, push, &url);
     Ok(url)
 }
 
@@ -1561,57 +1581,114 @@ mod tests {
 
     #[test]
     fn put_then_get_within_ttl_hits() {
-        cache_put("/repo/a", "origin", "git@example.com:a.git");
+        cache_put("/repo/a", "origin", false, "git@example.com:a.git");
         assert_eq!(
-            cache_get("/repo/a", "origin", BIG),
+            cache_get("/repo/a", "origin", false, BIG),
             Some("git@example.com:a.git".to_string())
         );
     }
 
     #[test]
     fn zero_ttl_is_always_expired() {
-        cache_put("/repo/b", "origin", "https://example.com/b.git");
+        cache_put("/repo/b", "origin", false, "https://example.com/b.git");
         // Zero TTL: any elapsed time (however small) is >= the TTL, so the entry reads as expired.
-        assert_eq!(cache_get("/repo/b", "origin", Duration::ZERO), None);
+        assert_eq!(cache_get("/repo/b", "origin", false, Duration::ZERO), None);
     }
 
     #[test]
     fn invalidate_drops_the_entry() {
-        cache_put("/repo/c", "origin", "https://example.com/c.git");
-        assert!(cache_get("/repo/c", "origin", BIG).is_some());
+        cache_put("/repo/c", "origin", false, "https://example.com/c.git");
+        assert!(cache_get("/repo/c", "origin", false, BIG).is_some());
         cache_invalidate("/repo/c", "origin");
-        assert_eq!(cache_get("/repo/c", "origin", BIG), None);
+        assert_eq!(cache_get("/repo/c", "origin", false, BIG), None);
     }
 
     #[test]
     fn distinct_keys_do_not_collide() {
-        cache_put("/repo/d", "origin", "url-origin");
-        cache_put("/repo/d", "upstream", "url-upstream");
-        cache_put("/repo/e", "origin", "url-e-origin");
+        cache_put("/repo/d", "origin", false, "url-origin");
+        cache_put("/repo/d", "upstream", false, "url-upstream");
+        cache_put("/repo/e", "origin", false, "url-e-origin");
         assert_eq!(
-            cache_get("/repo/d", "origin", BIG),
+            cache_get("/repo/d", "origin", false, BIG),
             Some("url-origin".to_string())
         );
         assert_eq!(
-            cache_get("/repo/d", "upstream", BIG),
+            cache_get("/repo/d", "upstream", false, BIG),
             Some("url-upstream".to_string())
         );
         assert_eq!(
-            cache_get("/repo/e", "origin", BIG),
+            cache_get("/repo/e", "origin", false, BIG),
             Some("url-e-origin".to_string())
         );
         // Invalidating one key leaves the others intact.
         cache_invalidate("/repo/d", "origin");
-        assert_eq!(cache_get("/repo/d", "origin", BIG), None);
+        assert_eq!(cache_get("/repo/d", "origin", false, BIG), None);
         assert_eq!(
-            cache_get("/repo/d", "upstream", BIG),
+            cache_get("/repo/d", "upstream", false, BIG),
             Some("url-upstream".to_string())
         );
     }
 
+    /// The fetch and push variants of one remote are separate entries, and an
+    /// invalidation drops both.
+    #[test]
+    fn push_and_fetch_urls_cache_apart_and_invalidate_together() {
+        cache_put("/repo/f", "origin", false, "https://fetch.example/f.git");
+        cache_put("/repo/f", "origin", true, "https://push.example/f.git");
+        assert_eq!(
+            cache_get("/repo/f", "origin", false, BIG),
+            Some("https://fetch.example/f.git".to_string())
+        );
+        assert_eq!(
+            cache_get("/repo/f", "origin", true, BIG),
+            Some("https://push.example/f.git".to_string())
+        );
+        cache_invalidate("/repo/f", "origin");
+        assert_eq!(cache_get("/repo/f", "origin", false, BIG), None);
+        assert_eq!(cache_get("/repo/f", "origin", true, BIG), None);
+    }
+
+    /// `--push` reads a separate pushurl, and falls back to the fetch URL without one.
+    #[tokio::test]
+    async fn the_push_url_command_reads_the_pushurl_or_falls_back() {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-remote-pushurl-")
+            .tempdir()
+            .unwrap();
+        let repo = dir.path().to_string_lossy().into_owned();
+        run_git(Some(&repo), &["init", "-q"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let add = ["remote", "add", "origin", "https://fetch.example/o/r.git"];
+        run_git(Some(&repo), &add, DEFAULT_TIMEOUT).await.unwrap();
+        let url = |push: bool| {
+            let (repo, name) = (repo.clone(), "origin".to_string());
+            async move {
+                if push {
+                    super::git_remote_push_url(repo, name).await.unwrap()
+                } else {
+                    super::git_remote_url(repo, name).await.unwrap()
+                }
+            }
+        };
+        assert_eq!(url(true).await, "https://fetch.example/o/r.git");
+        let set = [
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            "https://push.example/me/r.git",
+        ];
+        run_git(Some(&repo), &set, DEFAULT_TIMEOUT).await.unwrap();
+        // An out-of-band write: the in-app writers evict, this one waits out the TTL.
+        cache_invalidate(&repo, "origin");
+        assert_eq!(url(true).await, "https://push.example/me/r.git");
+        assert_eq!(url(false).await, "https://fetch.example/o/r.git");
+    }
+
     #[test]
     fn miss_returns_none() {
-        assert_eq!(cache_get("/repo/never-written", "origin", BIG), None);
+        assert_eq!(cache_get("/repo/never-written", "origin", false, BIG), None);
     }
 
     // --- Auth-class classifier for the ambient-credential fallback. ---
@@ -3433,7 +3510,9 @@ mod tests {
             }
         };
         let state = AppState::default();
-        cache_put(&work_s, "origin", "https://stale.example/old.git");
+        for push in [false, true] {
+            cache_put(&work_s, "origin", push, "https://stale.example/old.git");
+        }
         let err = CONFIG_WRITE_ATTEMPT_HOOK
             .scope(
                 Arc::new(hook),
@@ -3442,8 +3521,8 @@ mod tests {
             .await
             .expect_err("the push-default leg is lost");
         assert_eq!(
-            cache_get(&work_s, "origin", BIG),
-            None,
+            [false, true].map(|push| cache_get(&work_s, "origin", push, BIG)),
+            [None, None],
             "the removed remote's URL is not served"
         );
         std::fs::remove_file(&lock).unwrap();
@@ -3562,7 +3641,9 @@ mod tests {
         }
         assert_eq!(run(&work_s, &["remote"]).await, "", "nothing added");
 
-        cache_put(&work_s, "origin", "https://stale.example/old.git");
+        for push in [false, true] {
+            cache_put(&work_s, "origin", push, "https://stale.example/old.git");
+        }
         git_remote_add_core(
             &state,
             work_s.clone(),
@@ -3572,8 +3653,8 @@ mod tests {
         .await
         .expect("the add lands");
         assert_eq!(
-            cache_get(&work_s, "origin", BIG),
-            None,
+            [false, true].map(|push| cache_get(&work_s, "origin", push, BIG)),
+            [None, None],
             "the stale entry is gone"
         );
         assert_eq!(

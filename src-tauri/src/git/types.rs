@@ -68,6 +68,17 @@ pub struct BranchHead {
     /// Whether `upstream_branch` is the upstream remote's default branch (its
     /// `refs/remotes/<R>/HEAD`). Only probed while `push_name_mismatch`; None = unknown.
     pub upstream_is_remote_default: Option<bool>,
+    /// The remote a BARE push of this branch lands on: `%(push…)` read with the push
+    /// config where that changes the answer (matching, triangular `simple`), so a
+    /// git without the atoms may still carry a config-derived destination. None when
+    /// unresolvable (a push remote with its own push refspecs or `remote.<r>.mirror`
+    /// set among them: git's bare push runs as configured) or there is no upstream (the
+    /// read only runs beside one). A destination that is the branch's own same-named
+    /// live upstream reads no config, so it stays Some even on a mirror remote.
+    pub push_remote: Option<String>,
+    /// The branch a bare push creates or updates on `push_remote`. Both Some or both
+    /// None.
+    pub push_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -221,6 +221,124 @@ pub async fn git_branches(repo_path: String) -> AppResult<Vec<Branch>> {
     Ok(branches)
 }
 
+/// The for-each-ref atoms [`push_destination_fields`] reads, appended NUL-separated
+/// after a read's own fields: the push remote, its explicit destination ref (filled only
+/// under a `remote.<r>.push` refspec), the destination's remote-tracking ref, and the
+/// upstream's tracking ref it is compared with.
+const PUSH_DESTINATION_ATOMS: &str =
+    "%(push:remotename)%00%(push:remoteref)%00%(push)%00%(upstream)";
+
+/// Runs `for-each-ref <pattern>` with `base_format` extended by
+/// [`PUSH_DESTINATION_ATOMS`]. A git that rejects one of them fails the whole command,
+/// so that failure re-runs `base_format` once and the lines carry no atoms: the
+/// destination reads as unknown, never a broken read (the status read may still derive
+/// one from the push config).
+pub(crate) async fn read_refs_with_push_destination(
+    repo_path: &str,
+    pattern: &str,
+    base_format: &str,
+) -> AppResult<String> {
+    let extended = format!("{base_format}%00{PUSH_DESTINATION_ATOMS}");
+    read_refs_with_fallback(repo_path, pattern, &extended, base_format).await
+}
+
+async fn read_refs_with_fallback(
+    repo_path: &str,
+    pattern: &str,
+    extended: &str,
+    base_format: &str,
+) -> AppResult<String> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["for-each-ref", pattern, extended],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    if out.code == 0 {
+        return Ok(out.stdout_lossy());
+    }
+    // Any other failure surfaces exactly as `run_git` would have reported it.
+    if !is_unknown_format_atom(&out.stderr) {
+        out.exit_verdict()?;
+    }
+    let out = run_git(
+        Some(repo_path),
+        &["for-each-ref", pattern, base_format],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(out.stdout_lossy())
+}
+
+/// Whether for-each-ref refused a format atom: git's ref-filter says `unknown field
+/// name: <atom>` for an atom it lacks and `unrecognized %(push) argument: <arg>` for a
+/// known atom's unknown argument. The runner pins `LC_ALL=C`, so neither localizes.
+fn is_unknown_format_atom(stderr: &str) -> bool {
+    stderr.contains("unknown field name") || stderr.contains("unrecognized %(push) argument")
+}
+
+/// `(push_remote, push_branch)` from a line's [`PUSH_DESTINATION_ATOMS`] fields (empty
+/// when the read fell back without them), via [`push_destination`].
+pub(crate) fn push_destination_fields(
+    local: &str,
+    atoms: &[&str],
+    upstream_remote: &str,
+    upstream_remoteref: &str,
+) -> (Option<String>, Option<String>) {
+    let [push_remote, push_remoteref, push_track, upstream_track] = match atoms {
+        [a, b, c, d, ..] => [*a, *b, *c, *d],
+        _ => return (None, None),
+    };
+    push_destination(
+        local,
+        push_remote,
+        push_remoteref,
+        push_track,
+        upstream_track,
+        upstream_remote,
+        upstream_remoteref,
+    )
+}
+
+/// Where a BARE push of `local` lands, as `(remote, branch on it)`: both Some or both
+/// None. A push remote with its own push refspecs is unresolved: git's bare push sends
+/// every configured refspec, which no single destination describes, and
+/// `%(push:remoteref)` fills only then (one that doesn't map the branch leaves `%(push)`
+/// empty). Otherwise `%(push)` is the destination's LOCAL remote-tracking ref, which
+/// depends on the fetch refspec's mapping, so it is only read back when it is the
+/// upstream's own tracking ref on the same remote (the upstream's branch) or the
+/// standard `refs/remotes/<remote>/<local>` (the same name). Any other shape (a
+/// remapped fetch refspec, `team/…`) is unresolved: a wrong branch name is never an
+/// answer. A mirror push remote (`remote.<r>.mirror`) resolves here like any other; the
+/// atoms can't tell it apart, so the status read clears it from the push config, except
+/// for the branch's own same-named live upstream, where it reads no config.
+fn push_destination(
+    local: &str,
+    push_remote: &str,
+    push_remoteref: &str,
+    push_track: &str,
+    upstream_track: &str,
+    upstream_remote: &str,
+    upstream_remoteref: &str,
+) -> (Option<String>, Option<String>) {
+    if !crate::git::remote::is_named_remote(push_remote) || !push_remoteref.is_empty() {
+        return (None, None);
+    }
+    let branch = if push_track.is_empty() {
+        None
+    } else if push_track == upstream_track && upstream_remote == push_remote {
+        upstream_remoteref.strip_prefix("refs/heads/")
+    } else if push_track == format!("refs/remotes/{push_remote}/{local}") {
+        Some(local)
+    } else {
+        None
+    };
+    match branch.filter(|b| !b.is_empty()) {
+        Some(b) => (Some(push_remote.to_string()), Some(b.to_string())),
+        None => (None, None),
+    }
+}
+
 /// Parses git's `%(upstream:track)` field into `(ahead, behind, gone)`.
 ///
 /// Shapes: `[ahead 1, behind 2]`, `[ahead 1]`, `[behind 2]`, `[gone]`
@@ -2865,6 +2983,10 @@ mod tests {
         branch_tip_sha, current_branch_name, is_session_holder, name_paths, update_in_holder,
         worktree_holding_branch, HolderMerge, UpdateBranchOutcome,
     };
+    use super::{
+        is_unknown_format_atom, push_destination, read_refs_with_fallback,
+        read_refs_with_push_destination,
+    };
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
     use crate::error::AppError;
     use crate::git::runner::LOCK_WAIT_TIMEOUT;
@@ -3321,6 +3443,245 @@ mod tests {
             run(&repo_s, &["rev-parse", "refs/tags/origin/x"]).await,
             "fixture sanity: the tag sits on another commit"
         );
+    }
+
+    /// The destination derivation's arms: an explicit push ref, the upstream's own
+    /// tracking ref, the standard same-name tracking ref, and everything that stays
+    /// unresolved rather than naming a wrong branch.
+    #[test]
+    fn push_destination_arms() {
+        let both = |r: &str, b: &str| (Some(r.to_string()), Some(b.to_string()));
+        let none = (None, None);
+        let up = "refs/remotes/origin/main";
+        // (local, push remote, push remoteref, %(push), %(upstream), upstream remote,
+        //  upstream remoteref) → destination
+        let cases = [
+            // A push remote with its own push refspecs sends them all, as configured:
+            // no single destination describes that push.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "refs/heads/pushed/t",
+                    "refs/remotes/origin/pushed/t",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            (
+                (
+                    "topic",
+                    "origin",
+                    "refs/tags/t",
+                    "",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            // The upstream's own tracking ref on the same remote: the upstream branch.
+            (
+                ("topic", "origin", "", up, up, "origin", "refs/heads/main"),
+                both("origin", "main"),
+            ),
+            // The upstream's tracking ref named for ANOTHER push remote (upstream
+            // mode, triangular): git refuses that push.
+            (
+                ("topic", "second", "", up, up, "origin", "refs/heads/main"),
+                none.clone(),
+            ),
+            // The standard same-name tracking ref.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/topic",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("origin", "topic"),
+            ),
+            (
+                (
+                    "a/b",
+                    "fork",
+                    "",
+                    "refs/remotes/fork/a/b",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("fork", "a/b"),
+            ),
+            // A remapped fetch refspec's tracking name is never read as the branch.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/team/topic",
+                    "refs/remotes/origin/team/main",
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            // Remapped, but the destination IS the upstream: read back through it.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/team/main",
+                    "refs/remotes/origin/team/main",
+                    "origin",
+                    "refs/heads/main",
+                ),
+                both("origin", "main"),
+            ),
+            // No destination (simple's cross-name refusal, nothing, a narrow fetch).
+            (
+                ("topic", "origin", "", "", up, "origin", "refs/heads/main"),
+                none.clone(),
+            ),
+            // No remote, or a local one.
+            (
+                (
+                    "topic",
+                    "",
+                    "",
+                    "refs/remotes/origin/topic",
+                    up,
+                    "origin",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            (
+                (
+                    "topic",
+                    ".",
+                    "",
+                    "refs/heads/main",
+                    "",
+                    ".",
+                    "refs/heads/main",
+                ),
+                none.clone(),
+            ),
+            // An upstream that is no branch can't name the destination.
+            (
+                (
+                    "topic",
+                    "origin",
+                    "",
+                    "refs/remotes/origin/pr",
+                    "refs/remotes/origin/pr",
+                    "origin",
+                    "refs/pull/1/head",
+                ),
+                none.clone(),
+            ),
+        ];
+        for ((local, pr, prr, p, u, ur, urr), want) in cases {
+            assert_eq!(
+                push_destination(local, pr, prr, p, u, ur, urr),
+                want,
+                "{local} {pr} {prr} {p} {u}"
+            );
+        }
+    }
+
+    /// git's two real phrasings for a refused format atom (measured live below) are the
+    /// retry's trigger; any other failure is not.
+    #[test]
+    fn unknown_format_atom_phrasings() {
+        assert!(is_unknown_format_atom("fatal: unknown field name: pushx"));
+        assert!(is_unknown_format_atom(
+            "fatal: unrecognized %(push) argument: bogus"
+        ));
+        assert!(!is_unknown_format_atom("fatal: not a git repository"));
+        assert!(!is_unknown_format_atom(
+            "fatal: unrecognized %(upstream) argument: bogus"
+        ));
+    }
+
+    /// The retry-once, live, over the status read's own format: an extended format this
+    /// git rejects (an unknown atom, and a known atom with an unknown argument) re-runs
+    /// the base format, so the read still answers with the tracking fields and no push
+    /// atoms. A failure of any other kind is an error, not a retry.
+    #[tokio::test]
+    async fn a_rejected_push_atom_falls_back_to_the_base_read() {
+        use crate::git::remote::{parse_upstream_tracking, Upstream, UPSTREAM_TRACKING_FORMAT};
+        let (_base, base) = temp_base("push-atom-retry");
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let repo_s = repo.to_string_lossy().into_owned();
+        init_repo(&repo_s, "r.txt").await;
+        // A tracked branch, so the tracking fields have something to say.
+        let main = run(&repo_s, &["symbolic-ref", "--short", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let refname = run(&repo_s, &["symbolic-ref", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        run(&repo_s, &["remote", "add", "origin", &repo_s]).await;
+        let tracking = format!("refs/remotes/origin/{main}");
+        run(&repo_s, &["update-ref", &tracking, "HEAD"]).await;
+        let upstream = format!("--set-upstream-to=origin/{main}");
+        run(&repo_s, &["branch", "-q", &upstream]).await;
+        // Pinned, so a global remote.pushDefault can't move the push remote read below.
+        let push_remote = format!("branch.{main}.pushRemote");
+        run(&repo_s, &["config", &push_remote, "origin"]).await;
+        let fmt = UPSTREAM_TRACKING_FORMAT;
+        let base_text = run(&repo_s, &["for-each-ref", &refname, fmt]).await;
+        let tracked = Some((Upstream::Branch(main.clone()), "origin".to_string(), false));
+        assert_eq!(parse_upstream_tracking(&base_text, &refname), tracked);
+        for bogus in ["%(nosuchatom)", "%(push:bogus)"] {
+            // The premise: git itself rejects it with a phrasing the matcher knows.
+            let raw = run_git_raw(
+                Some(&repo_s),
+                &["for-each-ref", &refname, &format!("--format={bogus}")],
+                DEFAULT_TIMEOUT,
+            )
+            .await
+            .unwrap();
+            assert_ne!(raw.code, 0, "{bogus}");
+            assert!(
+                is_unknown_format_atom(&raw.stderr),
+                "{bogus}: {}",
+                raw.stderr
+            );
+            let extended = format!("{fmt}%00{bogus}");
+            let text = read_refs_with_fallback(&repo_s, &refname, &extended, fmt)
+                .await
+                .expect("the fallback answers");
+            assert_eq!(text, base_text, "{bogus}");
+            assert_eq!(parse_upstream_tracking(&text, &refname), tracked, "{bogus}");
+        }
+        // The real extended read answers with the atoms on this git: the tracking
+        // fields unchanged, the push remote after them.
+        let text = read_refs_with_push_destination(&repo_s, &refname, fmt)
+            .await
+            .unwrap();
+        assert_eq!(parse_upstream_tracking(&text, &refname), tracked);
+        let line = text.lines().next().unwrap();
+        // The base format's 4 fields plus the 4 atoms, whatever their values.
+        assert_eq!(line.split('\0').count(), 8, "{line:?}");
+        assert_eq!(line.split('\0').nth(4), Some("origin"), "{line:?}");
+        // Not a format refusal: no retry, an error.
+        let missing = base.join("not-a-repo");
+        std::fs::create_dir_all(&missing).unwrap();
+        read_refs_with_push_destination(&missing.to_string_lossy(), &refname, fmt)
+            .await
+            .expect_err("a broken repository is an error");
     }
 
     /// `git_branches` must surface git's authoritative `%(upstream:remotename)`
@@ -6046,6 +6407,195 @@ mod tests {
         assert!(
             !files.contains("side.txt"),
             "the tag's commit is not: {files}"
+        );
+    }
+
+    // --- "Update from <default>" sends the default's `%(upstream:short)` as `base`
+    // when the local default is behind it, so a remote-tracking base reaches every arm.
+
+    /// Mints `refs/remotes/origin/<main>` one commit AHEAD of local `main` (a new
+    /// `remote.txt`), as a fetch would, leaving `main` where it is. Returns its sha.
+    async fn mint_origin_ahead(repo: &std::path::Path, repo_s: &str, main: &str) -> String {
+        run(repo_s, &["switch", "-qc", "remote-tip", main]).await;
+        std::fs::write(repo.join("remote.txt"), "remote\n").unwrap();
+        run(repo_s, &["add", "-A"]).await;
+        run(repo_s, &["commit", "-qm", "remote work"]).await;
+        let sha = run(repo_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+        run(
+            repo_s,
+            &["update-ref", &format!("refs/remotes/origin/{main}"), &sha],
+        )
+        .await;
+        run(repo_s, &["switch", "-q", main]).await;
+        run(repo_s, &["branch", "-qD", "remote-tip"]).await;
+        sha
+    }
+
+    /// The fast-forward arm (`fetch .`) of a branch that is NOT checked out takes a
+    /// remote-tracking base, and the local default stays where it was.
+    #[tokio::test]
+    async fn update_branch_from_accepts_a_remote_tracking_base() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-remote-ff").await;
+        run(&repo_s, &["branch", "behind", "HEAD~1"]).await;
+        let main_tip = run(&repo_s, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        let remote = mint_origin_ahead(&repo, &repo_s, &main).await;
+
+        let state = AppState::default();
+        let base = format!("origin/{main}");
+        let outcome = update_branch_from(&state, &repo_s, "behind", &base, &HashSet::new(), None)
+            .await
+            .expect("the update succeeds");
+        assert_eq!(outcome.outcome, "fast-forward");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/behind"])
+                .await
+                .trim(),
+            remote,
+            "the branch lands on the remote-tracking tip"
+        );
+        assert_eq!(
+            run(&repo_s, &["rev-parse", &main]).await.trim(),
+            main_tip,
+            "the local default is never moved"
+        );
+    }
+
+    /// The in-place arm merges the remote-tracking tip into the checked-out branch.
+    #[tokio::test]
+    async fn update_branch_from_remote_tracking_base_merges_in_place() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-remote-in-place").await;
+        let remote = mint_origin_ahead(&repo, &repo_s, &main).await;
+        run(&repo_s, &["switch", "-q", "feature"]).await;
+
+        let state = AppState::default();
+        let base = format!("origin/{main}");
+        let outcome = update_branch_from(&state, &repo_s, "feature", &base, &HashSet::new(), None)
+            .await
+            .expect("the in-place merge succeeds");
+        assert_eq!(outcome.outcome, "merge");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature^2"])
+                .await
+                .trim(),
+            remote,
+            "the merge's second parent is the remote-tracking tip"
+        );
+        assert!(repo.join("remote.txt").exists(), "its work is merged in");
+    }
+
+    /// The up-to-date probe reads the remote-tracking ref: a branch that contains it
+    /// is up to date even though it lacks the local default's newer commit.
+    #[tokio::test]
+    async fn update_branch_from_up_to_date_against_remote_tracking_base() {
+        let (_guard, _repo, repo_s, main) = diverged_repo("update-remote-uptodate").await;
+        let seed = run(&repo_s, &["rev-parse", "HEAD~1"])
+            .await
+            .trim()
+            .to_string();
+        run(
+            &repo_s,
+            &["update-ref", &format!("refs/remotes/origin/{main}"), &seed],
+        )
+        .await;
+        let feature_tip = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+
+        let state = AppState::default();
+        let base = format!("origin/{main}");
+        let outcome = update_branch_from(&state, &repo_s, "feature", &base, &HashSet::new(), None)
+            .await
+            .expect("the update succeeds");
+        assert_eq!(outcome.outcome, "up-to-date");
+        assert_eq!(
+            run(&repo_s, &["rev-parse", "refs/heads/feature"])
+                .await
+                .trim(),
+            feature_tip
+        );
+    }
+
+    /// A LOCAL branch literally named `origin/<main>` would capture the short form, so
+    /// git reports the upstream disambiguated (`remotes/origin/<main>`) and the UI
+    /// sends that string verbatim. Exercises the fast-forward arm of a branch that is
+    /// not checked out: the branch lands on the remote-tracking tip, never on the
+    /// local look-alike's (which it could fast-forward to as well).
+    #[tokio::test]
+    async fn update_branch_from_base_is_not_captured_by_a_local_branch() {
+        let (_guard, repo, repo_s, main) = diverged_repo("update-remote-shadowed").await;
+        let remote = mint_origin_ahead(&repo, &repo_s, &main).await;
+        // Never contacted: the remote exists only so the upstream resolves.
+        let nowhere = repo
+            .parent()
+            .expect("the repo lives under the temp base")
+            .join("origin.git");
+        run(
+            &repo_s,
+            &["remote", "add", "origin", &nowhere.to_string_lossy()],
+        )
+        .await;
+        run(&repo_s, &["branch", "tracker", "HEAD~1"]).await;
+        run(
+            &repo_s,
+            &[
+                "branch",
+                "-q",
+                &format!("--set-upstream-to=origin/{main}"),
+                "tracker",
+            ],
+        )
+        .await;
+        async fn upstream_short(repo_s: &str) -> String {
+            run(
+                repo_s,
+                &[
+                    "for-each-ref",
+                    "--format=%(upstream:short)",
+                    "refs/heads/tracker",
+                ],
+            )
+            .await
+            .trim()
+            .to_string()
+        }
+        assert_eq!(upstream_short(&repo_s).await, format!("origin/{main}"));
+        run(
+            &repo_s,
+            &["branch", &format!("origin/{main}"), "refs/heads/feature"],
+        )
+        .await;
+        let lookalike = run(&repo_s, &["rev-parse", "refs/heads/feature"])
+            .await
+            .trim()
+            .to_string();
+        // The premise: the short form git reports once the local branch exists.
+        let base = upstream_short(&repo_s).await;
+        assert_eq!(base, format!("remotes/origin/{main}"));
+
+        let state = AppState::default();
+        let outcome = update_branch_from(&state, &repo_s, "tracker", &base, &HashSet::new(), None)
+            .await
+            .expect("the update succeeds");
+        assert_eq!(outcome.outcome, "fast-forward");
+        let tip = run(&repo_s, &["rev-parse", "refs/heads/tracker"])
+            .await
+            .trim()
+            .to_string();
+        assert_eq!(tip, remote, "the remote-tracking tip is what lands");
+        assert_ne!(tip, lookalike, "never the local look-alike's tip");
+        assert_eq!(
+            run(
+                &repo_s,
+                &["rev-parse", &format!("refs/heads/origin/{main}")]
+            )
+            .await
+            .trim(),
+            lookalike,
+            "the look-alike branch is never moved"
         );
     }
 

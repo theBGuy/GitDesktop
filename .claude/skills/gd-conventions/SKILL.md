@@ -106,6 +106,17 @@ ops imports the existing prompt, never re-spells it.
 Staging-over-conflict-markers prompts likewise live in
 `src/features/repository/conflict-confirms.ts`: the generic stage gate and
 Mark resolved both build theirs there.
+A prompt asked from a closing Menu/Popover/ContextMenu item awaits
+`useCloseSettled`'s `waitClosed()`
+(`src/features/repository/publish-confirm.tsx`, its `onOpenChangeComplete`
+spread on that Root) before asking — never a bare rAF from the handler: Base
+UI returns focus to the trigger when the closing popup unmounts, which lands
+after the dialog's initial focus and steals it.
+Whether a push publishes or would CREATE its branch on the remote reads
+`willPublish` / `willCreateOnRemote`
+(`src/features/repository/branch-sync-state.ts`), never an inline
+`!upstream || upstreamGone`; a local upstream (remote `.` or null in the
+branch list) is `isLocalUpstream` from the same module.
 
 **Command palette.** Any new tab/surface/action needs an ACTIONS entry in
 `src/lib/hotkeys/registry.ts` + `useHotkeyAction` wiring in the same change
