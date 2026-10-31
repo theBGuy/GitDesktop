@@ -489,6 +489,10 @@ async fn run_git_spawn(
         "diff.dstPrefix=b/",
         "-c",
         "diff.mnemonicPrefix=false",
+        // Machine-read log/show output must not carry signature text; an explicit
+        // `--show-signature` on the command line still overrides it.
+        "-c",
+        "log.showSignature=false",
     ]);
     cmd.args(args);
     if let Some(repo) = repo_path {

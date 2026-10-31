@@ -25,6 +25,11 @@ export interface FileDiff {
    *  other backend diffs send false and hand-built ones omit it, so neither means
    *  the bytes were checked. */
   undecodable?: boolean;
+  /** Set only when the shown diff pairs this file with a DIFFERENT source path
+   *  (that surface's own rename detection). Old-side whole-file reads use
+   *  `oldPath ?? filePath`; backend diffs omit it for non-renames and hand-built
+   *  diffs (PR patches) omit it entirely. */
+  oldPath?: string;
 }
 
 export interface DiffStatEntry {

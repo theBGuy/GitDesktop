@@ -275,6 +275,7 @@ export function DiffModeToggle({
  */
 export function GitDiffView({
   filePath,
+  oldPath,
   text,
   repoPath,
   contentRevs,
@@ -283,6 +284,9 @@ export function GitDiffView({
   forceUnified,
 }: {
   filePath: string;
+  /** The path the old side's whole-file read uses (a rename's source).
+   *  Omitted = `filePath`, for hosts with no old side to read. */
+  oldPath?: string;
   text: string;
   /** The diff's own repo, for reading full file text (highlight context). */
   repoPath?: string;
@@ -299,6 +303,7 @@ export function GitDiffView({
     <DiffErrorBoundary resetKey={`${filePath} ${text.length}`}>
       <RenderedDiff
         filePath={filePath}
+        oldPath={oldPath}
         text={text}
         repoPath={repoPath}
         contentRevs={contentRevs}
@@ -473,6 +478,8 @@ export function createDiffFile(
 export function useFileContent(
   repoPath: string | undefined,
   filePath: string,
+  // The old side's path: the diff's rename source, else `filePath`.
+  oldPath: string,
   diffText: string,
   contentRevs?: DiffContentRevs,
   // Max diff size before content mode engages. The read-only surface caps its
@@ -493,7 +500,7 @@ export function useFileContent(
   const oldQ = useFileAtRev(
     repoPath ?? "",
     oldRev ?? null,
-    filePath,
+    oldPath,
     wantContent && oldRev !== undefined,
   );
   const newQ = useFileAtRev(
@@ -546,7 +553,7 @@ export function useFileContent(
   const [painted, setPainted] = useState<Painted | null>(null);
   const [expiredFor, setExpiredFor] = useState<Painted | null>(null);
   const now = {
-    reads: contentReadsKey(filePath, oldRev, newRev),
+    reads: contentReadsKey(filePath, oldRev, newRev, oldPath),
     text: diffText,
     oldText,
     newText,
@@ -728,6 +735,7 @@ type AnchorExtendData = Record<string, { data: { render: () => ReactNode } }>;
 
 function RenderedDiff({
   filePath,
+  oldPath,
   text,
   repoPath,
   contentRevs,
@@ -736,6 +744,7 @@ function RenderedDiff({
   forceUnified,
 }: {
   filePath: string;
+  oldPath?: string;
   text: string;
   repoPath?: string;
   contentRevs?: DiffContentRevs;
@@ -770,6 +779,7 @@ function RenderedDiff({
   // screen and builds the new one at low priority, coalescing fast steps.
   const deferredText = useDeferredValue(text);
   const deferredPath = useDeferredValue(filePath);
+  const deferredOldPath = useDeferredValue(oldPath ?? filePath);
 
   // Reset on the DEFERRED path, not the urgent `filePath`: `blocked` derives
   // from `deferredText`, so an urgent reset would re-block the OUTGOING mega
@@ -803,6 +813,7 @@ function RenderedDiff({
   } = useFileContent(
     repoPath,
     deferredPath,
+    deferredOldPath,
     deferredText,
     // Shortened hunk text (long lines cut) would no longer line up with the
     // whole-file reads content mode maps syntax onto, and the two whole-file
@@ -1537,6 +1548,10 @@ export function DiffContent({
   if (!data) {
     return <DiffPlaceholder message="Could not load diff for this file" />;
   }
+  // The old side's whole-file reads follow the diff's own pairing. A placeholder
+  // never lends its `oldPath`: it is another key's diff (another commit's, for
+  // the same path), while the revs already name the new selection.
+  const oldSidePath = dataIsPlaceholder ? filePath : (data.oldPath ?? filePath);
 
   // Error + fetching (a reconnect's resumed read) is unsettled: no notice. A
   // settled error says it failed, with Retry; a park (alone, or over an error)
@@ -1575,7 +1590,12 @@ export function DiffContent({
   if (data.isBinary) {
     if (repoPath && imageRevs && imageMime(filePath)) {
       return withNotice(
-        <ImageDiff repoPath={repoPath} filePath={filePath} revs={imageRevs} />,
+        <ImageDiff
+          repoPath={repoPath}
+          filePath={filePath}
+          oldPath={oldSidePath}
+          revs={imageRevs}
+        />,
         false,
       );
     }
@@ -1695,6 +1715,7 @@ export function DiffContent({
           <MarkdownDocPreview
             repoPath={repoPath}
             filePath={filePath}
+            oldPath={oldSidePath}
             revs={previewRevs}
           />
         ) : (
@@ -1704,12 +1725,14 @@ export function DiffContent({
                 <ImagePanes
                   repoPath={repoPath}
                   filePath={filePath}
+                  oldPath={oldSidePath}
                   revs={imageRevs}
                 />
               </div>
             )}
             <GitDiffView
               filePath={filePath}
+              oldPath={oldSidePath}
               text={data.text}
               repoPath={repoPath}
               // A truncated diff was cut by the byte cap and can't line up

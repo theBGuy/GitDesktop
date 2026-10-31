@@ -180,6 +180,64 @@ fn hunk_section(header: &str) -> &str {
     }
 }
 
+/// File-header lines that pair a diff with a different source path.
+const PAIRING_HEADERS: [&str; 6] = [
+    "similarity index ",
+    "dissimilarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+];
+
+/// A rename/copy file header rewritten as a plain modification of the NEW path, so
+/// a partial patch edits that path in place; applied in reverse, the pairing would
+/// undo the rename itself. Mode and index lines stay, and a header without pairing
+/// lines comes back unchanged. Names reuse the diff's own `+++` token, quoting
+/// included; the TAB git appends there for a name with a space stays on the
+/// `---`/`+++` lines and never reaches `diff --git`.
+fn plain_modification_header(header: &str) -> std::borrow::Cow<'_, str> {
+    let lines: Vec<&str> = header.split('\n').collect();
+    let pairs = |l: &str| PAIRING_HEADERS.iter().any(|p| l.starts_with(p));
+    let minus = lines.iter().find_map(|l| l.strip_prefix("--- "));
+    let plus = lines.iter().find_map(|l| l.strip_prefix("+++ "));
+    let (true, Some(minus), Some(plus)) = (lines.iter().any(|l| pairs(l)), minus, plus) else {
+        return std::borrow::Cow::Borrowed(header);
+    };
+    let (new_name, tab) = match plus.strip_suffix('\t') {
+        Some(name) => (name, "\t"),
+        None => (plus, ""),
+    };
+    let Some(old_side) = old_side_spelling(minus.strip_suffix('\t').unwrap_or(minus), new_name)
+    else {
+        return std::borrow::Cow::Borrowed(header);
+    };
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    for line in lines {
+        if line.starts_with("diff --git ") {
+            out.push(format!("diff --git {old_side} {new_name}"));
+        } else if line.starts_with("--- ") {
+            out.push(format!("--- {old_side}{tab}"));
+        } else if !pairs(line) {
+            out.push(line.to_string());
+        }
+    }
+    std::borrow::Cow::Owned(out.join("\n"))
+}
+
+/// `new`'s name under the prefix `old` carries (`b/x` beside `a/y` gives `a/x`),
+/// keeping `new`'s C-quoting. `None` for a name without a prefix.
+fn old_side_spelling(old: &str, new: &str) -> Option<String> {
+    let old = old.strip_prefix('"').unwrap_or(old);
+    let (quote, new) = match new.strip_prefix('"') {
+        Some(rest) => ("\"", rest),
+        None => ("", new),
+    };
+    let prefix = &old[..old.find('/')?];
+    let name = &new[new.find('/')? + 1..];
+    Some(format!("{quote}{prefix}/{name}"))
+}
+
 /// Build a patch containing only the user-selected changed lines from a
 /// single-file unified diff, neutralizing the rest so the result still applies
 /// cleanly. `reverse` means the patch will be applied with `--reverse`
@@ -206,6 +264,7 @@ pub fn build_partial_patch(diff_text: &str, selected: &[SelectedLine], reverse: 
         return String::new();
     };
     let header = lines[..first_hunk].join("\n");
+    let header = plain_modification_header(&header);
 
     let mut out_hunks = String::new();
     let mut i = first_hunk;
@@ -342,6 +401,121 @@ const VIEWER_MAX_BYTES: usize = 1_000_000;
 /// Default cap on staged diff text shipped for AI prompt building.
 const AI_DEFAULT_MAX_BYTES: usize = 1_000_000;
 
+/// One file's diff output, paired with its rename source when the surface pairs it.
+pub(crate) struct PathDiff {
+    /// Raw bytes of the run whose text is shown.
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) old_path: Option<String>,
+}
+
+/// Runs `content -- <file_path>` (literal pathspec) and, when that shows the file
+/// as an addition, re-runs it with the rename source's pathspec too: a one-path
+/// pathspec hides the source, so an unpaired rename always renders as an add.
+/// `probe` is the same diff in `--name-status -z` form with NO pathspec, so the
+/// surface's own rename detection decides and the pane agrees with its file list.
+/// A failed probe or re-run is `Err`; a re-run without exactly one rename section
+/// keeps the single-path output.
+pub(crate) async fn diff_with_rename_pairing(
+    repo: &str,
+    file_path: &str,
+    content: &[&str],
+    probe: &[&str],
+) -> AppResult<PathDiff> {
+    let new_spec = crate::git::pathspec::literal(file_path);
+    let mut args = content.to_vec();
+    args.extend(["--", new_spec.as_str()]);
+    let single = run_git(Some(repo), &args, DEFAULT_TIMEOUT).await?.stdout;
+    let unpaired = |stdout| PathDiff {
+        stdout,
+        old_path: None,
+    };
+    if !shows_new_file(&single) {
+        return Ok(unpaired(single));
+    }
+    let names = run_git(Some(repo), probe, DEFAULT_TIMEOUT).await?;
+    // A source name that isn't UTF-8 can't round-trip into a pathspec.
+    let Some(old) = rename_source(&names.stdout, file_path.as_bytes())
+        .and_then(|old| String::from_utf8(old.to_vec()).ok())
+    else {
+        return Ok(unpaired(single));
+    };
+    let old_spec = crate::git::pathspec::literal(&old);
+    args.push(old_spec.as_str());
+    let rerun = run_git(Some(repo), &args, DEFAULT_TIMEOUT).await?;
+    Ok(match sole_rename_section(&rerun.stdout) {
+        Some(stdout) => PathDiff {
+            stdout,
+            old_path: Some(old),
+        },
+        None => unpaired(single),
+    })
+}
+
+/// Whether diff output renders a file as an addition. Hunk lines always carry a
+/// `+`/`-`/space prefix, so a line-start `new file mode ` can only be a header.
+fn shows_new_file(stdout: &[u8]) -> bool {
+    stdout
+        .split(|&b| b == b'\n')
+        .any(|l| l.starts_with(b"new file mode "))
+}
+
+/// The source of the rename `--name-status -z` output pairs into `new_path`,
+/// compared byte-for-byte (`-z` names are raw, never C-quoted). Rows are
+/// `<status>\0<path>\0`, or `<status>\0<old>\0<new>\0` for renames and copies;
+/// log-family output leads a status token with `\n`. Copies never count.
+fn rename_source<'a>(name_status_z: &'a [u8], new_path: &[u8]) -> Option<&'a [u8]> {
+    let mut tokens = name_status_z.split(|&b| b == 0);
+    while let Some(token) = tokens.next() {
+        let status = &token[token.iter().take_while(|&&b| b == b'\n').count()..];
+        let Some(&kind) = status.first() else {
+            continue;
+        };
+        if kind == b'R' || kind == b'C' {
+            let old = tokens.next()?;
+            if tokens.next()? == new_path && kind == b'R' {
+                return Some(old);
+            }
+        } else {
+            tokens.next()?;
+        }
+    }
+    None
+}
+
+/// The one section of a two-pathspec run that carries a `rename from`/`rename to`
+/// pair, after any preamble ahead of the first section (a `show` commit header),
+/// or `None` when the run holds zero or several. The source's literal pathspec
+/// also matches files under a directory now at that path, so extra sections occur.
+fn sole_rename_section(stdout: &[u8]) -> Option<Vec<u8>> {
+    let mut starts = Vec::new();
+    let mut at = 0;
+    for line in stdout.split_inclusive(|&b| b == b'\n') {
+        if line.starts_with(b"diff --git ") {
+            starts.push(at);
+        }
+        at += line.len();
+    }
+    let mut found = None;
+    for (i, &start) in starts.iter().enumerate() {
+        let section = &stdout[start..starts.get(i + 1).copied().unwrap_or(stdout.len())];
+        let header = || {
+            section
+                .split(|&b| b == b'\n')
+                .take_while(|l| !l.starts_with(b"@@"))
+        };
+        if header().any(|l| l.starts_with(b"rename from "))
+            && header().any(|l| l.starts_with(b"rename to "))
+        {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(section);
+        }
+    }
+    let section = found?;
+    Some([&stdout[..starts[0]], section].concat())
+}
+
 #[tauri::command]
 pub async fn git_diff_file(
     repo_path: String,
@@ -374,23 +548,38 @@ pub async fn git_diff_file(
                 stderr: out.stderr,
             });
         }
-        out
+        PathDiff {
+            stdout: out.stdout,
+            old_path: None,
+        }
+    } else if staged {
+        // Only this arm pairs. An index↔worktree diff does pair an intent-to-add
+        // file with its deleted source (measured), but its hunks would then sit on
+        // the source, and staging one onto the empty intent-to-add entry fails.
+        diff_with_rename_pairing(
+            &repo_path,
+            &file_path,
+            &["diff", "--no-ext-diff", "--no-color", "--cached"],
+            &["diff", "--no-ext-diff", "--name-status", "-z", "--cached"],
+        )
+        .await?
     } else {
         // Literal pathspec: a `[slug]`-style path would otherwise splice its
         // glob-siblings' hunks into this file's diff.
         let spec = crate::git::pathspec::literal(&file_path);
-        let mut args = vec!["diff", "--no-ext-diff", "--no-color"];
-        if staged {
-            args.push("--cached");
+        let args = ["diff", "--no-ext-diff", "--no-color", "--", spec.as_str()];
+        PathDiff {
+            stdout: run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT)
+                .await?
+                .stdout,
+            old_path: None,
         }
-        args.extend(["--", spec.as_str()]);
-        run_git(Some(&repo_path), &args, DEFAULT_TIMEOUT).await?
     };
 
     // Decided from the raw bytes before the lossy decode and the truncation cut:
     // a genuine U+FFFD is valid UTF-8, and a bad byte past the cut still counts.
     let undecodable = std::str::from_utf8(&out.stdout).is_err();
-    let text = out.stdout_lossy();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let is_binary = text.lines().any(|l| {
         l.starts_with("Binary files ") && l.ends_with(" differ")
     });
@@ -402,6 +591,7 @@ pub async fn git_diff_file(
         is_truncated,
         text,
         undecodable,
+        old_path: out.old_path,
     })
 }
 
@@ -419,19 +609,21 @@ pub async fn git_session_file_diff(
     base: String,
 ) -> AppResult<FileDiff> {
     // base → working tree: captures both committed-turn changes and uncommitted edits.
-    // Literal pathspec so a `[slug]`-style path can't pull in a glob-sibling's hunks.
-    let spec = crate::git::pathspec::literal(&file_path);
-    let out = run_git(
-        Some(&repo_path),
-        &["diff", "--no-ext-diff", "--no-color", &base, "--", &spec],
-        DEFAULT_TIMEOUT,
+    let out = diff_with_rename_pairing(
+        &repo_path,
+        &file_path,
+        &["diff", "--no-ext-diff", "--no-color", &base],
+        &["diff", "--no-ext-diff", "--name-status", "-z", &base],
     )
     .await?;
-    let mut text = out.stdout_lossy();
+    let old_path = out.old_path;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
 
     // Empty tracked diff + the file is untracked (a just-written new file) →
     // show it as a full add, the same way git_diff_file handles untracked.
     if text.trim().is_empty() {
+        // Literal pathspec: a `[slug]`-style path would match a glob-sibling's untracked file.
+        let spec = crate::git::pathspec::literal(&file_path);
         let others = run_git(
             Some(&repo_path),
             &["ls-files", "--others", "--exclude-standard", "--", &spec],
@@ -476,6 +668,7 @@ pub async fn git_session_file_diff(
         is_truncated,
         text,
         undecodable: false,
+        old_path,
     })
 }
 
@@ -3131,10 +3324,884 @@ mod tests {
             is_truncated: false,
             text: String::new(),
             undecodable: true,
+            old_path: None,
         })
         .unwrap();
         assert_eq!(json["undecodable"], serde_json::json!(true));
         assert!(json.get("filePath").is_some(), "{json}");
         assert!(json.get("file_path").is_none(), "{json}");
+        // An unpaired diff carries NO `oldPath` key; a paired one carries it camelCased.
+        assert!(json.get("oldPath").is_none(), "{json}");
+        assert!(json.get("old_path").is_none(), "{json}");
+        let paired = serde_json::to_value(FileDiff {
+            file_path: "b.txt".into(),
+            is_binary: false,
+            is_truncated: false,
+            text: String::new(),
+            undecodable: false,
+            old_path: Some("a.txt".into()),
+        })
+        .unwrap();
+        assert_eq!(paired["oldPath"], serde_json::json!("a.txt"));
+    }
+
+    // ---- Rename pairing ----------------------------------------------------------
+
+    /// Raw `--name-status -z` output per probe argv family, captured from git
+    /// 2.51.1.windows.1 (`R100 a.txt → b.txt` plus `M k.txt` committed; `a.txt →
+    /// c.txt` staged, then stashed). `log -z --name-status` leads a record's first
+    /// row with `\n` (same git); the probes here never emit it, the parser
+    /// tolerates it.
+    const PROBE_SHOW: &[u8] = b"R100\0a.txt\0b.txt\0M\0k.txt\0";
+    const PROBE_SHOW_MERGE: &[u8] = b"R100\0a.txt\0b.txt\0M\0k.txt\0";
+    const PROBE_THREE_DOT: &[u8] = b"R100\0a.txt\0b.txt\0M\0k.txt\0";
+    const PROBE_CACHED: &[u8] = b"R100\0a.txt\0c.txt\0";
+    const PROBE_HEAD: &[u8] = b"R100\0a.txt\0c.txt\0";
+    const PROBE_SESSION_BASE: &[u8] = b"R100\0a.txt\0c.txt\0";
+    const PROBE_STASH: &[u8] = b"R100\0a.txt\0c.txt\0";
+    const PROBE_ROOT: &[u8] = b"A\0a.txt\0A\0k.txt\0";
+    const PROBE_CACHED_QUOTED: &[u8] =
+        b"R077\0sp ace2.txt\0sp ace3.txt\0R077\0x y.txt\0x y\xc3\xa9.txt\0";
+    const PROBE_LOG_FAMILY: &[u8] = b"\0\nR100\0x\0z\0";
+
+    #[test]
+    fn rename_source_reads_every_probe_family() {
+        for z in [PROBE_SHOW, PROBE_SHOW_MERGE, PROBE_THREE_DOT] {
+            assert_eq!(rename_source(z, b"b.txt"), Some(&b"a.txt"[..]));
+            // A modify row and the rename's SOURCE side never pair.
+            assert_eq!(rename_source(z, b"k.txt"), None);
+            assert_eq!(rename_source(z, b"a.txt"), None);
+        }
+        for z in [PROBE_CACHED, PROBE_HEAD, PROBE_SESSION_BASE, PROBE_STASH] {
+            assert_eq!(rename_source(z, b"c.txt"), Some(&b"a.txt"[..]));
+        }
+        assert_eq!(rename_source(PROBE_ROOT, b"a.txt"), None);
+        assert_eq!(
+            rename_source(PROBE_CACHED_QUOTED, b"x y\xc3\xa9.txt"),
+            Some(&b"x y.txt"[..])
+        );
+        assert_eq!(
+            rename_source(PROBE_CACHED_QUOTED, b"sp ace3.txt"),
+            Some(&b"sp ace2.txt"[..])
+        );
+        assert_eq!(rename_source(PROBE_LOG_FAMILY, b"z"), Some(&b"x"[..]));
+        // Copies keep their two-name row aligned but never pair; a cut-off row is no row.
+        assert_eq!(rename_source(b"C075\0a\0b\0R100\0c\0d\0", b"b"), None);
+        assert_eq!(
+            rename_source(b"C075\0a\0b\0R100\0c\0d\0", b"d"),
+            Some(&b"c"[..])
+        );
+        assert_eq!(rename_source(b"R100\0a", b"a"), None);
+        assert_eq!(rename_source(b"", b"a"), None);
+    }
+
+    #[test]
+    fn the_new_file_gate_reads_header_lines_only() {
+        assert!(shows_new_file(
+            b"diff --git a/x b/x\nnew file mode 100644\n"
+        ));
+        assert!(!shows_new_file(
+            b"@@ -1 +1,2 @@\n x\n+new file mode 100644\n"
+        ));
+        assert!(!shows_new_file(b""));
+    }
+
+    /// The fallback arm: a re-run with zero or several rename sections yields `None`,
+    /// which keeps the single-path text; exactly one is kept with any preamble.
+    #[test]
+    fn only_a_sole_rename_section_is_kept() {
+        let add = b"diff --git a/a/x b/a/x\nnew file mode 100644\n--- /dev/null\n+++ b/a/x\n@@ -0,0 +1 @@\n+rename from a\n";
+        let ren = b"diff --git a/a b/b\nsimilarity index 100%\nrename from a\nrename to b\n";
+        let both = [&add[..], &ren[..]].concat();
+        assert_eq!(sole_rename_section(&both).as_deref(), Some(&ren[..]));
+        let with_preamble = [&b"commit 1\n\n    msg\n\n"[..], &ren[..], &add[..]].concat();
+        assert_eq!(
+            sole_rename_section(&with_preamble),
+            Some([&b"commit 1\n\n    msg\n\n"[..], &ren[..]].concat())
+        );
+        assert_eq!(sole_rename_section(add), None);
+        assert_eq!(sole_rename_section(&[&ren[..], &ren[..]].concat()), None);
+        assert_eq!(sole_rename_section(b""), None);
+    }
+
+    /// A staged rename+edit of a name with a space, exactly as `git diff --cached`
+    /// writes it (git 2.51.1): `---`/`+++` carry a trailing TAB, `diff --git` none.
+    const SPACE_RENAME_DIFF: &str = "diff --git a/sp ace2.txt b/sp ace3.txt\nsimilarity index 77%\nrename from sp ace2.txt\nrename to sp ace3.txt\nindex 01f84f8..2169c5f 100644\n--- a/sp ace2.txt\t\n+++ b/sp ace3.txt\t\n@@ -1,5 +1,5 @@\n l1\n-l2\n+l2 EDIT\n l3\n l4\n l5\n";
+    /// The hunk-unstage patch for it: a plain modification of the new path. The
+    /// frontend's `buildHunkPatch` test embeds this same literal (cross-builder pin).
+    const SPACE_RENAME_PATCH: &str = "diff --git a/sp ace3.txt b/sp ace3.txt\nindex 01f84f8..2169c5f 100644\n--- a/sp ace3.txt\t\n+++ b/sp ace3.txt\t\n@@ -1,5 +1,5 @@\n l1\n-l2\n+l2 EDIT\n l3\n l4\n l5\n";
+    /// A space + non-ASCII rename+edit captured from raw git with `core.quotePath=true`
+    /// (the app's runner pins it false): C-quoted names, the `+++` still TAB-ended.
+    const QUOTED_RENAME_DIFF: &str = "diff --git a/x y.txt \"b/x y\\303\\251.txt\"\nsimilarity index 77%\nrename from x y.txt\nrename to \"x y\\303\\251.txt\"\nindex 01f84f8..4a7bb98 100644\n--- a/x y.txt\t\n+++ \"b/x y\\303\\251.txt\"\t\n@@ -6,5 +6,5 @@ l5\n l6\n l7\n l8\n-l9\n+l9 EDIT\n l10\n";
+
+    #[test]
+    fn a_rename_header_normalizes_to_a_new_path_modification() {
+        let patch = build_partial_patch(
+            SPACE_RENAME_DIFF,
+            &[sel(Side::Old, 2), sel(Side::New, 2)],
+            true,
+        );
+        assert_eq!(patch, SPACE_RENAME_PATCH);
+        let quoted = build_partial_patch(
+            QUOTED_RENAME_DIFF,
+            &[sel(Side::Old, 9), sel(Side::New, 9)],
+            true,
+        );
+        let header: Vec<&str> = quoted.lines().take(4).collect();
+        assert_eq!(
+            header,
+            [
+                "diff --git \"a/x y\\303\\251.txt\" \"b/x y\\303\\251.txt\"",
+                "index 01f84f8..4a7bb98 100644",
+                "--- \"a/x y\\303\\251.txt\"\t",
+                "+++ \"b/x y\\303\\251.txt\"\t",
+            ]
+        );
+    }
+
+    /// Parity pin: a header without pairing lines is returned byte-identical, mode
+    /// lines included; a rename + mode change keeps its mode lines.
+    #[test]
+    fn non_rename_headers_pass_through_and_mode_lines_stay() {
+        let modified = "diff --git a/m.sh b/m.sh\nold mode 100644\nnew mode 100755\nindex 1..2\n--- a/m.sh\n+++ b/m.sh";
+        assert_eq!(plain_modification_header(modified), modified);
+        let plain = format!("{FILE_HEADER}@@ -1,1 +1,1 @@\n-a\n+b\n");
+        let out = build_partial_patch(&plain, &[sel(Side::Old, 1), sel(Side::New, 1)], true);
+        assert_eq!(out, plain);
+        let renamed = "diff --git a/m.sh b/n.sh\nold mode 100644\nnew mode 100755\nsimilarity index 90%\nrename from m.sh\nrename to n.sh\nindex 1..2\n--- a/m.sh\n+++ b/n.sh";
+        assert_eq!(
+            plain_modification_header(renamed),
+            "diff --git a/n.sh b/n.sh\nold mode 100644\nnew mode 100755\nindex 1..2\n--- a/n.sh\n+++ b/n.sh"
+        );
+    }
+
+    const TEN: &str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+
+    /// A repo pinned for rename tests: the test runner sets only GIT_CONFIG_NOSYSTEM,
+    /// so a global `diff.renames` would otherwise decide what pairs (quoting and diff
+    /// prefixes are pinned by the git runner itself).
+    async fn rename_repo(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
+        let (tmp, dir, repo) = init_line_stats_repo(prefix).await;
+        for (key, value) in [("diff.renames", "true"), ("commit.gpgSign", "false")] {
+            git_ok(&repo, &["config", key, value]).await;
+        }
+        (tmp, dir, repo)
+    }
+
+    async fn git_ok(repo: &str, args: &[&str]) -> String {
+        run_git(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    async fn commit_all(repo: &str, msg: &str) -> String {
+        git_ok(repo, &["add", "-A"]).await;
+        git_ok(repo, &["commit", "-qm", msg]).await;
+        git_ok(repo, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    async fn commit_diff(repo: &str, sha: &str, path: &str) -> FileDiff {
+        crate::git::history::git_commit_file_diff(repo.into(), sha.into(), path.into())
+            .await
+            .unwrap()
+    }
+
+    /// What the single-pathspec commit read returns: the unpaired baseline.
+    async fn single_commit_diff(repo: &str, sha: &str, path: &str) -> String {
+        let spec = crate::git::pathspec::literal(path);
+        let args = [
+            "show",
+            "-m",
+            "--first-parent",
+            "--no-color",
+            "--format=",
+            sha,
+            "--",
+            spec.as_str(),
+        ];
+        git_ok(repo, &args).await
+    }
+
+    fn assert_paired(d: &FileDiff, old: &str, new: &str) {
+        assert_eq!(d.file_path, new);
+        assert_eq!(d.old_path.as_deref(), Some(old), "{}", d.text);
+        assert!(d.text.contains("rename from "), "{}", d.text);
+        assert!(d.text.contains("rename to "), "{}", d.text);
+        assert!(d.text.contains("similarity index "), "{}", d.text);
+        assert!(!d.text.contains("new file mode"), "{}", d.text);
+        assert_eq!(d.text.matches("diff --git ").count(), 1, "{}", d.text);
+    }
+
+    fn assert_pure_rename(d: &FileDiff, old: &str, new: &str) {
+        assert_paired(d, old, new);
+        assert!(d.text.contains("similarity index 100%"), "{}", d.text);
+        assert!(!d.text.contains("@@"), "{}", d.text);
+        assert!(!d.is_binary);
+    }
+
+    #[tokio::test]
+    async fn commit_file_diff_pairs_a_pure_rename_and_leaves_adds_alone() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-commit-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(dir.join("n.txt"), "brand new\n").unwrap();
+        let sha = commit_all(&repo, "rename").await;
+
+        let renamed = commit_diff(&repo, &sha, "b.txt").await;
+        assert_pure_rename(&renamed, "a.txt", "b.txt");
+        assert!(renamed.text.contains("rename from a.txt\nrename to b.txt"));
+        // A true addition in the same commit is byte-identical to the single run.
+        let added = commit_diff(&repo, &sha, "n.txt").await;
+        assert_eq!(added.text, single_commit_diff(&repo, &sha, "n.txt").await);
+        assert!(added.text.contains("new file mode"));
+        assert_eq!(added.old_path, None);
+    }
+
+    #[tokio::test]
+    async fn commit_file_diff_pairs_a_rename_with_edits_to_only_its_hunks() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-edit-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(dir.join("b.txt"), TEN.replace("l5\n", "l5 EDIT\n")).unwrap();
+        let sha = commit_all(&repo, "rename+edit").await;
+
+        let d = commit_diff(&repo, &sha, "b.txt").await;
+        assert_paired(&d, "a.txt", "b.txt");
+        assert_eq!(
+            d.text.lines().filter(|l| l.starts_with("@@")).count(),
+            1,
+            "{}",
+            d.text
+        );
+        assert!(d.text.contains("\n-l5\n+l5 EDIT\n"), "{}", d.text);
+        assert!(!d.text.contains("+l1\n"), "{}", d.text);
+    }
+
+    #[tokio::test]
+    async fn commit_file_diff_pairs_mode_cross_dir_and_case_only_renames() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-shapes-").await;
+        std::fs::write(dir.join("m.sh"), TEN).unwrap();
+        std::fs::write(dir.join("a.txt"), TEN.replace("l1", "x1")).unwrap();
+        std::fs::write(dir.join("File.txt"), TEN.replace("l1", "c1")).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "m.sh", "n.sh"]).await;
+        git_ok(&repo, &["update-index", "--chmod=+x", "n.sh"]).await;
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        git_ok(&repo, &["mv", "a.txt", "sub/b.txt"]).await;
+        git_ok(&repo, &["mv", "File.txt", "file.txt"]).await;
+        git_ok(&repo, &["commit", "-qm", "shapes"]).await;
+        let sha = git_ok(&repo, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        let mode = commit_diff(&repo, &sha, "n.sh").await;
+        assert_paired(&mode, "m.sh", "n.sh");
+        assert!(
+            mode.text.contains("old mode 100644\nnew mode 100755"),
+            "{}",
+            mode.text
+        );
+        assert_pure_rename(
+            &commit_diff(&repo, &sha, "sub/b.txt").await,
+            "a.txt",
+            "sub/b.txt",
+        );
+        assert_pure_rename(
+            &commit_diff(&repo, &sha, "file.txt").await,
+            "File.txt",
+            "file.txt",
+        );
+    }
+
+    /// A space + non-ASCII name: the probe and `old_path` carry the RAW `-z` spelling,
+    /// and the runner's `core.quotePath=false` names it raw in the headers too. A
+    /// literal `"` in a name (which git still C-quotes) is left out: NTFS refuses it.
+    #[tokio::test]
+    async fn commit_file_diff_pairs_a_c_quoted_rename_by_its_raw_name() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-quoted-").await;
+        let new = std::str::from_utf8(b"x y\xc3\xa9.txt").unwrap();
+        std::fs::write(dir.join("sp ace.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "sp ace.txt", new]).await;
+        let sha = commit_all(&repo, "rename").await;
+
+        let d = commit_diff(&repo, &sha, new).await;
+        assert_pure_rename(&d, "sp ace.txt", new);
+        let pair = format!("rename from sp ace.txt\nrename to {new}\n");
+        assert!(d.text.contains(&pair), "{}", d.text);
+    }
+
+    #[tokio::test]
+    async fn commit_file_diff_pairs_binary_renames() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-binary-").await;
+        let bin: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.join("a.bin"), &bin).unwrap();
+        std::fs::write(dir.join("c.bin"), &bin[..2048]).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.bin", "b.bin"]).await;
+        git_ok(&repo, &["mv", "c.bin", "d.bin"]).await;
+        let mut edited = bin[..2048].to_vec();
+        edited[2000] = 7;
+        std::fs::write(dir.join("d.bin"), &edited).unwrap();
+        let sha = commit_all(&repo, "binary renames").await;
+
+        // Pure: no `Binary files … differ` line, so not binary and header-only.
+        assert_pure_rename(&commit_diff(&repo, &sha, "b.bin").await, "a.bin", "b.bin");
+        let edit = commit_diff(&repo, &sha, "d.bin").await;
+        assert_paired(&edit, "c.bin", "d.bin");
+        assert!(edit.is_binary, "{}", edit.text);
+    }
+
+    /// The source's literal pathspec also matches a file under a directory now at
+    /// that path, so the re-run carries two sections and only the rename is kept.
+    #[tokio::test]
+    async fn commit_file_diff_keeps_the_rename_section_under_a_dir_shadow() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-dirshadow-").await;
+        std::fs::write(dir.join("a"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a", "b"]).await;
+        std::fs::create_dir(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a").join("x"), "shadow\n").unwrap();
+        let sha = commit_all(&repo, "shadow").await;
+        let both = git_ok(
+            &repo,
+            &[
+                "show",
+                "--no-color",
+                "--format=",
+                &sha,
+                "--",
+                ":(literal)b",
+                ":(literal)a",
+            ],
+        )
+        .await;
+        assert_eq!(
+            both.matches("diff --git ").count(),
+            2,
+            "fixture premise:\n{both}"
+        );
+
+        let d = commit_diff(&repo, &sha, "b").await;
+        assert_pure_rename(&d, "a", "b");
+        assert!(!d.text.contains("a/x"), "{}", d.text);
+    }
+
+    /// Negatives: a re-created source path, a rewrite below the similarity
+    /// threshold, and `diff.renames=false` pair in neither the commit's file list
+    /// nor its per-file diff.
+    #[tokio::test]
+    async fn commit_file_diff_leaves_unpaired_shapes_as_adds() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-negatives-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        std::fs::write(dir.join("r.txt"), TEN.replace('l', "r")).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(dir.join("a.txt"), "re-created\n").unwrap();
+        git_ok(&repo, &["mv", "r.txt", "s.txt"]).await;
+        std::fs::write(
+            dir.join("s.txt"),
+            "w1\nw2\nw3\nw4\nw5\nw6\nw7\nw8\nr9\nr10\n",
+        )
+        .unwrap();
+        let sha = commit_all(&repo, "negatives").await;
+        let files = crate::git::history::git_commit_files(repo.clone(), sha.clone())
+            .await
+            .unwrap();
+        let added = |p: &str| {
+            files
+                .iter()
+                .find(|f| f.path == p)
+                .map(|f| (f.added, f.deleted))
+        };
+        assert_eq!(added("b.txt"), Some((10, 0)), "{files:?}");
+        assert_eq!(added("s.txt"), Some((10, 0)), "{files:?}");
+        for path in ["b.txt", "s.txt"] {
+            let d = commit_diff(&repo, &sha, path).await;
+            assert_eq!(d.old_path, None, "{}", d.text);
+            assert_eq!(d.text, single_commit_diff(&repo, &sha, path).await);
+        }
+
+        git_ok(&repo, &["config", "diff.renames", "false"]).await;
+        git_ok(&repo, &["mv", "b.txt", "c.txt"]).await;
+        let off = commit_all(&repo, "renames off").await;
+        let files = crate::git::history::git_commit_files(repo.clone(), off.clone())
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 2, "add + delete in the list: {files:?}");
+        let d = commit_diff(&repo, &off, "c.txt").await;
+        assert_eq!(d.old_path, None, "{}", d.text);
+        assert!(d.text.contains("new file mode"), "{}", d.text);
+    }
+
+    #[tokio::test]
+    async fn commit_file_diff_pairs_a_merge_and_leaves_a_root_commit_alone() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-merge-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        let root = commit_all(&repo, "base").await;
+        git_ok(&repo, &["checkout", "-q", "-b", "trunk"]).await;
+        git_ok(&repo, &["checkout", "-q", "-b", "feat"]).await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        commit_all(&repo, "rename").await;
+        git_ok(&repo, &["checkout", "-q", "trunk"]).await;
+        std::fs::write(dir.join("s.txt"), "side\n").unwrap();
+        commit_all(&repo, "side").await;
+        git_ok(&repo, &["merge", "-q", "--no-ff", "--no-edit", "feat"]).await;
+        let merge = git_ok(&repo, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        assert_pure_rename(&commit_diff(&repo, &merge, "b.txt").await, "a.txt", "b.txt");
+        let first = commit_diff(&repo, &root, "a.txt").await;
+        assert_eq!(first.old_path, None);
+        assert_eq!(first.text, single_commit_diff(&repo, &root, "a.txt").await);
+    }
+
+    #[tokio::test]
+    async fn branch_file_diff_pairs_a_three_dot_rename() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-branch-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["checkout", "-q", "-b", "trunk"]).await;
+        git_ok(&repo, &["checkout", "-q", "-b", "feat"]).await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(dir.join("n.txt"), "new\n").unwrap();
+        commit_all(&repo, "rename").await;
+        let diff = |p: &'static str| {
+            crate::git::compare::git_branch_file_diff(
+                repo.clone(),
+                "trunk".into(),
+                "feat".into(),
+                p.into(),
+            )
+        };
+
+        assert_pure_rename(&diff("b.txt").await.unwrap(), "a.txt", "b.txt");
+        let added = diff("n.txt").await.unwrap();
+        let single = git_ok(
+            &repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "refs/heads/trunk...refs/heads/feat",
+                "--",
+                ":(literal)n.txt",
+            ],
+        )
+        .await;
+        assert_eq!(added.text, single);
+        assert_eq!(added.old_path, None);
+    }
+
+    /// Staged arm pairs; the unstaged arm for the new path is a plain modify and the
+    /// untracked arm is untouched.
+    #[tokio::test]
+    async fn staged_file_diff_pairs_and_the_other_arms_stay_unchanged() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-staged-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(dir.join("n.txt"), "staged add\n").unwrap();
+        git_ok(&repo, &["add", "n.txt"]).await;
+        std::fs::write(dir.join("b.txt"), format!("{TEN}unstaged\n")).unwrap();
+        std::fs::write(dir.join("u.txt"), "untracked\n").unwrap();
+
+        let staged = git_diff_file(repo.clone(), "b.txt".into(), true, false)
+            .await
+            .unwrap();
+        assert_pure_rename(&staged, "a.txt", "b.txt");
+        assert!(!staged.undecodable);
+        let add = git_diff_file(repo.clone(), "n.txt".into(), true, false)
+            .await
+            .unwrap();
+        let single = git_ok(
+            &repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--cached",
+                "--",
+                ":(literal)n.txt",
+            ],
+        )
+        .await;
+        assert_eq!((add.text, add.old_path), (single, None));
+        let unstaged = git_diff_file(repo.clone(), "b.txt".into(), false, false)
+            .await
+            .unwrap();
+        let single = git_ok(
+            &repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--",
+                ":(literal)b.txt",
+            ],
+        )
+        .await;
+        assert!(unstaged.text.contains("+unstaged"), "{}", unstaged.text);
+        assert_eq!((unstaged.text, unstaged.old_path), (single, None));
+        let untracked = git_diff_file(repo.clone(), "u.txt".into(), false, true)
+            .await
+            .unwrap();
+        let raw = run_git_raw(
+            Some(&repo),
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                "u.txt",
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        assert_eq!((untracked.text, untracked.old_path), (raw, None));
+    }
+
+    /// A failed probe is an error, never a defaulted "it's an add" verdict.
+    #[tokio::test]
+    async fn a_failed_rename_probe_is_an_error() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-probe-err-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::write(dir.join("n.txt"), "new\n").unwrap();
+        git_ok(&repo, &["add", "n.txt"]).await;
+        let res = diff_with_rename_pairing(
+            &repo,
+            "n.txt",
+            &["diff", "--no-ext-diff", "--no-color", "--cached"],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--name-status",
+                "-z",
+                "no-such-rev",
+            ],
+        )
+        .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn session_file_diff_pairs_a_committed_rename() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-session-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        let base = commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "b.txt"]).await;
+        commit_all(&repo, "turn 1").await;
+        std::fs::write(dir.join("new.txt"), "agent wrote\n").unwrap();
+
+        let d = git_session_file_diff(repo.clone(), "b.txt".into(), base.clone())
+            .await
+            .unwrap();
+        assert_pure_rename(&d, "a.txt", "b.txt");
+        let untracked = git_session_file_diff(repo.clone(), "new.txt".into(), base)
+            .await
+            .unwrap();
+        let raw = run_git_raw(
+            Some(&repo),
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                "new.txt",
+            ],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        assert_eq!((untracked.text, untracked.old_path), (raw, None));
+    }
+
+    async fn stash_diff(repo: &str, path: &str) -> FileDiff {
+        crate::git::ops::git_stash_file_diff(repo.into(), 0, path.into())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn stash_file_diff_pairs_a_stashed_rename_beside_its_untracked_parent() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-stash-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.txt", "c.txt"]).await;
+        std::fs::write(dir.join("u.txt"), "untracked\n").unwrap();
+        git_ok(&repo, &["stash", "push", "-q", "-u"]).await;
+
+        assert_pure_rename(&stash_diff(&repo, "c.txt").await, "a.txt", "c.txt");
+        let u = stash_diff(&repo, "u.txt").await;
+        let raw = git_ok(
+            &repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "stash@{0}^1",
+                "stash@{0}^3",
+                "--",
+                ":(literal)u.txt",
+            ],
+        )
+        .await;
+        assert!(raw.contains("new file mode"), "{raw}");
+        assert_eq!((u.text, u.old_path), (raw, None));
+    }
+
+    /// OUT OF REACH, pinned: a stashed deletion of tracked `x` plus an untracked twin
+    /// `y` pairs `x => y` in the stash's file list, but `y`'s tracked arm is empty, so
+    /// the pane stays the `^3` full add. A change here must be deliberate.
+    #[tokio::test]
+    async fn stash_file_diff_keeps_a_deleted_plus_untracked_twin_as_an_add() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-stash-twin-").await;
+        std::fs::write(dir.join("x.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::remove_file(dir.join("x.txt")).unwrap();
+        std::fs::write(dir.join("y.txt"), TEN).unwrap();
+        git_ok(&repo, &["stash", "push", "-q", "-u"]).await;
+
+        let y = stash_diff(&repo, "y.txt").await;
+        let raw = git_ok(
+            &repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "stash@{0}^1",
+                "stash@{0}^3",
+                "--",
+                ":(literal)y.txt",
+            ],
+        )
+        .await;
+        assert!(y.text.contains("new file mode"), "{}", y.text);
+        assert_eq!((y.text, y.old_path), (raw, None));
+    }
+
+    /// Stages `old → new` with `edit` applied, returning the paired staged diff.
+    async fn staged_rename(
+        repo: &str,
+        dir: &std::path::Path,
+        old: &str,
+        new: &str,
+        edit: &str,
+    ) -> FileDiff {
+        git_ok(repo, &["mv", old, new]).await;
+        std::fs::write(dir.join(new), edit).unwrap();
+        git_ok(repo, &["add", "-A"]).await;
+        let d = git_diff_file(repo.into(), new.into(), true, false)
+            .await
+            .unwrap();
+        assert_eq!(d.old_path.as_deref(), Some(old), "{}", d.text);
+        d
+    }
+
+    async fn apply_reverse_cached(repo: &str, patch: &str) {
+        crate::git::runner::run_git_input(
+            Some(repo),
+            &[
+                "apply",
+                "--whitespace=nowarn",
+                "--recount",
+                "--cached",
+                "--reverse",
+                "-",
+            ],
+            Some(patch),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// The unnormalized form of a partial patch: the diff's own rename header.
+    fn with_raw_header(diff: &str, patch: &str) -> String {
+        let at = |s: &str| s.find("\n@@").unwrap() + 1;
+        format!("{}{}", &diff[..at(diff)], &patch[at(patch)..])
+    }
+
+    const TWO_HUNK_EDIT: &str =
+        "l1\nl2 EDIT\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13 EDIT\n";
+
+    /// git pairs an intent-to-add file with its deleted source in the index↔worktree
+    /// diff, yet the unstaged arm keeps the add: its hunks then apply onto the empty
+    /// intent-to-add entry, so staging a line still works.
+    #[tokio::test]
+    async fn an_intent_to_add_rename_stays_a_stageable_add() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-ita-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::remove_file(dir.join("a.txt")).unwrap();
+        std::fs::write(dir.join("b.txt"), TEN.replace("l2\n", "l2 EDIT\n")).unwrap();
+        git_ok(&repo, &["add", "-N", "b.txt"]).await;
+        let names = git_ok(&repo, &["diff", "--no-ext-diff", "--name-status", "-z"]).await;
+        assert!(names.starts_with('R'), "premise: git pairs it\n{names:?}");
+
+        let d = git_diff_file(repo.clone(), "b.txt".into(), false, false)
+            .await
+            .unwrap();
+        assert_eq!(d.old_path, None, "{}", d.text);
+        assert!(d.text.contains("new file mode"), "{}", d.text);
+        let patch = build_partial_patch(&d.text, &[sel(Side::New, 1)], false);
+        crate::git::runner::run_git_input(
+            Some(&repo),
+            &["apply", "--whitespace=nowarn", "--recount", "--cached", "-"],
+            Some(&patch),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_ok(&repo, &["show", ":b.txt"]).await, "l1\n");
+    }
+
+    #[tokio::test]
+    async fn unstaging_a_hunk_of_a_staged_rename_keeps_the_rename() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-unstage-hunk-").await;
+        std::fs::write(
+            dir.join("a.txt"),
+            "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\n",
+        )
+        .unwrap();
+        commit_all(&repo, "base").await;
+        let d = staged_rename(&repo, &dir, "a.txt", "b.txt", TWO_HUNK_EDIT).await;
+        assert_eq!(d.text.matches("\n@@ ").count(), 2, "two hunks:\n{}", d.text);
+
+        let patch = build_partial_patch(&d.text, &[sel(Side::Old, 2), sel(Side::New, 2)], true);
+        assert!(patch.starts_with("diff --git a/b.txt b/b.txt\n"), "{patch}");
+        apply_reverse_cached(&repo, &patch).await;
+        assert_eq!(git_ok(&repo, &["ls-files"]).await, "b.txt\n");
+        let index = git_ok(&repo, &["show", ":b.txt"]).await;
+        assert!(
+            index.contains("l2\n") && index.contains("l13 EDIT\n"),
+            "{index}"
+        );
+
+        // Negative control: the same reverse patch under the diff's own rename header
+        // undoes the rename itself.
+        git_ok(&repo, &["add", "-A"]).await;
+        let d = git_diff_file(repo.clone(), "b.txt".into(), true, false)
+            .await
+            .unwrap();
+        let patch = build_partial_patch(&d.text, &[sel(Side::Old, 2), sel(Side::New, 2)], true);
+        apply_reverse_cached(&repo, &with_raw_header(&d.text, &patch)).await;
+        assert!(git_ok(&repo, &["ls-files"]).await.contains("a.txt"));
+    }
+
+    #[tokio::test]
+    async fn unstaging_a_line_of_a_staged_rename_keeps_the_rename() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-unstage-line-").await;
+        std::fs::write(
+            dir.join("a.txt"),
+            "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\n",
+        )
+        .unwrap();
+        commit_all(&repo, "base").await;
+        let d = staged_rename(&repo, &dir, "a.txt", "b.txt", TWO_HUNK_EDIT).await;
+
+        // Withdraw only the added `l13 EDIT`; its unselected `-l13` stays dropped.
+        let patch = build_partial_patch(&d.text, &[sel(Side::New, 13)], true);
+        apply_reverse_cached(&repo, &patch).await;
+        assert_eq!(git_ok(&repo, &["ls-files"]).await, "b.txt\n");
+        let index = git_ok(&repo, &["show", ":b.txt"]).await;
+        assert!(!index.contains("l13"), "{index}");
+        assert!(index.contains("l2 EDIT\n"), "{index}");
+    }
+
+    /// Parity with a modified file: a hunk unstage on a rename + mode change also
+    /// reverts the mode, exactly as the same patch does for a plain modification.
+    #[tokio::test]
+    async fn unstaging_a_hunk_of_a_renamed_mode_change_reverts_the_mode_too() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-unstage-mode-").await;
+        std::fs::write(dir.join("a.sh"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        git_ok(&repo, &["mv", "a.sh", "b.sh"]).await;
+        std::fs::write(dir.join("b.sh"), TEN.replace("l5\n", "l5 EDIT\n")).unwrap();
+        git_ok(&repo, &["add", "-A"]).await;
+        git_ok(&repo, &["update-index", "--chmod=+x", "b.sh"]).await;
+        let d = git_diff_file(repo.clone(), "b.sh".into(), true, false)
+            .await
+            .unwrap();
+        assert_paired(&d, "a.sh", "b.sh");
+
+        let patch = build_partial_patch(&d.text, &[sel(Side::Old, 5), sel(Side::New, 5)], true);
+        assert!(
+            patch.contains("old mode 100644\nnew mode 100755\n"),
+            "{patch}"
+        );
+        apply_reverse_cached(&repo, &patch).await;
+        let staged = git_ok(&repo, &["ls-files", "-s"]).await;
+        assert!(
+            staged.starts_with("100644 ") && staged.ends_with("\tb.sh\n"),
+            "{staged}"
+        );
+        assert_eq!(git_ok(&repo, &["show", ":b.sh"]).await, TEN);
+    }
+
+    #[tokio::test]
+    async fn the_normalized_space_and_quoted_rename_patches_apply() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-unstage-names-").await;
+        let quoted = std::str::from_utf8(b"x y\xc3\xa9.txt").unwrap();
+        std::fs::write(dir.join("sp ace2.txt"), TEN).unwrap();
+        std::fs::write(dir.join("x y.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+
+        let d = staged_rename(
+            &repo,
+            &dir,
+            "sp ace2.txt",
+            "sp ace3.txt",
+            &TEN.replace("l2\n", "l2 EDIT\n"),
+        )
+        .await;
+        assert_eq!(d.text, SPACE_RENAME_DIFF);
+        let patch = build_partial_patch(&d.text, &[sel(Side::Old, 2), sel(Side::New, 2)], true);
+        assert_eq!(patch, SPACE_RENAME_PATCH);
+        apply_reverse_cached(&repo, &patch).await;
+        assert_eq!(git_ok(&repo, &["show", ":sp ace3.txt"]).await, TEN);
+
+        // The runner's `core.quotePath=false` names this file raw; the C-quoted capture
+        // is the same staged change, so its normalized patch must apply here too.
+        let d = staged_rename(
+            &repo,
+            &dir,
+            "x y.txt",
+            quoted,
+            &TEN.replace("l9\n", "l9 EDIT\n"),
+        )
+        .await;
+        let raw = build_partial_patch(&d.text, &[sel(Side::Old, 9), sel(Side::New, 9)], true);
+        assert!(
+            raw.starts_with(&format!("diff --git a/{quoted} b/{quoted}\n")),
+            "{raw}"
+        );
+        let patch = build_partial_patch(
+            QUOTED_RENAME_DIFF,
+            &[sel(Side::Old, 9), sel(Side::New, 9)],
+            true,
+        );
+        apply_reverse_cached(&repo, &patch).await;
+        let files = git_ok(&repo, &["ls-files", "-z"]).await;
+        assert!(
+            !files.contains("x y.txt") && !files.contains("sp ace2.txt"),
+            "{files:?}"
+        );
+        assert_eq!(git_ok(&repo, &["show", &format!(":{quoted}")]).await, TEN);
     }
 }

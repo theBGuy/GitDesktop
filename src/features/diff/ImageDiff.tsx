@@ -140,13 +140,16 @@ interface PanesState {
 export function ImagePanes({
   repoPath,
   filePath,
+  oldPath,
   revs,
 }: {
   repoPath: string;
   filePath: string;
+  /** The old side's path: the diff's rename source, else `filePath`. */
+  oldPath: string;
   revs: ImageRevs;
 }) {
-  const oldFile = useFileAtRev(repoPath, revs.old, filePath, true);
+  const oldFile = useFileAtRev(repoPath, revs.old, oldPath, true);
   const newFile = useFileAtRev(repoPath, revs.new, filePath, true);
   // Keyed by the pair being shown, so a switch to another file drops the
   // previous one's measurements and viewer index during render.
@@ -156,7 +159,7 @@ export function ImagePanes({
   const oldSide = oldFile.data ?? null;
   const newSide = newFile.data ?? null;
 
-  const id = [filePath, revs.old, revs.new].join("|");
+  const id = [filePath, oldPath, revs.old, revs.new].join("|");
   const current = state.id === id ? state : null;
   const patch = (next: Partial<PanesState>) =>
     setState((prev) =>
@@ -171,24 +174,24 @@ export function ImagePanes({
 
   // The sniffed type wins over the extension, which any commit spells freely;
   // it's per-side because the two revisions can hold different formats.
-  const paneSrc = (side: FileBytes) =>
+  const paneSrc = (side: FileBytes, path: string) =>
     side.base64 === null
       ? null
-      : `data:${side.mime ?? imageMime(filePath) ?? "application/octet-stream"};base64,${side.base64}`;
+      : `data:${side.mime ?? imageMime(path) ?? "application/octet-stream"};base64,${side.base64}`;
 
   const panes: Pane[] = [];
   if (oldSide !== null) {
     panes.push({
       key: "old",
       label: newSide === null ? "Deleted" : "Old",
-      src: paneSrc(oldSide),
+      src: paneSrc(oldSide, oldPath),
     });
   }
   if (newSide !== null) {
     panes.push({
       key: "new",
       label: oldSide === null ? "Added" : "New",
-      src: paneSrc(newSide),
+      src: paneSrc(newSide, filePath),
     });
   }
 
@@ -270,10 +273,13 @@ export function ImagePanes({
 export function ImageDiff({
   repoPath,
   filePath,
+  oldPath,
   revs,
 }: {
   repoPath: string;
   filePath: string;
+  /** The old side's path: the diff's rename source, else `filePath`. */
+  oldPath: string;
   revs: ImageRevs;
 }) {
   return (
@@ -286,7 +292,12 @@ export function ImageDiff({
         />
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <ImagePanes repoPath={repoPath} filePath={filePath} revs={revs} />
+        <ImagePanes
+          repoPath={repoPath}
+          filePath={filePath}
+          oldPath={oldPath}
+          revs={revs}
+        />
       </div>
     </div>
   );

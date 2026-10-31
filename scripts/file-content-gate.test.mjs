@@ -15,7 +15,7 @@ import {
 } from "../src/features/diff/file-content-gate.ts";
 
 /** The reads of the default fixture: one file at a commit pair. */
-const READS = contentReadsKey("f.ts", "aaaa~1", "aaaa");
+const READS = contentReadsKey("f.ts", "aaaa~1", "aaaa", "f.ts");
 
 /** Whether two paints were built from the same inputs. */
 const sameInputs = (a, b) =>
@@ -330,7 +330,7 @@ test("revs changed: another commit's warm diff builds at once, never held", () =
   const { painted: before } = render(null, BEFORE);
   const other = render(before, {
     ...AFTER,
-    reads: contentReadsKey("f.ts", "bbbb~1", "bbbb"),
+    reads: contentReadsKey("f.ts", "bbbb~1", "bbbb", "f.ts"),
     oldFetching: true,
     newFetching: true,
   });
@@ -342,7 +342,7 @@ test("another file at the same revs builds at once, never held", () => {
   const { painted: before } = render(null, BEFORE);
   const other = render(before, {
     ...AFTER,
-    reads: contentReadsKey("g.ts", "aaaa~1", "aaaa"),
+    reads: contentReadsKey("g.ts", "aaaa~1", "aaaa", "g.ts"),
     newFetching: true,
   });
   assert.equal(other.decision, "build");
@@ -350,12 +350,37 @@ test("another file at the same revs builds at once, never held", () => {
 
 test("contentReadsKey: the working tree, an absent side and a rev never collide", () => {
   const keys = [
-    contentReadsKey("f", null, null),
-    contentReadsKey("f", undefined, null),
-    contentReadsKey("f", null, undefined),
-    contentReadsKey("f", ":0", null),
-    contentReadsKey("f", "~", null),
-    contentReadsKey("f", "-", null),
+    contentReadsKey("f", null, null, "f"),
+    contentReadsKey("f", undefined, null, "f"),
+    contentReadsKey("f", null, undefined, "f"),
+    contentReadsKey("f", ":0", null, "f"),
+    contentReadsKey("f", "~", null, "f"),
+    contentReadsKey("f", "-", null, "f"),
   ];
   assert.equal(new Set(keys).size, keys.length);
+});
+
+test("contentReadsKey: a changed oldPath changes the key; a same-path key is unchanged", () => {
+  // A same-path pair keys exactly as a key without a rename source.
+  assert.equal(READS, "=aaaa~1\n=aaaa\nf.ts");
+  const renamed = contentReadsKey("f.ts", "aaaa~1", "aaaa", "e.ts");
+  assert.notEqual(renamed, READS);
+  assert.notEqual(renamed, contentReadsKey("f.ts", "aaaa~1", "aaaa", "d.ts"));
+});
+
+test("contentReadsKey: a newline in a path never reads as a rename source", () => {
+  assert.notEqual(
+    contentReadsKey("f\nx", "aaaa~1", "aaaa", "f\nx"),
+    contentReadsKey("f", "aaaa~1", "aaaa", "x"),
+  );
+});
+
+test("another pairing of the same path builds at once, never held", () => {
+  const { painted: before } = render(null, BEFORE);
+  const other = render(before, {
+    ...AFTER,
+    reads: contentReadsKey("f.ts", "aaaa~1", "aaaa", "e.ts"),
+    oldFetching: true,
+  });
+  assert.equal(other.decision, "build");
 });

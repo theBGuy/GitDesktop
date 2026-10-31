@@ -42,5 +42,59 @@ export function parseHunks(diffText: string): ParsedDiff {
 
 /** A patch containing just one hunk, in the form `git apply` expects. */
 export function buildHunkPatch(parsed: ParsedDiff, hunk: DiffHunk): string {
-  return `${parsed.fileHeader}${hunk.text}`;
+  return `${plainModificationHeader(parsed.fileHeader)}${hunk.text}`;
+}
+
+/** File-header lines that pair a diff with a different source path. */
+const PAIRING_HEADERS = [
+  "similarity index ",
+  "dissimilarity index ",
+  "rename from ",
+  "rename to ",
+  "copy from ",
+  "copy to ",
+];
+
+/**
+ * A rename/copy file header rewritten as a plain modification of the NEW path,
+ * so a hunk patch edits that path in place: applied in reverse, the pairing
+ * would undo the rename itself. Mirrors the Rust `plain_modification_header`
+ * byte for byte (mode and index lines stay; a header without pairing lines
+ * comes back unchanged). Names reuse the diff's own `+++` token, quoting
+ * included; its trailing TAB stays on `---`/`+++` and never reaches `diff --git`.
+ */
+function plainModificationHeader(header: string): string {
+  const lines = header.split("\n");
+  const pairs = (l: string) => PAIRING_HEADERS.some((p) => l.startsWith(p));
+  const minus = lines.find((l) => l.startsWith("--- "))?.slice(4);
+  const plus = lines.find((l) => l.startsWith("+++ "))?.slice(4);
+  if (!lines.some(pairs) || minus === undefined || plus === undefined)
+    return header;
+  const tab = plus.endsWith("\t") ? "\t" : "";
+  const newName = tab ? plus.slice(0, -1) : plus;
+  const oldSide = oldSideSpelling(
+    minus.endsWith("\t") ? minus.slice(0, -1) : minus,
+    newName,
+  );
+  if (oldSide === null) return header;
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("diff --git "))
+      out.push(`diff --git ${oldSide} ${newName}`);
+    else if (line.startsWith("--- ")) out.push(`--- ${oldSide}${tab}`);
+    else if (!pairs(line)) out.push(line);
+  }
+  return out.join("\n");
+}
+
+/** `name`'s path under the prefix `old` carries (`b/x` beside `a/y` gives
+ *  `a/x`), keeping `name`'s C-quoting; null for a name without a prefix. */
+function oldSideSpelling(old: string, name: string): string | null {
+  const bareOld = old.startsWith('"') ? old.slice(1) : old;
+  const quote = name.startsWith('"') ? '"' : "";
+  const bareNew = quote ? name.slice(1) : name;
+  const oldSlash = bareOld.indexOf("/");
+  const newSlash = bareNew.indexOf("/");
+  if (oldSlash === -1 || newSlash === -1) return null;
+  return `${quote}${bareOld.slice(0, oldSlash)}/${bareNew.slice(newSlash + 1)}`;
 }

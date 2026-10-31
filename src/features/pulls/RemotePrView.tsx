@@ -2952,11 +2952,13 @@ export function RemotePrView({
           queryClient.ensureQueryData(prDiffOptions(repoPath, number, lens)),
           aiExcludePatterns(repoPath, settings.aiIgnorePatterns),
         ]);
+        // The Files tab's own binary verdict, read from the diff just awaited.
+        const bins = binaryRowPaths(prForGen.files, splitUnifiedDiff(text));
         const files = prForGen.files.map((f) => ({
           path: f.path,
           added: f.additions,
           deleted: f.deletions,
-          isBinary: false,
+          isBinary: bins.has(f.path),
         }));
         // A forge-supplied diff arrives whole, so it is filtered client-side.
         // NEVER write the result back into the query cache: the same string
@@ -3893,16 +3895,20 @@ export function RemotePrView({
             loadDiff: () =>
               queryClient
                 .ensureQueryData(prDiffOptions(repoPath, shownNumber, lens))
-                .then((text) => ({
-                  text,
-                  truncated: false,
-                  files: pr.files.map((f) => ({
-                    path: f.path,
-                    added: f.additions,
-                    deleted: f.deletions,
-                    isBinary: false,
-                  })),
-                })),
+                .then((text) => {
+                  // The Files tab's own binary verdict, read from this diff.
+                  const bins = binaryRowPaths(pr.files, splitUnifiedDiff(text));
+                  return {
+                    text,
+                    truncated: false,
+                    files: pr.files.map((f) => ({
+                      path: f.path,
+                      added: f.additions,
+                      deleted: f.deletions,
+                      isBinary: bins.has(f.path),
+                    })),
+                  };
+                }),
           }}
           posting={commentPending}
           // The context above is seeded from the rendered PR, so through a switch

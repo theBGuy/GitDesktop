@@ -5637,11 +5637,7 @@ export const CHECKS = [
     // The helper module IS the idiom; everything else imports sectionIsBinary.
     appliesTo: (file) => file !== "src/lib/git/diff-split.ts",
     scan: perLine(BINARY_MARKER_RE),
-    allowlist: [
-      // stripBinarySections already matches the line-anchored
-      // "\nBinary files " literal.
-      "src/lib/ai/prompt.ts",
-    ],
+    allowlist: [],
     message:
       'the git binary-marker check lives in sectionIsBinary (src/lib/git/diff-split.ts) — a re-spelled "Binary files" literal or regex re-mints the loose-match class (a text diff whose CONTENT mentions binary files read as binary) or drifts from the line-anchored form one site at a time; import the helper',
   },
