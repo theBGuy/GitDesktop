@@ -553,7 +553,9 @@ pub async fn git_diff_file(
             old_path: None,
         }
     } else if staged {
-        // Only HEAD↔index can pair a rename; an index↔worktree diff never holds one.
+        // Only this arm pairs. An index↔worktree diff does pair an intent-to-add
+        // file with its deleted source (measured), but its hunks would then sit on
+        // the source, and staging one onto the empty intent-to-add entry fails.
         diff_with_rename_pairing(
             &repo_path,
             &file_path,
@@ -4037,6 +4039,37 @@ mod tests {
 
     const TWO_HUNK_EDIT: &str =
         "l1\nl2 EDIT\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13 EDIT\n";
+
+    /// git pairs an intent-to-add file with its deleted source in the index↔worktree
+    /// diff, yet the unstaged arm keeps the add: its hunks then apply onto the empty
+    /// intent-to-add entry, so staging a line still works.
+    #[tokio::test]
+    async fn an_intent_to_add_rename_stays_a_stageable_add() {
+        let (_tmp, dir, repo) = rename_repo("gd-rename-ita-").await;
+        std::fs::write(dir.join("a.txt"), TEN).unwrap();
+        commit_all(&repo, "base").await;
+        std::fs::remove_file(dir.join("a.txt")).unwrap();
+        std::fs::write(dir.join("b.txt"), TEN.replace("l2\n", "l2 EDIT\n")).unwrap();
+        git_ok(&repo, &["add", "-N", "b.txt"]).await;
+        let names = git_ok(&repo, &["diff", "--no-ext-diff", "--name-status", "-z"]).await;
+        assert!(names.starts_with('R'), "premise: git pairs it\n{names:?}");
+
+        let d = git_diff_file(repo.clone(), "b.txt".into(), false, false)
+            .await
+            .unwrap();
+        assert_eq!(d.old_path, None, "{}", d.text);
+        assert!(d.text.contains("new file mode"), "{}", d.text);
+        let patch = build_partial_patch(&d.text, &[sel(Side::New, 1)], false);
+        crate::git::runner::run_git_input(
+            Some(&repo),
+            &["apply", "--whitespace=nowarn", "--recount", "--cached", "-"],
+            Some(&patch),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(git_ok(&repo, &["show", ":b.txt"]).await, "l1\n");
+    }
 
     #[tokio::test]
     async fn unstaging_a_hunk_of_a_staged_rename_keeps_the_rename() {

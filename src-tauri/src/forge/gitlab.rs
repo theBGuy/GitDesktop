@@ -1821,12 +1821,13 @@ struct GlabChange {
     a_mode: String,
     #[serde(default, deserialize_with = "null_to_default")]
     b_mode: String,
-    /// The server left this file's hunks out (GitLab 18.4+ flags; absent before),
-    /// so an empty `diff` says nothing about what changed.
-    #[serde(default, deserialize_with = "null_to_default")]
-    collapsed: bool,
-    #[serde(default, deserialize_with = "null_to_default")]
-    too_large: bool,
+    /// Whether the server left this file's hunks out. gitlab.com's MR `/changes`
+    /// sends both flags on every entry (measured); an older server may omit them,
+    /// and an absent or null flag reads as unknown (`None`).
+    #[serde(default)]
+    collapsed: Option<bool>,
+    #[serde(default)]
+    too_large: Option<bool>,
     /// The per-file hunks (no `diff --git`/`---`/`+++` header — we add those).
     #[serde(default)]
     diff: String,
@@ -1942,9 +1943,15 @@ fn reconstruct_file_diff(c: &GlabChange) -> String {
         b_label.as_str()
     };
     let mut s = format!("diff --git {a_label} {b_label}\n");
-    // A file the server left out keeps the header-plus-body shape: its empty
-    // `diff` is no evidence that the change is header-only.
-    if !(c.collapsed || c.too_large) {
+    // Extended headers are written only when the server can't have withheld the
+    // body: an empty `diff` needs both flags answered false, while a `diff` with
+    // hunks loses them only to a flag answered true (an absent flag passes).
+    let whole = if c.diff.is_empty() {
+        c.collapsed == Some(false) && c.too_large == Some(false)
+    } else {
+        c.collapsed != Some(true) && c.too_large != Some(true)
+    };
+    if whole {
         // Extended headers in git's order; modes are grammar-checked because a
         // header-only reader accepts exactly six octal digits.
         let a_mode = git_file_mode(&c.a_mode);
@@ -14886,8 +14893,20 @@ mod tests {
         assert_eq!(out.lines().filter(|l| l.starts_with("+++ ")).count(), 1);
     }
 
-    // The header-only literals below are shared verbatim with
-    // scripts/forge-diff-headers.test.mjs, which classifies them; keep both in step.
+    // Four header-only literals below are shared verbatim with
+    // scripts/forge-diff-headers.test.mjs, which classifies them: the rename, the
+    // mode-only change, the `.gitkeep` new empty file and the control-byte rename.
+    // Keep both sides in step.
+
+    /// A change whose server answered both suppression flags false, the only case
+    /// where an empty `diff` reads as header-only.
+    fn answered() -> GlabChange {
+        GlabChange {
+            collapsed: Some(false),
+            too_large: Some(false),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn renames_without_hunks_as_a_header_only_section() {
@@ -14897,7 +14916,7 @@ mod tests {
             renamed_file: true,
             a_mode: "100644".into(),
             b_mode: "100644".into(),
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&c),
@@ -14914,7 +14933,7 @@ mod tests {
             new_path: "bin/run.sh".into(),
             a_mode: "100644".into(),
             b_mode: "100755".into(),
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&c),
@@ -14930,7 +14949,7 @@ mod tests {
             new_file: true,
             a_mode: "0".into(),
             b_mode: "100644".into(),
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&c),
@@ -14946,7 +14965,7 @@ mod tests {
             new_file: true,
             a_mode: "0".into(),
             b_mode: "100755".into(),
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&added),
@@ -14958,7 +14977,7 @@ mod tests {
             deleted_file: true,
             a_mode: "0".into(),
             b_mode: "0".into(),
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&deleted),
@@ -14975,7 +14994,7 @@ mod tests {
             a_mode: "100644".into(),
             b_mode: "100755".into(),
             diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&c),
@@ -15001,7 +15020,7 @@ mod tests {
                 a_mode: a.into(),
                 b_mode: b.into(),
                 diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
-                ..Default::default()
+                ..answered()
             };
             assert_eq!(
                 reconstruct_file_diff(&c),
@@ -15011,9 +15030,15 @@ mod tests {
         }
     }
 
+    /// An empty `diff` claims a header-only change only when both flags answered
+    /// false; a set flag or an unknown (absent or null) one keeps this shape.
     #[test]
     fn a_suppressed_diff_keeps_the_header_and_body_shape() {
-        for (collapsed, too_large) in [(true, false), (false, true)] {
+        let flags = [Some(true), Some(false), None];
+        let pairs = flags
+            .iter()
+            .flat_map(|&c| flags.iter().map(move |&t| (c, t)));
+        for (collapsed, too_large) in pairs.filter(|&p| p != (Some(false), Some(false))) {
             let c = GlabChange {
                 old_path: "old.bin".into(),
                 new_path: "new.bin".into(),
@@ -15022,11 +15047,12 @@ mod tests {
                 b_mode: "100755".into(),
                 collapsed,
                 too_large,
-                ..Default::default()
+                ..answered()
             };
             assert_eq!(
                 reconstruct_file_diff(&c),
                 "diff --git a/old.bin b/new.bin\n--- a/old.bin\n+++ b/new.bin\n\n",
+                "collapsed {collapsed:?}, too_large {too_large:?}",
             );
         }
     }
@@ -15037,7 +15063,7 @@ mod tests {
             old_path: "src/mixed.txt".into(),
             new_path: "src/mixed\rname.txt".into(),
             renamed_file: true,
-            ..Default::default()
+            ..answered()
         };
         assert_eq!(
             reconstruct_file_diff(&c),
@@ -15050,7 +15076,7 @@ mod tests {
             old_path: "plain.txt".into(),
             new_path: forged.into(),
             renamed_file: true,
-            ..Default::default()
+            ..answered()
         };
         let out = reconstruct_file_diff(&c);
         let quoted = "evil\\n+++ b/ok.txt\\ndiff --git a/ok.txt b/ok.txt";
@@ -15069,13 +15095,24 @@ mod tests {
                 "b_mode":null,"collapsed":null,"too_large":true,"diff":""}"#,
         )
         .unwrap();
-        assert!(c.renamed_file && c.too_large && !c.collapsed);
+        assert!(c.renamed_file);
+        assert_eq!((c.collapsed, c.too_large), (None, Some(true)));
         assert_eq!((c.a_mode.as_str(), c.b_mode.as_str()), ("100644", ""));
-        // Absent on the deprecated /changes wire: every new field defaults.
+        // gitlab.com sends both flags on every /changes entry (measured); a server
+        // that omits them, and the other new fields, must still parse.
         let bare: GlabChange =
             serde_json::from_str(r#"{"old_path":"a","new_path":"a","diff":""}"#).unwrap();
-        assert!(!bare.renamed_file && !bare.collapsed && !bare.too_large);
+        assert!(!bare.renamed_file);
+        assert_eq!((bare.collapsed, bare.too_large), (None, None));
         assert!(bare.a_mode.is_empty() && bare.b_mode.is_empty());
+        let answered: GlabChange = serde_json::from_str(
+            r#"{"old_path":"a","new_path":"a","collapsed":false,"too_large":false,"diff":""}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (answered.collapsed, answered.too_large),
+            (Some(false), Some(false))
+        );
     }
 
     #[test]

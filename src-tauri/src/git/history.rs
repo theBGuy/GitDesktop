@@ -286,6 +286,11 @@ pub async fn git_file_log(
     // `--skip` counts commits before `--follow` filters them, so pages would
     // overlap: walk `skip + limit` file commits and drop the first `skip` here.
     // `-M` keeps a user's `diff.renames=false` from turning a rename into A/D.
+    // `--no-show-signature`: `log.showSignature` prints verification text ahead of a
+    // signed record, which the NUL-split parser would read as part of the hash.
+    // `--relative` names rows from `repo_path` like the queried path, since the MCP
+    // server may be bound to a subdirectory; history stops at a rename from outside
+    // it, whose source git doesn't follow there.
     // git refuses an `-n` past i32::MAX ("not an integer", measured).
     let n_arg = skip.saturating_add(limit).min(i32::MAX as u32).to_string();
     // Literal pathspec, honored even under `--follow`: a raw `[slug]`-style path
@@ -295,8 +300,10 @@ pub async fn git_file_log(
         Some(&repo_path),
         &[
             "log",
+            "--no-show-signature",
             "--follow",
             "-M",
+            "--relative",
             "--name-status",
             "-z",
             "-n",
@@ -605,6 +612,7 @@ pub async fn git_commit_file_diff(
         &file_path,
         &[
             "show",
+            "--no-show-signature",
             "-m",
             "--first-parent",
             "--no-color",
@@ -613,6 +621,7 @@ pub async fn git_commit_file_diff(
         ],
         &[
             "show",
+            "--no-show-signature",
             "-m",
             "--first-parent",
             "--name-status",
