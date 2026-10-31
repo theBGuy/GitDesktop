@@ -15,7 +15,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { presentError } from "@/lib/error-summary";
 import { decodeBase64Utf8 } from "@/lib/git/api";
-import { fileAtRevOptions, useFileAtRev } from "@/lib/git/queries";
+import { useFileAtRev } from "@/lib/git/queries";
 import { isAppError } from "@/lib/tauri/invoke";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import type { DiffContentRevs } from "./DiffSurface";
@@ -244,12 +244,6 @@ export function MarkdownDocPreview({
   // Images come from the side on screen: its rev, and its own path's directory.
   const imageRev = (showOld ? revs.oldRev : revs.newRev) ?? null;
   const imageBaseDir = repoDocBaseDir(showOld ? oldPath : filePath);
-  // A version whose reads never go stale can't change under the same text; any
-  // other re-reads its images whenever the document's own read lands again.
-  const imageRefresh =
-    fileAtRevOptions(repoPath, imageRev, filePath).staleTime === Infinity
-      ? 0
-      : activeQ.dataUpdatedAt;
   return shell(
     <>
       {showOld && (
@@ -265,7 +259,9 @@ export function MarkdownDocPreview({
       <div className="mx-auto w-full max-w-2xl p-6">
         {/* No forge context, so repository-relative links stay inert with an
             explanatory card; relative images load from the version shown and
-            re-read with each landed read of a version that can change. Keyed
+            re-read whenever the document's own read lands again: on refresh
+            for a version that can change, only on invalidation for one that
+            can't (a fetch that deepens a shallow clone). Keyed
             on that version: the same text at another one needs a fresh body,
             not one whose images an earlier load already rewrote. */}
         <Markdown
@@ -274,7 +270,7 @@ export function MarkdownDocPreview({
             repoPath,
             rev: imageRev,
             baseDir: imageBaseDir,
-            refreshKey: imageRefresh,
+            refreshKey: activeQ.dataUpdatedAt,
           }}
         >
           {cleaned}

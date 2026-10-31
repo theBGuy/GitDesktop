@@ -42,17 +42,20 @@ export function normalizeHref(raw: string): string {
 /** Reads one rendered document issues at once. */
 export const REPO_IMAGE_MAX_IN_FLIGHT = 4;
 
-/** Decoded image bytes one rendered document may load; past it an image gets
- *  the "too large" caption, so a document can't make the app buffer without
- *  bound. */
+/** Decoded image bytes one rendered body may load under one refresh key; past
+ *  it an image not yet shown gets the "too large" caption, so a document can't
+ *  make the app buffer without bound. */
 export const REPO_IMAGE_DOC_BUDGET_BYTES = 64 * 1024 * 1024;
 
-/** One document's image budget. Every completed read is charged, kept or not,
- *  since its bytes were buffered either way; once the charge reaches the limit
- *  no further read starts, so overshoot stays within the reads in flight. */
+/** One body's image budget under one refresh key. Every completed read is
+ *  charged, kept or not, since its bytes were buffered either way; once the
+ *  charge reaches the limit no further read starts, so overshoot stays within
+ *  the reads in flight. */
 export interface ImageBudget {
-  /** Charges `size` decoded bytes; true when they still fit the limit. */
-  admit(size: number): boolean;
+  /** Charges `size` decoded bytes; true when they still fit the limit. A read
+   *  of an `id` already charged (a path re-read after an interrupted run) is
+   *  not charged again. */
+  admit(size: number, id?: string): boolean;
   /** Whether the limit is reached, so a read not yet started must not start. */
   exhausted(): boolean;
 }
@@ -61,12 +64,33 @@ export function createImageBudget(
   limit = REPO_IMAGE_DOC_BUDGET_BYTES,
 ): ImageBudget {
   let spent = 0;
+  const charged = new Set<string>();
   return {
-    admit(size) {
-      spent += size;
+    admit(size, id) {
+      if (id === undefined || !charged.has(id)) {
+        if (id !== undefined) charged.add(id);
+        spent += size;
+      }
       return spent <= limit;
     },
     exhausted: () => spent >= limit,
+  };
+}
+
+/** Budgets kept per rendered body and refresh key: a run under the key a body's
+ *  budget was made for reuses it, so a run interrupted mid-queue (an
+ *  `<Activity>` hide) can't buy a fresh limit by restarting; a new key, or a new
+ *  body (a re-parse or a keyed remount), starts fresh. */
+export function createBudgetStore(
+  make: () => ImageBudget = createImageBudget,
+): (body: WeakKey, key: string) => ImageBudget {
+  const held = new WeakMap<WeakKey, { key: string; budget: ImageBudget }>();
+  return (body, key) => {
+    const entry = held.get(body);
+    if (entry !== undefined && entry.key === key) return entry.budget;
+    const budget = make();
+    held.set(body, { key, budget });
+    return budget;
   };
 }
 
@@ -87,6 +111,30 @@ export const IMAGE_CAPTION_REASON: Record<ImageCaptionReason, string> = {
   readFailed: "Couldn't read the file",
   noRepo: "Images can't load in this view",
 };
+
+/** Why a relative image value didn't load: a caption reason, or the document's
+ *  budget refusing it, which says nothing about the file and captions as too
+ *  large. */
+export type ImageFailure = ImageCaptionReason | "overBudget";
+
+/** The caption a failure shows. */
+export function captionReason(failure: ImageFailure): ImageCaptionReason {
+  return failure === "overBudget" ? "tooLarge" : failure;
+}
+
+/** The loader's attributes: the neutralize hook's moved values, the caption
+ *  marker, the refresh key a unit was written for, and the relative candidate a
+ *  fallback image shows. A body's raw HTML keeps its `data-*` through DOMPurify
+ *  by design, so the hook strips every one of these from it first. */
+export const RUN_ATTR = "data-repo-image-run";
+export const SHOWN_SRC_ATTR = "data-repo-shown-src";
+export const REPO_IMAGE_ATTRS: readonly string[] = [
+  "data-repo-src",
+  "data-repo-srcset",
+  "data-repo-image-caption",
+  RUN_ATTR,
+  SHOWN_SRC_ATTR,
+];
 
 /** Phosphor's `Image` icon, regular weight, on its 256-unit viewBox: the
  *  caption builds its glyph from this path rather than rendering a component
@@ -306,15 +354,17 @@ export function unitNeedsWalk(
   return writtenFor !== runKey;
 }
 
-/** Whether a unit already showing an image keeps it untouched: a failed read
- *  says nothing about the file, so it never downgrades a shown image. A definite
- *  outcome (absent, too large, not an image) is the file's state now, so it
- *  does. */
+/** Whether a unit already showing an image keeps it untouched. A failed read
+ *  or a budget refusal says nothing about the file, so any one among the unit's
+ *  failures keeps a shown image; only a unit whose failures are all definite
+ *  (absent, too large, not an image: the file's state now) is rewritten. */
 export function keepsShownImage(
   showing: boolean,
-  reasons: readonly ImageCaptionReason[],
+  failures: readonly ImageFailure[],
 ): boolean {
-  return showing && reasons.includes("readFailed");
+  return (
+    showing && failures.some((f) => f === "readFailed" || f === "overBudget")
+  );
 }
 
 /** URL attributes the neutralize hook removes when relative, by lowercase

@@ -11,6 +11,8 @@ import { test } from "node:test";
 
 import {
   captionName,
+  captionReason,
+  createBudgetStore,
   createImageBudget,
   decodedByteLength,
   IMAGE_CAPTION_REASON,
@@ -20,11 +22,14 @@ import {
   keepsShownImage,
   parseSrcset,
   RELATIVE_URL_ATTRS,
+  REPO_IMAGE_ATTRS,
+  RUN_ATTR,
   relativeUrlAttrs,
   renderableImageMime,
   repoDocBaseDir,
   resolveRepoImagePath,
   runCapped,
+  SHOWN_SRC_ATTR,
   serializeSrcset,
   unitNeedsWalk,
 } from "../src/components/markdown/markdown-images.ts";
@@ -323,11 +328,53 @@ test("the loader gates and charges its reads through the budget", () => {
     true,
   );
   for (const call of [
-    "createImageBudget(",
+    "createBudgetStore(",
+    "budgetFor(htmlProp, runKey)",
     "budget.exhausted(",
     "budget.admit(",
   ])
     assert.ok(masked.includes(call), call);
+});
+
+test("a re-read of a charged path costs nothing more", () => {
+  const budget = createImageBudget(100);
+  assert.equal(budget.admit(60, "a.png"), true);
+  assert.equal(budget.admit(60, "a.png"), true);
+  assert.equal(budget.exhausted(), false);
+  assert.equal(budget.admit(60, "b.png"), false);
+  assert.equal(budget.exhausted(), true);
+});
+
+/** A run interrupted after charging, then the next run under `secondKey`: how
+ *  much the next run may still read. */
+function interruptedRun(store, secondKey) {
+  const body = {};
+  store(body, "k1").admit(80, "a.png");
+  const next = store(body, secondKey);
+  return { exhausted: next.exhausted(), fits: next.admit(30, "b.png") };
+}
+
+test("a same-key run resumes its body's budget; a new key or body starts fresh", () => {
+  const store = createBudgetStore(() => createImageBudget(100));
+  assert.deepEqual(interruptedRun(store, "k1"), {
+    exhausted: false,
+    fits: false,
+  });
+  assert.deepEqual(interruptedRun(store, "k2"), {
+    exhausted: false,
+    fits: true,
+  });
+  const a = {};
+  assert.equal(store(a, "k1"), store(a, "k1"));
+  assert.notEqual(store(a, "k1"), store({}, "k1"));
+});
+
+test("the budget-store pin fails a budget made fresh for every run", () => {
+  const freshEachRun = () => createImageBudget(100);
+  assert.notDeepEqual(interruptedRun(freshEachRun, "k1"), {
+    exhausted: false,
+    fits: false,
+  });
 });
 
 /** Image units after their srcsets are written: what the image's own src did,
@@ -439,6 +486,57 @@ test("a failed read never downgrades a shown image; a definite outcome does", ()
   assert.notEqual(writeEverything(true, ["readFailed"]), true);
 });
 
+test("a budget refusal keeps a shown image and captions an unshown one as too large", () => {
+  assert.equal(keepsShownImage(true, ["overBudget"]), true);
+  assert.equal(keepsShownImage(true, ["absent", "overBudget"]), true);
+  assert.equal(keepsShownImage(false, ["overBudget"]), false);
+  assert.equal(captionReason("overBudget"), "tooLarge");
+  for (const reason of Object.keys(IMAGE_CAPTION_REASON))
+    assert.equal(captionReason(reason), reason);
+  // Negative control: a refusal spelled as the file's own size downgrades.
+  assert.equal(keepsShownImage(true, ["tooLarge"]), false);
+});
+
+/** The `data-repo-*` names a source spells, as attributes or dataset keys. */
+function repoDataAttrs(src) {
+  const names = new Set(src.match(/data-repo-[a-z][a-z0-9-]*/g) ?? []);
+  const masked = maskNonCode(src, true);
+  for (const m of masked.matchAll(/\.dataset\.repo([A-Z][A-Za-z0-9]*)/g))
+    names.add(
+      `data-repo-${m[1].replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`).slice(1)}`,
+    );
+  return [...names];
+}
+
+test("the sanitize hook strips every data-repo attribute the loader uses", () => {
+  const used = repoDataAttrs(read("src/components/markdown/markdown.tsx"));
+  assert.ok(used.includes("data-repo-src"), "the scan reads attribute names");
+  assert.ok(used.includes("data-repo-srcset"));
+  assert.deepEqual(
+    used.filter((name) => !REPO_IMAGE_ATTRS.includes(name)),
+    [],
+  );
+  assert.ok(REPO_IMAGE_ATTRS.includes(RUN_ATTR));
+  assert.ok(REPO_IMAGE_ATTRS.includes(SHOWN_SRC_ATTR));
+  const masked = maskNonCode(
+    read("src/components/markdown/markdown.tsx"),
+    true,
+  );
+  assert.ok(masked.includes("of REPO_IMAGE_ATTRS) node.removeAttribute("));
+});
+
+test("the strip pin flags an unlisted data-repo name in either spelling", () => {
+  const src = read("src/components/markdown/markdown.tsx");
+  for (const forged of [
+    `${src}\nel.setAttribute("data-repo-forged", "");\n`,
+    `${src}\nel.dataset.repoForgedRun = "0";\n`,
+  ])
+    assert.deepEqual(
+      repoDataAttrs(forged).filter((n) => !REPO_IMAGE_ATTRS.includes(n)),
+      [forged.includes("Run") ? "data-repo-forged-run" : "data-repo-forged"],
+    );
+});
+
 test("the loader decides through the pinned helpers and stamps its run key", () => {
   const masked = maskNonCode(
     read("src/components/markdown/markdown.tsx"),
@@ -452,6 +550,10 @@ test("the loader decides through the pinned helpers and stamps its run key", () 
     "relativeUrlAttrs(",
     "contains(active)",
     "preventScroll: true",
+    "reconcileLightboxImage(",
+    "unmarkLightboxImage(",
+    "SHOWN_SRC_ATTR",
+    "rescueFocus(home)",
   ])
     assert.ok(masked.includes(call), call);
 });

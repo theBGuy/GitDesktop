@@ -86,9 +86,10 @@ fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewR
     Ok(PreviewRead::Bytes(bytes))
 }
 
-/// Absence is a missing path/stage at a resolved revision, a missing ancestor of
-/// a resolved base, or a HEAD/@ read (with navigation) while HEAD is unborn.
-/// Other failures stay errors so unrelated bad revisions cannot look absent.
+/// Absence is what git reports as a missing path or stage (it words an unknown
+/// full object id the same way), a missing ancestor of a base that resolves, or a
+/// HEAD/@ read while HEAD is unborn. Other failures stay errors, so a bad
+/// revision name can't pass for an absent file.
 async fn preview_rev_failure(repo: &str, rev: &str, out: GitOutput) -> AppResult<()> {
     if [
         "does not exist in '",

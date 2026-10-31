@@ -44,7 +44,8 @@ import { settingsFormOpts } from "./settings-form";
 
 /** The row's small warning chip, restyled from the Badge base it rides. Its
  *  hover/open tint is warning-keyed: the secondary variant's own tint matches
- *  this bg-muted in dark themes, so it would never show. */
+ *  this bg-muted in dark themes, so it would never show. Light uses /10 to keep
+ *  the warning text's contrast on the tint, dark /20 so the tint stays visible. */
 const MCP_CHIP_CLASS =
   "h-auto shrink-0 rounded border-0 bg-muted px-1.5 py-0.5 text-[10px] text-warning hover:bg-warning/10 aria-expanded:bg-warning/10 dark:hover:bg-warning/20 dark:aria-expanded:bg-warning/20";
 
