@@ -8,7 +8,8 @@
  *  explicit retrack (the mismatch menu's publish item). Drives ROUTING and the
  *  publish confirm's gate; success toasts claim outcomes through pushOutcome /
  *  pushSuccessCopy, never this flag alone. KEEP IN STEP with the backend's
- *  publish arm (`build_push_args`, git/remote.rs). */
+ *  publish arm (`build_push_args`, git/remote.rs) and the twin predicate
+ *  branchPushLabel inlines (push-writes.ts). */
 export function willPublish(b: {
   upstream: string | null;
   upstreamGone: boolean;
@@ -391,17 +392,23 @@ export function publishConfirmTitle(branch: string): string {
 }
 
 /** Whether one of `pushes` is sending `branch`. A HEAD push names no branch
- *  (push-writes.ts BranchPushState.branch null), so it counts as the current
- *  branch, and as ANY branch while the current name is unknown, failing
- *  toward refusal: the hold costs one toast, a miss moves the ref mid-send. */
+ *  (push-writes.ts BranchPushState.branch null) and counts as both the branch it
+ *  recorded starting on (`startedOn`) and the current branch, or ANY branch
+ *  while the current name is unknown, failing toward refusal: the hold costs one
+ *  toast, a miss moves the ref mid-send. The current branch holds because the
+ *  backend pins (`-u`) the HEAD it reads when the IPC call lands, which a
+ *  checkout outside the app can move before the app's status re-read. It holds
+ *  for a bare push too, which resolves HEAD only at spawn, after the
+ *  network-lock wait. Limit: two checkouts during one push waiting on that lock
+ *  (A to B to C) leave the branch git sends (B) unheld. */
 export function pushesBranch(
-  pushes: readonly { branch: string | null }[],
+  pushes: readonly { branch: string | null; startedOn?: string | null }[],
   branch: string,
   currentName: string | null,
 ): boolean {
-  return pushes.some(
-    (p) =>
-      p.branch === branch ||
-      (p.branch === null && (currentName === null || currentName === branch)),
-  );
+  return pushes.some((p) => {
+    if (p.branch !== null) return p.branch === branch;
+    if ((p.startedOn ?? null) === branch) return true;
+    return currentName === null || currentName === branch;
+  });
 }

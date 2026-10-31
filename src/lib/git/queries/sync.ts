@@ -258,8 +258,9 @@ export function useSetSubmoduleBranch(repo: string) {
 }
 
 /** Keyed per repo with the branch in the variables: {@link usePendingBranchPushes}
- *  reads every push in flight, whichever mount fired it. `source` stays on the
- *  client; the backend gets exactly the push's own arguments. */
+ *  reads every push in flight, whichever mount fired it. The client-only vars
+ *  (`source`, `startedOn`) stay on the client; the backend gets exactly the
+ *  push's own arguments. */
 export function usePush(repo: string) {
   const queryClient = useQueryClient();
   return useRepoMutation(

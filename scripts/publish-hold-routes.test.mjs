@@ -202,13 +202,20 @@ const RENDER_PINS = {
   [`${Q}remotes.ts`]: {
     need: [
       "identity: publishRepoKey(repo, identity),",
-      'predicate: (q) => q.queryKey[0] === "repo" && q.queryKey[1] !== repo && q.queryKey[2] === "remotes",',
+      // Sibling worktrees by identity; an identity this session never learned,
+      // or the raw-path fallback, on either side, counts as a sibling.
+      "const siblingRemotes = siblingRemotesOf(repo, identity);",
+      'if (root !== "repo" || path === repo || kind !== "remotes") return false;',
+      "const own = identity ?? peekRepoIdentity(repo);",
+      'if (own === undefined || own === repo || typeof path !== "string") return true;',
+      "const theirs = peekRepoIdentity(path);",
+      "return theirs === undefined || theirs === path || theirs === own;",
     ],
     stale: [],
     // The sibling worktrees' remotes re-read runs on either outcome of the
     // publish call itself (its own try), never of some other step.
     pattern: [
-      /try \{return await api\.forgePublishRepo\([^)]*\);\} finally \{void queryClient\.invalidateQueries\(\{predicate: \(q\) => q\.queryKey\[0\] === "repo" && q\.queryKey\[1\] !== repo && q\.queryKey\[2\] === "remotes",\}\);\}/,
+      /try \{return await api\.forgePublishRepo\([^)]*\);\} finally \{void queryClient\.invalidateQueries\(\{predicate: siblingRemotes\}\);\}/,
     ],
   },
 };
@@ -879,7 +886,53 @@ test("a publish whose remotes re-read skips an outcome fails the check", () => {
   failsWith(detached, `${file}: missing /`);
   // The publishing repo's own remotes back in the sibling pass.
   const ownRepo = mutate(realSources(), file, (text) =>
-    text.replace(/\n\s*q\.queryKey\[1\] !== repo &&/, ""),
+    text.replace(" || path === repo", ""),
   );
-  failsWith(ownRepo, `${file}: missing \`predicate`);
+  failsWith(ownRepo, `${file}: missing \`if (root`);
+  // Every other cached repo again: the identity arm dropped.
+  const anyRepo = mutate(realSources(), file, (text) =>
+    text.replace(
+      "return theirs === undefined || theirs === path || theirs === own;",
+      "return true;",
+    ),
+  );
+  failsWith(anyRepo, `${file}: missing \`return theirs`);
+  // A sibling predicate built but never handed to the re-read.
+  const unwired = mutate(realSources(), file, (text) =>
+    text.replace("{ predicate: siblingRemotes }", "{ predicate: () => true }"),
+  );
+  failsWith(unwired, `${file}: missing /`);
+  // An unknown identity read as no sibling.
+  const unknownSkips = mutate(realSources(), file, (text) =>
+    text.replace(
+      "return theirs === undefined || theirs === path || theirs === own;",
+      "return theirs === path || theirs === own;",
+    ),
+  );
+  failsWith(unknownSkips, `${file}: missing \`return theirs`);
+  // The sibling's identity peeked under the publisher's path: every learned
+  // checkout then compares the publisher with itself.
+  const peeksOwn = mutate(realSources(), file, (text) =>
+    text.replace(
+      "const theirs = peekRepoIdentity(path);",
+      "const theirs = peekRepoIdentity(repo);",
+    ),
+  );
+  failsWith(peeksOwn, `${file}: missing \`const theirs`);
+  // The publisher's raw-path fallback read as a learned identity.
+  const ownRawLearned = mutate(realSources(), file, (text) =>
+    text.replace(
+      "own === undefined || own === repo ||",
+      "own === undefined ||",
+    ),
+  );
+  failsWith(ownRawLearned, `${file}: missing \`if (own`);
+  // A sibling's raw-path fallback read as a learned identity.
+  const theirRawLearned = mutate(realSources(), file, (text) =>
+    text.replace(
+      "theirs === undefined || theirs === path ||",
+      "theirs === undefined ||",
+    ),
+  );
+  failsWith(theirRawLearned, `${file}: missing \`return theirs`);
 });

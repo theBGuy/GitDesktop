@@ -726,6 +726,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         force,
         branch,
         source: "header",
+        // A HEAD push names no branch, so it records the one it starts on, which
+        // keeps that branch held after a checkout; the current one is held too.
+        startedOn: branch === undefined ? headNameRef.current : undefined,
       });
       const { away } = landedIn(repoPath);
       // The outcome toast claims only the pre-push decision (the push IPC

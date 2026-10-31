@@ -199,7 +199,8 @@ export function PublishDialog({
   // The one spelling of draft identity: every draft-store read and write keys
   // on it. The store keeps a failed draft per repo across unmounts and dialog
   // instances, for a retry when this repo's dialog reopens on the same provider.
-  // A success or an owned idle close clears it; a foreign reseed retires it.
+  // A success or an owned idle close clears it; an open on another provider
+  // that reseeds retires it.
   const repoKey = normPath(repoPath);
   // The repo key whose stored draft THIS instance restored, or held when its
   // own submit failed. Compared to repoKey, never tested for truth: the seed's
@@ -234,7 +235,8 @@ export function PublishDialog({
   });
   // Which repo's draft THIS instance's form holds, stamped on every open
   // transition ahead of the seed's skip arm. With seedGenRef it gates only this
-  // instance's settle: the success close, and which values a failure stamps.
+  // instance's settle: the success close, which values a failure stamps, and
+  // whether the failure claims the draft (setOwnsDraft).
   const draftRepoRef = useRef(repoKey);
   // Bumped wherever the seed resets the form: the repo stamp can't tell drafts
   // apart within one repo, since an A→B→A round trip returns to the same key.
@@ -412,8 +414,11 @@ export function PublishDialog({
   useSeedOnOpen(open, seedOnOpen);
 
   // Edits to a failed draft this open instance shows keep the store current.
-  // Only edits and the seed's reset move the form's values (its defaults are
-  // constant), so a repo switch leaves the old subscription nothing to write.
+  // The form's values move only through this dialog's own writes (edits, the
+  // owner and workspace seeds, Generate, the seed's reset), and in-repo ones
+  // rightly mirror. The subscription is keyed to the owned repoKey and torn
+  // down on a switch before any new-repo seed, so it never writes one repo's
+  // values into another's draft.
   const storedProvider = usePublishDraftStore(
     (s) => s.byRepo[repoKey]?.provider,
   );

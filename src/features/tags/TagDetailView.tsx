@@ -391,13 +391,14 @@ export function TagDetailView({
   async function onPushTag() {
     if (tagPush || refuseWhileOffline()) return;
     if (refuseWhilePublishing(queryClient, repoPath)) return;
+    const pushedIn = repoPath;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
       onError(e);
       return;
     }
-    toast.success(`Pushed ${tag}`);
+    toast.success(`Pushed ${tag}${landedIn(pushedIn).away}`);
   }
 
   // `selectTag` is global — deselect only while THIS tag in THIS repo is still
@@ -413,6 +414,7 @@ export function TagDetailView({
     if (deleteTagRemote && refuseWhileOffline()) return;
     if (deleteTagRemote && refuseWhilePublishing(queryClient, repoPath)) return;
     const startedFor = tagKey;
+    const deletedIn = repoPath;
     try {
       await (deleteTagRemote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(
         tag,
@@ -422,7 +424,7 @@ export function TagDetailView({
       if (isLiveTag(startedFor)) setDeleteTagOpen(false);
       return;
     }
-    toast.success(`Deleted ${tag}`);
+    toast.success(`Deleted ${tag}${landedIn(deletedIn).away}`);
     if (isLiveTag(startedFor)) setDeleteTagOpen(false);
     deselectIfStillHere();
   }

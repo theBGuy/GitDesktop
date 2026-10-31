@@ -53,7 +53,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -139,7 +139,9 @@ export function DeleteTagDialog({
       closeIfStillOpen();
       return;
     }
-    toast.success(`Deleted tag ${name}${remote ? " (local and origin)" : ""}`);
+    toast.success(
+      `Deleted tag ${name}${remote ? " (local and origin)" : ""}${landedIn(startedIn).away}`,
+    );
     closeIfStillOpen();
   }
   return (

@@ -122,7 +122,7 @@ import type {
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
-import { focusInOpenModal } from "@/lib/hotkeys/modal-gate";
+import { focusInOpenModal } from "@/lib/hotkeys/open-modal";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   OFFLINE_ITEM_REASON,
@@ -1452,6 +1452,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           )
         )
           return;
+        // Inside the try, so the finally's clearTarget closes the confirm on
+        // this refusal; the one before the try leaves it open.
         if (refuseWhileBranchPushes(deleteTarget)) return;
         const free = (b: string | null | undefined): b is string =>
           Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
@@ -1519,7 +1521,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         remote: target.remote,
         name: target.name,
       });
-      toast.success(`Deleted ${target.name} on ${target.remote}`);
+      toast.success(
+        `Deleted ${target.name} on ${target.remote}${landedIn(target.repo).away}`,
+      );
     } catch (e) {
       onError(e);
     } finally {
@@ -2046,8 +2050,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   }
 
   // Fire-time hold for routes that move or remove `branch`'s ref: the fork-PR
-  // detection, the latched render read (a HEAD push stays on the branch it
-  // started on), and the live cache for pushes started after this render.
+  // detection, the latched render read, and the live cache for pushes started
+  // after this render. A HEAD push's recorded start keeps that branch held after
+  // a checkout, and the current branch is held too.
   function refuseWhileBranchPushes(
     branch: string,
     message = BRANCH_PUSH_ACTIVE_MESSAGE,
@@ -2245,12 +2250,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // list or a switch back still shows a push an earlier render started.
   const pendingPushes = usePendingBranchPushes(repoPath);
   const pendingPushIds = usePendingBranchPushIds();
-  // A HEAD push (the header's plain push) names no branch, so each is latched to
-  // the branch current when it first shows here: a checkout mid-push must not
-  // walk its spinner onto another row. State adjusted in render (never a ref:
-  // the compiler would skip the component), keyed on the mutation id so the
-  // adjust is idempotent. An id leaves only once it is pending in NO repo, so a
-  // switch away and back still finds it latched.
+  // A HEAD push (the header's plain push) names no branch, so for display each
+  // is latched to the branch it recorded starting on, else the one current when
+  // it first shows here: a checkout mid-push keeps its row spinner on that
+  // branch. The fire-time holds also cover the current branch. State adjusted
+  // in render (never a ref: the compiler would skip the component), keyed on
+  // the mutation id so the adjust is idempotent. An id leaves only once it is
+  // pending in NO repo, so a switch away and back still finds it latched.
   const [pushLatch, setPushLatch] = useState<Readonly<Record<number, string>>>(
     {},
   );

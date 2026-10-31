@@ -310,7 +310,8 @@ export function useStashReapplyRecovery(repoPath: string) {
     // own, and an open prompt stays up to confirm again once reconnected. The
     // others replay local refs and run offline.
     if (req.run.op === "pull" && refuseWhileOffline()) return;
-    // A push started after the prompt opened: the prompt stays up, as offline.
+    // A push started after the prompt opened: an open prompt stays up, as
+    // offline; an auto-run is dropped with the push toast.
     if (refuseWhileRunPushes(queryClient, repoPath, req.run)) return;
     const copy: AutostashCopy = {
       operation: capitalize(req.operationLabel),

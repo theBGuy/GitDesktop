@@ -27,7 +27,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
 import { refuseWhilePublishing } from "./PublishPendingBanner";
 
@@ -139,6 +139,7 @@ export function ForkPrPublishGuard({
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    const pushedIn = repoPath;
     try {
       await push.mutateAsync({
         setUpstream: false,
@@ -146,7 +147,10 @@ export function ForkPrPublishGuard({
         remote,
         remoteBranch: match.headRefName,
       });
-      toast.success(`Pushed ${commits} to ${slug}:${match.headRefName}.`);
+      const { away } = landedIn(pushedIn);
+      toast.success(
+        `Pushed ${commits} to ${slug}:${match.headRefName}${away}.`,
+      );
       onClose();
     } catch (e) {
       toastError(e);

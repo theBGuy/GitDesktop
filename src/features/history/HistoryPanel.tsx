@@ -96,7 +96,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -722,13 +722,14 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   async function pushTagToOrigin(tag: string) {
     if (pendingTagPush(tag) || refuseWhileOffline()) return;
     if (refuseWhilePublishing(queryClient, repoPath)) return;
+    const pushedIn = repoPath;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
       onError(e);
       return;
     }
-    toast.success(`Pushed tag ${tag} to origin`);
+    toast.success(`Pushed tag ${tag} to origin${landedIn(pushedIn).away}`);
   }
 
   // The log can trail an outside commit (and push): undo only the HEAD status

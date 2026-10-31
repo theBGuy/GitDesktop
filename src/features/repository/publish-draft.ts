@@ -58,8 +58,10 @@ export type DraftActionOnOpen = "keep" | "restore" | "reseed";
 /** What an opening dialog does with its form. "keep": leave the submitting
  *  form untouched. "restore": reset the form from the stored failed draft
  *  (same repo, same provider). "reseed": reset to defaults and retire any
- *  stored draft for this repo. Arm order is the contract: a running submit's
- *  form is never reset under it. */
+ *  stored draft for this repo. Arm order is the contract: a same-repo reopen
+ *  never resets a running submit's form under it. A reopen in another repo
+ *  resets the form, and the submit's settle is guarded by the seed
+ *  generation (PublishDialog's seedGenRef). */
 export function keepDraftOnOpen(input: {
   prevRepo: string;
   repo: string;

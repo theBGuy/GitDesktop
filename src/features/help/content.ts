@@ -1066,8 +1066,9 @@ Publishing pushes the current branch's full history, so it can take a few minute
 Closing the dialog doesn't stop it: a status line at the top of the repository shows it
 until it finishes, and **Publish repository…** in the sync bar reads **Publishing…** and
 stays disabled meanwhile, so a second publish can't start. Until it finishes, pushes from
-the sync bar and the branch list, new pull requests, and tag pushes stop with a note that
-a publish is running, in the repository and in any of its worktrees.
+the sync bar and the branch list, tag pushes, new pull requests, and deleting a branch or
+tag on a remote stop with a note that a publish is running, in the repository and
+in its worktrees.
 
 ## Stash and reapply
 

@@ -1,5 +1,6 @@
 import {
   type MutationCache,
+  type Query,
   type QueryClient,
   useQuery,
   useQueryClient,
@@ -53,11 +54,30 @@ export function useRemotes(repo: string) {
   });
 }
 
+/** Matches the cached remotes of `repo`'s sibling worktrees: another checkout
+ *  whose repository identity is `repo`'s. Identities are peeked when it runs
+ *  (never resolved), and one this session never learned, on either side, counts
+ *  as a sibling, as does the raw-path fallback (repo-identity.ts: an identity
+ *  equal to its path is none): a missed one keeps a stale no-origin answer, an
+ *  extra one costs a local re-read. */
+function siblingRemotesOf(repo: string, identity: string | undefined) {
+  return (q: Query): boolean => {
+    const [root, path, kind] = q.queryKey;
+    if (root !== "repo" || path === repo || kind !== "remotes") return false;
+    const own = identity ?? peekRepoIdentity(repo);
+    if (own === undefined || own === repo || typeof path !== "string")
+      return true;
+    const theirs = peekRepoIdentity(path);
+    return theirs === undefined || theirs === path || theirs === own;
+  };
+}
+
 /** Publishing pushes the repo's commits to the new remote, so it arms the delayed
  *  run recheck like a push. */
 export function usePublishRepo(repo: string) {
   const queryClient = useQueryClient();
   const identity = useRepoIdentity(repo).data;
+  const siblingRemotes = siblingRemotesOf(repo, identity);
   return useRepoMutation(
     repo,
     async (args: {
@@ -82,16 +102,12 @@ export function usePublishRepo(repo: string) {
           args.workspace,
         );
       } finally {
-        // Every worktree shares origin, and a publish can fail after the remote
-        // is already added (before its push), so on either outcome a sibling's
-        // cached remotes (and its Publish arm) drop their no-origin answer. This
-        // repo's own remotes ride useRepoMutation's settle-time subtree pass.
-        void queryClient.invalidateQueries({
-          predicate: (q) =>
-            q.queryKey[0] === "repo" &&
-            q.queryKey[1] !== repo &&
-            q.queryKey[2] === "remotes",
-        });
+        // Every worktree of the repository shares origin, and a publish can fail
+        // after the remote is already added (before its push), so on either
+        // outcome a sibling worktree's cached remotes (and its Publish arm) drop
+        // their no-origin answer. This repo's own remotes ride useRepoMutation's
+        // settle-time subtree pass.
+        void queryClient.invalidateQueries({ predicate: siblingRemotes });
       }
     },
     {

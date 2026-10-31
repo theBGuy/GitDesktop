@@ -1,17 +1,19 @@
 // Pins the fire-time push re-checks on the routes that move or remove a branch
 // ref (rename, local delete, archive, reset to upstream, pull-drop, the
-// stash-reapply reruns) or delete branches in bulk (Clean up), and the Ctrl+B
-// modal gate. A dialog opened before a push started still submits after it, so
-// each submit reads the pending pushes live; render state alone predates them.
+// stash-reapply reruns) or delete branches in bulk (Clean up), every HEAD push
+// recording the branch it starts on, and the Ctrl+B modal gate. A dialog
+// opened before a push started still submits after it, so each submit reads
+// the pending pushes live; render state alone predates them.
 //
 // The source checker is a pure function over file text, so the suite feeds it
 // the real files (must pass) and in-memory mutants with a check removed (must
 // fail). It fails closed: a missing file, anchor or needle is a failure.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { posix } from "node:path";
 import { test } from "node:test";
 import { pushesBranch } from "../src/features/repository/branch-sync-state.ts";
-import { elementInOpenModal } from "../src/lib/hotkeys/modal-gate.ts";
+import { elementInOpenModal } from "../src/lib/hotkeys/open-modal.ts";
 
 const R = "src/features/repository/";
 const DERIVED =
@@ -129,6 +131,21 @@ const PINS = [
       "await hardReset.mutateAsync",
     ],
     mutate: ["if (refuseWhileBranchPushes(branch)) return;"],
+  },
+  {
+    // The header's push is the one push that can name no branch.
+    name: "sync header push records its start",
+    file: `${R}SyncControls.tsx`,
+    anchor: "async function doPush(",
+    seq: [
+      "await push.mutateAsync({",
+      "branch,",
+      "startedOn: branch === undefined ? headNameRef.current : undefined,",
+      "});",
+    ],
+    mutate: [
+      "startedOn: branch === undefined ? headNameRef.current : undefined,",
+    ],
   },
   {
     name: "sync helper",
@@ -292,14 +309,622 @@ test("pushesBranch: own, other, HEAD and unknown-current pushes", () => {
   assert.equal(pushesBranch(head, "feat", null), true);
   assert.equal(pushesBranch([], "feat", null), false);
   assert.equal(pushesBranch([...other, ...own], "feat", "main"), true);
+  // A null start is an unrecorded one: the rows above hold.
+  const unrecorded = [{ branch: null, startedOn: null }];
+  assert.equal(pushesBranch(unrecorded, "feat", "feat"), true);
+  assert.equal(pushesBranch(unrecorded, "feat", "main"), false);
+  assert.equal(pushesBranch(unrecorded, "feat", null), true);
 });
 
-test("branch-sync-state stays runtime-import-free", () => {
+/** The truth table for HEAD pushes with a recorded start, as
+ *  [name, pushes, branch, currentName, expected]. */
+const START_ROWS = [
+  // Started on A, then a checkout to B: both hold, pinned (-u) or not.
+  ["start, start", [{ branch: null, startedOn: "a" }], "a", "b", true],
+  ["start, current", [{ branch: null, startedOn: "a" }], "b", "b", true],
+  ["start, other", [{ branch: null, startedOn: "a" }], "c", "b", false],
+  ["start, unknown", [{ branch: null, startedOn: "a" }], "c", null, true],
+  [
+    "pinned start, current",
+    [{ branch: null, startedOn: "a", setUpstream: true }],
+    "b",
+    "b",
+    true,
+  ],
+  [
+    "pinned start, unknown",
+    [{ branch: null, startedOn: "a", setUpstream: true }],
+    "c",
+    null,
+    true,
+  ],
+  // No start: the current branch, or any while it is unknown.
+  ["no start, current", [{ branch: null, startedOn: null }], "b", "b", true],
+  ["no start, other", [{ branch: null, startedOn: null }], "a", "b", false],
+  ["no start, unknown", [{ branch: null, startedOn: null }], "a", null, true],
+  // A named push ignores any start it carries, and the current branch.
+  ["named, its start", [{ branch: "c", startedOn: "a" }], "a", "a", false],
+  ["named, its branch", [{ branch: "c", startedOn: "a" }], "c", "a", true],
+];
+
+test("pushesBranch: a HEAD push holds its recorded start and the current branch", () => {
+  for (const [name, pushes, branch, current, want] of START_ROWS)
+    assert.equal(pushesBranch(pushes, branch, current), want, name);
+});
+
+// Each mutant drops or bends one arm of the HEAD-push rules (start, current,
+// unknown current, named push); the table must catch every one.
+const PUSHES_BRANCH_MUTANTS = {
+  "start ignored": (pushes, branch, current) =>
+    pushes.some((p) =>
+      p.branch !== null
+        ? p.branch === branch
+        : current === null || current === branch,
+    ),
+  "a recorded start replaces the current branch": (pushes, branch, current) =>
+    pushes.some((p) => {
+      if (p.branch !== null) return p.branch === branch;
+      if ((p.startedOn ?? null) !== null) return p.startedOn === branch;
+      return current === null || current === branch;
+    }),
+  "a pinned start replaces the current branch": (pushes, branch, current) =>
+    pushes.some((p) => {
+      if (p.branch !== null) return p.branch === branch;
+      if (p.startedOn === branch) return true;
+      if ((p.startedOn ?? null) !== null && p.setUpstream === true)
+        return false;
+      return current === null || current === branch;
+    }),
+  "an unknown current widens nothing": (pushes, branch, current) =>
+    pushes.some((p) =>
+      p.branch !== null
+        ? p.branch === branch
+        : p.startedOn === branch || current === branch,
+    ),
+  "current dropped": (pushes, branch) =>
+    pushes.some((p) =>
+      p.branch !== null ? p.branch === branch : p.startedOn === branch,
+    ),
+  "a HEAD push holds every branch": (pushes, branch) =>
+    pushes.some((p) => p.branch === null || p.branch === branch),
+  "a named push reads its start": (pushes, branch, current) =>
+    pushes.some((p) => {
+      if (p.startedOn === branch) return true;
+      if (p.branch !== null) return p.branch === branch;
+      return current === null || current === branch;
+    }),
+  "a named push holds nothing": (pushes, branch, current) =>
+    pushes.some(
+      (p) =>
+        p.branch === null &&
+        (p.startedOn === branch || current === null || current === branch),
+    ),
+};
+
+test("pushesBranch mutants each fail a truth row, and every row fails one", () => {
+  const caught = new Set();
+  for (const [name, fn] of Object.entries(PUSHES_BRANCH_MUTANTS)) {
+    let failed = false;
+    for (const [row, pushes, branch, current, want] of START_ROWS)
+      if (fn(pushes, branch, current) !== want) {
+        failed = true;
+        caught.add(row);
+      }
+    assert.ok(failed, `mutant "${name}" passes every row`);
+  }
+  for (const [row] of START_ROWS)
+    assert.ok(caught.has(row), `no mutant fails row "${row}"`);
+});
+
+/** Two views of `text`, each the same length with newlines kept: `code` drops
+ *  comments; `bare` also blanks string and template-literal text (quotes,
+ *  backticks and `${…}` expressions stay). One string-aware pass. A `/` opens a
+ *  regex literal after an operator, `(`, `,` or a keyword; a quote with no
+ *  closing quote on its line is JSX text, not a string. Memoized per text: the
+ *  mutants re-scan the same tree. */
+const lexed = new Map();
+function lex(text) {
+  const hit = lexed.get(text);
+  if (hit !== undefined) return hit;
+  const views = lexOnce(text);
+  lexed.set(text, views);
+  return views;
+}
+function lexOnce(text) {
+  const code = [...text];
+  const bare = [...text];
+  const blank = (arr, from, to) => {
+    for (let k = from; k < to; k++) if (arr[k] !== "\n") arr[k] = " ";
+  };
+  const REGEX_AFTER =
+    /[(,=:[!&|?{;+\-*%~^]$|\b(?:return|typeof|case|in|of|void|yield|await|do|else)$|^$/;
+  const braces = []; // template-expression brace depths, innermost last
+  let depth = 0;
+  let i = 0;
+  const readTemplate = () => {
+    // At a backtick or a `}` closing an expression: text up to `${` or "`".
+    const start = i + 1;
+    let j = start;
+    while (j < text.length && text[j] !== "`") {
+      if (text[j] === "\\") j += 2;
+      else if (text[j] === "$" && text[j + 1] === "{") break;
+      else j++;
+    }
+    blank(bare, start, Math.min(j, text.length));
+    if (text[j] === "$") {
+      braces.push(depth);
+      depth++;
+      i = j + 2;
+    } else i = j + 1;
+  };
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "/" && text[i + 1] === "/") {
+      const end = text.indexOf("\n", i);
+      const to = end < 0 ? text.length : end;
+      blank(code, i, to);
+      blank(bare, i, to);
+      i = to;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      const to = end < 0 ? text.length : end + 2;
+      blank(code, i, to);
+      blank(bare, i, to);
+      i = to;
+    } else if (
+      c === "/" &&
+      REGEX_AFTER.test(text.slice(Math.max(0, i - 8), i).trimEnd())
+    ) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < text.length && text[j] !== "\n") {
+        if (text[j] === "\\") j++;
+        else if (text[j] === "[") inClass = true;
+        else if (text[j] === "]") inClass = false;
+        else if (text[j] === "/" && !inClass) break;
+        j++;
+      }
+      blank(bare, i + 1, j);
+      i = j + 1;
+    } else if (c === '"' || c === "'") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== c && text[j] !== "\n")
+        j += text[j] === "\\" ? 2 : 1;
+      if (text[j] === c) {
+        blank(bare, i + 1, j);
+        i = j + 1;
+      } else i++;
+    } else if (c === "`") {
+      readTemplate();
+    } else if (c === "{") {
+      depth++;
+      i++;
+    } else if (c === "}") {
+      depth--;
+      if (braces.length > 0 && braces[braces.length - 1] === depth) {
+        braces.pop();
+        readTemplate();
+      } else i++;
+    } else i++;
+  }
+  return { code: code.join(""), bare: bare.join("") };
+}
+
+// The CI guards job runs this suite with no install, so a runtime import in a
+// module it loads from src/ would fail; this pin bans every import so none can
+// slip in, re-exports and dynamic imports included. Matched over `lex`'s bare
+// view, so neither a comment nor text inside a string hides or fakes one.
+const IMPORT_FREE = [
+  `${R}branch-sync-state.ts`,
+  "src/lib/hotkeys/open-modal.ts",
+];
+const IMPORT_SHAPES = [
+  /(^|[^\w$.])import\s*(type\s+)?[\w{*]/,
+  /(^|[^\w$.])import\s*["'`]/,
+  /(^|[^\w$.])export\s*(type\s+)?(\*(\s*as\s+\w+)?|\{[^}]*\})\s*from\s*["'`]/,
+  /(^|[^\w$.])import\s*\(\s*["'`\w]/,
+];
+const importsIn = (src) => {
+  const { bare } = lex(src);
+  return IMPORT_SHAPES.filter((re) => re.test(bare));
+};
+for (const file of IMPORT_FREE)
+  test(`${file} stays import-free`, () => {
+    const src = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    assert.deepEqual(importsIn(src), []);
+  });
+
+test("the import-free check catches each import shape, and only real ones", () => {
   const src = readFileSync(
-    new URL(`../${R}branch-sync-state.ts`, import.meta.url),
+    new URL(`../${IMPORT_FREE[0]}`, import.meta.url),
     "utf8",
   );
-  assert.doesNotMatch(src, /^\s*import\s/m);
+  for (const line of [
+    'import { x } from "./x";',
+    'import type { X } from "./x";',
+    'import "./x";',
+    'export { x } from "./x";',
+    'export * from "./x";',
+    'export {\n  x,\n} from "./x";',
+    'const m = await import("./x");',
+    // A `/*` inside a string opens no comment.
+    'const s = "/*"; import { x } from "./x"; // */',
+    'const t = `${"/*"}`;\nimport { x } from "./x";',
+  ])
+    assert.notDeepEqual(importsIn(`${src}\n${line}\n`), [], line);
+  for (const line of [
+    "const s = \"import { x } from './x'\";",
+    "const s = 'export * from \"./x\"';",
+    'const t = `import("./x")`;',
+    "// import { x } from './x';",
+    "/* export * from './x'; */",
+  ])
+    assert.deepEqual(importsIn(`${src}\n${line}\n`), [], line);
+});
+
+// The usePush call scan. What it proves, over every src/ file: each file that
+// imports `usePush` (by any local name) from the module that defines it or the
+// queries barrel re-exporting it binds it only as `const <x> = <name>(…)`, and
+// uses `<x>` only as `<x>.mutateAsync(…)` / `<x>.mutate(…)` with an object
+// literal, or a read-only member in READ_MEMBERS. Each such object names its
+// branch (`branch:` with a value other than a bare identifier or `undefined`)
+// or records its start (`startedOn:`, same rule); a shorthand, bare-identifier
+// or `undefined` value counts only inside a function BARE_BRANCH lists, whose
+// value it reviewed as a string. A HEAD push with neither would hold only the
+// current branch. Anything else it meets fails closed: another binding shape,
+// any other use of `<x>`, a spread, a template literal or unreadable entry, a
+// namespace import or re-export of either module, zero calls, a stale entry.
+// What it can't see: values beyond that syntactic rule (a non-bare expression
+// that evaluates to undefined), a dynamic `import()` of the module, a use of
+// `<x>` that reads as JSX text (see proseAt), comments or strings the
+// regex-literal heuristic in `lex` misreads, and pushes outside usePush.
+const BARE_BRANCH = {
+  [`${R}SyncControls.tsx`]: ["beginBarePush", "pushFromMenu"],
+  [`${R}ForkPrPublishGuard.tsx`]: ["pushToFork"],
+};
+const READ_MEMBERS = ["isPending", "isPaused"];
+const USE_PUSH_MODULES = new Set([
+  "src/lib/git/queries/sync",
+  "src/lib/git/queries",
+  "src/lib/git/queries/index",
+]);
+const USE_PUSH_BARREL = "src/lib/git/queries/index.ts";
+
+/** `spec` imported from `file`, as a src-rooted path without extension. */
+function resolveSpec(file, spec) {
+  let path;
+  if (spec.startsWith("@/")) path = `src/${spec.slice(2)}`;
+  else if (spec.startsWith(".")) path = posix.join(posix.dirname(file), spec);
+  else return spec;
+  return path.replace(/\.(tsx?|jsx?|mjs)$/, "");
+}
+
+/** The top-level entries of the object literal opening at `open` in `code`
+ *  (comments already dropped), or null when it holds a template literal or
+ *  doesn't close. */
+function objectEntries(code, open) {
+  const entries = [];
+  let cur = "";
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    const c = code[i];
+    if (c === "`") return null;
+    if (c === '"' || c === "'") {
+      const from = i;
+      i++;
+      while (i < code.length && code[i] !== c) i += code[i] === "\\" ? 2 : 1;
+      cur += code.slice(from, i + 1);
+    } else if ("{[(".includes(c)) {
+      if (depth++ > 0) cur += c;
+    } else if ("}])".includes(c)) {
+      if (--depth === 0) {
+        entries.push(cur);
+        return entries.map((e) => e.trim()).filter((e) => e !== "");
+      }
+      cur += c;
+    } else if (c === "," && depth === 1) {
+      entries.push(cur);
+      cur = "";
+    } else cur += c;
+  }
+  return null;
+}
+
+/** The innermost `function NAME(` whose body contains `at`, or null. */
+function enclosingFunction(code, at) {
+  let best = null;
+  for (const m of code.matchAll(/\bfunction\s+(\w+)\s*\(/g)) {
+    if (m.index > at) break;
+    const body = bodyAfter(code.slice(m.index), m[0]);
+    if (body === null) continue;
+    const open = m.index + code.slice(m.index).indexOf(body);
+    if (at > open && at < open + body.length) best = m[1];
+  }
+  return best;
+}
+
+/** A name's own start: no word char before it, and no member dot (a spread's
+ *  `...` still counts as a use). */
+const NOT_MEMBER = "(?<![\\w$])(?<!(?:^|[^.])\\.)";
+
+const lineOf = (text, at) => text.slice(0, at).split("\n").length;
+
+/** Whether [from, to) reads as JSX text: a word before it, and after it a
+ *  word, or sentence punctuation then a tag or a word. */
+function proseAt(bare, from, to) {
+  const left = bare.slice(0, from).trimEnd();
+  const right = bare.slice(to);
+  return (
+    /\w$/.test(left) && /^(\s*\w|[?!.,:;]*\s*<|[?!.,:;]+\s+\w)/.test(right)
+  );
+}
+
+/** How an entry's key counts: "strong" (a value the rule trusts), "bare"
+ *  (shorthand, a bare identifier or `undefined`), or null when absent. */
+function keyStrength(keys, name) {
+  const k = keys.find((e) => e.key === name);
+  if (k === undefined) return null;
+  if (k.value === null || /^(?:\w+|undefined)$/.test(k.value)) return "bare";
+  return "strong";
+}
+
+/** Failures for the usePush call scan over `sources` (src-relative path ->
+ *  text); empty means every call names its branch or records its start. */
+function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
+  const fails = [];
+  let calls = 0;
+  const used = new Set();
+  for (const [file, raw] of Object.entries(sources)) {
+    const text = raw.replace(/\r\n/g, "\n");
+    const { code, bare } = lex(text);
+    const at = (i) => `${file}:${lineOf(text, i)}`;
+    const locals = [];
+    const importRanges = [];
+    for (const m of code.matchAll(
+      /(^|[^\w$.])(import|export)\s+(type\s+)?([\w\s,{}*$]*?)\s*from\s*(["'])([^"'\n]+)\5/g,
+    )) {
+      const start = m.index + m[1].length;
+      // Text inside a string that only looks like an import.
+      if (bare[start] !== m[2][0]) continue;
+      const target = resolveSpec(file, m[6]);
+      if (!USE_PUSH_MODULES.has(target)) continue;
+      importRanges.push([start, start + m[0].length - m[1].length]);
+      const clause = m[4];
+      if (m[2] === "export") {
+        if (file !== USE_PUSH_BARREL)
+          fails.push(`${at(start)}: re-exports a usePush module`);
+        continue;
+      }
+      if (/\*\s*as\s/.test(clause)) {
+        fails.push(`${at(start)}: namespace import of a usePush module`);
+        continue;
+      }
+      const named = clause.match(/\{([^}]*)\}/);
+      for (const spec of named ? named[1].split(",") : []) {
+        const parts = spec
+          .trim()
+          .match(/^(?:type\s+)?(\w+)(?:\s+as\s+(\w+))?$/);
+        if (parts?.[1] === "usePush") locals.push(parts[2] ?? parts[1]);
+      }
+    }
+    const inImport = (i) => importRanges.some(([a, b]) => i >= a && i < b);
+    const bindings = [];
+    for (const local of locals) {
+      for (const m of bare.matchAll(
+        new RegExp(`${NOT_MEMBER}${local}(?![\\w$])`, "g"),
+      )) {
+        if (inImport(m.index)) continue;
+        const bound = bare.slice(0, m.index).match(/\bconst\s+(\w+)\s*=\s*$/);
+        if (bound && /^\s*\(/.test(bare.slice(m.index + local.length)))
+          bindings.push({
+            name: bound[1],
+            at:
+              m.index -
+              bound[0].length +
+              bound[0].indexOf(bound[1], "const".length),
+          });
+        else
+          fails.push(
+            `${at(m.index)}: usePush used other than as const <x> = usePush(…)`,
+          );
+      }
+    }
+    for (const binding of bindings) {
+      const re = new RegExp(`${NOT_MEMBER}${binding.name}(?![\\w$])`, "g");
+      for (const ref of bare.matchAll(re)) {
+        if (ref.index === binding.at) continue;
+        const end = ref.index + binding.name.length;
+        const after = bare.slice(end);
+        const member = after.match(/^\.(\w+)/);
+        if (
+          member &&
+          READ_MEMBERS.includes(member[1]) &&
+          !/^\s*[(=]/.test(after.slice(member[0].length))
+        )
+          continue;
+        const call = after.match(/^\.(mutateAsync|mutate)\s*\(\s*/);
+        if (!call) {
+          if (proseAt(bare, ref.index, end)) continue;
+          fails.push(
+            `${at(ref.index)}: ${binding.name} used other than .mutateAsync/.mutate or a read-only member`,
+          );
+          continue;
+        }
+        const open = end + call[0].length;
+        const verb = `${binding.name}.${call[1]}`;
+        const fn = enclosingFunction(code, ref.index);
+        const where = `${at(ref.index)}: ${verb} in ${fn ?? "(no function)"}`;
+        if (code[open] !== "{") {
+          fails.push(`${where}: without an object literal`);
+          continue;
+        }
+        calls++;
+        const entries = objectEntries(code, open);
+        if (entries === null) {
+          fails.push(`${where}: an object it can't read`);
+          continue;
+        }
+        if (entries.some((e) => e.startsWith("..."))) {
+          fails.push(`${where}: spread in the push variables`);
+          continue;
+        }
+        const keys = entries.map((e) => {
+          const m = e.match(/^(\w+)\s*(?::\s*([\s\S]+))?$/);
+          return m ? { key: m[1], value: m[2]?.trim() ?? null } : null;
+        });
+        if (keys.some((k) => k === null)) {
+          fails.push(`${where}: an entry it can't read`);
+          continue;
+        }
+        const branch = keyStrength(keys, "branch");
+        const started = keyStrength(keys, "startedOn");
+        if (branch === "strong" || started === "strong") continue;
+        const allowed = fn !== null && (bareBranch[file] ?? []).includes(fn);
+        if (allowed && (branch === "bare" || started === "bare")) {
+          used.add(`${file}#${fn}`);
+          continue;
+        }
+        fails.push(`${where}: names no branch and records no start`);
+      }
+    }
+  }
+  for (const [file, fns] of Object.entries(bareBranch))
+    for (const fn of fns)
+      if (!used.has(`${file}#${fn}`))
+        fails.push(`stale bare-branch entry: ${file}#${fn}`);
+  if (calls === 0) fails.push("no usePush calls found");
+  return fails;
+}
+
+function walkSrc(dir = "src", out = {}) {
+  for (const entry of readdirSync(new URL(`../${dir}`, import.meta.url), {
+    withFileTypes: true,
+  })) {
+    const rel = `${dir}/${entry.name}`;
+    if (entry.isDirectory()) walkSrc(rel, out);
+    else if (/\.tsx?$/.test(entry.name))
+      out[rel] = readFileSync(new URL(`../${rel}`, import.meta.url), "utf8");
+  }
+  return out;
+}
+
+test("every usePush call names its branch or records its start", () => {
+  assert.deepEqual(checkPushCalls(walkSrc()), []);
+});
+
+test("the usePush call scan fails closed on every shape it can't prove", () => {
+  const sources = walkSrc();
+  const scanFailsWith = (srcs, fragment, bareBranch, label = fragment) => {
+    const fails = checkPushCalls(srcs, bareBranch);
+    assert.ok(
+      fails.some((f) => f.includes(fragment)),
+      `${label}: expected a failure naming ${fragment}, got ${JSON.stringify(fails)}`,
+    );
+  };
+  const sc = `${R}SyncControls.tsx`;
+  const startLine =
+    "startedOn: branch === undefined ? headNameRef.current : undefined,";
+  assert.ok(sources[sc].includes(startLine));
+  // doPush's shorthand `branch` may be undefined, so it is not listed.
+  scanFailsWith(
+    { ...sources, [sc]: sources[sc].replace(startLine, "") },
+    "in doPush: names no branch and records no start",
+  );
+  scanFailsWith(
+    {
+      ...sources,
+      [sc]: sources[sc].replace(startLine, "startedOn: undefined,"),
+    },
+    "in doPush: names no branch and records no start",
+  );
+  const fg = `${R}ForkPrPublishGuard.tsx`;
+  const probe = (body) => ({
+    ...sources,
+    [fg]: `${sources[fg]}\nasync function probe() {\n  ${body}\n}\n`,
+  });
+  for (const [body, fragment] of [
+    [
+      "await push.mutateAsync({ setUpstream: false });",
+      "in probe: names no branch and records no start",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: false, branch });",
+      "in probe: names no branch and records no start",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: false, branch: branch });",
+      "in probe: names no branch and records no start",
+    ],
+    [
+      "await push.mutateAsync({ setUpstream: false, startedOn: undefined });",
+      "in probe: names no branch and records no start",
+    ],
+    ["await push.mutateAsync(vars);", "without an object literal"],
+    ["await push.mutateAsync({ ...vars });", "spread in the push variables"],
+    ["await push.mutateAsync({ branch: `${x}` });", "an object it can't read"],
+    ['await push.mutateAsync({ ["branch"]: x });', "an entry it can't read"],
+    // Every other use of the binding.
+    ["const run = push.mutateAsync;", "push used other than"],
+    ["const p2 = push;", "push used other than"],
+    ["const { mutateAsync } = push;", "push used other than"],
+    ["await push?.mutateAsync({ branch: x.name });", "push used other than"],
+    ["helper(push);", "push used other than"],
+    ["const o = { ...push };", "push used other than"],
+    ["push.reset();", "push used other than"],
+    // A call after a URL string on the same line is still read.
+    [
+      'const u = "https://x"; await push.mutateAsync({ setUpstream: false });',
+      "in probe: names no branch and records no start",
+    ],
+    // usePush bound any other way.
+    ["const [p] = [usePush(repoPath)];", "usePush used other than"],
+    ["let p = usePush(repoPath);", "usePush used other than"],
+  ])
+    scanFailsWith(probe(body), fragment, undefined, body);
+  // An aliased import is followed under its local name.
+  const aliased = {
+    ...sources,
+    "src/features/probe.tsx": [
+      'import { usePush as usePushAlias } from "@/lib/git/queries";',
+      "function Probe() {",
+      '  const p = usePushAlias("r");',
+      "  p.mutate({ setUpstream: false });",
+      "}",
+    ].join("\n"),
+  };
+  scanFailsWith(aliased, "src/features/probe.tsx:4: p.mutate in Probe");
+  // Relative and module paths resolve too.
+  const relative = {
+    ...sources,
+    "src/lib/git/queries/probe.ts": [
+      'import { usePush } from "./sync";',
+      "export function useProbe() {",
+      '  const p = usePush("r");',
+      "  return p;",
+      "}",
+    ].join("\n"),
+  };
+  scanFailsWith(relative, "src/lib/git/queries/probe.ts:4: p used other than");
+  for (const [line, fragment] of [
+    ['import * as q from "@/lib/git/queries";', "namespace import"],
+    [
+      'export { usePush } from "./queries/sync";',
+      "re-exports a usePush module",
+    ],
+  ])
+    scanFailsWith({ ...sources, "src/lib/git/probe.ts": line }, fragment);
+  // A `/*` in a string doesn't hide the call after it.
+  scanFailsWith(
+    probe(
+      'const s = "/*"; await push.mutateAsync({ setUpstream: false }); // */',
+    ),
+    "in probe: names no branch and records no start",
+  );
+  scanFailsWith({}, "no usePush calls found");
+  scanFailsWith(sources, "stale bare-branch entry", {
+    ...BARE_BRANCH,
+    [sc]: [...BARE_BRANCH[sc], "noSuchFunction"],
+  });
 });
 
 test("every route re-checks the running push where it fires", () => {
@@ -451,9 +1076,9 @@ test("elementInOpenModal: open slots, nested portaled popups, closed and other s
   assert.equal(elementInOpenModal(drawerClosed), false);
 });
 
-test("modal-gate selector strings name every slot and portal", () => {
+test("open-modal selector strings name every slot and portal", () => {
   const src = readFileSync(
-    new URL("../src/lib/hotkeys/modal-gate.ts", import.meta.url),
+    new URL("../src/lib/hotkeys/open-modal.ts", import.meta.url),
     "utf8",
   );
   for (const s of [
