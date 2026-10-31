@@ -1,3 +1,4 @@
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { useEffect, useEffectEvent, useRef } from "react";
 import { toast } from "sonner";
@@ -11,7 +12,15 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { required, useAppForm } from "@/lib/form";
-import { useRenameBranch } from "@/lib/git/queries";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  pendingMutationEntries,
+  useRenameBranch,
+} from "@/lib/git/queries";
+import {
+  branchPushKey,
+  pendingBranchPushesFor,
+} from "@/lib/git/queries/push-writes";
 import {
   isSessionBranchName,
   refNameWarning,
@@ -22,6 +31,7 @@ import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
+import { pushesBranch } from "./branch-sync-state";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   GenerateBranchNameButton,
@@ -32,6 +42,27 @@ import {
   type CommittedNameSource,
   useGenerateBranchName,
 } from "./useGenerateBranchName";
+
+/** Refuses (and says why) while a push is sending `branch`: renaming moves the
+ *  ref the push reads, and a push can start after the dialog opened. */
+function refuseWhileBranchPushes(
+  queryClient: QueryClient,
+  repoPath: string,
+  branch: string,
+  currentName: string | null,
+): boolean {
+  const pushes = pendingBranchPushesFor(
+    pendingMutationEntries(
+      queryClient
+        .getMutationCache()
+        .findAll({ mutationKey: branchPushKey(repoPath), status: "pending" }),
+    ),
+    repoPath,
+  );
+  if (!pushesBranch(pushes, branch, currentName)) return false;
+  toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+  return true;
+}
 
 /** Why Generate holds while the rename runs: the name it would revise has
  *  already been sent. */
@@ -91,6 +122,7 @@ export function RenameBranchDialog({
   committedStatus: "ready" | "pending" | "error";
   onOpenSettings: (section: "ai") => void;
 }) {
+  const queryClient = useQueryClient();
   const renameBranch = useRenameBranch(repoPath);
   const branchNameGen = useGenerateBranchName(repoPath);
   // The Generate affordance's copy — and so its enabled state — is retained
@@ -135,6 +167,8 @@ export function RenameBranchDialog({
     defaultValues: { name: "" },
     onSubmit: async ({ value }) => {
       if (!target) return;
+      if (refuseWhileBranchPushes(queryClient, repoPath, target, currentName))
+        return;
       if (promotionBlocksCheckout(repoPath)) {
         toast.info(PROMOTION_BLOCKS_CHECKOUT);
         return;

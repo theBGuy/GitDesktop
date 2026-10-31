@@ -29,6 +29,7 @@ import {
 } from "@/lib/offline-writes";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { toastError } from "@/lib/toast";
+import { refuseWhilePublishing } from "./PublishPendingBanner";
 
 /**
  * Shown when the branch being published is a local copy of a fork PR's head:
@@ -107,7 +108,13 @@ export function ForkPrPublishGuard({
   // normal push error. The push mutation invalidates the whole repo subtree,
   // which is where the PR list and details live.
   async function pushToFork() {
-    if (!match || refuseWhileOffline() || switchedAway() || pushRunning())
+    if (
+      !match ||
+      refuseWhileOffline() ||
+      switchedAway() ||
+      pushRunning() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
       return;
     setEnsuring(true);
     let remote: string;
@@ -125,7 +132,13 @@ export function ForkPrPublishGuard({
     setEnsuring(false);
     // Again below the remote setup, an await the connection can drop, the user
     // can switch repositories, and another push can start during.
-    if (refuseWhileOffline() || switchedAway() || pushRunning()) return;
+    if (
+      refuseWhileOffline() ||
+      switchedAway() ||
+      pushRunning() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
+      return;
     try {
       await push.mutateAsync({
         setUpstream: false,

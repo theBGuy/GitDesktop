@@ -1,3 +1,4 @@
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
@@ -7,18 +8,29 @@ import type {
   PullMode,
 } from "@/lib/git/api";
 import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  isBranchPushActive,
+  pendingMutationEntries,
+  refuseWhilePushRuns,
+  repoKeys,
   useMergeAutostash,
   usePullAutostash,
   usePullRebaseDecidedAutostash,
   useRebaseAutostash,
   useRebaseOntoAutostash,
 } from "@/lib/git/queries";
+import {
+  branchPushKey,
+  pendingBranchPushesFor,
+} from "@/lib/git/queries/push-writes";
+import type { Branch } from "@/lib/git/types";
 import { refuseWhileOffline } from "@/lib/offline-writes";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { errorToastAction, toastError, toastErrorWithNote } from "@/lib/toast";
+import { pushesBranch } from "./branch-sync-state";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   StashReapplyDialog,
@@ -167,6 +179,42 @@ export interface StashReapplyRequest {
   onUnhandledError?: (e: unknown) => boolean;
 }
 
+/** Refuses (and says why) while a push holds what `run` touches: pull and merge
+ *  queue on the network lock behind ANY push; the rebases rewrite one branch,
+ *  so only its push holds them (any push while the current name is unknown). */
+function refuseWhileRunPushes(
+  queryClient: QueryClient,
+  repoPath: string,
+  run: StashReapplyRun,
+): boolean {
+  if (run.op === "pull" || run.op === "merge")
+    return refuseWhilePushRuns(queryClient, repoPath);
+  const currentName =
+    queryClient
+      .getQueryData<Branch[]>(repoKeys.branches(repoPath))
+      ?.find((b) => b.isCurrent)?.name ?? null;
+  const branch = run.op === "pullRebaseDecided" ? run.branch : currentName;
+  const held =
+    branch === null
+      ? isBranchPushActive(queryClient, repoPath)
+      : pushesBranch(
+          pendingBranchPushesFor(
+            pendingMutationEntries(
+              queryClient.getMutationCache().findAll({
+                mutationKey: branchPushKey(repoPath),
+                status: "pending",
+              }),
+            ),
+            repoPath,
+          ),
+          branch,
+          currentName,
+        );
+  if (!held) return false;
+  toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+  return true;
+}
+
 /** One mounted recovery, as another hook on the same surface consumes it — the
  *  guard that fires BEFORE a dirty-tree refusal hands its own retry back here
  *  rather than mounting a second recovery (and a second dialog). */
@@ -186,6 +234,7 @@ export type StashReapplyRecovery = ReturnType<typeof useStashReapplyRecovery>;
  * runs straight away.
  */
 export function useStashReapplyRecovery(repoPath: string) {
+  const queryClient = useQueryClient();
   const settings = useSettings();
   const saveSettings = useSaveSettings();
   const pullAutostash = usePullAutostash(repoPath);
@@ -261,6 +310,8 @@ export function useStashReapplyRecovery(repoPath: string) {
     // own, and an open prompt stays up to confirm again once reconnected. The
     // others replay local refs and run offline.
     if (req.run.op === "pull" && refuseWhileOffline()) return;
+    // A push started after the prompt opened: the prompt stays up, as offline.
+    if (refuseWhileRunPushes(queryClient, repoPath, req.run)) return;
     const copy: AutostashCopy = {
       operation: capitalize(req.operationLabel),
       reapplied: req.reappliedMessage,

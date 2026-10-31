@@ -52,6 +52,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -310,6 +311,7 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
 }
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
+  const queryClient = useQueryClient();
   const log = useLog(repoPath);
   // Batch-resolve commit-author avatars for the log's authors (GitHub-only,
   // deduped by react-query across the History surfaces).
@@ -719,6 +721,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   async function pushTagToOrigin(tag: string) {
     if (pendingTagPush(tag) || refuseWhileOffline()) return;
+    if (refuseWhilePublishing(queryClient, repoPath)) return;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {

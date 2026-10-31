@@ -45,10 +45,12 @@ import {
   useLastFetchedAt,
 } from "@/lib/git/auto-fetch";
 import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
   branchPushHoldItemReason,
   branchPushHoldReason,
   branchRewriteStatusOptions,
   carriesAllLocalCommits,
+  pendingMutationEntries,
   refuseWhilePushRuns,
   remoteBranchesOptions,
   repoStatusOptions,
@@ -64,6 +66,10 @@ import {
   useRepoStatus,
   useUpdateFromUpstream,
 } from "@/lib/git/queries";
+import {
+  branchPushKey,
+  pendingBranchPushesFor,
+} from "@/lib/git/queries/push-writes";
 import type { BranchRewriteStatus, ForkPrMatch } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
@@ -90,7 +96,11 @@ import {
 import { formatRelativeTime } from "@/lib/time";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import {
+  type PushOutcome,
   presenceUnderUrls,
+  pushesBranch,
+  pushOutcome,
+  pushSuccessCopy,
   pushWouldCreate,
   remoteHasBranch,
   visibilityApplies,
@@ -99,6 +109,7 @@ import {
 } from "./branch-sync-state";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
+import { refuseWhilePublishing } from "./PublishPendingBanner";
 import {
   PublishRepoControl,
   publishPendingReason,
@@ -635,6 +646,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       toast.info("HEAD moved while the dialog was open — nothing was reset.");
       return;
     }
+    if (refuseWhileBranchPushes(branch)) return;
     // An outside fetch can move the upstream while the prompt sits open, so the
     // reset re-measures before it acts. A read that joins one in flight may have
     // begun before that fetch's ref write and return the older tip; the reset
@@ -650,6 +662,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     if (refuseIfSwitched(resetIn, "nothing was reset")) return;
+    // A push can start during the re-read; the reset moves the tip it sends.
+    if (refuseWhileBranchPushes(branch)) return;
     // No measurable upstream tip proves nothing moved.
     if (fresh.upstreamTip === null) {
       toast.info(UNCONFIRMED_NOTICE(upstream, branch));
@@ -692,11 +706,20 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // leaves `-u` to the backend, which reads THAT branch's tracking (untracked
   // or gone publishes with `-u`, tracked never retracks): `hasUpstream`
   // describes HEAD, which may no longer be that branch.
-  async function doPush(force: boolean, branch?: string) {
+  async function doPush(
+    force: boolean,
+    branch?: string,
+    outcome?: PushOutcome,
+  ) {
     // The force confirm and the fork-PR guard can both sit open across a
     // disconnect, and each lands here. Some routes also arrive after an await (a
     // status read, a fork-PR detection) another surface's push can start in.
-    if (refuseWhileOffline() || refuseWhilePushing()) return;
+    if (
+      refuseWhileOffline() ||
+      refuseWhilePushing() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
+      return;
     try {
       const guard = await push.mutateAsync({
         setUpstream: branch === undefined && !hasUpstream,
@@ -704,12 +727,24 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         branch,
         source: "header",
       });
-      // Only a force push has a guarantee to report, and only the two
-      // degraded values say more than the plain confirmation does.
+      const { away } = landedIn(repoPath);
+      // The outcome toast claims only the pre-push decision (the push IPC
+      // reports no create signal); the force toast's two degraded guard values
+      // are the only post-push facts reported.
       if (force)
-        toast.success("Force pushed", {
+        toast.success(`Force pushed${away}`, {
           description: FORCE_PUSH_DEGRADED[guard],
         });
+      else if (outcome !== undefined && branch !== undefined) {
+        const copy = pushSuccessCopy({
+          outcome,
+          branch,
+          remote: "origin",
+          tracks: true,
+          away,
+        });
+        if (copy) toast.success(copy.title, { description: copy.description });
+      }
       closeForceConfirm();
     } catch (e) {
       onError(e);
@@ -852,7 +887,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     // A push that started during the detection refuses before any prompt.
-    if (refuseWhilePushing()) return;
+    if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
+      return;
     // The HEAD arm publishes to origin. A branch origin already has (as of the
     // last fetch) only fast-forwards and tracks, so only a create asks first;
     // the list mirrors origin's FETCH side, so a differing push URL asks too.
@@ -872,13 +908,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       )
     )
       return;
+    const presence = presenceUnderUrls(
+      remoteHasBranch(list, "origin", branch),
+      fetchUrl,
+      pushUrl,
+    );
     const create = willCreateOnRemote({
       ...facts,
-      remoteHasSameName: presenceUnderUrls(
-        remoteHasBranch(list, "origin", branch),
-        fetchUrl,
-        pushUrl,
-      ),
+      remoteHasSameName: presence,
     });
     if (create) {
       const ok = await askPublishConfirm(
@@ -899,7 +936,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     }
     // Pushes `branch` by name: a HEAD that moved under the prompt publishes the
     // branch it named. doPush re-checks offline and running pushes itself.
-    void doPush(false, branch);
+    void doPush(
+      false,
+      branch,
+      pushOutcome({ willPublish: true, create, presence }),
+    );
   }
 
   // A tracked branch whose bare push git sends somewhere other than its upstream
@@ -927,15 +968,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       gitRemotePushUrl(pushedIn, pushRemote).catch(() => null),
     ]);
     if (switchedAway()) return;
-    const create = pushWouldCreate({
-      pushRemote,
-      pushBranch,
-      presence: presenceUnderUrls(
-        remoteHasBranch(list, pushRemote, pushBranch),
-        fetchUrl,
-        pushUrl,
-      ),
-    });
+    const presence = presenceUnderUrls(
+      remoteHasBranch(list, pushRemote, pushBranch),
+      fetchUrl,
+      pushUrl,
+    );
+    const create = pushWouldCreate({ pushRemote, pushBranch, presence });
     if (create !== true) {
       // doPush pushes HEAD, and the destination was read for `branch`.
       if (headNameRef.current !== branch) {
@@ -946,7 +984,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     // A push that started during the reads refuses before any prompt.
-    if (refuseWhilePushing()) return;
+    if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
+      return;
     const ok = await askPublishConfirm(
       {
         branch,
@@ -964,7 +1003,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     );
     if (!ok) return;
     if (switchedAway()) return;
-    if (refuseWhileOffline() || refuseWhilePushing()) return;
+    if (
+      refuseWhileOffline() ||
+      refuseWhilePushing() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
+      return;
     try {
       // Sets no upstream, exactly like the bare push it stands in for.
       await push.mutateAsync({
@@ -974,7 +1018,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         remoteBranch: pushBranch,
         source: "header",
       });
-      toast.success(`Pushed ${branch} to ${pushRemote}/${pushBranch}`);
+      const copy = pushSuccessCopy({
+        outcome: pushOutcome({ willPublish: true, create, presence }),
+        branch,
+        remote: pushRemote,
+        ...(pushBranch === branch ? {} : { remoteBranch: pushBranch }),
+        tracks: false,
+        away: landedIn(pushedIn).away,
+      });
+      if (copy) toast.success(copy.title, { description: copy.description });
     } catch (e) {
       onError(e);
     }
@@ -1002,7 +1054,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       )
     )
       return;
-    if (refuseWhilePushing()) return;
+    if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
+      return;
     const { branch, remote, remoteBranch } = capture.menu;
     if (headNameRef.current !== branch) {
       toast.info("HEAD moved — nothing was pushed.");
@@ -1017,7 +1070,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           remoteBranch,
           source: "header",
         });
-        toast.success(`Pushed ${branch} to ${remote}/${remoteBranch}`);
+        toast.success(
+          `Pushed ${branch} to ${remote}/${remoteBranch}${landedIn(capture.repo).away}`,
+        );
       } else {
         // A same-named branch the remote already has (as of the last fetch) is
         // only fast-forwarded and tracked; an unloaded list asks, and so does a
@@ -1034,12 +1089,14 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             "before the push started",
           );
         if (switchedAway()) return;
+        const presence = presenceUnderUrls(listed, fetchUrl, pushUrl);
         const create = willCreateOnRemote({
           upstream: head?.upstream ?? null,
           upstreamGone: head?.upstreamGone === true,
           setUpstream: true,
-          remoteHasSameName: presenceUnderUrls(listed, fetchUrl, pushUrl),
+          remoteHasSameName: presence,
         });
+        const outcome = pushOutcome({ willPublish: true, create, presence });
         if (create) {
           // The prompt stamps whichever repo is live when it asks, and Base UI
           // returns focus to the menu's trigger once its close finishes.
@@ -1064,7 +1121,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         // This route pushes directly, so the window its reads (and any prompt)
         // opened re-runs the checks doPush would: a push started meanwhile, or
         // a HEAD move.
-        if (refuseWhileOffline() || refuseWhilePushing()) return;
+        if (
+          refuseWhileOffline() ||
+          refuseWhilePushing() ||
+          refuseWhilePublishing(queryClient, repoPath)
+        )
+          return;
         if (headNameRef.current !== branch) {
           toast.info("HEAD moved — nothing was pushed.");
           return;
@@ -1075,9 +1137,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           remote,
           source: "header",
         });
-        toast.success(
-          `Published ${branch} to ${remote} — Push now sends to ${remote}/${branch}`,
-        );
+        const { away } = landedIn(capture.repo);
+        // A create keeps the retrack tail; the other outcomes' description
+        // carries it.
+        const copy =
+          outcome === "created"
+            ? {
+                title: `Published ${branch} to ${remote}${away} — Push now sends to ${remote}/${branch}`,
+              }
+            : pushSuccessCopy({ outcome, branch, remote, tracks: true, away });
+        if (copy) toast.success(copy.title, { description: copy.description });
       }
     } catch (e) {
       onError(e);
@@ -1131,6 +1200,23 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // network lock for up to a minute, so it refuses and says why instead.
   function refuseWhilePushing(): boolean {
     return refuseWhilePushRuns(queryClient, repoPath);
+  }
+
+  // A reset moves `branch`'s ref, so only that branch's push holds it. Read live:
+  // a push can start while the confirm or the re-measure is pending.
+  function refuseWhileBranchPushes(branch: string): boolean {
+    const pushes = pendingBranchPushesFor(
+      pendingMutationEntries(
+        queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: branchPushKey(repoPath), status: "pending" }),
+      ),
+      repoPath,
+    );
+    if (!pushesBranch(pushes, branch, headNameRef.current ?? null))
+      return false;
+    toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+    return true;
   }
 
   // Hotkeys mirror the buttons' own holds (sync-controls-state.ts); the routes
@@ -1524,7 +1610,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             if (
               forkGuard.open &&
               forkGuard.repo === repoPath &&
-              refuseWhilePushing()
+              (refuseWhilePushing() ||
+                refuseWhilePublishing(queryClient, repoPath))
             )
               return;
             closeForkGuard(forkGuard.token);
@@ -1536,7 +1623,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
               refuseIfSwitched(forkGuard.repo, "nothing was published")
             )
               return;
-            void doPush(false, forkGuard.branch);
+            void doPush(
+              false,
+              forkGuard.branch,
+              pushOutcome({
+                willPublish: true,
+                create: undefined,
+                presence: undefined,
+              }),
+            );
           }}
         />
       )}

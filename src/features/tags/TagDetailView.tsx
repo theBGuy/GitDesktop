@@ -4,6 +4,7 @@ import {
   TrashIcon,
   UploadSimpleIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useRef, useState } from "react";
@@ -36,6 +37,7 @@ import {
 } from "@/features/history/commit-confirms";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { formatBytes } from "@/features/repository/insights/primitives";
+import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { presentError } from "@/lib/error-summary";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
 import {
@@ -95,6 +97,7 @@ export function TagDetailView({
   repoPath: string;
   tag: string;
 }) {
+  const queryClient = useQueryClient();
   const gh = useForgeStatus(repoPath);
   // Release reads are provider-neutral; a tag with no release stays just a tag.
   const ghReady = forgeFeatureReady(gh.data, "releases");
@@ -387,6 +390,7 @@ export function TagDetailView({
 
   async function onPushTag() {
     if (tagPush || refuseWhileOffline()) return;
+    if (refuseWhilePublishing(queryClient, repoPath)) return;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
@@ -407,6 +411,7 @@ export function TagDetailView({
   async function onDeleteTag() {
     // Only the remote arm is held: the local-only delete runs offline.
     if (deleteTagRemote && refuseWhileOffline()) return;
+    if (deleteTagRemote && refuseWhilePublishing(queryClient, repoPath)) return;
     const startedFor = tagKey;
     try {
       await (deleteTagRemote ? deleteTagOnOrigin : deleteLocalTag).mutateAsync(

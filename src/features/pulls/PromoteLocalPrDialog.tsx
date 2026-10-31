@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
+import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { presentError } from "@/lib/error-summary";
 import { forgePrComment } from "@/lib/git/api";
 import { useCreatePr, useForgeStatus } from "@/lib/git/queries";
@@ -191,6 +192,8 @@ export function PromoteLocalPrDialog({
     // The look is retained through the close fade; these live gates add `open`
     // and one run at a time, since `pendingPub` holds a single run.
     if (!open || pendingPub !== null || refuseWhileOffline()) return;
+    // The create pushes its head, which a running repository publish holds.
+    if (refuseWhilePublishing(queryClient, repoPath)) return;
     // Fire-time admission, claimed before the first await: the push plus the
     // forge call outlives this dialog, and a second create for the same head
     // would queue on the repo lock and then open a duplicate PR.
@@ -226,6 +229,16 @@ export function PromoteLocalPrDialog({
       const stamp = new Date().toISOString();
       await closeLocal(stamp);
       closedAt = stamp;
+      // A publish can start during the close; refused, the PR reopens through
+      // its own try, so a reopen failure never reaches the create's catch.
+      if (refuseWhilePublishing(queryClient, repoPath)) {
+        try {
+          await reopenLocal(closedAt, prior);
+        } catch (e) {
+          toastError(e);
+        }
+        return;
+      }
       const { number, url } = await createPr.mutateAsync({
         base: pr.base,
         head: pr.head,

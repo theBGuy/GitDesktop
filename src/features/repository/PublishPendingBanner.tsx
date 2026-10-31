@@ -1,6 +1,12 @@
+import type { QueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { Spinner } from "@/components/ui/spinner";
 import { clipTitleFromText } from "@/lib/clip-title";
-import { type PendingPublish, usePendingPublishes } from "@/lib/git/queries";
+import {
+  activePublishOf,
+  type PendingPublish,
+  usePendingPublishes,
+} from "@/lib/git/queries";
 
 /** Each publish provider's display name. */
 export const PUBLISH_PROVIDER_LABELS: Record<
@@ -33,13 +39,38 @@ export function publishingHold(p: PendingPublish): string {
   return `${before}${name}${after}`;
 }
 
+/** A push route's held-confirm reason while the repository publishes. */
+export const PUBLISH_HOLD_REASON = "A publish is running.";
+
+/** A push route's menu-item parenthetical while the repository publishes. */
+export const PUBLISH_HOLD_ITEM_REASON = "a publish is running";
+
+/** The fire-time refusal of a push route while the repository publishes. */
+export function publishRunningMessage(p: PendingPublish): string {
+  return `A publish to ${PUBLISH_PROVIDER_LABELS[p.provider]} is running — wait for it to finish.`;
+}
+
+/** The fire-time refusal every push route shares: true (and says why) while the
+ *  repository has a publish in flight, from this worktree or a sibling. Every
+ *  route refuses whatever its remote, since the publish pushes the whole history. */
+export function refuseWhilePublishing(
+  queryClient: QueryClient,
+  repo: string,
+  identity?: string,
+): boolean {
+  const p = activePublishOf(queryClient, repo, identity);
+  if (p === null) return false;
+  toast.info(publishRunningMessage(p));
+  return true;
+}
+
 /**
  * Keeps a running repository publish visible after its dialog is dismissed. A
  * publish pushes the whole history and can run for minutes, so it lives in the
  * repo view's layout flow, like the worktree-removal line. Read from the mutation
- * cache for the open repo, so it shows only in the repo that started it, shows
- * again on a switch back, and clears when the publish settles either way. There
- * is nothing to press: a publish can't be cancelled.
+ * cache, so it shows in every worktree of the repository (identity-matched),
+ * shows again on a switch back, and clears when the publish settles either way.
+ * There is nothing to press: a publish can't be cancelled.
  */
 export function PublishPendingBanner({ repoPath }: { repoPath: string }) {
   const publishes = usePendingPublishes(repoPath);

@@ -66,6 +66,7 @@ import {
   carriesAllLocalCommits,
   forgeFeatureReady,
   nextPushLatch,
+  pendingMutationEntries,
   REMOTE_BRANCHES_STALE_TIME,
   refuseWhilePushRuns,
   remoteBranchesOptions,
@@ -88,6 +89,7 @@ import {
   usePendingBranchPushes,
   usePendingBranchPushIds,
   usePendingLocalPrWrites,
+  usePendingPublishes,
   usePrList,
   usePush,
   useRebaseBranch,
@@ -105,6 +107,10 @@ import {
   useUpdateBranchFrom,
   useUserWorktrees,
 } from "@/lib/git/queries";
+import {
+  branchPushKey,
+  pendingBranchPushesFor,
+} from "@/lib/git/queries/push-writes";
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type {
   Branch,
@@ -116,6 +122,7 @@ import type {
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { secondaryClickLabel } from "@/lib/hotkeys/binding";
 import { dispatchAction, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { focusInOpenModal } from "@/lib/hotkeys/modal-gate";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import {
   OFFLINE_ITEM_REASON,
@@ -174,7 +181,11 @@ import {
 } from "./branch-list-state";
 import {
   isLocalUpstream,
+  type PushOutcome,
   presenceUnderUrls,
+  pushesBranch,
+  pushOutcome,
+  pushSuccessCopy,
   remoteHasBranch,
   resolveUpdateFromDefault,
   type UpdateSource,
@@ -197,6 +208,11 @@ import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { ForkPrPublishGuard } from "./ForkPrPublishGuard";
 import { OperationHistoryDialog } from "./OperationHistoryDialog";
 import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
+import {
+  PUBLISH_HOLD_ITEM_REASON,
+  PUBLISH_HOLD_REASON,
+  refuseWhilePublishing,
+} from "./PublishPendingBanner";
 import {
   askPublishConfirm,
   recordedVisibility,
@@ -1081,6 +1097,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // loses its listeners — a hidden `<Activity>` tab or an unmounted host — and
   // the outcome would never reach the user. Every mutation below follows suit.
   async function setArchived(name: string, archived: boolean) {
+    // Unarchiving is exempt, as in the menu's render hold.
+    if (archived && refuseWhileBranchPushes(name)) return;
     try {
       await setBranchArchived.mutateAsync({ name, archived });
       toast.success(archived ? `Archived ${name}` : `Unarchived ${name}`);
@@ -1395,6 +1413,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       closeDelete();
       return;
     }
+    // Outside the try, whose finally would close the confirm.
+    if (refuseWhileBranchPushes(deleteTarget)) return;
     try {
       // Between freeing its branch and checking it out, a promote leaves that
       // branch in no checkout, so git would let it be deleted from under it.
@@ -1432,6 +1452,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           )
         )
           return;
+        if (refuseWhileBranchPushes(deleteTarget)) return;
         const free = (b: string | null | undefined): b is string =>
           Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
         const fallback = free(defaultName)
@@ -1460,6 +1481,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           )
         )
           return;
+        if (
+          refuseWhileBranchPushes(
+            deleteTarget,
+            `A push is already running — ${fallback} is checked out and ${deleteTarget} was kept.`,
+          )
+        )
+          return;
       }
       await deleteBranch.mutateAsync(deleteTarget);
       toast.success(`Deleted ${deleteTarget}`);
@@ -1480,7 +1508,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // The confirm can sit open across a disconnect, or from before a push started
     // (a remote delete is a push, so it would queue behind it); refusing keeps it
     // open.
-    if (refuseWhileOffline() || pushAlreadyActive()) return;
+    if (
+      refuseWhileOffline() ||
+      pushAlreadyActive() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
+      return;
     try {
       await deleteRemoteBranch.mutateAsync({
         remote: target.remote,
@@ -1887,6 +1920,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // move's `expectedTip` refuses only when that branch sits elsewhere. A switch
     // under the prompt refuses instead.
     if (refuseIfSwitched(resetIn, "nothing was reset")) return;
+    if (refuseWhileBranchPushes(branch.name)) return;
     // Below the confirm: a promote can start while the prompt is open.
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -1925,6 +1959,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           return;
         }
         if (refuseIfSwitched(resetIn, "nothing was reset")) return;
+        // A push can start during the re-read; the reset moves the tip it sends.
+        if (refuseWhileBranchPushes(branch.name)) return;
         // No measurable upstream tip proves nothing moved.
         if (fresh.upstreamTip === null) {
           toast.info(UNCONFIRMED_NOTICE(base, branch.name));
@@ -1978,9 +2014,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // network lock, so the row shows its progress and the rest of the list stays
   // usable. A publish that would create the branch closes it for its prompt.
   function doPushBranch(branch: Branch, remote?: string) {
-    if (refuseWhileOffline() || pushAlreadyActive()) return;
+    if (
+      refuseWhileOffline() ||
+      pushAlreadyActive() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
+      return;
     if (willPublish(branch)) void beginPublishBranch(branch, remote);
-    else void runPushBranch(branch, remote);
+    else
+      void runPushBranch(
+        branch,
+        remote,
+        pushOutcome({
+          willPublish: false,
+          create: undefined,
+          presence: undefined,
+        }),
+      );
   }
 
   // One push at a time, re-checked where each network-lock route fires: a menu
@@ -1993,6 +2043,32 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return true;
     }
     return refuseWhilePushRuns(queryClient, repoPath);
+  }
+
+  // Fire-time hold for routes that move or remove `branch`'s ref: the fork-PR
+  // detection, the latched render read (a HEAD push stays on the branch it
+  // started on), and the live cache for pushes started after this render.
+  function refuseWhileBranchPushes(
+    branch: string,
+    message = BRANCH_PUSH_ACTIVE_MESSAGE,
+  ): boolean {
+    const detect = publishDetectRef.current;
+    const live = pendingBranchPushesFor(
+      pendingMutationEntries(
+        queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: branchPushKey(repoPath), status: "pending" }),
+      ),
+      repoPath,
+    );
+    if (
+      !(detect?.repo === repoPath && detect.branch === branch) &&
+      !branchPushing(branch) &&
+      !pushesBranch(live, branch, currentNameRef.current)
+    )
+      return false;
+    toast.info(message);
+    return true;
   }
 
   // Publishing a branch that is really a local copy of a fork PR's head pushes a
@@ -2035,7 +2111,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return;
     }
     // A push that started during the detection refuses before any prompt.
-    if (pushAlreadyActive()) return;
+    if (pushAlreadyActive() || refuseWhilePublishing(queryClient, repoPath))
+      return;
     // A named publish with no remote goes to origin (the backend's default). A
     // branch the destination already has (as of the last fetch) only
     // fast-forwards and tracks, so only a create asks first; the list mirrors the
@@ -2055,14 +2132,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       gitRemotePushUrl(publishIn, destination).catch(() => null),
     ]);
     if (switchedAway()) return;
+    const presence = presenceUnderUrls(
+      remoteHasBranch(list, destination, branch.name),
+      fetchUrl,
+      pushUrl,
+    );
     const create = willCreateOnRemote({
       upstream: branch.upstream,
       upstreamGone: branch.upstreamGone,
-      remoteHasSameName: presenceUnderUrls(
-        remoteHasBranch(list, destination, branch.name),
-        fetchUrl,
-        pushUrl,
-      ),
+      remoteHasSameName: presence,
     });
     if (create) {
       // The prompt takes over from the list; it opens once the list's close
@@ -2090,25 +2168,45 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (!ok) return;
     }
     // runPushBranch re-checks offline and running pushes at its own entry.
-    void runPushBranch(branch, remote);
+    void runPushBranch(
+      branch,
+      remote,
+      pushOutcome({ willPublish: true, create, presence }),
+    );
   }
 
-  async function runPushBranch(branch: Branch, remote?: string) {
+  // `outcome` is decided before the push from last-fetch presence: the push
+  // IPC reports no created-vs-updated signal.
+  async function runPushBranch(
+    branch: Branch,
+    remote: string | undefined,
+    outcome: PushOutcome,
+  ) {
     // The fork-PR guard's "Publish anyway" and the detection's fall-through land
     // here without passing doPushBranch.
-    if (refuseWhileOffline() || pushAlreadyActive()) return;
-    const publishing = willPublish(branch);
+    if (
+      refuseWhileOffline() ||
+      pushAlreadyActive() ||
+      refuseWhilePublishing(queryClient, repoPath)
+    )
+      return;
+    const pushedIn = repoPath;
     try {
       await push.mutateAsync({
         setUpstream: false,
         branch: branch.name,
         remote,
       });
-      toast.success(
-        publishing
-          ? `Published ${branch.name} to ${remote ?? "origin"}`
-          : `Pushed ${branch.name} to ${branch.upstream}`,
-      );
+      const { away } = landedIn(pushedIn);
+      const copy = pushSuccessCopy({
+        outcome,
+        branch: branch.name,
+        remote: remote ?? "origin",
+        tracks: true,
+        away,
+      });
+      if (copy) toast.success(copy.title, { description: copy.description });
+      else toast.success(`Pushed ${branch.name} to ${branch.upstream}${away}`);
     } catch (e) {
       onError(e);
     }
@@ -2178,6 +2276,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // "A push is running" in this repo — what one-push-at-a-time and the items
   // that would queue on the network lock hold on.
   const pushActive = pendingPushes.length > 0 || detectingBranch !== null;
+  // A repository publish (from any worktree) holds every push route; the
+  // handlers re-check at the press.
+  const publishActive = usePendingPublishes(repoPath).length > 0;
   // Feeds the parked-write copy: a push parked offline is waiting, not running.
   const pushPaused = pendingPushes.some((p) => p.paused);
   const pushOnBranch = (name: string) =>
@@ -2350,6 +2451,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   useHotkeyAction(
     "show-branches",
     () => {
+      // Silent: a toast over the modal would be noise, and focus stays put.
+      if (focusInOpenModal()) return;
       if (!open) snapshotOrder();
       setOpen(true);
     },
@@ -2890,6 +2993,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // Push and Publish: one push at a time, never while this row updates.
     const pushItemSuffix = (() => {
       switch (true) {
+        case publishActive:
+          return ` (${PUBLISH_HOLD_ITEM_REASON})`;
         case rowPushing:
           return ` (${rowPushReason})`;
         case rowUpdating:
@@ -2901,7 +3006,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       }
     })();
     const pushItemDisabled =
-      rowPushing || rowUpdating || pushActive || busy || !!offlineHold;
+      rowPushing ||
+      rowUpdating ||
+      pushActive ||
+      busy ||
+      !!offlineHold ||
+      publishActive;
     // The update items hold on their own row's update and push, and on the
     // CURRENT row also on `busy` and any push: an in-place merge must not start
     // under another HEAD-moving op, and it waits on a push's network lock. Other
@@ -3629,7 +3739,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           <ContextMenuItem
             className={MENU_HELD_ROW_CLASS}
             // A remote delete is a push, so it would queue on the network lock.
-            disabled={deletionBlocked || pushActive || !!offlineHold}
+            disabled={
+              deletionBlocked || pushActive || !!offlineHold || publishActive
+            }
             onClick={() => {
               setOpen(false);
               setRemoteDeleteTarget({
@@ -3643,6 +3755,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               switch (true) {
                 case deletionBlocked:
                   return `Delete on ${branch.remote}… (protected)`;
+                case publishActive:
+                  return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`;
                 case pushActive:
                   return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`;
                 default:
@@ -4226,6 +4340,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         }
         confirmLabel="Delete"
         confirmVariant="destructive"
+        // This branch's push only: a local delete takes no network lock.
+        heldReason={
+          deleteTarget !== null && branchPushing(deleteTarget)
+            ? branchPushHoldReason(pushOnBranch(deleteTarget)?.paused ?? false)
+            : undefined
+        }
         pending={deleteBranch.isPending || checkout.isPending}
         onConfirm={doDelete}
       />
@@ -4257,7 +4377,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         pending={deleteRemoteBranch.isPending}
         // A remote delete is a push: it waits out a running one, as an offline
         // hold would (the handler re-checks at the press).
-        heldReason={pushActive ? branchPushHoldReason(pushPaused) : offlineHold}
+        heldReason={
+          pushActive
+            ? branchPushHoldReason(pushPaused)
+            : publishActive
+              ? PUBLISH_HOLD_REASON
+              : offlineHold
+        }
         onConfirm={doDeleteRemoteBranch}
       />
 
@@ -4343,13 +4469,26 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         onClose={() => setForkGuard(null)}
         onPublishAnyway={() => {
           // Refused before the dialog closes, so it stays to retry from.
-          if (forkGuard?.repo === repoPath && pushAlreadyActive()) return;
+          if (
+            forkGuard?.repo === repoPath &&
+            (pushAlreadyActive() ||
+              refuseWhilePublishing(queryClient, repoPath))
+          )
+            return;
           setForkGuard(null);
           if (
             forkGuard &&
             !refuseIfSwitched(forkGuard.repo, "nothing was published")
           )
-            void runPushBranch(forkGuard.branch, forkGuard.remote);
+            void runPushBranch(
+              forkGuard.branch,
+              forkGuard.remote,
+              pushOutcome({
+                willPublish: true,
+                create: undefined,
+                presence: undefined,
+              }),
+            );
         }}
       />
 

@@ -11,9 +11,12 @@ import {
 } from "@/lib/query-cache-times";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
+import { peekRepoIdentity } from "../repo-identity";
+import { useRepoIdentity } from "./core";
 import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import {
   type PendingPublish,
+  PUBLISH_REPO_KEY,
   pendingMutationEntries,
   pendingPublishesFor,
   publishRepoKey,
@@ -54,9 +57,10 @@ export function useRemotes(repo: string) {
  *  run recheck like a push. */
 export function usePublishRepo(repo: string) {
   const queryClient = useQueryClient();
+  const identity = useRepoIdentity(repo).data;
   return useRepoMutation(
     repo,
-    (args: {
+    async (args: {
       provider: "github" | "gitlab" | "bitbucket";
       name: string;
       isPrivate: boolean;
@@ -65,22 +69,37 @@ export function usePublishRepo(repo: string) {
       topics: string[];
       /** Bitbucket only — the workspace the repo is created under. */
       workspace?: string;
-    }) =>
-      api.forgePublishRepo(
-        args.provider,
-        repo,
-        args.name,
-        args.isPrivate,
-        args.description,
-        args.homepage,
-        args.topics,
-        args.workspace,
-      ),
+    }) => {
+      try {
+        return await api.forgePublishRepo(
+          args.provider,
+          repo,
+          args.name,
+          args.isPrivate,
+          args.description,
+          args.homepage,
+          args.topics,
+          args.workspace,
+        );
+      } finally {
+        // Every worktree shares origin, and a publish can fail after the remote
+        // is already added (before its push), so on either outcome a sibling's
+        // cached remotes (and its Publish arm) drop their no-origin answer. This
+        // repo's own remotes ride useRepoMutation's settle-time subtree pass.
+        void queryClient.invalidateQueries({
+          predicate: (q) =>
+            q.queryKey[0] === "repo" &&
+            q.queryKey[1] !== repo &&
+            q.queryKey[2] === "remotes",
+        });
+      }
+    },
     {
       // Pinned: the publish and its repo-subtree invalidation close over `repo`, and
       // the dialog survives a repo switch — without the key the newly-live repo's
-      // controls would read the pending publish as busy.
-      identity: publishRepoKey(repo),
+      // controls would read the pending publish as busy. The identity element lets
+      // every worktree of the repository see the publish.
+      identity: publishRepoKey(repo, identity),
       onSuccess: () => recheckRunsAfterPush(queryClient, repo),
     },
   );
@@ -88,38 +107,55 @@ export function usePublishRepo(repo: string) {
 
 const NO_PENDING_PUBLISHES: PendingPublish[] = [];
 
-/** The publishes of `repo` in flight, read from the mutation cache rather than
- *  the publish's observer: the identity pin idles the observer at a repo switch,
- *  and every Publish host (hidden tabs included) must read the same answer. */
+/** The publishes of the repository in flight, matched by checkout path or repo
+ *  identity, read from the mutation cache rather than the publish's observer: the
+ *  identity pin idles the observer at a repo switch, and every Publish host
+ *  (hidden tabs and sibling worktrees included) must read the same answer. */
 export function usePendingPublishes(repo: string): PendingPublish[] {
+  const identity = useRepoIdentity(repo).data;
   const select = useCallback(
     (cache: MutationCache) =>
       pendingPublishesFor(
         pendingMutationEntries(
-          cache.findAll({
-            mutationKey: publishRepoKey(repo),
-            status: "pending",
-          }),
+          cache.findAll({ mutationKey: PUBLISH_REPO_KEY, status: "pending" }),
         ),
         repo,
+        identity,
       ),
-    [repo],
+    [repo, identity],
   );
   return useMutationCacheSnapshot(select, NO_PENDING_PUBLISHES);
 }
 
-/** Fire-time twin of {@link usePendingPublishes}: whether `repo` has a publish in
- *  flight right now, for a submit a stale render could otherwise let through. */
+/** Fire-time twin of {@link usePendingPublishes}: the repository's first publish
+ *  in flight right now, for a press a stale render could otherwise let through.
+ *  `identity` defaults to the one this session already resolved for `repo`;
+ *  unresolved, it matches by checkout path alone. */
+export function activePublishOf(
+  queryClient: QueryClient,
+  repo: string,
+  identity?: string,
+): PendingPublish | null {
+  return (
+    pendingPublishesFor(
+      pendingMutationEntries(
+        queryClient
+          .getMutationCache()
+          .findAll({ mutationKey: PUBLISH_REPO_KEY, status: "pending" }),
+      ),
+      repo,
+      identity ?? peekRepoIdentity(repo),
+    )[0] ?? null
+  );
+}
+
+/** Whether the repository has a publish in flight; see {@link activePublishOf}. */
 export function isPublishActive(
   queryClient: QueryClient,
   repo: string,
+  identity?: string,
 ): boolean {
-  return (
-    queryClient
-      .getMutationCache()
-      .findAll({ mutationKey: publishRepoKey(repo), status: "pending" })
-      .length > 0
-  );
+  return activePublishOf(queryClient, repo, identity) !== null;
 }
 
 /** Which providers this machine can publish to — drives the publish buttons for

@@ -27,6 +27,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { required, withForm } from "@/lib/form";
 import { type CherryPickRangeResult, headBranchPin } from "@/lib/git/api";
@@ -96,6 +97,7 @@ export function DeleteTagDialog({
   onRemoteChange: (v: boolean) => void;
   onClose: () => void;
 }) {
+  const queryClient = useQueryClient();
   const deleteLocalTag = useDeleteLocalTag(repoPath);
   const deleteTagOnOrigin = useDeleteTagOnOrigin(repoPath);
   // Offline holds only the origin arm; the local-only delete runs offline.
@@ -123,6 +125,7 @@ export function DeleteTagDialog({
       return;
     }
     if (remote && refuseWhileOffline()) return;
+    if (remote && refuseWhilePublishing(queryClient, repoPath)) return;
     const startedFor = name;
     const startedIn = repoPath;
     const closeIfStillOpen = () => {
