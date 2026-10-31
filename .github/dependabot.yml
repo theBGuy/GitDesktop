@@ -14,6 +14,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 10
+    # Dependabot leaves pnpm-patched `core` alone, but a lone `react` bump installs
+    # a second, unpatched `core` in react's own render path. Bump the pair by hand.
+    ignore:
+      - dependency-name: "@git-diff-view/react"
     # Hold off on freshly-published releases (supply-chain safety). pnpm's
     # minimumReleaseAge in pnpm-workspace.yaml is the same idea for direct
     # installs, on its own never-longer delay, not kept in step with these.
