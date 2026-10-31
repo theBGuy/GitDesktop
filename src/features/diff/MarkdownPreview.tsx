@@ -85,10 +85,14 @@ export function MarkdownViewToggle({
 export function MarkdownDocPreview({
   repoPath,
   filePath,
+  oldPath,
   revs,
 }: {
   repoPath: string;
   filePath: string;
+  /** The old side's path (the diff's rename source, else `filePath`), read
+   *  when the old side is the one shown. */
+  oldPath: string;
   /** The versions the diff itself shows. Omit a side rather than passing `null`
    *  unless the working tree really is that side — `null` reads the checkout. */
   revs: DiffContentRevs;
@@ -103,7 +107,7 @@ export function MarkdownDocPreview({
   // that failure goes unannounced, since the notice reads the old side's read.
   const newAbsent = hasNew && !newQ.isPending && newQ.data === null;
   const showOld = hasOld && (!hasNew || newAbsent);
-  const oldQ = useFileAtRev(repoPath, revs.oldRev ?? null, filePath, showOld);
+  const oldQ = useFileAtRev(repoPath, revs.oldRev ?? null, oldPath, showOld);
   const activeQ = showOld ? oldQ : newQ;
   const b64 = activeQ.data?.base64 ?? null;
   // The backend's own refusal (its 20MB cap, far past the preview cap) ships
@@ -151,7 +155,7 @@ export function MarkdownDocPreview({
   // focus to <body>; land it on the host. Change-only, so a mount never takes
   // focus from elsewhere.
   const focusHost = useRef<HTMLDivElement | null>(null);
-  const viewFrame = `${arm}:${filePath}@${revs.newRev ?? ""}:${revs.oldRev ?? ""}`;
+  const viewFrame = `${arm}:${filePath}@${revs.newRev ?? ""}:${oldPath}@${revs.oldRev ?? ""}`;
   const lastViewFrame = useRef(viewFrame);
   useLayoutEffect(() => {
     if (lastViewFrame.current === viewFrame) return;

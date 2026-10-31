@@ -153,6 +153,11 @@ pub struct FileDiff {
     /// `text` is a lossy decode and must never be handed back to `git apply`.
     /// Computed only by `git_diff_file`; every other producer sets false.
     pub undecodable: bool,
+    /// The path the shown diff pairs this file FROM, when that differs from
+    /// `file_path` (the surface's own rename detection paired them). Old-side
+    /// whole-file reads use it; `file_path` still echoes the requested path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -192,6 +197,16 @@ pub struct CommitSummary {
     pub tags: Vec<String>,
     /// More than one parent — history rewriting must not cross it.
     pub is_merge: bool,
+}
+
+/// One file-history entry: the commit plus the file's path as of that commit
+/// (the new-side name there), so diffs across a rename read the right blob.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileLogEntry {
+    #[serde(flatten)]
+    pub commit: CommitSummary,
+    pub path: String,
 }
 
 /// One git tag, for the Tags list.

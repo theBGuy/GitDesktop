@@ -532,12 +532,15 @@ function WorkingTreeDiff({
   // `parsed === null` and still fall through to the whole-file view below.
   const hunkMode = parsed !== null && parsed.hunks.length > 0;
   const liveText = diff.data?.text;
+  // The old side's whole-file reads follow the staged diff's own pairing (a
+  // rename's source), riding the view so a kept view keeps its own.
+  const liveOldPath = diff.data?.oldPath ?? file.path;
   const liveView = useMemo(
     () =>
       hunkMode && parsed !== null && liveText !== undefined
-        ? { text: liveText, hunks: parsed.hunks }
+        ? { text: liveText, hunks: parsed.hunks, oldPath: liveOldPath }
         : null,
-    [hunkMode, parsed, liveText],
+    [hunkMode, parsed, liveText, liveOldPath],
   );
   // A held or preparing slot is inert, but hotkeys and the portaled Discard
   // confirm reach past `inert`, so each gates on this as well.
@@ -989,6 +992,7 @@ function WorkingTreeDiff({
             <ImagePanes
               repoPath={repoPath}
               filePath={file.path}
+              oldPath={shownView.oldPath}
               revs={
                 file.staged
                   ? { old: "HEAD", new: ":0" }
@@ -1001,6 +1005,7 @@ function WorkingTreeDiff({
           <MarkdownDocPreview
             repoPath={repoPath}
             filePath={file.path}
+            oldPath={shownView.oldPath}
             revs={workingRevs}
           />
         ) : (
@@ -1045,6 +1050,7 @@ function WorkingTreeDiff({
             <StagingDiffView
               repoPath={repoPath}
               filePath={file.path}
+              oldPath={shownView.oldPath}
               diffText={shownView.text}
               contentRevs={workingRevs}
               viewMode={viewMode}
@@ -1552,6 +1558,7 @@ function HunkHeaderBar({
 function StagingDiffView({
   repoPath,
   filePath,
+  oldPath,
   diffText,
   contentRevs,
   viewMode,
@@ -1569,6 +1576,8 @@ function StagingDiffView({
 }: {
   repoPath: string;
   filePath: string;
+  /** The old side's path: the diff's rename source, else `filePath`. */
+  oldPath: string;
   diffText: string;
   contentRevs: DiffContentRevs;
   viewMode: string;
@@ -1600,6 +1609,7 @@ function StagingDiffView({
   const { syntaxMap, customLanguages } = useEffectiveSyntax(activeRepo);
   const deferredText = useDeferredValue(diffText);
   const deferredPath = useDeferredValue(filePath);
+  const deferredOldPath = useDeferredValue(oldPath);
   // The hunks parsed from `deferredText`: both resolve in the same deferred
   // render, so the overlay and its buttons pair with the rows on screen.
   const deferredHunks = useDeferredValue(hunks);
@@ -1641,6 +1651,7 @@ function StagingDiffView({
   } = useFileContent(
     repoPath,
     deferredPath,
+    deferredOldPath,
     deferredText,
     // Shortened hunk text (long lines cut) no longer lines up with the
     // whole-file reads content mode maps syntax onto, and the reads are wasted

@@ -100,7 +100,7 @@ const SITES = [
     noun: "preview",
     noticeNoun: "this preview",
     stale: "activeQ.isPlaceholderData",
-    identity: ["filePath", 'revs.newRev ?? ""', 'revs.oldRev ?? ""'],
+    identity: ["filePath", 'revs.newRev ?? ""', "oldPath", 'revs.oldRev ?? ""'],
     shell: "notice",
   },
   {

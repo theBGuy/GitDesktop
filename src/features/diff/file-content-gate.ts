@@ -67,15 +67,19 @@ export interface Painted extends PaintedInputs {
 }
 
 /** The `reads` identity of one file's content reads at a rev pair (`null` is
- *  the working tree, `undefined` a side with no read). */
+ *  the working tree, `undefined` a side with no read). `oldPath` is the path
+ *  the old side reads (a rename's source); it keys only when it differs, after
+ *  a NUL no git path can contain, so no path split reads as another pair. */
 export function contentReadsKey(
   filePath: string,
   oldRev: string | null | undefined,
   newRev: string | null | undefined,
+  oldPath: string,
 ): string {
   const rev = (r: string | null | undefined) =>
     r === undefined ? "-" : r === null ? "~" : `=${r}`;
-  return `${rev(oldRev)}\n${rev(newRev)}\n${filePath}`;
+  const from = oldPath === filePath ? "" : `\0${oldPath}`;
+  return `${rev(oldRev)}\n${rev(newRev)}\n${filePath}${from}`;
 }
 
 /**

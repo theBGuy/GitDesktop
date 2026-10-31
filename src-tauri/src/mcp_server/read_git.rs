@@ -119,7 +119,10 @@ impl GitDesktopMcp {
         json_result(&commits)
     }
 
-    #[tool(description = "List the commits that touched a single file (newest first).")]
+    #[tool(
+        description = "List the commits that touched a single file (newest first), following \
+                       renames. Each entry carries `path`: the file's path as of that commit."
+    )]
     async fn file_history(
         &self,
         Parameters(args): Parameters<FileHistoryArgs>,
@@ -196,15 +199,13 @@ impl GitDesktopMcp {
         Parameters(args): Parameters<CommitDiffArgs>,
     ) -> Result<CallToolResult, McpError> {
         ensure_not_flag(&args.sha, "sha")?;
-        let mut a: Vec<&str> = vec!["show", "--no-color", args.sha.as_str()];
-        // `path` is documented as a single file, so it matches only itself — a raw
-        // `[slug]`-style path would splice a glob-sibling's hunks into the answer.
-        let spec = args.path.as_deref().map(crate::git::pathspec::literal);
-        if let Some(spec) = spec.as_deref() {
-            a.push("--");
-            a.push(spec);
-        }
-        diff_text(&self.repo, &a).await
+        let text = commit_diff_text(&self.repo, &args.sha, args.path.as_deref())
+            .await
+            .map_err(app_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(cap_head(
+            text,
+            super::DIFF_MAX_BYTES,
+        ))]))
     }
 
     #[tool(
@@ -217,22 +218,17 @@ impl GitDesktopMcp {
         &self,
         Parameters(args): Parameters<WorkingDiffArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let mut a: Vec<&str> = vec!["diff", "--no-ext-diff", "--no-color"];
-        // `git diff HEAD` = staged + unstaged vs HEAD; `git diff --cached` = staged
-        // vs HEAD. Scoping with `-- <path>` keeps the same base (unlike the per-file
-        // UI command, which only diffs against the index).
-        if args.staged.unwrap_or(false) {
-            a.push("--cached");
-        } else {
-            a.push("HEAD");
-        }
-        // Single documented file, so it matches only itself (see commit_diff).
-        let spec = args.path.as_deref().map(crate::git::pathspec::literal);
-        if let Some(spec) = spec.as_deref() {
-            a.push("--");
-            a.push(spec);
-        }
-        diff_text(&self.repo, &a).await
+        let text = working_diff_text(
+            &self.repo,
+            args.staged.unwrap_or(false),
+            args.path.as_deref(),
+        )
+        .await
+        .map_err(app_err)?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(cap_head(
+            text,
+            super::DIFF_MAX_BYTES,
+        ))]))
     }
 
     #[tool(
@@ -423,9 +419,187 @@ async fn read_file_core(
     Ok(cap_head(raw, READ_FILE_MAX_BYTES))
 }
 
+/// `commit_diff`'s uncapped text. A `path` answer pairs a renamed file with its
+/// source through the GUI's per-file pairing, so it reads as a rename rather than a
+/// whole-file add; the pairing passes literal pathspecs, since a raw `[slug]`-style
+/// path would splice a glob-sibling's hunks into the answer. The probe runs
+/// `--relative` because `repo` may be a subdirectory: its names then match the
+/// cwd-relative `path`, and a rename from outside that directory stays an add.
+async fn commit_diff_text(
+    repo: &str,
+    sha: &str,
+    path: Option<&str>,
+) -> crate::error::AppResult<String> {
+    let content = ["show", "--no-color", sha];
+    let stdout = match path {
+        Some(path) => {
+            let probe = [
+                "show",
+                "--relative",
+                "--name-status",
+                "-z",
+                "--format=",
+                sha,
+            ];
+            crate::git::diff::diff_with_rename_pairing(repo, path, &content, &probe)
+                .await?
+                .stdout
+        }
+        None => {
+            crate::git::runner::run_git(Some(repo), &content, crate::git::runner::DEFAULT_TIMEOUT)
+                .await?
+                .stdout
+        }
+    };
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// `working_diff`'s uncapped text, its `path` answer paired like `commit_diff`'s
+/// (relative probe included).
+/// `git diff HEAD` = staged + unstaged vs HEAD; `git diff --cached` = staged vs
+/// HEAD. Scoping to a path keeps the same base (unlike the per-file UI command,
+/// whose unstaged arm diffs against the index).
+async fn working_diff_text(
+    repo: &str,
+    staged: bool,
+    path: Option<&str>,
+) -> crate::error::AppResult<String> {
+    let against = if staged { "--cached" } else { "HEAD" };
+    let content = ["diff", "--no-ext-diff", "--no-color", against];
+    let stdout = match path {
+        Some(path) => {
+            let probe = [
+                "diff",
+                "--no-ext-diff",
+                "--relative",
+                "--name-status",
+                "-z",
+                against,
+            ];
+            crate::git::diff::diff_with_rename_pairing(repo, path, &content, &probe)
+                .await?
+                .stdout
+        }
+        None => {
+            crate::git::runner::run_git(Some(repo), &content, crate::git::runner::DEFAULT_TIMEOUT)
+                .await?
+                .stdout
+        }
+    };
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn git(repo: &str, args: &[&str]) -> String {
+        crate::git::runner::run_git(Some(repo), args, crate::git::runner::DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+    }
+
+    /// `a.txt` renamed to `b.txt` (plus a true add, `n.txt`) in the returned commit,
+    /// then `b.txt` renamed to `c.txt` in the index. `diff.renames` is pinned: the test
+    /// runner sets only GIT_CONFIG_NOSYSTEM.
+    async fn renamed_repo() -> (tempfile::TempDir, String, String) {
+        let tmp = tempfile::Builder::new()
+            .prefix("gd-mcp-rename-")
+            .tempdir()
+            .unwrap();
+        let repo = tmp.path().to_string_lossy().into_owned();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t.local"],
+            vec!["config", "user.name", "T"],
+            vec!["config", "core.autocrlf", "false"],
+            vec!["config", "diff.renames", "true"],
+            vec!["config", "commit.gpgSign", "false"],
+        ] {
+            git(&repo, &args).await;
+        }
+        let ten = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n";
+        std::fs::write(tmp.path().join("a.txt"), ten).unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "base"]).await;
+        git(&repo, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(tmp.path().join("n.txt"), "new\n").unwrap();
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "rename"]).await;
+        let sha = git(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        git(&repo, &["mv", "b.txt", "c.txt"]).await;
+        (tmp, repo, sha)
+    }
+
+    #[tokio::test]
+    async fn commit_diff_answers_a_renamed_path_as_a_rename() {
+        let (_tmp, repo, sha) = renamed_repo().await;
+        let text = commit_diff_text(&repo, &sha, Some("b.txt")).await.unwrap();
+        assert!(
+            text.contains("rename from a.txt\nrename to b.txt\n"),
+            "{text}"
+        );
+        assert!(!text.contains("new file mode"), "{text}");
+        // The commit header ahead of the diff survives the pairing.
+        assert!(text.starts_with(&format!("commit {sha}")), "{text}");
+        let added = commit_diff_text(&repo, &sha, Some("n.txt")).await.unwrap();
+        let single = git(
+            &repo,
+            &["show", "--no-color", &sha, "--", ":(literal)n.txt"],
+        )
+        .await;
+        assert_eq!(added, single);
+    }
+
+    #[tokio::test]
+    async fn working_diff_answers_a_staged_rename_on_both_arms() {
+        let (_tmp, repo, _) = renamed_repo().await;
+        for staged in [true, false] {
+            let text = working_diff_text(&repo, staged, Some("c.txt"))
+                .await
+                .unwrap();
+            assert!(
+                text.contains("rename from b.txt\nrename to c.txt\n"),
+                "staged={staged}: {text}"
+            );
+            assert!(!text.contains("new file mode"), "staged={staged}: {text}");
+        }
+    }
+
+    /// Bound to a subdirectory, `path` is relative to it while git names files
+    /// from the root; both tools still pair the rename.
+    #[tokio::test]
+    async fn diff_tools_pair_a_rename_from_a_subdirectory_repo() {
+        let (tmp, root, _) = renamed_repo().await;
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("d.txt"), "s1\ns2\ns3\ns4\ns5\ns6\ns7\ns8\n").unwrap();
+        git(&root, &["add", "-A"]).await;
+        git(&root, &["commit", "-qm", "sub"]).await;
+        git(&root, &["mv", "sub/d.txt", "sub/e.txt"]).await;
+        git(&root, &["commit", "-qm", "sub rename"]).await;
+        let sha = git(&root, &["rev-parse", "HEAD"]).await.trim().to_string();
+        git(&root, &["mv", "sub/e.txt", "sub/f.txt"]).await;
+        let repo = sub.to_string_lossy().into_owned();
+
+        let text = commit_diff_text(&repo, &sha, Some("e.txt")).await.unwrap();
+        assert!(
+            text.contains("rename from sub/d.txt\nrename to sub/e.txt\n"),
+            "{text}"
+        );
+        assert!(!text.contains("new file mode"), "{text}");
+        for staged in [true, false] {
+            let text = working_diff_text(&repo, staged, Some("f.txt"))
+                .await
+                .unwrap();
+            assert!(
+                text.contains("rename from sub/e.txt\nrename to sub/f.txt\n"),
+                "staged={staged}: {text}"
+            );
+            assert!(!text.contains("new file mode"), "staged={staged}: {text}");
+        }
+    }
 
     /// A remote with no `remote.<name>.url` emits ONE bare row — name, TAB, nothing —
     /// and no `(fetch)` row, so it must survive the parse on the name side alone. Its

@@ -11,6 +11,11 @@ export interface CommitSummary {
   isMerge: boolean;
 }
 
+/** One file-history entry: the commit plus the file's path as of that commit. */
+export interface FileLogEntry extends CommitSummary {
+  path: string;
+}
+
 export interface CommitDetails {
   hash: string;
   subject: string;

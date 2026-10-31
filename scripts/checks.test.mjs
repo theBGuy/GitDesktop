@@ -1542,7 +1542,7 @@ test("binary-marker-single-source exempts the helper module only", () => {
   assert.equal(appliesTo("src/features/pulls/RemotePrView.tsx"), true);
   assert.equal(appliesTo("src/features/pulls/PrCommitDetail.tsx"), true);
   assert.equal(appliesTo("src/lib/ai/prompt.ts"), true);
-  assert.deepEqual(allowlist, ["src/lib/ai/prompt.ts"]);
+  assert.deepEqual(allowlist, []);
 });
 
 test("null-suspense-fallback flags the literal on one line or wrapped", () => {

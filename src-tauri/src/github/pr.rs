@@ -6314,7 +6314,14 @@ struct GhPrFile {
     additions: u32,
     #[serde(default)]
     deletions: u32,
+    /// The file's blob id (the pre-image's on a removal). The one field that tells
+    /// an empty file from a binary: both arrive as 0/0 with no `patch`.
+    #[serde(default)]
+    sha: String,
 }
+
+/// git's id for the empty blob.
+const EMPTY_BLOB_SHA: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
 /// Fetches changed files past the GraphQL 100-item cap via the paginated REST API.
 /// REST stops at [`GH_REST_PR_FILES_CEILING`]; the view fold reports that ceiling.
@@ -6660,26 +6667,30 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
         let new_path = f.filename.as_str();
         let is_added = f.status == "added";
         let is_removed = f.status == "removed";
-        let is_renamed = f.status == "renamed";
-        // a/ side = pre-change path (previous filename on a rename).
-        let old_path = if is_renamed {
+        let pair_kind = match f.status.as_str() {
+            "renamed" => Some("rename"),
+            "copied" => Some("copy"),
+            _ => None,
+        };
+        // a/ side = pre-change path (previous filename on a rename or copy).
+        let old_path = if pair_kind.is_some() {
             f.previous_filename.as_deref().unwrap_or(new_path)
         } else {
             new_path
         };
+        let pair_kind = pair_kind.filter(|_| old_path != new_path);
 
         // Every name rides git's C-quoting, so a control byte in a path can't
         // break a line and forge a header the splitter would key on.
         let a_label = c_quote_label("a/", old_path);
         let b_label = c_quote_label("b/", new_path);
         out.push_str(&format!("diff --git {a_label} {b_label}\n"));
-        if is_renamed && old_path != new_path {
-            out.push_str("rename from ");
-            out.push_str(&c_quote_path(old_path));
-            out.push('\n');
-            out.push_str("rename to ");
-            out.push_str(&c_quote_path(new_path));
-            out.push('\n');
+        if let Some(kind) = pair_kind {
+            out.push_str(&format!(
+                "{kind} from {}\n{kind} to {}\n",
+                c_quote_path(old_path),
+                c_quote_path(new_path)
+            ));
         }
         if is_added {
             out.push_str("new file mode 100644\n");
@@ -6705,11 +6716,20 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
                     out.push('\n');
                 }
             }
-            // No hunks: binary or an individually-huge file GitHub dropped the
-            // patch for. Emit git's binary placeholder (the frontend recognizes
-            // the `Binary files ` marker and renders it as an undisplayable file).
+            // No hunks: a header-only change, a binary, or an individually-huge
+            // file GitHub dropped the patch for. A 0/0 rename/copy and a provably
+            // empty added/removed file stay header-only, as git writes them (a
+            // renamed binary whose content also changed reads as a pure rename:
+            // the API gives no pre-image sha to tell). Everything else, mode-only
+            // changes included (the API carries no modes), keeps git's marker.
             _ => {
-                out.push_str(&format!("Binary files {a_label} and {b_label} differ\n"));
+                let empty_blob = f.sha == EMPTY_BLOB_SHA;
+                let header_only = (pair_kind.is_some() && f.additions == 0 && f.deletions == 0)
+                    || (is_added && f.additions == 0 && empty_blob)
+                    || (is_removed && f.deletions == 0 && empty_blob);
+                if !header_only {
+                    out.push_str(&format!("Binary files {a_label} and {b_label} differ\n"));
+                }
             }
         }
     }
@@ -7648,6 +7668,7 @@ mod tests {
         stack_members_from_output, PrStackProbe,
         map_gh_mergeability, stack_memberships_from, stack_write_args, stack_write_outcome_from,
         PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
+        EMPTY_BLOB_SHA,
         GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
@@ -8354,6 +8375,7 @@ mod tests {
             patch: patch.map(str::to_string),
             additions: 0,
             deletions: 0,
+            sha: String::new(),
         }
     }
 
@@ -10455,7 +10477,138 @@ mod tests {
         assert!(out.contains("diff --git a/old3.txt \"b/\\\"escaped\\\".txt\"\n"));
         assert!(out.contains("rename from old3.txt\n"));
         assert!(out.contains("rename to \"\\\"escaped\\\".txt\"\n"));
+        // A patch-less 0/0 rename is header-only, as git writes it.
+        assert!(!out.contains("Binary files"));
+    }
+
+    #[test]
+    fn quotes_the_marker_of_a_renamed_file_with_counts() {
+        let mut f = file("renamed", "\"escaped\".txt", None);
+        f.previous_filename = Some("old3.txt".to_string());
+        f.additions = 1;
+        let out = reconstruct_pr_diff(&[f]);
+        assert!(out.contains("rename to \"\\\"escaped\\\".txt\"\n"));
         assert!(out.contains("Binary files a/old3.txt and \"b/\\\"escaped\\\".txt\" differ\n"));
+    }
+
+    // The fallback literals below are shared verbatim with
+    // scripts/forge-diff-headers.test.mjs, which classifies them; keep both in step.
+
+    #[test]
+    fn a_patchless_pure_rename_is_header_only() {
+        let mut f = file("renamed", "docs/new-name.md", Some(""));
+        f.previous_filename = Some("docs/old.md".to_string());
+        let out = reconstruct_pr_diff(&[f]);
+        assert_eq!(
+            out,
+            "diff --git a/docs/old.md b/docs/new-name.md\n\
+             rename from docs/old.md\n\
+             rename to docs/new-name.md\n",
+        );
+        assert!(!out.contains("Binary files"));
+    }
+
+    #[test]
+    fn a_patchless_copy_names_its_source() {
+        let mut f = file("copied", "lib/copy.rs", None);
+        f.previous_filename = Some("lib/orig.rs".to_string());
+        let out = reconstruct_pr_diff(&[f]);
+        assert_eq!(
+            out,
+            "diff --git a/lib/orig.rs b/lib/copy.rs\n\
+             copy from lib/orig.rs\n\
+             copy to lib/copy.rs\n",
+        );
+        // A copy with a patch keeps the source on its a/ side too.
+        let mut f = file("copied", "lib/copy.rs", Some("@@ -1 +1 @@\n-a\n+b\n"));
+        f.previous_filename = Some("lib/orig.rs".to_string());
+        f.additions = 1;
+        f.deletions = 1;
+        let out = reconstruct_pr_diff(&[f]);
+        assert!(out.contains("copy from lib/orig.rs\ncopy to lib/copy.rs\n--- a/lib/orig.rs\n"));
+    }
+
+    #[test]
+    fn a_rename_or_copy_without_a_usable_pair_keeps_the_marker() {
+        for status in ["renamed", "copied"] {
+            let out = reconstruct_pr_diff(&[file(status, "same.txt", None)]);
+            assert_eq!(
+                out,
+                "diff --git a/same.txt b/same.txt\n\
+                 Binary files a/same.txt and b/same.txt differ\n",
+                "{status}",
+            );
+            let mut f = file(status, "same.txt", None);
+            f.previous_filename = Some("same.txt".to_string());
+            assert!(
+                reconstruct_pr_diff(&[f]).contains("Binary files "),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_added_or_removed_file_is_header_only() {
+        let mut added = file("added", ".gitkeep", None);
+        added.sha = EMPTY_BLOB_SHA.to_string();
+        let mut removed = file("removed", "old/.gitkeep", Some(""));
+        removed.sha = EMPTY_BLOB_SHA.to_string();
+        let out = reconstruct_pr_diff(&[added, removed]);
+        assert_eq!(
+            out,
+            "diff --git a/.gitkeep b/.gitkeep\n\
+             new file mode 100644\n\
+             diff --git a/old/.gitkeep b/old/.gitkeep\n\
+             deleted file mode 100644\n",
+        );
+        assert!(!out.contains("Binary files"));
+    }
+
+    #[test]
+    fn a_patchless_file_without_the_empty_blob_keeps_the_marker() {
+        // A real blob id or a missing sha: binary or too large, never claimed empty.
+        for sha in ["", "4b763df1c9b6ec2a0d31a0fbbf8a1fa1e7f9a2b3"] {
+            let mut added = file("added", "logo.png", None);
+            added.sha = sha.to_string();
+            let mut removed = file("removed", "old.png", None);
+            removed.sha = sha.to_string();
+            let out = reconstruct_pr_diff(&[added, removed]);
+            assert!(out.contains("Binary files a/logo.png and b/logo.png differ\n"));
+            assert!(out.contains("Binary files a/old.png and b/old.png differ\n"));
+        }
+        // Counts with the empty blob's id are contradictory: keep the marker.
+        let mut big = file("added", "big.txt", None);
+        big.sha = EMPTY_BLOB_SHA.to_string();
+        big.additions = 5;
+        assert!(reconstruct_pr_diff(&[big]).contains("Binary files "));
+        // A type change or mode-only change carries no evidence either way.
+        let mut changed = file("changed", "link", None);
+        changed.sha = EMPTY_BLOB_SHA.to_string();
+        assert!(reconstruct_pr_diff(&[changed]).contains("Binary files a/link and b/link differ\n"));
+    }
+
+    #[test]
+    fn header_only_sections_keep_hostile_names_quoted() {
+        let forged = "evil\n+++ b/ok.txt\ndiff --git a/ok.txt b/ok.txt";
+        let quoted = "evil\\n+++ b/ok.txt\\ndiff --git a/ok.txt b/ok.txt";
+        let mut renamed = file("renamed", forged, None);
+        renamed.previous_filename = Some("src/mixed\rname.txt".to_string());
+        let mut added = file("added", forged, None);
+        added.sha = EMPTY_BLOB_SHA.to_string();
+        let out = reconstruct_pr_diff(&[renamed, added]);
+        assert!(out.starts_with(&format!(
+            "diff --git \"a/src/mixed\\rname.txt\" \"b/{quoted}\"\n\
+             rename from \"src/mixed\\rname.txt\"\n\
+             rename to \"{quoted}\"\n\
+             diff --git \"a/{quoted}\" \"b/{quoted}\"\n\
+             new file mode 100644\n"
+        )));
+        assert!(!out.contains('\r'));
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("diff --git ")).count(),
+            2
+        );
+        assert_eq!(out.lines().filter(|l| l.starts_with("+++ ")).count(), 0);
     }
 
     #[test]

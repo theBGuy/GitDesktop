@@ -3115,21 +3115,15 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
     // Literal pathspec: the path comes from the stash's own file list, so a
     // `[slug]`-style name would splice a glob-sibling's hunks into this file's diff.
     let path_spec = crate::git::pathspec::literal(file_path);
-    let out = run_git(
-        Some(repo),
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-            &base,
-            spec,
-            "--",
-            &path_spec,
-        ],
-        DEFAULT_TIMEOUT,
+    let out = crate::git::diff::diff_with_rename_pairing(
+        repo,
+        file_path,
+        &["diff", "--no-ext-diff", "--no-color", &base, spec],
+        &["diff", "--no-ext-diff", "--name-status", "-z", &base, spec],
     )
     .await?;
-    let mut text = out.stdout_lossy();
+    let old_path = out.old_path;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     if text.trim().is_empty() {
         // Not a tracked change — try the untracked-files parent if present.
         let untracked = format!("{spec}^3");
@@ -3161,6 +3155,7 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
         is_truncated,
         text,
         undecodable: false,
+        old_path,
     })
 }
 

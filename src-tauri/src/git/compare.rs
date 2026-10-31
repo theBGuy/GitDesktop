@@ -232,23 +232,17 @@ pub async fn git_branch_file_diff(
     validate_ref(&base)?;
     validate_ref(&compare)?;
     let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
-    // Literal pathspec: a raw `[slug]`-style path pulls a glob-sibling's hunks
-    // into this file's branch diff (measured).
-    let spec = crate::git::pathspec::literal(&file_path);
-    let out = run_git(
-        Some(&repo_path),
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-color",
-            &format!("{base}...{compare}"),
-            "--",
-            &spec,
-        ],
-        DEFAULT_TIMEOUT,
+    // The helper passes literal pathspecs: a raw `[slug]`-style path pulls a
+    // glob-sibling's hunks into this file's branch diff (measured).
+    let range = format!("{base}...{compare}");
+    let out = crate::git::diff::diff_with_rename_pairing(
+        &repo_path,
+        &file_path,
+        &["diff", "--no-ext-diff", "--no-color", &range],
+        &["diff", "--no-ext-diff", "--name-status", "-z", &range],
     )
     .await?;
-    let text = out.stdout_lossy();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let is_binary = text
         .lines()
         .any(|l| l.starts_with("Binary files ") && l.ends_with(" differ"));
@@ -259,6 +253,7 @@ pub async fn git_branch_file_diff(
         is_truncated,
         text,
         undecodable: false,
+        old_path: out.old_path,
     })
 }
 

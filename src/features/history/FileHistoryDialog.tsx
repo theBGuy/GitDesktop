@@ -43,6 +43,7 @@ import {
   heldButtonRender,
 } from "@/lib/use-disabled-reason";
 import { cn } from "@/lib/utils";
+import { dedupeByHash, entryPathFor } from "./file-history-entries";
 
 /** Commit history for one file: pick a commit to see the file's diff there. */
 export function FileHistoryDialog({
@@ -60,7 +61,8 @@ export function FileHistoryDialog({
   // Batch-resolve commit-author avatars (GitHub-only; deduped by react-query with
   // the other History surfaces, so this shares one call per repo per 15min).
   useCommitAuthorAvatarIndex(repoPath);
-  const commits = fileLog.data?.pages.flat() ?? [];
+  // Offset pages can repeat a row when HEAD moves between fetches.
+  const commits = dedupeByHash(fileLog.data?.pages.flat() ?? []);
   const [selected, setSelected] = useState<string | null>(null);
   // Default to the newest commit; reset when the dialog closes.
   const activeHash = selected ?? commits[0]?.hash ?? null;
@@ -242,7 +244,7 @@ export function FileHistoryDialog({
                 view.kind === "file" ? (
                   <FileHistoryDiffSlot
                     repoPath={repoPath}
-                    path={path}
+                    entryPath={entryPathFor(commits, view.file, path)}
                     hash={view.file}
                     reportRead={diffSlots.reportRead}
                   />
@@ -258,23 +260,25 @@ export function FileHistoryDialog({
   );
 }
 
-/** The dialog file's diff at one commit, in the pane's slot, on its own read. */
+/** The dialog file's diff at one commit, in the pane's slot, on its own read.
+ *  `entryPath` is the file's name as of that commit, so a pre-rename commit
+ *  reads the blob it actually touched. */
 function FileHistoryDiffSlot({
   repoPath,
-  path,
+  entryPath,
   hash,
   reportRead,
 }: {
   repoPath: string;
-  path: string;
+  entryPath: string;
   hash: string;
   reportRead: (read: SlotRead) => void;
 }) {
-  const diff = useCommitFileDiff(repoPath, hash, path);
+  const diff = useCommitFileDiff(repoPath, hash, entryPath);
   useSlotRead(reportRead, diff);
   return (
     <DiffSurface
-      filePath={path}
+      filePath={entryPath}
       diff={diff}
       repoPath={repoPath}
       imageRevs={{ old: `${hash}~1`, new: hash }}

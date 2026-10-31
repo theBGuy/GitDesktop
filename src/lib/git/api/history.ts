@@ -6,6 +6,7 @@ import type {
   CommitSummary,
   DiffStatEntry,
   FileDiff,
+  FileLogEntry,
   StagedDiff,
   TodoScan,
 } from "../types";
@@ -49,7 +50,7 @@ export const gitFileLog = (
   path: string,
   limit: number,
   skip: number,
-) => invoke<CommitSummary[]>("git_file_log", { repoPath, path, limit, skip });
+) => invoke<FileLogEntry[]>("git_file_log", { repoPath, path, limit, skip });
 
 export const gitBlame = (repoPath: string, path: string, rev?: string | null) =>
   invoke<BlameLine[]>("git_blame", { repoPath, path, rev: rev ?? null });

@@ -30,7 +30,7 @@ use crate::forge::my_work::{
 };
 use crate::forge::session::{classify_glab_failure_for_host, mask_host_tokens, GlabFailure};
 use crate::forge::{
-    c_quote_label, cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP,
+    c_quote_label, c_quote_path, cap_readme, validate_owner, validate_repo_name, FORK_LIST_CAP,
     FORK_POLL_ATTEMPTS, FORK_POLL_DELAY, README_CANDIDATES,
 };
 use crate::forge::Forge;
@@ -1803,7 +1803,7 @@ pub async fn poll_prs(repo_path: &str) -> AppResult<Vec<PrPollInfo>> {
 }
 
 /// One changed file as the MR `/changes` endpoint returns it.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct GlabChange {
     #[serde(default)]
     old_path: String,
@@ -1813,6 +1813,20 @@ struct GlabChange {
     new_file: bool,
     #[serde(default)]
     deleted_file: bool,
+    /// GitLab's own rename verdict; differing old/new paths alone don't make one.
+    #[serde(default, deserialize_with = "null_to_default")]
+    renamed_file: bool,
+    /// Octal file modes per side; GitLab sends "0" for an absent side.
+    #[serde(default, deserialize_with = "null_to_default")]
+    a_mode: String,
+    #[serde(default, deserialize_with = "null_to_default")]
+    b_mode: String,
+    /// The server left this file's hunks out (GitLab 18.4+ flags; absent before),
+    /// so an empty `diff` says nothing about what changed.
+    #[serde(default, deserialize_with = "null_to_default")]
+    collapsed: bool,
+    #[serde(default, deserialize_with = "null_to_default")]
+    too_large: bool,
     /// The per-file hunks (no `diff --git`/`---`/`+++` header — we add those).
     #[serde(default)]
     diff: String,
@@ -1927,12 +1941,50 @@ fn reconstruct_file_diff(c: &GlabChange) -> String {
     } else {
         b_label.as_str()
     };
-    let mut s = format!("diff --git {a_label} {b_label}\n--- {minus}\n+++ {plus}\n");
+    let mut s = format!("diff --git {a_label} {b_label}\n");
+    // A file the server left out keeps the header-plus-body shape: its empty
+    // `diff` is no evidence that the change is header-only.
+    if !(c.collapsed || c.too_large) {
+        // Extended headers in git's order; modes are grammar-checked because a
+        // header-only reader accepts exactly six octal digits.
+        let a_mode = git_file_mode(&c.a_mode);
+        let b_mode = git_file_mode(&c.b_mode);
+        if c.new_file {
+            s.push_str(&format!("new file mode {}\n", b_mode.unwrap_or("100644")));
+        } else if c.deleted_file {
+            s.push_str(&format!(
+                "deleted file mode {}\n",
+                a_mode.unwrap_or("100644")
+            ));
+        } else if let (Some(a), Some(b)) = (a_mode, b_mode) {
+            if a != b {
+                s.push_str(&format!("old mode {a}\nnew mode {b}\n"));
+            }
+        }
+        if c.renamed_file && old != new {
+            s.push_str(&format!(
+                "rename from {}\nrename to {}\n",
+                c_quote_path(old),
+                c_quote_path(new)
+            ));
+        }
+        // git writes no `---`/`+++` for a change without hunks.
+        if c.diff.is_empty() {
+            return s;
+        }
+    }
+    s.push_str(&format!("--- {minus}\n+++ {plus}\n"));
     s.push_str(&c.diff);
     if !c.diff.ends_with('\n') {
         s.push('\n');
     }
     s
+}
+
+/// A GitLab mode field as a git header mode: exactly six octal digits, or None
+/// (GitLab's "0" for an absent side, empty, or anything else).
+fn git_file_mode(mode: &str) -> Option<&str> {
+    (mode.len() == 6 && mode.bytes().all(|b| (b'0'..=b'7').contains(&b))).then_some(mode)
 }
 
 // ── Multi-line diff-note ranges (line_range / line_code) ───────────────────────
@@ -14727,10 +14779,11 @@ mod tests {
             new_file: true,
             deleted_file: false,
             diff: "@@ -0,0 +1 @@\n+hi".into(),
+            ..Default::default()
         };
         let out = reconstruct_file_diff(&c);
         // The splitter keys on these lines, so they must be present and well-formed.
-        assert!(out.starts_with("diff --git a/docs/x.md b/docs/x.md\n"));
+        assert!(out.starts_with("diff --git a/docs/x.md b/docs/x.md\nnew file mode 100644\n"));
         assert!(out.contains("--- /dev/null\n"));
         assert!(out.contains("+++ b/docs/x.md\n"));
         assert!(out.ends_with('\n'));
@@ -14744,6 +14797,7 @@ mod tests {
             new_file: false,
             deleted_file: true,
             diff: "@@ -1 +0,0 @@\n-bye\n".into(),
+            ..Default::default()
         };
         let out = reconstruct_file_diff(&c);
         assert!(out.contains("--- a/gone.txt\n"));
@@ -14762,6 +14816,7 @@ mod tests {
             new_file: false,
             deleted_file: false,
             diff: "@@ -1 +1 @@\n-old\n+new\n".into(),
+            ..Default::default()
         };
         assert_eq!(
             reconstruct_file_diff(&c),
@@ -14780,10 +14835,12 @@ mod tests {
             new_file: false,
             deleted_file: true,
             diff: "@@ -1 +0,0 @@\n-removed\n".into(),
+            ..Default::default()
         };
         let out = reconstruct_file_diff(&c);
         assert!(out.starts_with(
             "diff --git \"a/src/caf\\303\\251.txt\" \"b/src/caf\\303\\251.txt\"\n\
+             deleted file mode 100644\n\
              --- \"a/src/caf\\303\\251.txt\"\n+++ /dev/null\n"
         ));
     }
@@ -14796,6 +14853,7 @@ mod tests {
             new_file: false,
             deleted_file: false,
             diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+            ..Default::default()
         };
         let out = reconstruct_file_diff(&c);
         assert!(out.starts_with(
@@ -14813,17 +14871,211 @@ mod tests {
             new_file: false,
             deleted_file: true,
             diff: "@@ -1 +0,0 @@\n-bye\n".into(),
+            ..Default::default()
         };
         let out = reconstruct_file_diff(&c);
         let quoted = "evil\\n+++ b/ok.txt\\ndiff --git a/ok.txt b/ok.txt";
         assert!(out.starts_with(&format!(
-            "diff --git \"a/{quoted}\" \"b/{quoted}\"\n--- \"a/{quoted}\"\n+++ /dev/null\n"
+            "diff --git \"a/{quoted}\" \"b/{quoted}\"\ndeleted file mode 100644\n\
+             --- \"a/{quoted}\"\n+++ /dev/null\n"
         )));
         assert_eq!(
             out.lines().filter(|l| l.starts_with("diff --git ")).count(),
             1
         );
         assert_eq!(out.lines().filter(|l| l.starts_with("+++ ")).count(), 1);
+    }
+
+    // The header-only literals below are shared verbatim with
+    // scripts/forge-diff-headers.test.mjs, which classifies them; keep both in step.
+
+    #[test]
+    fn renames_without_hunks_as_a_header_only_section() {
+        let c = GlabChange {
+            old_path: "old3.txt".into(),
+            new_path: "\"escaped\".txt".into(),
+            renamed_file: true,
+            a_mode: "100644".into(),
+            b_mode: "100644".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&c),
+            "diff --git a/old3.txt \"b/\\\"escaped\\\".txt\"\n\
+             rename from old3.txt\n\
+             rename to \"\\\"escaped\\\".txt\"\n",
+        );
+    }
+
+    #[test]
+    fn writes_a_mode_only_change_as_a_header_only_section() {
+        let c = GlabChange {
+            old_path: "bin/run.sh".into(),
+            new_path: "bin/run.sh".into(),
+            a_mode: "100644".into(),
+            b_mode: "100755".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&c),
+            "diff --git a/bin/run.sh b/bin/run.sh\nold mode 100644\nnew mode 100755\n",
+        );
+    }
+
+    #[test]
+    fn writes_a_new_empty_file_as_a_header_only_section() {
+        let c = GlabChange {
+            old_path: ".gitkeep".into(),
+            new_path: ".gitkeep".into(),
+            new_file: true,
+            a_mode: "0".into(),
+            b_mode: "100644".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&c),
+            "diff --git a/.gitkeep b/.gitkeep\nnew file mode 100644\n",
+        );
+    }
+
+    #[test]
+    fn takes_new_and_deleted_modes_from_their_side_when_valid() {
+        let added = GlabChange {
+            old_path: "run.sh".into(),
+            new_path: "run.sh".into(),
+            new_file: true,
+            a_mode: "0".into(),
+            b_mode: "100755".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&added),
+            "diff --git a/run.sh b/run.sh\nnew file mode 100755\n",
+        );
+        let deleted = GlabChange {
+            old_path: "gone".into(),
+            new_path: "gone".into(),
+            deleted_file: true,
+            a_mode: "0".into(),
+            b_mode: "0".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&deleted),
+            "diff --git a/gone b/gone\ndeleted file mode 100644\n",
+        );
+    }
+
+    #[test]
+    fn writes_a_mode_delta_riding_a_rename_in_git_order() {
+        let c = GlabChange {
+            old_path: "a.sh".into(),
+            new_path: "b.sh".into(),
+            renamed_file: true,
+            a_mode: "100644".into(),
+            b_mode: "100755".into(),
+            diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&c),
+            "diff --git a/a.sh b/b.sh\nold mode 100644\nnew mode 100755\n\
+             rename from a.sh\nrename to b.sh\n\
+             --- a/a.sh\n+++ b/b.sh\n@@ -1 +1 @@\n-a\n+b\n",
+        );
+    }
+
+    #[test]
+    fn writes_no_mode_lines_for_equal_or_malformed_modes() {
+        for (a, b) in [
+            ("100644", "100644"),
+            ("0", "100755"),
+            ("", "100755"),
+            ("100644", "10075x"),
+            ("100644", "1007550"),
+            ("100644", "100755\n"),
+        ] {
+            let c = GlabChange {
+                old_path: "f.txt".into(),
+                new_path: "f.txt".into(),
+                a_mode: a.into(),
+                b_mode: b.into(),
+                diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                reconstruct_file_diff(&c),
+                "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n",
+                "modes {a:?} -> {b:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_suppressed_diff_keeps_the_header_and_body_shape() {
+        for (collapsed, too_large) in [(true, false), (false, true)] {
+            let c = GlabChange {
+                old_path: "old.bin".into(),
+                new_path: "new.bin".into(),
+                renamed_file: true,
+                a_mode: "100644".into(),
+                b_mode: "100755".into(),
+                collapsed,
+                too_large,
+                ..Default::default()
+            };
+            assert_eq!(
+                reconstruct_file_diff(&c),
+                "diff --git a/old.bin b/new.bin\n--- a/old.bin\n+++ b/new.bin\n\n",
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_names_on_rename_lines_stay_quoted() {
+        let c = GlabChange {
+            old_path: "src/mixed.txt".into(),
+            new_path: "src/mixed\rname.txt".into(),
+            renamed_file: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reconstruct_file_diff(&c),
+            "diff --git a/src/mixed.txt \"b/src/mixed\\rname.txt\"\n\
+             rename from src/mixed.txt\n\
+             rename to \"src/mixed\\rname.txt\"\n",
+        );
+        let forged = "evil\n+++ b/ok.txt\ndiff --git a/ok.txt b/ok.txt";
+        let c = GlabChange {
+            old_path: "plain.txt".into(),
+            new_path: forged.into(),
+            renamed_file: true,
+            ..Default::default()
+        };
+        let out = reconstruct_file_diff(&c);
+        let quoted = "evil\\n+++ b/ok.txt\\ndiff --git a/ok.txt b/ok.txt";
+        assert!(out.ends_with(&format!("rename to \"{quoted}\"\n")));
+        assert_eq!(
+            out.lines().filter(|l| l.starts_with("diff --git ")).count(),
+            1
+        );
+        assert_eq!(out.lines().filter(|l| l.starts_with("+++ ")).count(), 0);
+    }
+
+    #[test]
+    fn deserializes_rename_mode_and_suppression_flags_tolerating_null() {
+        let c: GlabChange = serde_json::from_str(
+            r#"{"old_path":"a","new_path":"b","renamed_file":true,"a_mode":"100644",
+                "b_mode":null,"collapsed":null,"too_large":true,"diff":""}"#,
+        )
+        .unwrap();
+        assert!(c.renamed_file && c.too_large && !c.collapsed);
+        assert_eq!((c.a_mode.as_str(), c.b_mode.as_str()), ("100644", ""));
+        // Absent on the deprecated /changes wire: every new field defaults.
+        let bare: GlabChange =
+            serde_json::from_str(r#"{"old_path":"a","new_path":"a","diff":""}"#).unwrap();
+        assert!(!bare.renamed_file && !bare.collapsed && !bare.too_large);
+        assert!(bare.a_mode.is_empty() && bare.b_mode.is_empty());
     }
 
     #[test]
@@ -15536,6 +15788,7 @@ mod tests {
             new_file: false,
             deleted_file: false,
             diff: "@@ -1 +1 @@\n-a\n+b\n".into(),
+            ..Default::default()
         }];
         // New side matches on new_path; old side on old_path.
         assert!(gl_file_diff(&changes, "new_name.rs", "new").is_some());
