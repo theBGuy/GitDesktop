@@ -1,6 +1,9 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { reloadLocalPrs } from "@/lib/pulls/local";
-import { REPO_SHELL_GC_TIME } from "@/lib/query-cache-times";
+import {
+  REPO_SHELL_GC_TIME,
+  REPO_SHELL_WARM_STALE_MS,
+} from "@/lib/query-cache-times";
 import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
@@ -10,14 +13,22 @@ import { useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
 import { recheckListsLater } from "./push-writes";
 
-export function useBranches(repo: string) {
-  return useQuery({
+/** Shared by the hook and the shell warm-up, so the branch menu's local list is
+ *  cached before the menu first opens. */
+export function branchesOptions(repo: string) {
+  return {
     queryKey: repoKeys.branches(repo),
     queryFn: () => api.gitBranches(repo),
     // Local reads must not park on react-query's default "online" mode offline;
     // the same holds for every `networkMode` in this file.
-    networkMode: "always",
-  });
+    networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+export function useBranches(repo: string) {
+  return useQuery(branchesOptions(repo));
 }
 
 /** Shared by the hook and the shell warm-up, so the switcher's Remote group is
@@ -106,6 +117,7 @@ export function defaultBranchOptions(repo: string) {
     queryKey: ["repo", repo, "default-branch"] as const,
     queryFn: () => api.gitDefaultBranch(repo),
     networkMode: "always" as const,
+    staleTime: REPO_SHELL_WARM_STALE_MS,
     gcTime: REPO_SHELL_GC_TIME,
   };
 }

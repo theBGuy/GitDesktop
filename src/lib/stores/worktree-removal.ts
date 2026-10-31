@@ -25,7 +25,7 @@ import {
 import { queryClient } from "@/lib/query-client";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { useStashReapplyMarker } from "./stash-reapply-marker";
-import { useUiStore } from "./ui";
+import { claimWarmRepoShell, useUiStore } from "./ui";
 
 /** A worktree removal the app is still waiting on. */
 export interface WorktreeRemoval {
@@ -510,6 +510,10 @@ async function runPromote(
     // There's no fs-watcher (status is polled), so switching away stops future
     // polls; `removeWorktreeFreeingBranch` retries once for any last in-flight
     // poll that hasn't drained (openRepo's switch can apply after it returns).
+    // Land the main workspace fully drawn: hold the switch on its shell warm-up
+    // (within the 250 ms budget), the same hold every other repo switch takes.
+    // Its supersession verdict is ignored: the app must leave this folder.
+    await claimWarmRepoShell(info.root)?.settled;
     useUiStore.getState().openRepo(info, { bypassLeaveGuard: true });
     await new Promise((resolve) => setTimeout(resolve, 80));
     // Main is the active repo now, so the removal is visible where the user is.

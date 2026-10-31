@@ -38,6 +38,7 @@ import {
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
+import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -720,8 +721,6 @@ export function MyWorkScreen() {
     // view change), so a continuation from a previous mount stays superseded;
     // the view is read live because the screen can be gone entirely.
     const gen = ++openGen;
-    const superseded = () =>
-      gen !== openGen || useUiStore.getState().view !== "mywork";
     // The same set the row's affordances render from, so a local-looking row is
     // never one this refuses over a provider. Both open arms below start here,
     // so PRs and issues are gated alike.
@@ -730,6 +729,14 @@ export function MyWorkScreen() {
       openUrl(item.url);
       return;
     }
+    // Claimed here, before the first await but after the browser-only arm, so a
+    // browser-only click leaves opens made elsewhere (the picker, a held
+    // notification jump) alone; this screen's own it retires by `openGen`. A newer
+    // open claimed elsewhere retires this one. Read only before the navigator
+    // call, whose own claim would retire it.
+    const claimed = claimRepoOpen();
+    const superseded = () =>
+      gen !== openGen || !claimed() || useUiStore.getState().view !== "mywork";
     // EVERY row is proven below, whatever its provider: the key's host and owner
     // are STORED values, so a re-pointed origin leaves any provider's key naming
     // a checkout that is no longer this project. GitLab carries a second reason —
@@ -887,6 +894,13 @@ export function MyWorkScreen() {
         clearSelections: true,
         persist: false,
       });
+    // Re-checked when the navigator applies, a frame or a warm-up hold after this
+    // call: generation for a later click here (a browser-only one claims nothing
+    // and moves no epoch), epoch for any other action. Never `claimed()`: the
+    // navigator claims again, which would retire this open.
+    const stillValid = (epochAtRequest: number) =>
+      gen === openGen &&
+      useUiStore.getState().interactionEpoch === epochAtRequest;
     if (item.isPullRequest) {
       openPr({
         kind: "remote",
@@ -898,6 +912,7 @@ export function MyWorkScreen() {
         // selection reach the same commit; applied here it would land a render
         // early and fetch the new lens against the OLD number.
         beforeSelect: applyLens,
+        stillValid,
       });
     } else {
       openIssue({
@@ -905,6 +920,7 @@ export function MyWorkScreen() {
         repoName: targetName,
         number: item.number,
         beforeSelect: applyLens,
+        stillValid,
       });
     }
   }

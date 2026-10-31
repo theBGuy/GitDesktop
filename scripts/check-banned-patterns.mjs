@@ -5540,6 +5540,8 @@ export const CHECKS = [
       // re-registering on a re-show is the correct behavior, not a reset.
       "src/components/mention-autocomplete.tsx",
       // Prefetch loop; `prefetchQuery` honors staleTime, so a repeat is free.
+      // And the open list's order-freeze seed on the rows' first arrival,
+      // idempotent behind its no-snapshot-yet gate.
       "src/features/repository/BranchSwitcher.tsx",
       // Registers the open dialog with the native-menu gate; add/remove pair.
       "src/lib/hotkeys/modal-gate.ts",

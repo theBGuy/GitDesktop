@@ -28,6 +28,8 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import {
   isDeletionBlocked,
   isMergeMethodAllowed,
@@ -41,6 +43,7 @@ import {
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
+import { applyFrozenOrder } from "@/lib/frozen-order";
 import {
   forgeDetectForkPrForBranch,
   gitBranches,
@@ -165,6 +168,11 @@ import {
   type PickerMode,
 } from "./BranchMergePickerDialog";
 import {
+  type BranchListMode,
+  branchListRetrying,
+  branchListState,
+} from "./branch-list-state";
+import {
   isLocalUpstream,
   presenceUnderUrls,
   remoteHasBranch,
@@ -272,19 +280,85 @@ const PR_STATE_LABEL: Record<PrAuditState, string> = {
   closed: "Closed",
 };
 
-/** `branches` (already sorted) reordered by a snapshot of names: snapshot names in
- *  snapshot order, then branches the snapshot lacks in their sorted order. Names
- *  gone from `branches` drop out; a null snapshot keeps the sorted order. */
-function applyFrozenOrder(
-  branches: Branch[],
-  frozen: readonly string[] | null,
-): Branch[] {
-  if (frozen === null) return branches;
-  const rank = new Map(frozen.map((name, i) => [name, i] as const));
-  const known = branches
-    .filter((b) => rank.has(b.name))
-    .sort((a, b) => (rank.get(a.name) ?? 0) - (rank.get(b.name) ?? 0));
-  return [...known, ...branches.filter((b) => !rank.has(b.name))];
+/** One spelling for a failed branch-list read: the disabled reasons, the list's
+ *  failure line, and its status region all describe the same query. */
+const BRANCH_LIST_READ_FAILED = "Couldn't read the branch list.";
+
+/** The list's loading status, in `ListRowSkeletons`' "Loading {name}…" shape;
+ *  the disabled reasons' "Checking branches…" is a separate, deliberate line. */
+const BRANCH_LIST_LOADING = "Loading branches…";
+
+/** The list's announcement per mode while the menu is open; ready says nothing,
+ *  the rows do. */
+const BRANCH_LIST_STATUS: Record<BranchListMode, string> = {
+  pending: BRANCH_LIST_LOADING,
+  failed: BRANCH_LIST_READ_FAILED,
+  ready: "",
+};
+
+const BRANCH_SKELETON_ROWS = 4;
+
+/** Placeholders shaped like a branch row: its `gap-y-0.5 px-3 py-1.5` box, an h-4
+ *  name line, and a meta line as tall as the real row's text-[11px] spans (11px
+ *  at text-xs's inherited 1/0.75 line-height), so the rows that replace them
+ *  shift nothing. Local rather than `ListRowSkeletons`, whose rows are bordered
+ *  `py-2` boxes of full-width bars. */
+function BranchRowSkeletons() {
+  return (
+    <div aria-busy>
+      {/* Index key: a fixed static list that never reorders. */}
+      {Array.from({ length: BRANCH_SKELETON_ROWS }, (_, i) => (
+        <div key={i} className="flex flex-col gap-y-0.5 px-3 py-1.5">
+          <div className="flex h-4 items-center">
+            <Skeleton className="h-3 w-2/5" />
+          </div>
+          <div className="flex h-[calc(11px/0.75)] items-center">
+            <Skeleton className="h-2.5 w-1/4" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** The failure line's retry, held by `aria-disabled` while the read runs so it
+ *  keeps focus for the rescue when rows land. Not ARIA_DISABLED_CLASS: its
+ *  pointer-events-none lets a press fall through and take focus off the button,
+ *  and 50% opacity on primary misses AA (2.26:1 light, 3.13:1 slate; the muted
+ *  token used instead measures 5.18:1 or better, computed from App.css). */
+function BranchListRetry({
+  retrying,
+  retryRef,
+  onRetry,
+}: {
+  retrying: boolean;
+  retryRef: (node: HTMLElement | null) => () => void;
+  onRetry: () => void;
+}) {
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({
+      disabled: retrying,
+      reason: BRANCH_LIST_LOADING,
+      onClick: onRetry,
+    });
+  return (
+    <span className="flex shrink-0" title={wrapperTitle}>
+      <button
+        {...nativeProps}
+        ref={retryRef}
+        type="button"
+        aria-describedby={describedBy}
+        className="cursor-pointer font-medium text-primary hover:underline aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground aria-disabled:hover:no-underline"
+      >
+        Try again
+      </button>
+      {blockedReason ? (
+        <span id={reasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 function MenuRow({
@@ -731,13 +805,46 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // Row ORDER freezes while the list is open, so an update that moves a branch's
   // commit date doesn't reorder rows under the pointer; row data stays live.
   // Snapshotted IN the open transition, so the first open frame already paints
-  // it — `onOpenChange` and the show-branches hotkey are the only ways in.
+  // it — `onOpenChange` and the show-branches hotkey are the only ways in. An
+  // open before the first read lands holds no snapshot (an empty one would
+  // freeze nothing), and the effect below takes it when the rows arrive.
   const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
-  const snapshotOrder = () => setFrozenOrder(sortedBranches.map((b) => b.name));
+  // This instance outlives repo switches, and a held cross-repo landing can switch
+  // under an open menu: drop the old repo's snapshot and arrow cursor (both name
+  // its rows) so the effect below re-snapshots the new list. The filter stays: it
+  // is the user's visible input, and the switch can land mid-keystroke.
+  const [orderRepo, setOrderRepo] = useState(repoPath);
+  if (orderRepo !== repoPath) {
+    setOrderRepo(repoPath);
+    setFrozenOrder(null);
+    setActiveBranch(null);
+  }
+  const snapshotOrder = () =>
+    setFrozenOrder(
+      branches.data === undefined ? null : sortedBranches.map((b) => b.name),
+    );
+  // Idempotent: it acts only while the open list holds no snapshot, and a close
+  // clears the snapshot along with `open`.
+  useEffect(() => {
+    if (open && frozenOrder === null && branches.data !== undefined)
+      setFrozenOrder(sortedBranches.map((b) => b.name));
+  }, [open, frozenOrder, branches.data, sortedBranches]);
   const orderedBranches = useMemo(
-    () => applyFrozenOrder(sortedBranches, frozenOrder),
+    () => applyFrozenOrder(sortedBranches, frozenOrder, (b) => b.name),
     [sortedBranches, frozenOrder],
   );
+  const listState = branchListState({
+    errorUpdateCount: branches.errorUpdateCount,
+    hasData: branches.data !== undefined,
+  });
+  // The Try again line unmounts under focus when the rows land; the filter input
+  // survives every list state, so it takes the focus back.
+  const listRescue = useRetryFocusRescue(open && listState.mode === "failed");
+  // One string for the failure line and the status region, so they can't disagree.
+  const listRetrying = branchListRetrying(listState.mode, branches);
+  const listLine = listRetrying
+    ? BRANCH_LIST_LOADING
+    : BRANCH_LIST_STATUS[listState.mode];
   const bq = branchFilter.trim().toLowerCase();
   const visibleBranches = useMemo(
     () =>
@@ -768,9 +875,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     repoPath,
     open || branchDialogOpen,
   );
-  // One prefetch per repo for the opens that skip the shell warm-up (notification
-  // and My work jumps), so the menu still opens with its Remote group. The hook
-  // stays open-gated; a fresh warmed entry makes this a no-op.
+  // One prefetch per repo for an open that skips the shell warm-up (a same-repo
+  // remount from a non-repo view), so the menu still opens with its Remote group.
+  // The hook stays open-gated; a fresh warmed entry makes this a no-op.
   useEffect(() => {
     if (!repoPath) return;
     void queryClient.prefetchQuery({
@@ -794,6 +901,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       .filter((b) => (seen.has(b.name) ? false : (seen.add(b.name), true)))
       .sort((a, b) => b.lastCommitDate.localeCompare(a.lastCommitDate));
   }, [remoteBranchesQuery.data, localNames, bq]);
+  // One gate for the Remote group's render and its arrow-key rows, so the nav
+  // list never reaches a row that isn't on screen.
+  const showRemoteSection =
+    listState.remoteGroupMayRender && remoteOnly.length > 0;
   // The ref being named, whose committed work the AI fallback describes: the
   // rename target (which need NOT be checked out) or the checked-out branch for
   // a create; null ⇒ both closed. Create names the BRANCH, not the literal
@@ -918,7 +1029,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const navBranches: { name: string }[] = [
     ...visibleBranches,
     ...(showArchived ? archivedBranches : []),
-    ...(showRemote ? remoteOnly : []),
+    ...(showRemote && showRemoteSection ? remoteOnly : []),
   ];
   const onBranchKeyDown = listKeyboardNav({
     items: navBranches,
@@ -2126,7 +2237,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const branchesUnread = unread(
     branches,
     "Checking branches…",
-    "Couldn't read the branch list.",
+    BRANCH_LIST_READ_FAILED,
   );
   const stashCountUnread = unread(
     stashCount,
@@ -2167,6 +2278,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (!currentName)
       return headUnread ?? "HEAD is detached — there's no branch to update.";
     if (defaultName === currentName) return `You're already on ${defaultName}.`;
+    // Without the list, the default's upstream is unknown, and so is the base. A
+    // promotion rule holds whether or not the list lands, so it isn't displaced.
+    if (branchesUnread && !currentPromotion) return branchesUnread;
     // An in-place update waits on the network lock a push holds.
     if (pushActive) return branchPushHoldReason(pushPaused);
     if (busy) return "Another git operation is running.";
@@ -2478,6 +2592,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     Boolean(
       defaultName &&
         defaultName !== currentName &&
+        // An unread list would resolve the base to the local default.
+        !branchesUnread &&
         !busy &&
         currentName &&
         !currentPromotion,
@@ -3724,6 +3840,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               )}
               <div className="border-b p-2">
                 <Input
+                  ref={listRescue.hostRef}
                   value={branchFilter}
                   onChange={(e) => setBranchFilter(e.target.value)}
                   placeholder="Filter branches"
@@ -3732,7 +3849,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 />
               </div>
               <div className="max-h-60 overflow-y-auto">
-                {visibleBranches.length === 0 &&
+                {listState.mode === "pending" && <BranchRowSkeletons />}
+                {listState.mode === "failed" && (
+                  <div className="flex items-center gap-2 px-3 py-4 text-xs">
+                    <span className="min-w-0 flex-1 text-muted-foreground">
+                      {listLine}
+                    </span>
+                    <BranchListRetry
+                      retrying={listRetrying}
+                      retryRef={listRescue.retryRef}
+                      onRetry={() => void branches.refetch()}
+                    />
+                  </div>
+                )}
+                {listState.mode === "ready" &&
+                  visibleBranches.length === 0 &&
                   archivedBranches.length === 0 &&
                   remoteOnly.length === 0 && (
                     <p className="px-3 py-4 text-center text-xs text-muted-foreground">
@@ -3760,7 +3891,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     {showArchived && archivedBranches.map(renderBranchRow)}
                   </>
                 )}
-                {remoteOnly.length > 0 && (
+                {showRemoteSection && (
                   <>
                     <button
                       type="button"
@@ -3911,6 +4042,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     !defaultName ||
                     !currentName ||
                     defaultName === currentName ||
+                    branchesUnread !== null ||
                     pushActive ||
                     busy ||
                     currentPromotion
@@ -4002,6 +4134,13 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           </Popover.Positioner>
         </Popover.Portal>
       </Popover.Root>
+      {/* The list's live region, outside the portal so it stays mounted: text
+          a region already holds when it enters the a11y tree is never announced,
+          and the popup remounts on every open. Each open of a loading or failed
+          list changes this text, and so do a retry and its repeat failure. */}
+      <span role="status" className="sr-only">
+        {open ? listLine : ""}
+      </span>
 
       <CreateBranchDialog
         repoPath={repoPath}

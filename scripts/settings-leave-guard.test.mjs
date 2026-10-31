@@ -1,7 +1,9 @@
 // Pins the Settings leave guard by source scans: every navigator in the ui store
 // that writes `view` (itself or through another member) consults the guard
 // before its epoch bump, or sits in a closed exempt list with its reason, and the
-// intercept bumps for the request before the guard runs; the guard is registered
+// intercept bumps for the request before the guard runs; a cross-repo jump held on
+// the repo-shell warm-up consults the guard again before it lands, since the
+// guard can be registered during the hold without a bump; the guard is registered
 // while Settings holds unsaved edits or a save is writing, nulled at cleanup, and
 // routes through the one `requestLeave` that Back and Esc call too, which asks,
 // holds a move silently while a write is in flight (dropping it on a failed or
@@ -44,6 +46,9 @@ const BRANCH_SWITCHER = "src/features/repository/BranchSwitcher.tsx";
 
 /** The notification jumps' navigators, each re-checked by `stillValid`. */
 const JUMP_NAVIGATORS = ["openPr", "openRun", "openAgentTab", "openRepoView"];
+
+/** The navigators that hold a cross-repo landing on the repo-shell warm-up. */
+const HELD_NAVIGATORS = [...JUMP_NAVIGATORS, "openIssue"];
 
 /** View writers that never leave Settings through the guard, each with why. */
 const EXEMPT = {
@@ -668,6 +673,125 @@ function onAppliedProblems(text) {
     )
   )
     problems.push("openRepo's resume thunk drops its opts");
+  return problems;
+}
+
+/** Problems with the held landings, `[]` when pinned. Every `holdNavigation`
+ *  mention in ui.ts is its import or a call inside a store member, and the
+ *  members making those calls are exactly HELD_NAVIGATORS (a call it can't
+ *  attribute, or a member outside the set, fails). Each of those members is,
+ *  end to end: the leave guard, the request's bump, the request-time motion,
+ *  one `land` closure over `startViewTransition(`, the warm-up claimed only
+ *  when the target repo differs from the open one, a synchronous `land();` with
+ *  no warm-up, and one `holdNavigation(warm, () => {…})` call as its last
+ *  statement, with `land()` called exactly twice. The transition callback opens
+ *  with the `stillValid` refusal, ahead of any `beforeSelect`. The hold's
+ *  callback is exactly that refusal, then
+ *  `if (interceptSettingsLeave(() => get().<itself>(target))) return; land();`,
+ *  so a jump its caller retired yields silently: typing into a clean Settings
+ *  registers the guard without an epoch bump, so only this re-check stops a held
+ *  landing leaving unsaved edits unprompted. */
+function heldLandingProblems(text) {
+  const masked = maskNonCode(text, false);
+  const obj = storeObject(masked);
+  if (!obj) return ["the store creator's returned object was not found"];
+  const members = objectMembers(masked, obj[0], obj[1]);
+  const problems = [];
+  const holdsBy = new Map();
+  for (const ref of masked.matchAll(/(?<![\w$.])holdNavigation(?![\w$])/g)) {
+    const after = masked.slice(ref.index + ref[0].length);
+    if (
+      /^\s*\}\s*from\s/.test(after) &&
+      /import\s*\{\s*$/.test(masked.slice(0, ref.index))
+    )
+      continue;
+    if (!/^\s*\(/.test(after)) {
+      problems.push(
+        "holdNavigation is referenced other than by its import or a call",
+      );
+      continue;
+    }
+    const owner = members.find(
+      (m) => ref.index >= m.start && ref.index < m.end,
+    );
+    if (!owner) {
+      problems.push("a holdNavigation call sits outside the store's members");
+      continue;
+    }
+    if (!HELD_NAVIGATORS.includes(owner.key)) {
+      problems.push(
+        `${owner.key} holds a landing but isn't a pinned held navigator`,
+      );
+      continue;
+    }
+    holdsBy.set(owner.key, (holdsBy.get(owner.key) ?? 0) + 1);
+  }
+  const values = new Map(
+    members.map((m) => [m.key, masked.slice(m.start, m.end)]),
+  );
+  for (const name of HELD_NAVIGATORS) {
+    const value = values.get(name);
+    if (value === undefined) {
+      problems.push(`${name} not found`);
+      continue;
+    }
+    const head = new RegExp(
+      `^\\s*\\(target\\)\\s*=>\\s*\\{\\s*if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*const epochAtRequest = bumpEpochNow\\(\\);\\s*const motion = repoViewMotion\\(\\);\\s*const land = \\(\\) =>\\s*startViewTransition\\(`,
+    ).exec(value);
+    if (
+      head &&
+      !/^\(\)\s*=>\s*\{\s*if \(target\.stillValid\?\.\(epochAtRequest\) === false\) return;/.test(
+        value.slice(head[0].length),
+      )
+    )
+      problems.push(
+        `${name}'s landing doesn't open with its stillValid refusal`,
+      );
+    const landClose = head ? matchBrace(value, head[0].length - 1) : -1;
+    const tail =
+      landClose === -1
+        ? null
+        : /^\s*;\s*const warm =\s*get\(\)\.repoPath !== target\.repoPath\s*\?\s*claimWarmRepoShell\(target\.repoPath\)\s*:\s*null;\s*if \(!warm\) \{\s*land\(\);\s*return;\s*\}\s*holdNavigation\(/.exec(
+            value.slice(landClose + 1),
+          );
+    const callOpen = tail ? landClose + tail[0].length : -1;
+    const callClose = tail ? matchBrace(value, callOpen) : -1;
+    if (callClose === -1 || !/^\s*;\s*\}\s*$/.test(value.slice(callClose + 1)))
+      problems.push(
+        `${name} isn't guard, bump, motion, land, a cross-repo-only warm-up, a synchronous land without one, then the hold as its last statement`,
+      );
+    if ((value.match(/(?<![\w$.])land\(\)/g) ?? []).length !== 2)
+      problems.push(`${name} doesn't call land() exactly twice`);
+    if ((holdsBy.get(name) ?? 0) !== 1) {
+      problems.push(`expected one holdNavigation( in ${name}`);
+      continue;
+    }
+    // An unreadable shape was reported above; nothing below could be located.
+    if (callClose === -1) continue;
+    const cb = /^\s*warm,\s*\(\)\s*=>\s*\{/.exec(value.slice(callOpen + 1));
+    if (!cb) {
+      problems.push(`${name}'s hold doesn't land through a block callback`);
+      continue;
+    }
+    const bodyOpen = callOpen + cb[0].length;
+    const bodyClose = matchBrace(value, bodyOpen);
+    if (
+      bodyClose === -1 ||
+      !/^\s*,?\s*$/.test(value.slice(bodyClose + 1, callClose))
+    ) {
+      problems.push(
+        `${name}'s hold callback has no block body, or arguments follow it`,
+      );
+      continue;
+    }
+    const guard = new RegExp(
+      `^\\{\\s*if \\(target\\.stillValid\\?\\.\\(epochAtRequest\\) === false\\) return;\\s*if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*land\\(\\);\\s*\\}$`,
+    );
+    if (!guard.test(value.slice(bodyOpen, bodyClose + 1)))
+      problems.push(
+        `${name}'s held landing doesn't refuse a retired jump, then re-run the leave guard for itself before it lands`,
+      );
+  }
   return problems;
 }
 
@@ -1381,6 +1505,100 @@ test("the navigators run onApplied only once their landing applies", () => {
   );
 });
 
+test("a held cross-repo jump re-runs the leave guard before it lands", () => {
+  pin(
+    heldLandingProblems,
+    source(UI),
+    // Dropping the settle-time re-check: typing into Settings during the hold
+    // would be left unprompted.
+    once(
+      "        if (interceptSettingsLeave(() => get().openPr(target))) return;\n        land();\n",
+      "        land();\n",
+    ),
+    // Landing ahead of the re-check.
+    once(
+      "        if (interceptSettingsLeave(() => get().openRun(target))) return;\n        land();\n",
+      "        land();\n        if (interceptSettingsLeave(() => get().openRun(target))) return;\n",
+    ),
+    // A resume that re-requests a different navigator.
+    once(
+      "get().openIssue(target))) return;\n        land();",
+      "get().openPr(target))) return;\n        land();",
+    ),
+    // A same-repo jump held, or one without a warm-up no longer landing at once.
+    once(
+      "        get().repoPath !== target.repoPath\n          ? claimWarmRepoShell(target.repoPath)\n          : null;\n",
+      "        claimWarmRepoShell(target.repoPath);\n",
+    ),
+    once("      if (!warm) {\n        land();\n        return;\n      }\n", ""),
+    // A stillValid member re-checking Settings for a jump its caller retired.
+    once(
+      "        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openAgentTab(target))) return;\n",
+      "        if (interceptSettingsLeave(() => get().openAgentTab(target))) return;\n",
+    ),
+    // The refusal after the re-check: a retired jump would still prompt.
+    once(
+      "        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openRepoView(target))) return;\n",
+      "        if (interceptSettingsLeave(() => get().openRepoView(target))) return;\n        if (target.stillValid?.(epochAtRequest) === false) return;\n",
+    ),
+    // A second hold in one member.
+    once(
+      "      holdNavigation(warm, () => {\n        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openRun(",
+      "      holdNavigation(warm, land);\n      holdNavigation(warm, () => {\n        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openRun(",
+    ),
+    // A callback that isn't an arrow with a block body.
+    once(
+      "      holdNavigation(warm, () => {\n        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openRepoView(",
+      "      holdNavigation(warm, function () {\n        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openRepoView(",
+    ),
+    // An argument after the callback.
+    once(
+      "        land();\n      });\n    },\n    setRepoTab:",
+      "        land();\n      }, 0);\n    },\n    setRepoTab:",
+    ),
+    // openIssue held to the same order: no refusal, the refusal after the
+    // re-check, none in its landing, the lens write ahead of it, a bare bump.
+    once(
+      "        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n",
+      "        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n",
+    ),
+    once(
+      "        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n",
+      "        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n        if (target.stillValid?.(epochAtRequest) === false) return;\n",
+    ),
+    once(
+      "          if (target.stillValid?.(epochAtRequest) === false) return;\n          runBeforeSelect(target.beforeSelect);\n",
+      "          runBeforeSelect(target.beforeSelect);\n",
+    ),
+    once(
+      "          if (target.stillValid?.(epochAtRequest) === false) return;\n          runBeforeSelect(target.beforeSelect);\n",
+      "          runBeforeSelect(target.beforeSelect);\n          if (target.stillValid?.(epochAtRequest) === false) return;\n",
+    ),
+    once(
+      "get().openIssue(target))) return;\n      const epochAtRequest = bumpEpochNow();\n",
+      "get().openIssue(target))) return;\n      bumpEpochNow();\n",
+    ),
+    // An extra, unheld landing.
+    once(
+      "      // Held across repos like openPr, which carries the rationale.\n",
+      "      land();\n",
+    ),
+    // A hold outside the store's members, a new member holding, and an alias.
+    once(
+      "export const useUiStore =",
+      "const holdLater = (w, l) => holdNavigation(w, l);\nexport const useUiStore =",
+    ),
+    once(
+      "    setRepoTab: (tab) =>",
+      "    openElsewhere: (target) => {\n      holdNavigation(target.warm, () => target.land());\n    },\n    setRepoTab: (tab) =>",
+    ),
+    once(
+      "export const useUiStore =",
+      "const hold = holdNavigation;\nexport const useUiStore =",
+    ),
+  );
+});
+
 test("a notification jump reads its row only when the landing applies", () => {
   pin(
     markReadProblems,
@@ -1467,7 +1685,7 @@ test("the guard's escapes are used at exactly the two system landings", () => {
     ],
     [
       "src/features/repository/RepoDialogs.tsx",
-      once("if (wasOpen) closeRepoUnguarded();", "if (wasOpen) closeRepo();"),
+      once("closeRepoUnguarded();", "closeRepo();"),
     ],
     // Something other than a literal true.
     [
