@@ -14,14 +14,19 @@ import {
   createImageBudget,
   decodedByteLength,
   IMAGE_CAPTION_REASON,
+  imageFate,
   isRepoRelativeImageUrl,
   isSvgDocument,
+  keepsShownImage,
   parseSrcset,
+  RELATIVE_URL_ATTRS,
+  relativeUrlAttrs,
   renderableImageMime,
   repoDocBaseDir,
   resolveRepoImagePath,
   runCapped,
   serializeSrcset,
+  unitNeedsWalk,
 } from "../src/components/markdown/markdown-images.ts";
 import { maskNonCode } from "./lib/ts-mask.mjs";
 
@@ -323,6 +328,210 @@ test("the loader gates and charges its reads through the budget", () => {
     "budget.admit(",
   ])
     assert.ok(masked.includes(call), call);
+});
+
+/** Image units after their srcsets are written: what the image's own src did,
+ *  and the fate each must get. */
+const FATE_CASES = [
+  {
+    name: "own src loaded",
+    input: { own: { loaded: "data:a" }, ownSrcset: "", sourceSrcsets: [] },
+    fate: { keepWithSrc: "data:a" },
+  },
+  {
+    name: "own srcset kept a candidate",
+    input: { own: "failed", ownSrcset: "data:b 2x", sourceSrcsets: [] },
+    fate: "keep",
+  },
+  {
+    name: "absolute src",
+    input: { own: "absolute", ownSrcset: "", sourceSrcsets: [""] },
+    fate: "keep",
+  },
+  {
+    name: "lone image whose src failed",
+    input: { own: "failed", ownSrcset: "", sourceSrcsets: [] },
+    fate: "caption",
+  },
+  {
+    name: "picture whose img failed beside a kept dark-mode source",
+    input: {
+      own: "failed",
+      ownSrcset: "",
+      sourceSrcsets: ["", "https://cdn.example/dark.png 1x, data:c 2x"],
+    },
+    fate: { keepWithSrc: "https://cdn.example/dark.png" },
+  },
+  {
+    name: "picture whose img failed beside a loaded relative source",
+    input: { own: "failed", ownSrcset: "", sourceSrcsets: ["data:d"] },
+    fate: { keepWithSrc: "data:d" },
+  },
+  {
+    name: "picture with no candidate anywhere",
+    input: { own: "failed", ownSrcset: "", sourceSrcsets: ["", ""] },
+    fate: "caption",
+  },
+  {
+    name: "src-less image in a picture whose source kept one",
+    input: { own: "none", ownSrcset: "", sourceSrcsets: ["data:e"] },
+    fate: "keep",
+  },
+  {
+    name: "src-less image with nothing kept",
+    input: { own: "none", ownSrcset: "", sourceSrcsets: [] },
+    fate: "caption",
+  },
+];
+
+/** The cases `fate` gets wrong, by name. */
+const fateMisses = (fate) =>
+  FATE_CASES.filter((c) => {
+    try {
+      assert.deepEqual(fate(c.input), c.fate);
+      return false;
+    } catch {
+      return true;
+    }
+  }).map((c) => c.name);
+
+/** The rule the picture fallback replaced: an image whose own src failed is
+ *  captioned unless its own srcset kept something. */
+function captionWhenOwnSrcFailed({ own, ownSrcset, sourceSrcsets }) {
+  if (typeof own === "object") return { keepWithSrc: own.loaded };
+  if (parseSrcset(ownSrcset).length > 0 || own === "absolute") return "keep";
+  if (own === "failed") return "caption";
+  return sourceSrcsets.some((s) => parseSrcset(s).length > 0)
+    ? "keep"
+    : "caption";
+}
+
+test("a picture with a surviving source keeps an image, taking its candidate as src", () => {
+  assert.deepEqual(fateMisses(imageFate), []);
+});
+
+test("the picture-fallback pin fails the caption-when-own-src-failed rule", () => {
+  assert.deepEqual(fateMisses(captionWhenOwnSrcFailed), [
+    "picture whose img failed beside a kept dark-mode source",
+    "picture whose img failed beside a loaded relative source",
+  ]);
+});
+
+test("a run walks only units not yet written for its key", () => {
+  assert.equal(unitNeedsWalk(undefined, "0"), true);
+  assert.equal(unitNeedsWalk("1700", "1700"), false);
+  assert.equal(unitNeedsWalk("1700", "1800"), true);
+  // Negative control: skipping any unit written before never re-reads one.
+  const skipWritten = (writtenFor) => writtenFor === undefined;
+  assert.notEqual(skipWritten("1700", "1800"), unitNeedsWalk("1700", "1800"));
+});
+
+test("a failed read never downgrades a shown image; a definite outcome does", () => {
+  assert.equal(keepsShownImage(true, ["readFailed"]), true);
+  assert.equal(keepsShownImage(true, ["absent", "readFailed"]), true);
+  for (const reason of ["absent", "tooLarge", "notImage"])
+    assert.equal(keepsShownImage(true, [reason]), false, reason);
+  assert.equal(keepsShownImage(true, []), false);
+  // Never shown (first write, or a caption), a failed read captions as before.
+  assert.equal(keepsShownImage(false, ["readFailed"]), false);
+  // Negative control: writing every outcome downgrades on a failed read.
+  const writeEverything = () => false;
+  assert.notEqual(writeEverything(true, ["readFailed"]), true);
+});
+
+test("the loader decides through the pinned helpers and stamps its run key", () => {
+  const masked = maskNonCode(
+    read("src/components/markdown/markdown.tsx"),
+    true,
+  );
+  for (const call of [
+    "imageFate(",
+    "unitNeedsWalk(",
+    "keepsShownImage(",
+    "captionedRoots.set(",
+    "relativeUrlAttrs(",
+    "contains(active)",
+    "preventScroll: true",
+  ])
+    assert.ok(masked.includes(call), call);
+});
+
+const HREFS = ["href", "xlink:href"];
+
+test("relative fetch URLs are removed on exactly these elements and attributes", () => {
+  assert.deepEqual(
+    [...RELATIVE_URL_ATTRS].map(([tag, attrs]) => [tag, [...attrs]]),
+    [
+      ["*", ["background"]],
+      ["altglyph", HREFS],
+      ["audio", ["src"]],
+      ["feimage", HREFS],
+      ["filter", HREFS],
+      ["glyphref", HREFS],
+      ["image", HREFS],
+      ["input", ["src"]],
+      ["lineargradient", HREFS],
+      ["mpath", HREFS],
+      ["pattern", HREFS],
+      ["radialgradient", HREFS],
+      ["source", ["src"]],
+      ["textpath", HREFS],
+      ["track", ["src"]],
+      ["tref", HREFS],
+      ["video", ["src", "poster"]],
+    ],
+  );
+  // Matched by name in any case, with `background` on every element.
+  assert.deepEqual(relativeUrlAttrs("feImage"), ["background", ...HREFS]);
+  assert.deepEqual(relativeUrlAttrs("TD"), ["background"]);
+  assert.deepEqual(relativeUrlAttrs("IMG"), ["background"]);
+  // The same predicate as images: relative goes; absolute, data: and a
+  // same-document fragment stay.
+  for (const v of ["clip.mp4", "./a/b.vtt", "/media/poster.png", "x.svg#g"])
+    assert.equal(isRepoRelativeImageUrl(v), true, v);
+  for (const v of [
+    "https://cdn.example/clip.mp4",
+    "//cdn/x.mp4",
+    "data:x",
+    "#g",
+  ])
+    assert.equal(isRepoRelativeImageUrl(v), false, v);
+});
+
+/** DOMPurify's default allowlists, read from its build: the frozen lists its
+ *  DEFAULT_ALLOWED_TAGS and DEFAULT_ALLOWED_ATTR spread. */
+function purifyDefaults() {
+  const src = readFileSync(
+    new URL("../node_modules/dompurify/dist/purify.es.mjs", import.meta.url),
+    "utf8",
+  );
+  const lists = new Map();
+  for (const m of src.matchAll(/const (\w+\$?\d*) = freeze\(\[([^\]]*)\]\);/g))
+    lists.set(
+      m[1],
+      [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1].toLowerCase()),
+    );
+  const union = (names) =>
+    new Set(
+      names.flatMap((n) => {
+        assert.ok(lists.has(n), `DOMPurify list ${n}`);
+        return lists.get(n);
+      }),
+    );
+  return {
+    tags: union(["html$1", "svg$1", "svgFilters", "mathMl$1"]),
+    attrs: union(["html", "svg", "mathMl", "xml"]),
+  };
+}
+
+test("every neutralized pair survives DOMPurify's default allowlists", () => {
+  const { tags, attrs } = purifyDefaults();
+  for (const [tag, names] of RELATIVE_URL_ATTRS) {
+    if (tag !== "*") assert.ok(tags.has(tag), tag);
+    for (const attr of names) assert.ok(attrs.has(attr), `${tag} ${attr}`);
+  }
+  // Negative control: a disallowed SVG element isn't in the union.
+  assert.equal(tags.has("use"), false);
 });
 
 function deferred() {

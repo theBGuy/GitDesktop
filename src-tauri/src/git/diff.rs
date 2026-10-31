@@ -86,8 +86,9 @@ fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewR
     Ok(PreviewRead::Bytes(bytes))
 }
 
-/// Both revision reads classify failures identically, including a ref moving
-/// between the size probe and the read. Only proven absence becomes `None`.
+/// Absence is a missing path/stage at a resolved revision, a missing ancestor of
+/// a resolved base, or a HEAD/@ read (with navigation) while HEAD is unborn.
+/// Other failures stay errors so unrelated bad revisions cannot look absent.
 async fn preview_rev_failure(repo: &str, rev: &str, out: GitOutput) -> AppResult<()> {
     if [
         "does not exist in '",
@@ -97,35 +98,35 @@ async fn preview_rev_failure(repo: &str, rev: &str, out: GitOutput) -> AppResult
     ]
     .iter()
     .any(|text| out.stderr.contains(text))
-        || unborn_head(repo).await?
     {
         return Ok(());
     }
-    if out.stderr.contains("invalid object name '") {
-        let mut base = rev;
-        loop {
-            let before_digits = base.trim_end_matches(|c: char| c.is_ascii_digit());
-            let Some(prefix) = before_digits.strip_suffix(['~', '^']) else {
-                break;
-            };
-            if prefix.is_empty() {
-                break;
-            }
-            base = prefix;
+    let mut base = rev;
+    loop {
+        let before_digits = base.trim_end_matches(|c: char| c.is_ascii_digit());
+        let Some(prefix) = before_digits.strip_suffix(['~', '^']) else {
+            break;
+        };
+        if prefix.is_empty() {
+            break;
         }
-        if base.len() < rev.len() {
-            let base = format!("{base}^{{commit}}");
-            #[cfg(test)]
-            VERIFY_SPAWNS.with(|n| n.set(n.get() + 1));
-            let verified = run_git_raw(
-                Some(repo),
-                &["rev-parse", "--verify", "--quiet", &base],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
-            if verified.code == 0 {
-                return Ok(());
-            }
+        base = prefix;
+    }
+    if matches!(base, "HEAD" | "@") && unborn_head(repo).await? {
+        return Ok(());
+    }
+    if out.stderr.contains("invalid object name '") && base.len() < rev.len() {
+        let base = format!("{base}^{{commit}}");
+        #[cfg(test)]
+        VERIFY_SPAWNS.with(|n| n.set(n.get() + 1));
+        let verified = run_git_raw(
+            Some(repo),
+            &["rev-parse", "--verify", "--quiet", &base],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if verified.code == 0 {
+            return Ok(());
         }
     }
     out.exit_verdict().map(|_| ())
@@ -3519,6 +3520,43 @@ mod tests {
                     .unwrap();
             assert!(staged.base64.is_some());
             assert_preview_spawns(probe, 1, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_orphan_head_absence_does_not_hide_unrelated_bad_revs() {
+        let (_tmp, _dir, repo) = init_preview_repo().await;
+        let existing = git_ok(&repo, &["rev-parse", "HEAD"]).await;
+        git_ok(&repo, &["switch", "--orphan", "preview-orphan"]).await;
+        for probe_size in [None, Some(true)] {
+            let probe = usize::from(probe_size == Some(true));
+            for (rev, path) in [
+                ("HEAD", "a.png"),
+                ("HEAD~1", "a.png"),
+                ("HEAD~", "a.png"),
+                ("HEAD^", "a.png"),
+                ("@", "a.png"),
+                ("@~1^", "a.png"),
+                (existing.trim(), "missing.png"),
+            ] {
+                reset_preview_spawns();
+                assert!(
+                    git_file_base64(repo.clone(), Some(rev.into()), path.into(), probe_size)
+                        .await
+                        .unwrap_or_else(|e| panic!("{rev}:{path}: {e:?}"))
+                        .is_none()
+                );
+                assert_preview_spawns(probe, 1 - probe, 0);
+            }
+            for (rev, verify) in [("bogus", 0), ("bogus~1", 1)] {
+                reset_preview_spawns();
+                let err =
+                    git_file_base64(repo.clone(), Some(rev.into()), "a.png".into(), probe_size)
+                        .await
+                        .unwrap_err();
+                assert!(matches!(err, AppError::Git { .. }), "{rev}: {err:?}");
+                assert_preview_spawns(probe, 1 - probe, verify);
+            }
         }
     }
 

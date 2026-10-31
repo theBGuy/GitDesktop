@@ -1147,7 +1147,8 @@ review via its subscription login. The full list is under
   turns out to be; on GitLab, `#123` opens the issue and `!123` the merge
   request. `@user` opens the profile in your browser. Hover a reference, or
   reach it with Tab, and a **preview card** shows what you'd be opening: the
-  state (Open, Merged, Closed, or Draft), title, and author of an issue or
+  state (Open, Merged, Closed, or Draft, or Open or draft when GitHub could
+  only confirm that a pull request is open), title, and author of an issue or
   pull request, or the avatar and handle of a person. Bitbucket bodies leave
   references plain, matching Bitbucket itself, and a reference inside a code
   span or fence stays plain text.

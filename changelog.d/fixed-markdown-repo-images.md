@@ -1,4 +1,6 @@
-- Markdown previews of repository files now show the repository's own images,
-  GIFs and `<picture>` sources included, read from the version you're viewing.
-  In Explore and in pull request and issue text, an image that can't load there
-  shows its alt text and the reason.
+- Markdown previews of repository files show the repository's own images, GIFs
+  and `<picture>` sources included, read from the version you're viewing; a
+  preview of your working tree picks up an image you change on disk. Everywhere
+  else Markdown is rendered (Explore, pull requests, issues, comments,
+  discussions, releases and more), an image with a relative link shows its alt
+  text or file name and the reason it can't load there.

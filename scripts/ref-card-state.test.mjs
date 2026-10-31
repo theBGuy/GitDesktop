@@ -2,7 +2,7 @@
 // (src/components/markdown/ref-card-state.ts): only a pull request whose state
 // came from the issue read's stand-in AND reads OPEN renders the neutral
 // "open or draft" form; CLOSED and MERGED stand-ins keep their definite pills,
-// and the uncertainty flag alone never neutralizes. Stdlib only, importing the
+// and only a flagged OPEN pull request neutralizes. Stdlib only, importing the
 // import-free module straight from src under Node's type stripping.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -36,7 +36,7 @@ test("CLOSED and MERGED stand-ins keep their definite pills", () => {
   }
 });
 
-test("the uncertainty flag alone never neutralizes", () => {
+test("only a flagged OPEN pull request neutralizes", () => {
   assert.equal(refCardStateChoice({ flavor: "pr", state: "OPEN" }), "definite");
   assert.equal(
     refCardStateChoice({ flavor: "pr", state: "OPEN", stateUncertain: false }),

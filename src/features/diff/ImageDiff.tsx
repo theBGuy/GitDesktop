@@ -44,8 +44,9 @@ interface Size {
 
 type PaneKey = "old" | "new";
 
-/** Why a side's read failed: a refusal (a link, a non-file) answers the same on
- *  every read, so only a failed read offers Retry. */
+/** Why a side's read failed: a refusal (a linked, non-regular or refused path,
+ *  or an invalid rev) answers the same on every read, so only a failed read
+ *  offers Retry. */
 type SideError = "notImage" | "readFailed";
 
 interface Pane {
@@ -55,19 +56,27 @@ interface Pane {
   src: string | null;
   /** The read failed, so this side's existence is unknown. */
   error?: SideError;
+  /** The side is reading again after a failure; the other side stays shown. */
+  pending?: true;
 }
 
-/** A side's settled read: its bytes (null = not in that version), or why it
- *  couldn't be read. A failure with bytes already loaded keeps showing them. */
-type SideRead = { bytes: FileBytes | null } | { error: SideError };
+/** A side's read: its bytes (null = not in that version), why it couldn't be
+ *  read, or still pending. A failure with bytes already loaded keeps showing
+ *  them. */
+type SideRead =
+  | { bytes: FileBytes | null }
+  | { error: SideError }
+  | { pending: true };
 
 function sideRead(read: {
   data: FileBytes | null | undefined;
+  isPending: boolean;
   isError: boolean;
   error: unknown;
 }): SideRead {
-  if (read.data !== undefined || !read.isError)
-    return { bytes: read.data ?? null };
+  if (read.data !== undefined) return { bytes: read.data };
+  if (read.isPending) return { pending: true };
+  if (!read.isError) return { bytes: null };
   return {
     error:
       isAppError(read.error) && read.error.kind === "invalidArgument"
@@ -155,6 +164,19 @@ function RefusedSide({ label }: { label: string }) {
   );
 }
 
+/** A side reading again after a failure, in the refusal box's look: empty, so a
+ *  local read that settles at once doesn't flash a message. */
+function PendingSide({ label }: { label: string }) {
+  return (
+    <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
+      <figcaption className="text-xs font-medium text-muted-foreground">
+        {label}
+      </figcaption>
+      <div aria-busy="true" className="h-40 w-56 max-w-full border" />
+    </figure>
+  );
+}
+
 /** A side whose read failed, in the refusal box's look: the reason, and a
  *  Retry when another read could answer differently. */
 function FailedSide({
@@ -225,14 +247,18 @@ export function ImagePanes({
   // previous one's measurements and viewer index during render.
   const [state, setState] = useState<PanesState>({ id: "" });
 
-  const pending = oldFile.isPending || newFile.isPending;
+  // Only a first read holds the pair back; a side reading again after a failure
+  // (Retry, a focus refetch) pends on its own while the other stays shown.
+  const pending =
+    (oldFile.isPending && oldFile.errorUpdateCount === 0) ||
+    (newFile.isPending && newFile.errorUpdateCount === 0);
   const oldRead = sideRead(oldFile);
   const newRead = sideRead(newFile);
   // Absent only when the read answered so: a failed side might exist.
   const oldAbsent = "bytes" in oldRead && oldRead.bytes === null;
   const newAbsent = "bytes" in newRead && newRead.bytes === null;
   // One rescue per side, so each Retry keeps its own claim on focus: a retry
-  // resets its read to pending, which unmounts both sides' Retrys at once.
+  // resets its read to pending, which unmounts that side's Retry.
   const oldRescue = useRetryFocusRescue(
     !pending && "error" in oldRead && oldRead.error === "readFailed",
   );
@@ -270,6 +296,7 @@ export function ImagePanes({
     path: string,
     label: string,
   ): Pane | null => {
+    if ("pending" in read) return { key, label, src: null, pending: true };
     if ("error" in read) return { key, label, src: null, error: read.error };
     return read.bytes === null
       ? null
@@ -290,6 +317,7 @@ export function ImagePanes({
   // pair to load or fail. Refused sides and the no-image line are final.
   useReportPaneSettled(
     !pending &&
+      !panes.some((pane) => pane.pending) &&
       shown.every(
         (pane) =>
           current?.[pane.key] !== undefined || current?.failed?.[pane.key],
@@ -331,6 +359,9 @@ export function ImagePanes({
         // Keyed by the pair as well as the slot: an `<img>` kept across a
         // file switch paints the previous file until the new src decodes.
         const key = `${id}|${pane.key}`;
+        if (pane.pending) {
+          return <PendingSide key={key} label={pane.label} />;
+        }
         if (pane.error !== undefined) {
           const read = pane.key === "old" ? oldFile : newFile;
           const rescue = pane.key === "old" ? oldRescue : newRescue;

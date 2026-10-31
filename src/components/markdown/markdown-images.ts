@@ -255,6 +255,106 @@ export function serializeSrcset(
     .join(", ");
 }
 
+/** An image's own `src` after a load: the URL its relative value loaded as, a
+ *  relative value that didn't load, an absolute value left as written, or none
+ *  at all. */
+export type ImageOwnSrc = { loaded: string } | "failed" | "absolute" | "none";
+
+/** What the loader does with an image: set its src and keep it, keep it as it
+ *  stands, or replace it (and any `<picture>` around it) with a caption. */
+export type ImageFate = { keepWithSrc: string } | "keep" | "caption";
+
+/** The first candidate URL of the first srcset that kept one. */
+function firstKeptCandidate(srcsets: readonly string[]): string | null {
+  for (const srcset of srcsets) {
+    const first = parseSrcset(srcset)[0];
+    if (first !== undefined) return first.url;
+  }
+  return null;
+}
+
+/**
+ * An image's fate once its unit's srcsets are written. It keeps itself when its
+ * own src loaded, its own srcset kept a candidate, or its src is absolute. Left
+ * with nothing of its own, a candidate kept by any of its picture's sources
+ * (`sourceSrcsets`, each as written, in document order) keeps the picture: a
+ * src-less image is left as written, and one whose relative src failed takes
+ * that first candidate as its src, so a source whose media query doesn't match
+ * still leaves an image showing. With no candidate anywhere, it is captioned.
+ */
+export function imageFate(input: {
+  own: ImageOwnSrc;
+  ownSrcset: string;
+  sourceSrcsets: readonly string[];
+}): ImageFate {
+  const { own } = input;
+  if (typeof own === "object") return { keepWithSrc: own.loaded };
+  if (parseSrcset(input.ownSrcset).length > 0 || own === "absolute")
+    return "keep";
+  const fallback = firstKeptCandidate(input.sourceSrcsets);
+  if (fallback === null) return "caption";
+  return own === "failed" ? { keepWithSrc: fallback } : "keep";
+}
+
+/** Whether a loader run must write a unit: one already written for the run's
+ *  key (its refresh key) is left alone, so a re-run under an unchanged key issues
+ *  no reads. A new key re-walks every unit, captioned ones included. */
+export function unitNeedsWalk(
+  writtenFor: string | undefined,
+  runKey: string,
+): boolean {
+  return writtenFor !== runKey;
+}
+
+/** Whether a unit already showing an image keeps it untouched: a failed read
+ *  says nothing about the file, so it never downgrades a shown image. A definite
+ *  outcome (absent, too large, not an image) is the file's state now, so it
+ *  does. */
+export function keepsShownImage(
+  showing: boolean,
+  reasons: readonly ImageCaptionReason[],
+): boolean {
+  return showing && reasons.includes("readFailed");
+}
+
+/** URL attributes the neutralize hook removes when relative, by lowercase
+ *  element name (`*` = any element): nothing loads them from the repository,
+ *  and the webview would resolve them against its own origin. Each pair
+ *  survives DOMPurify's default allowlists. The SVG template references
+ *  (gradients, pattern, filter, text and motion paths, glyphs) are removed
+ *  fail-closed: a same-document `#id` stays, and a relative file names nothing
+ *  the webview could load from the repository. `img` and `srcset` stay with the
+ *  image arm. */
+export const RELATIVE_URL_ATTRS: ReadonlyMap<string, readonly string[]> =
+  new Map([
+    ["*", ["background"]],
+    ["altglyph", ["href", "xlink:href"]],
+    ["audio", ["src"]],
+    ["feimage", ["href", "xlink:href"]],
+    ["filter", ["href", "xlink:href"]],
+    ["glyphref", ["href", "xlink:href"]],
+    ["image", ["href", "xlink:href"]],
+    ["input", ["src"]],
+    ["lineargradient", ["href", "xlink:href"]],
+    ["mpath", ["href", "xlink:href"]],
+    ["pattern", ["href", "xlink:href"]],
+    ["radialgradient", ["href", "xlink:href"]],
+    ["source", ["src"]],
+    ["textpath", ["href", "xlink:href"]],
+    ["track", ["src"]],
+    ["tref", ["href", "xlink:href"]],
+    ["video", ["src", "poster"]],
+  ]);
+
+/** The attributes {@link RELATIVE_URL_ATTRS} names for an element, matched
+ *  case-insensitively: the HTML parser keeps SVG's mixed case (`feImage`). */
+export function relativeUrlAttrs(nodeName: string): readonly string[] {
+  return [
+    ...(RELATIVE_URL_ATTRS.get("*") ?? []),
+    ...(RELATIVE_URL_ATTRS.get(nodeName.toLowerCase()) ?? []),
+  ];
+}
+
 /** Bytes a base64 payload decodes to. */
 export function decodedByteLength(base64: string): number {
   const pad = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;

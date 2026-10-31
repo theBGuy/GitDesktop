@@ -251,9 +251,10 @@ export function guardIntrawordUnderscores(root: Mode): number {
 
 // Front matter engages exactly when stripFrontmatter (markdown-preview.ts)
 // strips it: the input's first line is the fence, and a same-fence line closes
-// it with no blank line before. `(?<![\s\S])` pins the input's start, so a lone
-// fence line in a per-line or mid-file buffer never engages. Built per call:
-// hljs compiles modes in place, and two hljs versions load these.
+// it with no blank line before. `(?<![\s\S])` pins the BUFFER's start, not the
+// file's: a fence with no closing line (a per-line buffer's) never engages, but
+// a buffer that starts at a fenced mid-file block can. Built per call: hljs
+// compiles modes in place, and two hljs versions load these.
 function frontmatterModes(): Mode[] {
   return [
     {
