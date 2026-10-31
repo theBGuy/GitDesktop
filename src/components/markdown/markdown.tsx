@@ -705,7 +705,9 @@ function loadRepoImages(
   };
   const paths = [...new Set(waiting.flatMap((w) => w.paths))];
   void runCapped(paths, REPO_IMAGE_MAX_IN_FLIGHT, isCancelled, async (path) => {
-    if (budget.exhausted()) {
+    // A path an earlier run under this key admitted still passes: its re-read
+    // isn't charged again, and its verdict stands.
+    if (budget.exhausted() && !budget.admitted(path)) {
       settle(path, OVER_BUDGET);
       return;
     }

@@ -336,6 +336,67 @@ test("the loader gates and charges its reads through the budget", () => {
     assert.ok(masked.includes(call), call);
 });
 
+/** The loader's gate and charge for one path, as markdown.tsx runs them. */
+function gateAndCharge(budget, path, size) {
+  if (budget.exhausted() && !budget.admitted?.(path)) return "refused";
+  return budget.admit(size, path) ? "admitted" : "refused";
+}
+
+/** Four paths charged to exactly the limit by a run whose writes a hide
+ *  dropped, then a same-key resume reading them again plus a fifth. */
+function resumeScenario(store) {
+  const body = {};
+  const paths = ["a.png", "b.png", "c.png", "d.png"];
+  const first = store(body, "k");
+  for (const p of paths) gateAndCharge(first, p, 25);
+  const resumed = store(body, "k");
+  return {
+    resumed: paths.map((p) => gateAndCharge(resumed, p, 25)),
+    fifth: gateAndCharge(resumed, "e.png", 25),
+  };
+}
+
+const RESUME_EXPECTED = {
+  resumed: ["admitted", "admitted", "admitted", "admitted"],
+  fifth: "refused",
+};
+
+/** The budget before verdicts were kept: a charged id answers with what is
+ *  spent now, and nothing lets an admitted path past the exhausted gate. */
+function currentSpendVerdicts(limit) {
+  let spent = 0;
+  const charged = new Set();
+  return {
+    admit(size, id) {
+      if (id === undefined || !charged.has(id)) {
+        if (id !== undefined) charged.add(id);
+        spent += size;
+      }
+      return spent <= limit;
+    },
+    exhausted: () => spent >= limit,
+  };
+}
+
+test("a same-key resume keeps every admitted path and refuses a new one", () => {
+  const store = createBudgetStore(() => createImageBudget(100));
+  assert.deepEqual(resumeScenario(store), RESUME_EXPECTED);
+  const budget = createImageBudget(100);
+  assert.equal(budget.admit(150, "big.png"), false);
+  assert.equal(budget.admit(0, "big.png"), false, "a refusal stands too");
+  assert.equal(budget.admitted("big.png"), false);
+  const masked = maskNonCode(
+    read("src/components/markdown/markdown.tsx"),
+    true,
+  );
+  assert.ok(masked.includes("budget.exhausted() && !budget.admitted(path)"));
+});
+
+test("the resume pin fails a budget that re-judges charged paths", () => {
+  const store = createBudgetStore(() => currentSpendVerdicts(100));
+  assert.notDeepEqual(resumeScenario(store), RESUME_EXPECTED);
+});
+
 test("a re-read of a charged path costs nothing more", () => {
   const budget = createImageBudget(100);
   assert.equal(budget.admit(60, "a.png"), true);

@@ -49,14 +49,18 @@ export const REPO_IMAGE_DOC_BUDGET_BYTES = 64 * 1024 * 1024;
 
 /** One body's image budget under one refresh key. Every completed read is
  *  charged, kept or not, since its bytes were buffered either way; once the
- *  charge reaches the limit no further read starts, so overshoot stays within
- *  the reads in flight. */
+ *  charge reaches the limit no new read starts, so overshoot stays within the
+ *  reads in flight. An id keeps the verdict it was charged with, so a path
+ *  re-read after an interrupted run (a hide that dropped its write) is neither
+ *  charged again nor refused for what later reads spent. */
 export interface ImageBudget {
-  /** Charges `size` decoded bytes; true when they still fit the limit. A read
-   *  of an `id` already charged (a path re-read after an interrupted run) is
-   *  not charged again. */
+  /** Charges `size` decoded bytes; true when they still fit the limit. An `id`
+   *  already charged returns its first verdict and charges nothing. */
   admit(size: number, id?: string): boolean;
-  /** Whether the limit is reached, so a read not yet started must not start. */
+  /** Whether `id` was charged and fit. */
+  admitted(id: string): boolean;
+  /** Whether the limit is reached, so a read not yet started must not start
+   *  unless its path was already admitted. */
   exhausted(): boolean;
 }
 
@@ -64,15 +68,17 @@ export function createImageBudget(
   limit = REPO_IMAGE_DOC_BUDGET_BYTES,
 ): ImageBudget {
   let spent = 0;
-  const charged = new Set<string>();
+  const verdicts = new Map<string, boolean>();
   return {
     admit(size, id) {
-      if (id === undefined || !charged.has(id)) {
-        if (id !== undefined) charged.add(id);
-        spent += size;
-      }
-      return spent <= limit;
+      const first = id === undefined ? undefined : verdicts.get(id);
+      if (first !== undefined) return first;
+      spent += size;
+      const fits = spent <= limit;
+      if (id !== undefined) verdicts.set(id, fits);
+      return fits;
     },
+    admitted: (id) => verdicts.get(id) === true,
     exhausted: () => spent >= limit,
   };
 }
