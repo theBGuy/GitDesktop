@@ -3,11 +3,13 @@
 // dock's `navigate` (ActivityDock.tsx). Each declares
 // `const claimed = claimRepoOpen();` once, as a top-level statement of its body,
 // ahead of its first `await`, `throw` and navigator call, and after its early
-// returns (the arms that never open a repo, which must not retire a pending
-// open); its `superseded` reads `!claimed()`, and nothing else does (never the
-// navigator's `stillValid`, which runs after the navigator's own claim and would
-// retire it); and before EVERY navigator call, an `if (superseded()) return;`
-// runs after the last await preceding that call, at a depth no deeper than it.
+// returns (the arms that never open a repo, which must not retire an open made
+// elsewhere); its `superseded` reads `!claimed()`, and nothing else does (never
+// the navigator's `stillValid`, which runs after the navigator's own claim and
+// would retire it); and before EVERY navigator call, an `if (superseded()) return;`
+// runs after the last await preceding that call, at a depth no deeper than it;
+// and EVERY navigator call passes the one `stillValid`, which is exactly the
+// click's generation and the navigator's own epoch.
 // An older jump still held on its repo-shell warm-up checks the open claims, so
 // a click that claimed late, or never read its claim, lets an older target land
 // over a newer one, or lets a newer open be retired by an older click. A narrow
@@ -35,11 +37,13 @@ const SITES = {
     // The parameter list is matched as a group, then the body must follow it.
     head: /\basync function openItem\s*\(/g,
     params: true,
+    generation: "openGen",
   },
   navigate: {
     file: "src/features/activity/ActivityDock.tsx",
     head: /\bconst navigate = \(n: AppNotification\) => \{/g,
     params: false,
+    generation: "clickGen",
   },
 };
 
@@ -153,7 +157,26 @@ function claimProblems(name, text) {
       problems.push(
         `${name}'s ${nav[0].slice(0, -1)} call isn't preceded by a superseded() check after its last await`,
       );
+    const argsOpen = nav.index + nav[0].length - 1;
+    const argsClose = matchBrace(body, argsOpen);
+    if (
+      argsClose === -1 ||
+      !/(?<![\w$.])stillValid\s*,/.test(body.slice(argsOpen, argsClose))
+    )
+      problems.push(
+        `${name}'s ${nav[0].slice(0, -1)} call doesn't pass its stillValid`,
+      );
   }
+  const predicate = new RegExp(
+    `(?<![\\w$.])const stillValid = \\(epochAtRequest: number\\) =>\\s*gen === ${site.generation} &&\\s*useUiStore\\.getState\\(\\)\\.interactionEpoch === epochAtRequest;`,
+  );
+  if (
+    !predicate.test(body) ||
+    [...body.matchAll(/(?<![\w$.])const stillValid(?![\w$])/g)].length !== 1
+  )
+    problems.push(
+      `${name}'s stillValid isn't exactly its generation and the navigator's epoch`,
+    );
   return problems;
 }
 
@@ -198,6 +221,27 @@ const MUTANTS = {
       "      openIssue({\n",
       "      await null;\n      openIssue({\n",
     ),
+    "the openPr arm drops stillValid": once(
+      "        beforeSelect: applyLens,\n        stillValid,\n      });\n    } else {",
+      "        beforeSelect: applyLens,\n      });\n    } else {",
+    ),
+    "the openIssue arm drops stillValid": once(
+      "        number: item.number,\n        beforeSelect: applyLens,\n        stillValid,\n",
+      "        number: item.number,\n        beforeSelect: applyLens,\n",
+    ),
+    "the claim read inside stillValid": once(
+      "      gen === openGen &&\n",
+      "      gen === openGen &&\n      claimed() &&\n",
+    ),
+    "superseded read inside stillValid": once(
+      "      gen === openGen &&\n",
+      "      gen === openGen &&\n      !superseded() &&\n",
+    ),
+    "stillValid without the generation": once("      gen === openGen &&\n", ""),
+    "stillValid without the epoch": once(
+      "      gen === openGen &&\n      useUiStore.getState().interactionEpoch === epochAtRequest;\n",
+      "      gen === openGen;\n",
+    ),
     "openItem renamed": once(
       "async function openItem(",
       "async function openRow(",
@@ -238,6 +282,14 @@ const MUTANTS = {
     "an await just before openPr without a re-check": once(
       "      openPr({\n",
       "      await null;\n      openPr({\n",
+    ),
+    "the openPr call drops stillValid": once(
+      "        stillValid,\n        onApplied: () => markNotificationRead(n.id),\n      });\n    })()",
+      "        onApplied: () => markNotificationRead(n.id),\n      });\n    })()",
+    ),
+    "stillValid without the generation": once(
+      "        gen === clickGen &&\n",
+      "",
     ),
     "navigate renamed": once(
       "const navigate = (n: AppNotification) => {",

@@ -684,12 +684,13 @@ function onAppliedProblems(text) {
  *  one `land` closure over `startViewTransition(`, the warm-up claimed only
  *  when the target repo differs from the open one, a synchronous `land();` with
  *  no warm-up, and one `holdNavigation(warm, () => {…})` call as its last
- *  statement, with `land()` called exactly twice. The callback is exactly
+ *  statement, with `land()` called exactly twice. The transition callback opens
+ *  with the `stillValid` refusal, ahead of any `beforeSelect`. The hold's
+ *  callback is exactly that refusal, then
  *  `if (interceptSettingsLeave(() => get().<itself>(target))) return; land();`,
- *  preceded in the `stillValid` members by that refusal, so a jump its caller
- *  retired yields silently: typing into a clean Settings registers the guard
- *  without an epoch bump, so only this re-check stops a held landing leaving
- *  unsaved edits unprompted. */
+ *  so a jump its caller retired yields silently: typing into a clean Settings
+ *  registers the guard without an epoch bump, so only this re-check stops a held
+ *  landing leaving unsaved edits unprompted. */
 function heldLandingProblems(text) {
   const masked = maskNonCode(text, false);
   const obj = storeObject(masked);
@@ -734,10 +735,18 @@ function heldLandingProblems(text) {
       problems.push(`${name} not found`);
       continue;
     }
-    const takesStillValid = JUMP_NAVIGATORS.includes(name);
     const head = new RegExp(
-      `^\\s*\\(target\\)\\s*=>\\s*\\{\\s*if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*${takesStillValid ? "const epochAtRequest = " : ""}bumpEpochNow\\(\\);\\s*const motion = repoViewMotion\\(\\);\\s*const land = \\(\\) =>\\s*startViewTransition\\(`,
+      `^\\s*\\(target\\)\\s*=>\\s*\\{\\s*if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*const epochAtRequest = bumpEpochNow\\(\\);\\s*const motion = repoViewMotion\\(\\);\\s*const land = \\(\\) =>\\s*startViewTransition\\(`,
     ).exec(value);
+    if (
+      head &&
+      !/^\(\)\s*=>\s*\{\s*if \(target\.stillValid\?\.\(epochAtRequest\) === false\) return;/.test(
+        value.slice(head[0].length),
+      )
+    )
+      problems.push(
+        `${name}'s landing doesn't open with its stillValid refusal`,
+      );
     const landClose = head ? matchBrace(value, head[0].length - 1) : -1;
     const tail =
       landClose === -1
@@ -775,15 +784,12 @@ function heldLandingProblems(text) {
       );
       continue;
     }
-    const refusal = takesStillValid
-      ? "if \\(target\\.stillValid\\?\\.\\(epochAtRequest\\) === false\\) return;\\s*"
-      : "";
     const guard = new RegExp(
-      `^\\{\\s*${refusal}if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*land\\(\\);\\s*\\}$`,
+      `^\\{\\s*if \\(target\\.stillValid\\?\\.\\(epochAtRequest\\) === false\\) return;\\s*if \\(interceptSettingsLeave\\(\\(\\) => get\\(\\)\\.${name}\\(target\\)\\)\\) return;\\s*land\\(\\);\\s*\\}$`,
     );
     if (!guard.test(value.slice(bodyOpen, bodyClose + 1)))
       problems.push(
-        `${name}'s held landing doesn't ${takesStillValid ? "refuse a retired jump, then " : ""}re-run the leave guard for itself before it lands`,
+        `${name}'s held landing doesn't refuse a retired jump, then re-run the leave guard for itself before it lands`,
       );
   }
   return problems;
@@ -1549,6 +1555,28 @@ test("a held cross-repo jump re-runs the leave guard before it lands", () => {
     once(
       "        land();\n      });\n    },\n    setRepoTab:",
       "        land();\n      }, 0);\n    },\n    setRepoTab:",
+    ),
+    // openIssue held to the same order: no refusal, the refusal after the
+    // re-check, none in its landing, the lens write ahead of it, a bare bump.
+    once(
+      "        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n",
+      "        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n",
+    ),
+    once(
+      "        if (target.stillValid?.(epochAtRequest) === false) return;\n        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n",
+      "        if (interceptSettingsLeave(() => get().openIssue(target))) return;\n        if (target.stillValid?.(epochAtRequest) === false) return;\n",
+    ),
+    once(
+      "          if (target.stillValid?.(epochAtRequest) === false) return;\n          runBeforeSelect(target.beforeSelect);\n",
+      "          runBeforeSelect(target.beforeSelect);\n",
+    ),
+    once(
+      "          if (target.stillValid?.(epochAtRequest) === false) return;\n          runBeforeSelect(target.beforeSelect);\n",
+      "          runBeforeSelect(target.beforeSelect);\n          if (target.stillValid?.(epochAtRequest) === false) return;\n",
+    ),
+    once(
+      "get().openIssue(target))) return;\n      const epochAtRequest = bumpEpochNow();\n",
+      "get().openIssue(target))) return;\n      bumpEpochNow();\n",
     ),
     // An extra, unheld landing.
     once(

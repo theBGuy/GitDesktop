@@ -729,11 +729,11 @@ export function MyWorkScreen() {
       openUrl(item.url);
       return;
     }
-    // Claimed here, before the first await but after the browser-only arm, so
-    // only a click that may open a repo retires a pending open: an older one
-    // still held on its warm-up checks the open claims, not `openGen`. A newer
-    // open claimed elsewhere (a held notification jump) retires this one. Read
-    // only before the navigator call, whose own claim would retire it.
+    // Claimed here, before the first await but after the browser-only arm, so a
+    // browser-only click leaves opens made elsewhere (the picker, a held
+    // notification jump) alone; this screen's own it retires by `openGen`. A newer
+    // open claimed elsewhere retires this one. Read only before the navigator
+    // call, whose own claim would retire it.
     const claimed = claimRepoOpen();
     const superseded = () =>
       gen !== openGen || !claimed() || useUiStore.getState().view !== "mywork";
@@ -894,6 +894,13 @@ export function MyWorkScreen() {
         clearSelections: true,
         persist: false,
       });
+    // Re-checked when the navigator applies, a frame or a warm-up hold after this
+    // call: generation for a later click here (a browser-only one claims nothing
+    // and moves no epoch), epoch for any other action. Never `claimed()`: the
+    // navigator claims again, which would retire this open.
+    const stillValid = (epochAtRequest: number) =>
+      gen === openGen &&
+      useUiStore.getState().interactionEpoch === epochAtRequest;
     if (item.isPullRequest) {
       openPr({
         kind: "remote",
@@ -905,6 +912,7 @@ export function MyWorkScreen() {
         // selection reach the same commit; applied here it would land a render
         // early and fetch the new lens against the OLD number.
         beforeSelect: applyLens,
+        stillValid,
       });
     } else {
       openIssue({
@@ -912,6 +920,7 @@ export function MyWorkScreen() {
         repoName: targetName,
         number: item.number,
         beforeSelect: applyLens,
+        stillValid,
       });
     }
   }

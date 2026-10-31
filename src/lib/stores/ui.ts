@@ -499,6 +499,8 @@ interface UiState {
      *  view-transition callback as the selection (openPr's field of the same
      *  name carries the full rationale). */
     beforeSelect?: () => void;
+    /** Deferred-apply re-check; openPr's field of the same name carries the contract. */
+    stillValid?: (epochAtRequest: number) => boolean;
   }) => void;
   /** Open a repo (if not already) and land on a workflow run in the Actions tab —
    *  used by a notification's click-through. Atomic, like openPr. */
@@ -947,10 +949,11 @@ export const useUiStore = create<UiState>()((set, get) => {
     },
     openIssue: (target) => {
       if (interceptSettingsLeave(() => get().openIssue(target))) return;
-      bumpEpochNow();
+      const epochAtRequest = bumpEpochNow();
       const motion = repoViewMotion();
       const land = () =>
         startViewTransition(() => {
+          if (target.stillValid?.(epochAtRequest) === false) return;
           runBeforeSelect(target.beforeSelect);
           const switchingRepo = get().repoPath !== target.repoPath;
           set({
@@ -976,6 +979,7 @@ export const useUiStore = create<UiState>()((set, get) => {
         return;
       }
       holdNavigation(warm, () => {
+        if (target.stillValid?.(epochAtRequest) === false) return;
         if (interceptSettingsLeave(() => get().openIssue(target))) return;
         land();
       });
