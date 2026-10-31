@@ -6299,24 +6299,24 @@ fn is_diff_too_large(msg: &str) -> bool {
 /// sink the whole reconstruction.
 #[derive(Deserialize, Default)]
 struct GhPrFile {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     filename: String,
     #[serde(default)]
     previous_filename: Option<String>,
     /// added / removed / modified / renamed / changed / copied / unchanged.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     status: String,
     /// The `@@` hunks only — GitHub omits this for binary or individually-huge
     /// files. We synthesize the `---`/`+++` header lines ourselves.
     #[serde(default)]
     patch: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     additions: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     deletions: u32,
     /// The file's blob id (the pre-image's on a removal). The one field that tells
     /// an empty file from a binary: both arrive as 0/0 with no `patch`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     sha: String,
 }
 
@@ -10397,6 +10397,19 @@ mod tests {
         assert!(!is_diff_too_large("HTTP 404: Not Found"));
         assert!(!is_diff_too_large("could not resolve to a PullRequest"));
         assert!(!is_diff_too_large("no pull requests found for branch"));
+    }
+
+    #[test]
+    fn gh_pr_file_tolerates_explicit_nulls() {
+        let page: Vec<GhPrFile> = serde_json::from_str(
+            r#"[{"filename":"a","status":"added","sha":null,"additions":null,"deletions":null},{"filename":"b","status":"modified","sha":"abc","additions":2,"deletions":1}]"#,
+        )
+        .expect("a page with null fields still parses");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].sha, "");
+        assert_eq!((page[0].additions, page[0].deletions), (0, 0));
+        assert_eq!(page[1].filename, "b");
+        assert_eq!(page[1].sha, "abc");
     }
 
     #[test]

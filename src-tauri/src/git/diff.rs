@@ -609,8 +609,6 @@ pub async fn git_session_file_diff(
     base: String,
 ) -> AppResult<FileDiff> {
     // base → working tree: captures both committed-turn changes and uncommitted edits.
-    // Literal pathspec so a `[slug]`-style path can't pull in a glob-sibling's hunks.
-    let spec = crate::git::pathspec::literal(&file_path);
     let out = diff_with_rename_pairing(
         &repo_path,
         &file_path,
@@ -624,6 +622,8 @@ pub async fn git_session_file_diff(
     // Empty tracked diff + the file is untracked (a just-written new file) →
     // show it as a full add, the same way git_diff_file handles untracked.
     if text.trim().is_empty() {
+        // Literal pathspec: a `[slug]`-style path would match a glob-sibling's untracked file.
+        let spec = crate::git::pathspec::literal(&file_path);
         let others = run_git(
             Some(&repo_path),
             &["ls-files", "--others", "--exclude-standard", "--", &spec],
@@ -3694,9 +3694,9 @@ mod tests {
         assert!(!d.text.contains("a/x"), "{}", d.text);
     }
 
-    /// Negatives (D2 congruence): a re-created source path, a rewrite below the
-    /// similarity threshold, and `diff.renames=false` pair in neither the commit's
-    /// file list nor its per-file diff.
+    /// Negatives: a re-created source path, a rewrite below the similarity
+    /// threshold, and `diff.renames=false` pair in neither the commit's file list
+    /// nor its per-file diff.
     #[tokio::test]
     async fn commit_file_diff_leaves_unpaired_shapes_as_adds() {
         let (_tmp, dir, repo) = rename_repo("gd-rename-negatives-").await;
