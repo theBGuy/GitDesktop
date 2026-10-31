@@ -3160,6 +3160,8 @@ you). It's **read-only**: it searches and reads, but never changes your code. Pi
 **Claude**, **Codex**, **GitHub Copilot**, or **opencode** (the picker opens on your
 **Settings → AI** default agent) — each uses its own native web search and fetch.
 (opencode's web *search* needs its Exa integration enabled — web *fetch* always works.)
+On opencode, the session also loads the repository's own opencode config and plugins, which
+can widen what it does, so use another agent for a repository you don't trust.
 
 ## Plan a task (read-only)
 
@@ -3169,7 +3171,9 @@ context, approach, affected files, acceptance criteria, and a test plan. It can 
 clarifying questions; answer them and it refines the plan in the same conversation.
 The cited file paths are validated against the repo, so the plan stays grounded. From
 a finished plan you can **file it as a GitHub or local issue**, or **hand it straight
-to an implementing session**.
+to an implementing session**. On opencode, the planner also loads the repository's own
+opencode config and plugins, which can widen what it does, so use another agent for a
+repository you don't trust.
 
 ## Delegate a task
 

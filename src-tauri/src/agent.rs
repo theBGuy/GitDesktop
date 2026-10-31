@@ -433,18 +433,39 @@ impl ChildEnv for portable_pty::CommandBuilder {
 }
 
 /// Removes the AppImage bundle's paths and an inherited `PWD` from a child's
-/// environment. Call it FIRST, before a site's own `.env()` calls, so explicitly-set
+/// environment and, on macOS/Linux once a capture has landed, puts the login shell's
+/// PATH first. Call it FIRST, before a site's own `.env()` calls, so explicitly-set
 /// variables always win.
 pub(crate) fn sanitize_child_env<C: ChildEnv>(cmd: &mut C) {
+    sanitize_child_env_with(cmd, child_env_overrides(), merged_shell_path().as_deref());
+}
+
+/// Set on a child whose PATH is the merged shell PATH, to that same value: a process
+/// that finds it equal to its own PATH needn't capture again, and one whose PATH was
+/// rewritten on the way down sees a mismatch and captures for itself.
+pub(crate) const SHELL_PATH_MERGED_MARKER: &str = "GITDESKTOP_SHELL_PATH_MERGED";
+
+/// [`sanitize_child_env`] with the override plan and the merged PATH passed in;
+/// `None` leaves PATH as inherited and sets no marker.
+fn sanitize_child_env_with<C: ChildEnv>(
+    cmd: &mut C,
+    overrides: &[(&str, Option<String>)],
+    merged_path: Option<&str>,
+) {
     // An inherited `PWD` (a shell-launched app exports one) names the LAUNCHER's
     // directory, never this child's — and a tool that prefers `PWD` over its real
     // cwd (opencode's run root does) would run against that stale path.
     cmd.unset_var("PWD");
-    for (name, value) in child_env_overrides() {
+    for (name, value) in overrides {
         match value {
             Some(v) => cmd.set_var(name, v),
             None => cmd.unset_var(name),
         }
+    }
+    // After the overrides: the merge already started from the plan's PATH.
+    if let Some(path) = merged_path {
+        cmd.set_var("PATH", path);
+        cmd.set_var(SHELL_PATH_MERGED_MARKER, path);
     }
 }
 
@@ -672,50 +693,77 @@ pub(crate) fn find_executable(names: &[&str]) -> Option<PathBuf> {
 /// macOS/Linux fallback: a packaged GUI app inherits launchd's minimal PATH, so
 /// a version-manager-installed CLI (nvm/fnm/asdf) is on neither PATH nor in
 /// `candidate_dirs`. Ask the user's login+interactive shell to resolve it.
-/// POSIX-ish shells only; fish users fall back to the Settings path override.
 #[cfg(not(windows))]
 async fn resolve_via_login_shell(names: &[&str]) -> Option<PathBuf> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     for name in names {
-        let mut cmd = Command::new(&shell);
-        sanitize_child_env(&mut cmd);
-        // -l sources the profile; -i sources the rc files, where zsh/bash users
-        // commonly set PATH (nvm, `brew shellenv`, …). stdin is closed so the
-        // shell runs the one command and exits rather than waiting for input.
-        cmd.arg("-lic")
-            .arg(format!("command -v {name}"))
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let Ok(Ok(out)) = tokio::time::timeout(DETECT_TIMEOUT, cmd.output()).await else {
+        let marker = capture_marker();
+        let Some(body) = command_v_body(name) else {
             continue;
         };
-        // rc files may print banners, so scan every line for an absolute path to
-        // a real file named like the binary, rather than trusting the first line.
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let candidate = PathBuf::from(line.trim());
-            if candidate.is_absolute()
-                && candidate.file_name().and_then(|f| f.to_str()) == Some(*name)
-                && candidate.is_file()
-            {
-                return Some(candidate);
-            }
+        let script = marker_wrapped_script(&marker, &body);
+        let Some(stdout) = run_login_shell(&script, &marker).await else {
+            continue;
+        };
+        if let Some(found) = command_v_match(&stdout, &marker, name, Path::is_file) {
+            return Some(found);
         }
     }
     None
 }
 
+/// The resolver's `command -v` line with the name single-quoted, or None for a name
+/// holding a quote, a backslash or a control character: a user-configured launcher
+/// token reaches it, and fish reads `\` escapes inside single quotes where sh doesn't.
+#[cfg(any(not(windows), test))]
+fn command_v_body(name: &str) -> Option<String> {
+    let quotable = !name
+        .chars()
+        .any(|c| c == '\'' || c == '\\' || c.is_control());
+    quotable.then(|| format!("command -v '{name}'"))
+}
+
+/// The first line between the `marker` pair that is an absolute path to a file named
+/// `name` (per `is_file`). rc files may print banners and `command -v` may report an
+/// alias or function, so every line is scanned rather than the first one trusted.
+#[cfg(any(not(windows), test))]
+fn command_v_match(
+    stdout: &[u8],
+    marker: &str,
+    name: &str,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    String::from_utf8_lossy(between_markers(stdout, marker.as_bytes())?)
+        .lines()
+        .map(|line| PathBuf::from(line.trim()))
+        .find(|candidate| {
+            // A unix absolute path; `Path::is_absolute` would misread it on Windows tests.
+            candidate.to_str().is_some_and(|c| c.starts_with('/'))
+                && candidate.file_name().and_then(|f| f.to_str()) == Some(name)
+                && is_file(candidate.as_path())
+        })
+}
+
+/// The no-spawn arms of [`resolve_named`] in their order: the process PATH and known
+/// dirs first (the app's own tools keep today's tie-break), then each name on the
+/// captured shell PATH. None means only the login-shell fallback is left.
+fn resolve_without_spawn(
+    names: &[&str],
+    find_executable: impl FnOnce(&[&str]) -> Option<PathBuf>,
+    on_shell_path: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    find_executable(names).or_else(|| names.iter().find_map(|name| on_shell_path(name)))
+}
+
 /// Resolves a binary by candidate `names`: an explicit override if it exists,
-/// else a static search of PATH + known dirs, else (non-Windows) the user's
-/// login shell. Shared by the agent CLIs and the health-screen tool detection.
+/// else a static search of PATH + known dirs, else the captured login-shell PATH,
+/// else (non-Windows) the user's login shell. Shared by the agent CLIs and the
+/// health-screen tool detection.
 pub(crate) async fn resolve_named(names: &[&str], bin_path: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = bin_path.map(str::trim).filter(|s| !s.is_empty()) {
         let pb = PathBuf::from(p);
         return pb.is_file().then_some(pb);
     }
-    if let Some(found) = find_executable(names) {
+    if let Some(found) = resolve_without_spawn(names, find_executable, find_on_shell_path) {
         return Some(found);
     }
     #[cfg(not(windows))]
@@ -734,7 +782,8 @@ pub(crate) async fn resolve_named(names: &[&str], bin_path: Option<&str>) -> Opt
 //
 // A Finder/Dock launch inherits launchd's minimal PATH, so hooks, filter drivers,
 // ssh and by-name credential helpers that git runs miss the user's tools. The login
-// shell's PATH is captured once and merged into git, gh and hook-manager children.
+// shell's PATH is captured once and merged into every child `sanitize_child_env` sets
+// up, agent CLIs and their hooks included.
 
 /// The login shell's PATH; set only by a capture that succeeded, so a failed one is
 /// retried by the next `prime_shell_path` caller.
@@ -751,21 +800,206 @@ const SHELL_PATH_CAPTURE_CAP: usize = 1024 * 1024;
 #[cfg(not(windows))]
 pub(crate) async fn prime_shell_path() {
     // Boxed: a `#[tauri::command]` awaits this, and command futures must stay small.
-    let _ = SHELL_PATH
-        .get_or_try_init(|| Box::pin(async { capture_shell_path().await.ok_or(()) }))
-        .await;
+    let _ = Box::pin(init_holding_flag(
+        &SHELL_PATH,
+        shell_capture_in_flight(),
+        || async {
+            let captured = capture_shell_path().await;
+            if captured.is_none() {
+                if let Ok(mut stamp) = SHELL_RETRY_STAMP.lock() {
+                    *stamp = Some(Instant::now());
+                }
+            }
+            captured
+        },
+    ))
+    .await;
+}
+
+/// `cell.get_or_try_init(init)` with `flag`'s count raised while THIS caller's init runs.
+/// The guard is parked in a slot this frame drops only after the call returns, so a
+/// successful init lowers the count only once the cell is set. A failed init frees the
+/// cell before that drop, so a queued waiter can start its own init (filling its own
+/// slot) first; counting keeps that overlap in flight, so a reader seeing 0 finds no
+/// init running. A dropped future drops its slot too; a waiter whose init never runs
+/// leaves the count alone.
+#[cfg(any(not(windows), test))]
+async fn init_holding_flag<'c, T, Fut>(
+    cell: &'c tokio::sync::OnceCell<T>,
+    flag: &tokio::sync::watch::Sender<usize>,
+    init: impl FnOnce() -> Fut,
+) -> Option<&'c T>
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let slot = OnceLock::new();
+    let value = cell
+        .get_or_try_init(|| async {
+            let _ = slot.set(InFlightGuard::enter(flag));
+            init().await.ok_or(())
+        })
+        .await
+        .ok();
+    drop(slot);
+    value
 }
 
 /// Windows children keep the inherited PATH; the stub keeps call sites cfg-free.
 #[cfg(windows)]
 pub(crate) async fn prime_shell_path() {}
 
-/// The PATH to set on a git, gh or hook-manager child: the captured shell PATH merged
+/// How long a failed capture waits before `merged_shell_path` re-primes.
+#[cfg(any(not(windows), test))]
+const SHELL_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// When the last capture failed, or the last re-prime was spawned; None until a
+/// capture fails, so a session whose capture landed never re-primes.
+#[cfg(not(windows))]
+static SHELL_RETRY_STAMP: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// How many captures are executing; above 0 means in flight. A count, since a capture
+/// taking over after a failed one can start before the failed one's guard drops. A
+/// watch, so a reader that subscribes and then waits for 0 can't miss the edge.
+#[cfg(not(windows))]
+fn shell_capture_in_flight() -> &'static tokio::sync::watch::Sender<usize> {
+    static IN_FLIGHT: OnceLock<tokio::sync::watch::Sender<usize>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| tokio::sync::watch::Sender::new(0))
+}
+
+/// Counts one executing capture for its lifetime. Released on drop, so a capture that
+/// panics or whose future is dropped mid-run can't leave the count stuck above 0.
+#[cfg(any(not(windows), test))]
+struct InFlightGuard<'a>(&'a tokio::sync::watch::Sender<usize>);
+
+#[cfg(any(not(windows), test))]
+impl<'a> InFlightGuard<'a> {
+    fn enter(flag: &'a tokio::sync::watch::Sender<usize>) -> Self {
+        // `send_modify`, not `send`: it updates the value even with no receiver.
+        flag.send_modify(|n| *n += 1);
+        Self(flag)
+    }
+}
+
+#[cfg(any(not(windows), test))]
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// Whether a re-prime is due: armed by a failure at least `SHELL_RETRY_COOLDOWN` ago,
+/// with no capture executing (a prime stacked behind one would run the rc files twice).
+#[cfg(any(not(windows), test))]
+fn retry_due(last_failed: Option<Instant>, in_flight: bool, now: Instant) -> bool {
+    !in_flight
+        && last_failed.is_some_and(|t| now.saturating_duration_since(t) >= SHELL_RETRY_COOLDOWN)
+}
+
+/// Claims the retry window under the stamp's lock: true, restamped, when due and the
+/// caller can spawn. A caller that can't leaves the window armed for the next one.
+#[cfg(any(not(windows), test))]
+fn claim_shell_retry(
+    stamp: &mut Option<Instant>,
+    in_flight: bool,
+    can_spawn: bool,
+    now: Instant,
+) -> bool {
+    if !can_spawn || !retry_due(*stamp, in_flight, now) {
+        return false;
+    }
+    *stamp = Some(now);
+    true
+}
+
+/// Spawns one background re-prime when the retry window is due; never awaits, since
+/// `merged_shell_path` sits on the status/diff hot path.
+#[cfg(not(windows))]
+fn reprime_shell_path_if_due() {
+    let Ok(mut stamp) = SHELL_RETRY_STAMP.lock() else {
+        return;
+    };
+    if stamp.is_none() {
+        return;
+    }
+    // Not `tauri::async_runtime::spawn`: in a process tauri never set up (the MCP
+    // server) it would start a second tokio runtime beside the one already running.
+    let handle = tokio::runtime::Handle::try_current().ok();
+    let in_flight = *shell_capture_in_flight().borrow() > 0;
+    if claim_shell_retry(&mut stamp, in_flight, handle.is_some(), Instant::now()) {
+        drop(stamp);
+        if let Some(handle) = handle {
+            handle.spawn(prime_shell_path());
+        }
+    }
+}
+
+/// Longest an agent spawn waits for a capture that is already executing.
+#[cfg(any(not(windows), test))]
+const SHELL_CAPTURE_WAIT: Duration = Duration::from_secs(3);
+
+/// How a wait on an executing capture ended.
+#[cfg(any(not(windows), test))]
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureWait {
+    NothingInFlight,
+    Finished,
+    TimedOut,
+    Cancelled,
+}
+
+/// Waits up to `limit` for the in-flight count behind `rx` to reach 0. Only joins a
+/// capture another caller is executing, never runs one: a timed-out executor would
+/// drop a capture other callers still want.
+#[cfg(any(not(windows), test))]
+async fn wait_out_capture(
+    rx: &mut tokio::sync::watch::Receiver<usize>,
+    cancel: &Notify,
+    limit: Duration,
+) -> CaptureWait {
+    if *rx.borrow() == 0 {
+        return CaptureWait::NothingInFlight;
+    }
+    // The `Ref` drops inside the block: one held across the wait would block the
+    // guard's send.
+    let cleared = async {
+        let _ = rx.wait_for(|in_flight| *in_flight == 0).await;
+    };
+    tokio::select! {
+        biased;
+        () = cancel.notified() => CaptureWait::Cancelled,
+        done = tokio::time::timeout(limit, cleared) => match done {
+            Ok(()) => CaptureWait::Finished,
+            Err(_) => CaptureWait::TimedOut,
+        },
+    }
+}
+
+/// Holds an agent spawn briefly for a capture already executing, so the CLI and the
+/// hooks it runs start on the merged PATH; true when the run was cancelled meanwhile.
+#[cfg(not(windows))]
+async fn wait_for_executing_capture(cancel: &Notify) -> bool {
+    if merged_shell_path().is_some() {
+        return false;
+    }
+    let mut rx = shell_capture_in_flight().subscribe();
+    wait_out_capture(&mut rx, cancel, SHELL_CAPTURE_WAIT).await == CaptureWait::Cancelled
+}
+
+/// Windows children keep the inherited PATH, so there is nothing to wait for.
+#[cfg(windows)]
+async fn wait_for_executing_capture(_cancel: &Notify) -> bool {
+    false
+}
+
+/// The PATH to set on a spawned child: the captured shell PATH merged
 /// with the one the child would otherwise get. None (leave the child's PATH as is)
 /// until a capture lands, or when the inherited PATH is not valid UTF-8.
 #[cfg(not(windows))]
 pub(crate) fn merged_shell_path() -> Option<String> {
-    let shell = SHELL_PATH.get()?;
+    let Some(shell) = SHELL_PATH.get() else {
+        reprime_shell_path_if_due();
+        return None;
+    };
     let plan_path = plan_path_entry(child_env_overrides());
     let env_path = std::env::var_os("PATH");
     let inherited = inherited_path_value(plan_path, env_path.as_deref())?;
@@ -839,15 +1073,20 @@ fn merge_path_lists(shell: &str, inherited: &str) -> String {
         .join(":")
 }
 
+/// The bytes between the first `marker` pair in `stdout`; None without a closed pair.
+#[cfg(any(not(windows), test))]
+fn between_markers<'a>(stdout: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
+    let after_open = &stdout[find_bytes(stdout, marker)? + marker.len()..];
+    Some(&after_open[..find_bytes(after_open, marker)?])
+}
+
 /// The PATH between the first `marker` pair in a capture's stdout, minus printenv's
 /// trailing newline, AppImage-stripped when `appdir` is set. None (a failed capture)
 /// for a missing pair, a non-UTF-8 value, any control character, or no absolute
 /// entry. Only the value is decoded, so non-UTF-8 rc noise around it never fails it.
 #[cfg(any(not(windows), test))]
 fn finalize_capture(stdout: &[u8], marker: &str, appdir: Option<&str>) -> Option<String> {
-    let marker = marker.as_bytes();
-    let after_open = &stdout[find_bytes(stdout, marker)? + marker.len()..];
-    let value = std::str::from_utf8(&after_open[..find_bytes(after_open, marker)?]).ok()?;
+    let value = std::str::from_utf8(between_markers(stdout, marker.as_bytes())?).ok()?;
     let value = value
         .strip_suffix("\r\n")
         .or_else(|| value.strip_suffix('\n'))
@@ -892,26 +1131,72 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Runs `$SHELL -lic` to print PATH between random markers, so rc-file banners can't
-/// corrupt it. Each marker is printed split across printf arguments, so an xtrace
-/// echo of the command line never contains it whole.
+/// A fresh marker for one login-shell run; unique per process and instant, so no
+/// rc output can know it in advance.
 #[cfg(not(windows))]
-async fn capture_shell_path() -> Option<String> {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".into());
+fn capture_marker() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let marker = format!("GDPATH{:x}x{nanos:x}", std::process::id());
+    format!("GDPATH{:x}x{nanos:x}", std::process::id())
+}
+
+/// `body` between two prints of `marker`. Each print splits the marker across printf
+/// arguments, so an xtrace echo of the command line never contains it whole.
+#[cfg(any(not(windows), test))]
+fn marker_wrapped_script(marker: &str, body: &str) -> String {
     let (head, tail) = marker.split_at(marker.len() / 2);
     let print_marker = format!("printf '%s%s' '{head}' '{tail}'");
-    // `printenv` is an external program, so the line parses alike in sh, bash, zsh
-    // and fish (fish rejects `${PATH}`); `command` skips aliases an -i shell defines.
-    let script = format!("{print_marker}; command printenv PATH; {print_marker}");
-    let mut cmd = Command::new(&shell);
+    format!("{print_marker}; {body}; {print_marker}")
+}
+
+/// Reads `stdout` until it holds a closed `marker` pair, returning everything read.
+/// None on EOF first, a read error, or reaching `cap` bytes. It never waits for EOF:
+/// an rc-started background process can hold the pipe open long past the shell's exit.
+#[cfg(any(not(windows), test))]
+async fn read_until_marker_pair<R: AsyncRead + Unpin>(
+    stdout: &mut R,
+    marker: &[u8],
+    cap: usize,
+) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    // Heap, not an inline array: this lives across the read await.
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let room = cap - buf.len();
+        if room == 0 {
+            return None;
+        }
+        let take = chunk.len().min(room);
+        let n = stdout.read(&mut chunk[..take]).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if capture_pair_closed(&buf, marker) {
+            return Some(buf);
+        }
+    }
+}
+
+/// The login shell to run: `$SHELL` unless unset or empty, else `/bin/sh`.
+#[cfg(not(windows))]
+fn login_shell_program() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// Runs `script` (from [`marker_wrapped_script`]) under `$SHELL -lic` and returns its
+/// stdout up to the closing `marker`, or None on a spawn failure, EOF before the pair,
+/// the byte cap, or `DETECT_TIMEOUT`. The one runner for every login-shell probe.
+#[cfg(not(windows))]
+async fn run_login_shell(script: &str, marker: &str) -> Option<Vec<u8>> {
+    let mut cmd = Command::new(login_shell_program());
     sanitize_child_env(&mut cmd);
+    // -l sources the profile and -i the rc files, where zsh/bash users commonly set
+    // PATH (nvm, `brew shellenv`, …); stdin is closed so the shell never waits on it.
     cmd.arg("-lic")
         .arg(script)
         .env("NO_COLOR", "1")
@@ -934,28 +1219,19 @@ async fn capture_shell_path() -> Option<String> {
     }
     let mut child = cmd.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
-    // Reads only until the closing marker: an rc-started background process can hold
-    // the pipe open long past the shell's exit, so waiting for EOF could time out.
-    let read = async {
-        let mut buf = Vec::new();
-        let mut chunk = vec![0u8; 8192];
-        loop {
-            let room = SHELL_PATH_CAPTURE_CAP - buf.len();
-            if room == 0 {
-                return None;
-            }
-            let take = chunk.len().min(room);
-            let n = stdout.read(&mut chunk[..take]).await.ok()?;
-            if n == 0 {
-                return None;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if capture_pair_closed(&buf, marker.as_bytes()) {
-                return Some(buf);
-            }
-        }
-    };
-    let buf = tokio::time::timeout(DETECT_TIMEOUT, read).await.ok()??;
+    let read = read_until_marker_pair(&mut stdout, marker.as_bytes(), SHELL_PATH_CAPTURE_CAP);
+    tokio::time::timeout(DETECT_TIMEOUT, read).await.ok()?
+}
+
+/// Runs `$SHELL -lic` to print PATH between random markers, so rc-file banners can't
+/// corrupt it.
+#[cfg(not(windows))]
+async fn capture_shell_path() -> Option<String> {
+    let marker = capture_marker();
+    // `printenv` is an external program, so the line parses alike in sh, bash, zsh
+    // and fish (fish rejects `${PATH}`); `command` skips aliases an -i shell defines.
+    let script = marker_wrapped_script(&marker, "command printenv PATH");
+    let buf = run_login_shell(&script, &marker).await?;
     finalize_capture(&buf, &marker, appimage_appdir().as_deref())
 }
 
@@ -1748,12 +2024,12 @@ fn claude_thinking_keyword(level: &str) -> Option<&'static str> {
 /// and `copilot.exe` is a real binary, so it's exempt from the batch-file
 /// newline-arg limit.
 ///
-/// Diff-only: no tool flags, so it just analyzes the prompt's diff. Repo-aware
-/// (Tier 2): `--allow-all-tools` avoids a permission hang while `--deny-tool`ing
-/// `write` + `shell`; denial takes precedence over allow-all, so reads are
-/// auto-approved (path-allowed — the review runs with the repo as cwd) and
-/// writes stay impossible even in the live repo. `--disable-builtin-mcps` keeps
-/// it to local repo reads.
+/// Every arm `--deny-tool`s `write` + `shell`, and denial takes precedence over
+/// allow-all, so writes stay impossible even in the live repo. Diff-only passes
+/// `--allow-all-tools` only with self-MCP (the server needs tools enabled).
+/// Repo-aware (Tier 2): `--allow-all-tools` avoids a permission hang, so reads
+/// are auto-approved (path-allowed — the review runs with the repo as cwd).
+/// `--disable-builtin-mcps` keeps it to local repo reads.
 fn copilot_review_args(
     model: &str,
     prompt: &str,
@@ -1773,16 +2049,19 @@ fn copilot_review_args(
     ];
     if let Some(path) = mcp_config {
         // `@` marks a file path. The server needs tools enabled to be reachable, so a
-        // diff-only review must carry the allow-all/deny-write pair itself.
+        // diff-only review must carry allow-all itself.
         args.push("--additional-mcp-config".into());
         args.push(format!("@{path}"));
         if !repo_aware {
             args.push("--allow-all-tools".into());
-            args.push("--deny-tool=write".into());
-            args.push("--deny-tool=shell".into());
         }
     }
-    if repo_aware {
+    if !repo_aware {
+        // With or without self-MCP, so the user's own env or config allowing all
+        // tools can't let a diff-only review write or shell either.
+        args.push("--deny-tool=write".into());
+        args.push("--deny-tool=shell".into());
+    } else {
         args.push("--allow-all-tools".into());
         args.push("--deny-tool=write".into());
         args.push("--deny-tool=shell".into());
@@ -1819,8 +2098,9 @@ fn opencode_session_args(
     effort: &str,
     read_only: bool,
     // Research profile: use our generated `gd-research` agent instead of the
-    // builtin `plan` — `plan` has NO web tools and opencode has no permission CLI
-    // flags, so the agent is defined in `OPENCODE_CONFIG` (see mcp.rs).
+    // builtin `plan`. The pin denies web to every agent, so only an agent's own
+    // `permission` can re-allow it; opencode has no permission CLI flags, so the
+    // agent is defined in `OPENCODE_CONFIG` (see mcp.rs).
     web: bool,
     dir: &str,
 ) -> Vec<String> {
@@ -1835,9 +2115,10 @@ fn opencode_session_args(
         dir.into(),
     ];
     if read_only {
-        // A read-only conversation: a hard read-only guarantee via an agent with no
-        // write/edit/bash tools — the builtin `plan` (Plan; glob/read only), or our
-        // `gd-research` (Research; adds webfetch/websearch). See the `web` doc above.
+        // The read-only control is `opencode_session_env`'s `OPENCODE_PERMISSION`
+        // pin; `--agent` (`plan`, or Research's `gd-research`, which re-allows web) is
+        // a second layer that fails open to the default agent on an unknown name.
+        // Sessions keep the repo's opencode config, which can re-enable tools here.
         args.push("--agent".into());
         args.push(if web { crate::mcp::GD_RESEARCH_AGENT } else { "plan" }.into());
     }
@@ -1865,10 +2146,13 @@ fn opencode_session_args(
 /// argv ceiling, on Windows `opencode` is a `.cmd` and Rust refuses to pass a
 /// newline-bearing argument to a batch file — which every diff prompt is.
 ///
-/// `repo_aware` uses the builtin read-only `plan` agent (glob/read, no
-/// write/edit/bash — a hard guarantee even in the live repo);
-/// `--dangerously-skip-permissions` only auto-approves those reads. Diff-only
-/// invokes no tools at all.
+/// The read-only control is `review_env`'s `OPENCODE_PERMISSION` pin, with
+/// project config disabled so the repo's own opencode config can't re-enable a
+/// tool. `--agent plan` on `repo_aware` is a second layer only: `plan` denies
+/// edits alone, and an unresolved agent name falls back to the full-access
+/// default. The pin carries no `ask` rule, so `--dangerously-skip-permissions`
+/// can approve only an `ask` a global config layer puts on a key the pin leaves
+/// unnamed (the residual `opencode_permission_json` documents).
 fn opencode_review_args(model: &str, repo_aware: bool, effort: &str, dir: &str) -> Vec<String> {
     // `--dir` pins opencode's run root (it resolves `PWD` before cwd).
     let mut args: Vec<String> = vec![
@@ -1892,6 +2176,139 @@ fn opencode_review_args(model: &str, repo_aware: bool, effort: &str, dir: &str) 
         args.push(v.into());
     }
     args
+}
+
+/// Which `OPENCODE_PERMISSION` pin a read-only opencode run carries. `DiffOnly`
+/// (every non-repo-aware review run: diff-only reviews, commit/PR/branch
+/// generation) keeps `read` alone; `ReadOnly` (every repo-aware run, Debug with
+/// AI and AI conflict resolve under Agentic review included, plus Plan/Research
+/// sessions) adds `grep`/`glob`/`list`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpencodePin {
+    DiffOnly,
+    ReadOnly,
+}
+
+/// The compact `OPENCODE_PERMISSION` JSON for a read-only opencode run. Rules
+/// resolve last-match-wins over wildcard keys, so the emitted ORDER is the
+/// policy: `*` and the MCP-shaped `*_*` deny first, per-server `<name>_*` allows,
+/// the `read` rule and the pin's `grep`/`glob`/`list` rules (allowed for ReadOnly,
+/// denied for DiffOnly), then the deny tail last so no server wildcard
+/// (`external_*`, `doom_*`, `plan_*`) can re-enable a builtin. Never
+/// `{"*":"deny"}` alone: with every tool disabled `opencode run` hangs with no
+/// output (measured, opencode 1.18.18).
+///
+/// Merged config layers keep each key at its FIRST position with the last
+/// layer's value. A global layer naming only specific keys loses to our later `*`
+/// (measured); one naming `*` ahead of its allows keeps `*` early, so those allows
+/// outrank our `*` but not a key new to the merge: `*_*` denies its `<server>_*`
+/// allows and the tail names each builtin we know. Residual: under such a layer, an
+/// allow for any tool key we don't name still wins, custom or plugin tools without
+/// an underscore (a global `deploy`) and unnamed builtins (`codesearch`, `lsp`)
+/// included; one that also names `*_*` early re-opens `<x>_*` keys. `<name>_*` also
+/// admits any loaded server whose sanitized name starts with `<name>_`. Built by
+/// hand because the crate's `serde_json` map sorts keys.
+fn opencode_permission_json(pin: OpencodePin, mcp_servers: &[&str]) -> String {
+    let mut out = String::from(r#"{"*":"deny","*_*":"deny","#);
+    for name in mcp_servers {
+        // opencode's tool-key sanitizer: every UTF-16 unit outside
+        // `[A-Za-z0-9_-]` becomes `_`.
+        let sanitized: String = name
+            .encode_utf16()
+            .map(|u| match char::from_u32(u32::from(u)) {
+                Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '-' => c,
+                _ => '_',
+            })
+            .collect();
+        out.push_str(&serde_json::Value::String(format!("{sanitized}_*")).to_string());
+        out.push_str(r#":"allow","#);
+    }
+    // `*.env` reads stay denied, mirroring opencode's own default carve-out
+    // with its `ask` hardened to `deny`.
+    out.push_str(
+        r#""read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"#,
+    );
+    out.push_str(match pin {
+        OpencodePin::DiffOnly => r#""grep":"deny","glob":"deny","list":"deny","#,
+        OpencodePin::ReadOnly => r#""grep":"allow","glob":"allow","list":"allow","#,
+    });
+    // Explicit keys, because a key an earlier config layer named keeps that
+    // layer's position in the merged ruleset and would otherwise outrank `*`.
+    out.push_str(concat!(
+        r#""skill":"deny","todowrite":"deny","question":"deny","#,
+        r#""edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","#,
+        r#""external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+    ));
+    out
+}
+
+/// The whole extra env of an `agent_review` spawn. Every opencode review is
+/// pinned read-only with project config disabled, so neither a hostile diff nor
+/// the repo's `opencode.json`/`.opencode/`/AGENTS.md can widen it; `OPENCODE_CONFIG`
+/// (the self-MCP config) still loads under that flag. `COPILOT_ALLOW_ALL=false`
+/// rides only the diff-only arm without self-MCP: that arm never passes
+/// `--allow-all-tools`, so no env-vs-flag precedence is involved.
+fn review_env(
+    kind: AgentKind,
+    repo_aware: bool,
+    mcp_config_path: Option<&str>,
+    self_mcp_servers: &[&str],
+) -> Vec<(&'static str, String)> {
+    match kind {
+        AgentKind::Opencode => {
+            let mut env = Vec::new();
+            if let Some(path) = mcp_config_path {
+                env.push(("OPENCODE_CONFIG", path.to_string()));
+            }
+            // Long-lived app-managed runs must not fork opencode's detached catalog
+            // refresh (stray-grandchild churn); the `agent_models` probe refreshes it.
+            env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
+            let pin = if repo_aware {
+                OpencodePin::ReadOnly
+            } else {
+                OpencodePin::DiffOnly
+            };
+            env.push((
+                "OPENCODE_PERMISSION",
+                opencode_permission_json(pin, self_mcp_servers),
+            ));
+            env.push(("OPENCODE_DISABLE_PROJECT_CONFIG", "1".to_string()));
+            env
+        }
+        AgentKind::Copilot if !repo_aware && mcp_config_path.is_none() => {
+            vec![("COPILOT_ALLOW_ALL", "false".to_string())]
+        }
+        AgentKind::Copilot | AgentKind::Claude | AgentKind::Codex => Vec::new(),
+    }
+}
+
+/// The whole opencode env of an `agent_session` spawn (host and container). A
+/// read-only session carries the `ReadOnly` pin plus `<name>_*` per opted-in
+/// server, but keeps the repo's project config, so the repo's own opencode
+/// config (agent `permission`, `.opencode/agent/*.md`, plugins) can re-enable
+/// tools there. A write-capable session carries no pin: its worktree confines it.
+fn opencode_session_env(
+    read_only: bool,
+    research: bool,
+    config_path: Option<String>,
+    mcp_servers: &[&str],
+) -> Vec<(&'static str, String)> {
+    let mut env = Vec::new();
+    if let Some(path) = config_path {
+        env.push(("OPENCODE_CONFIG", path));
+    }
+    env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
+    if research {
+        // Enable opencode's Exa-backed websearch tool (webfetch works regardless).
+        env.push(("OPENCODE_ENABLE_EXA", "1".to_string()));
+    }
+    if read_only {
+        env.push((
+            "OPENCODE_PERMISSION",
+            opencode_permission_json(OpencodePin::ReadOnly, mcp_servers),
+        ));
+    }
+    env
 }
 
 /// App effort level → opencode `--variant` (provider-specific reasoning effort).
@@ -2655,6 +3072,10 @@ async fn stream_agent(
 ) -> AppResult<Option<ReviewEvent>> {
     #[cfg(not(unix))]
     let _ = kill_group_on_exit;
+    // Before the sanitize below, which reads whatever that capture landed.
+    if wait_for_executing_capture(&cancel).await {
+        return Ok(None);
+    }
     let mut cmd = Command::new(binary);
     sanitize_child_env(&mut cmd);
     cmd.args(args)
@@ -2981,17 +3402,9 @@ pub async fn agent_review(
     };
 
     // opencode reads its MCP config from `OPENCODE_CONFIG` (no flag); the others carry
-    // it in argv. Set the env only when we actually wrote an opencode config.
-    let mut extra_env: Vec<(&str, String)> = match (kind, &mcp_config_path) {
-        (AgentKind::Opencode, Some(path)) => vec![("OPENCODE_CONFIG", path.clone())],
-        _ => Vec::new(),
-    };
-    if kind == AgentKind::Opencode {
-        // Long-lived app-managed runs must not fork opencode's detached catalog
-        // refresh (stray-grandchild churn). The short-lived probes keep opencode's
-        // default behavior — the `agent_models` probe is what refreshes the cache.
-        extra_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
-    }
+    // it in argv. `review_env` also carries the read-only pins.
+    let self_names: Vec<&str> = self_specs.iter().map(|s| s.name.as_str()).collect();
+    let extra_env = review_env(kind, repo_aware, mcp_config_path.as_deref(), &self_names);
 
     // Codex always explores the repo, so it gets the longer agentic budget too — and
     // a self-MCP review is agentic regardless of `repo_aware` (the agent pulls the
@@ -3071,8 +3484,9 @@ pub async fn agent_session(
     fork: bool,
     // Read-only mode: a Plan conversation. Swaps every CLI's write toolset/sandbox
     // for its read-only one (Claude read tools + no bypass, Codex `-s read-only`,
-    // Copilot deny-write/shell, opencode `--agent plan`), so the turn can explore
-    // but can NEVER write — even though it runs in the live repo, not a worktree.
+    // Copilot deny-write/shell, opencode its `OPENCODE_PERMISSION` pin), so the turn
+    // can explore but never write, even in the live repo (for opencode, unless the
+    // repo's own opencode config re-enables a tool; see `opencode_session_env`).
     read_only: bool,
     // Research profile: each CLI gains its native web tools while still never
     // writing (see each `*_session_args`). Only meaningful alongside `read_only`.
@@ -3118,7 +3532,8 @@ pub async fn agent_session(
     };
     let container = isolation.as_deref() == Some("container");
     // opencode Research: it needs its generated read-only-web agent in OPENCODE_CONFIG
-    // (the builtin `plan` agent has no web tools), written even with no MCP servers.
+    // (the pin denies web to every agent, so only gd-research's own permission
+    // re-allows it), written even with no MCP servers.
     let opencode_research = kind == AgentKind::Opencode && web;
 
     // Resolve the session's opted-in MCP servers into a generated config file, passed
@@ -3129,6 +3544,8 @@ pub async fn agent_session(
     // `mcp__<server>` allowlist entries — loading a server via `--mcp-config` does
     // NOT admit its tools past `--tools`. Claude only (host and container).
     let mcp_tools = crate::mcp::tool_allow_patterns(&mcp_specs);
+    // opencode's read-only pin admits each opted-in server's `<name>_*` tools.
+    let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect();
     // Per-CLI MCP config plumbing (`mcp_config_path` holds whatever this CLI needs):
     //  - Claude: JSON via `--mcp-config` (strict) + a `mcp__<server>` allowlist;
     //    host = a host path, container = the mounted `/home/node/.claude/mcp.json`.
@@ -3412,23 +3829,14 @@ pub async fn agent_session(
         let npm_cache = crate::agent_sandbox::npm_cache_dir(&app);
         // opencode reads its MCP config from `OPENCODE_CONFIG` (no flag) — point it at the
         // file mounted in the home. Other agents read their dotdir file implicitly.
-        let mut container_env: Vec<(&str, String)> =
-            match crate::agent_sandbox::container_mcp_config("opencode") {
-                Some((_, path))
-                    if kind == AgentKind::Opencode
-                        && (!mcp_specs.is_empty() || opencode_research) =>
-                {
-                    vec![("OPENCODE_CONFIG", path)]
-                }
-                _ => Vec::new(),
-            };
-        if kind == AgentKind::Opencode {
-            container_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
-        }
-        if opencode_research {
-            // Enable opencode's Exa-backed websearch tool (webfetch works regardless).
-            container_env.push(("OPENCODE_ENABLE_EXA", "1".to_string()));
-        }
+        let container_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {
+            let config_path = crate::agent_sandbox::container_mcp_config("opencode")
+                .map(|(_, path)| path)
+                .filter(|_| !mcp_specs.is_empty() || opencode_research);
+            opencode_session_env(read_only, opencode_research, config_path, &mcp_names)
+        } else {
+            Vec::new()
+        };
         // Use the repo's per-repo custom image when it's built, else the managed base.
         let image = crate::agent_sandbox::resolve_session_image(&runtime, &worktree_path).await;
         let args = crate::agent_sandbox::build_run_args(
@@ -3471,17 +3879,11 @@ pub async fn agent_session(
     })?;
     // opencode has no config-file flag: it reads `OPENCODE_CONFIG`, and merges
     // config layers, so ours adds to the user's rather than replacing it.
-    let mut host_extra_env: Vec<(&str, String)> = match (kind, &mcp_config_path) {
-        (AgentKind::Opencode, Some(path)) => vec![("OPENCODE_CONFIG", path.clone())],
-        _ => Vec::new(),
+    let host_extra_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {
+        opencode_session_env(read_only, opencode_research, mcp_config_path, &mcp_names)
+    } else {
+        Vec::new()
     };
-    if kind == AgentKind::Opencode {
-        host_extra_env.push(("OPENCODE_DISABLE_MODELS_FETCH", "1".to_string()));
-    }
-    if opencode_research {
-        // Enable opencode's Exa-backed websearch tool (webfetch works regardless).
-        host_extra_env.push(("OPENCODE_ENABLE_EXA", "1".to_string()));
-    }
     stream_agent(
         cancel.notify.clone(),
         kind,
@@ -3544,6 +3946,75 @@ mod child_env_tests {
         assert!(
             !env.set.iter().any(|(k, _)| k == "PWD"),
             "PWD must be dropped, never re-set: {env:?}"
+        );
+    }
+
+    /// The values `env` set for `key`, in order.
+    fn set_values<'a>(env: &'a RecordingEnv, key: &str) -> Vec<&'a str> {
+        env.set
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn sanitize_child_env_sets_path_and_the_marker_to_the_same_merged_value() {
+        let merged = "/Users/me/.nvm/versions/node/v22/bin:/opt/homebrew/bin:/usr/bin:/bin";
+        let mut env = RecordingEnv::default();
+        sanitize_child_env_with(&mut env, &[], Some(merged));
+        assert_eq!(set_values(&env, "PATH").last(), Some(&merged), "{env:?}");
+        assert_eq!(
+            set_values(&env, SHELL_PATH_MERGED_MARKER),
+            vec![merged],
+            "the marker carries the PATH value verbatim: {env:?}"
+        );
+        assert!(env.unset.iter().any(|k| k == "PWD"), "{env:?}");
+    }
+
+    #[test]
+    fn sanitize_child_env_sets_the_merged_path_after_the_override_plan() {
+        // An AppImage plan rewrites PATH too; the merge started from that value, so
+        // the merged PATH must be the last PATH set and the marker must equal it.
+        let plan = [
+            ("PATH", Some("/usr/local/bin:/usr/bin".to_string())),
+            ("LD_LIBRARY_PATH", None),
+        ];
+        let merged = "/home/me/.local/bin:/usr/local/bin:/usr/bin";
+        let mut env = RecordingEnv::default();
+        sanitize_child_env_with(&mut env, &plan, Some(merged));
+        assert_eq!(
+            set_values(&env, "PATH"),
+            vec!["/usr/local/bin:/usr/bin", merged],
+            "{env:?}"
+        );
+        assert_eq!(set_values(&env, SHELL_PATH_MERGED_MARKER), vec![merged]);
+        assert!(env.unset.iter().any(|k| k == "LD_LIBRARY_PATH"), "{env:?}");
+    }
+
+    #[test]
+    fn sanitize_child_env_without_a_merge_sets_neither_path_nor_the_marker() {
+        let mut env = RecordingEnv::default();
+        sanitize_child_env_with(&mut env, &[], None);
+        assert!(
+            set_values(&env, SHELL_PATH_MERGED_MARKER).is_empty(),
+            "{env:?}"
+        );
+        assert!(!env.unset.iter().any(|k| k == SHELL_PATH_MERGED_MARKER));
+        assert!(set_values(&env, "PATH").is_empty(), "{env:?}");
+        assert!(env.unset.iter().any(|k| k == "PWD"), "{env:?}");
+    }
+
+    #[test]
+    fn sanitize_child_env_in_tests_never_sees_a_captured_path() {
+        // Tests never prime the process-global cell (on Windows there is none), so the
+        // real entry point takes the no-merge arm; a merge here means a test primed it.
+        assert_eq!(merged_shell_path(), None);
+        let mut env = RecordingEnv::default();
+        sanitize_child_env(&mut env);
+        assert!(
+            set_values(&env, SHELL_PATH_MERGED_MARKER).is_empty(),
+            "{env:?}"
         );
     }
 
@@ -4214,6 +4685,433 @@ mod child_env_tests {
         let expected = |dir: &PathBuf| format!("{}/gd-tool", dir.display());
         assert_eq!(found, Some(expected(&second)));
         assert_eq!(by_mode_bits, Some(expected(&first)));
+    }
+
+    #[test]
+    fn login_path_resolve_takes_the_process_path_before_the_shell_path() {
+        let on_shell = |name: &str| {
+            first_on_path("/home/u/.nvm/bin:/usr/bin", name, |c| {
+                c == "/home/u/.nvm/bin/opencode" || c == "/home/u/.nvm/bin/claude"
+            })
+            .map(PathBuf::from)
+        };
+        // On the process PATH only, and on both: the process side wins either way.
+        let process = |_: &[&str]| Some(PathBuf::from("/usr/local/bin/claude"));
+        assert_eq!(
+            resolve_without_spawn(&["claude"], process, on_shell),
+            Some(PathBuf::from("/usr/local/bin/claude"))
+        );
+        // On the shell PATH only, under the second candidate name.
+        assert_eq!(
+            resolve_without_spawn(&["oc", "opencode"], |_| None, on_shell),
+            Some(PathBuf::from("/home/u/.nvm/bin/opencode"))
+        );
+        // On neither: only the login-shell fallback is left.
+        assert_eq!(resolve_without_spawn(&["codex"], |_| None, on_shell), None);
+    }
+
+    #[test]
+    fn login_path_resolver_single_quotes_the_name() {
+        assert_eq!(
+            command_v_body("lefthook").as_deref(),
+            Some("command -v 'lefthook'")
+        );
+        assert_eq!(
+            command_v_body("a; rm -rf ~").as_deref(),
+            Some("command -v 'a; rm -rf ~'")
+        );
+        // Names no single-quoting is safe for in every shell (fish included) are refused.
+        for name in ["it's", r"a\b", r"x\'; id #", "a\nb", "a\u{7}b"] {
+            assert_eq!(command_v_body(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn login_path_shared_script_never_spells_the_marker_whole() {
+        let script = marker_wrapped_script(MARK, "command printenv PATH");
+        assert_eq!(
+            script,
+            "printf '%s%s' 'GDPAT' 'H1fx2e'; command printenv PATH; printf '%s%s' 'GDPAT' 'H1fx2e'"
+        );
+        assert!(!script.contains(MARK));
+    }
+
+    #[test]
+    fn login_path_resolver_reads_the_value_between_markers_despite_noise() {
+        // A decoy outside the pair and non-UTF-8 noise around it must not matter.
+        let mut out = b"/usr/bin/lefthook\nBienvenue \xe0 bord\n".to_vec();
+        out.extend(framed("/opt/bin/lefthook\n"));
+        out.extend_from_slice(b"\xff /usr/bin/lefthook\n");
+        let any = |_: &Path| true;
+        assert_eq!(
+            command_v_match(&out, MARK, "lefthook", any),
+            Some(PathBuf::from("/opt/bin/lefthook"))
+        );
+        // Negative control: no closed pair finds nothing, even with a match outside.
+        assert_eq!(
+            command_v_match(b"/usr/bin/lefthook\n", MARK, "lefthook", any),
+            None
+        );
+    }
+
+    #[test]
+    fn login_path_resolver_skips_lines_that_are_not_the_named_file() {
+        let value = framed(
+            "lefthook: aliased to npx lefthook\nbin/lefthook\n/usr/bin/lefthooks\n/opt/bin/lefthook\n",
+        );
+        assert_eq!(
+            command_v_match(&value, MARK, "lefthook", |_| true),
+            Some(PathBuf::from("/opt/bin/lefthook"))
+        );
+        // A named path that is not a file is passed over too.
+        assert_eq!(command_v_match(&value, MARK, "lefthook", |_| false), None);
+        assert_eq!(
+            command_v_match(&framed(""), MARK, "lefthook", |_| true),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn login_path_shared_runner_read_stops_at_the_closing_marker_without_eof() {
+        // The writer stays open, as an rc-started background process holds the pipe.
+        let (mut tx, mut rx) = tokio::io::duplex(1024);
+        let mut sent = b"banner\n".to_vec();
+        sent.extend(framed("/usr/bin\n"));
+        tx.write_all(&sent).await.unwrap();
+        let read = read_until_marker_pair(&mut rx, MARK.as_bytes(), 1024);
+        let got = tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("the read returns once the pair closes");
+        assert_eq!(got, Some(sent));
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn login_path_shared_runner_read_fails_on_eof_or_the_cap() {
+        let opened = format!("noise{MARK}/usr/bin\n");
+        let mut eof: &[u8] = opened.as_bytes();
+        assert_eq!(
+            read_until_marker_pair(&mut eof, MARK.as_bytes(), 1024).await,
+            None
+        );
+        // The pair lands past the cap, so the read gives up first.
+        let late = [vec![b'x'; 64], framed("/usr/bin\n")].concat();
+        let mut capped: &[u8] = &late;
+        assert_eq!(
+            read_until_marker_pair(&mut capped, MARK.as_bytes(), 32).await,
+            None
+        );
+        // Negative control: the same bytes under a roomy cap succeed.
+        let mut roomy: &[u8] = &late;
+        assert_eq!(
+            read_until_marker_pair(&mut roomy, MARK.as_bytes(), 1024).await,
+            Some(late.clone())
+        );
+    }
+
+    /// `secs` after `t0`, for the retry-window fixtures.
+    fn after(t0: Instant, secs: u64) -> Instant {
+        t0 + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn shell_retry_is_never_due_while_unarmed() {
+        let t0 = Instant::now();
+        assert!(!retry_due(None, false, after(t0, 3600)));
+        let mut stamp = None;
+        assert!(!claim_shell_retry(&mut stamp, false, true, after(t0, 3600)));
+        assert_eq!(stamp, None, "an unarmed gate stays unarmed");
+    }
+
+    #[test]
+    fn shell_retry_is_due_from_exactly_the_cooldown() {
+        let t0 = Instant::now();
+        assert_eq!(SHELL_RETRY_COOLDOWN, Duration::from_secs(60));
+        assert!(!retry_due(Some(t0), false, after(t0, 1)));
+        assert!(!retry_due(Some(t0), false, after(t0, 59)));
+        assert!(retry_due(Some(t0), false, after(t0, 60)));
+        assert!(retry_due(Some(t0), false, after(t0, 61)));
+    }
+
+    #[test]
+    fn shell_retry_never_stacks_on_a_capture_in_flight() {
+        let t0 = Instant::now();
+        assert!(!retry_due(Some(t0), true, after(t0, 61)));
+        let mut stamp = Some(t0);
+        assert!(!claim_shell_retry(&mut stamp, true, true, after(t0, 61)));
+        assert_eq!(stamp, Some(t0), "a skipped claim keeps the window armed");
+    }
+
+    #[test]
+    fn shell_retry_claim_restamps_so_a_window_spawns_once() {
+        let t0 = Instant::now();
+        let mut stamp = Some(t0);
+        assert!(claim_shell_retry(&mut stamp, false, true, after(t0, 61)));
+        assert_eq!(stamp, Some(after(t0, 61)));
+        // A second caller right behind the first finds the window restamped.
+        assert!(!claim_shell_retry(&mut stamp, false, true, after(t0, 61)));
+        assert!(!claim_shell_retry(&mut stamp, false, true, after(t0, 120)));
+        assert!(claim_shell_retry(&mut stamp, false, true, after(t0, 121)));
+    }
+
+    #[test]
+    fn shell_retry_without_a_runtime_keeps_the_window_for_the_next_caller() {
+        let t0 = Instant::now();
+        let mut stamp = Some(t0);
+        assert!(!claim_shell_retry(&mut stamp, false, false, after(t0, 61)));
+        assert_eq!(stamp, Some(t0), "no spawn, so no restamp");
+        assert!(claim_shell_retry(&mut stamp, false, true, after(t0, 62)));
+    }
+
+    #[tokio::test]
+    async fn init_holding_flag_holds_the_flag_until_the_cell_is_settled() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let cell = tokio::sync::OnceCell::new();
+        let got = init_holding_flag(&cell, &flag, || async {
+            assert_eq!(*flag.borrow(), 1, "held while the init runs");
+            Some(7)
+        })
+        .await;
+        assert_eq!(got, Some(&7));
+        assert_eq!(*flag.borrow(), 0);
+        // A set cell never runs the init again, so the flag stays down.
+        let again = init_holding_flag(&cell, &flag, || async { unreachable!() }).await;
+        assert_eq!(again, Some(&7));
+        assert_eq!(*flag.borrow(), 0);
+
+        let failed = tokio::sync::OnceCell::<u32>::new();
+        assert_eq!(
+            init_holding_flag(&failed, &flag, || async { None }).await,
+            None
+        );
+        assert_eq!(*flag.borrow(), 0);
+        assert!(!failed.initialized());
+    }
+
+    #[tokio::test]
+    async fn init_holding_flag_clears_when_dropped_and_a_waiter_never_touches_it() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let cell = tokio::sync::OnceCell::<u32>::new();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let mut owner = Box::pin(init_holding_flag(&cell, &flag, || async {
+            let _ = rx.await;
+            Some(1)
+        }));
+        assert!(futures_poll_once(owner.as_mut()).await.is_none());
+        assert_eq!(*flag.borrow(), 1);
+        // A waiter queued behind the executing init holds no guard of its own.
+        let mut waiter = Box::pin(init_holding_flag(&cell, &flag, || async { Some(2) }));
+        assert!(futures_poll_once(waiter.as_mut()).await.is_none());
+        drop(waiter);
+        assert_eq!(
+            *flag.borrow(),
+            1,
+            "a dropped waiter leaves the executing init's count"
+        );
+        // Dropping the executing init mid-run clears it.
+        drop(owner);
+        assert_eq!(*flag.borrow(), 0);
+        assert!(!cell.initialized());
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn init_holding_flag_counts_a_waiter_that_takes_over_after_a_failure() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let cell = tokio::sync::OnceCell::<u32>::new();
+        let (fail, fail_rx) = tokio::sync::oneshot::channel::<()>();
+        let (finish, finish_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut owner = Box::pin(init_holding_flag(&cell, &flag, || async {
+            let _ = fail_rx.await;
+            None
+        }));
+        assert!(futures_poll_once(owner.as_mut()).await.is_none());
+        let mut waiter = Box::pin(init_holding_flag(&cell, &flag, || async {
+            let _ = finish_rx.await;
+            Some(2)
+        }));
+        assert!(futures_poll_once(waiter.as_mut()).await.is_none());
+        let _ = fail.send(());
+        assert_eq!(futures_poll_once(owner.as_mut()).await, Some(None));
+        // The waiter now runs its own init, under its own count.
+        assert!(futures_poll_once(waiter.as_mut()).await.is_none());
+        assert_eq!(*flag.borrow(), 1);
+        let _ = finish.send(());
+        assert_eq!(futures_poll_once(waiter.as_mut()).await, Some(Some(&2)));
+        assert_eq!(*flag.borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn shell_capture_wait_holds_until_every_overlapping_capture_ends() {
+        // A failed init's permit frees before its guard drops, so the next init's guard
+        // can enter first: the count stays above 0 until both are gone.
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let cancel = Notify::new();
+        let failed = InFlightGuard::enter(&flag);
+        let next = InFlightGuard::enter(&flag);
+        assert_eq!(*flag.borrow(), 2);
+        let mut wait = Box::pin(wait_out_capture(
+            &mut rx,
+            &cancel,
+            Duration::from_secs(3600),
+        ));
+        assert!(futures_poll_once(wait.as_mut()).await.is_none());
+        drop(failed);
+        assert_eq!(*flag.borrow(), 1);
+        assert!(
+            futures_poll_once(wait.as_mut()).await.is_none(),
+            "one capture still runs"
+        );
+        drop(next);
+        assert_eq!(wait.await, CaptureWait::Finished);
+        assert_eq!(*flag.borrow(), 0);
+    }
+
+    #[test]
+    fn shell_capture_in_flight_release_saturates_at_zero() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        drop(InFlightGuard(&flag));
+        assert_eq!(*flag.borrow(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn init_holding_flag_lowers_the_flag_only_after_the_cell_is_set() {
+        let flag: &'static _ = Box::leak(Box::new(tokio::sync::watch::Sender::new(0usize)));
+        let cell: &'static _ = Box::leak(Box::new(tokio::sync::OnceCell::<u32>::new()));
+        let mut rx = flag.subscribe();
+        let (go, wait) = tokio::sync::oneshot::channel::<()>();
+        let watcher = tokio::spawn(async move {
+            // Subscribed before the init starts, so a late watcher still sees the edge.
+            while rx.changed().await.is_ok() {
+                if *rx.borrow_and_update() == 0 {
+                    return cell.initialized();
+                }
+            }
+            false
+        });
+        let owner = tokio::spawn(init_holding_flag(cell, flag, || async {
+            let _ = wait.await;
+            Some(3)
+        }));
+        flag.subscribe().wait_for(|v| *v > 0).await.unwrap();
+        let _ = go.send(());
+        assert_eq!(owner.await.unwrap(), Some(&3));
+        assert!(watcher.await.unwrap(), "a count of 0 must imply a set cell");
+    }
+
+    /// Polls `fut` once: `Some` if it finished, `None` if it is still pending.
+    async fn futures_poll_once<F: std::future::Future + Unpin>(fut: F) -> Option<F::Output> {
+        let mut fut = fut;
+        std::future::poll_fn(|cx| {
+            std::task::Poll::Ready(
+                match std::future::Future::poll(std::pin::Pin::new(&mut fut), cx) {
+                    std::task::Poll::Ready(v) => Some(v),
+                    std::task::Poll::Pending => None,
+                },
+            )
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn shell_retry_in_flight_flag_clears_when_the_capture_is_dropped_or_panics() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let capture = async {
+            let _in_flight = InFlightGuard::enter(&flag);
+            std::future::pending::<()>().await;
+        };
+        // The capture never finishes; the select drops it once the flag is seen set.
+        tokio::select! {
+            () = capture => unreachable!("the capture future never completes"),
+            seen = async { rx.wait_for(|v| *v > 0).await.is_ok() } => assert!(seen),
+        }
+        assert_eq!(
+            *flag.borrow(),
+            0,
+            "a dropped capture future clears the flag"
+        );
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _in_flight = InFlightGuard::enter(&flag);
+            assert_eq!(*flag.borrow(), 1);
+            panic!("the capture panicked");
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(*flag.borrow(), 0, "a panicking capture clears the flag");
+    }
+
+    #[test]
+    fn shell_capture_wait_is_bounded_at_three_seconds() {
+        assert_eq!(SHELL_CAPTURE_WAIT, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn shell_capture_wait_future_is_send() {
+        // Spawned agent futures await it on macOS/Linux, where the call never compiles
+        // on a Windows host: no watch `Ref` may live across one of its awaits.
+        fn assert_send<T: Send>(_: &T) {}
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let cancel = Notify::new();
+        let wait = wait_out_capture(&mut rx, &cancel, SHELL_CAPTURE_WAIT);
+        assert_send(&wait);
+    }
+
+    #[tokio::test]
+    async fn shell_capture_wait_returns_at_once_with_nothing_in_flight() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let cancel = Notify::new();
+        cancel.notify_one();
+        assert_eq!(
+            wait_out_capture(&mut rx, &cancel, Duration::from_secs(3600)).await,
+            CaptureWait::NothingInFlight
+        );
+        // The pending cancel is left for the run's own loop to consume.
+        assert!(tokio::time::timeout(Duration::ZERO, cancel.notified())
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn shell_capture_wait_ends_when_the_capture_finishes() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let cancel = Notify::new();
+        let guard = InFlightGuard::enter(&flag);
+        let (waited, ()) = tokio::join!(
+            wait_out_capture(&mut rx, &cancel, Duration::from_secs(3600)),
+            async move { drop(guard) },
+        );
+        assert_eq!(waited, CaptureWait::Finished);
+    }
+
+    #[tokio::test]
+    async fn shell_capture_wait_gives_up_at_its_limit() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let cancel = Notify::new();
+        let _in_flight = InFlightGuard::enter(&flag);
+        assert_eq!(
+            wait_out_capture(&mut rx, &cancel, Duration::from_millis(10)).await,
+            CaptureWait::TimedOut
+        );
+        assert_eq!(*flag.borrow(), 1, "the waiter never touches the count");
+    }
+
+    #[tokio::test]
+    async fn shell_capture_wait_yields_to_a_cancel() {
+        let flag = tokio::sync::watch::Sender::new(0usize);
+        let mut rx = flag.subscribe();
+        let cancel = Notify::new();
+        let _in_flight = InFlightGuard::enter(&flag);
+        cancel.notify_one();
+        assert_eq!(
+            wait_out_capture(&mut rx, &cancel, Duration::from_secs(3600)).await,
+            CaptureWait::Cancelled
+        );
     }
 }
 
@@ -5502,17 +6400,35 @@ opencode/x-preview-f-free
     }
 
     #[test]
-    fn copilot_review_without_mcp_is_unchanged() {
-        // No self-MCP: no `--additional-mcp-config`. Repo-aware still carries the
-        // allow-all/deny pair + `--disable-builtin-mcps`; diff-only carries none.
+    fn copilot_review_without_mcp_denies_write_and_shell() {
+        // No self-MCP: no `--additional-mcp-config`. Repo-aware carries the
+        // allow-all/deny pair + `--disable-builtin-mcps`.
         let aware = copilot_review_args("m", "prompt", true, "", None);
-        assert!(!aware.iter().any(|a| a == "--additional-mcp-config"));
-        assert!(aware.iter().any(|a| a == "--allow-all-tools"));
-        assert!(aware.iter().any(|a| a == "--disable-builtin-mcps"));
+        assert_eq!(
+            aware,
+            [
+                "-p",
+                "prompt",
+                "--output-format",
+                "json",
+                "--no-color",
+                "--allow-all-tools",
+                "--deny-tool=write",
+                "--deny-tool=shell",
+                "--disable-builtin-mcps",
+                "--model",
+                "m",
+            ]
+        );
 
+        // Diff-only denies write + shell even though it never enables tools, so a
+        // user-level allow-all can't widen it.
         let diff_only = copilot_review_args("m", "prompt", false, "", None);
         assert!(!diff_only.iter().any(|a| a == "--additional-mcp-config"));
         assert!(!diff_only.iter().any(|a| a == "--allow-all-tools"));
+        assert!(diff_only.iter().any(|a| a == "--deny-tool=write"));
+        assert!(diff_only.iter().any(|a| a == "--deny-tool=shell"));
+        assert!(!diff_only.iter().any(|a| a == "--disable-builtin-mcps"));
     }
 
     #[test]
@@ -5573,9 +6489,188 @@ opencode/x-preview-f-free
     fn opencode_review_pins_the_repo_directory() {
         let aware = opencode_review_args("m", true, "", "C:/repos/gd");
         assert_eq!(flag_value(&aware, "--dir"), Some("C:/repos/gd"));
-        // A diff-only review invokes no tools, but the run still resolves a root.
+        // The diff-only arm still resolves its root via `--dir`; its pin is tested in
+        // `review_env_pins_every_mode`.
         let diff_only = opencode_review_args("m", false, "", "C:/repos/gd");
         assert_eq!(flag_value(&diff_only, "--dir"), Some("C:/repos/gd"));
+    }
+
+    // --- opencode / Copilot read-only pins -----------------------------------
+
+    const DENY_TAIL: &str = r#""skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#;
+    const PIN_HEAD: &str = r#"{"*":"deny","*_*":"deny","#;
+    const DENIED_BUILTINS: [&str; 12] = [
+        "skill",
+        "todowrite",
+        "question",
+        "edit",
+        "bash",
+        "webfetch",
+        "websearch",
+        "task",
+        "external_directory",
+        "doom_loop",
+        "plan_enter",
+        "plan_exit",
+    ];
+
+    #[test]
+    fn opencode_permission_pins_are_exact() {
+        assert_eq!(
+            opencode_permission_json(OpencodePin::DiffOnly, &[]),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+        );
+        assert_eq!(
+            opencode_permission_json(OpencodePin::ReadOnly, &[]),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"allow","glob":"allow","list":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+        );
+        for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+            let bare = opencode_permission_json(pin, &[]);
+            let rest = bare.strip_prefix(PIN_HEAD).unwrap();
+            // Server allows sit right after `*_*`, in input order, sanitized.
+            assert_eq!(
+                opencode_permission_json(pin, &["gitdesktop"]),
+                format!(r#"{PIN_HEAD}"gitdesktop_*":"allow",{rest}"#)
+            );
+            assert_eq!(
+                opencode_permission_json(pin, &["a.b", "x"]),
+                format!(r#"{PIN_HEAD}"a_b_*":"allow","x_*":"allow",{rest}"#)
+            );
+            for servers in [&[][..], &["gitdesktop"][..], &["a.b", "x"][..]] {
+                let out = opencode_permission_json(pin, servers);
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                    "{out}"
+                );
+                assert!(out.starts_with(PIN_HEAD), "{out}");
+                assert!(out.ends_with(DENY_TAIL), "{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_permission_pins_deny_the_write_surface() {
+        for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+            let out = opencode_permission_json(pin, &["external", "doom", "plan"]);
+            let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+            for key in DENIED_BUILTINS {
+                assert_eq!(v[key], "deny", "{pin:?} {key}");
+            }
+            assert_eq!(v["*"], "deny");
+            assert_eq!(v["*_*"], "deny");
+            assert_eq!(v["read"]["*"], "allow");
+            assert_eq!(v["read"]["*.env"], "deny");
+            assert_eq!(v["read"]["*.env.*"], "deny");
+            for key in ["grep", "glob", "list"] {
+                match pin {
+                    OpencodePin::DiffOnly => assert_eq!(v[key], "deny", "{key}"),
+                    OpencodePin::ReadOnly => assert_eq!(v[key], "allow", "{key}"),
+                }
+            }
+            // Last match wins, so a server wildcard that also matches a builtin must
+            // precede that builtin's deny, and every allow sits between the `*_*`
+            // catch-all and `read`.
+            let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{needle}"));
+            let read = at(r#""read":"#);
+            let catch_all = at(r#""*_*":"deny""#);
+            for (allow, denies) in [
+                (
+                    r#""external_*":"allow""#,
+                    &[r#""external_directory":"deny""#][..],
+                ),
+                (r#""doom_*":"allow""#, &[r#""doom_loop":"deny""#][..]),
+                (
+                    r#""plan_*":"allow""#,
+                    &[r#""plan_enter":"deny""#, r#""plan_exit":"deny""#][..],
+                ),
+            ] {
+                assert!(catch_all < at(allow) && at(allow) < read, "{allow}");
+                for deny in denies {
+                    assert!(at(allow) < at(deny), "{allow} vs {deny}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn review_env_pins_every_mode() {
+        let kinds = [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Copilot,
+            AgentKind::Opencode,
+        ];
+        let mut rows = 0;
+        for kind in kinds {
+            for repo_aware in [false, true] {
+                for self_mcp in [false, true] {
+                    rows += 1;
+                    let (path, servers): (Option<&str>, &[&str]) = if self_mcp {
+                        (Some("C:/cfg/r.opencode.json"), &["gitdesktop"])
+                    } else {
+                        (None, &[])
+                    };
+                    let env = review_env(kind, repo_aware, path, servers);
+                    let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
+                    match kind {
+                        AgentKind::Opencode => {
+                            let pin = if repo_aware {
+                                OpencodePin::ReadOnly
+                            } else {
+                                OpencodePin::DiffOnly
+                            };
+                            let want = opencode_permission_json(pin, servers);
+                            assert_eq!(get("OPENCODE_PERMISSION"), Some(want.as_str()));
+                            assert_eq!(get("OPENCODE_DISABLE_PROJECT_CONFIG"), Some("1"));
+                            assert_eq!(get("OPENCODE_DISABLE_MODELS_FETCH"), Some("1"));
+                            assert_eq!(get("OPENCODE_CONFIG"), path);
+                            assert_eq!(env.len(), 3 + usize::from(path.is_some()));
+                        }
+                        AgentKind::Copilot if !repo_aware && !self_mcp => {
+                            assert_eq!(env, [("COPILOT_ALLOW_ALL", "false".to_string())]);
+                        }
+                        _ => assert!(env.is_empty(), "{kind:?} aware={repo_aware} mcp={self_mcp}"),
+                    }
+                }
+            }
+        }
+        assert_eq!(rows, 16);
+    }
+
+    #[test]
+    fn opencode_session_env_pins_read_only_sessions() {
+        let read_only_pin =
+            |servers: &[&str]| opencode_permission_json(OpencodePin::ReadOnly, servers);
+        for read_only in [false, true] {
+            for research in [false, true] {
+                for path in [
+                    None,
+                    Some("/home/node/.local/share/opencode/opencode-mcp.json"),
+                    Some("C:/cfg/x.json"),
+                ] {
+                    for servers in [&[][..], &["docs"][..]] {
+                        let env = opencode_session_env(
+                            read_only,
+                            research,
+                            path.map(str::to_string),
+                            servers,
+                        );
+                        let get =
+                            |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
+                        let want = read_only.then(|| read_only_pin(servers));
+                        assert_eq!(get("OPENCODE_PERMISSION"), want.as_deref());
+                        if read_only && !servers.is_empty() {
+                            assert!(want.unwrap().contains(r#""docs_*":"allow""#));
+                        }
+                        assert_eq!(get("OPENCODE_ENABLE_EXA"), research.then_some("1"));
+                        assert_eq!(get("OPENCODE_CONFIG"), path);
+                        assert_eq!(get("OPENCODE_DISABLE_MODELS_FETCH"), Some("1"));
+                        // Sessions keep the repo's project config.
+                        assert_eq!(get("OPENCODE_DISABLE_PROJECT_CONFIG"), None);
+                    }
+                }
+            }
+        }
     }
 
     // --- EventSink seam ------------------------------------------------------

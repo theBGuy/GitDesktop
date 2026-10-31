@@ -1048,7 +1048,9 @@ touches your checkout.
   local Markdown file (yours to review and commit, in `.gitdesktop/research/`).
   It searches and reads but never writes, and runs on **any agent** (Claude,
   Codex, Copilot, or opencode), each using its own native web search and
-  fetch.
+  fetch. On opencode it also loads the repository's own opencode config and
+  plugins, which can widen what it does, so use another agent for a
+  repository you don't trust.
 - **Plan before you build**: a read-only **Plan** mode drafts an agent-ready
   issue from a task (or an existing issue): a repo-aware agent explores your
   code and writes the problem, approach, affected files, acceptance
@@ -1057,7 +1059,9 @@ touches your checkout.
   in an inline panel (pick a suggestion or write your own) and **refine**
   the plan with your choices. Then file it as a local, GitHub, or GitLab
   issue, or hand it **straight to a write-capable agent session** to
-  implement. Nothing is changed during planning; it never writes.
+  implement. Nothing is changed during planning; it never writes. On
+  opencode, Plan loads the repository's own opencode config and plugins the
+  same way Research does.
 - **From issue to implementation**: a **Solve with agent** button on any
   local, GitHub, or GitLab issue (and **Implement** on a finished plan)
   seeds the agent composer with the spec, so you pick the agent and

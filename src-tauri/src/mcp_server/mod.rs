@@ -653,6 +653,15 @@ pub fn run_mcp_server() {
 }
 
 async fn serve(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // A client started from Finder/Dock hands this process launchd's minimal PATH, and
+    // main.rs reaches here without the app's startup capture. Fire-and-forget on this
+    // runtime; the capture writes nothing to stdout, which carries the JSON-RPC stream.
+    if mcp_should_prime(
+        std::env::var_os(crate::agent::SHELL_PATH_MERGED_MARKER).as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    ) {
+        tokio::spawn(crate::agent::prime_shell_path());
+    }
     let service = GitDesktopMcp::with_options(
         args.repo,
         args.allow_write,
@@ -665,6 +674,12 @@ async fn serve(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Whether `serve` should capture the login shell's PATH: always, unless the parent's
+/// merged marker still equals this process's PATH (the in-app self-MCP inherits both).
+fn mcp_should_prime(marker: Option<&std::ffi::OsStr>, path: Option<&std::ffi::OsStr>) -> bool {
+    marker.is_none() || marker != path
 }
 
 /// The parsed MCP-server launch arguments: the bound `--repo`, and the four
@@ -748,6 +763,29 @@ mod tests {
 
     fn parse(argv: &[&str]) -> McpArgs {
         McpArgs::parse(argv.iter().map(|s| s.to_string()))
+    }
+
+    fn os(s: &str) -> Option<&std::ffi::OsStr> {
+        Some(std::ffi::OsStr::new(s))
+    }
+
+    #[test]
+    fn mcp_should_prime_without_a_marker() {
+        assert!(mcp_should_prime(None, os("/usr/bin:/bin")));
+        assert!(mcp_should_prime(None, None));
+    }
+
+    #[test]
+    fn mcp_should_prime_when_the_marker_no_longer_matches_path() {
+        let merged = "/opt/homebrew/bin:/usr/bin:/bin";
+        assert!(mcp_should_prime(os(merged), os("/usr/bin:/bin")));
+        assert!(mcp_should_prime(os(merged), None));
+    }
+
+    #[test]
+    fn mcp_should_prime_skips_when_the_marker_equals_path() {
+        let merged = "/opt/homebrew/bin:/usr/bin:/bin";
+        assert!(!mcp_should_prime(os(merged), os(merged)));
     }
 
     #[test]

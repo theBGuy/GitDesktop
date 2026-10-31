@@ -340,7 +340,7 @@ struct BuiltCommand {
 /// `docker` is spawned directly as the PTY child: the vendored portable-pty patch
 /// (NULL std handles) makes the child attach to the pseudoconsole, so its TTY check
 /// passes and `-t` allocates a real container TTY.
-async fn build_command(opts: &PtyOpts, id: &str) -> AppResult<BuiltCommand> {
+async fn build_command(opts: &PtyOpts) -> AppResult<BuiltCommand> {
     if opts.kind == "container" {
         let (bin, args, tip) = container_shell_command(&opts.cwd, &opts.ports).await?;
         let mut cmd = CommandBuilder::new(bin);
@@ -384,28 +384,15 @@ async fn build_command(opts: &PtyOpts, id: &str) -> AppResult<BuiltCommand> {
             }
             None => {
                 let body = opts.body.as_deref().unwrap_or_default();
-                // Sanitize the (unique-per-run) id to safe filename chars.
-                let safe: String = id
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                            c
-                        } else {
-                            '-'
-                        }
-                    })
-                    .collect();
-                let tmp = std::env::temp_dir().join(format!("gd-task-{safe}.{ext}"));
-                std::fs::write(&tmp, body).map_err(AppError::Io)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = std::fs::metadata(&tmp) {
-                        let mut perm = meta.permissions();
-                        perm.set_mode(0o755);
-                        let _ = std::fs::set_permissions(&tmp, perm);
-                    }
-                }
+                // Executable (0o700, still owner-only) so a body that re-runs itself
+                // by path works.
+                let tmp = crate::agent_sandbox::write_temp_script(
+                    "gd-task-",
+                    &format!(".{ext}"),
+                    body,
+                    true,
+                )
+                .map_err(AppError::Io)?;
                 (tmp.to_string_lossy().into_owned(), Some(tmp))
             }
         };
@@ -548,12 +535,13 @@ pub async fn pty_open(
         tip,
         cleanup,
         tree_kill,
-    } = build_command(&opts, &id).await?;
+    } = build_command(&opts).await?;
     // portable-pty's CommandBuilder already inherits the parent environment, so we
-    // only subtract (whatever `sanitize_child_env` removes — the AppImage bundle's
-    // paths and an inherited PWD, which would misdirect host tools run in the
-    // terminal) and advertise a capable terminal — re-copying every var is
-    // redundant and can introduce odd-cased duplicate Windows vars.
+    // only apply `sanitize_child_env`'s rewrites (it drops an inherited PWD and the
+    // AppImage bundle's paths, which would misdirect host tools run in the terminal,
+    // and on macOS/Linux sets the merged shell PATH plus its marker) and advertise a
+    // capable terminal; re-copying every var is redundant and can introduce
+    // odd-cased duplicate Windows vars.
     crate::agent::sanitize_child_env(&mut cmd);
     cmd.env("TERM", "xterm-256color");
 
@@ -565,7 +553,12 @@ pub async fn pty_open(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| AppError::Command(format!("failed to open a terminal: {e}")))?;
+        .map_err(|e| {
+            if let Some(p) = &cleanup {
+                let _ = std::fs::remove_file(p);
+            }
+            AppError::Command(format!("failed to open a terminal: {e}"))
+        })?;
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
         // The temp script file is orphaned if the spawn fails — clean it up.
@@ -605,7 +598,6 @@ pub async fn pty_open(
     std::thread::spawn(move || pump_pty_input(writer, input_rx, pump_queued));
 
     let gen = PTY_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let cleanup_path = cleanup.clone();
     let prev = state.ptys.lock().unwrap().insert(
         id.clone(),
         PtyHandle {
@@ -620,12 +612,8 @@ pub async fn pty_open(
     );
     // A same-id re-open (React StrictMode double-mount in dev fires two opens
     // whose closes can't catch them) — tear the stale process tree down so it
-    // can't orphan. Skip deleting its temp script when this run reuses the same
-    // path (inline tasks derive the name from the shared id).
-    if let Some(mut old) = prev {
-        if old.cleanup == cleanup_path {
-            old.cleanup = None;
-        }
+    // can't orphan.
+    if let Some(old) = prev {
         std::thread::spawn(move || teardown_handle(old));
     }
 
@@ -758,9 +746,6 @@ pub fn pty_close(state: State<'_, PtyState>, id: String) -> AppResult<()> {
 // frontend's gate is statically false there. Mirrors
 // `agent_sandbox::launch_container_shell`.
 
-#[cfg(debug_assertions)]
-static TERM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 #[cfg(all(unix, debug_assertions))]
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -800,20 +785,17 @@ fn spawn_terminal(cwd: &str, bin: &str, argv: &[String], interpreter: &str) -> A
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let script = task_terminal_script(cwd, bin, argv, interpreter)?;
-    let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path =
-        std::env::temp_dir().join(format!("gd-task-run-{}-{n}.cmd", std::process::id()));
-    std::fs::write(&path, script).map_err(AppError::Io)?;
+    let path = crate::agent_sandbox::write_temp_script("gd-task-run-", ".cmd", &script, false)
+        .map_err(AppError::Io)?;
     let mut c = std::process::Command::new("cmd");
     c.raw_arg(format!("/c start \"GitDesktop\" \"{}\"", path.display()));
     c.creation_flags(CREATE_NO_WINDOW);
-    c.spawn().map(|_| ()).map_err(AppError::Io)
+    crate::agent_sandbox::discard_script_on_err(&path, c.spawn().map(|_| ()).map_err(AppError::Io))
 }
 
 /// macOS: write a temp `.command` (Terminal.app runs it on `open`).
 #[cfg(all(target_os = "macos", debug_assertions))]
 fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
-    use std::os::unix::fs::PermissionsExt;
     let mut line = sh_quote(bin);
     for a in argv {
         line.push(' ');
@@ -823,18 +805,14 @@ fn spawn_terminal(cwd: &str, bin: &str, argv: &[String]) -> AppResult<()> {
         "#!/bin/bash\ncd {}\n{line}\necho\necho '(task exited)'\n",
         sh_quote(cwd)
     );
-    let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path =
-        std::env::temp_dir().join(format!("gd-task-run-{}-{n}.command", std::process::id()));
-    std::fs::write(&path, script).map_err(AppError::Io)?;
-    let mut perm = std::fs::metadata(&path).map_err(AppError::Io)?.permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(&path, perm).map_err(AppError::Io)?;
-    std::process::Command::new("open")
+    let path = crate::agent_sandbox::write_temp_script("gd-task-run-", ".command", &script, true)
+        .map_err(AppError::Io)?;
+    let spawned = std::process::Command::new("open")
         .arg(&path)
         .spawn()
         .map(|_| ())
-        .map_err(AppError::Io)
+        .map_err(AppError::Io);
+    crate::agent_sandbox::discard_script_on_err(&path, spawned)
 }
 
 /// Linux: run the command in the first available terminal emulator, dropping into a
@@ -922,6 +900,7 @@ async fn task_open_terminal_impl(
     #[cfg(windows)]
     crate::agent_sandbox::cmd_script_quoted(&bin.to_string_lossy())?;
 
+    let mut inline_tmp = None;
     let script_path = match path.as_deref().filter(|p| !p.is_empty()) {
         Some(file) => {
             let full = resolve_script_path(&cwd, file);
@@ -935,22 +914,17 @@ async fn task_open_terminal_impl(
         }
         None => {
             // Inline body → a temp script the external terminal reads after we
-            // return. Not cleaned up here (we'd race the terminal); the OS clears
-            // its temp dir.
+            // return, so a launched one stays in the temp dir; only a failed spawn
+            // removes it. Executable (0o700) so a body that re-runs itself works.
             let body = body.as_deref().unwrap_or_default();
-            let n = TERM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let tmp = std::env::temp_dir()
-                .join(format!("gd-task-inline-{}-{n}.{ext}", std::process::id()));
-            std::fs::write(&tmp, body).map_err(AppError::Io)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(&tmp) {
-                    let mut perm = meta.permissions();
-                    perm.set_mode(0o755);
-                    let _ = std::fs::set_permissions(&tmp, perm);
-                }
-            }
+            let tmp = crate::agent_sandbox::write_temp_script(
+                "gd-task-inline-",
+                &format!(".{ext}"),
+                body,
+                true,
+            )
+            .map_err(AppError::Io)?;
+            inline_tmp = Some(tmp.clone());
             tmp.to_string_lossy().into_owned()
         }
     };
@@ -959,12 +933,12 @@ async fn task_open_terminal_impl(
     argv.extend(args);
     let bin = bin.to_string_lossy().into_owned();
     #[cfg(windows)]
-    {
-        spawn_terminal(&cwd, &bin, &argv, &interpreter)
-    }
+    let spawned = spawn_terminal(&cwd, &bin, &argv, &interpreter);
     #[cfg(not(windows))]
-    {
-        spawn_terminal(&cwd, &bin, &argv)
+    let spawned = spawn_terminal(&cwd, &bin, &argv);
+    match inline_tmp {
+        Some(tmp) => crate::agent_sandbox::discard_script_on_err(&tmp, spawned),
+        None => spawned,
     }
 }
 
