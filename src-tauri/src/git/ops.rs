@@ -3112,9 +3112,6 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
 /// dangling.
 async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResult<FileDiff> {
     let base = format!("{spec}^1");
-    // Literal pathspec: the path comes from the stash's own file list, so a
-    // `[slug]`-style name would splice a glob-sibling's hunks into this file's diff.
-    let path_spec = crate::git::pathspec::literal(file_path);
     let out = crate::git::diff::diff_with_rename_pairing(
         repo,
         file_path,
@@ -3127,6 +3124,9 @@ async fn stash_file_diff_at(repo: &str, spec: &str, file_path: &str) -> AppResul
     if text.trim().is_empty() {
         // Not a tracked change — try the untracked-files parent if present.
         let untracked = format!("{spec}^3");
+        // Literal pathspec: a `[slug]`-style path would splice a glob-sibling's
+        // untracked file from the stash's untracked parent into this diff.
+        let path_spec = crate::git::pathspec::literal(file_path);
         if let Ok(o) = run_git(
             Some(repo),
             &[

@@ -6698,18 +6698,19 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
             out.push_str("deleted file mode 100644\n");
         }
 
+        // git names a missing side `/dev/null` in both the hunk header and the binary marker.
+        let minus = if is_added {
+            "/dev/null"
+        } else {
+            a_label.as_str()
+        };
+        let plus = if is_removed {
+            "/dev/null"
+        } else {
+            b_label.as_str()
+        };
         match &f.patch {
             Some(patch) if !patch.is_empty() => {
-                let minus = if is_added {
-                    "/dev/null"
-                } else {
-                    a_label.as_str()
-                };
-                let plus = if is_removed {
-                    "/dev/null"
-                } else {
-                    b_label.as_str()
-                };
                 out.push_str(&format!("--- {minus}\n+++ {plus}\n"));
                 out.push_str(patch);
                 if !patch.ends_with('\n') {
@@ -6728,7 +6729,7 @@ fn reconstruct_pr_diff(files: &[GhPrFile]) -> String {
                     || (is_added && f.additions == 0 && empty_blob)
                     || (is_removed && f.deletions == 0 && empty_blob);
                 if !header_only {
-                    out.push_str(&format!("Binary files {a_label} and {b_label} differ\n"));
+                    out.push_str(&format!("Binary files {minus} and {plus} differ\n"));
                 }
             }
         }
@@ -10586,8 +10587,8 @@ mod tests {
             let mut removed = file("removed", "old.png", None);
             removed.sha = sha.to_string();
             let out = reconstruct_pr_diff(&[added, removed]);
-            assert!(out.contains("Binary files a/logo.png and b/logo.png differ\n"));
-            assert!(out.contains("Binary files a/old.png and b/old.png differ\n"));
+            assert!(out.contains("Binary files /dev/null and b/logo.png differ\n"));
+            assert!(out.contains("Binary files a/old.png and /dev/null differ\n"));
         }
         // Counts with the empty blob's id are contradictory: keep the marker.
         let mut big = file("added", "big.txt", None);
@@ -10667,7 +10668,7 @@ mod tests {
         assert!(out.contains(&format!("diff --git \"a/{quoted}\" \"b/{quoted}\"\n")));
         assert!(out.contains(&format!("+++ \"b/{quoted}\"\n")));
         assert!(out.contains(&format!(
-            "Binary files \"a/{quoted}\" and \"b/{quoted}\" differ\n"
+            "Binary files \"a/{quoted}\" and /dev/null differ\n"
         )));
         // Two files in, two sections and one +++ line out: nothing in the name broke a line.
         assert_eq!(

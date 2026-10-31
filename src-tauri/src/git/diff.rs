@@ -3345,6 +3345,39 @@ mod tests {
         assert_eq!(paired["oldPath"], serde_json::json!("a.txt"));
     }
 
+    /// The frontend's `FileLogEntry extends CommitSummary`: the commit fields sit
+    /// at the top level beside `path`, never nested under `commit`.
+    #[test]
+    fn file_log_entry_wire_shape_is_flat() {
+        let json = serde_json::to_value(crate::git::types::FileLogEntry {
+            commit: crate::git::types::CommitSummary {
+                hash: "abc".into(),
+                subject: "s".into(),
+                author: "a".into(),
+                author_email: "a@x".into(),
+                date: "d".into(),
+                tags: vec![],
+                is_merge: false,
+            },
+            path: "p.txt".into(),
+        })
+        .unwrap();
+        for key in [
+            "hash",
+            "subject",
+            "author",
+            "authorEmail",
+            "date",
+            "tags",
+            "isMerge",
+            "path",
+        ] {
+            assert!(json.get(key).is_some(), "missing {key}: {json}");
+        }
+        assert!(json.get("commit").is_none(), "{json}");
+        assert!(json.get("author_email").is_none(), "{json}");
+    }
+
     // ---- Rename pairing ----------------------------------------------------------
 
     /// Raw `--name-status -z` output per probe argv family, captured from git
