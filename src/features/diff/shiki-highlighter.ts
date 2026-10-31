@@ -90,9 +90,10 @@ const BUILTIN_LANGS: Record<
   // MDX's bundle is the mdx grammar alone — all 42 of its embeds are lazy — so
   // the ESM header and every fenced block would render plain. Register the ones
   // a diff needs: tsx for the header/JSX, ts/js and sql for the fences devs
-  // actually write, markdown for shared prose internals; mdx last so its own
-  // grammar wins a name collision. The remaining lazy embeds stay unregistered
-  // and those fences render plain — pulling all 42 would cost megabytes.
+  // actually write, markdown for shared prose internals, yaml and toml for
+  // front matter; mdx last so its own grammar wins a name collision. The
+  // remaining lazy embeds stay unregistered and those fences render plain —
+  // pulling all 42 would cost megabytes.
   mdx: async () => {
     const bundles = await Promise.all([
       import("@shikijs/langs/tsx"),
@@ -100,6 +101,8 @@ const BUILTIN_LANGS: Record<
       import("@shikijs/langs/javascript"),
       import("@shikijs/langs/markdown"),
       import("@shikijs/langs/sql"),
+      import("@shikijs/langs/yaml"),
+      import("@shikijs/langs/toml"),
       import("@shikijs/langs/mdx"),
     ]);
     return { default: bundles.flatMap((b) => b.default) };

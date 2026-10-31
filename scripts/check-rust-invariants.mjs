@@ -416,6 +416,12 @@ const BARE_REV_ALLOWLIST = [
     rationale: "`base` is the fixed literal `HEAD` or `--cached`, never a name",
   },
   {
+    file: "git/diff.rs",
+    fn: "preview_rev_failure",
+    rationale:
+      "classifies a failed `git show <rev>:<path>`: `base` is that same rev minus its trailing `~`/`^` navigation suffixes, so it must resolve exactly as the read did",
+  },
+  {
     file: "git/ops.rs",
     fn: "refuse_untracked_reset_collisions",
     rationale:

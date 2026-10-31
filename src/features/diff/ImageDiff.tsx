@@ -1,11 +1,16 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
+import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
 import { PathText } from "@/components/path-text";
+import { Button } from "@/components/ui/button";
 import {
   ImageLightbox,
   type LightboxImage,
 } from "@/components/ui/image-lightbox";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import type { FileBytes } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
+import { isAppError } from "@/lib/tauri/invoke";
+import { cn } from "@/lib/utils";
 import { useReportPaneSettled } from "./diff-pane-hold";
 
 const IMAGE_MIME: Record<string, string> = {
@@ -39,11 +44,36 @@ interface Size {
 
 type PaneKey = "old" | "new";
 
+/** Why a side's read failed: a refusal (a link, a non-file) answers the same on
+ *  every read, so only a failed read offers Retry. */
+type SideError = "notImage" | "readFailed";
+
 interface Pane {
   key: PaneKey;
   label: string;
   /** null = the backend refused these bytes; the side renders a refusal box. */
   src: string | null;
+  /** The read failed, so this side's existence is unknown. */
+  error?: SideError;
+}
+
+/** A side's settled read: its bytes (null = not in that version), or why it
+ *  couldn't be read. A failure with bytes already loaded keeps showing them. */
+type SideRead = { bytes: FileBytes | null } | { error: SideError };
+
+function sideRead(read: {
+  data: FileBytes | null | undefined;
+  isError: boolean;
+  error: unknown;
+}): SideRead {
+  if (read.data !== undefined || !read.isError)
+    return { bytes: read.data ?? null };
+  return {
+    error:
+      isAppError(read.error) && read.error.kind === "invalidArgument"
+        ? "notImage"
+        : "readFailed",
+  };
 }
 
 function ImageSide({
@@ -117,7 +147,47 @@ function RefusedSide({ label }: { label: string }) {
         {label}
       </figcaption>
       <div className="flex h-40 w-56 max-w-full items-center justify-center border px-4">
-        <p className="text-xs text-muted-foreground">Too large to preview</p>
+        <p className="text-xs text-muted-foreground">
+          {IMAGE_CAPTION_REASON.tooLarge}
+        </p>
+      </div>
+    </figure>
+  );
+}
+
+/** A side whose read failed, in the refusal box's look: the reason, and a
+ *  Retry when another read could answer differently. */
+function FailedSide({
+  label,
+  error,
+  onRetry,
+  retryRef,
+}: {
+  label: string;
+  error: SideError;
+  onRetry: () => void;
+  retryRef: ReturnType<typeof useRetryFocusRescue>["retryRef"];
+}) {
+  return (
+    <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
+      <figcaption className="text-xs font-medium text-muted-foreground">
+        {label}
+      </figcaption>
+      <div className="flex h-40 w-56 max-w-full flex-col items-center justify-center gap-2 border px-4">
+        <p className="text-xs text-muted-foreground">
+          {IMAGE_CAPTION_REASON[error]}
+        </p>
+        {error === "readFailed" && (
+          <Button
+            ref={retryRef}
+            variant="outline"
+            size="sm"
+            className="cursor-pointer"
+            onClick={onRetry}
+          >
+            Retry
+          </Button>
+        )}
       </div>
     </figure>
   );
@@ -156,8 +226,23 @@ export function ImagePanes({
   const [state, setState] = useState<PanesState>({ id: "" });
 
   const pending = oldFile.isPending || newFile.isPending;
-  const oldSide = oldFile.data ?? null;
-  const newSide = newFile.data ?? null;
+  const oldRead = sideRead(oldFile);
+  const newRead = sideRead(newFile);
+  // Absent only when the read answered so: a failed side might exist.
+  const oldAbsent = "bytes" in oldRead && oldRead.bytes === null;
+  const newAbsent = "bytes" in newRead && newRead.bytes === null;
+  // One rescue per side, so each Retry keeps its own claim on focus: a retry
+  // resets its read to pending, which unmounts both sides' Retrys at once.
+  const oldRescue = useRetryFocusRescue(
+    !pending && "error" in oldRead && oldRead.error === "readFailed",
+  );
+  const newRescue = useRetryFocusRescue(
+    !pending && "error" in newRead && newRead.error === "readFailed",
+  );
+  const hostRef = (node: HTMLDivElement | null) => {
+    oldRescue.hostRef(node);
+    newRescue.hostRef(node);
+  };
 
   const id = [filePath, oldPath, revs.old, revs.new].join("|");
   const current = state.id === id ? state : null;
@@ -179,21 +264,21 @@ export function ImagePanes({
       ? null
       : `data:${side.mime ?? imageMime(path) ?? "application/octet-stream"};base64,${side.base64}`;
 
-  const panes: Pane[] = [];
-  if (oldSide !== null) {
-    panes.push({
-      key: "old",
-      label: newSide === null ? "Deleted" : "Old",
-      src: paneSrc(oldSide, oldPath),
-    });
-  }
-  if (newSide !== null) {
-    panes.push({
-      key: "new",
-      label: oldSide === null ? "Added" : "New",
-      src: paneSrc(newSide, filePath),
-    });
-  }
+  const toPane = (
+    key: PaneKey,
+    read: SideRead,
+    path: string,
+    label: string,
+  ): Pane | null => {
+    if ("error" in read) return { key, label, src: null, error: read.error };
+    return read.bytes === null
+      ? null
+      : { key, label, src: paneSrc(read.bytes, path) };
+  };
+  const panes = [
+    toPane("old", oldRead, oldPath, newAbsent ? "Deleted" : "Old"),
+    toPane("new", newRead, filePath, oldAbsent ? "Added" : "New"),
+  ].filter((pane): pane is Pane => pane !== null);
 
   // A refused side has nothing to show fullscreen, so the viewer indexes only
   // the sides that rendered an image.
@@ -211,8 +296,24 @@ export function ImagePanes({
       ),
   );
 
+  // The root renders on every arm, pending included (empty and unpadded, so an
+  // embedding view lays out as before): it is where a pressed Retry's focus
+  // lands once the retried read swaps the panes out.
+  const shell = (content: ReactNode) => (
+    <div
+      ref={hostRef}
+      tabIndex={-1}
+      className={cn(
+        "flex items-start justify-center gap-8 outline-none",
+        !pending && "p-6",
+      )}
+    >
+      {content}
+    </div>
+  );
+
   if (pending) {
-    return null;
+    return shell(null);
   }
 
   const images: LightboxImage[] = shown.map((pane) => ({
@@ -224,16 +325,32 @@ export function ImagePanes({
   }));
   const viewing = current?.viewing ?? null;
 
-  return (
-    <div className="flex items-start justify-center gap-8 p-6">
-      {panes.map((pane) =>
-        pane.src === null ? (
-          <RefusedSide key={`${id}|${pane.key}`} label={pane.label} />
-        ) : (
+  return shell(
+    <>
+      {panes.map((pane) => {
+        // Keyed by the pair as well as the slot: an `<img>` kept across a
+        // file switch paints the previous file until the new src decodes.
+        const key = `${id}|${pane.key}`;
+        if (pane.error !== undefined) {
+          const read = pane.key === "old" ? oldFile : newFile;
+          const rescue = pane.key === "old" ? oldRescue : newRescue;
+          return (
+            <FailedSide
+              key={key}
+              label={pane.label}
+              error={pane.error}
+              onRetry={() => void read.refetch()}
+              retryRef={rescue.retryRef}
+            />
+          );
+        }
+        if (pane.src === null) {
+          return <RefusedSide key={key} label={pane.label} />;
+        }
+        const { src } = pane;
+        return (
           <ImageSide
-            // Keyed by the pair as well as the slot: an `<img>` kept across a
-            // file switch paints the previous file until the new src decodes.
-            key={`${id}|${pane.key}`}
+            key={key}
             label={pane.label}
             onMeasure={(size) => patch({ [pane.key]: size })}
             onFail={() => markFailed(pane.key)}
@@ -241,10 +358,10 @@ export function ImagePanes({
               patch({ viewing: shown.findIndex((s) => s.key === pane.key) })
             }
             size={current?.[pane.key]}
-            src={pane.src}
+            src={src}
           />
-        ),
-      )}
+        );
+      })}
       {panes.length === 0 && (
         <p className="py-8 text-xs text-muted-foreground">
           Could not load this image.
@@ -262,7 +379,7 @@ export function ImagePanes({
         }}
         open={viewing !== null}
       />
-    </div>
+    </>,
   );
 }
 

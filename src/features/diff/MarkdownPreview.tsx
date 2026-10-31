@@ -1,6 +1,7 @@
 import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
 import { InfoNote } from "@/components/info-note";
 import { Markdown } from "@/components/markdown/markdown";
+import { repoDocBaseDir } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
@@ -15,6 +16,7 @@ import {
 import { presentError } from "@/lib/error-summary";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
+import { isAppError } from "@/lib/tauri/invoke";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import type { DiffContentRevs } from "./DiffSurface";
 import { useReportPaneSettled } from "./diff-pane-hold";
@@ -196,6 +198,10 @@ export function MarkdownDocPreview({
   // no-flash rule as the diff itself. They never park offline either.
   if (pane === "skeleton" || pane === "offline") return shell(null);
   if (pane === "error" || activeQ.data === undefined) {
+    // A refusal (a linked or non-regular file) answers the same on every read,
+    // so it gets no Retry; with none mounted the focus rescue never claims.
+    const refused =
+      isAppError(activeQ.error) && activeQ.error.kind === "invalidArgument";
     return shell(
       <DiffPlaceholder
         message="Could not load this file to preview"
@@ -205,15 +211,17 @@ export function MarkdownDocPreview({
               <p className="max-w-md text-center text-xs">
                 {presentError(activeQ.error).summary}
               </p>
-              <Button
-                ref={retryRef}
-                variant="outline"
-                size="sm"
-                className="cursor-pointer"
-                onClick={() => void activeQ.refetch()}
-              >
-                Retry
-              </Button>
+              {!refused && (
+                <Button
+                  ref={retryRef}
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={() => void activeQ.refetch()}
+                >
+                  Retry
+                </Button>
+              )}
             </div>
           ) : undefined
         }
@@ -232,6 +240,9 @@ export function MarkdownDocPreview({
   if (cleaned.trim() === "") {
     return shell(<DiffPlaceholder message="Nothing to preview" />);
   }
+  // Images come from the side on screen: its rev, and its own path's directory.
+  const imageRev = (showOld ? revs.oldRev : revs.newRev) ?? null;
+  const imageBaseDir = repoDocBaseDir(showOld ? oldPath : filePath);
   return shell(
     <>
       {showOld && (
@@ -245,10 +256,16 @@ export function MarkdownDocPreview({
       )}
       {/* Same reading measure as the in-app guide's rendered pages. */}
       <div className="mx-auto w-full max-w-2xl p-6">
-        {/* No forge context: repo docs routinely carry repository-relative
-            hrefs (LICENSE, docs/…), and with nothing to resolve them against
-            the renderer leaves them inert with an explanatory card. */}
-        <Markdown>{cleaned}</Markdown>
+        {/* No forge context, so repository-relative links stay inert with an
+            explanatory card; relative images load from the version shown.
+            Keyed on that version: the same text at another one needs a fresh
+            body, not one whose images an earlier load already rewrote. */}
+        <Markdown
+          key={JSON.stringify([repoPath, imageRev, imageBaseDir])}
+          repoImages={{ repoPath, rev: imageRev, baseDir: imageBaseDir }}
+        >
+          {cleaned}
+        </Markdown>
       </div>
     </>,
   );

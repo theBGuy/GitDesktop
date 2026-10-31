@@ -556,8 +556,9 @@ the last list up, with a line above it saying it couldn't refresh.
   button from the toolbar; *Change diff language…* in the command palette (palette-only
   by default — bind a key in **Settings → Keyboard**) still opens the picker.
 - **Image diffs** render side by side; a file too large to decode safely shows a
-  **Too large to preview** pane instead. Click a rendered side, or Tab to it and press
-  Enter, to open it fullscreen: the image over a dimmed backdrop, its label and pixel
+  **Too large to preview** pane instead. A side that couldn't be read says why, with
+  **Retry** when reading it again could help. Click a rendered side, or Tab to it and
+  press Enter, to open it fullscreen: the image over a dimmed backdrop, its label and pixel
   dimensions along the bottom, and a **Fit** / **100%** toggle. In **Fit** view ← and → move
   between the old and new sides; at **100%** the arrow keys pan the zoomed image, and
   Esc closes either way. The **SVG** preview above a text diff and the image diffs
@@ -566,7 +567,8 @@ the last list up, with a line above it saying it couldn't refresh.
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
   ship, and frontmatter (an unbroken leading \`---\` or \`+++\` block) stays out of the
-  render. MDX renders approximately: components and expressions appear as plain text.
+  render. Images stored in the repository render from the version being previewed.
+  MDX renders approximately: components and expressions appear as plain text.
   **Raw** stays the default for every file. The toggle appears on the working tree,
   commit details, stashes, an agent session's worktree changes, a file's history, and
   branch compare — on those a deleted file previews its last version instead. A pull
@@ -1403,8 +1405,9 @@ forge instead, so the number always lands where it belongs); on GitLab, **#123**
 issue and **!123** a merge request. **@user** opens that person's profile in your
 browser. Hover a reference, or land on it with Tab, and a preview card names what you'd
 be opening: an issue, pull request, or merge request shows its state (Open, Merged,
-Closed, or Draft) beside its number, then its title and author, while **@user** shows
-that person's avatar and handle. Esc dismisses the card. **Bitbucket** bodies leave
+Closed, or Draft; **Open or draft** when GitHub could only confirm that a pull request
+is open) beside its number, then its title and author, while **@user** shows that
+person's avatar and handle. Esc dismisses the card. **Bitbucket** bodies leave
 references plain, matching Bitbucket itself, and a reference inside backticks or a fenced
 code block stays plain text everywhere.
 

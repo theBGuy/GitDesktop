@@ -1,7 +1,11 @@
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::git::runner::{run_git, run_git_mutating_input, run_git_raw, DEFAULT_TIMEOUT};
+use crate::git::history::unborn_head;
+use crate::git::ops::{discard_rel_path, discard_shown, linked_component, DISCARD_LINKED};
+use crate::git::runner::{
+    run_git, run_git_mutating_input, run_git_raw, GitOutput, DEFAULT_TIMEOUT,
+};
 use crate::git::types::{DiffStatEntry, FileDiff, StagedDiff};
 use crate::image_sniff::{dimensions_within_caps, has_raster_magic, sniff_image};
 use crate::state::AppState;
@@ -9,8 +13,14 @@ use crate::state::AppState;
 /// Cap on file bytes shipped for image previews.
 const IMAGE_MAX_BYTES: usize = 20_000_000;
 
-/// One file's bytes for the webview, or the reason they are being withheld. A refusal
-/// is a STATE rather than an error: the diff view has a pane to show for it.
+#[cfg(test)]
+thread_local! {
+    static PROBE_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SHOW_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VERIFY_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One file's bytes for the webview, or a size refusal the diff view can display.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileBytes {
@@ -32,25 +42,146 @@ fn is_repo_relative(path: &str) -> bool {
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
+enum PreviewRead {
+    Absent,
+    TooLarge,
+    Bytes(Vec<u8>),
+}
+
+fn preview_read_refusal(raw: &str, why: &str) -> AppError {
+    AppError::InvalidArgument(format!("Can't read {} — {why}.", discard_shown(raw)))
+}
+
+fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewRead> {
+    use std::io::Read;
+    let path = std::path::Path::new(repo).join(rel);
+    #[cfg(windows)]
+    let path = crate::fsops::verbatim_path(&path)
+        .ok_or_else(|| preview_read_refusal(raw, "the path has no verbatim form"))?;
+    if linked_component(repo, rel, true)? {
+        return Err(preview_read_refusal(raw, DISCARD_LINKED));
+    }
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(PreviewRead::Absent)
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !metadata.is_file() {
+        return Err(preview_read_refusal(raw, "it isn't a regular file"));
+    }
+    if metadata.len() > IMAGE_MAX_BYTES as u64 {
+        return Ok(PreviewRead::TooLarge);
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?
+        .take(IMAGE_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(PreviewRead::Bytes(bytes))
+}
+
+/// Both revision reads classify failures identically, including a ref moving
+/// between the size probe and the read. Only proven absence becomes `None`.
+async fn preview_rev_failure(repo: &str, rev: &str, out: GitOutput) -> AppResult<()> {
+    if [
+        "does not exist in '",
+        "exists on disk, but not in ",
+        "does not exist (neither on disk nor in the index)",
+        "is in the index, but not at stage",
+    ]
+    .iter()
+    .any(|text| out.stderr.contains(text))
+        || unborn_head(repo).await?
+    {
+        return Ok(());
+    }
+    if out.stderr.contains("invalid object name '") {
+        let mut base = rev;
+        loop {
+            let before_digits = base.trim_end_matches(|c: char| c.is_ascii_digit());
+            let Some(prefix) = before_digits.strip_suffix(['~', '^']) else {
+                break;
+            };
+            if prefix.is_empty() {
+                break;
+            }
+            base = prefix;
+        }
+        if base.len() < rev.len() {
+            let base = format!("{base}^{{commit}}");
+            #[cfg(test)]
+            VERIFY_SPAWNS.with(|n| n.set(n.get() + 1));
+            let verified = run_git_raw(
+                Some(repo),
+                &["rev-parse", "--verify", "--quiet", &base],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if verified.code == 0 {
+                return Ok(());
+            }
+        }
+    }
+    out.exit_verdict().map(|_| ())
+}
+
 /// Raw file bytes (base64) at a revision, or from the working tree when
 /// `rev` is None. `None` result = the file doesn't exist there (e.g. the
-/// old side of an added file). Drives the image diff view.
+/// old side of an added file). `probe_size` opts document-chosen revision
+/// reads into a size check before buffering; omitted means a single read.
 #[tauri::command]
 pub async fn git_file_base64(
     repo_path: String,
     rev: Option<String>,
     file_path: String,
+    probe_size: Option<bool>,
 ) -> AppResult<Option<FileBytes>> {
     use base64::Engine;
-    let bytes: Option<Vec<u8>> = match rev {
+    let read = match rev {
         Some(rev) => {
             if rev.is_empty() || rev.starts_with('-') {
                 return Err(AppError::InvalidArgument(format!("invalid rev: {rev}")));
             }
             let spec = format!("{rev}:{file_path}");
+            if probe_size == Some(true) {
+                #[cfg(test)]
+                PROBE_SPAWNS.with(|n| n.set(n.get() + 1));
+                let out = run_git_raw(
+                    Some(&repo_path),
+                    &["cat-file", "-s", &spec],
+                    DEFAULT_TIMEOUT,
+                )
+                .await?;
+                if out.code != 0 {
+                    preview_rev_failure(&repo_path, &rev, out).await?;
+                    return Ok(None);
+                }
+                let size = out.stdout_lossy().trim().parse::<u64>().map_err(|_| {
+                    AppError::Command("Git returned an unreadable file size.".into())
+                })?;
+                if size > IMAGE_MAX_BYTES as u64 {
+                    return Ok(Some(FileBytes {
+                        base64: None,
+                        mime: None,
+                        too_large: true,
+                    }));
+                }
+            }
+            #[cfg(test)]
+            SHOW_SPAWNS.with(|n| n.set(n.get() + 1));
             let out = run_git_raw(Some(&repo_path), &["show", &spec], DEFAULT_TIMEOUT).await?;
-            // Nonzero exit = the path doesn't exist at that revision.
-            (out.code == 0).then_some(out.stdout)
+            if out.code != 0 {
+                preview_rev_failure(&repo_path, &rev, out).await?;
+                PreviewRead::Absent
+            } else {
+                PreviewRead::Bytes(out.stdout)
+            }
         }
         None => {
             if !is_repo_relative(&file_path) {
@@ -58,12 +189,24 @@ pub async fn git_file_base64(
                     "invalid path: {file_path}"
                 )));
             }
-            tokio::fs::read(std::path::Path::new(&repo_path).join(&file_path))
+            let rel = discard_rel_path(&file_path)
+                .map_err(|why| preview_read_refusal(&file_path, why))?;
+            tokio::task::spawn_blocking(move || read_preview_worktree(&repo_path, &file_path, &rel))
                 .await
-                .ok()
+                .map_err(|e| AppError::Command(e.to_string()))??
         }
     };
-    let Some(bytes) = bytes else { return Ok(None) };
+    let bytes = match read {
+        PreviewRead::Absent => return Ok(None),
+        PreviewRead::TooLarge => {
+            return Ok(Some(FileBytes {
+                base64: None,
+                mime: None,
+                too_large: true,
+            }))
+        }
+        PreviewRead::Bytes(bytes) => bytes,
+    };
     if bytes.len() > IMAGE_MAX_BYTES {
         return Ok(Some(FileBytes {
             base64: None,
@@ -3004,7 +3147,7 @@ mod tests {
         // refused by the area cap alone.
         for name in ["bomb.png", "area.png"] {
             for rev in [None, Some("HEAD".to_string())] {
-                let got = git_file_base64(repo.clone(), rev.clone(), name.into())
+                let got = git_file_base64(repo.clone(), rev.clone(), name.into(), None)
                     .await
                     .unwrap()
                     .expect("the file exists on both paths");
@@ -3021,7 +3164,7 @@ mod tests {
     async fn the_sniffed_type_wins_over_the_file_extension() {
         let (_tmp, _dir, repo) = init_preview_repo().await;
         for rev in [None, Some("HEAD".to_string())] {
-            let ok = git_file_base64(repo.clone(), rev.clone(), "ok.png".into())
+            let ok = git_file_base64(repo.clone(), rev.clone(), "ok.png".into(), None)
                 .await
                 .unwrap()
                 .unwrap();
@@ -3029,7 +3172,7 @@ mod tests {
             assert_eq!(ok.mime.as_deref(), Some("image/png"));
             assert!(ok.base64.is_some());
 
-            let lying = git_file_base64(repo.clone(), rev.clone(), "lying.png".into())
+            let lying = git_file_base64(repo.clone(), rev.clone(), "lying.png".into(), None)
                 .await
                 .unwrap()
                 .unwrap();
@@ -3038,7 +3181,7 @@ mod tests {
 
             // SVG has no header raster to gate, so its declared 9000x9000 is not a
             // decode the caps can bound — it ships, byte-bound, and typeless.
-            let svg = git_file_base64(repo.clone(), rev.clone(), "icon.svg".into())
+            let svg = git_file_base64(repo.clone(), rev.clone(), "icon.svg".into(), None)
                 .await
                 .unwrap()
                 .unwrap();
@@ -3062,7 +3205,7 @@ mod tests {
         assert_eq!(sniff_image(&bytes), None);
 
         for rev in [None, Some("HEAD".to_string())] {
-            let got = git_file_base64(repo.clone(), rev.clone(), "stuffed.jpg".into())
+            let got = git_file_base64(repo.clone(), rev.clone(), "stuffed.jpg".into(), None)
                 .await
                 .unwrap()
                 .expect("the file exists on both paths");
@@ -3072,7 +3215,7 @@ mod tests {
 
         // The control that keeps the refusal from swallowing everything typeless: bytes
         // with no raster magic still ship, bounded by the byte cap alone.
-        let svg = git_file_base64(repo.clone(), None, "icon.svg".into())
+        let svg = git_file_base64(repo.clone(), None, "icon.svg".into(), None)
             .await
             .unwrap()
             .unwrap();
@@ -3086,7 +3229,7 @@ mod tests {
     async fn the_byte_cap_refuses_and_a_missing_file_is_still_none() {
         let (_tmp, dir, repo) = init_preview_repo().await;
         std::fs::write(dir.join("huge.bin"), vec![0u8; IMAGE_MAX_BYTES + 1]).unwrap();
-        let huge = git_file_base64(repo.clone(), None, "huge.bin".into())
+        let huge = git_file_base64(repo.clone(), None, "huge.bin".into(), None)
             .await
             .unwrap()
             .expect("an over-cap file is a refusal, not an absence");
@@ -3095,7 +3238,7 @@ mod tests {
         assert_eq!(huge.mime, None);
 
         for rev in [None, Some("HEAD".to_string())] {
-            assert!(git_file_base64(repo.clone(), rev, "nope.png".into())
+            assert!(git_file_base64(repo.clone(), rev, "nope.png".into(), None)
                 .await
                 .unwrap()
                 .is_none());
@@ -3155,7 +3298,7 @@ mod tests {
         let outside = tmp.path().join("outside.png");
         std::fs::write(&outside, png_fixture(16, 16)).unwrap();
 
-        let inside = git_file_base64(repo.clone(), None, "inside.png".into())
+        let inside = git_file_base64(repo.clone(), None, "inside.png".into(), None)
             .await
             .unwrap()
             .expect("a file inside the repo reads");
@@ -3166,7 +3309,7 @@ mod tests {
             "sub/../../outside.png".to_string(),
             outside.to_string_lossy().into_owned(),
         ] {
-            let err = git_file_base64(repo.clone(), None, escape.clone())
+            let err = git_file_base64(repo.clone(), None, escape.clone(), None)
                 .await
                 .expect_err("an escaping path is refused, not read");
             assert!(
@@ -3174,6 +3317,403 @@ mod tests {
                 "{escape}: {err:?}"
             );
         }
+    }
+
+    fn reset_preview_spawns() {
+        PROBE_SPAWNS.with(|n| n.set(0));
+        SHOW_SPAWNS.with(|n| n.set(0));
+        VERIFY_SPAWNS.with(|n| n.set(0));
+    }
+
+    fn assert_preview_spawns(probe: usize, show: usize, verify: usize) {
+        assert_eq!(
+            (
+                PROBE_SPAWNS.with(|n| n.get()),
+                SHOW_SPAWNS.with(|n| n.get()),
+                VERIFY_SPAWNS.with(|n| n.get()),
+            ),
+            (probe, show, verify)
+        );
+    }
+
+    async fn assert_preview_bytes(repo: &str, path: &str, expected: &[u8]) {
+        use base64::Engine;
+        let got = git_file_base64(repo.into(), None, path.into(), None)
+            .await
+            .unwrap()
+            .expect("in-repo control exists");
+        assert!(!got.too_large);
+        assert_eq!(
+            got.base64,
+            Some(base64::engine::general_purpose::STANDARD.encode(expected))
+        );
+    }
+
+    async fn assert_preview_refused(repo: &str, path: &str, outside: &[u8], reason: &str) {
+        use base64::Engine;
+        let result = git_file_base64(repo.into(), None, path.into(), None).await;
+        if let Ok(Some(bytes)) = &result {
+            assert_ne!(
+                bytes.base64,
+                Some(base64::engine::general_purpose::STANDARD.encode(outside)),
+                "outside sentinel must never be returned"
+            );
+        }
+        let err = result.expect_err("the guard must refuse, not return absence or bytes");
+        assert!(
+            matches!(&err, AppError::InvalidArgument(message) if message.contains(reason)),
+            "{path}: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_size_probe_preserves_row_spawns_and_bounds_document_reads() {
+        use base64::Engine;
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        std::fs::File::create(dir.join("huge.bin"))
+            .unwrap()
+            .set_len(IMAGE_MAX_BYTES as u64 + 1)
+            .unwrap();
+        git_ok(&repo, &["add", "--", "huge.bin"]).await;
+        git_ok(&repo, &["commit", "-qm", "large blob"]).await;
+
+        for probe_size in [None, Some(false), Some(true)] {
+            reset_preview_spawns();
+            let got = git_file_base64(
+                repo.clone(),
+                Some("HEAD".into()),
+                "huge.bin".into(),
+                probe_size,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(got.too_large);
+            assert_eq!(got.base64, None);
+            assert_eq!(got.mime, None);
+            let probe = usize::from(probe_size == Some(true));
+            assert_preview_spawns(probe, 1 - probe, 0);
+
+            reset_preview_spawns();
+            let got = git_file_base64(
+                repo.clone(),
+                Some("HEAD".into()),
+                "ok.png".into(),
+                probe_size,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(!got.too_large);
+            assert_eq!(got.mime.as_deref(), Some("image/png"));
+            assert_eq!(
+                got.base64,
+                Some(base64::engine::general_purpose::STANDARD.encode(png_fixture(1200, 630)))
+            );
+            assert_preview_spawns(probe, 1, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_rev_failures_distinguish_absent_paths_and_ancestors_from_bad_revs() {
+        let (_tmp, _dir, repo) = init_preview_repo().await;
+        let root = git_ok(&repo, &["rev-parse", "HEAD"]).await;
+        for probe_size in [None, Some(true)] {
+            let probe = usize::from(probe_size == Some(true));
+            for (rev, path, verify) in [
+                ("HEAD".to_string(), "absent.png", 0),
+                (":0".to_string(), "absent.png", 0),
+                (format!("{}~1", root.trim()), "ok.png", 1),
+                (format!("{}^", root.trim()), "ok.png", 1),
+                ("HEAD~5".to_string(), "ok.png", 1),
+                ("HEAD~1^2~".to_string(), "ok.png", 1),
+            ] {
+                reset_preview_spawns();
+                assert!(
+                    git_file_base64(repo.clone(), Some(rev.clone()), path.into(), probe_size)
+                        .await
+                        .unwrap_or_else(|e| panic!("{rev}:{path}: {e:?}"))
+                        .is_none()
+                );
+                assert_preview_spawns(probe, 1 - probe, verify);
+            }
+            for (rev, verify) in [("bogus~1", 1), ("bogus", 0)] {
+                reset_preview_spawns();
+                let err =
+                    git_file_base64(repo.clone(), Some(rev.into()), "ok.png".into(), probe_size)
+                        .await
+                        .unwrap_err();
+                assert!(matches!(err, AppError::Git { .. }), "{err:?}");
+                assert_preview_spawns(probe, 1 - probe, verify);
+            }
+        }
+        git_ok(&repo, &["rm", "--cached", "--", "ok.png"]).await;
+        for probe_size in [None, Some(true)] {
+            reset_preview_spawns();
+            assert!(
+                git_file_base64(repo.clone(), Some(":0".into()), "ok.png".into(), probe_size)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let probe = usize::from(probe_size == Some(true));
+            assert_preview_spawns(probe, 1 - probe, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_on_disk_additions_are_absent_at_head_and_the_adding_commits_parent() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        std::fs::write(dir.join("newimg.png"), png_fixture(16, 16)).unwrap();
+        git_ok(&repo, &["add", "--", "newimg.png"]).await;
+        for committed in [false, true] {
+            let rev = if committed {
+                git_ok(&repo, &["commit", "-qm", "add image"]).await;
+                let added = git_ok(&repo, &["rev-parse", "HEAD"]).await;
+                format!("{}~1", added.trim())
+            } else {
+                "HEAD".to_string()
+            };
+            assert!(dir.join("newimg.png").is_file());
+            for probe_size in [None, Some(true)] {
+                reset_preview_spawns();
+                assert!(git_file_base64(
+                    repo.clone(),
+                    Some(rev.clone()),
+                    "newimg.png".into(),
+                    probe_size
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{rev}:newimg.png: {e:?}"))
+                .is_none());
+                let probe = usize::from(probe_size == Some(true));
+                assert_preview_spawns(probe, 1 - probe, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_unborn_head_is_absent_in_both_modes() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-preview-unborn-").await;
+        std::fs::write(dir.join("ok.png"), png_fixture(16, 16)).unwrap();
+        git_ok(&repo, &["add", "--", "ok.png"]).await;
+        for probe_size in [None, Some(true)] {
+            reset_preview_spawns();
+            assert!(git_file_base64(
+                repo.clone(),
+                Some("HEAD".into()),
+                "ok.png".into(),
+                probe_size
+            )
+            .await
+            .unwrap()
+            .is_none());
+            let probe = usize::from(probe_size == Some(true));
+            assert_preview_spawns(probe, 1 - probe, 0);
+
+            reset_preview_spawns();
+            let staged =
+                git_file_base64(repo.clone(), Some(":0".into()), "ok.png".into(), probe_size)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(staged.base64.is_some());
+            assert_preview_spawns(probe, 1, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_unmerged_stage_zero_is_absent_in_both_modes() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        git_ok(&repo, &["checkout", "-qb", "preview-left"]).await;
+        std::fs::write(dir.join("icon.svg"), "left\n").unwrap();
+        git_ok(&repo, &["commit", "-qam", "left"]).await;
+        git_ok(&repo, &["checkout", "-qb", "preview-right", "HEAD~1"]).await;
+        std::fs::write(dir.join("icon.svg"), "right\n").unwrap();
+        git_ok(&repo, &["commit", "-qam", "right"]).await;
+        let merged = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "preview-left"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged.code, 1);
+        assert!(merged.stdout_lossy().contains("CONFLICT"));
+        for probe_size in [None, Some(true)] {
+            reset_preview_spawns();
+            assert!(git_file_base64(
+                repo.clone(),
+                Some(":0".into()),
+                "icon.svg".into(),
+                probe_size
+            )
+            .await
+            .unwrap()
+            .is_none());
+            let probe = usize::from(probe_size == Some(true));
+            assert_preview_spawns(probe, 1 - probe, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn preview_worktree_absence_directory_and_size_are_distinct() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = png_fixture(11, 13);
+        std::fs::write(outside.path().join("outside.png"), &sentinel).unwrap();
+        std::fs::create_dir(dir.join("folder.png")).unwrap();
+        std::fs::write(dir.join("folder.png/ok.png"), png_fixture(16, 16)).unwrap();
+        assert_preview_refused(&repo, "folder.png", &sentinel, "regular file").await;
+        assert_preview_bytes(&repo, "folder.png/ok.png", &png_fixture(16, 16)).await;
+        assert_preview_bytes(&repo, "ok.png", &png_fixture(1200, 630)).await;
+        for path in ["missing.png", "ok.png/x.png"] {
+            assert!(git_file_base64(repo.clone(), None, path.into(), None)
+                .await
+                .unwrap()
+                .is_none());
+        }
+        std::fs::File::create(dir.join("huge.png"))
+            .unwrap()
+            .set_len(IMAGE_MAX_BYTES as u64 + 1)
+            .unwrap();
+        for probe_size in [None, Some(true)] {
+            let got = git_file_base64(repo.clone(), None, "huge.png".into(), probe_size)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(got.too_large);
+            assert_eq!(got.base64, None);
+            assert_eq!(got.mime, None);
+        }
+        assert!(matches!(
+            read_preview_worktree(&repo, "huge.png", "huge.png").unwrap(),
+            PreviewRead::TooLarge
+        ));
+    }
+
+    #[cfg(any(windows, unix))]
+    fn preview_directory_link(link: &std::path::Path, target: &std::path::Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args([
+                    "/C",
+                    "mklink",
+                    "/J",
+                    &link.to_string_lossy(),
+                    &target.to_string_lossy(),
+                ])
+                .output()
+                .expect("run mklink");
+            assert!(made.status.success(), "{made:?}");
+        }
+    }
+
+    #[cfg(any(windows, unix))]
+    #[tokio::test]
+    async fn preview_worktree_refuses_linked_ancestors_including_huge_targets() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = png_fixture(11, 13);
+        std::fs::write(outside.path().join("ok.png"), &sentinel).unwrap();
+        std::fs::write(outside.path().join("huge.png"), &sentinel).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(outside.path().join("huge.png"))
+            .unwrap()
+            .set_len(IMAGE_MAX_BYTES as u64 + 1)
+            .unwrap();
+        preview_directory_link(&dir.join("linked"), outside.path());
+        std::fs::create_dir(dir.join("local")).unwrap();
+        for name in ["ok.png", "huge.png"] {
+            std::fs::write(dir.join("local").join(name), png_fixture(16, 16)).unwrap();
+            assert_preview_refused(&repo, &format!("linked/{name}"), &sentinel, DISCARD_LINKED)
+                .await;
+            assert_preview_bytes(&repo, &format!("local/{name}"), &png_fixture(16, 16)).await;
+        }
+        #[cfg(windows)]
+        std::fs::remove_dir(dir.join("linked")).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(dir.join("linked")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn preview_worktree_refuses_leaf_symlinks_before_target_size_checks() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = png_fixture(11, 13);
+        for (name, huge) in [("leaf.png", false), ("huge.png", true)] {
+            let target = outside.path().join(name);
+            std::fs::write(&target, &sentinel).unwrap();
+            if huge {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&target)
+                    .unwrap()
+                    .set_len(IMAGE_MAX_BYTES as u64 + 1)
+                    .unwrap();
+            }
+            std::os::unix::fs::symlink(&target, dir.join(name)).unwrap();
+            assert_preview_refused(&repo, name, &sentinel, DISCARD_LINKED).await;
+            std::fs::remove_file(dir.join(name)).unwrap();
+            std::fs::write(dir.join(name), png_fixture(16, 16)).unwrap();
+            assert_preview_bytes(&repo, name, &png_fixture(16, 16)).await;
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn preview_worktree_io_failure_is_an_error_and_reads_recover() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("ok.png"))
+            .unwrap();
+        let err = git_file_base64(repo.clone(), None, "ok.png".into(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Io(_)), "{err:?}");
+        drop(locked);
+        assert_preview_bytes(&repo, "ok.png", &png_fixture(1200, 630)).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn preview_windows_aliases_and_git_dir_are_refused_but_verbatim_files_read() {
+        let (_tmp, dir, repo) = init_preview_repo().await;
+        let outside = tempfile::tempdir().unwrap();
+        let sentinel = png_fixture(11, 13);
+        std::fs::write(outside.path().join("x.png"), &sentinel).unwrap();
+        preview_directory_link(&dir.join("a"), outside.path());
+        assert_preview_refused(&repo, "a./x.png", &sentinel, "dot or space").await;
+        std::fs::remove_dir(dir.join("a")).unwrap();
+        std::fs::create_dir(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/x.png"), png_fixture(16, 16)).unwrap();
+        assert_preview_bytes(&repo, "a/x.png", &png_fixture(16, 16)).await;
+
+        let shell = "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}";
+        std::fs::create_dir(dir.join(shell)).unwrap();
+        std::fs::write(dir.join(shell).join("f.png"), &sentinel).unwrap();
+        assert_preview_refused(&repo, &format!("{shell}/f.png"), &sentinel, "shell link").await;
+        std::fs::create_dir(dir.join("x")).unwrap();
+        std::fs::write(dir.join("x/f.png"), png_fixture(16, 16)).unwrap();
+        assert_preview_bytes(&repo, "x/f.png", &png_fixture(16, 16)).await;
+
+        assert_preview_refused(&repo, ".git/config", &sentinel, ".git folder").await;
+        std::fs::create_dir(dir.join("git")).unwrap();
+        std::fs::write(dir.join("git/config"), png_fixture(16, 16)).unwrap();
+        assert_preview_bytes(&repo, "git/config", &png_fixture(16, 16)).await;
+
+        let reserved = crate::fsops::verbatim_path(&dir.join("nul.png")).unwrap();
+        std::fs::write(&reserved, png_fixture(16, 16)).unwrap();
+        assert_preview_bytes(&repo, "nul.png", &png_fixture(16, 16)).await;
+        std::fs::remove_file(reserved).unwrap();
     }
 
     /// The frontend reads `base64`/`mime`/`tooLarge` off this record — `rename_all` is a
