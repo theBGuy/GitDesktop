@@ -1,0 +1,26 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    macOS variant of app-icon.svg, source of src-tauri/icons/icon.icns only.
+    macOS doesn't pad icons, so the body sits on Apple's 824px grid (100px margin, ~22.5% corners).
+    Regenerating with `tauri icon` overwrites every platform's files, so output to a temp dir and copy just the .icns:
+      pnpm tauri icon app-icon-macos.svg -o <tmp> && cp <tmp>/icon.icns src-tauri/icons/icon.icns
+  -->
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+  </defs>
+  <rect x="100" y="112" width="824" height="824" rx="185" fill="#000" fill-opacity="0.3" filter="url(#shadow)"/>
+  <g transform="translate(100 100) scale(0.8046875)">
+    <rect width="1024" height="1024" rx="230" fill="#4FE0C4"/>
+    <path d="M 0 240 V 230 A 230 230 0 0 1 230 0 H 794 A 230 230 0 0 1 1024 230 V 240 Z" fill="#0B2E35"/>
+    <circle cx="156" cy="120" r="40" fill="#4FE0C4"/>
+    <circle cx="286" cy="120" r="40" fill="#4FE0C4"/>
+    <circle cx="416" cy="120" r="40" fill="#4FE0C4"/>
+    <path d="M 332 440 V 832" stroke="#0B2E35" stroke-width="88" stroke-linecap="round" fill="none"/>
+    <path d="M 332 626 C 332 478 566 438 724 436" stroke="#0B2E35" stroke-width="88" stroke-linecap="round" fill="none"/>
+    <circle cx="332" cy="440" r="88" fill="#0B2E35"/>
+    <circle cx="332" cy="832" r="88" fill="#0B2E35"/>
+    <circle cx="752" cy="436" r="88" fill="#0B2E35"/>
+  </g>
+</svg>

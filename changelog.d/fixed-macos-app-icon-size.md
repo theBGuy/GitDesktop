@@ -1,0 +1,1 @@
+- The macOS app icon now matches the size of other apps in the Dock and Applications folder, instead of looking oversized.
