@@ -4,6 +4,9 @@
     Mint #4FE0C4 body + ink #0B2E35 title bar/branch. The window fills the
     whole icon (no padding) so the branch curve survives small sizes.
     Source of truth: design/logos/gitdesktop/final/gitdesktop-icon.svg.
+    app-icon-macos.svg mirrors this artwork and is the source of icon.icns: apply
+    artwork edits to both, and after `tauri icon` from this file, regenerate the
+    .icns from the macOS variant (steps in that file).
   -->
   <rect width="1024" height="1024" rx="212" fill="#4FE0C4"/>
   <path d="M 0 240 V 212 A 212 212 0 0 1 212 0 H 812 A 212 212 0 0 1 1024 212 V 240 Z" fill="#0B2E35"/>
