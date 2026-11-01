@@ -4383,13 +4383,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         pending={deleteRemoteBranch.isPending}
         // A remote delete is a push: it waits out a running one, as an offline
         // hold would (the handler re-checks at the press).
-        heldReason={
-          pushActive
-            ? branchPushHoldReason(pushPaused)
-            : publishActive
-              ? PUBLISH_HOLD_REASON
-              : offlineHold
-        }
+        heldReason={(() => {
+          switch (true) {
+            case pushActive:
+              return branchPushHoldReason(pushPaused);
+            case publishActive:
+              return PUBLISH_HOLD_REASON;
+            default:
+              return offlineHold;
+          }
+        })()}
         onConfirm={doDeleteRemoteBranch}
       />
 

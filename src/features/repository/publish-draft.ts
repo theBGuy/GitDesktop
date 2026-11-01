@@ -62,7 +62,7 @@ export type DraftActionOnOpen = "keep" | "restore" | "reseed";
  *  never resets a running submit's form under it. A reopen in another repo
  *  resets the form, and the submit's settle is guarded by the seed
  *  generation (PublishDialog's seedGenRef). */
-export function keepDraftOnOpen(input: {
+export function draftActionOnOpen(input: {
   prevRepo: string;
   repo: string;
   submitting: boolean;

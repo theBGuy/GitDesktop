@@ -76,12 +76,12 @@ const EXCLUDED = {
   "features/pulls/RemotePrView.tsx": {
     hooks: ["useMergeRemotePr"],
     reason:
-      "owner-excluded: another lane owns the file, its background fetch included",
+      "merges an existing remote pull request, its background fetch included, and a repository being published has no remote yet",
   },
   "features/pulls/ResolveRemotePrView.tsx": {
     hooks: ["useFinishRemotePrResolve"],
     reason:
-      "renders only inside RemotePrView.tsx (pinned below), behind the owner-excluded file, and needs an existing remote PR",
+      "renders only inside RemotePrView.tsx (pinned below) and finishes a conflict resolve on an existing remote pull request; a repository being published has no remote yet",
   },
   [`${R}PublishDialog.tsx`]: {
     hooks: ["usePublishRepo"],
@@ -177,7 +177,8 @@ const RENDER_PINS = {
       "disabled={deletionBlocked || pushActive || !!offlineHold || publishActive}",
       // After the protected arm, before the push arm.
       "case deletionBlocked: return `Delete on ${branch.remote}… (protected)`; case publishActive: return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`; case pushActive:",
-      "heldReason={pushActive ? branchPushHoldReason(pushPaused) : publishActive ? PUBLISH_HOLD_REASON : offlineHold}",
+      // The push arm first, then the publish arm, then offline.
+      "heldReason={(() => {switch (true) {case pushActive: return branchPushHoldReason(pushPaused); case publishActive: return PUBLISH_HOLD_REASON; default: return offlineHold;",
     ],
     stale: [],
   },
@@ -755,6 +756,19 @@ test("dropping a render hold fails the check", () => {
     ),
   );
   failsWith(sources, "const pushItemDisabled");
+});
+
+test("a remote delete's held reason without its publish arm, or out of order, fails the check", () => {
+  const file = `${R}BranchSwitcher.tsx`;
+  const push =
+    "            case pushActive:\n              return branchPushHoldReason(pushPaused);\n";
+  const publish =
+    "            case publishActive:\n              return PUBLISH_HOLD_REASON;\n";
+  for (const edit of [
+    (text) => text.replace(publish, ""),
+    (text) => text.replace(`${push}${publish}`, `${publish}${push}`),
+  ])
+    failsWith(mutate(realSources(), file, edit), "heldReason={(() => {");
 });
 
 test("a missing roster file fails closed", () => {

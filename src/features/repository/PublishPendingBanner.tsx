@@ -51,14 +51,14 @@ export function publishRunningMessage(p: PendingPublish): string {
 }
 
 /** The fire-time refusal every push route shares: true (and says why) while the
- *  repository has a publish in flight, from this worktree or a sibling. Every
- *  route refuses whatever its remote, since the publish pushes the whole history. */
+ *  repository has a publish in flight, from this worktree or, once this session
+ *  has resolved the repository's identity, a sibling. Every route refuses
+ *  whatever its remote, since the publish pushes the whole history. */
 export function refuseWhilePublishing(
   queryClient: QueryClient,
   repo: string,
-  identity?: string,
 ): boolean {
-  const p = activePublishOf(queryClient, repo, identity);
+  const p = activePublishOf(queryClient, repo);
   if (p === null) return false;
   toast.info(publishRunningMessage(p));
   return true;

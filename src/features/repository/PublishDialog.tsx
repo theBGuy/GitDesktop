@@ -55,8 +55,8 @@ import {
 } from "./PublishPendingBanner";
 import {
   clearDraft,
+  draftActionOnOpen,
   draftFor,
-  keepDraftOnOpen,
   stampDraft,
   updateDraftValues,
 } from "./publish-draft";
@@ -386,7 +386,7 @@ export function PublishDialog({
     // reset would blank on reopen.
     if (surface.shouldSkipSeed(descGen.generating)) return;
     const failed = draftFor(usePublishDraftStore.getState().byRepo, repoKey);
-    const action = keepDraftOnOpen({
+    const action = draftActionOnOpen({
       prevRepo: prev,
       repo: repoKey,
       submitting: form.state.isSubmitting,

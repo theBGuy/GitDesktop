@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { keepDraftOnOpen } from "../src/features/repository/publish-draft.ts";
+import { draftActionOnOpen } from "../src/features/repository/publish-draft.ts";
 import {
   PUBLISH_REPO_KEY,
   pendingMutationEntries,
@@ -377,45 +377,45 @@ const openArgs = (over) => ({
 });
 
 test("a same-repo reopen keeps the form while its publish runs", () => {
-  assert.equal(keepDraftOnOpen(openArgs({ submitting: true })), "keep");
+  assert.equal(draftActionOnOpen(openArgs({ submitting: true })), "keep");
   assert.equal(
-    keepDraftOnOpen(openArgs({ submitting: true, failed: failedA })),
+    draftActionOnOpen(openArgs({ submitting: true, failed: failedA })),
     "keep",
   );
 });
 
 test("a failed draft for the same repo and provider restores", () => {
-  assert.equal(keepDraftOnOpen(openArgs({ failed: failedA })), "restore");
+  assert.equal(draftActionOnOpen(openArgs({ failed: failedA })), "restore");
 });
 
 test("a failed draft reseeds for another provider", () => {
   assert.equal(
-    keepDraftOnOpen(openArgs({ failed: failedA, provider: "bitbucket" })),
+    draftActionOnOpen(openArgs({ failed: failedA, provider: "bitbucket" })),
     "reseed",
   );
 });
 
 test("a failed draft for another repo reseeds", () => {
   assert.equal(
-    keepDraftOnOpen(openArgs({ failed: { ...failedA, repo: REPO_B } })),
+    draftActionOnOpen(openArgs({ failed: { ...failedA, repo: REPO_B } })),
     "reseed",
   );
 });
 
 test("a cross-repo open reseeds with no draft and restores a matching one", () => {
-  assert.equal(keepDraftOnOpen(openArgs({ prevRepo: REPO_B })), "reseed");
+  assert.equal(draftActionOnOpen(openArgs({ prevRepo: REPO_B })), "reseed");
   assert.equal(
-    keepDraftOnOpen(openArgs({ prevRepo: REPO_B, submitting: true })),
+    draftActionOnOpen(openArgs({ prevRepo: REPO_B, submitting: true })),
     "reseed",
   );
   assert.equal(
-    keepDraftOnOpen(openArgs({ prevRepo: REPO_B, failed: failedA })),
+    draftActionOnOpen(openArgs({ prevRepo: REPO_B, failed: failedA })),
     "restore",
   );
 });
 
 test("no failed draft and nothing submitting reseeds", () => {
-  assert.equal(keepDraftOnOpen(openArgs({})), "reseed");
+  assert.equal(draftActionOnOpen(openArgs({})), "reseed");
 });
 
 // The dialog's seed applies that rule with its live inputs: the store's entry
@@ -427,8 +427,8 @@ function seedRuleProblems(text) {
   if (start < 0 || end < start) return ["seedOnOpen not found"];
   const body = text.slice(start, end);
   const problems = [];
-  if (!body.includes("keepDraftOnOpen({")) {
-    problems.push("seed doesn't apply keepDraftOnOpen");
+  if (!body.includes("draftActionOnOpen({")) {
+    problems.push("seed doesn't apply draftActionOnOpen");
   }
   for (const arg of [
     "const failed = draftFor(usePublishDraftStore.getState().byRepo, repoKey);",
@@ -469,7 +469,7 @@ test("a seed that skips or misfeeds the rule is caught", () => {
   const retire =
     "    // Retired before the reset, so the mirror can't write the defaults over it.\n    setPublishDrafts((drafts) => clearDraft(drafts, repoKey));\n";
   const mutants = [
-    live.replace("keepDraftOnOpen({", "Boolean({"),
+    live.replace("draftActionOnOpen({", "Boolean({"),
     live.replace("prevRepo: prev,", "prevRepo: repoKey,"),
     live.replace("repo: repoKey,", "repo: repoPath,"),
     live.replace(
@@ -691,7 +691,7 @@ test("a mirror that leaks, retargets or never subscribes is caught", () => {
   }
 });
 
-// Identity-keyed holds (P1-hold)
+// Identity-keyed holds
 
 const WT_A = "C:/work/harbor";
 const WT_B = "C:/work/harbor-feature";
