@@ -50,10 +50,14 @@ export function repoIdentityStrict(repoPath: string): Promise<string> {
  *  it never resolved one. READ-ONLY on the memo: never resolves, never populates.
  *  For callers that must not RESOLVE — a dead path answers the raw-path fallback and
  *  would pin it — but may honor an identity learned while the path was still alive.
- *  Deliberately unaged, for both its consumers: the notification ladder asks about
+ *  Deliberately unaged, for each of its consumers: the notification ladder asks about
  *  checkouts that are GONE, which never re-stamp and whose identity-keyed mute has to
- *  outlive the folder, and {@link repoIdentity}'s fallback must never expire into a
- *  raw path that would redirect a write. */
+ *  outlive the folder; and {@link repoIdentity}'s fallback must never expire into a
+ *  raw path that would redirect a write. remotes.ts's fire-time reads peek too, so
+ *  an aged-out entry would turn a learned identity back into unknown: the publish
+ *  refusal (`activePublishOf`) would fall back to matching by path, and the sibling
+ *  remotes re-read counts an unknown or raw-path identity on either side as a
+ *  sibling. */
 export function peekRepoIdentity(repoPath: string): string | undefined {
   return memo.peek(repoPath);
 }

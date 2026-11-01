@@ -39,6 +39,7 @@ import {
   useFinishAndSurface,
 } from "@/features/conversations/useAiStream";
 import { AssigneesPopover } from "@/features/issues/IssueMetaPickers";
+import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { REVIEWER_NOTES_MARKER } from "@/lib/ai/notes-context";
 import { track } from "@/lib/analytics";
 import { triggerAutomations } from "@/lib/automations/runner";
@@ -477,6 +478,8 @@ export function CreatePrDialog({
       // Again below the duplicate re-check, which is an await the connection can
       // drop during; ahead of the lane claim, so a refusal owns nothing.
       if (refuseWhileOffline()) return;
+      // The create pushes its head, which a running repository publish holds.
+      if (refuseWhilePublishing(queryClient, repoPath)) return;
       // Fire-time admission, claimed before the create's first await: the push
       // plus the forge call runs for minutes and the user can dismiss the dialog
       // the moment it starts, so a second attempt on the same head would queue

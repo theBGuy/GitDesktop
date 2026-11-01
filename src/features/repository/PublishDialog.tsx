@@ -2,7 +2,7 @@ import { SparkleIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useEffect, useEffectEvent, useRef } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DIALOG_SCROLL } from "@/components/dialog-scroll";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -18,12 +18,14 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { useFinishAndSurface } from "@/features/conversations/useAiStream";
 import { required, useAppForm } from "@/lib/form";
+import { normPath } from "@/lib/git/path";
 import {
   isPublishActive,
   useBbWorkspaces,
   useGhPublishOwners,
   usePendingPublishes,
   usePublishRepo,
+  useRepoIdentity,
 } from "@/lib/git/queries";
 import { useGenerateChord } from "@/lib/hotkeys/useGenerateChord";
 import {
@@ -34,6 +36,11 @@ import {
 } from "@/lib/offline-writes";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
+import {
+  type PublishFormValues,
+  setPublishDrafts,
+  usePublishDraftStore,
+} from "@/lib/stores/publish-draft";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
 import {
   ARIA_DISABLED_CLASS,
@@ -46,7 +53,13 @@ import {
   PUBLISH_PROVIDER_LABELS,
   publishingHold,
 } from "./PublishPendingBanner";
-import { type FailedPublishDraft, keepDraftOnOpen } from "./publish-draft";
+import {
+  clearDraft,
+  draftActionOnOpen,
+  draftFor,
+  stampDraft,
+  updateDraftValues,
+} from "./publish-draft";
 
 /** Bitbucket repo slugs must start alphanumeric, then allow dot/underscore/hyphen.
  *  A blank name is caught by the `required` validator, so don't double-flag it. */
@@ -146,6 +159,19 @@ function parseTopics(text: string): string[] {
  *  has already been sent. */
 const PUBLISH_PENDING_GENERATE_REASON = "Wait for the publish to finish";
 
+/** The form's defaultValues, constant across renders, repos and resets: useForm
+ *  re-applies them to an untouched form whenever they change, so per-open values
+ *  (the repo's name, a restored draft) arrive only through the seed's reset. */
+const BLANK_PUBLISH_VALUES: PublishFormValues = {
+  name: "",
+  description: "",
+  homepage: "",
+  topics: "",
+  workspace: "",
+  owner: "",
+  isPrivate: true,
+};
+
 export function PublishDialog({
   repoPath,
   provider,
@@ -165,16 +191,31 @@ export function PublishDialog({
   const queryClient = useQueryClient();
   // Any instance's publish of this repo, so the other host's dialog holds too.
   const pendingPublish = usePendingPublishes(repoPath)[0];
-  // The draft whose publish failed, kept for a retry when the same repo's dialog
-  // reopens on the same provider. A success or an idle user close discards it,
-  // and a foreign reseed retires it. A switch's own close keeps it, but a switch
-  // that unmounts this dialog loses it with the rest of the dialog's state.
-  const failedDraftRef = useRef<FailedPublishDraft | null>(null);
+  // The publish's key carries the repo identity, so sibling worktrees see it:
+  // while it resolves the submit fails closed. An identity error is settled and
+  // publishes under the path-only key.
+  const identity = useRepoIdentity(repoPath);
+  const identityLoading = identity.data === undefined && !identity.isError;
+  // The one spelling of draft identity: every draft-store read and write keys
+  // on it. The store keeps a failed draft per repo across unmounts and dialog
+  // instances, for a retry when this repo's dialog reopens on the same provider.
+  // A success or an owned idle close clears it; an open on another provider
+  // that reseeds retires it.
+  const repoKey = normPath(repoPath);
+  // The repo key whose stored draft THIS instance restored, or held when its
+  // own submit failed. Compared to repoKey, never tested for truth: the seed's
+  // skip arm can carry a claim across a repo switch. State, so the mirror gates
+  // on it.
+  const [ownsDraft, setOwnsDraft] = useState<string | null>(null);
   // The user's close rule (Esc, the X, the backdrop, the footer button): an idle
-  // close discards a failed draft, while a close during a publish leaves it to
-  // that publish, whose success clears it and whose failure re-stamps it.
+  // close discards a draft this instance showed, while a close during a publish
+  // leaves it to that publish, whose success clears it and whose failure
+  // stamps it.
   function closeOrOpen(next: boolean) {
-    if (!next && !pendingPublish) failedDraftRef.current = null;
+    if (!next && !pendingPublish && ownsDraft === repoKey) {
+      setPublishDrafts((drafts) => clearDraft(drafts, repoKey));
+      setOwnsDraft(null);
+    }
     onOpenChange(next);
   }
   const aiEnabled = useAiEnabled();
@@ -192,14 +233,13 @@ export function PublishDialog({
     readyDescription: "It's waiting in the dialog.",
     reopen: () => onOpenChange(true),
   });
-  // Which repo's draft the form holds — stamped on every open transition, ahead
-  // of the seed's skip arm (which holds a seed off only for a draft already this
-  // repo's). A dialog left open across a repo switch never re-seeds, so this
-  // still reads the submit's repo and the settle's close is the right one.
-  const draftRepoRef = useRef(repoPath);
-  // Which draft the form holds, bumped only where the seed actually reseeds. The
-  // repo stamp can't tell drafts apart within one repo: an A→B→A round trip
-  // restores the same path behind different content.
+  // Which repo's draft THIS instance's form holds, stamped on every open
+  // transition ahead of the seed's skip arm. With seedGenRef it gates only this
+  // instance's settle: the success close, which values a failure stamps, and
+  // whether the failure claims the draft (setOwnsDraft).
+  const draftRepoRef = useRef(repoKey);
+  // Bumped wherever the seed resets the form: the repo stamp can't tell drafts
+  // apart within one repo, since an A→B→A round trip returns to the same key.
   const seedGenRef = useRef(0);
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
@@ -247,20 +287,13 @@ export function PublishDialog({
   );
 
   const form = useAppForm({
-    defaultValues: {
-      name: defaultName,
-      description: "",
-      homepage: "",
-      topics: "",
-      workspace: "",
-      owner: "",
-      isPrivate: true,
-    },
+    defaultValues: BLANK_PUBLISH_VALUES,
     onSubmit: async ({ value }) => {
       if (refuseWhileOffline()) return;
       // Fire-time twin of the render gate: a submit raced past a stale render
       // still meets the cache, which marks a publish pending at mutate.
-      if (isPublishActive(queryClient, repoPath)) return;
+      if (isPublishActive(queryClient, repoPath, identity.data)) return;
+      if (identityLoading) return;
       const submitGen = seedGenRef.current;
       const name = value.name.trim();
       // The publish backend takes `owner/repo` in `name`; compose it only for an
@@ -294,25 +327,32 @@ export function PublishDialog({
         // Closed whenever the form still holds THIS submit's draft — leaving an
         // already-published draft open is a duplicate factory.
         const ourDraft =
-          draftRepoRef.current === repoPath && seedGenRef.current === submitGen;
+          draftRepoRef.current === repoKey && seedGenRef.current === submitGen;
         if (ourDraft) onOpenChange(false);
-        if (failedDraftRef.current?.repo === repoPath) {
-          failedDraftRef.current = null;
-        }
+        setPublishDrafts((drafts) => clearDraft(drafts, repoKey));
+        // Compare-and-clear: since the submit, this instance may own another
+        // repo's restored draft, and that claim isn't this settle's to drop.
+        setOwnsDraft((owned) => (owned === repoKey ? null : owned));
       } catch (e) {
         // Read at the failure, not before it: a publish that fails after a repo
         // switch has to name the repo it belongs to, same as the success arm.
         const originNote = originNoteFor(repoPath);
         if (originNote) toastErrorWithNote(e, originNote);
         else toastError(e);
-        // The dialog may be closed by now; the next same-repo open keeps this
-        // draft for a retry instead of reseeding it away.
-        if (
-          draftRepoRef.current === repoPath &&
-          seedGenRef.current === submitGen
-        ) {
-          failedDraftRef.current = { repo: repoPath, gen: submitGen, provider };
-        }
+        // Stamped even after an unmount, so the next open of this repo restores
+        // it. Edits made during the run count only while this form still holds
+        // the submitted draft; a reseed since means the submitted values are it.
+        const formStillHoldsDraft =
+          draftRepoRef.current === repoKey && seedGenRef.current === submitGen;
+        setPublishDrafts((drafts) =>
+          stampDraft(
+            drafts,
+            repoKey,
+            provider,
+            formStillHoldsDraft ? form.state.values : value,
+          ),
+        );
+        if (formStillHoldsDraft) setOwnsDraft(repoKey);
       }
     },
   });
@@ -340,35 +380,57 @@ export function PublishDialog({
 
   const seedOnOpen = useEffectEvent(() => {
     const prev = draftRepoRef.current;
-    draftRepoRef.current = repoPath;
+    draftRepoRef.current = repoKey;
     // A generation still streaming — or one that settled while the dialog was
     // closed — leaves the description and topics in form state, which this
     // reset would blank on reopen.
     if (surface.shouldSkipSeed(descGen.generating)) return;
-    if (
-      keepDraftOnOpen({
-        prevRepo: prev,
-        repo: repoPath,
-        submitting: form.state.isSubmitting,
-        failed: failedDraftRef.current,
-        gen: seedGenRef.current,
-        provider,
-      })
-    ) {
+    const failed = draftFor(usePublishDraftStore.getState().byRepo, repoKey);
+    const action = draftActionOnOpen({
+      prevRepo: prev,
+      repo: repoKey,
+      submitting: form.state.isSubmitting,
+      failed,
+      provider,
+    });
+    if (action === "keep") return;
+    if (action === "restore" && failed) {
+      seedGenRef.current += 1;
+      // Every reset keeps the defaults: a bare one would move them, and the next
+      // render's update() would reset the untouched form back to the constant.
+      form.reset(failed.values, { keepDefaultValues: true });
+      setOwnsDraft(repoKey);
       return;
     }
+    // Retired before the reset, so the mirror can't write the defaults over it.
+    setPublishDrafts((drafts) => clearDraft(drafts, repoKey));
+    setOwnsDraft(null);
     seedGenRef.current += 1;
-    form.reset({
-      name: defaultName,
-      description: "",
-      homepage: "",
-      topics: "",
-      workspace: "",
-      owner: "",
-      isPrivate: true,
-    });
+    form.reset(
+      { ...BLANK_PUBLISH_VALUES, name: defaultName },
+      { keepDefaultValues: true },
+    );
   });
   useSeedOnOpen(open, seedOnOpen);
+
+  // Edits to a failed draft this open instance shows keep the store current.
+  // The form's values move only through this dialog's own writes (edits, the
+  // owner and workspace seeds, Generate, the seed's reset), and in-repo ones
+  // rightly mirror. The subscription is keyed to the owned repoKey and torn
+  // down on a switch before any new-repo seed, so it never writes one repo's
+  // values into another's draft.
+  const storedProvider = usePublishDraftStore(
+    (s) => s.byRepo[repoKey]?.provider,
+  );
+  useEffect(() => {
+    if (!open || ownsDraft !== repoKey || storedProvider !== provider) return;
+    const sub = form.store.subscribe(() => {
+      setPublishDrafts((drafts) =>
+        updateDraftValues(drafts, repoKey, form.state.values),
+      );
+    });
+    return () => sub.unsubscribe();
+  }, [open, ownsDraft, storedProvider, provider, repoKey, form]);
 
   // Workspaces load after the dialog opens, so seed the picker once they arrive
   // (and only while the field is still empty — never stomp a user's pick).
@@ -446,7 +508,8 @@ export function PublishDialog({
     bbBlocked ||
     ghBlocked ||
     !!offlineHold ||
-    pendingPublish !== undefined;
+    pendingPublish !== undefined ||
+    identityLoading;
   // The running description draft, the running publish, and offline carry a
   // reason, ranked running-first, so a flip between them never drops focus to a
   // native disable; the name refusals keep their field hints and a plain disable.

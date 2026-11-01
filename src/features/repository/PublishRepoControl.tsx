@@ -12,7 +12,9 @@ import {
   useForgeStatus,
   usePendingPublishes,
   usePublishTargets,
+  useRepoIdentity,
 } from "@/lib/git/queries";
+import { useOfflineHold } from "@/lib/offline-writes";
 import { useUiStore } from "@/lib/stores/ui";
 import { PublishDialog } from "./PublishDialog";
 import {
@@ -122,6 +124,15 @@ export function PublishRepoControl({
   // holds this trigger too, and it outranks `disabledTitle`.
   const pending = usePendingPublishes(repoPath);
   const busyReason = pending[0] ? publishingHold(pending[0]) : undefined;
+  // Fails closed while the repo identity resolves: the publish's key carries it,
+  // so sibling worktrees see the publish. An identity error is settled (the
+  // path-only key), never a hold.
+  const offlineHold = useOfflineHold();
+  const identity = useRepoIdentity(repoPath);
+  const identityHold =
+    identity.data === undefined && !identity.isError
+      ? publishPendingReason(offlineHold)
+      : undefined;
   const lead = busyReason ? (
     <Spinner data-icon="inline-start" aria-hidden />
   ) : (
@@ -146,8 +157,8 @@ export function PublishRepoControl({
               <DisabledReasonButton
                 variant="outline"
                 size="sm"
-                disabled={!!busyReason}
-                reason={busyReason}
+                disabled={!!busyReason || !!identityHold}
+                reason={busyReason ?? identityHold}
               />
             }
           >
@@ -167,13 +178,14 @@ export function PublishRepoControl({
         <DisabledReasonButton
           variant="outline"
           size="sm"
-          disabled={!soleTarget || !!busyReason}
-          reason={busyReason ?? (soleTarget ? undefined : disabledTitle)}
+          disabled={!soleTarget || !!busyReason || !!identityHold}
+          // A structural reason (no provider) outranks the identity hold.
+          reason={busyReason ?? (soleTarget ? identityHold : disabledTitle)}
           onClick={() => soleTarget && openPublish(soleTarget.id)}
           // No idle hint while busy: a title here would hover-show instead of
           // the publishing reason, which rides the wrapper's title.
           title={
-            soleTarget && !busyReason
+            soleTarget && !busyReason && !identityHold
               ? `Create a ${soleTarget.label} repository and push this one`
               : undefined
           }

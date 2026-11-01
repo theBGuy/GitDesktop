@@ -527,9 +527,13 @@ export const readPendingLocalPrWrite = (kind: string, vars: unknown) =>
 /** Filter prefix for every repository publish ({@link publishRepoKey}). */
 export const PUBLISH_REPO_KEY = ["publish-repo"] as const;
 
-/** A repository publish's mutation key; provider and name ride the variables. */
-export const publishRepoKey = (repo: string) =>
-  [...PUBLISH_REPO_KEY, repo] as const;
+/** A repository publish's mutation key; provider and name ride the variables. The
+ *  repo identity, when known, rides a third element so every worktree of the
+ *  repository sees the publish; without it the key stays path-only. */
+export const publishRepoKey = (repo: string, identity?: string) =>
+  identity === undefined
+    ? ([...PUBLISH_REPO_KEY, repo] as const)
+    : ([...PUBLISH_REPO_KEY, repo, identity] as const);
 
 /** One publish in flight: where it goes and the name it creates there. */
 export interface PendingPublish {
@@ -537,17 +541,25 @@ export interface PendingPublish {
   name: string;
 }
 
-/** The publishes of `repo` among `entries`, which the caller has already narrowed
- *  to pending ones. Variables without a known provider and a string name are
- *  dropped, so a malformed entry holds nothing. */
+/** The publishes of the repository among `entries`, which the caller has already
+ *  narrowed to pending ones: keyed under `repo`'s own path, or under any path
+ *  whose key carries `identity` (an absent identity never matches an absent one).
+ *  Variables without a known provider and a string name are dropped, so a
+ *  malformed entry holds nothing. */
 export function pendingPublishesFor(
   entries: readonly PendingMutationEntry[],
   repo: string,
+  identity?: string,
 ): PendingPublish[] {
   const out: PendingPublish[] = [];
   for (const e of entries) {
-    const [prefix, keyRepo] = e.key ?? [];
-    if (prefix !== PUBLISH_REPO_KEY[0] || keyRepo !== repo) continue;
+    const [prefix, keyRepo, keyIdentity] = e.key ?? [];
+    if (prefix !== PUBLISH_REPO_KEY[0]) continue;
+    if (
+      keyRepo !== repo &&
+      (identity === undefined || keyIdentity !== identity)
+    )
+      continue;
     if (typeof e.vars !== "object" || e.vars === null) continue;
     const { provider, name } = e.vars as Record<string, unknown>;
     if (

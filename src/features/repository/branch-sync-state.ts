@@ -6,8 +6,10 @@
 /** Whether a push of this branch runs with publish (-u) semantics.
  *  `setUpstream` covers the one route that publishes a TRACKED branch by
  *  explicit retrack (the mismatch menu's publish item). Drives ROUTING and the
- *  "Published …" toasts, not the confirm. KEEP IN STEP with the backend's
- *  publish arm (`build_push_args`, git/remote.rs) and push-writes.ts's twin. */
+ *  publish confirm's gate; success toasts claim outcomes through pushOutcome /
+ *  pushSuccessCopy, never this flag alone. KEEP IN STEP with the backend's
+ *  publish arm (`build_push_args`, git/remote.rs) and the twin predicate
+ *  branchPushLabel inlines (push-writes.ts). */
 export function willPublish(b: {
   upstream: string | null;
   upstreamGone: boolean;
@@ -60,6 +62,71 @@ export function pushWouldCreate(dest: {
 }): boolean | undefined {
   if (dest.pushRemote == null || dest.pushBranch == null) return undefined;
   return dest.presence !== true;
+}
+
+/** What a branch push did, decided BEFORE the push from last-fetch presence:
+ *  the push IPC reports no created-vs-updated signal. */
+export type PushOutcome =
+  | "created"
+  | "updated-and-tracking"
+  | "pushed"
+  | "unknown";
+
+/** `willPublish`: the push can create or retrack on the destination. `create`:
+ *  the route's willCreateOnRemote/pushWouldCreate result; undefined = presence
+ *  never read. `presence`: the presenceUnderUrls value that create decision
+ *  read; a create decided from undefined presence may NOT claim "created". */
+export function pushOutcome(o: {
+  willPublish: boolean;
+  create: boolean | undefined;
+  presence: boolean | undefined;
+}): PushOutcome {
+  if (!o.willPublish) return "pushed";
+  if (o.create === false) return "updated-and-tracking";
+  if (o.create === true && o.presence === false) return "created";
+  return "unknown";
+}
+
+/** The success toast for a branch push; null for "pushed" (the surface keeps
+ *  its own behavior). `away` is landedIn(repo).away read AFTER the await.
+ *  `remoteBranch` only when the destination name differs from `branch`.
+ *  `tracks`: whether this push sets or keeps tracking (false only on the bare
+ *  push, which sets no upstream); it gates the unknown row's description. */
+export function pushSuccessCopy(o: {
+  outcome: PushOutcome;
+  branch: string;
+  remote: string;
+  remoteBranch?: string;
+  tracks: boolean;
+  away: string;
+}): { title: string; description?: string } | null {
+  const { branch, remote, away } = o;
+  const tracking = `${branch} now tracks ${remote}/${branch}.`;
+  switch (o.outcome) {
+    case "pushed":
+      return null;
+    case "created":
+      return {
+        title:
+          o.remoteBranch === undefined
+            ? `Published ${branch} to ${remote}${away}`
+            : `Published ${branch} to ${remote} as ${o.remoteBranch}${away}`,
+      };
+    case "updated-and-tracking":
+      return {
+        title: `Pushed ${branch} to ${remote}/${branch}${away}`,
+        description: tracking,
+      };
+    case "unknown":
+      return o.tracks
+        ? {
+            title: `Pushed ${branch} to ${remote}${away}`,
+            description: tracking,
+          }
+        : {
+            title: `Pushed ${branch} to ${remote}/${o.remoteBranch ?? branch}${away}`,
+          };
+  }
 }
 
 const DEFAULT_PORTS: Readonly<Record<string, string>> = {
@@ -322,4 +389,26 @@ export function publishConfirmBody(o: {
  *  action ("Didn't publish <branch> …"). */
 export function publishConfirmTitle(branch: string): string {
   return `Publish ${branch}?`;
+}
+
+/** Whether one of `pushes` is sending `branch`. A HEAD push names no branch
+ *  (push-writes.ts BranchPushState.branch null) and counts as both the branch it
+ *  recorded starting on (`startedOn`) and the current branch, or ANY branch
+ *  while the current name is unknown, failing toward refusal: the hold costs one
+ *  toast, a miss moves the ref mid-send. The current branch holds because the
+ *  backend pins (`-u`) the HEAD it reads when the IPC call lands, which a
+ *  checkout outside the app can move before the app's status re-read. It holds
+ *  for a bare push too, which resolves HEAD only at spawn, after the
+ *  network-lock wait. Limit: two checkouts during one push waiting on that lock
+ *  (A to B to C) leave the branch git sends (B) unheld. */
+export function pushesBranch(
+  pushes: readonly { branch: string | null; startedOn?: string | null }[],
+  branch: string,
+  currentName: string | null,
+): boolean {
+  return pushes.some((p) => {
+    if (p.branch !== null) return p.branch === branch;
+    if ((p.startedOn ?? null) === branch) return true;
+    return currentName === null || currentName === branch;
+  });
 }

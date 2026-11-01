@@ -1035,14 +1035,15 @@ right on the **Push** and **Pull** buttons.
   see **Publish branch** instead. A push that would create the branch on the remote asks
   first, naming the branch and where it's going: **Cancel** has the focus, so
   {{key:enter}} backs out, and **Publish** sends it. A branch the remote already has (as
-  of the last fetch) just pushes, without asking. When the branch tracks a remote branch
-  with a different name (after renaming a pushed branch, say) and Git would refuse a
-  plain push, **Push** opens a small menu: push to the branch it tracks, or publish under
-  its own name and track that, which asks the same question when it would create the
-  branch there. When Git knows the tracked branch is the remote's default branch, only
-  the publish item appears. While the names differ there's no force push: a diverged
-  branch is reconciled from the **Pull** menu first. Setups that route pushes elsewhere
-  keep a plain **Push**.
+  of the last fetch) just pushes, without asking. Afterwards the message says "Published"
+  only when that fetch showed the branch was new to the remote, and "Pushed" otherwise.
+  When the branch tracks a remote branch with a different name (after renaming a pushed
+  branch, say) and Git would refuse a plain push, **Push** opens a small menu: push to
+  the branch it tracks, or publish under its own name and track that, which asks the
+  same question when it would create the branch there. When Git knows the tracked branch
+  is the remote's default branch, only the publish item appears. While the names differ
+  there's no force push: a diverged branch is reconciled from the **Pull** menu first.
+  Setups that route pushes elsewhere keep a plain **Push**.
 
 ## Publish a local repo
 
@@ -1064,7 +1065,10 @@ leaves the cached list in place.
 Publishing pushes the current branch's full history, so it can take a few minutes.
 Closing the dialog doesn't stop it: a status line at the top of the repository shows it
 until it finishes, and **Publish repository…** in the sync bar reads **Publishing…** and
-stays disabled meanwhile, so a second publish can't start.
+stays disabled meanwhile, so a second publish can't start. Until it finishes, pushes from
+the sync bar and the branch list, tag pushes, new pull requests, and deleting a branch or
+tag on a remote stop with a note that a publish is running, in the repository and
+in its worktrees.
 
 ## Stash and reapply
 

@@ -1,3 +1,4 @@
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import {
@@ -10,10 +11,21 @@ import type {
   PullDecisionShas,
   PullWouldDrop,
 } from "@/lib/git/api";
-import { usePullRebaseDecided } from "@/lib/git/queries";
+import {
+  BRANCH_PUSH_ACTIVE_MESSAGE,
+  pendingMutationEntries,
+  repoKeys,
+  usePullRebaseDecided,
+} from "@/lib/git/queries";
+import {
+  branchPushKey,
+  pendingBranchPushesFor,
+} from "@/lib/git/queries/push-writes";
+import type { Branch } from "@/lib/git/types";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import { pushesBranch } from "./branch-sync-state";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
 import {
   PULL_DECISION_COPY,
@@ -23,6 +35,30 @@ import type {
   StashReapplyRecovery,
   StashReapplyRequest,
 } from "./useStashReapplyRecovery";
+
+/** Refuses (and says why) while a push is sending `branch`, which the decided
+ *  rebase would rewrite under it. */
+function refuseWhileBranchPushes(
+  queryClient: QueryClient,
+  repoPath: string,
+  branch: string,
+): boolean {
+  const currentName =
+    queryClient
+      .getQueryData<Branch[]>(repoKeys.branches(repoPath))
+      ?.find((b) => b.isCurrent)?.name ?? null;
+  const pushes = pendingBranchPushesFor(
+    pendingMutationEntries(
+      queryClient
+        .getMutationCache()
+        .findAll({ mutationKey: branchPushKey(repoPath), status: "pending" }),
+    ),
+    repoPath,
+  );
+  if (!pushesBranch(pushes, branch, currentName)) return false;
+  toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
+  return true;
+}
 
 /**
  * The refuse → ask → re-run choreography for a rebase pull that would rewrite
@@ -42,6 +78,7 @@ export function usePullDropGuard(
   repoPath: string,
   recovery: StashReapplyRecovery,
 ) {
+  const queryClient = useQueryClient();
   const decided = usePullRebaseDecided(repoPath);
   // The open question carries the repo it was raised in: the decided re-run
   // goes through a hook bound to the LIVE repo, so answering it after a repo
@@ -99,6 +136,8 @@ export function usePullDropGuard(
       setAsked(null);
       return;
     }
+    // The question stays up with the user's choice: only the push must finish.
+    if (refuseWhileBranchPushes(queryClient, repoPath, refusal.branch)) return;
     const shas: PullDecisionShas = {
       branch: refusal.branch,
       decision,

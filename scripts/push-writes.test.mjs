@@ -34,6 +34,7 @@ const entry = (vars, extra = {}) => ({
 const push = (overrides = {}) => ({
   mutationId: 1,
   branch: "feature",
+  startedOn: null,
   remote: null,
   remoteBranch: null,
   setUpstream: false,
@@ -70,6 +71,7 @@ test("a push of the repo reads back every field, mutationId and paused included"
     {
       mutationId: 7,
       branch: "feature",
+      startedOn: null,
       remote: "fork",
       remoteBranch: "pr-head",
       setUpstream: true,
@@ -104,7 +106,13 @@ test("missing or mistyped fields read as null / false, never guessed", () => {
   const [out] = pendingBranchPushesFor(
     [
       entry(
-        { setUpstream: "yes", branch: 3, remote: {}, remoteBranch: [] },
+        {
+          setUpstream: "yes",
+          branch: 3,
+          remote: {},
+          remoteBranch: [],
+          startedOn: 4,
+        },
         { mutationId: undefined, paused: "true" },
       ),
     ],
@@ -113,6 +121,7 @@ test("missing or mistyped fields read as null / false, never guessed", () => {
   assert.deepEqual(out, {
     mutationId: null,
     branch: null,
+    startedOn: null,
     remote: null,
     remoteBranch: null,
     setUpstream: false,
@@ -128,6 +137,16 @@ test("a HEAD push (no branch) keeps a null branch for the latch to resolve", () 
   );
   assert.equal(out.branch, null);
   assert.equal(out.mutationId, 9);
+  assert.equal(out.startedOn, null);
+});
+
+test("a HEAD push's recorded start reads back", () => {
+  const [out] = pendingBranchPushesFor(
+    [entry({ setUpstream: false, source: "header", startedOn: "main" })],
+    "/repo",
+  );
+  assert.equal(out.branch, null);
+  assert.equal(out.startedOn, "main");
 });
 
 test("a branch named like an Object.prototype member reads as itself", () => {
@@ -341,6 +360,12 @@ test("latch: a null current branch latches nothing, but still prunes", () => {
 test("latch: an id not pending in any repo is never latched", () => {
   // A snapshot that tore ahead of the id list must not latch what the prune drops.
   assert.equal(nextPushLatch({}, [headPush(4)], [], "main"), null);
+});
+
+test("latch: a recorded start beats the current branch, even an unknown one", () => {
+  const started = push({ branch: null, mutationId: 4, startedOn: "main" });
+  assert.deepEqual(nextPushLatch({}, [started], [4], "feature"), { 4: "main" });
+  assert.deepEqual(nextPushLatch({}, [started], [4], null), { 4: "main" });
 });
 
 // The delayed list re-read. The stub client records each invalidation's filter;

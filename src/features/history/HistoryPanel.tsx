@@ -52,6 +52,7 @@ import {
 } from "@/features/conversations/remote-section-state";
 import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
@@ -95,7 +96,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
@@ -310,6 +311,7 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
 }
 
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
+  const queryClient = useQueryClient();
   const log = useLog(repoPath);
   // Batch-resolve commit-author avatars for the log's authors (GitHub-only,
   // deduped by react-query across the History surfaces).
@@ -719,13 +721,15 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   async function pushTagToOrigin(tag: string) {
     if (pendingTagPush(tag) || refuseWhileOffline()) return;
+    if (refuseWhilePublishing(queryClient, repoPath)) return;
+    const pushedIn = repoPath;
     try {
       await pushTag.mutateAsync(tag);
     } catch (e) {
       onError(e);
       return;
     }
-    toast.success(`Pushed tag ${tag} to origin`);
+    toast.success(`Pushed tag ${tag} to origin${landedIn(pushedIn).away}`);
   }
 
   // The log can trail an outside commit (and push): undo only the HEAD status

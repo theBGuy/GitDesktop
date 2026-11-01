@@ -36,13 +36,20 @@ export interface PushVars {
   /** Client-only provenance: "header" = started by SyncControls, which holds its
    *  bar only on its own pushes. usePush's mutationFn never forwards it. */
   source?: "header";
+  /** Client-only: for a HEAD push (no `branch`), the branch the app last saw
+   *  checked out when the push started, which keeps that branch held after a
+   *  checkout. Null or absent on a detached HEAD. usePush's mutationFn never
+   *  forwards it. */
+  startedOn?: string | null;
 }
 
-/** One push in flight. `branch` null is a HEAD push (no branch in the vars),
- *  which a reader resolves to a row by its `mutationId`. */
+/** One push in flight. `branch` null is a HEAD push (no branch in the vars):
+ *  `startedOn` names the branch it started on when the caller recorded one, and
+ *  otherwise a reader resolves it to a row by its `mutationId`. */
 export interface BranchPushState {
   mutationId: number | null;
   branch: string | null;
+  startedOn: string | null;
   remote: string | null;
   remoteBranch: string | null;
   setUpstream: boolean;
@@ -84,11 +91,12 @@ export function pendingBranchPushesFor(
     const [prefix, keyRepo] = e.key ?? [];
     if (prefix !== BRANCH_PUSH_KEY[0] || keyRepo !== repo) continue;
     if (typeof e.vars !== "object" || e.vars === null) continue;
-    const { setUpstream, branch, remote, remoteBranch, source } =
+    const { setUpstream, branch, remote, remoteBranch, source, startedOn } =
       e.vars as Partial<Record<keyof PushVars, unknown>>;
     out.push({
       mutationId: typeof e.mutationId === "number" ? e.mutationId : null,
       branch: typeof branch === "string" ? branch : null,
+      startedOn: typeof startedOn === "string" ? startedOn : null,
       remote: typeof remote === "string" ? remote : null,
       remoteBranch: typeof remoteBranch === "string" ? remoteBranch : null,
       setUpstream: setUpstream === true,
@@ -123,9 +131,9 @@ export function branchPushLabel(
 
 /** The HEAD-push latch after a render's reads: `pending` is this repo's pushes,
  *  `pendingIds` every repo's. A branch-less push still pending somewhere latches
- *  to `currentName` once, and an id pending in no repo is pruned (a switch away
- *  keeps it, so a switch back still finds it). Null when nothing changes, so a
- *  render-time adjust settles. */
+ *  once, to the branch it recorded starting on or else to `currentName`, and an
+ *  id pending in no repo is pruned (a switch away keeps it, so a switch back
+ *  still finds it). Null when nothing changes, so a render-time adjust settles. */
 export function nextPushLatch(
   latch: Readonly<Record<number, string>>,
   pending: readonly BranchPushState[],
@@ -133,16 +141,16 @@ export function nextPushLatch(
   currentName: string | null,
 ): Record<number, string> | null {
   const added: [number, string][] = [];
-  if (currentName !== null) {
-    for (const p of pending) {
-      if (
-        p.branch === null &&
-        p.mutationId !== null &&
-        pendingIds.includes(p.mutationId) &&
-        !Object.hasOwn(latch, p.mutationId)
-      )
-        added.push([p.mutationId, currentName]);
-    }
+  for (const p of pending) {
+    const on = p.startedOn ?? currentName;
+    if (
+      on !== null &&
+      p.branch === null &&
+      p.mutationId !== null &&
+      pendingIds.includes(p.mutationId) &&
+      !Object.hasOwn(latch, p.mutationId)
+    )
+      added.push([p.mutationId, on]);
   }
   const kept = Object.entries(latch).filter(([id]) =>
     pendingIds.includes(Number(id)),

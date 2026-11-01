@@ -1,6 +1,6 @@
 import { CheckIcon, MinusIcon, WarningCircleIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { RelativeTime, useRelativeNow } from "@/components/relative-time";
@@ -17,12 +17,24 @@ import {
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import * as api from "@/lib/git/api";
-import { repoKeys, useBranchDivergence } from "@/lib/git/queries";
+import {
+  refuseWhilePushRuns,
+  repoKeys,
+  useBranchDivergence,
+} from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { cn } from "@/lib/utils";
 import { PROMOTION_BLOCKS_CHECKOUT } from "./checkout-copy";
+import {
+  keepCandidates,
+  namesOfKey,
+  type SelectionSeed,
+  selectionAfterBatch,
+  selectionKey,
+  selectionStep,
+} from "./cleanup-selection";
 
 type Mode = "archive" | "delete";
 
@@ -402,8 +414,7 @@ export function CleanupBranchesDialog({
   // flip while it is open, so a delete-only hold buys nothing and can miss.
   const holdingReads = checkingWorktrees || rulesSettling;
 
-  // Re-check every candidate whenever the set itself changes — opening, switching
-  // mode, adjusting the window, or divergence resolving to reveal merged branches.
+  // Every row the list offers; the post-batch prune keeps the selection inside it.
   const candidateNames = useMemo(
     () => candidates.map((c) => c.branch.name),
     [candidates],
@@ -416,22 +427,51 @@ export function CleanupBranchesDialog({
     () => candidates.filter((c) => c.merged || c.old).map((c) => c.branch.name),
     [candidates],
   );
-  // Re-seed the selection only when the SET of pre-checked names actually changes,
-  // keyed on their joined value rather than the array identity. A parent
-  // re-render that yields an equal-but-new `candidates` array — a fresh
-  // `isProtected` closure, a no-op branch refetch — would otherwise re-run this
-  // and silently wipe the user's deselections. Branch names can't contain
-  // newlines (git ref rules), so the join is unambiguous — and it joins a SORTED
-  // copy, because the render order shifts as ages tick on the shared 30s clock
-  // and a pure reorder must not read as a new set.
-  const autoSelectKey = [...autoSelectNames].sort().join("\n");
+  // The selection re-seeds only when the repo or the pre-checked SET changes
+  // (sorted keys, so a new-but-equal array or a reorder on the 30s clock isn't
+  // one); a close and reopen, an `<Activity>` re-show or a held-read flap keeps
+  // the user's choices. After a batch that leaves the dialog open, until the
+  // user changes mode or window or closes it, a changed set only prunes rows
+  // that stopped being candidates (cleanup-selection.ts).
+  const autoSelectKey = selectionKey(autoSelectNames);
+  const candidateKey = selectionKey(candidateNames);
+  // The user's own controls; a batch's refetch changes neither.
+  const selectionContext = `${mode}\n${windowDays}`;
+  // A ref: the policy's memory must survive renders without causing them.
+  const selectionSeed = useRef<SelectionSeed>({
+    repo: null,
+    seededKey: null,
+    afterBatch: null,
+  });
   useEffect(() => {
-    if (running) return; // don't clobber a batch mid-flight
-    // Nothing may be pre-selected off a stand-in exclusion: the seed re-runs
-    // once those reads land and the excluded rows are really gone.
-    if (holdingReads) return;
-    setSelected(new Set(autoSelectKey ? autoSelectKey.split("\n") : []));
-  }, [autoSelectKey, running, holdingReads]);
+    // Never under a running batch, nor off a stand-in exclusion: the seed
+    // re-runs once those reads land and the excluded rows are really gone.
+    const step = selectionStep(selectionSeed.current, {
+      repo: repoPath,
+      open,
+      running,
+      holdingReads,
+      context: selectionContext,
+      autoKey: autoSelectKey,
+    });
+    selectionSeed.current = {
+      repo: step.repo,
+      seededKey: step.seededKey,
+      afterBatch: step.afterBatch,
+    };
+    if (step.action === "reseed")
+      setSelected(new Set(namesOfKey(autoSelectKey)));
+    else if (step.action === "prune")
+      setSelected((prev) => keepCandidates(prev, candidateKey));
+  }, [
+    repoPath,
+    open,
+    autoSelectKey,
+    candidateKey,
+    selectionContext,
+    running,
+    holdingReads,
+  ]);
 
   // First load: a merged signal still in flight and nothing has surfaced yet.
   // Age-based candidates already show instantly (branch data is cached), so this
@@ -506,10 +546,19 @@ export function CleanupBranchesDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    // The batch can include the pushing branch, so any push holds it.
+    if (refuseWhilePushRuns(queryClient, repoPath)) return;
     const fails = new Map<string, string>();
     setFailed(new Map());
     setProgress({ done: 0, total: names.length });
+    let processed = names.length;
     for (let i = 0; i < names.length; i++) {
+      // A push can start mid-batch: stop before the next branch, keeping the
+      // dialog and the unprocessed selection.
+      if (refuseWhilePushRuns(queryClient, repoPath)) {
+        processed = i;
+        break;
+      }
       const name = names[i];
       try {
         if (mode === "archive") {
@@ -536,10 +585,26 @@ export function CleanupBranchesDialog({
     await queryClient.invalidateQueries({
       queryKey: ["repo", repoPath, "divergence"],
     });
+    // A stopped or partly failed batch leaves the dialog open: the rows left
+    // keep the user's choices, minus the ones this batch finished.
+    if (processed < names.length || fails.size > 0) {
+      selectionSeed.current = {
+        ...selectionSeed.current,
+        afterBatch: selectionContext,
+      };
+      setSelected((prev) => selectionAfterBatch(prev, names, processed, fails));
+    }
     setProgress(null);
 
-    const ok = names.length - fails.size;
+    const ok = processed - fails.size;
     const verb = mode === "archive" ? "Archived" : "Deleted";
+    if (processed < names.length) {
+      if (fails.size > 0) {
+        setFailed(fails);
+        toast.error(`${verb} ${ok}, ${fails.size} failed`);
+      } else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);
+      return;
+    }
     if (fails.size === 0) {
       toast.success(`${verb} ${pluralBranches(ok)}`);
       onClose();
