@@ -177,10 +177,13 @@ export function MarkdownDocPreview({
     fetching: activeQ.isFetching,
   });
   const failed = refreshFailed(activeQ);
-  // Retry stays mounted while its refetch runs; a success swaps the error arm
-  // for content in the same host, so focus lands there.
+  // A refusal (a linked, non-regular or refused path, or an invalid rev)
+  // answers the same on every read, so it gets no Retry.
+  const refused = isAppError(failure) && failure.kind === "invalidArgument";
+  // The gate tracks Retry's own visibility: it stays mounted while its refetch
+  // runs, and leaves on a success or a refusal, so focus lands on the host.
   const { hostRef, retryRef } = useRetryFocusRescue(
-    pane === "error" && failure !== null,
+    pane === "error" && failure !== null && !refused,
   );
   // Degraded content is the same arm, so a failed or recovered refresh never
   // moves focus.
@@ -230,10 +233,6 @@ export function MarkdownDocPreview({
   // no-flash rule as the diff itself. They never park offline either.
   if (pane === "skeleton" || pane === "offline") return shell(null);
   if (pane === "error" || activeQ.data === undefined) {
-    // A refusal (a linked, non-regular or refused path, or an invalid rev)
-    // answers the same on every read, so it gets no Retry; with none mounted the
-    // focus rescue never claims.
-    const refused = isAppError(failure) && failure.kind === "invalidArgument";
     return shell(
       <DiffPlaceholder
         message="Could not load this file to preview"

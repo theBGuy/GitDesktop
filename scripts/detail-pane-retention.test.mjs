@@ -108,7 +108,7 @@ const SITES = [
       fetching: "activeQ.isFetching",
     },
     failed: { name: "failed", init: "refreshFailed(activeQ)" },
-    rescue: 'pane === "error" && failure !== null',
+    rescue: 'pane === "error" && failure !== null && !refused',
     retry: { inline: "() => void activeQ.refetch()" },
     noticeRetry: "() => void activeQ.refetch()",
     noun: "preview",
