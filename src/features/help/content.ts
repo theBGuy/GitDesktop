@@ -3156,9 +3156,9 @@ keeps its sources in context. When a report is ready you can **Turn it into a Pl
 distills the whole session into a plan-ready brief to hand the planner, falling back to the
 full session if distillation is unavailable) or **Save report** as a local Markdown
 file (written to \`.gitdesktop/research/\` for you to review and commit — never committed for
-you). It searches and reads, and outside opencode it never changes your code. Pick any agent —
-**Claude**, **Codex**, **GitHub Copilot**, or **opencode** (the picker opens on your
-**Settings → AI** default agent) — each uses its own native web search and fetch.
+you). It searches and reads, and outside opencode it never changes your code. Pick any agent
+(**Claude**, **Codex**, **GitHub Copilot**, or **opencode**; the picker opens on your
+**Settings → AI** default agent), and each uses its own native web search and fetch.
 (opencode's web *search* needs its Exa integration enabled — web *fetch* always works.)
 On opencode, the session also loads the repository's own opencode config and plugins, which
 can widen what it does, so use another agent for a repository you don't trust.

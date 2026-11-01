@@ -7,9 +7,9 @@
 // branch none (its opencode loads none of the host's config files). Each
 // read_mirror is built once, from opencode_read_mirror fed the OPENCODE_CONFIG
 // the run gets and Path::new(&repo_path) / Path::new(&worktree_path), in the arm
-// that pins the run (an opencode review, a read-only session); the other arm
-// mirrors nothing. That same path is pinned as the run's spawn cwd (the
-// stream_agent cwd argument of the review and of the host session) and its
+// that pins the run (a repo-aware opencode review, a read-only session); the
+// other arm mirrors nothing. That same path is pinned as the run's spawn cwd
+// (the stream_agent cwd argument of the review and of the host session) and its
 // --dir (opencode_review_args' dir; agent_session's
 // `let dir = run_dir(container, &worktree_path)` handed to
 // opencode_session_args). The checker is a pure function over the file's text,
@@ -104,7 +104,7 @@ function callsIn(masked, [from, to], name) {
 /** The whitespace-collapsed `let read_mirror` each fn holds, up to its `;`: the
  *  resolver, fed the run's OPENCODE_CONFIG and --dir, in the arm that pins it. */
 const REVIEW_MIRROR =
-  "let read_mirror = if kind == AgentKind::Opencode { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path)) } else { OpencodeReadMirror::default() }";
+  "let read_mirror = if kind == AgentKind::Opencode && repo_aware { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path)) } else { OpencodeReadMirror::default() }";
 const HOST_MIRROR =
   "let read_mirror = if read_only { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&worktree_path)) } else { OpencodeReadMirror::default() }";
 const RUN_DIR = "let dir = run_dir(container, &worktree_path)";
@@ -545,11 +545,25 @@ test("P9: the mirrored read rules reach each call from the resolver", () => {
   // Each arm condition is pinned: the resolver runs exactly for the pinned run.
   for (const [condition, mutantCondition, refused] of [
     [
-      "if kind == AgentKind::Opencode {",
-      "if kind != AgentKind::Opencode {",
+      "if kind == AgentKind::Opencode && repo_aware {",
+      "if kind != AgentKind::Opencode && repo_aware {",
       reviewRefused,
     ],
-    ["if kind == AgentKind::Opencode {", "if true {", reviewRefused],
+    [
+      "if kind == AgentKind::Opencode && repo_aware {",
+      "if kind == AgentKind::Opencode {",
+      reviewRefused,
+    ],
+    [
+      "if kind == AgentKind::Opencode && repo_aware {",
+      "if kind == AgentKind::Opencode && !repo_aware {",
+      reviewRefused,
+    ],
+    [
+      "if kind == AgentKind::Opencode && repo_aware {",
+      "if true {",
+      reviewRefused,
+    ],
     ["if read_only {", "if !read_only {", hostRefused],
     ["if read_only {", "if true {", hostRefused],
   ]) {

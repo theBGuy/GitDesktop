@@ -183,10 +183,11 @@ pub const GD_RESEARCH_AGENT: &str = "gd-research";
 /// allowlist there: a server's tools are callable only through its `<server>_*` allow
 /// and that allow's `<server>_?*` alias, which also admit any loaded server whose
 /// sanitized name starts with `<server>_`. The ReadOnly pin's `read` also reads the
-/// resources of any connected server. Plan/Research sessions carry the ReadOnly pin with no server
-/// allows (they pass no servers) but keep the repo's config, and a global config layer
-/// can still widen either (the residual `opencode_permission_json` documents).
-/// Write-capable sessions auto-approve server tools via `--dangerously-skip-permissions`.
+/// resources of any connected server. Plan/Research sessions carry the ReadOnly pin
+/// with no server allows (they pass no servers) but keep the repo's config, and a
+/// global config layer can still widen either (the residual `opencode_permission_json`
+/// documents). Write-capable sessions auto-approve server tools via
+/// `--dangerously-skip-permissions`.
 ///
 /// `research` adds the WEB agent (`GD_RESEARCH_AGENT`): the pin denies web to every
 /// agent (the builtin `plan` allows bash and webfetch by default) and opencode has no

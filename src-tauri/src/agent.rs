@@ -1712,10 +1712,11 @@ pub async fn agent_models(kind: AgentKind, bin_path: Option<String>) -> AppResul
 
 /// Claude Code review invocation. The diff-bearing user prompt is fed on stdin;
 /// this builds everything else. Read-only either way: Tier 1 (`repo_aware =
-/// false`) exposes no tools at all; Tier 2 exposes only read tools so the agent
-/// can read surrounding code for context but still can't edit, run commands, or
-/// hang waiting on a permission prompt. Both load user settings only, so the
-/// reviewed repository's own Claude settings and hooks never apply.
+/// false`) exposes no builtin tools (a self-MCP server's tools stay callable);
+/// Tier 2 exposes only read tools so the agent can read surrounding code for
+/// context but still can't edit, run commands, or hang waiting on a permission
+/// prompt. Both load user settings only, so the reviewed repository's own Claude
+/// settings and hooks never apply.
 fn claude_review_args(
     model: &str,
     system_prompt: &str,
@@ -3237,7 +3238,8 @@ fn opencode_read_mirror(config_path: Option<&str>, dir: &Path) -> OpencodeReadMi
 /// (the self-MCP config) still loads under that flag. `COPILOT_ALLOW_ALL=false`
 /// rides only the diff-only arm without self-MCP: that arm never passes
 /// `--allow-all-tools`, so no env-vs-flag precedence is involved. `mirror` is the
-/// user's mirrored read rules (`opencode_read_mirror`).
+/// user's mirrored read rules (`opencode_read_mirror`), empty for a DiffOnly run,
+/// whose pin ignores it.
 fn review_env(
     kind: AgentKind,
     repo_aware: bool,
@@ -4400,7 +4402,9 @@ pub async fn agent_review(
     // opencode reads its MCP config from `OPENCODE_CONFIG` (no flag); the others carry
     // it in argv. `review_env` also carries the read-only pins.
     let self_names: Vec<&str> = self_specs.iter().map(|s| s.name.as_str()).collect();
-    let read_mirror = if kind == AgentKind::Opencode {
+    // Only a repo-aware run's ReadOnly pin mirrors the user's read rules; DiffOnly
+    // ignores them, so its config files go unread.
+    let read_mirror = if kind == AgentKind::Opencode && repo_aware {
         opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path))
     } else {
         OpencodeReadMirror::default()
