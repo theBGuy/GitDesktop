@@ -7,9 +7,10 @@
 // branch none (its opencode loads none of the host's config files). Each
 // read_mirror is built once, from opencode_read_mirror fed the OPENCODE_CONFIG
 // the run gets and Path::new(&repo_path) / Path::new(&worktree_path), in the arm
-// that pins the run (a repo-aware opencode review, a read-only session); the
-// other arm mirrors nothing. That same path is pinned as the run's spawn cwd
-// (the stream_agent cwd argument of the review and of the host session) and its
+// whose run carries the ReadOnly pin (a repo-aware opencode review, a read-only
+// session); the other arm, DiffOnly runs included, mirrors nothing. That same
+// path is pinned as the run's spawn cwd (the stream_agent cwd argument of the
+// review and of the host session) and its
 // --dir (opencode_review_args' dir; agent_session's
 // `let dir = run_dir(container, &worktree_path)` handed to
 // opencode_session_args). The checker is a pure function over the file's text,
@@ -102,7 +103,7 @@ function callsIn(masked, [from, to], name) {
 }
 
 /** The whitespace-collapsed `let read_mirror` each fn holds, up to its `;`: the
- *  resolver, fed the run's OPENCODE_CONFIG and --dir, in the arm that pins it. */
+ *  resolver, fed the run's OPENCODE_CONFIG and --dir, in the ReadOnly-pinned arm. */
 const REVIEW_MIRROR =
   "let read_mirror = if kind == AgentKind::Opencode && repo_aware { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path)) } else { OpencodeReadMirror::default() }";
 const HOST_MIRROR =
@@ -542,7 +543,7 @@ test("P9: the mirrored read rules reach each call from the resolver", () => {
     );
     assert.deepEqual(checkPinCallSites(mutant), [reviewRefused, hostRefused]);
   }
-  // Each arm condition is pinned: the resolver runs exactly for the pinned run.
+  // Each arm condition is pinned: the resolver runs only for a ReadOnly-pinned run.
   for (const [condition, mutantCondition, refused] of [
     [
       "if kind == AgentKind::Opencode && repo_aware {",
