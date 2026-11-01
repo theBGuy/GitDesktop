@@ -843,12 +843,15 @@ export function Markdown({
         : {
             baseDir: imagesBase,
             read: async (path: string) => {
-              const options = fileAtRevOptions(
-                imagesRepo,
-                imagesRev ?? null,
-                path,
-                { probeSize: true },
-              );
+              // gcTime 0: image bytes leave the cache once read. query-core
+              // keeps the longest gcTime a key has seen, so a key an image diff
+              // side also reads keeps that side's.
+              const options = {
+                ...fileAtRevOptions(imagesRepo, imagesRev ?? null, path, {
+                  probeSize: true,
+                }),
+                gcTime: 0,
+              };
               // fetchQuery joins a read already in flight, which may have
               // started before this key's change: read again once it settles,
               // fresh. Nothing is cancelled, since another observer (an image

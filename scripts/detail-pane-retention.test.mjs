@@ -17,8 +17,10 @@
 // SITES is a closed roster: a new detail pane over a read joins it in the same
 // change, or nothing here pins its retention.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { lineOf, maskNonCode, matchBrace, tagEnd } from "./lib/ts-mask.mjs";
 
@@ -96,7 +98,19 @@ const SITES = [
   {
     file: "src/features/diff/MarkdownPreview.tsx",
     component: "MarkdownDocPreview",
-    read: "activeQ",
+    // A failed read resets to pending on each refetch, so the ladder pends on
+    // a first read only and the error arm reads the failure the view kept.
+    inputs: {
+      pending: "pending",
+      error: "activeQ.isError",
+      hasData: "activeQ.data !== undefined",
+      paused: "activeQ.isPaused",
+      fetching: "activeQ.isFetching",
+    },
+    failed: { name: "failed", init: "refreshFailed(activeQ)" },
+    rescue: 'pane === "error" && failure !== null',
+    retry: { inline: "() => void activeQ.refetch()" },
+    noticeRetry: "() => void activeQ.refetch()",
     noun: "preview",
     noticeNoun: "this preview",
     stale: "activeQ.isPlaceholderData",
@@ -1116,6 +1130,103 @@ test("a deleted file's retained answer keeps the old side through a failed refre
     /\.(?:isError|error|status)\b/,
     `${file}: newAbsent must not read newQ's failure, or a failed refresh flips the preview back to the new side`,
   );
+});
+
+// A file-at-rev read that failed with nothing loaded resets to pending on each
+// refetch (a refocus, an invalidation, Retry), so every consumer pends on a
+// first read only. Closed roster: each `useFileAtRev(` caller is listed, with
+// the declarations that may read its queries' `isPending` (a null value is
+// allowed but pinned elsewhere). ImageDiff's `sideRead(` takes a whole query,
+// so a side's own pending (by design) is out of this scan's sight.
+const FILE_AT_REV_GATES = {
+  "src/features/diff/DiffSurface.tsx": {
+    queries: ["oldQ", "newQ"],
+    decls: {
+      oldSettled:
+        "oldRev === undefined || !(oldQ.isPending && oldQ.errorUpdateCount === 0)",
+      newSettled:
+        "newRev === undefined || !(newQ.isPending && newQ.errorUpdateCount === 0)",
+    },
+  },
+  "src/features/diff/ImageDiff.tsx": {
+    queries: ["oldFile", "newFile"],
+    decls: {
+      pending:
+        "(oldFile.isPending && oldFile.errorUpdateCount === 0) || (newFile.isPending && newFile.errorUpdateCount === 0)",
+    },
+  },
+  "src/features/diff/MarkdownPreview.tsx": {
+    queries: ["oldQ", "newQ", "activeQ"],
+    decls: {
+      newAbsent: null,
+      failure:
+        "activeQ.error ?? (activeQ.isPending && activeQ.errorUpdateCount > 0 && lastFailure?.key === readKey ? lastFailure.error : null)",
+      pending: "activeQ.isPending && failure === null",
+    },
+  },
+};
+
+function srcFiles() {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  return readdirSync(join(root, "src"), {
+    recursive: true,
+    withFileTypes: true,
+  })
+    .filter((d) => d.isFile() && /\.tsx?$/.test(d.name))
+    .map((d) => relative(root, join(d.parentPath, d.name)).replace(/\\/g, "/"));
+}
+
+test("file-at-rev reads pend on a first read only", () => {
+  const files = srcFiles();
+  assert.ok(files.length > 0, "no source files under src/");
+  const callers = files
+    .filter((file) =>
+      readFileSync(new URL(`../${file}`, import.meta.url), "utf8").includes(
+        "useFileAtRev",
+      ),
+    )
+    .filter((file) =>
+      /(?<![\w$])useFileAtRev\s*\(/.test(
+        load(file).masked.replace(/\bfunction\s+useFileAtRev\s*\(/g, ""),
+      ),
+    )
+    .sort();
+  assert.deepEqual(
+    callers,
+    Object.keys(FILE_AT_REV_GATES).sort(),
+    "the useFileAtRev( callers must match FILE_AT_REV_GATES",
+  );
+  for (const [file, { queries, decls }] of Object.entries(FILE_AT_REV_GATES)) {
+    const { raw, masked } = load(file);
+    const spans = [];
+    for (const [name, want] of Object.entries(decls)) {
+      const all = [
+        ...masked.matchAll(new RegExp(`\\bconst\\s+${name}\\s*=\\s*`, "g")),
+      ];
+      assert.equal(all.length, 1, `${file}: expected one \`const ${name} =\``);
+      const at = all[0].index + all[0][0].length;
+      const end = statementEnd(masked, at);
+      spans.push({ from: at, to: end });
+      if (want === null) continue;
+      assert.equal(
+        squash(raw.slice(at, end - 1)),
+        squash(want),
+        `${file}: \`${name}\` must be \`${want}\``,
+      );
+    }
+    const reads = new RegExp(
+      `(?<![\\w$.])(?:${queries.join("|")})\\s*\\.\\s*isPending\\b`,
+      "g",
+    );
+    const strays = [...masked.matchAll(reads)]
+      .filter((m) => !spans.some((s) => m.index >= s.from && m.index < s.to))
+      .map((m) => `line ${lineOf(raw, m.index)}`);
+    assert.deepEqual(
+      strays,
+      [],
+      `${file}: an isPending read of a file-at-rev query outside its pinned gates`,
+    );
+  }
 });
 
 test("Markdown preview reports its settle before every return", () => {

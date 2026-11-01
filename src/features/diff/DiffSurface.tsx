@@ -527,8 +527,10 @@ export function useFileContent(
   );
   // Usable once the enabled side-reads settle and both files fit the highlight
   // budget (a 1-line change in a huge file stays hunk-only, no whole-file walk).
-  const oldSettled = oldRev === undefined || !oldQ.isPending;
-  const newSettled = newRev === undefined || !newQ.isPending;
+  const oldSettled =
+    oldRev === undefined || !(oldQ.isPending && oldQ.errorUpdateCount === 0);
+  const newSettled =
+    newRev === undefined || !(newQ.isPending && newQ.errorUpdateCount === 0);
   const fitsBudget = (s: string) =>
     s.length <= CONTENT_HIGHLIGHT_MAX_CHARS &&
     countLines(s) <= HIGHLIGHT_MAX_LINES;
@@ -546,8 +548,9 @@ export function useFileContent(
     covers(newText, maxNewLine) &&
     covers(oldText, maxOldLine);
   // Content mode wants to apply but its reads are in flight — the caller holds
-  // the paint rather than build a hunk-only diff it will restructure. isPending,
-  // NOT isFetching: a background refetch of cached data must never re-blank.
+  // the paint rather than build a hunk-only diff it will restructure. Only a
+  // first read pends: a background refetch of cached data must never re-blank,
+  // nor one of a failed read, which react-query resets to pending each time.
   const pending = wantContent && (!oldSettled || !newSettled);
 
   // The inputs of the build on screen, and the one whose hold ran its bound.

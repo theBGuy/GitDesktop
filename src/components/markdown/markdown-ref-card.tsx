@@ -23,7 +23,7 @@ import {
   useAssignableUsers,
 } from "@/lib/git/queries";
 import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
-import { prPill } from "@/lib/pulls/pr-state";
+import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -271,6 +271,20 @@ function neutralIssuePill(state: string): StatePill {
   };
 }
 
+/** A resolved reference's state pill: an open stand-in that can't tell open
+ *  from draft says both, a pull request takes `prPill`, an issue `ISSUE_PILL`. */
+function refPill(item: RefItem, noun: PrNoun, openOrDraft: boolean): StatePill {
+  if (openOrDraft) {
+    return {
+      Icon: CircleIcon,
+      tone: "text-muted-foreground",
+      word: openOrDraftWord(noun),
+    };
+  }
+  if (item.flavor === "pr") return prPill(item.state, item.isDraft, noun);
+  return ISSUE_PILL[item.state] ?? neutralIssuePill(item.state);
+}
+
 /** The card's settled maximum, reserved up front: a state row, a `line-clamp-2`
  *  title, and an author row — four lines at the popup's own `text-xs/relaxed`
  *  line box. The card may SHRINK when the reference resolves (the bottom edge
@@ -362,15 +376,7 @@ function RefCardBody({
     return <p className="text-muted-foreground">{`Couldn't load ${label}`}</p>;
   }
   const openOrDraft = refCardStateChoice(item) === "openOrDraft";
-  const pill: StatePill = openOrDraft
-    ? {
-        Icon: CircleIcon,
-        tone: "text-muted-foreground",
-        word: openOrDraftWord(noun),
-      }
-    : item.flavor === "pr"
-      ? prPill(item.state, item.isDraft, noun)
-      : (ISSUE_PILL[item.state] ?? neutralIssuePill(item.state));
+  const pill = refPill(item, noun, openOrDraft);
   const { createdAt } = item;
   return (
     <div className="flex flex-col gap-1.5">

@@ -413,7 +413,8 @@ export function relativeUrlAttrs(nodeName: string): readonly string[] {
 
 /** Bytes a base64 payload decodes to. */
 export function decodedByteLength(base64: string): number {
-  const pad = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  let pad = 0;
+  while (pad < 2 && base64[base64.length - 1 - pad] === "=") pad++;
   return Math.floor((base64.length * 3) / 4) - pad;
 }
 

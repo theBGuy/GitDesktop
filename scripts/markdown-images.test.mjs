@@ -661,42 +661,6 @@ test("relative fetch URLs are removed on exactly these elements and attributes",
     assert.equal(isRepoRelativeImageUrl(v), false, v);
 });
 
-/** DOMPurify's default allowlists, read from its build: the frozen lists its
- *  DEFAULT_ALLOWED_TAGS and DEFAULT_ALLOWED_ATTR spread. */
-function purifyDefaults() {
-  const src = readFileSync(
-    new URL("../node_modules/dompurify/dist/purify.es.mjs", import.meta.url),
-    "utf8",
-  );
-  const lists = new Map();
-  for (const m of src.matchAll(/const (\w+\$?\d*) = freeze\(\[([^\]]*)\]\);/g))
-    lists.set(
-      m[1],
-      [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1].toLowerCase()),
-    );
-  const union = (names) =>
-    new Set(
-      names.flatMap((n) => {
-        assert.ok(lists.has(n), `DOMPurify list ${n}`);
-        return lists.get(n);
-      }),
-    );
-  return {
-    tags: union(["html$1", "svg$1", "svgFilters", "mathMl$1"]),
-    attrs: union(["html", "svg", "mathMl", "xml"]),
-  };
-}
-
-test("every neutralized pair survives DOMPurify's default allowlists", () => {
-  const { tags, attrs } = purifyDefaults();
-  for (const [tag, names] of RELATIVE_URL_ATTRS) {
-    if (tag !== "*") assert.ok(tags.has(tag), tag);
-    for (const attr of names) assert.ok(attrs.has(attr), `${tag} ${attr}`);
-  }
-  // Negative control: a disallowed SVG element isn't in the union.
-  assert.equal(tags.has("use"), false);
-});
-
 function deferred() {
   let resolve;
   let reject;

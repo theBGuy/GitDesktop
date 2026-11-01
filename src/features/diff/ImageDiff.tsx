@@ -52,7 +52,8 @@ type SideError = "notImage" | "readFailed";
 interface Pane {
   key: PaneKey;
   label: string;
-  /** null = the backend refused these bytes; the side renders a refusal box. */
+  /** null = no bytes to show: a pending or failed side (see `pending` and
+   *  `error`), else one whose bytes the backend refused (a refusal box). */
   src: string | null;
   /** The read failed, so this side's existence is unknown. */
   error?: SideError;
