@@ -248,9 +248,10 @@ export function MarkdownDocPreview({
                   variant="outline"
                   size="sm"
                   className="cursor-pointer"
+                  aria-busy={activeQ.isFetching || undefined}
                   onClick={() => void activeQ.refetch()}
                 >
-                  Retry
+                  {activeQ.isFetching ? "Retrying…" : "Retry"}
                 </Button>
               )}
             </div>
