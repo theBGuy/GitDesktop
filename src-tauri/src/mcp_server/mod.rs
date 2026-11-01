@@ -677,7 +677,8 @@ async fn serve(args: McpArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Whether `serve` should capture the login shell's PATH: always, unless the parent's
-/// merged marker still equals this process's PATH (the in-app self-MCP inherits both).
+/// merged marker still equals this process's PATH (true for the in-app self-MCP when its
+/// launcher passes its whole environment to stdio MCP children).
 fn mcp_should_prime(marker: Option<&std::ffi::OsStr>, path: Option<&std::ffi::OsStr>) -> bool {
     marker.is_none() || marker != path
 }

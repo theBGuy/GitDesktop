@@ -5,7 +5,7 @@
 //! Reuses the user's existing CLI subscription auth, so no API key is needed.
 //! Reviews are read-only: Tier 1 exposes no tools at all.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -744,8 +744,8 @@ fn command_v_match(
 }
 
 /// The no-spawn arms of [`resolve_named`] in their order: the process PATH and known
-/// dirs first (the app's own tools keep today's tie-break), then each name on the
-/// captured shell PATH. None means only the login-shell fallback is left.
+/// dirs win over the captured shell PATH, so a landing capture only fills misses and
+/// never re-points a tool already found. None leaves only the login-shell fallback.
 fn resolve_without_spawn(
     names: &[&str],
     find_executable: impl FnOnce(&[&str]) -> Option<PathBuf>,
@@ -857,9 +857,10 @@ const SHELL_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 #[cfg(not(windows))]
 static SHELL_RETRY_STAMP: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// How many captures are executing; above 0 means in flight. A count, since a capture
-/// taking over after a failed one can start before the failed one's guard drops. A
-/// watch, so a reader that subscribes and then waits for 0 can't miss the edge.
+/// Counted holds: above 0 while any capture or claimed re-prime is live, not an exact
+/// capture count. A count, since a capture taking over after a failed one can start
+/// before the failed one's guard drops. A watch, so a reader that subscribes and then
+/// waits for 0 can't miss the edge.
 #[cfg(not(windows))]
 fn shell_capture_in_flight() -> &'static tokio::sync::watch::Sender<usize> {
     static IN_FLIGHT: OnceLock<tokio::sync::watch::Sender<usize>> = OnceLock::new();
@@ -915,22 +916,64 @@ fn claim_shell_retry(
 /// `merged_shell_path` sits on the status/diff hot path.
 #[cfg(not(windows))]
 fn reprime_shell_path_if_due() {
-    let Ok(mut stamp) = SHELL_RETRY_STAMP.lock() else {
-        return;
-    };
-    if stamp.is_none() {
-        return;
-    }
     // Not `tauri::async_runtime::spawn`: in a process tauri never set up (the MCP
     // server) it would start a second tokio runtime beside the one already running.
-    let handle = tokio::runtime::Handle::try_current().ok();
-    let in_flight = *shell_capture_in_flight().borrow() > 0;
-    if claim_shell_retry(&mut stamp, in_flight, handle.is_some(), Instant::now()) {
-        drop(stamp);
-        if let Some(handle) = handle {
-            handle.spawn(prime_shell_path());
-        }
+    reprime_if_due(
+        &SHELL_RETRY_STAMP,
+        shell_capture_in_flight(),
+        tokio::runtime::Handle::try_current().ok(),
+        Instant::now(),
+        prime_shell_path,
+    );
+}
+
+/// `reprime_shell_path_if_due` over its stamp, count, runtime, clock and prime. The
+/// capture is counted before the stamp lock drops, so the caller that triggered the
+/// re-prime, and any caller that takes the lock after it, sees it in flight
+/// (`send_modify` takes no stamp lock). Returns the task when one was spawned. The
+/// wrapper is compiled only off Windows, so `reprime_seam_violations` pins its body
+/// and this fn's guard-before-unlock order by source.
+#[cfg(any(not(windows), test))]
+fn reprime_if_due<F, Fut>(
+    stamp: &Mutex<Option<Instant>>,
+    flag: &'static tokio::sync::watch::Sender<usize>,
+    handle: Option<tokio::runtime::Handle>,
+    now: Instant,
+    prime: F,
+) -> Option<tokio::task::JoinHandle<()>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut stamp = stamp.lock().ok()?;
+    if stamp.is_none() {
+        return None;
     }
+    let in_flight = *flag.borrow() > 0;
+    if !claim_shell_retry(&mut stamp, in_flight, handle.is_some(), now) {
+        return None;
+    }
+    let handle = handle?;
+    let counted = InFlightGuard::enter(flag);
+    drop(stamp);
+    Some(spawn_counted(&handle, counted, prime()))
+}
+
+/// Spawns `prime` holding `counted` until the task ends, so the count it raised
+/// before the spawn stays up through the capture.
+#[cfg(any(not(windows), test))]
+fn spawn_counted<F>(
+    handle: &tokio::runtime::Handle,
+    counted: InFlightGuard<'static>,
+    prime: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    handle.spawn(async move {
+        let _counted = counted;
+        prime.await;
+    })
 }
 
 /// Longest an agent spawn waits for a capture that is already executing.
@@ -2180,9 +2223,10 @@ fn opencode_review_args(model: &str, repo_aware: bool, effort: &str, dir: &str) 
 
 /// Which `OPENCODE_PERMISSION` pin a read-only opencode run carries. `DiffOnly`
 /// (every non-repo-aware review run: diff-only reviews, commit/PR/branch
-/// generation) keeps `read` alone; `ReadOnly` (every repo-aware run, Debug with
-/// AI and AI conflict resolve under Agentic review included, plus Plan/Research
-/// sessions) adds `grep`/`glob`/`list`.
+/// generation) keeps `read` alone and denies `grep`/`glob`/`list`; `ReadOnly` (every
+/// repo-aware run, Debug with AI and AI conflict resolve under Agentic review
+/// included, plus Plan/Research sessions) allows them unless the user's config denies
+/// the tool outright.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpencodePin {
     DiffOnly,
@@ -2192,23 +2236,66 @@ enum OpencodePin {
 /// The compact `OPENCODE_PERMISSION` JSON for a read-only opencode run. Rules
 /// resolve last-match-wins over wildcard keys, so the emitted ORDER is the
 /// policy: `*` and the MCP-shaped `*_*` deny first, per-server `<name>_*` allows,
-/// the `read` rule and the pin's `grep`/`glob`/`list` rules (allowed for ReadOnly,
-/// denied for DiffOnly), then the deny tail last so no server wildcard
-/// (`external_*`, `doom_*`, `plan_*`) can re-enable a builtin. Never
-/// `{"*":"deny"}` alone: with every tool disabled `opencode run` hangs with no
-/// output (measured, opencode 1.18.18).
+/// the `read` rule and the pin's `grep`/`glob`/`list` rules (ReadOnly allows each
+/// unless the user's config denies it outright; DiffOnly denies them), then the deny
+/// tail last so a server wildcard (`external_*`, `doom_*`, `plan_*`) can't re-enable a
+/// builtin the tail names (but see the
+/// residual). Never `{"*":"deny"}` alone: with every tool disabled `opencode run`
+/// hangs with no output (measured, opencode 1.18.18).
 ///
-/// Merged config layers keep each key at its FIRST position with the last
-/// layer's value. A global layer naming only specific keys loses to our later `*`
-/// (measured); one naming `*` ahead of its allows keeps `*` early, so those allows
-/// outrank our `*` but not a key new to the merge: `*_*` denies its `<server>_*`
-/// allows and the tail names each builtin we know. Residual: under such a layer, an
-/// allow for any tool key we don't name still wins, custom or plugin tools without
-/// an underscore (a global `deploy`) and unnamed builtins (`codesearch`, `lsp`)
-/// included; one that also names `*_*` early re-opens `<x>_*` keys. `<name>_*` also
-/// admits any loaded server whose sanitized name starts with `<name>_`. Built by
-/// hand because the crate's `serde_json` map sorts keys.
-fn opencode_permission_json(pin: OpencodePin, mcp_servers: &[&str]) -> String {
+/// Merged config layers keep each key at its FIRST position with the last layer's
+/// value (measured). A global layer naming a key the pin DENIES moves that deny ahead
+/// of our `*`, which still denies it unless a server allow after `*` matches it too.
+/// One naming a key the pin ALLOWS moves the allow ahead of our `*`, which would deny
+/// it, so each allow is followed by an alias no config names, keeping that allow after
+/// `*`. A builtin's alias is its id plus ` *` (`read *`, `grep *`, `glob *`, `list *`):
+/// opencode's matcher (regex flags "si") lets a trailing ` *` match the bare prefix,
+/// so it matches that tool. Never a `?` alias: it matches any same-length id sharing
+/// the prefix, case-insensitively, custom tools included. A server's alias `<name>_?*`
+/// matches only a subset of `<name>_*`. One naming `*` ahead of its own allows keeps
+/// `*` early, so those allows outrank our `*` but not a key new to the merge: `*_*`
+/// denies its `<server>_*` allows and the tail names each builtin we know.
+///
+/// The `read *` alias's `*` allow comes after every other read rule, so it would undo
+/// a config layer's own nested read rules. `mirror` (from `opencode_read_mirror`)
+/// restores them in both read rule sets, in this order: `*` (`deny` when the user's last
+/// catch-all read rule, `*`, `**` or `* *`, is anything but allow), the user's live
+/// allows, the `.env` carve-out
+/// (`*.env.example` takes `*`'s action), then the user's denies and asks as `deny`. An
+/// allow that some rule also denies is dropped, so denies win and every deny lands after
+/// every allow: an allow carved out of a narrower deny (`secret/**` denied,
+/// `secret/public/**` allowed) stays denied. Keys stay unique: a user allow equal to a
+/// carve-out key is dropped, and a deny equal to one turns it to `deny` in place, so the
+/// last read rule is never a bare `*` deny, which would disable the tool. A user's
+/// outright read deny (`"read": "deny"`, a string `permission`, legacy
+/// `tools: {"read": false}`) therefore keeps the tool on with every read denied. A user
+/// deny whose pattern is an array index (`2024`) is emitted as `2024 *`, which matches
+/// it and more: `JSON.parse` would hoist the bare key ahead of `*`. An index-shaped
+/// allow is hoisted that way, which only narrows the pin. A ReadOnly pin denies `grep`,
+/// `glob` and `list`, each key and its ` *` alias in place, when the user's config
+/// denies that tool outright, so read stays the one tool left on. Otherwise they stay
+/// allowed, so a grep returns lines of files the read rules deny and a glob or list
+/// names them; nested `grep`/`glob`/`list` patterns are not mirrored.
+/// Residual: a config layer's `agent.<name>.permission` merges after this env pin, so
+/// its allows re-open tools the pin denies (the agent a run uses: the default agent,
+/// `build` unless `default_agent` names another, for DiffOnly reviews and generation
+/// runs; `plan` for repo-aware reviews and Plan sessions; `gd-research` for Research).
+/// Under a layer naming keys, an allow for any tool key we don't name still wins,
+/// custom or plugin tools without an underscore (a global `deploy`) included; one that
+/// also names `*_*` early re-opens `<x>_*` keys; one naming an alias spelling itself
+/// moves that alias ahead of `*` as well; a picked server whose sanitized name plus `_`
+/// prefixes a denied builtin (`external`, `doom`, `plan`) re-opens that builtin when a
+/// global layer names it. A ` *` alias also admits a custom or plugin tool whose id is
+/// its builtin's id, a space and more (`read all`). `<name>_*` also admits any loaded
+/// server whose sanitized name starts with `<name>_`. The builtin MCP resource tools
+/// (`list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`) are
+/// governed by `read`, so a pinned run can read the resources of any connected MCP
+/// server (read-only). Built by hand because the crate's `serde_json` map sorts keys.
+fn opencode_permission_json(
+    pin: OpencodePin,
+    mcp_servers: &[&str],
+    mirror: &OpencodeReadMirror,
+) -> String {
     let mut out = String::from(r#"{"*":"deny","*_*":"deny","#);
     for name in mcp_servers {
         // opencode's tool-key sanitizer: every UTF-16 unit outside
@@ -2220,26 +2307,890 @@ fn opencode_permission_json(pin: OpencodePin, mcp_servers: &[&str]) -> String {
                 _ => '_',
             })
             .collect();
-        out.push_str(&serde_json::Value::String(format!("{sanitized}_*")).to_string());
-        out.push_str(r#":"allow","#);
+        // Each allow, then its alias (see the doc).
+        for key in [format!("{sanitized}_*"), format!("{sanitized}_?*")] {
+            out.push_str(&serde_json::Value::String(key).to_string());
+            out.push_str(r#":"allow","#);
+        }
     }
     // `*.env` reads stay denied, mirroring opencode's own default carve-out
-    // with its `ask` hardened to `deny`.
-    out.push_str(
-        r#""read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"#,
-    );
-    out.push_str(match pin {
-        OpencodePin::DiffOnly => r#""grep":"deny","glob":"deny","list":"deny","#,
-        OpencodePin::ReadOnly => r#""grep":"allow","glob":"allow","list":"allow","#,
-    });
+    // with its `ask` hardened to `deny`; the user's allows precede it and the
+    // user's denies follow it.
+    let respelled: Vec<String> = mirror
+        .denies
+        .iter()
+        .map(|pattern| match js_array_index(pattern) {
+            Some(_) => format!("{pattern} *"),
+            None => pattern.clone(),
+        })
+        .collect();
+    let denied: HashSet<&str> = mirror
+        .denies
+        .iter()
+        .chain(&respelled)
+        .map(String::as_str)
+        .collect();
+    let star = if mirror.star_denied || denied.contains("*") {
+        "deny"
+    } else {
+        "allow"
+    };
+    let carve_out = [
+        ("*.env", "deny"),
+        ("*.env.*", "deny"),
+        ("*.env.example", star),
+    ];
+    let mut read_rules = vec![("*", star)];
+    // Each key's index in `read_rules`.
+    let mut at: HashMap<&str, usize> = HashMap::from([("*", 0)]);
+    for pattern in &mirror.allows {
+        let pattern = pattern.as_str();
+        let taken = carve_out.iter().any(|(key, _)| *key == pattern)
+            || denied.contains(pattern)
+            || at.contains_key(pattern);
+        if !taken {
+            at.insert(pattern, read_rules.len());
+            read_rules.push((pattern, "allow"));
+        }
+    }
+    for rule in carve_out {
+        at.insert(rule.0, read_rules.len());
+        read_rules.push(rule);
+    }
+    for pattern in &respelled {
+        let pattern = pattern.as_str();
+        match at.get(pattern) {
+            Some(&index) => read_rules[index].1 = "deny",
+            None => {
+                at.insert(pattern, read_rules.len());
+                read_rules.push((pattern, "deny"));
+            }
+        }
+    }
+    let read_rules: Vec<String> = read_rules
+        .into_iter()
+        .map(|(key, action)| {
+            format!(
+                r#"{}:"{action}""#,
+                serde_json::Value::String(key.to_string())
+            )
+        })
+        .collect();
+    let read_rules = format!("{{{}}}", read_rules.join(","));
+    for key in [r#""read":"#, r#""read *":"#] {
+        out.push_str(key);
+        out.push_str(&read_rules);
+        out.push(',');
+    }
+    match pin {
+        OpencodePin::DiffOnly => out.push_str(r#""grep":"deny","glob":"deny","list":"deny","#),
+        OpencodePin::ReadOnly => {
+            for tool in MIRRORED_TOOLS {
+                let action = if mirror.denied_tools.contains(&tool) {
+                    "deny"
+                } else {
+                    "allow"
+                };
+                out.push_str(&format!(r#""{tool}":"{action}","{tool} *":"{action}","#));
+            }
+        }
+    }
     // Explicit keys, because a key an earlier config layer named keeps that
     // layer's position in the merged ruleset and would otherwise outrank `*`.
     out.push_str(concat!(
-        r#""skill":"deny","todowrite":"deny","question":"deny","#,
-        r#""edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","#,
+        r#""skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","#,
+        r#""webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","#,
         r#""external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
     ));
     out
+}
+
+/// One config source an opencode run loads: a file, or `OPENCODE_CONFIG_CONTENT`.
+#[derive(Debug, PartialEq, Eq)]
+enum OpencodeConfigSource {
+    File(PathBuf),
+    Inline(String),
+}
+
+/// The local config sources an opencode 1.18.18 run loads given its env, in its load
+/// order (`Config.loadInstanceState`): the global dir (`$XDG_CONFIG_HOME`, else
+/// `<home>/.config`, joined with `opencode` on every OS) with `config.json`,
+/// `opencode.json`, `opencode.jsonc`; the `OPENCODE_CONFIG` file (the app's
+/// `config_path` when it passes one, else the inherited value); `opencode.json` and
+/// `opencode.jsonc` in `<home>/.opencode` (home is `OPENCODE_TEST_HOME` when set) and
+/// in `OPENCODE_CONFIG_DIR`; `OPENCODE_CONFIG_CONTENT`; then the managed dir's
+/// `opencode.json` and `opencode.jsonc` (`OPENCODE_TEST_MANAGED_CONFIG_DIR`, else
+/// `%ProgramData%\opencode`, `/Library/Application Support/opencode` or
+/// `/etc/opencode`). The two dirs replay `ConfigPaths.directories`, a string-unique list
+/// of the global dir and `<home>/.opencode` (both spelled as `path.join` spells them)
+/// and `OPENCODE_CONFIG_DIR` (compared as written): an `OPENCODE_CONFIG_DIR` equal to
+/// the global dir loads its pair right after `OPENCODE_CONFIG`, and one equal to
+/// `<home>/.opencode` loads once. One equal to a project `.opencode` dir loads at that
+/// dir's place, which isn't modeled. An empty variable reads as unset, as opencode's
+/// truthy checks do, except `OPENCODE_TEST_HOME`, which opencode tests with `??`. A
+/// relative path resolves against the child's spawn cwd, which is the `dir` passed here
+/// (opencode loads config before `opencode run` chdirs into `--dir`), and so does a
+/// drive-relative one (`C:cfg`) on `dir`'s own drive. One on another drive is skipped
+/// and logged once, so its denies are lost.
+/// Out of reach, not emulated: a global dir under a `\\` (UNC or device) root is never
+/// deemed equal to `OPENCODE_CONFIG_DIR`, so that pair loads last; on POSIX a source is
+/// read at its raw joined spelling, which the kernel resolves through symlinks before
+/// `..`, while opencode normalizes lexically; a non-UTF-8 env value decodes lossily,
+/// matching opencode only if Bun decodes it the same way (unverified); a bare-drive `X:`
+/// base stays drive-relative, as Node's `path.join` keeps it, and maps like any
+/// same-drive drive-relative path; the child's cwd for another drive (`=X:`) isn't
+/// modeled.
+/// Not listed: project config (`opencode.json(c)` and `.opencode/` dirs from the run
+/// dir up), which reviews disable and Plan/Research sessions keep; remote sources (an
+/// auth entry's `.well-known/opencode`, the console org config); macOS managed
+/// preferences; and a legacy TOML `config`, which opencode folds into `config.json`.
+fn opencode_config_sources(
+    config_path: Option<&str>,
+    dir: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Vec<OpencodeConfigSource> {
+    let var = |key: &str| env(key).filter(|value| !value.is_empty());
+    let mut files: Vec<PathBuf> = Vec::new();
+    let windows = cfg!(windows);
+    let xdg = var("XDG_CONFIG_HOME");
+    let global = xdg
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".config")));
+    if let Some(global) = global {
+        let dir = global.join("opencode");
+        files.extend(["config.json", "opencode.json", "opencode.jsonc"].map(|f| dir.join(f)));
+    }
+    let config = config_path
+        .map(str::to_string)
+        .or_else(|| var("OPENCODE_CONFIG"));
+    files.extend(config.map(PathBuf::from));
+    let test_home = env("OPENCODE_TEST_HOME");
+    let dot_home = test_home
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| home.map(Path::to_path_buf));
+    // opencode's own spellings of the global dir and `<home>/.opencode`.
+    let global_spelled = match &xdg {
+        Some(xdg) => node_path_join(&[xdg, "opencode"], windows),
+        None => home
+            .and_then(Path::to_str)
+            .and_then(|h| node_path_join(&[h, ".config", "opencode"], windows)),
+    };
+    let dot_spelled = test_home
+        .as_deref()
+        .or_else(|| home.and_then(Path::to_str))
+        .and_then(|h| node_path_join(&[h, ".opencode"], windows));
+    let config_dir = var("OPENCODE_CONFIG_DIR");
+    let at_global = config_dir.is_some() && config_dir == global_spelled;
+    let mut dirs = Vec::new();
+    dirs.extend(config_dir.clone().filter(|_| at_global).map(PathBuf::from));
+    dirs.extend(dot_home.map(|h| h.join(".opencode")));
+    if !at_global && config_dir != dot_spelled {
+        dirs.extend(config_dir.map(PathBuf::from));
+    }
+    for dir in dirs {
+        files.extend(["opencode.json", "opencode.jsonc"].map(|f| dir.join(f)));
+    }
+    let drive = |path: &Path| match path.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+            std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => {
+                Some(letter.to_ascii_uppercase())
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    let file = |path: PathBuf| {
+        let drive_relative = !path.has_root()
+            && matches!(
+                path.components().next(),
+                Some(std::path::Component::Prefix(_))
+            );
+        if !drive_relative {
+            return Some(OpencodeConfigSource::File(dir.join(path)));
+        }
+        // The child resolves `C:cfg` against its cwd when that sits on drive C.
+        if drive(&path).is_some() && drive(&path) == drive(dir) {
+            let rest: PathBuf = path.components().skip(1).collect();
+            return Some(OpencodeConfigSource::File(dir.join(rest)));
+        }
+        log_mirror_once(format!(
+            "opencode config path {} is drive-relative; its read rules are not mirrored",
+            path.display()
+        ));
+        None
+    };
+    let mut sources: Vec<OpencodeConfigSource> = files.into_iter().filter_map(&file).collect();
+    sources.extend(var("OPENCODE_CONFIG_CONTENT").map(OpencodeConfigSource::Inline));
+    let managed = var("OPENCODE_TEST_MANAGED_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                let data = var("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into());
+                PathBuf::from(data).join("opencode")
+            } else if cfg!(target_os = "macos") {
+                PathBuf::from("/Library/Application Support/opencode")
+            } else {
+                PathBuf::from("/etc/opencode")
+            }
+        });
+    sources.extend(
+        ["opencode.json", "opencode.jsonc"]
+            .into_iter()
+            .filter_map(|f| file(managed.join(f))),
+    );
+    sources
+}
+
+/// Node's `path.join`, which Bun's matches, as opencode's `===` compares its results:
+/// empty parts drop, the rest join on the platform separator, and the result
+/// normalizes (`/` reads as a separator on Windows too, empty and `.` segments drop, `..`
+/// pops a segment). None for a Windows path under a `\\` root (UNC or device), whose
+/// normalization isn't modeled.
+fn node_path_join(parts: &[&str], windows: bool) -> Option<String> {
+    let sep = if windows { "\\" } else { "/" };
+    let is_sep = |c: char| c == '/' || (windows && c == '\\');
+    let parts: Vec<&str> = parts.iter().copied().filter(|p| !p.is_empty()).collect();
+    let joined = parts.join(sep);
+    if joined.is_empty() {
+        return Some(".".to_string());
+    }
+    let mut chars = joined.chars();
+    let (first, second, third) = (chars.next(), chars.next(), chars.next());
+    let (device, absolute, rest) = match (first, second) {
+        (Some(a), Some(b)) if windows && is_sep(a) && is_sep(b) => return None,
+        (Some(a), _) if is_sep(a) => ("", true, &joined[1..]),
+        (Some(a), Some(':')) if windows && a.is_ascii_alphabetic() => {
+            match third.is_some_and(is_sep) {
+                true => (&joined[..2], true, &joined[3..]),
+                false => (&joined[..2], false, &joined[2..]),
+            }
+        }
+        _ => ("", false, joined.as_str()),
+    };
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in rest.split(is_sep) {
+        match segment {
+            "" | "." => {}
+            ".." if segments.last().is_some_and(|last| *last != "..") => {
+                segments.pop();
+            }
+            ".." if absolute => {}
+            _ => segments.push(segment),
+        }
+    }
+    let mut tail = segments.join(sep);
+    if tail.is_empty() && !absolute {
+        tail.push('.');
+    }
+    if !tail.is_empty() && joined.ends_with(is_sep) {
+        tail.push_str(sep);
+    }
+    let root = if absolute { sep } else { "" };
+    Some(format!("{device}{root}{tail}"))
+}
+
+/// Parses config text the way opencode's loader does (jsonc-parser, trailing commas
+/// allowed): `//` and `/* */` comments and trailing commas outside strings drop
+/// before a strict parse; a `//` comment ends at CR or LF. None when it still isn't
+/// JSON.
+fn parse_jsonc<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    // Index in `out` of a comma that only whitespace has followed so far, and the
+    // indexes of trailing commas, dropped in one pass at the end.
+    let mut comma: Option<usize> = None;
+    let mut trailing: Vec<usize> = Vec::new();
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '/' if chars.peek() == Some(&'/') => {
+                while chars
+                    .next_if(|&next| next != '\n' && next != '\r')
+                    .is_some()
+                {}
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = None;
+                loop {
+                    match chars.next() {
+                        Some('/') if prev == Some('*') => break,
+                        Some(next) => prev = Some(next),
+                        None => return None,
+                    }
+                }
+                out.push(' ');
+            }
+            c if c.is_whitespace() => out.push(c),
+            c => {
+                if let Some(at) = comma.take() {
+                    if c == '}' || c == ']' {
+                        trailing.push(at);
+                    }
+                }
+                if c == ',' {
+                    comma = Some(out.len());
+                }
+                in_string = c == '"';
+                out.push(c);
+            }
+        }
+    }
+    let mut out = out.into_bytes();
+    let mut trailing = trailing.into_iter().peekable();
+    let mut at = 0;
+    out.retain(|_| {
+        let keep = trailing.next_if_eq(&at).is_none();
+        at += 1;
+        keep
+    });
+    serde_json::from_slice(&out).ok()
+}
+
+/// A config value as opencode's JS parse holds it: an object's entries in JS property
+/// order (array-index keys ascending, then the rest in first-seen order; a repeated key
+/// keeps its first position and takes its last value, as `JSON.parse` and jsonc-parser
+/// do), a string, or any other value by its JS truthiness (all a legacy `tools` flag
+/// needs). serde_json's own map sorts keys, which would hide rule order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConfigValue {
+    Object(Vec<(String, ConfigValue)>),
+    String(String),
+    Other(bool),
+}
+
+/// `key`'s value as a JS array index, the keys JS property order puts first.
+fn js_array_index(key: &str) -> Option<u32> {
+    let canonical = key == "0"
+        || (!key.is_empty() && !key.starts_with('0') && key.bytes().all(|b| b.is_ascii_digit()));
+    canonical
+        .then(|| key.parse::<u32>().ok())
+        .flatten()
+        .filter(|&index| index != u32::MAX)
+}
+
+/// Puts first-seen-ordered entries in JS property order (a stable sort).
+fn js_order(entries: &mut [(String, ConfigValue)]) {
+    entries.sort_by_key(|(key, _)| js_array_index(key).map_or((1, 0), |index| (0, index)));
+}
+
+/// Sets `key` as a JS assignment does: an existing key keeps its position.
+fn js_set(
+    entries: &mut Vec<(String, ConfigValue)>,
+    at: &mut HashMap<String, usize>,
+    key: String,
+    value: ConfigValue,
+) {
+    match at.get(&key) {
+        Some(&index) => entries[index].1 = value,
+        None => {
+            at.insert(key.clone(), entries.len());
+            entries.push((key, value));
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = ConfigValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON value")
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<ConfigValue, E> {
+                Ok(ConfigValue::Other(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<ConfigValue, E> {
+                Ok(ConfigValue::Other(v != 0))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<ConfigValue, E> {
+                Ok(ConfigValue::Other(v != 0))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<ConfigValue, E> {
+                Ok(ConfigValue::Other(v != 0.0 && !v.is_nan()))
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<ConfigValue, E> {
+                Ok(ConfigValue::String(v.to_string()))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<ConfigValue, E> {
+                Ok(ConfigValue::Other(false))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<ConfigValue, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(ConfigValue::Other(true))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<ConfigValue, A::Error> {
+                let (mut entries, mut at) = (Vec::new(), HashMap::new());
+                while let Some((key, value)) = map.next_entry::<String, ConfigValue>()? {
+                    js_set(&mut entries, &mut at, key, value);
+                }
+                js_order(&mut entries);
+                Ok(ConfigValue::Object(entries))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// remeda's `mergeDeep`, which opencode 1.18.18 merges config layers with: `dest`'s keys
+/// keep their positions, `src`'s new keys follow, and a key both hold takes `src`'s
+/// value, merged recursively when both are objects.
+fn merge_deep(
+    mut dest: Vec<(String, ConfigValue)>,
+    src: Vec<(String, ConfigValue)>,
+) -> Vec<(String, ConfigValue)> {
+    let mut at: HashMap<String, usize> = dest
+        .iter()
+        .enumerate()
+        .map(|(index, (key, _))| (key.clone(), index))
+        .collect();
+    for (key, value) in src {
+        let Some(&index) = at.get(&key) else {
+            at.insert(key.clone(), dest.len());
+            dest.push((key, value));
+            continue;
+        };
+        let slot = &mut dest[index].1;
+        *slot = match (std::mem::replace(slot, ConfigValue::Other(false)), value) {
+            (ConfigValue::Object(old), ConfigValue::Object(new)) => {
+                ConfigValue::Object(merge_deep(old, new))
+            }
+            (_, value) => value,
+        };
+    }
+    js_order(&mut dest);
+    dest
+}
+
+/// opencode's `Wildcard.match` (1.18.18): `\` reads as `/` on both sides, `*` matches
+/// any run and `?` one character, anything else matches itself case-insensitively
+/// (regex flags "si"; exact for ASCII keys, as JS folds no non-ASCII character to
+/// ASCII), and a trailing ` *` also matches the bare prefix.
+fn wildcard_matches(pattern: &str, key: &str) -> bool {
+    // Greedy match, backtracking to the last `*`, so no pattern costs more than
+    // pattern length times key length.
+    fn glob(p: &[char], k: &[char]) -> bool {
+        let (mut pi, mut ki) = (0, 0);
+        let mut star: Option<(usize, usize)> = None;
+        while ki < k.len() {
+            match p.get(pi) {
+                Some('*') => {
+                    star = Some((pi, ki));
+                    pi += 1;
+                }
+                Some(&c) if c == '?' || c.eq_ignore_ascii_case(&k[ki]) => {
+                    pi += 1;
+                    ki += 1;
+                }
+                _ => match star {
+                    Some((sp, sk)) => {
+                        star = Some((sp, sk + 1));
+                        pi = sp + 1;
+                        ki = sk + 1;
+                    }
+                    None => return false,
+                },
+            }
+        }
+        p[pi..].iter().all(|&c| c == '*')
+    }
+    let chars = |s: &str| s.replace('\\', "/").chars().collect::<Vec<char>>();
+    let (p, k) = (chars(pattern), chars(key));
+    p.strip_suffix(&[' ', '*'])
+        .is_some_and(|bare| glob(bare, &k))
+        || glob(&p, &k)
+}
+
+/// The user's read rules a pin mirrors (see `opencode_permission_json`), read from the
+/// merged `permission` the way opencode's `fromConfig` flattens it: top-level keys in
+/// merged order, a string value as one rule on pattern `*`, an object's rules in its
+/// order, kept when the key matches the tool under opencode's matcher (`*`, `r*`,
+/// `READ` for read). A catch-all is any pattern matching every input (`*`, `**`,
+/// `* *`, `** *`; see `catch_all`), and one
+/// whose action is not allow, deny or ask counts as a deny (failing closed); any other
+/// rule with such an action is skipped. `star_denied`: the last catch-all read rule
+/// closes (no catch-all rule allows). `allows`: the allow patterns after the last
+/// closing catch-all; one before it is dead in plain opencode. `denies`: every deny or
+/// ask pattern wherever it sits, so a deny a later rule allows is still mirrored. Both
+/// deduped, first-seen order, catch-alls left out. `denied_tools`: each of grep, glob
+/// and list whose last catch-all rule closes it. Approximate: the pin emits every deny
+/// after every allow, so it can be narrower than plain opencode but never wider, for
+/// the rules mirrored.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct OpencodeReadMirror {
+    star_denied: bool,
+    allows: Vec<String>,
+    denies: Vec<String>,
+    denied_tools: Vec<&'static str>,
+}
+
+/// The tools besides read whose outright deny a ReadOnly pin mirrors.
+const MIRRORED_TOOLS: [&str; 3] = ["grep", "glob", "list"];
+
+/// Whether `pattern` matches every input: a non-empty run of `*`, alone or followed by
+/// one ` *` (opencode's matcher makes a trailing ` *` optional).
+fn catch_all(pattern: &str) -> bool {
+    let run = pattern.strip_suffix(" *").unwrap_or(pattern);
+    !run.is_empty() && run.bytes().all(|b| b == b'*')
+}
+
+impl OpencodeReadMirror {
+    fn from_permission(permission: &[(String, ConfigValue)]) -> Self {
+        let rules_for = |tool: &str| {
+            let mut rules: Vec<(&str, &str)> = Vec::new();
+            for (key, value) in permission {
+                if !wildcard_matches(key, tool) {
+                    continue;
+                }
+                match value {
+                    ConfigValue::String(action) => rules.push(("*", action)),
+                    ConfigValue::Object(patterns) => {
+                        for (pattern, action) in patterns {
+                            if let ConfigValue::String(action) = action {
+                                rules.push((pattern, action));
+                            }
+                        }
+                    }
+                    ConfigValue::Other(_) => {}
+                }
+            }
+            rules
+        };
+        let closes = |&(pattern, action): &(&str, &str)| catch_all(pattern) && action != "allow";
+        let closed = |rules: &[(&str, &str)]| {
+            let last = rules.iter().rev().find(|(pattern, _)| catch_all(pattern));
+            last.is_some_and(closes)
+        };
+        let rules = rules_for("read");
+        let last_star_deny = rules.iter().rposition(closes);
+        let mut mirror = Self {
+            star_denied: closed(&rules),
+            denied_tools: MIRRORED_TOOLS
+                .into_iter()
+                .filter(|tool| closed(&rules_for(tool)))
+                .collect(),
+            ..Self::default()
+        };
+        let mut seen: HashSet<(bool, &str)> = HashSet::new();
+        for (index, &(pattern, action)) in rules.iter().enumerate() {
+            let (set, deny) = match action {
+                "allow" if last_star_deny.is_none_or(|at| index > at) => {
+                    (&mut mirror.allows, false)
+                }
+                "deny" | "ask" => (&mut mirror.denies, true),
+                _ => continue,
+            };
+            if !catch_all(pattern) && seen.insert((deny, pattern)) {
+                set.push(pattern.to_string());
+            }
+        }
+        mirror
+    }
+}
+
+/// What reading one config file gave the resolver.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigRead {
+    Missing,
+    TooLarge,
+    Bytes(Vec<u8>),
+}
+
+/// The largest config file the resolver reads; a larger one is skipped (logged once).
+const OPENCODE_CONFIG_CAP: usize = 4 << 20;
+
+/// Reads a config file for the resolver: anything but a regular file (a directory, a
+/// FIFO, which would block the open) is missing, and the read stops past the cap.
+fn read_config_file(path: &Path) -> ConfigRead {
+    use std::io::Read;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return ConfigRead::Missing;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return ConfigRead::Missing;
+    };
+    let mut bytes = Vec::new();
+    match file
+        .take(OPENCODE_CONFIG_CAP as u64 + 1)
+        .read_to_end(&mut bytes)
+    {
+        Ok(_) if bytes.len() > OPENCODE_CONFIG_CAP => ConfigRead::TooLarge,
+        Ok(_) => ConfigRead::Bytes(bytes),
+        Err(_) => ConfigRead::Missing,
+    }
+}
+
+/// opencode's `{env:NAME}` substitution over raw config text (`ConfigVariable`'s
+/// `/\{env:([^}]+)\}/g`): unset or empty gives "". `{file:...}` is not substituted,
+/// so a pattern built from one is mirrored literally.
+fn substitute_env(text: &str, env: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("{env:") {
+        let after = &rest[at + "{env:".len()..];
+        match after.find('}') {
+            None => break,
+            Some(0) => {
+                out.push_str(&rest[..=at]);
+                rest = &rest[at + 1..];
+            }
+            Some(end) => {
+                out.push_str(&rest[..at]);
+                out.push_str(&env(&after[..end]).unwrap_or_default());
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Logs `message` once per process: names only, never config content.
+fn log_mirror_once(message: String) {
+    static LOGGED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = LOGGED
+        .get_or_init(Mutex::default)
+        .lock()
+        .is_ok_and(|mut logged| logged.insert(message.clone()));
+    if first {
+        eprintln!("gitdesktop: {message}");
+    }
+}
+
+/// The home opencode 1.18.18 resolves (Bun's `os.homedir()`): `USERPROFILE` on Windows,
+/// `HOME` elsewhere; unset asks the OS (`os_home`). An empty `USERPROFILE` gives None,
+/// so the home sources are skipped: opencode exits at startup on one (measured,
+/// Windows). An empty `HOME` asks the OS like an unset one (measured on Linux; macOS,
+/// unprobed, shares Bun's POSIX path).
+fn opencode_home(
+    env: &dyn Fn(&str) -> Option<String>,
+    windows: bool,
+    os_home: &dyn Fn() -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    match env(if windows { "USERPROFILE" } else { "HOME" }) {
+        Some(home) if home.is_empty() && windows => None,
+        Some(home) if !home.is_empty() => Some(PathBuf::from(home)),
+        _ => os_home(),
+    }
+}
+
+/// [`opencode_read_mirror`] over its env, home and file reads, replaying opencode
+/// 1.18.18's `Config.loadInstanceState`: each source's text is decoded lossily (as
+/// opencode's decoder does), `{env:}`-substituted and JSONC-parsed in source order, and
+/// its `permission` (a string reads as `{"*": <it>}`, as opencode's schema decodes it)
+/// and `tools` merged into the layers before it (`merge_deep`). An inherited
+/// `OPENCODE_PERMISSION`, which the pin replaces on the child, merges after the files as
+/// strict JSON (opencode uses `JSON.parse`); then the legacy `tools` map, each flag as
+/// its key's `allow` or `deny` (`write`/`edit`/`patch` as `edit`), has the merged
+/// `permission` merged onto it: the map's keys keep their positions and take
+/// permission's values, and permission's other keys follow. A missing, unreadable or
+/// empty source contributes nothing; an over-cap or unparseable one is logged once by
+/// name. Residuals: such a skipped source's read rules don't bind pinned runs, and so
+/// are lost: a file over the cap, and JSON that `JSON.parse` and jsonc-parser accept but
+/// serde_json rejects (a lone surrogate escape, nesting deeper than 128, a float such
+/// as `1e400`).
+fn opencode_read_mirror_with(
+    config_path: Option<&str>,
+    dir: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+    read: &dyn Fn(&Path) -> ConfigRead,
+) -> OpencodeReadMirror {
+    let mut permission: Vec<(String, ConfigValue)> = Vec::new();
+    let mut tools: Option<Vec<(String, ConfigValue)>> = None;
+    for source in opencode_config_sources(config_path, dir, env, home) {
+        let (name, text) = match source {
+            OpencodeConfigSource::File(path) => match read(&path) {
+                ConfigRead::Bytes(bytes) => (
+                    path.display().to_string(),
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                ),
+                ConfigRead::TooLarge => {
+                    log_mirror_once(format!(
+                        "opencode config {} is over 4 MiB; its read rules are not mirrored",
+                        path.display()
+                    ));
+                    continue;
+                }
+                ConfigRead::Missing => continue,
+            },
+            OpencodeConfigSource::Inline(text) => ("OPENCODE_CONFIG_CONTENT".to_string(), text),
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        let Some(config) = parse_jsonc::<ConfigValue>(&substitute_env(&text, env)) else {
+            log_mirror_once(format!(
+                "opencode config {name} is not valid JSONC; its read rules are not mirrored"
+            ));
+            continue;
+        };
+        let ConfigValue::Object(config) = config else {
+            continue;
+        };
+        for (key, value) in config {
+            match (key.as_str(), value) {
+                ("permission", ConfigValue::String(action)) => {
+                    let star = vec![("*".to_string(), ConfigValue::String(action))];
+                    permission = merge_deep(permission, star);
+                }
+                ("permission", ConfigValue::Object(layer)) => {
+                    permission = merge_deep(permission, layer);
+                }
+                ("tools", ConfigValue::Object(layer)) => {
+                    tools = Some(merge_deep(tools.unwrap_or_default(), layer));
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(inherited) = env("OPENCODE_PERMISSION").filter(|value| !value.is_empty()) {
+        match serde_json::from_str::<ConfigValue>(&inherited) {
+            Ok(ConfigValue::Object(layer)) => permission = merge_deep(permission, layer),
+            // opencode spreads a non-object into index keys, which `read` never matches.
+            Ok(_) => {}
+            Err(_) => log_mirror_once(
+                "inherited OPENCODE_PERMISSION is not valid JSON; its read rules are not mirrored"
+                    .to_string(),
+            ),
+        }
+    }
+    if let Some(tools) = tools {
+        let (mut legacy, mut at) = (Vec::new(), HashMap::new());
+        for (tool, enabled) in tools {
+            let on = match &enabled {
+                ConfigValue::String(value) => !value.is_empty(),
+                ConfigValue::Object(_) => true,
+                ConfigValue::Other(truthy) => *truthy,
+            };
+            let key = match tool.as_str() {
+                "write" | "edit" | "patch" => "edit".to_string(),
+                _ => tool,
+            };
+            let action = if on { "allow" } else { "deny" };
+            js_set(
+                &mut legacy,
+                &mut at,
+                key,
+                ConfigValue::String(action.to_string()),
+            );
+        }
+        js_order(&mut legacy);
+        permission = merge_deep(legacy, permission);
+    }
+    OpencodeReadMirror::from_permission(&permission)
+}
+
+/// The env edits a spawn makes, keyed as the platform compares names (`fold`: Windows
+/// folds case).
+struct ChildEnvEdits {
+    fold: bool,
+    vars: HashMap<String, Option<String>>,
+}
+
+impl ChildEnvEdits {
+    fn key(&self, name: &str) -> String {
+        if self.fold {
+            name.to_ascii_uppercase()
+        } else {
+            name.to_string()
+        }
+    }
+}
+
+impl ChildEnv for ChildEnvEdits {
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.vars.insert(self.key(key), Some(value.to_string()));
+    }
+    fn unset_var(&mut self, key: &str) {
+        self.vars.insert(self.key(key), None);
+    }
+}
+
+/// The env an opencode child sees, for the read mirror: `inherited` (the app's env)
+/// under the edits every opencode spawn makes (`sanitize_child_env_with` over
+/// `overrides` and `merged_path`, `NO_COLOR`, `CLICOLOR`, `OPENCODE_CONFIG`,
+/// `OPENCODE_DISABLE_MODELS_FETCH`), names compared case-folded when `fold`. An edit's
+/// set value wins and its unset reads None. An inherited value that isn't valid Unicode
+/// decodes lossily, so its slot stays taken (a path from it names no file) and never
+/// falls back to the slot's default; only an unset value does.
+fn opencode_child_env<'a>(
+    config_path: Option<&str>,
+    overrides: &[(&str, Option<String>)],
+    merged_path: Option<&str>,
+    fold: bool,
+    inherited: &'a dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    let mut edits = ChildEnvEdits {
+        fold,
+        vars: HashMap::new(),
+    };
+    sanitize_child_env_with(&mut edits, overrides, merged_path);
+    for (key, value) in [
+        ("NO_COLOR", "1"),
+        ("CLICOLOR", "0"),
+        ("OPENCODE_DISABLE_MODELS_FETCH", "1"),
+    ] {
+        edits.set_var(key, value);
+    }
+    if let Some(path) = config_path {
+        edits.set_var("OPENCODE_CONFIG", path);
+    }
+    move |key: &str| match edits.vars.get(&edits.key(key)) {
+        Some(value) => value.clone(),
+        None => inherited(key).map(|value| value.to_string_lossy().into_owned()),
+    }
+}
+
+/// The read rules the user's local opencode config sets, for a pinned run's mirror (see
+/// `opencode_config_sources` for the sources). `config_path` is the `OPENCODE_CONFIG`
+/// the app passes the run and `dir` its `--dir` and spawn cwd. Sources and `{env:}`
+/// read the child's env (`opencode_child_env`). Residuals: the pin itself, a review's
+/// `OPENCODE_DISABLE_PROJECT_CONFIG` and Research's `OPENCODE_ENABLE_EXA` read the app's
+/// values; `PATH` and the shell-PATH marker are read before the spawn waits on an
+/// in-flight shell capture, so they can differ from the child's; and opencode's
+/// well-known auth tokens, which outrank the env for `{env:}`, aren't consulted. Empty
+/// under test, so no test reads the real user config: tests drive
+/// [`opencode_read_mirror_with`] and [`opencode_child_env`].
+fn opencode_read_mirror(config_path: Option<&str>, dir: &Path) -> OpencodeReadMirror {
+    if cfg!(test) {
+        return OpencodeReadMirror::default();
+    }
+    // `std::env::var_os` may panic on an empty key or one holding `=` or NUL.
+    let inherited = |key: &str| {
+        (!key.is_empty() && !key.contains(['=', '\0']))
+            .then(|| std::env::var_os(key))
+            .flatten()
+    };
+    let env = opencode_child_env(
+        config_path,
+        child_env_overrides(),
+        merged_shell_path().as_deref(),
+        cfg!(windows),
+        &inherited,
+    );
+    let home = opencode_home(&env, cfg!(windows), &std::env::home_dir);
+    opencode_read_mirror_with(config_path, dir, &env, home.as_deref(), &read_config_file)
 }
 
 /// The whole extra env of an `agent_review` spawn. Every opencode review is
@@ -2247,12 +3198,14 @@ fn opencode_permission_json(pin: OpencodePin, mcp_servers: &[&str]) -> String {
 /// the repo's `opencode.json`/`.opencode/`/AGENTS.md can widen it; `OPENCODE_CONFIG`
 /// (the self-MCP config) still loads under that flag. `COPILOT_ALLOW_ALL=false`
 /// rides only the diff-only arm without self-MCP: that arm never passes
-/// `--allow-all-tools`, so no env-vs-flag precedence is involved.
+/// `--allow-all-tools`, so no env-vs-flag precedence is involved. `mirror` is the
+/// user's mirrored read rules (`opencode_read_mirror`).
 fn review_env(
     kind: AgentKind,
     repo_aware: bool,
     mcp_config_path: Option<&str>,
     self_mcp_servers: &[&str],
+    mirror: &OpencodeReadMirror,
 ) -> Vec<(&'static str, String)> {
     match kind {
         AgentKind::Opencode => {
@@ -2270,7 +3223,7 @@ fn review_env(
             };
             env.push((
                 "OPENCODE_PERMISSION",
-                opencode_permission_json(pin, self_mcp_servers),
+                opencode_permission_json(pin, self_mcp_servers, mirror),
             ));
             env.push(("OPENCODE_DISABLE_PROJECT_CONFIG", "1".to_string()));
             env
@@ -2283,15 +3236,20 @@ fn review_env(
 }
 
 /// The whole opencode env of an `agent_session` spawn (host and container). A
-/// read-only session carries the `ReadOnly` pin plus `<name>_*` per opted-in
-/// server, but keeps the repo's project config, so the repo's own opencode
-/// config (agent `permission`, `.opencode/agent/*.md`, plugins) can re-enable
-/// tools there. A write-capable session carries no pin: its worktree confines it.
+/// read-only session carries the `ReadOnly` pin (its `<name>_*` allows only for
+/// servers it passes, and Plan/Research pass none today), but keeps the repo's
+/// project config, so the repo's own opencode config (agent `permission`,
+/// `.opencode/agent/*.md`, plugins) can re-enable tools there, and its read rules
+/// aren't mirrored: `mirror` holds those of the run's other local config sources
+/// (`opencode_read_mirror`). A container passes none: its opencode loads none of the
+/// host's files, and configs baked into its image aren't mirrored either.
+/// A write-capable session carries no pin: its worktree confines it.
 fn opencode_session_env(
     read_only: bool,
     research: bool,
     config_path: Option<String>,
     mcp_servers: &[&str],
+    mirror: &OpencodeReadMirror,
 ) -> Vec<(&'static str, String)> {
     let mut env = Vec::new();
     if let Some(path) = config_path {
@@ -2305,7 +3263,7 @@ fn opencode_session_env(
     if read_only {
         env.push((
             "OPENCODE_PERMISSION",
-            opencode_permission_json(OpencodePin::ReadOnly, mcp_servers),
+            opencode_permission_json(OpencodePin::ReadOnly, mcp_servers, mirror),
         ));
     }
     env
@@ -3404,7 +4362,18 @@ pub async fn agent_review(
     // opencode reads its MCP config from `OPENCODE_CONFIG` (no flag); the others carry
     // it in argv. `review_env` also carries the read-only pins.
     let self_names: Vec<&str> = self_specs.iter().map(|s| s.name.as_str()).collect();
-    let extra_env = review_env(kind, repo_aware, mcp_config_path.as_deref(), &self_names);
+    let read_mirror = if kind == AgentKind::Opencode {
+        opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path))
+    } else {
+        OpencodeReadMirror::default()
+    };
+    let extra_env = review_env(
+        kind,
+        repo_aware,
+        mcp_config_path.as_deref(),
+        &self_names,
+        &read_mirror,
+    );
 
     // Codex always explores the repo, so it gets the longer agentic budget too — and
     // a self-MCP review is agentic regardless of `repo_aware` (the agent pulls the
@@ -3833,7 +4802,13 @@ pub async fn agent_session(
             let config_path = crate::agent_sandbox::container_mcp_config("opencode")
                 .map(|(_, path)| path)
                 .filter(|_| !mcp_specs.is_empty() || opencode_research);
-            opencode_session_env(read_only, opencode_research, config_path, &mcp_names)
+            opencode_session_env(
+                read_only,
+                opencode_research,
+                config_path,
+                &mcp_names,
+                &OpencodeReadMirror::default(),
+            )
         } else {
             Vec::new()
         };
@@ -3880,7 +4855,18 @@ pub async fn agent_session(
     // opencode has no config-file flag: it reads `OPENCODE_CONFIG`, and merges
     // config layers, so ours adds to the user's rather than replacing it.
     let host_extra_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {
-        opencode_session_env(read_only, opencode_research, mcp_config_path, &mcp_names)
+        let read_mirror = if read_only {
+            opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&worktree_path))
+        } else {
+            OpencodeReadMirror::default()
+        };
+        opencode_session_env(
+            read_only,
+            opencode_research,
+            mcp_config_path,
+            &mcp_names,
+            &read_mirror,
+        )
     } else {
         Vec::new()
     };
@@ -4361,9 +5347,9 @@ mod child_env_tests {
 
     #[test]
     fn portable_pty_env_remove_drops_an_inherited_var() {
-        // The PTY applier only subtracts, so `CommandBuilder` must snapshot the
-        // parent environment into its own map — an `env_remove` that only cleared
-        // caller overrides would leave the bundle paths in place for the terminal.
+        // The PTY applier strips inherited bundle paths through `env_remove`, so
+        // `CommandBuilder` must snapshot the parent environment into its own map: an
+        // `env_remove` that only cleared caller overrides would leave them in place.
         let mut cmd = portable_pty::CommandBuilder::new("x");
         assert!(
             cmd.get_env("PATH").is_some(),
@@ -4973,6 +5959,125 @@ mod child_env_tests {
         let flag = tokio::sync::watch::Sender::new(0usize);
         drop(InFlightGuard(&flag));
         assert_eq!(*flag.borrow(), 0);
+    }
+
+    #[tokio::test]
+    async fn shell_reprime_counts_its_capture_before_the_task_runs() {
+        let flag: &'static _ = Box::leak(Box::new(tokio::sync::watch::Sender::new(0usize)));
+        let handle = || Some(tokio::runtime::Handle::current());
+        let unused = || async {};
+        let due = Instant::now();
+        let now = due + SHELL_RETRY_COOLDOWN;
+        // Unarmed, cooling down, or with no runtime: nothing spawns or counts, and a
+        // window the caller couldn't spawn for stays armed.
+        assert!(reprime_if_due(&Mutex::new(None), flag, handle(), now, unused).is_none());
+        let cooling = Mutex::new(Some(now));
+        assert!(reprime_if_due(&cooling, flag, handle(), now, unused).is_none());
+        let stamp = Mutex::new(Some(due));
+        assert!(reprime_if_due(&stamp, flag, None, now, unused).is_none());
+        assert_eq!(*stamp.lock().unwrap(), Some(due));
+        assert_eq!(*flag.borrow(), 0);
+
+        let release = std::sync::Arc::new(Notify::new());
+        let gate = std::sync::Arc::clone(&release);
+        let task = reprime_if_due(&stamp, flag, handle(), now, || async move {
+            gate.notified().await;
+        })
+        .expect("a due window spawns");
+        assert_eq!(*stamp.lock().unwrap(), Some(now), "restamped");
+        // A current-thread runtime hasn't polled the task yet: only the claim counts it,
+        // so the spawn that triggered the re-prime waits for it.
+        assert_eq!(*flag.borrow(), 1);
+        // A second caller sees it in flight and spawns nothing.
+        *stamp.lock().unwrap() = Some(due);
+        assert!(reprime_if_due(&stamp, flag, handle(), now, unused).is_none());
+        let mut rx = flag.subscribe();
+        release.notify_one();
+        let cancel = Notify::new();
+        assert_eq!(
+            wait_out_capture(&mut rx, &cancel, Duration::from_secs(5)).await,
+            CaptureWait::Finished
+        );
+        task.await.unwrap();
+        assert_eq!(*flag.borrow(), 0);
+    }
+
+    /// Source-order breaches of the re-prime seam. The off-Windows wrapper's body must
+    /// be exactly the seam call, and the seam must enter its guard after the claim and
+    /// before the stamp lock drops: the wrapper isn't compiled on Windows, and only a
+    /// racing reader could see the order, so no runtime test reaches either.
+    fn reprime_seam_violations(src: &str) -> Vec<String> {
+        let src = src.replace("\r\n", "\n");
+        let body = |header: &str| -> Option<String> {
+            let start = src.find(header)?;
+            let open = start + src[start..].find("{\n")? + 2;
+            let close = open + src[open..].find("\n}\n")?;
+            let code: String = src[open..close]
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect();
+            Some(code.split_whitespace().collect())
+        };
+        let seam_call = concat!(
+            "reprime_if_due(&SHELL_RETRY_STAMP,shell_capture_in_flight(),",
+            "tokio::runtime::Handle::try_current().ok(),Instant::now(),prime_shell_path,);",
+        );
+        let mut bad = Vec::new();
+        match body("fn reprime_shell_path_if_due() {") {
+            Some(b) if b == seam_call => {}
+            Some(b) => bad.push(format!("wrapper body is not the seam call: {b}")),
+            None => bad.push("no reprime_shell_path_if_due".into()),
+        }
+        let Some(seam) = body("fn reprime_if_due<") else {
+            bad.push("no reprime_if_due".into());
+            return bad;
+        };
+        let mut at = Vec::new();
+        for step in [
+            "claim_shell_retry(",
+            "InFlightGuard::enter(flag)",
+            "drop(stamp)",
+            "spawn_counted(",
+        ] {
+            match seam.matches(step).count() {
+                1 => at.push(seam.find(step).unwrap()),
+                n => bad.push(format!("{step} appears {n} times")),
+            }
+        }
+        if at.len() == 4 && !at.windows(2).all(|w| w[0] < w[1]) {
+            bad.push("seam order is not claim, guard, unlock, spawn".into());
+        }
+        bad
+    }
+
+    #[test]
+    fn reprime_seam_source_order_is_pinned() {
+        let src = include_str!("agent.rs").replace("\r\n", "\n");
+        assert_eq!(reprime_seam_violations(&src), Vec::<String>::new());
+        let guard_then_unlock = "    let counted = InFlightGuard::enter(flag);\n    drop(stamp);\n";
+        assert!(src.contains(guard_then_unlock));
+        let unlock_first = src.replacen(
+            guard_then_unlock,
+            "    drop(stamp);\n    let counted = InFlightGuard::enter(flag);\n",
+            1,
+        );
+        assert_eq!(
+            reprime_seam_violations(&unlock_first),
+            ["seam order is not claim, guard, unlock, spawn"]
+        );
+        let seam_call = "    reprime_if_due(\n        &SHELL_RETRY_STAMP,";
+        assert!(src.contains(seam_call));
+        let bare_spawn = src.replacen(
+            seam_call,
+            "    if let Ok(h) = tokio::runtime::Handle::try_current() {\n        h.spawn(prime_shell_path());\n    }\n    let _ = (\n        &SHELL_RETRY_STAMP,",
+            1,
+        );
+        let bad = reprime_seam_violations(&bare_spawn);
+        assert_eq!(bad.len(), 1, "{bad:?}");
+        assert!(
+            bad[0].starts_with("wrapper body is not the seam call"),
+            "{bad:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6497,9 +7602,32 @@ opencode/x-preview-f-free
 
     // --- opencode / Copilot read-only pins -----------------------------------
 
-    const DENY_TAIL: &str = r#""skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#;
+    const DENY_TAIL: &str = r#""skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#;
     const PIN_HEAD: &str = r#"{"*":"deny","*_*":"deny","#;
-    const DENIED_BUILTINS: [&str; 12] = [
+    const NO_MIRROR: OpencodeReadMirror = OpencodeReadMirror {
+        star_denied: false,
+        allows: Vec::new(),
+        denies: Vec::new(),
+        denied_tools: Vec::new(),
+    };
+
+    /// A read mirror from its three sets.
+    fn mirror(star_denied: bool, allows: &[&str], denies: &[&str]) -> OpencodeReadMirror {
+        let owned = |set: &[&str]| set.iter().map(|p| p.to_string()).collect();
+        OpencodeReadMirror {
+            star_denied,
+            allows: owned(allows),
+            denies: owned(denies),
+            denied_tools: Vec::new(),
+        }
+    }
+
+    /// `found` with `tools` denied outright.
+    fn closing(mut found: OpencodeReadMirror, tools: &[&'static str]) -> OpencodeReadMirror {
+        found.denied_tools = tools.to_vec();
+        found
+    }
+    const DENIED_BUILTINS: [&str; 14] = [
         "skill",
         "todowrite",
         "question",
@@ -6507,6 +7635,8 @@ opencode/x-preview-f-free
         "bash",
         "webfetch",
         "websearch",
+        "codesearch",
+        "lsp",
         "task",
         "external_directory",
         "doom_loop",
@@ -6517,27 +7647,30 @@ opencode/x-preview-f-free
     #[test]
     fn opencode_permission_pins_are_exact() {
         assert_eq!(
-            opencode_permission_json(OpencodePin::DiffOnly, &[]),
-            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+            opencode_permission_json(OpencodePin::DiffOnly, &[], &NO_MIRROR),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
         );
         assert_eq!(
-            opencode_permission_json(OpencodePin::ReadOnly, &[]),
-            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"allow","glob":"allow","list":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+            opencode_permission_json(OpencodePin::ReadOnly, &[], &NO_MIRROR),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
         );
         for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
-            let bare = opencode_permission_json(pin, &[]);
+            let bare = opencode_permission_json(pin, &[], &NO_MIRROR);
             let rest = bare.strip_prefix(PIN_HEAD).unwrap();
-            // Server allows sit right after `*_*`, in input order, sanitized.
+            // Server allows, each with its alias, sit right after `*_*`, in input
+            // order, sanitized.
             assert_eq!(
-                opencode_permission_json(pin, &["gitdesktop"]),
-                format!(r#"{PIN_HEAD}"gitdesktop_*":"allow",{rest}"#)
+                opencode_permission_json(pin, &["gitdesktop"], &NO_MIRROR),
+                format!(r#"{PIN_HEAD}"gitdesktop_*":"allow","gitdesktop_?*":"allow",{rest}"#)
             );
             assert_eq!(
-                opencode_permission_json(pin, &["a.b", "x"]),
-                format!(r#"{PIN_HEAD}"a_b_*":"allow","x_*":"allow",{rest}"#)
+                opencode_permission_json(pin, &["a.b", "x"], &NO_MIRROR),
+                format!(
+                    r#"{PIN_HEAD}"a_b_*":"allow","a_b_?*":"allow","x_*":"allow","x_?*":"allow",{rest}"#
+                )
             );
             for servers in [&[][..], &["gitdesktop"][..], &["a.b", "x"][..]] {
-                let out = opencode_permission_json(pin, servers);
+                let out = opencode_permission_json(pin, servers, &NO_MIRROR);
                 assert!(
                     serde_json::from_str::<serde_json::Value>(&out).is_ok(),
                     "{out}"
@@ -6548,10 +7681,866 @@ opencode/x-preview-f-free
         }
     }
 
+    /// The `read` rule set of a pin, asserting `read *` carries the same one.
+    fn read_rule_set(out: &str) -> &str {
+        let start = out.find(r#""read":"#).unwrap() + r#""read":"#.len();
+        let end = out.find(r#","read *":"#).unwrap();
+        let rules = &out[start..end];
+        assert!(
+            out.contains(&format!(r#""read *":{rules},"grep""#)),
+            "{out}"
+        );
+        rules
+    }
+
+    #[test]
+    fn opencode_permission_pins_mirror_the_read_allows_before_the_env_carve_out() {
+        // An allow-list config plus a deny: `*` denied, the allow, the carve-out with
+        // `*.env.example` closed (the user's `*` deny covers it), then the deny.
+        let list = mirror(true, &["src/**"], &["*.pem"]);
+        assert_eq!(
+            opencode_permission_json(OpencodePin::DiffOnly, &[], &list),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+        );
+        assert_eq!(
+            opencode_permission_json(OpencodePin::ReadOnly, &[], &list),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+        );
+        for (found, want) in [
+            // A pattern both allowed and denied is denied, after the carve-out.
+            (
+                mirror(false, &["src/**", "secret/**", "src/**"], &["secret/**"]),
+                r#"{"*":"allow","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","secret/**":"deny"}"#,
+            ),
+            // An allow equal to a carve-out key is dropped, so the carve-out stands; a
+            // deny equal to one turns it to `deny` in place.
+            (
+                mirror(
+                    false,
+                    &["*.env", "*.env.*", "*.env.example", "*"],
+                    &["*.env.example"],
+                ),
+                r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#,
+            ),
+            (
+                mirror(false, &["*.env.example"], &[]),
+                r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"}"#,
+            ),
+            // `*` denied with no allows: every read rule present, and the last one isn't
+            // a bare `*` deny, which would disable the tool.
+            (
+                mirror(true, &[], &[]),
+                r#"{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#,
+            ),
+        ] {
+            for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+                let out = opencode_permission_json(pin, &["gitdesktop"], &found);
+                assert_eq!(read_rule_set(&out), want, "{found:?}");
+                assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+            }
+        }
+    }
+
+    #[test]
+    fn opencode_permission_pins_mirror_the_read_denies_after_the_env_carve_out() {
+        let pem = mirror(false, &[], &["*.pem"]);
+        assert_eq!(
+            opencode_permission_json(OpencodePin::DiffOnly, &[], &pem),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","*.pem":"deny"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","*.pem":"deny"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+        );
+        assert_eq!(
+            opencode_permission_json(OpencodePin::ReadOnly, &[], &pem),
+            r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","*.pem":"deny"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","*.pem":"deny"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
+        );
+        // Arbitrary text is escaped as a JSON string; a repeat or a pin key's own
+        // spelling adds no key, and a carve-out key the user denies turns to `deny`
+        // where it stands, so the last rule is never a bare `*` deny.
+        let uni = "\u{43a}\u{43b}\u{44e}\u{447}.pem";
+        let denies = [
+            "*.pem",
+            r#"a"b\c"#,
+            uni,
+            "*.env.example",
+            "*",
+            "*.env",
+            "*.pem",
+        ];
+        let denies = mirror(false, &[], &denies);
+        let rules = format!(
+            r#"{{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny","a\"b\\c":"deny","{uni}":"deny"}}"#
+        );
+        let out = opencode_permission_json(OpencodePin::DiffOnly, &[], &denies);
+        assert_eq!(
+            out,
+            format!(
+                r#"{PIN_HEAD}"read":{rules},"read *":{rules},"grep":"deny","glob":"deny","list":"deny",{DENY_TAIL}"#
+            )
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["read *"][r#"a"b\c"#], "deny");
+        assert_eq!(v["read *"][uni], "deny");
+        for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+            let out = opencode_permission_json(pin, &["gitdesktop"], &denies);
+            assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+            for read in [r#""read":{"#, r#""read *":{"#] {
+                // No pattern here holds a `}`, so the first one closes the rule set.
+                let start = out.find(read).unwrap() + read.len();
+                let body = &out[start..start + out[start..].find('}').unwrap()];
+                let at = |k: &str| body.find(&format!(r#""{k}":"#)).unwrap();
+                assert!(at("*.env.example") < at("*.pem"), "{body}");
+                assert!(body.ends_with(&format!(r#""{uni}":"deny""#)), "{body}");
+            }
+        }
+    }
+
+    /// A temp tree of opencode config files the resolver seam reads, and the env it
+    /// sees: nothing outside the tree, and no process env.
+    struct ConfigFixture {
+        root: tempfile::TempDir,
+        env: std::collections::HashMap<&'static str, String>,
+    }
+
+    impl ConfigFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().unwrap();
+            let mut env = std::collections::HashMap::new();
+            let managed = root.path().join("managed").display().to_string();
+            env.insert("OPENCODE_TEST_MANAGED_CONFIG_DIR", managed);
+            Self { root, env }
+        }
+
+        fn home(&self) -> PathBuf {
+            self.root.path().join("home")
+        }
+
+        fn write(&self, rel: &str, body: &str) -> PathBuf {
+            let path = self.root.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, body).unwrap();
+            path
+        }
+
+        /// Writes a config whose `permission.read` denies `pattern` alone.
+        fn deny(&self, rel: &str, pattern: &str) -> PathBuf {
+            let body = format!(r#"{{"permission":{{"read":{{"{pattern}":"deny"}}}}}}"#);
+            self.write(rel, &body)
+        }
+
+        /// Points `key` at a path inside the fixture.
+        fn set_path(&mut self, key: &'static str, rel: &str) {
+            let path = self.root.path().join(rel).display().to_string();
+            self.env.insert(key, path);
+        }
+
+        fn holds_all(&self, paths: &[PathBuf]) -> bool {
+            paths.iter().all(|p| p.starts_with(self.root.path()))
+        }
+
+        /// The mirror and every path the seam asked to read; the run's `--dir` is
+        /// `<root>/run`.
+        fn resolve(&self, config_path: Option<&str>) -> (OpencodeReadMirror, Vec<PathBuf>) {
+            let asked = std::cell::RefCell::new(Vec::new());
+            let env = |key: &str| self.env.get(key).cloned();
+            let read = |path: &Path| {
+                asked.borrow_mut().push(path.to_path_buf());
+                // Never touch a path outside the fixture, even when asked.
+                if !path.starts_with(self.root.path()) {
+                    return ConfigRead::Missing;
+                }
+                read_config_file(path)
+            };
+            let home = self.home();
+            let dir = self.root.path().join("run");
+            let found = opencode_read_mirror_with(config_path, &dir, &env, Some(&home), &read);
+            (found, asked.into_inner())
+        }
+    }
+
+    #[test]
+    fn opencode_read_mirror_reads_every_local_source() {
+        let mut fx = ConfigFixture::new();
+        // Nothing on disk: nothing mirrored, and every read stays in the fixture.
+        let (found, asked) = fx.resolve(None);
+        assert_eq!(found, NO_MIRROR);
+        assert!(fx.holds_all(&asked), "{asked:?}");
+        fx.write(
+            "home/.config/opencode/opencode.json",
+            r#"{"permission":{"read":{"*":"allow","*.pem":"deny","*.key":"ask","*.md":"allow"}}}"#,
+        );
+        fx.write(
+            "home/.config/opencode/opencode.jsonc",
+            "{\n  // a comment with \"quotes\" and a , before }\n  \"permission\": {\n    /* block */ \"read\": {\"secret//x\": \"deny\", \"a/*b\": \"ask\",},\n  },\n}\n",
+        );
+        let string_form = r#"{"permission":{"read":"deny"}}"#;
+        fx.write("home/.config/opencode/config.json", string_form);
+        fx.deny("home/.opencode/opencode.json", "*.p12");
+        fx.deny("managed/opencode.jsonc", "*.kdbx");
+        // Rules keep source order; config.json's string-form `read` is replaced by
+        // opencode.json's object (a non-object never merges), and `*` stays allowed.
+        let want = ["*.pem", "*.key", "secret//x", "a/*b", "*.p12", "*.kdbx"];
+        assert_eq!(fx.resolve(None).0, mirror(false, &["*.md"], &want));
+
+        // XDG_CONFIG_HOME replaces `<home>/.config`.
+        fx.deny("xdg/opencode/opencode.json", "*.xdg");
+        fx.set_path("XDG_CONFIG_HOME", "xdg");
+        assert_eq!(fx.resolve(None).0.denies, ["*.xdg", "*.p12", "*.kdbx"]);
+
+        // OPENCODE_CONFIG: the app's path outranks an inherited one; the inherited one
+        // loads when the app passes none.
+        let app = fx.deny("app.json", "*.app").display().to_string();
+        fx.deny("elsewhere/user.json", "*.usr");
+        fx.set_path("OPENCODE_CONFIG", "elsewhere/user.json");
+        let want = ["*.xdg", "*.app", "*.p12", "*.kdbx"];
+        assert_eq!(fx.resolve(Some(&app)).0.denies, want);
+        assert_eq!(
+            fx.resolve(None).0.denies,
+            ["*.xdg", "*.usr", "*.p12", "*.kdbx"]
+        );
+
+        // OPENCODE_CONFIG_DIR and OPENCODE_CONFIG_CONTENT; an empty variable is unset.
+        let trailing = r#"{"permission":{"read":{"*.dir":"deny",},},}"#;
+        fx.write("cfgdir/opencode.jsonc", trailing);
+        fx.set_path("OPENCODE_CONFIG_DIR", "cfgdir");
+        let inline = r#"{"permission":{"read":{"*.inline":"ask"}}}"#;
+        fx.env.insert("OPENCODE_CONFIG_CONTENT", inline.into());
+        fx.env.insert("OPENCODE_CONFIG", String::new());
+        let want = ["*.xdg", "*.p12", "*.dir", "*.inline", "*.kdbx"];
+        assert_eq!(fx.resolve(None).0.denies, want);
+
+        // Relative paths, the managed dir's included, resolve against the run's spawn
+        // cwd (`dir`); an empty OPENCODE_TEST_HOME is kept (opencode tests it with `??`).
+        fx.deny("run/rel/opencode/opencode.json", "*.rel");
+        fx.env.insert("XDG_CONFIG_HOME", "rel".into());
+        fx.deny("run/.opencode/opencode.jsonc", "*.th");
+        fx.env.insert("OPENCODE_TEST_HOME", String::new());
+        fx.deny("run/mgd/opencode.json", "*.mgd");
+        fx.env
+            .insert("OPENCODE_TEST_MANAGED_CONFIG_DIR", "mgd".into());
+        fx.env.remove("OPENCODE_CONFIG_DIR");
+        fx.env.remove("OPENCODE_CONFIG_CONTENT");
+        let (found, asked) = fx.resolve(None);
+        assert_eq!(found.denies, ["*.rel", "*.th", "*.mgd"]);
+        assert!(fx.holds_all(&asked), "{asked:?}");
+
+        // A drive-relative path on another drive than `dir`'s names that drive's cwd on
+        // Windows, so it is never read there; elsewhere it is an ordinary relative
+        // path under `dir`.
+        let root = fx.root.path().display().to_string();
+        let other = if root.starts_with(['Q', 'q']) {
+            "R"
+        } else {
+            "Q"
+        };
+        fx.env.insert("XDG_CONFIG_HOME", format!("{other}:rel"));
+        let (_, asked) = fx.resolve(None);
+        assert!(fx.holds_all(&asked), "{asked:?}");
+        assert_eq!(asked.len(), if cfg!(windows) { 4 } else { 7 }, "{asked:?}");
+        // On `dir`'s own drive it resolves against `dir`, as the child's cwd.
+        if cfg!(windows) {
+            let drive = &root[..1].to_ascii_lowercase();
+            fx.env.insert("XDG_CONFIG_HOME", format!("{drive}:rel"));
+            assert_eq!(fx.resolve(None).0.denies, ["*.rel", "*.th", "*.mgd"]);
+        }
+    }
+
+    #[test]
+    fn opencode_read_mirror_dedupes_the_config_dir_as_opencode_does() {
+        let mut fx = ConfigFixture::new();
+        let home = fx.home();
+        let global = home.join(".config").join("opencode");
+        fx.write(
+            "home/.config/opencode/opencode.json",
+            r#"{"permission":{"read":{"*":"deny"}}}"#,
+        );
+        let app = fx.write("app.json", r#"{"permission":{"read":{"*":"allow"}}}"#);
+        let app = app.display().to_string();
+        let allow = r#"{"permission":{"read":{"*":"allow"}}}"#;
+        fx.write("home/.opencode/opencode.json", allow);
+        // Equal to the global dir: its pair reloads right after OPENCODE_CONFIG, before
+        // `<home>/.opencode`, whose `*` allow is then the last `*` rule.
+        fx.env
+            .insert("OPENCODE_CONFIG_DIR", global.display().to_string());
+        let (found, asked) = fx.resolve(Some(&app));
+        assert!(!found.star_denied, "{asked:?}");
+        let pair = [global.join("opencode.json"), global.join("opencode.jsonc")];
+        let dot = home.join(".opencode").join("opencode.json");
+        assert_eq!(asked[4..6], pair);
+        assert_eq!(asked[6], dot);
+        assert_eq!(asked.iter().filter(|p| **p == pair[0]).count(), 2);
+        // Spelled another way it is another string, loaded at its own slot, last.
+        let spelled = format!("{}{}", global.display(), std::path::MAIN_SEPARATOR);
+        fx.env.insert("OPENCODE_CONFIG_DIR", spelled);
+        let (found, asked) = fx.resolve(Some(&app));
+        assert!(found.star_denied, "{asked:?}");
+        assert_eq!(asked[4], dot);
+        assert_eq!(asked[6..8], pair);
+        // Equal to `<home>/.opencode`: loaded once.
+        let dot_dir = home.join(".opencode");
+        fx.env
+            .insert("OPENCODE_CONFIG_DIR", dot_dir.display().to_string());
+        let (_, asked) = fx.resolve(None);
+        assert_eq!(asked.iter().filter(|p| **p == dot).count(), 1, "{asked:?}");
+        assert_eq!(asked.len(), 7, "{asked:?}");
+        fx.env.remove("OPENCODE_CONFIG_DIR");
+        assert_eq!(fx.resolve(None).1.len(), 7);
+        // A test home spells `<home>/.opencode` from itself.
+        fx.set_path("OPENCODE_TEST_HOME", "th");
+        let th = fx.root.path().join("th").join(".opencode");
+        fx.env
+            .insert("OPENCODE_CONFIG_DIR", th.display().to_string());
+        let (_, asked) = fx.resolve(None);
+        assert_eq!(asked.len(), 7, "{asked:?}");
+    }
+
+    #[test]
+    fn node_path_join_spells_paths_as_node_does() {
+        for (parts, windows, want) in [
+            (&["/a", "opencode"][..], false, Some("/a/opencode")),
+            (
+                &["/a/", ".config", "opencode"][..],
+                false,
+                Some("/a/.config/opencode"),
+            ),
+            (&["/a//b/./c/..", "x"][..], false, Some("/a/b/x")),
+            (&["a", "../..", "x"][..], false, Some("../x")),
+            (&["/..", "x"][..], false, Some("/x")),
+            (&["", ".opencode"][..], false, Some(".opencode")),
+            (&["", ""][..], false, Some(".")),
+            (&["a\\b", "x"][..], false, Some("a\\b/x")),
+            (
+                &["C:/u/x/", "opencode"][..],
+                true,
+                Some("C:\\u\\x\\opencode"),
+            ),
+            (
+                &["C:\\u", ".config", "opencode"][..],
+                true,
+                Some("C:\\u\\.config\\opencode"),
+            ),
+            (&["c:rel", "opencode"][..], true, Some("c:rel\\opencode")),
+            (&["\\u\\..\\..", "x"][..], true, Some("\\x")),
+            (&["rel", "opencode"][..], true, Some("rel\\opencode")),
+            (&["\\\\srv\\share", "opencode"][..], true, None),
+            (&["//srv/share", "opencode"][..], true, None),
+        ] {
+            assert_eq!(
+                node_path_join(parts, windows).as_deref(),
+                want,
+                "{parts:?} {windows}"
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_child_env_reads_the_spawns_edits_over_the_apps_env() {
+        let inherited = |key: &str| {
+            let value = match key {
+                "NO_COLOR" | "OPENCODE_CONFIG" | "PWD" | "APPDIR" | "KEEP" => "app",
+                _ => return None,
+            };
+            Some(std::ffi::OsString::from(value))
+        };
+        let overrides = [("APPDIR", None), ("LD_LIBRARY_PATH", Some("/lib".into()))];
+        for fold in [false, true] {
+            let env = opencode_child_env(
+                Some("/cfg.json"),
+                &overrides,
+                Some("/bin"),
+                fold,
+                &inherited,
+            );
+            // A set edit wins; an unset edit reads None; the rest is the app's.
+            assert_eq!(env("NO_COLOR").as_deref(), Some("1"));
+            assert_eq!(env("CLICOLOR").as_deref(), Some("0"));
+            assert_eq!(env("OPENCODE_CONFIG").as_deref(), Some("/cfg.json"));
+            assert_eq!(env("OPENCODE_DISABLE_MODELS_FETCH").as_deref(), Some("1"));
+            assert_eq!(env("LD_LIBRARY_PATH").as_deref(), Some("/lib"));
+            assert_eq!(env("PATH").as_deref(), Some("/bin"));
+            assert_eq!(env(SHELL_PATH_MERGED_MARKER).as_deref(), Some("/bin"));
+            assert_eq!(env("PWD"), None);
+            assert_eq!(env("APPDIR"), None);
+            assert_eq!(env("KEEP").as_deref(), Some("app"));
+            assert_eq!(env("UNSET"), None);
+            // Windows compares names case-folded: an edit then covers every spelling.
+            let want = if fold { Some("1") } else { None };
+            assert_eq!(env("no_color").as_deref(), want);
+            assert_eq!(env("pwd"), None);
+        }
+        // Without a config path or a merged PATH, those read the app's env.
+        let env = opencode_child_env(None, &[], None, false, &inherited);
+        assert_eq!(env("OPENCODE_CONFIG").as_deref(), Some("app"));
+        assert_eq!(env("PATH"), None);
+        // A value that isn't valid Unicode decodes lossily: still set, so its slot
+        // never falls back (a home stays taken).
+        #[cfg(unix)]
+        let odd: std::ffi::OsString =
+            std::os::unix::ffi::OsStringExt::from_vec(b"/h\xff".to_vec());
+        #[cfg(windows)]
+        let odd: std::ffi::OsString =
+            std::os::windows::ffi::OsStringExt::from_wide(&[0x43, 0x3a, 0xd800]);
+        let odd_env = move |key: &str| (key == "HOME" || key == "USERPROFILE").then(|| odd.clone());
+        let env = opencode_child_env(None, &[], None, false, &odd_env);
+        let lossy = env("HOME").unwrap();
+        assert!(lossy.ends_with('\u{fffd}'), "{lossy}");
+        let os = || Some(PathBuf::from("/os"));
+        for windows in [false, true] {
+            assert_eq!(
+                opencode_home(&env, windows, &os),
+                Some(PathBuf::from(&lossy))
+            );
+        }
+    }
+
+    #[test]
+    fn opencode_read_mirror_follows_opencodes_loader() {
+        let mut fx = ConfigFixture::new();
+        let global = "home/.config/opencode/opencode.json";
+        // Every permission key matching `read` mirrors, in source order: a string value
+        // is a `*` rule, so `rea*`'s deny is the last `*` rule and kills `c`'s allow.
+        // Keys that don't match (`re`, `edit`) don't mirror.
+        fx.write(
+            global,
+            r#"{"permission":{"*":{"a":"deny"},"r*":{"b":"ask"},"read*":{"c":"allow"},"READ":{"*":"allow","d":"deny"},"read *":{"g":"deny"},"re":{"e":"deny"},"rea*":"deny","edit":{"f":"deny"}}}"#,
+        );
+        assert_eq!(fx.resolve(None).0, mirror(true, &[], &["a", "b", "d", "g"]));
+
+        // `{env:NAME}` substitutes before the parse: set, unset and empty.
+        fx.env.insert("GD_PAT", "*.secret".into());
+        fx.env.insert("GD_EMPTY", String::new());
+        fx.write(
+            global,
+            r#"{"permission":{"read":{"{env:GD_PAT}":"deny","x{env:GD_UNSET}y":"deny","p{env:GD_EMPTY}q":"ask","{env:}":"deny"}}}"#,
+        );
+        let want = ["*.secret", "xy", "pq", "{env:}"];
+        assert_eq!(fx.resolve(None).0, mirror(false, &[], &want));
+
+        // A `//` comment ends at a bare CR too.
+        fx.write(
+            global,
+            "{\"permission\": { // c\r\"read\": {\"*.cr\": \"deny\"}}}",
+        );
+        assert_eq!(fx.resolve(None).0.denies, ["*.cr"]);
+
+        // Non-UTF-8 bytes decode lossily, as opencode's decoder does.
+        let path = fx.root.path().join(global);
+        std::fs::write(
+            &path,
+            b"{\"permission\":{\"read\":{\"*.bin\":\"deny\"}},\"x\":\"\xff\"}",
+        )
+        .unwrap();
+        assert_eq!(fx.resolve(None).0.denies, ["*.bin"]);
+
+        // A file at the cap is read; one byte over is skipped.
+        let head = r#"{"permission":{"read":{"*.big":"deny"}},"pad":""#;
+        let pad = "x".repeat(OPENCODE_CONFIG_CAP - head.len() - 2);
+        fx.write(global, &format!("{head}{pad}\"}}"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            OPENCODE_CONFIG_CAP as u64
+        );
+        assert_eq!(fx.resolve(None).0.denies, ["*.big"]);
+        fx.write(global, &format!("{head}{pad}x\"}}"));
+        assert_eq!(read_config_file(&path), ConfigRead::TooLarge);
+        assert_eq!(fx.resolve(None).0, NO_MIRROR);
+        // A directory reads as missing.
+        assert_eq!(read_config_file(fx.root.path()), ConfigRead::Missing);
+
+        // An inherited OPENCODE_PERMISSION mirrors through the same key walk; garbage
+        // or a non-object contributes nothing.
+        fx.write(global, "{}");
+        let inherited = r#"{"r*":{"*":"ask"},"read":{"*.inh":"deny","ok/**":"allow"}}"#;
+        fx.env.insert("OPENCODE_PERMISSION", inherited.into());
+        assert_eq!(fx.resolve(None).0, mirror(true, &["ok/**"], &["*.inh"]));
+        for garbage in [r#"{"read":{"*.inh":"deny"},}"#, r#""deny""#, "{"] {
+            fx.env.insert("OPENCODE_PERMISSION", garbage.into());
+            assert_eq!(fx.resolve(None).0, NO_MIRROR, "{garbage}");
+        }
+    }
+
+    #[test]
+    fn opencode_read_mirror_replays_opencodes_order() {
+        let mut fx = ConfigFixture::new();
+        let global = "home/.config/opencode/opencode.json";
+        let managed = "managed/opencode.json";
+        let star = mirror(true, &[], &[]);
+        // (global, managed, mirror): one source's own order, then the merge across two.
+        for (global_body, managed_body, want) in [
+            // A repeated key keeps its first position and takes its last value.
+            (
+                r#"{"permission":{"read":{"x":"deny","*":"deny","y":"allow","x":"allow"}}}"#,
+                "{}",
+                mirror(true, &["y"], &[]),
+            ),
+            // Array-index keys come first, as in any JS object.
+            (
+                r#"{"permission":{"read":{"*":"deny","b":"allow","1":"allow"}}}"#,
+                "{}",
+                mirror(true, &["b"], &[]),
+            ),
+            // A later layer's value keeps the earlier position, behind its `*` deny.
+            (
+                r#"{"permission":{"read":{"docs/**":"deny","*":"deny"}}}"#,
+                r#"{"permission":{"read":{"docs/**":"allow"}}}"#,
+                star.clone(),
+            ),
+            (
+                r#"{"permission":{"read":{"docs/**":"allow"}}}"#,
+                r#"{"permission":{"read":{"*":"deny"}}}"#,
+                star.clone(),
+            ),
+            // The last `*` rule decides, across layers and across keys.
+            (
+                r#"{"permission":{"read":{"*":"deny"}}}"#,
+                r#"{"permission":{"read":{"*":"allow"}}}"#,
+                NO_MIRROR,
+            ),
+            (
+                r#"{"permission":{"read":{"*":"deny"},"r*":{"*":"allow"}}}"#,
+                "{}",
+                NO_MIRROR,
+            ),
+            (
+                r#"{"permission":{"*":"deny","read":"allow"}}"#,
+                "{}",
+                closing(NO_MIRROR, &MIRRORED_TOOLS),
+            ),
+            // A deny a later `*` allow overrides is still mirrored.
+            (
+                r#"{"permission":{"read":{"*.pem":"deny"},"r*":{"*":"allow"}}}"#,
+                "{}",
+                mirror(false, &[], &["*.pem"]),
+            ),
+            // String forms are `*` rules: `read`, a whole `permission`, legacy tools.
+            (r#"{"permission":{"read":"deny"}}"#, "{}", star.clone()),
+            (
+                r#"{"permission":"ask"}"#,
+                "{}",
+                closing(star.clone(), &MIRRORED_TOOLS),
+            ),
+            (r#"{"tools":{"read":false}}"#, "{}", star.clone()),
+            (
+                r#"{"tools":{"read":true}}"#,
+                r#"{"tools":{"read":false}}"#,
+                star.clone(),
+            ),
+            // The merged `permission` overrides the legacy map's values.
+            (
+                r#"{"tools":{"read":false},"permission":{"read":{"src/**":"allow"}}}"#,
+                "{}",
+                mirror(false, &["src/**"], &[]),
+            ),
+            (
+                r#"{"tools":{"read":false},"permission":{"*":"allow"}}"#,
+                "{}",
+                NO_MIRROR,
+            ),
+            // A string `read` replaces an earlier object, and an object a string.
+            (
+                r#"{"permission":{"read":{"*.a":"deny"}}}"#,
+                r#"{"permission":{"read":"ask"}}"#,
+                star.clone(),
+            ),
+            (
+                r#"{"permission":{"read":"deny","*":"allow"}}"#,
+                r#"{"permission":{"read":{"*.b":"deny"}}}"#,
+                mirror(false, &[], &["*.b"]),
+            ),
+        ] {
+            fx.write(global, global_body);
+            fx.write(managed, managed_body);
+            assert_eq!(fx.resolve(None).0, want, "{global_body} + {managed_body}");
+        }
+        // The inherited OPENCODE_PERMISSION merges after the files.
+        fx.write(global, r#"{"permission":{"read":{"*":"deny"}}}"#);
+        fx.write(managed, "{}");
+        let inherited = r#"{"read":{"src/**":"allow"}}"#;
+        fx.env.insert("OPENCODE_PERMISSION", inherited.into());
+        assert_eq!(fx.resolve(None).0, mirror(true, &["src/**"], &[]));
+    }
+
+    #[test]
+    fn opencode_read_mirror_pins_end_to_end() {
+        let fx = ConfigFixture::new();
+        let global = "home/.config/opencode/opencode.json";
+        let pins = |fx: &ConfigFixture| {
+            let found = fx.resolve(None).0;
+            [OpencodePin::DiffOnly, OpencodePin::ReadOnly]
+                .map(|pin| opencode_permission_json(pin, &[], &found))
+        };
+        fx.write(
+            global,
+            r#"{"permission":{"read":{"*":"deny","src/**":"allow","*.pem":"deny"}}}"#,
+        );
+        assert_eq!(
+            pins(&fx),
+            [
+                r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+                r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+            ]
+        );
+        // The dead allow, a string-form deny, a legacy flag and a cross-layer `*` deny
+        // all pin `*` denied with no allow, and the last read rule isn't `*`, so the
+        // read tool stays on.
+        let denied = [
+            r#"{"*":"deny","*_*":"deny","read":{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"read *":{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+            r#"{"*":"deny","*_*":"deny","read":{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"read *":{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+        ];
+        for (body, managed) in [
+            (
+                r#"{"permission":{"read":{"docs/**":"allow","*":"deny"}}}"#,
+                "{}",
+            ),
+            (r#"{"permission":{"read":"deny"}}"#, "{}"),
+            (r#"{"tools":{"read":false}}"#, "{}"),
+            (
+                r#"{"permission":{"read":{"docs/**":"allow"}}}"#,
+                r#"{"permission":{"read":{"*":"deny"}}}"#,
+            ),
+        ] {
+            fx.write(global, body);
+            fx.write("managed/opencode.json", managed);
+            let found = pins(&fx);
+            assert_eq!(found, denied, "{body} + {managed}");
+            assert!(!read_rule_set(&found[0]).ends_with(r#""*":"deny"}"#));
+        }
+        // The common lockdown keeps reads open (its later `read` allow is the last `*`
+        // rule) and denies grep, glob and list, aliases included.
+        fx.write(global, r#"{"permission":{"*":"deny","read":"allow"}}"#);
+        fx.write("managed/opencode.json", "{}");
+        assert_eq!(
+            pins(&fx),
+            [
+                r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+                r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"},"grep":"deny","grep *":"deny","glob":"deny","glob *":"deny","list":"deny","list *":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+            ]
+        );
+        // A read allow-list under a `*` deny: grep, glob and list denied too.
+        fx.write(
+            global,
+            r#"{"permission":{"*":"deny","read":{"*":"deny","src/**":"allow"}}}"#,
+        );
+        assert_eq!(
+            pins(&fx),
+            [
+                r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"grep":"deny","glob":"deny","list":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+                r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"},"grep":"deny","grep *":"deny","glob":"deny","glob *":"deny","list":"deny","list *":"deny","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#,
+            ]
+        );
+        // (config, read rules, ReadOnly's grep/glob/list); DiffOnly denies all three.
+        let pin = |rules: &str, tools: &str| {
+            format!(r#"{PIN_HEAD}"read":{rules},"read *":{rules},{tools}{DENY_TAIL}"#)
+        };
+        let tools = |[grep, glob, list]: [&str; 3]| {
+            format!(
+                r#""grep":"{grep}","grep *":"{grep}","glob":"{glob}","glob *":"{glob}","list":"{list}","list *":"{list}","#
+            )
+        };
+        let open = r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"}"#;
+        let src = r#"{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#;
+        let index = r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","0 *":"deny","2024 *":"deny","01":"deny"}"#;
+        for (body, rules, readonly) in [
+            (
+                r#"{"permission":{"*":"deny","grep":{"*":"allow"},"read":"allow"}}"#,
+                open,
+                ["allow", "deny", "deny"],
+            ),
+            (
+                r#"{"permission":{"grep":"deny"}}"#,
+                open,
+                ["deny", "allow", "allow"],
+            ),
+            // `**` and `***` are catch-alls.
+            (
+                r#"{"permission":{"grep":{"***":"deny"},"read":{"**":"deny","src/**":"allow"}}}"#,
+                src,
+                ["deny", "allow", "allow"],
+            ),
+            // A trailing ` *` is optional, so `* *` and `** *` are catch-alls too; read
+            // stays on, its last rule not a bare `*` deny.
+            (
+                r#"{"permission":{"read":{"* *":"deny"}}}"#,
+                r#"{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#,
+                ["allow", "allow", "allow"],
+            ),
+            (
+                r#"{"permission":{"grep":{"** *":"deny"}}}"#,
+                open,
+                ["deny", "allow", "allow"],
+            ),
+            // An unknown catch-all action closes, and ends the dead-allow window; an
+            // unknown action on any other pattern is skipped.
+            (
+                r#"{"permission":{"read":{"docs/**":"allow","*":"block","src/**":"allow","*.pem":"block"},"glob":"block"}}"#,
+                src,
+                ["allow", "deny", "allow"],
+            ),
+            // Index-shaped denies are respelled `<digits> *`, deduped; `01` isn't one.
+            (
+                r#"{"permission":{"read":{"2024":"deny","*":"allow","0":"ask","01":"deny","2024 *":"deny"}}}"#,
+                index,
+                ["allow", "allow", "allow"],
+            ),
+        ] {
+            fx.write(global, body);
+            let diff_only = r#""grep":"deny","glob":"deny","list":"deny","#;
+            assert_eq!(
+                pins(&fx),
+                [pin(rules, diff_only), pin(rules, &tools(readonly))],
+                "{body}"
+            );
+        }
+        // JS property order keeps the emitted read order: no key is an array index.
+        let found = pins(&fx);
+        for out in &found {
+            let Ok(ConfigValue::Object(top)) = serde_json::from_str::<ConfigValue>(out) else {
+                panic!("{out}");
+            };
+            for (key, value) in &top {
+                if let ConfigValue::Object(rules) = value {
+                    assert_eq!(rules[0].0, "*", "{key}");
+                    assert!(
+                        rules.iter().all(|(k, _)| js_array_index(k).is_none()),
+                        "{out}"
+                    );
+                }
+            }
+            assert_eq!(pin_alias_violations(out), Vec::<String>::new(), "{out}");
+        }
+        let lockdown = r#"{"permission":{"*":"deny","read":"allow"}}"#;
+        fx.write(global, lockdown);
+        let found = pins(&fx);
+        assert_eq!(pin_alias_violations(&found[1]), Vec::<String>::new());
+        // A deny that a later `*` allow overrides stays mirrored.
+        fx.write(
+            global,
+            r#"{"permission":{"read":{"*.pem":"deny"},"r*":{"*":"allow"}}}"#,
+        );
+        let pem = mirror(false, &[], &["*.pem"]);
+        let want = [OpencodePin::DiffOnly, OpencodePin::ReadOnly]
+            .map(|pin| opencode_permission_json(pin, &[], &pem));
+        assert_eq!(pins(&fx), want);
+    }
+
+    /// Fails instead of hanging when the resolver blocks on a FIFO at a config path.
+    #[cfg(unix)]
+    #[test]
+    fn opencode_read_mirror_skips_a_fifo_without_blocking() {
+        let fx = ConfigFixture::new();
+        let path = fx.root.path().join("home/.config/opencode/opencode.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.is_ok_and(|status| status.success()), "mkfifo");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                let _ = tx.send(fx.resolve(None).0);
+            });
+            let found = rx.recv_timeout(Duration::from_secs(10));
+            if found == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                // A read-write open never blocks on a FIFO and releases the blocked
+                // reader, whose read then sees EOF, so the scope joins.
+                let release = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path);
+                drop(release);
+            }
+            assert_eq!(found, Ok(NO_MIRROR));
+        });
+    }
+
+    #[test]
+    fn opencode_home_tracks_bun_os_homedir() {
+        let env = |home: &'static str| {
+            move |key: &str| match key {
+                "USERPROFILE" => Some("C:/Users/u".to_string()),
+                "HOME" => Some(home.to_string()),
+                _ => None,
+            }
+        };
+        let os = || Some(PathBuf::from("/os"));
+        assert_eq!(
+            opencode_home(&env("/h"), true, &os),
+            Some(PathBuf::from("C:/Users/u"))
+        );
+        assert_eq!(
+            opencode_home(&env("/h"), false, &os),
+            Some(PathBuf::from("/h"))
+        );
+        // An empty USERPROFILE gives none; an empty HOME asks the OS, as unset does.
+        let no_profile = |key: &str| (key == "USERPROFILE").then(String::new);
+        assert_eq!(opencode_home(&no_profile, true, &os), None);
+        assert_eq!(
+            opencode_home(&env(""), false, &os),
+            Some(PathBuf::from("/os"))
+        );
+        assert_eq!(
+            opencode_home(&|_: &str| None, false, &os),
+            Some(PathBuf::from("/os"))
+        );
+        assert_eq!(
+            opencode_home(&|_: &str| None, true, &os),
+            Some(PathBuf::from("/os"))
+        );
+        assert_eq!(opencode_home(&|_: &str| None, false, &|| None), None);
+    }
+
+    #[test]
+    fn opencode_read_mirror_skips_unreadable_and_garbage_sources() {
+        let fx = ConfigFixture::new();
+        fx.write("home/.config/opencode/config.json", "{ not json");
+        fx.write("home/.config/opencode/opencode.json", "/* never closed");
+        fx.write("home/.config/opencode/opencode.jsonc", "");
+        // A directory where a file belongs reads as nothing.
+        let dir = fx.root.path().join("home/.opencode/opencode.json");
+        std::fs::create_dir_all(dir).unwrap();
+        fx.deny("home/.opencode/opencode.jsonc", "*.ok");
+        fx.write("managed/opencode.json", r#"[1, 2]"#);
+        assert_eq!(fx.resolve(None).0.denies, ["*.ok"]);
+        // A string-form `permission` is a `*` rule; a non-string action contributes
+        // nothing.
+        fx.write("home/.opencode/opencode.jsonc", r#"{"permission":"deny"}"#);
+        let nested = r#"{"permission":{"read":{"*.x":{"y":"deny"}}}}"#;
+        fx.write("managed/opencode.jsonc", nested);
+        let want = closing(mirror(true, &[], &[]), &MIRRORED_TOOLS);
+        assert_eq!(fx.resolve(None).0, want);
+    }
+
+    #[test]
+    fn opencode_read_mirror_never_reads_outside_its_seam() {
+        // Hermetic by construction: the production entry returns nothing under test,
+        // and the seam reads only the paths its env and home name.
+        assert_eq!(opencode_read_mirror(None, Path::new(".")), NO_MIRROR);
+        let mut fx = ConfigFixture::new();
+        let (_, asked) = fx.resolve(None);
+        assert!(!asked.is_empty());
+        assert!(fx.holds_all(&asked), "{asked:?}");
+        // Negative control: without the managed-dir override the seam names the real
+        // per-OS managed dir, and the fixture's recorder sees the escape.
+        fx.env.remove("OPENCODE_TEST_MANAGED_CONFIG_DIR");
+        let (_, asked) = fx.resolve(None);
+        assert!(!fx.holds_all(&asked), "{asked:?}");
+    }
+
+    #[test]
+    fn parse_jsonc_keeps_comment_and_comma_text_inside_strings() {
+        type Json = serde_json::Value;
+        let v: Json =
+            parse_jsonc("{\"a\": \"x // y /* z */, }\", // c\n \"b\": [1, 2,], }").unwrap();
+        assert_eq!(v["a"], "x // y /* z */, }");
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+        assert_eq!(
+            parse_jsonc::<Json>("\u{feff}{\"q\": \"\\\"\"}").unwrap()["q"],
+            "\""
+        );
+        assert!(parse_jsonc::<Json>("{\"a\": 1,,}").is_none());
+        assert!(parse_jsonc::<Json>("{\"a\": 1} /* open").is_none());
+    }
+
     #[test]
     fn opencode_permission_pins_deny_the_write_surface() {
         for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
-            let out = opencode_permission_json(pin, &["external", "doom", "plan"]);
+            let out = opencode_permission_json(pin, &["external", "doom", "plan"], &NO_MIRROR);
             let v: serde_json::Value = serde_json::from_str(&out).unwrap();
             for key in DENIED_BUILTINS {
                 assert_eq!(v[key], "deny", "{pin:?} {key}");
@@ -6567,29 +8556,265 @@ opencode/x-preview-f-free
                     OpencodePin::ReadOnly => assert_eq!(v[key], "allow", "{key}"),
                 }
             }
-            // Last match wins, so a server wildcard that also matches a builtin must
-            // precede that builtin's deny, and every allow sits between the `*_*`
-            // catch-all and `read`.
+            // Last match wins, so a server wildcard or its alias that also matches a
+            // builtin must precede that builtin's deny, and every server allow sits
+            // between the `*_*` catch-all and `read`.
             let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{needle}"));
             let read = at(r#""read":"#);
             let catch_all = at(r#""*_*":"deny""#);
-            for (allow, denies) in [
+            for (server, denies) in [
+                ("external", &[r#""external_directory":"deny""#][..]),
+                ("doom", &[r#""doom_loop":"deny""#][..]),
                 (
-                    r#""external_*":"allow""#,
-                    &[r#""external_directory":"deny""#][..],
-                ),
-                (r#""doom_*":"allow""#, &[r#""doom_loop":"deny""#][..]),
-                (
-                    r#""plan_*":"allow""#,
+                    "plan",
                     &[r#""plan_enter":"deny""#, r#""plan_exit":"deny""#][..],
                 ),
             ] {
-                assert!(catch_all < at(allow) && at(allow) < read, "{allow}");
-                for deny in denies {
-                    assert!(at(allow) < at(deny), "{allow} vs {deny}");
+                for allow in [
+                    format!(r#""{server}_*":"allow""#),
+                    format!(r#""{server}_?*":"allow""#),
+                ] {
+                    assert!(catch_all < at(&allow) && at(&allow) < read, "{allow}");
+                    for deny in denies {
+                        assert!(at(&allow) < at(deny), "{allow} vs {deny}");
+                    }
                 }
             }
         }
+    }
+
+    /// A pin's top-level entries in emitted order, duplicates kept (a
+    /// `serde_json::Value` map would sort and dedupe them).
+    fn pin_entries(json: &str) -> Vec<(String, serde_json::Value)> {
+        struct Entries(Vec<(String, serde_json::Value)>);
+        impl<'de> serde::Deserialize<'de> for Entries {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct Visit;
+                impl<'de> serde::de::Visitor<'de> for Visit {
+                    type Value = Entries;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a permission object")
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(
+                        self,
+                        mut map: A,
+                    ) -> Result<Entries, A::Error> {
+                        let mut out = Vec::new();
+                        while let Some(entry) = map.next_entry()? {
+                            out.push(entry);
+                        }
+                        Ok(Entries(out))
+                    }
+                }
+                d.deserialize_map(Visit)
+            }
+        }
+        serde_json::from_str::<Entries>(json).unwrap().0
+    }
+
+    /// Same-length custom tool ids a `?` alias of a builtin would admit, plus one that
+    /// differs from a builtin only by case.
+    const CUSTOM_IDS: [&str; 5] = ["real", "lisp", "grey", "glow", "READ"];
+
+    /// Custom ids made of a builtin's id, a space and more: the documented residual a
+    /// ` *` alias admits.
+    const SPACED_IDS: [&str; 5] = ["read x", "grep x", "glob x", "list x", "read"];
+
+    /// The ids among the builtins and `CUSTOM_IDS` that `alias` matches and `key`
+    /// doesn't.
+    fn alias_overreach(alias: &str, key: &str) -> Vec<&'static str> {
+        DENIED_BUILTINS
+            .into_iter()
+            .chain(["read", "grep", "glob", "list"])
+            .chain(CUSTOM_IDS)
+            .filter(|id| wildcard_matches(alias, id) && !wildcard_matches(key, id))
+            .collect()
+    }
+
+    /// Whether a pin key is an alias spelling: a server's `<name>_?*`, a builtin's
+    /// `<id> *`, or a stray `?` form.
+    fn is_alias_key(key: &str) -> bool {
+        key.contains('?') || key.ends_with(" *")
+    }
+
+    /// Every breach of the alias rule: each allow-valued key but `*` needs its alias
+    /// (`<name>_?*` for a server's `<name>_*`, `<id> *` for a builtin) with the same
+    /// value, after both `*` and the key, matching the key's own tool and no builtin or
+    /// custom id the key doesn't; a server's alias also precedes the first tail deny;
+    /// every alias-shaped key must be such an alias.
+    fn pin_alias_violations(json: &str) -> Vec<String> {
+        let entries = pin_entries(json);
+        let pos = |k: &str| entries.iter().position(|(n, _)| n == k);
+        let (Some(star), Some(tail)) = (pos("*"), pos(DENIED_BUILTINS[0])) else {
+            return vec!["no `*` or no tail".into()];
+        };
+        let mut bad = Vec::new();
+        let mut aliases = Vec::new();
+        for (i, (key, value)) in entries.iter().enumerate() {
+            if key == "*" || is_alias_key(key) {
+                continue;
+            }
+            if *value == "deny" {
+                // A denied builtin may keep its alias, denied too.
+                let alias = format!("{key} *");
+                if pos(&alias).is_some_and(|at| entries[at].1 == "deny") {
+                    aliases.push(alias);
+                }
+                continue;
+            }
+            let server = key.strip_suffix('*');
+            let (alias, tool) = match server {
+                Some(prefix) => (format!("{prefix}?*"), format!("{prefix}tool")),
+                None => (format!("{key} *"), key.clone()),
+            };
+            aliases.push(alias.clone());
+            let Some(at) = pos(&alias) else {
+                bad.push(format!("{key}: no {alias}"));
+                continue;
+            };
+            if at < star || at < i {
+                bad.push(format!("{alias} precedes `*` or {key}"));
+            }
+            if server.is_some() && at > tail {
+                bad.push(format!("{alias} follows the tail"));
+            }
+            if entries[at].1 != *value {
+                bad.push(format!("{alias} differs from {key}"));
+            }
+            if !wildcard_matches(&alias, &tool) {
+                bad.push(format!("{alias} misses {tool}"));
+            }
+            for other in alias_overreach(&alias, key) {
+                bad.push(format!("{alias} also matches {other}"));
+            }
+        }
+        for (key, _) in &entries {
+            if is_alias_key(key) && !aliases.contains(key) {
+                bad.push(format!("stray {key}"));
+            }
+        }
+        bad
+    }
+
+    #[test]
+    fn opencode_permission_pins_alias_every_allow_after_the_catch_all() {
+        // The model of opencode's matcher the alias rule rests on.
+        for (pattern, key, hit) in [
+            ("read *", "read", true),
+            ("read *", "READ", true),
+            ("read *", "read x", true),
+            ("read *", "reads", false),
+            ("read *", "real", false),
+            ("rea?", "real", true),
+            ("rea?", "REAL", true),
+            ("rea?", "read", true),
+            ("x_?*", "x_tool", true),
+            ("x_?*", "x_", false),
+            ("x_*", "x_", true),
+            ("*", "read", true),
+            ("r*", "read", true),
+            ("READ*", "read", true),
+            ("re", "read", false),
+            ("?ead", "read", true),
+            ("a\\b", "a/b", true),
+            ("a/b", "a\\b", true),
+            ("a.b", "axb", false),
+        ] {
+            assert_eq!(wildcard_matches(pattern, key), hit, "{pattern} vs {key}");
+        }
+        // Many `*`s cost no backtracking blow-up.
+        assert!(!wildcard_matches(
+            &format!("{}x", "*?".repeat(500)),
+            &"r".repeat(400)
+        ));
+        // The documented residual: each ` *` alias admits exactly its builtin's spaced id
+        // beyond what the builtin's own key matches.
+        for id in ["read", "grep", "glob", "list"] {
+            let spaced: Vec<&str> = SPACED_IDS
+                .into_iter()
+                .filter(|s| wildcard_matches(&format!("{id} *"), s) && !wildcard_matches(id, s))
+                .collect();
+            assert_eq!(spaced, [format!("{id} x")], "{id}");
+        }
+        let rebuild = |entries: &[(String, serde_json::Value)]| {
+            let body: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}:{v}", serde_json::Value::String(k.clone())))
+                .collect();
+            format!("{{{}}}", body.join(","))
+        };
+        let mut variants = 0;
+        let mirrored = mirror(true, &["src/**", "*.md"], &["*.pem", "*.md"]);
+        for (pin, read_mirror) in [
+            (OpencodePin::DiffOnly, &NO_MIRROR),
+            (OpencodePin::ReadOnly, &NO_MIRROR),
+            (OpencodePin::DiffOnly, &mirrored),
+            (OpencodePin::ReadOnly, &mirrored),
+        ] {
+            for servers in [
+                &[][..],
+                &["gitdesktop"][..],
+                &["a.b", "x"][..],
+                &["external", "doom", "plan"][..],
+            ] {
+                variants += 1;
+                let out = opencode_permission_json(pin, servers, read_mirror);
+                assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+                let entries = pin_entries(&out);
+                let alias_count = entries.iter().filter(|(k, _)| is_alias_key(k)).count();
+                // DiffOnly's grep/glob/list stay denied, so they take no alias.
+                let builtin_aliases = match pin {
+                    OpencodePin::DiffOnly => 1,
+                    OpencodePin::ReadOnly => 4,
+                };
+                assert_eq!(alias_count, builtin_aliases + servers.len(), "{out}");
+                // The rebuild is faithful, so each mutant below differs only by its edit.
+                assert_eq!(
+                    pin_alias_violations(&rebuild(&entries)),
+                    Vec::<String>::new()
+                );
+                for (i, (key, _)) in entries.iter().enumerate() {
+                    if !is_alias_key(key) {
+                        continue;
+                    }
+                    if let Some(id) = key.strip_suffix(" *") {
+                        // A `?` alias in its place admits a custom id, so it must fail.
+                        let question = format!("{}?", &id[..id.len() - 1]);
+                        assert!(!alias_overreach(&question, id).is_empty(), "{question}");
+                        let mut swapped = entries.clone();
+                        swapped[i].0 = question;
+                        assert!(
+                            !pin_alias_violations(&rebuild(&swapped)).is_empty(),
+                            "{} in place of {key} must fail: {out}",
+                            swapped[i].0
+                        );
+                    }
+                    let mut dropped = entries.clone();
+                    dropped.remove(i);
+                    assert!(
+                        !pin_alias_violations(&rebuild(&dropped)).is_empty(),
+                        "dropping {key} must fail: {out}"
+                    );
+                    let mut hoisted = entries.clone();
+                    let alias = hoisted.remove(i);
+                    hoisted.insert(0, alias);
+                    assert!(
+                        !pin_alias_violations(&rebuild(&hoisted)).is_empty(),
+                        "{key} ahead of `*` must fail: {out}"
+                    );
+                    if key.ends_with("_?*") {
+                        let mut sunk = entries.clone();
+                        let alias = sunk.remove(i);
+                        sunk.push(alias);
+                        assert!(
+                            !pin_alias_violations(&rebuild(&sunk)).is_empty(),
+                            "{key} after the tail must fail: {out}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(variants, 16);
     }
 
     #[test]
@@ -6610,7 +8835,8 @@ opencode/x-preview-f-free
                     } else {
                         (None, &[])
                     };
-                    let env = review_env(kind, repo_aware, path, servers);
+                    let denies = mirror(true, &["src/**"], &["*.pem"]);
+                    let env = review_env(kind, repo_aware, path, servers, &denies);
                     let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());
                     match kind {
                         AgentKind::Opencode => {
@@ -6619,7 +8845,8 @@ opencode/x-preview-f-free
                             } else {
                                 OpencodePin::DiffOnly
                             };
-                            let want = opencode_permission_json(pin, servers);
+                            let want = opencode_permission_json(pin, servers, &denies);
+                            assert!(want.contains(r#""*.pem":"deny""#), "{want}");
                             assert_eq!(get("OPENCODE_PERMISSION"), Some(want.as_str()));
                             assert_eq!(get("OPENCODE_DISABLE_PROJECT_CONFIG"), Some("1"));
                             assert_eq!(get("OPENCODE_DISABLE_MODELS_FETCH"), Some("1"));
@@ -6639,8 +8866,9 @@ opencode/x-preview-f-free
 
     #[test]
     fn opencode_session_env_pins_read_only_sessions() {
+        let denies = mirror(true, &["src/**"], &["*.pem"]);
         let read_only_pin =
-            |servers: &[&str]| opencode_permission_json(OpencodePin::ReadOnly, servers);
+            |servers: &[&str]| opencode_permission_json(OpencodePin::ReadOnly, servers, &denies);
         for read_only in [false, true] {
             for research in [false, true] {
                 for path in [
@@ -6654,6 +8882,7 @@ opencode/x-preview-f-free
                             research,
                             path.map(str::to_string),
                             servers,
+                            &denies,
                         );
                         let get =
                             |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.as_str());

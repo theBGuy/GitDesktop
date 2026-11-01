@@ -241,12 +241,9 @@ fn apply_probe_env<C: crate::agent::ChildEnv>(cmd: &mut C) {
 /// The environment every gh child gets. `sanitize_child_env` runs first so these
 /// explicit sets win over it, per that function's ordering contract.
 fn apply_gh_env<C: crate::agent::ChildEnv>(cmd: &mut C, gh_host: Option<&str>) {
+    // Also gives the git gh runs underneath (`pr checkout`, `repo fork --remote`) the
+    // login-shell PATH its hooks and filter drivers need.
     crate::agent::sanitize_child_env(cmd);
-    // gh runs git underneath (`pr checkout`, `repo fork --remote`), whose hooks and
-    // filter drivers need the login-shell PATH a git child gets.
-    if let Some(path) = crate::agent::merged_shell_path() {
-        cmd.set_var("PATH", &path);
-    }
     // Keep gh fully non-interactive: no prompts, no pager, no update nags.
     cmd.set_var("GH_PAGER", "");
     cmd.set_var("GH_PROMPT_DISABLED", "1");

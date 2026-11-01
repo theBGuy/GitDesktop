@@ -1,16 +1,27 @@
 // The opencode permission pin only binds when the production call sites in
 // src-tauri/src/agent.rs feed it the run's own inputs: agent_review passes
-// review_env the self-MCP server names, and both agent_session branches
-// (container, then host) pass opencode_session_env the session's read_only
-// flag and its opted-in server names. The checker is a pure function over the
-// file's text, lexed so comments and string contents never satisfy a pin, and
-// fed the real file plus in-memory mutants. An unreadable file, unterminated
-// lexing, a missing anchor, an extra or missing call, or a bare mention of
-// either fn fails closed.
+// review_env the self-MCP server names and the user's mirrored read rules,
+// and both agent_session branches (container, then host) pass
+// opencode_session_env the session's read_only flag and its opted-in server
+// names; the host branch passes the mirrored read rules, the container
+// branch none (its opencode loads none of the host's config files). Each
+// read_mirror is built once, from opencode_read_mirror fed the OPENCODE_CONFIG
+// the run gets and Path::new(&repo_path) / Path::new(&worktree_path), in the arm
+// that pins the run (an opencode review, a read-only session); the other arm
+// mirrors nothing. That same path is pinned as the run's spawn cwd (the
+// stream_agent cwd argument of the review and of the host session) and its
+// --dir (opencode_review_args' dir; agent_session's
+// `let dir = run_dir(container, &worktree_path)` handed to
+// opencode_session_args). The checker is a pure function over the file's text,
+// lexed so comments and string contents never satisfy a pin, and fed the real
+// file plus in-memory mutants; a `,` before `)` is ignored, so a rustfmt reflow
+// passes. An unreadable file, unterminated lexing, a missing anchor, an extra
+// or missing call, or a bare mention of either env fn fails closed.
 // Out of reach: what review_env and opencode_session_env do with their
-// arguments (the Rust tests pin that), a value reassigned or shadowed through a
-// pattern binding or macro, calls in another file or through a re-export, and
-// which branch actually runs at runtime: the branch is inferred from the
+// arguments (the Rust tests pin that), what run_dir returns for a host session
+// (its Rust test pins that), a value reassigned or shadowed through a pattern
+// binding or macro, calls in another file or through a re-export, and which
+// branch actually runs at runtime: the branch is inferred from the
 // `let container_env` / `let host_extra_env` anchors' source order.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -56,8 +67,18 @@ function fnBody(masked, name) {
   return [open + 1, open + 1 + braceBody(masked, open).length];
 }
 
-/** The `let name … ;` statement opening inside [from, to), whitespace-collapsed,
- *  or null; `count` is how many such statements the range holds. */
+/** Whitespace collapsed to one space, then dropped after `(` and before `)`,
+ *  along with a `,` before `)`: the spots where a rustfmt reflow of the same call
+ *  differs. */
+const collapse = (text) =>
+  text
+    .replace(/\s+/g, " ")
+    .replace(/,\s*\)/g, ")")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")");
+
+/** The `let name … ;` statement opening inside [from, to), collapsed, or null;
+ *  `count` is how many such statements the range holds. */
 function letStatement(masked, [from, to], name) {
   const re = new RegExp(`\\blet\\s+(?:mut\\s+)?${name}\\b`, "g");
   const hits = [...masked.slice(from, to).matchAll(re)];
@@ -67,9 +88,26 @@ function letStatement(masked, [from, to], name) {
   return {
     count: hits.length,
     at,
-    text: masked.slice(at, end < 0 ? to : end).replace(/\s+/g, " "),
+    text: collapse(masked.slice(at, end < 0 ? to : end)),
   };
 }
+
+/** Every call of `name` opening inside [from, to): its arguments, or null when
+ *  its parens never close. */
+function callsIn(masked, [from, to], name) {
+  const re = new RegExp(`\\b${name}\\s*\\(`, "g");
+  return [...masked.slice(from, to).matchAll(re)].map((m) =>
+    callArgs(masked, from + m.index + m[0].length - 1),
+  );
+}
+
+/** The whitespace-collapsed `let read_mirror` each fn holds, up to its `;`: the
+ *  resolver, fed the run's OPENCODE_CONFIG and --dir, in the arm that pins it. */
+const REVIEW_MIRROR =
+  "let read_mirror = if kind == AgentKind::Opencode { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path)) } else { OpencodeReadMirror::default() }";
+const HOST_MIRROR =
+  "let read_mirror = if read_only { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&worktree_path)) } else { OpencodeReadMirror::default() }";
+const RUN_DIR = "let dir = run_dir(container, &worktree_path)";
 
 function checkPinCallSites(text) {
   if (typeof text !== "string" || text.length === 0)
@@ -124,13 +162,31 @@ function checkPinCallSites(text) {
       `expected 1 production review_env call, saw ${calls.review_env.length}${calls.review_env.map((c) => ` (${c.fn}:${c.line})`).join("")}`,
     );
   for (const call of calls.review_env) {
-    if (call.fn !== "agent_review")
+    if (call.fn !== "agent_review") {
       problems.push(`${FILE}:${call.line} review_env called from ${call.fn}`);
-    else if (call.args[3] !== "&self_names")
+      continue;
+    }
+    if (call.args[3] !== "&self_names")
       problems.push(
         `${FILE}:${call.line} review_env must receive &self_names, got ${call.args[3] ?? "nothing"}`,
       );
+    if (call.args[4] !== "&read_mirror")
+      problems.push(
+        `${FILE}:${call.line} review_env must receive &read_mirror, got ${call.args[4] ?? "nothing"}`,
+      );
   }
+  const reviewMirror = letStatement(masked, review, "read_mirror");
+  if (reviewMirror.count !== 1 || reviewMirror.text !== collapse(REVIEW_MIRROR))
+    problems.push(`agent_review must build read_mirror once: ${REVIEW_MIRROR}`);
+  // The dir the resolver gets is the child's --dir and spawn cwd.
+  const reviewDir = callsIn(masked, review, "opencode_review_args");
+  if (reviewDir.length !== 1 || reviewDir[0]?.[3] !== "&repo_path")
+    problems.push(
+      "agent_review must pass opencode_review_args &repo_path once",
+    );
+  const reviewSpawn = callsIn(masked, review, "stream_agent");
+  if (reviewSpawn.length !== 1 || reviewSpawn[0]?.[5] !== "&repo_path")
+    problems.push("agent_review must spawn stream_agent once, in &repo_path");
   const selfNames = letStatement(masked, review, "self_names");
   if (selfNames.count !== 1 || !/=\s*self_specs\.iter\(\)/.test(selfNames.text))
     problems.push(
@@ -184,7 +240,34 @@ function checkPinCallSites(text) {
       problems.push(
         `${FILE}:${call.line} ${branch} opencode_session_env must receive &mcp_names, got ${call.args[3] ?? "nothing"}`,
       );
+    const denies =
+      branch === "host" ? "&read_mirror" : "&OpencodeReadMirror::default()";
+    if (call.args[4] !== denies)
+      problems.push(
+        `${FILE}:${call.line} ${branch} opencode_session_env must receive ${denies}, got ${call.args[4] ?? "nothing"}`,
+      );
   }
+  const sessionMirror = letStatement(masked, session, "read_mirror");
+  if (
+    sessionMirror.count !== 1 ||
+    sessionMirror.at < host.at ||
+    sessionMirror.text !== collapse(HOST_MIRROR)
+  )
+    problems.push(
+      `agent_session's host branch must build read_mirror once: ${HOST_MIRROR}`,
+    );
+  const runDir = letStatement(masked, session, "dir");
+  if (runDir.count !== 1 || runDir.text !== collapse(RUN_DIR))
+    problems.push(`agent_session must build dir once: ${RUN_DIR}`);
+  const sessionDir = callsIn(masked, session, "opencode_session_args");
+  if (sessionDir.length !== 1 || sessionDir[0]?.[6] !== "dir")
+    problems.push("agent_session must pass opencode_session_args dir once");
+  const hostSpawn =
+    host.at < 0 ? [] : callsIn(masked, [host.at, session[1]], "stream_agent");
+  if (hostSpawn.length !== 1 || hostSpawn[0]?.[5] !== "&worktree_path")
+    problems.push(
+      "agent_session's host branch must spawn stream_agent once, in &worktree_path",
+    );
   if (letStatement(masked, session, "read_only").count !== 0)
     problems.push("agent_session must not rebind read_only");
   // Only agent_session's own signature counts: other fns declare read_only too.
@@ -221,11 +304,15 @@ function mutate(edit) {
 }
 
 const CONTAINER_CALL =
-  "opencode_session_env(read_only, opencode_research, config_path, &mcp_names)";
+  "opencode_session_env(\n                read_only,\n                opencode_research,\n                config_path,\n                &mcp_names,\n                &OpencodeReadMirror::default(),\n            )";
 const HOST_CALL =
-  "opencode_session_env(read_only, opencode_research, mcp_config_path, &mcp_names)";
+  "opencode_session_env(\n            read_only,\n            opencode_research,\n            mcp_config_path,\n            &mcp_names,\n            &read_mirror,\n        )";
 const REVIEW_CALL =
-  "review_env(kind, repo_aware, mcp_config_path.as_deref(), &self_names)";
+  "review_env(\n        kind,\n        repo_aware,\n        mcp_config_path.as_deref(),\n        &self_names,\n        &read_mirror,\n    )";
+const REVIEW_RESOLVE =
+  "opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&repo_path))";
+const HOST_RESOLVE =
+  "opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&worktree_path))";
 
 test("P1: the real agent.rs call sites pass the run's own inputs", () => {
   assert.ok(source, `${FILE} unreadable`);
@@ -307,7 +394,7 @@ test("P6: comments and strings cannot satisfy a pin", () => {
       t.replace(
         HOST_CALL,
         () =>
-          `opencode_session_env(false, opencode_research, mcp_config_path, &[]) // ${HOST_CALL}`,
+          `opencode_session_env(false, opencode_research, mcp_config_path, &[], &read_mirror) /* ${HOST_CALL} */`,
       ),
     ),
   );
@@ -317,11 +404,157 @@ test("P6: comments and strings cannot satisfy a pin", () => {
       t.replace(
         REVIEW_CALL,
         () =>
-          `review_env(kind, repo_aware, mcp_config_path.as_deref(), &[]); let _ = "${REVIEW_CALL}"`,
+          `review_env(kind, repo_aware, mcp_config_path.as_deref(), &[], &read_mirror); let _ = "${REVIEW_CALL}"`,
       ),
     ),
   );
   assert.ok(quoted.some((p) => p.includes("must receive &self_names")));
+});
+
+test("P9: the mirrored read rules reach each call from the resolver", () => {
+  const strip = (problems) => problems.map((p) => p.replace(/^[^ ]+ /, ""));
+  assert.deepEqual(
+    strip(
+      checkPinCallSites(
+        mutate((t) =>
+          t.replace(REVIEW_CALL, () =>
+            REVIEW_CALL.replace(
+              "&read_mirror",
+              "&OpencodeReadMirror::default()",
+            ),
+          ),
+        ),
+      ),
+    ),
+    [
+      "review_env must receive &read_mirror, got &OpencodeReadMirror::default()",
+    ],
+  );
+  assert.deepEqual(
+    strip(
+      checkPinCallSites(
+        mutate((t) =>
+          t.replace(HOST_CALL, () =>
+            HOST_CALL.replace("&read_mirror", "&OpencodeReadMirror::default()"),
+          ),
+        ),
+      ),
+    ),
+    [
+      "host opencode_session_env must receive &read_mirror, got &OpencodeReadMirror::default()",
+    ],
+  );
+  assert.deepEqual(
+    strip(
+      checkPinCallSites(
+        mutate((t) =>
+          t.replace(CONTAINER_CALL, () =>
+            CONTAINER_CALL.replace(
+              "&OpencodeReadMirror::default()",
+              "&read_mirror",
+            ),
+          ),
+        ),
+      ),
+    ),
+    [
+      "container opencode_session_env must receive &OpencodeReadMirror::default(), got &read_mirror",
+    ],
+  );
+  const reviewRefused = `agent_review must build read_mirror once: ${REVIEW_MIRROR}`;
+  const hostRefused = `agent_session's host branch must build read_mirror once: ${HOST_MIRROR}`;
+  // A resolver fed no config path, or the wrong run dir, in either fn, is refused.
+  // The host call is replaced first: a mutant review call can spell HOST_RESOLVE.
+  for (const [review, host] of [
+    [
+      REVIEW_RESOLVE.replace("mcp_config_path.as_deref()", "None"),
+      HOST_RESOLVE.replace("mcp_config_path.as_deref()", "None"),
+    ],
+    [
+      REVIEW_RESOLVE.replace("&repo_path", "&worktree_path"),
+      HOST_RESOLVE.replace("&worktree_path", "&repo_path"),
+    ],
+  ]) {
+    const mutant = mutate((t) =>
+      t.replace(HOST_RESOLVE, () => host).replace(REVIEW_RESOLVE, () => review),
+    );
+    assert.deepEqual(checkPinCallSites(mutant), [reviewRefused, hostRefused]);
+  }
+  // Each arm condition is pinned: the resolver runs exactly for the pinned run.
+  for (const [condition, mutantCondition, refused] of [
+    [
+      "if kind == AgentKind::Opencode {",
+      "if kind != AgentKind::Opencode {",
+      reviewRefused,
+    ],
+    ["if kind == AgentKind::Opencode {", "if true {", reviewRefused],
+    ["if read_only {", "if !read_only {", hostRefused],
+    ["if read_only {", "if true {", hostRefused],
+  ]) {
+    const mutant = mutate((t) => {
+      const at = t.indexOf(`let read_mirror = ${condition}`);
+      assert.ok(at > 0, `no let read_mirror = ${condition}`);
+      const head = `let read_mirror = ${condition}`;
+      return `${t.slice(0, at)}let read_mirror = ${mutantCondition}${t.slice(at + head.length)}`;
+    });
+    assert.deepEqual(checkPinCallSites(mutant), [refused], mutantCondition);
+  }
+  // Swapping the arms resolves for the unpinned run instead.
+  const swapped = mutate((t) =>
+    t.replace(
+      `{\n        ${REVIEW_RESOLVE}\n    } else {\n        OpencodeReadMirror::default()\n    }`,
+      () =>
+        `{\n        OpencodeReadMirror::default()\n    } else {\n        ${REVIEW_RESOLVE}\n    }`,
+    ),
+  );
+  assert.deepEqual(checkPinCallSites(swapped), [reviewRefused]);
+});
+
+test("P10: a rustfmt reflow with a trailing comma still passes", () => {
+  const reflowed = mutate((t) =>
+    t.replace(
+      REVIEW_RESOLVE,
+      () =>
+        "opencode_read_mirror(\n            mcp_config_path.as_deref(),\n            Path::new(&repo_path),\n        )",
+    ),
+  );
+  assert.deepEqual(checkPinCallSites(reflowed), []);
+});
+
+test("P11: the resolver's dir is each run's --dir and spawn cwd", () => {
+  for (const [from, to, refused] of [
+    [
+      "opencode_review_args(&model, repo_aware, &effort, &repo_path)",
+      "opencode_review_args(&model, repo_aware, &effort, &other_path)",
+      "agent_review must pass opencode_review_args &repo_path once",
+    ],
+    [
+      "stdin_text,\n        &repo_path,\n        timeout,",
+      "stdin_text,\n        &other_path,\n        timeout,",
+      "agent_review must spawn stream_agent once, in &repo_path",
+    ],
+    [
+      "stdin_text,\n        &worktree_path,\n        SESSION_TIMEOUT,",
+      "stdin_text,\n        &other_path,\n        SESSION_TIMEOUT,",
+      "agent_session's host branch must spawn stream_agent once, in &worktree_path",
+    ],
+    [
+      "let dir = run_dir(container, &worktree_path);",
+      "let dir = run_dir(true, &worktree_path);",
+      `agent_session must build dir once: ${RUN_DIR}`,
+    ],
+    [
+      "web,\n                    dir,\n                )",
+      "web,\n                    &worktree_path,\n                )",
+      "agent_session must pass opencode_session_args dir once",
+    ],
+  ]) {
+    const mutant = mutate((t) => {
+      assert.equal(t.split(from).length, 2, `not unique: ${from}`);
+      return t.replace(from, () => to);
+    });
+    assert.deepEqual(checkPinCallSites(mutant), [refused], to);
+  }
 });
 
 test("P7: missing anchors, rebinding and bare mentions fail closed", () => {

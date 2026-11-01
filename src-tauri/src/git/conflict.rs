@@ -561,19 +561,11 @@ pub(crate) async fn git_checkout_conflict_side_core(
 /// paths never surface).
 #[tauri::command]
 pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
-    let dir = tokio::task::spawn_blocking(|| {
-        let mut builder = tempfile::Builder::new();
-        builder.prefix("gd-conflict-diff-");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            builder.permissions(std::fs::Permissions::from_mode(0o700));
-        }
-        builder.tempdir()
-    })
-    .await
-    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
-    .map_err(AppError::Io)?;
+    let dir =
+        tokio::task::spawn_blocking(|| crate::agent_sandbox::private_temp_dir("gd-conflict-diff-"))
+            .await
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+            .map_err(AppError::Io)?;
     let old_path = dir.path().join("ours");
     let new_path = dir.path().join("proposed");
     let result = async {

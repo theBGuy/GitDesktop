@@ -178,11 +178,15 @@ pub const GD_RESEARCH_AGENT: &str = "gd-research";
 /// MERGES config layers, so this adds our servers (and the Research agent) on top of
 /// the user's global config. stdio = `"type": "local"` with a single `command` ARRAY
 /// (binary + args joined — opencode has no args field) and an `environment` map; http
-/// = `"type": "remote"`. Every review and read-only session is pinned by agent.rs's
-/// `OPENCODE_PERMISSION`, which IS the allowlist there: a server's tools are callable
-/// only through its `<server>_*` allow, which also admits any loaded server whose
-/// sanitized name starts with `<server>_`. Write-capable sessions auto-approve them
-/// via `--dangerously-skip-permissions`.
+/// = `"type": "remote"`. Reviews run with project config disabled under agent.rs's
+/// `OPENCODE_PERMISSION` pin (DiffOnly or ReadOnly by review mode), which is the
+/// allowlist there: a server's tools are callable only through its `<server>_*` allow
+/// and that allow's `<server>_?*` alias, which also admit any loaded server whose
+/// sanitized name starts with `<server>_`. The pin's `read` also reads the resources of
+/// any connected server. Plan/Research sessions carry the ReadOnly pin with no server
+/// allows (they pass no servers) but keep the repo's config, and a global config layer
+/// can still widen either (the residual `opencode_permission_json` documents).
+/// Write-capable sessions auto-approve server tools via `--dangerously-skip-permissions`.
 ///
 /// `research` adds the WEB agent (`GD_RESEARCH_AGENT`): the pin denies web to every
 /// agent (the builtin `plan` allows bash and webfetch by default) and opencode has no
