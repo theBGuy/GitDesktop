@@ -10,9 +10,8 @@
 // whose run carries the ReadOnly pin (a repo-aware opencode review, a read-only
 // session); the other arm, DiffOnly runs included, mirrors nothing. That same
 // path is pinned as the run's spawn cwd (the stream_agent cwd argument of the
-// review and of the host session) and its
-// --dir (opencode_review_args' dir; agent_session's
-// `let dir = run_dir(container, &worktree_path)` handed to
+// review and of the host session) and its --dir (opencode_review_args' dir;
+// agent_session's `let dir = run_dir(container, &worktree_path)` handed to
 // opencode_session_args). The checker is a pure function over the file's text,
 // lexed so comments and string contents never satisfy a pin, and fed the real
 // file plus in-memory mutants; a `,` before `)` is ignored, so a rustfmt reflow
@@ -576,7 +575,7 @@ test("P9: the mirrored read rules reach each call from the resolver", () => {
     });
     assert.deepEqual(checkPinCallSites(mutant), [refused], mutantCondition);
   }
-  // Swapping the arms resolves for the unpinned run instead.
+  // Swapping the arms resolves for the run without the ReadOnly pin instead.
   const swapped = mutate((t) =>
     t.replace(
       `{\n        ${REVIEW_RESOLVE}\n    } else {\n        OpencodeReadMirror::default()\n    }`,

@@ -3044,7 +3044,7 @@ fn opencode_home(
 /// `permission` merged onto it: the map's keys keep their positions and take
 /// permission's values, and permission's other keys follow. A missing, unreadable or
 /// empty source contributes nothing; an over-cap or unparseable one is logged once by
-/// name. Residuals: such a skipped source's read rules don't bind pinned runs, and so
+/// name. Residuals: such a skipped source's read rules don't bind ReadOnly-pinned runs, and so
 /// are lost: a file over the cap, and JSON that `JSON.parse` and jsonc-parser accept but
 /// serde_json rejects (a lone surrogate escape, nesting deeper than 128, a float such
 /// as `1e400`).
@@ -3201,7 +3201,7 @@ fn opencode_child_env<'a>(
     }
 }
 
-/// The read rules the user's local opencode config sets, for a pinned run's mirror (see
+/// The read rules the user's local opencode config sets, for a ReadOnly-pinned run's mirror (see
 /// `opencode_config_sources` for the sources). `config_path` is the `OPENCODE_CONFIG`
 /// the app passes the run and `dir` its `--dir` and spawn cwd. Sources and `{env:}`
 /// read the child's env (`opencode_child_env`). Residuals: the pin itself, a review's
