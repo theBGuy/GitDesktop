@@ -416,9 +416,10 @@ test("pushesBranch mutants each fail a truth row, and every row fails one", () =
     assert.ok(caught.has(row), `no mutant fails row "${row}"`);
 });
 
-/** Two views of `text`, each the same length with newlines kept: `code` drops
- *  comments; `bare` also blanks string and template-literal text (quotes,
- *  backticks and `${…}` expressions stay). One string-aware pass. A `/` opens a
+/** Two views of `text`, each the same UTF-16 length with newlines kept, so an
+ *  offset in one is the same offset in `text`: `code` drops comments; `bare`
+ *  also blanks string and template-literal text (quotes, backticks and `${…}`
+ *  expressions stay). One string-aware pass. A `/` opens a
  *  regex literal after an operator, `(`, `,` or a keyword; a quote with no
  *  closing quote on its line is JSX text, not a string. Memoized per text: the
  *  mutants re-scan the same tree. */
@@ -431,8 +432,9 @@ function lex(text) {
   return views;
 }
 function lexOnce(text) {
-  const code = [...text];
-  const bare = [...text];
+  // Code units, never code points: every index below is a UTF-16 offset.
+  const code = text.split("");
+  const bare = text.split("");
   const blank = (arr, from, to) => {
     for (let k = from; k < to; k++) if (arr[k] !== "\n") arr[k] = " ";
   };
@@ -507,8 +509,18 @@ function lexOnce(text) {
       } else i++;
     } else i++;
   }
-  return { code: code.join(""), bare: bare.join("") };
+  const views = { code: code.join(""), bare: bare.join("") };
+  if (views.code.length !== text.length || views.bare.length !== text.length)
+    throw new Error("lex: a view's length differs from its text's");
+  return views;
 }
+
+/** JS identifier spellings as regex source for the `u` flag: a start (Unicode
+ *  ID_Start, `$` or `_`), then ID_Continue or `$`. A name spelled with an
+ *  escape or a ZWNJ/ZWJ doesn't match, so the scan fails on it instead. */
+const ID_PART = String.raw`[\p{ID_Continue}$]`;
+const ID = String.raw`[\p{ID_Start}$_]${ID_PART}*`;
+const escapeId = (name) => name.replace(/\$/g, () => "\\$");
 
 // The CI guards job runs this suite with no install, so a runtime import in a
 // module it loads from src/ would fail; this pin bans every import so none can
@@ -519,10 +531,19 @@ const IMPORT_FREE = [
   "src/lib/hotkeys/open-modal.ts",
 ];
 const IMPORT_SHAPES = [
-  /(^|[^\w$.])import\s*(type\s+)?[\w{*]/,
+  new RegExp(
+    String.raw`(^|[^\w$.])import\s*(type\s+)?(?:${ID_PART}|[\\{*])`,
+    "u",
+  ),
   /(^|[^\w$.])import\s*["'`]/,
-  /(^|[^\w$.])export\s*(type\s+)?(\*(\s*as\s+\w+)?|\{[^}]*\})\s*from\s*["'`]/,
-  /(^|[^\w$.])import\s*\(\s*["'`\w]/,
+  new RegExp(
+    String.raw`(^|[^\w$.])export\s*(type\s+)?(\*(\s*as\s+${ID})?|\{[^}]*\})\s*from\s*["'\x60]`,
+    "u",
+  ),
+  new RegExp(
+    String.raw`(^|[^\w$.])import\s*\(\s*(?:["'\x60\\]|${ID_PART})`,
+    "u",
+  ),
 ];
 const importsIn = (src) => {
   const { bare } = lex(src);
@@ -571,9 +592,11 @@ test("the import-free check catches each import shape, and only real ones", () =
 // or records its start (`startedOn:`, same rule); a shorthand, bare-identifier
 // or `undefined` value counts only inside a function BARE_BRANCH lists, whose
 // value it reviewed as a string. A HEAD push with neither would hold only the
-// current branch. Anything else it meets fails closed: another binding shape,
-// any other use of `<x>`, a spread, a template literal or unreadable entry, a
-// namespace import or re-export of either module, zero calls, a stale entry.
+// current branch. Names match any JS identifier spelling but escapes and
+// ZWNJ/ZWJ. Anything else it meets fails closed: an import clause, specifier
+// or `from` of either module it can't read, another binding shape, any other
+// use of `<x>`, a spread, a template literal or unreadable entry, a namespace
+// import or re-export of either module, zero calls, a stale entry.
 // What it can't see: values beyond that syntactic rule (a non-bare expression
 // that evaluates to undefined), a dynamic `import()` of the module, a use of
 // `<x>` that reads as JSX text (see proseAt), comments or strings the
@@ -633,7 +656,11 @@ function objectEntries(code, open) {
 /** The innermost `function NAME(` whose body contains `at`, or null. */
 function enclosingFunction(code, at) {
   let best = null;
-  for (const m of code.matchAll(/\bfunction\s+(\w+)\s*\(/g)) {
+  const re = new RegExp(
+    String.raw`(?<!${ID_PART})function\s+(${ID})\s*\(`,
+    "gu",
+  );
+  for (const m of code.matchAll(re)) {
     if (m.index > at) break;
     const body = bodyAfter(code.slice(m.index), m[0]);
     if (body === null) continue;
@@ -643,9 +670,22 @@ function enclosingFunction(code, at) {
   return best;
 }
 
-/** A name's own start: no word char before it, and no member dot (a spread's
- *  `...` still counts as a use). */
-const NOT_MEMBER = "(?<![\\w$])(?<!(?:^|[^.])\\.)";
+/** A name's own start: no identifier char before it, and no member dot (a
+ *  spread's `...` still counts as a use). For the `u` flag. */
+const NOT_MEMBER = String.raw`(?<!${ID_PART})(?<!(?:^|[^.])\.)`;
+/** Every use of the identifier `name`, as a `u`-flag global regex. */
+const usesOf = (name) =>
+  new RegExp(`${NOT_MEMBER}${escapeId(name)}(?!${ID_PART})`, "gu");
+const BOUND = new RegExp(
+  String.raw`(?<!${ID_PART})const\s+(${ID})\s*=\s*$`,
+  "u",
+);
+const BARE_VALUE = new RegExp(`^${ID}$`, "u");
+const SPECIFIER = new RegExp(
+  String.raw`^(?:type\s+)?(${ID})(?:\s+as\s+(${ID}))?$`,
+  "u",
+);
+const DEFAULT_PART = new RegExp(String.raw`^\s*(?:${ID}\s*,?\s*)?$`, "u");
 
 const lineOf = (text, at) => text.slice(0, at).split("\n").length;
 
@@ -664,7 +704,7 @@ function proseAt(bare, from, to) {
 function keyStrength(keys, name) {
   const k = keys.find((e) => e.key === name);
   if (k === undefined) return null;
-  if (k.value === null || /^(?:\w+|undefined)$/.test(k.value)) return "bare";
+  if (k.value === null || BARE_VALUE.test(k.value)) return "bare";
   return "strong";
 }
 
@@ -681,7 +721,10 @@ function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
     const locals = [];
     const importRanges = [];
     for (const m of code.matchAll(
-      /(^|[^\w$.])(import|export)\s+(type\s+)?([\w\s,{}*$]*?)\s*from\s*(["'])([^"'\n]+)\5/g,
+      new RegExp(
+        String.raw`(^|[^\w$.])(import|export)\s+(type\s+)?([\p{ID_Continue}$\\\s,{}*]*?)\s*from\s*(["'])([^"'\n]+)\5`,
+        "gu",
+      ),
     )) {
       const start = m.index + m[1].length;
       // Text inside a string that only looks like an import.
@@ -700,21 +743,34 @@ function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
         continue;
       }
       const named = clause.match(/\{([^}]*)\}/);
+      const head = named ? clause.replace(named[0], () => "") : clause;
+      if (/[{}]/.test(head) || !DEFAULT_PART.test(head)) {
+        fails.push(`${at(start)}: an import clause it can't read`);
+        continue;
+      }
       for (const spec of named ? named[1].split(",") : []) {
-        const parts = spec
-          .trim()
-          .match(/^(?:type\s+)?(\w+)(?:\s+as\s+(\w+))?$/);
-        if (parts?.[1] === "usePush") locals.push(parts[2] ?? parts[1]);
+        if (spec.trim() === "") continue;
+        const parts = spec.trim().match(SPECIFIER);
+        if (parts === null)
+          fails.push(`${at(start)}: an import specifier it can't read`);
+        else if (parts[1] === "usePush") locals.push(parts[2] ?? parts[1]);
       }
     }
     const inImport = (i) => importRanges.some(([a, b]) => i >= a && i < b);
+    // Every `from '<usePush module>'` must sit in a statement read above.
+    for (const m of code.matchAll(/(^|[^\w$.])from\s*(["'])([^"'\n]+)\2/g)) {
+      const start = m.index + m[1].length;
+      if (bare[start] !== "f" || inImport(start)) continue;
+      if (USE_PUSH_MODULES.has(resolveSpec(file, m[3])))
+        fails.push(
+          `${at(start)}: imports or re-exports a usePush module in a form it can't read`,
+        );
+    }
     const bindings = [];
     for (const local of locals) {
-      for (const m of bare.matchAll(
-        new RegExp(`${NOT_MEMBER}${local}(?![\\w$])`, "g"),
-      )) {
+      for (const m of bare.matchAll(usesOf(local))) {
         if (inImport(m.index)) continue;
-        const bound = bare.slice(0, m.index).match(/\bconst\s+(\w+)\s*=\s*$/);
+        const bound = bare.slice(0, m.index).match(BOUND);
         if (bound && /^\s*\(/.test(bare.slice(m.index + local.length)))
           bindings.push({
             name: bound[1],
@@ -730,8 +786,7 @@ function checkPushCalls(sources, bareBranch = BARE_BRANCH) {
       }
     }
     for (const binding of bindings) {
-      const re = new RegExp(`${NOT_MEMBER}${binding.name}(?![\\w$])`, "g");
-      for (const ref of bare.matchAll(re)) {
+      for (const ref of bare.matchAll(usesOf(binding.name))) {
         if (ref.index === binding.at) continue;
         const end = ref.index + binding.name.length;
         const after = bare.slice(end);
@@ -926,6 +981,101 @@ test("the usePush call scan fails closed on every shape it can't prove", () => {
     [sc]: [...BARE_BRANCH[sc], "noSuchFunction"],
   });
 });
+
+// Non-BMP text and identifier spellings, one test per shape. Fixture text is
+// built from code points so this file stays ASCII.
+let srcTree;
+const PROBE = "src/features/probe.tsx";
+const scanWithProbe = (lines) =>
+  checkPushCalls({ ...(srcTree ??= walkSrc()), [PROBE]: lines.join("\n") });
+const failsNaming = (fails, fragment) =>
+  assert.ok(
+    fails.some((f) => f.includes(fragment)),
+    `expected a failure naming ${fragment}, got ${JSON.stringify(fails)}`,
+  );
+const NO_BRANCH = "p.mutate in Probe: names no branch and records no start";
+const UNSAFE = "{ setUpstream: false }";
+const SAFE = "{ setUpstream: false, branch: b.name }";
+const pushProbe = (alias, vars, lead = []) => [
+  ...lead,
+  alias === "usePush"
+    ? 'import { usePush } from "@/lib/git/queries";'
+    : `import { usePush as ${alias} } from "@/lib/git/queries";`,
+  "function Probe() {",
+  `  const p = ${alias}("r");`,
+  `  p.mutate(${vars});`,
+  "}",
+];
+const rocket = String.fromCodePoint(0x1f680);
+const eAcute = String.fromCodePoint(0xe9);
+const mathP = String.fromCodePoint(0x1d45d);
+const backslash = String.fromCharCode(92);
+
+for (const [where, lead] of [
+  ["a string", `const label = "${rocket}";`],
+  ["a line comment", `// ${rocket}${rocket}`],
+  ["a block comment", `/* ${rocket.repeat(4)} */`],
+])
+  test(`a non-BMP character in ${where} before the import hides no push`, () => {
+    failsNaming(scanWithProbe(pushProbe("usePush", UNSAFE, [lead])), NO_BRANCH);
+    assert.deepEqual(scanWithProbe(pushProbe("usePush", SAFE, [lead])), []);
+    const text = pushProbe("usePush", UNSAFE, [lead]).join("\n");
+    const { code, bare } = lex(text);
+    assert.deepEqual([code.length, bare.length], [text.length, text.length]);
+  });
+
+for (const alias of ["$usePush", "_p", `push${eAcute}`, mathP])
+  test(`an import aliased as ${alias} is followed`, () => {
+    failsNaming(scanWithProbe(pushProbe(alias, UNSAFE)), NO_BRANCH);
+    assert.deepEqual(scanWithProbe(pushProbe(alias, SAFE)), []);
+  });
+
+for (const value of ["$b", `b${eAcute}`, mathP])
+  test(`a bare branch value ${value} counts only through the allowlist`, () => {
+    const vars = `{ setUpstream: false, branch: ${value} }`;
+    failsNaming(scanWithProbe(pushProbe("usePush", vars)), NO_BRANCH);
+  });
+
+for (const [shape, line, fragment] of [
+  [
+    "an escaped specifier",
+    `import { usePu${backslash}u0073h as p } from "@/lib/git/queries";`,
+    "an import specifier it can't read",
+  ],
+  [
+    "an escaped default binding",
+    `import ${backslash}u0070, { usePush } from "@/lib/git/queries";`,
+    "an import clause it can't read",
+  ],
+  [
+    "a string-named specifier",
+    'import { "usePush" as p } from "@/lib/git/queries";',
+    "in a form it can't read",
+  ],
+  [
+    "no spacing around the clause",
+    'import{usePush as p}from"@/lib/git/queries";',
+    "in a form it can't read",
+  ],
+])
+  test(`an import of a usePush module with ${shape} fails`, () => {
+    const lines = [line, "function Probe() {", `  p.mutate(${UNSAFE});`, "}"];
+    failsNaming(scanWithProbe(lines), fragment);
+  });
+
+for (const line of [
+  'import $x from "./x";',
+  `import ${eAcute} from "./x";`,
+  `import ${mathP} from "./x";`,
+  'export * as $x from "./x";',
+  `export * as ${eAcute} from "./x";`,
+  "const m = await import($spec);",
+])
+  test(`the import-free check catches ${line}`, () => {
+    const file = new URL(`../${IMPORT_FREE[0]}`, import.meta.url);
+    const src = readFileSync(file, "utf8");
+    assert.notDeepEqual(importsIn(`${src}\n${line}\n`), [], line);
+  });
 
 test("every route re-checks the running push where it fires", () => {
   assert.deepEqual(checkPins(PINS, realSources()), []);
