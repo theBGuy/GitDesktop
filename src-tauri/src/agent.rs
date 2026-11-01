@@ -2265,8 +2265,10 @@ enum OpencodePin {
 /// allow that some rule also denies is dropped, so denies win and every deny lands after
 /// every allow: an allow carved out of a narrower deny (`secret/**` denied,
 /// `secret/public/**` allowed) stays denied. Keys stay unique: a user allow equal to a
-/// carve-out key is dropped, and a deny equal to one turns it to `deny` in place, so the
-/// last read rule is never a bare `*` deny, which would disable the tool. A user's
+/// carve-out key is dropped, and a carve-out key the user denies moves to its place
+/// among the denies, since left in place `*.env.*` would precede `*.env.example`'s
+/// allow. `*` stays first, denied through its own value, so the last read rule is
+/// never a bare `*` deny, which would disable the tool. A user's
 /// outright read deny (`"read": "deny"`, a string `permission`, legacy
 /// `tools: {"read": false}`) therefore keeps the tool on with every read denied. A user
 /// deny whose pattern is an array index (`2024`) is emitted as `2024 *`, which matches
@@ -2315,7 +2317,9 @@ fn opencode_permission_json(
     }
     // `*.env` reads stay denied, mirroring opencode's own default carve-out
     // with its `ask` hardened to `deny`; the user's allows precede it and the
-    // user's denies follow it.
+    // user's denies follow it. A carve-out key the user denies leaves the
+    // carve-out for its place among the denies, so it follows every allow, as
+    // plain opencode's appended user rules do.
     let respelled: Vec<String> = mirror
         .denies
         .iter()
@@ -2341,30 +2345,27 @@ fn opencode_permission_json(
         ("*.env.example", star),
     ];
     let mut read_rules = vec![("*", star)];
-    // Each key's index in `read_rules`.
-    let mut at: HashMap<&str, usize> = HashMap::from([("*", 0)]);
+    // `*` stays first, its deny carried by `star`, so it is never the last rule.
+    let mut keys: HashSet<&str> = HashSet::from(["*"]);
     for pattern in &mirror.allows {
         let pattern = pattern.as_str();
         let taken = carve_out.iter().any(|(key, _)| *key == pattern)
             || denied.contains(pattern)
-            || at.contains_key(pattern);
+            || keys.contains(pattern);
         if !taken {
-            at.insert(pattern, read_rules.len());
+            keys.insert(pattern);
             read_rules.push((pattern, "allow"));
         }
     }
     for rule in carve_out {
-        at.insert(rule.0, read_rules.len());
-        read_rules.push(rule);
+        if !denied.contains(rule.0) {
+            keys.insert(rule.0);
+            read_rules.push(rule);
+        }
     }
     for pattern in &respelled {
-        let pattern = pattern.as_str();
-        match at.get(pattern) {
-            Some(&index) => read_rules[index].1 = "deny",
-            None => {
-                at.insert(pattern, read_rules.len());
-                read_rules.push((pattern, "deny"));
-            }
+        if keys.insert(pattern.as_str()) {
+            read_rules.push((pattern.as_str(), "deny"));
         }
     }
     let read_rules: Vec<String> = read_rules
@@ -2920,15 +2921,26 @@ enum ConfigRead {
 const OPENCODE_CONFIG_CAP: usize = 4 << 20;
 
 /// Reads a config file for the resolver: anything but a regular file (a directory, a
-/// FIFO, which would block the open) is missing, and the read stops past the cap.
+/// FIFO) is missing, and the read stops past the cap. The type check reads the opened
+/// handle, never the path, so nothing swapped in between can reach the read; Unix
+/// opens with `O_NONBLOCK`, because a FIFO's open otherwise waits for a writer (it
+/// doesn't change regular-file reads).
 fn read_config_file(path: &Path) -> ConfigRead {
     use std::io::Read;
-    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
-        return ConfigRead::Missing;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags: libc::c_int = libc::O_NONBLOCK;
+        options.custom_flags(flags);
     }
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(file) = options.open(path) else {
         return ConfigRead::Missing;
     };
+    if !file.metadata().is_ok_and(|m| m.is_file()) {
+        return ConfigRead::Missing;
+    }
     let mut bytes = Vec::new();
     match file
         .take(OPENCODE_CONFIG_CAP as u64 + 1)
@@ -7693,6 +7705,56 @@ opencode/x-preview-f-free
         rules
     }
 
+    /// Both read rule sets of `out` in emitted order, `read` first.
+    fn read_rule_sets(out: &str) -> [Vec<(String, ConfigValue)>; 2] {
+        let Ok(ConfigValue::Object(top)) = serde_json::from_str::<ConfigValue>(out) else {
+            panic!("{out}");
+        };
+        ["read", "read *"].map(|read| match top.iter().find(|(key, _)| key == read) {
+            Some((_, ConfigValue::Object(rules))) => rules.clone(),
+            _ => panic!("no {read} rule set: {out}"),
+        })
+    }
+
+    /// The action of the last rule in `rules` matching `path`, as opencode resolves it.
+    fn read_verdict<'a>(rules: &'a [(String, ConfigValue)], path: &str) -> &'a str {
+        match rules
+            .iter()
+            .rev()
+            .find(|(key, _)| wildcard_matches(key, path))
+        {
+            Some((_, ConfigValue::String(action))) => action.as_str(),
+            other => panic!("{path}: {other:?}"),
+        }
+    }
+
+    /// Asserts that in both read rule sets every key spelling one of `found`'s denies
+    /// (index-shaped ones respelled) is a `deny` after every `allow` rule. `*` is
+    /// exempt: it stays first, denied through its own value.
+    fn assert_denies_follow_allows(out: &str, found: &OpencodeReadMirror) {
+        let denied: Vec<String> = found
+            .denies
+            .iter()
+            .map(|pattern| match js_array_index(pattern) {
+                Some(_) => format!("{pattern} *"),
+                None => pattern.clone(),
+            })
+            .collect();
+        for rules in read_rule_sets(out) {
+            let is = |value: &ConfigValue, action: &str| matches!(value, ConfigValue::String(a) if a == action);
+            let last_allow = rules.iter().rposition(|(_, value)| is(value, "allow"));
+            for (index, (key, value)) in rules.iter().enumerate() {
+                if key != "*" && denied.contains(key) {
+                    assert!(is(value, "deny"), "{key} not denied: {out}");
+                    assert!(
+                        last_allow.is_none_or(|at| index > at),
+                        "{key} precedes an allow: {out}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn opencode_permission_pins_mirror_the_read_allows_before_the_env_carve_out() {
         // An allow-list config plus a deny: `*` denied, the allow, the carve-out with
@@ -7706,6 +7768,9 @@ opencode/x-preview-f-free
             opencode_permission_json(OpencodePin::ReadOnly, &[], &list),
             r#"{"*":"deny","*_*":"deny","read":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"read *":{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
         );
+        for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+            assert_denies_follow_allows(&opencode_permission_json(pin, &[], &list), &list);
+        }
         for (found, want) in [
             // A pattern both allowed and denied is denied, after the carve-out.
             (
@@ -7713,7 +7778,7 @@ opencode/x-preview-f-free
                 r#"{"*":"allow","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","secret/**":"deny"}"#,
             ),
             // An allow equal to a carve-out key is dropped, so the carve-out stands; a
-            // deny equal to one turns it to `deny` in place.
+            // carve-out key the user denies moves to the deny tail.
             (
                 mirror(
                     false,
@@ -7737,6 +7802,7 @@ opencode/x-preview-f-free
                 let out = opencode_permission_json(pin, &["gitdesktop"], &found);
                 assert_eq!(read_rule_set(&out), want, "{found:?}");
                 assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+                assert_denies_follow_allows(&out, &found);
             }
         }
     }
@@ -7752,9 +7818,79 @@ opencode/x-preview-f-free
             opencode_permission_json(OpencodePin::ReadOnly, &[], &pem),
             r#"{"*":"deny","*_*":"deny","read":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","*.pem":"deny"},"read *":{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","*.pem":"deny"},"grep":"allow","grep *":"allow","glob":"allow","glob *":"allow","list":"allow","list *":"allow","skill":"deny","todowrite":"deny","question":"deny","edit":"deny","bash":"deny","webfetch":"deny","websearch":"deny","codesearch":"deny","lsp":"deny","task":"deny","external_directory":"deny","doom_loop":"deny","plan_enter":"deny","plan_exit":"deny"}"#
         );
+        for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+            assert_denies_follow_allows(&opencode_permission_json(pin, &[], &pem), &pem);
+        }
+        // A carve-out key the user denies leaves the carve-out for the deny tail, so
+        // it follows `*.env.example`'s allow as plain opencode's user rules do; `*`
+        // stays first and the last rule is never a bare `*` deny. (allows, denies,
+        // read rules, the verdict for `x.env.example` and `.env.example`)
+        for (allows, denies, want, example) in [
+            (
+                &[][..],
+                &["*.env.*"][..],
+                r#"{"*":"allow","*.env":"deny","*.env.example":"allow","*.env.*":"deny"}"#,
+                "deny",
+            ),
+            (
+                &["src/**"][..],
+                &["*.env.*"][..],
+                r#"{"*":"allow","src/**":"allow","*.env":"deny","*.env.example":"allow","*.env.*":"deny"}"#,
+                "deny",
+            ),
+            (
+                &[][..],
+                &["*.env"][..],
+                r#"{"*":"allow","*.env.*":"deny","*.env.example":"allow","*.env":"deny"}"#,
+                "allow",
+            ),
+            (
+                &[][..],
+                &["*.env.example"][..],
+                r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#,
+                "deny",
+            ),
+            (
+                &[][..],
+                &["*"][..],
+                r#"{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#,
+                "deny",
+            ),
+            (
+                &[][..],
+                &["*", "*.env.*"][..],
+                r#"{"*":"deny","*.env":"deny","*.env.example":"deny","*.env.*":"deny"}"#,
+                "deny",
+            ),
+            (
+                &[][..],
+                &["*.env.example", "*.env.*", "*.env", "*"][..],
+                r#"{"*":"deny","*.env.example":"deny","*.env.*":"deny","*.env":"deny"}"#,
+                "deny",
+            ),
+        ] {
+            let found = mirror(false, allows, denies);
+            for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
+                let out = opencode_permission_json(pin, &["gitdesktop"], &found);
+                assert_eq!(read_rule_set(&out), want, "{found:?}");
+                assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+                assert_denies_follow_allows(&out, &found);
+                for rules in read_rule_sets(&out) {
+                    for path in ["x.env.example", ".env.example"] {
+                        assert_eq!(read_verdict(&rules, path), example, "{path}: {out}");
+                    }
+                    assert_eq!(read_verdict(&rules, "x.env.local"), "deny", "{out}");
+                    assert_ne!(
+                        rules.last().map(|(key, _)| key.as_str()),
+                        Some("*"),
+                        "{out}"
+                    );
+                }
+            }
+        }
         // Arbitrary text is escaped as a JSON string; a repeat or a pin key's own
-        // spelling adds no key, and a carve-out key the user denies turns to `deny`
-        // where it stands, so the last rule is never a bare `*` deny.
+        // spelling adds no key, and the carve-out keys the user denies follow the
+        // other denies in the user's order.
         let uni = "\u{43a}\u{43b}\u{44e}\u{447}.pem";
         let denies = [
             "*.pem",
@@ -7767,7 +7903,7 @@ opencode/x-preview-f-free
         ];
         let denies = mirror(false, &[], &denies);
         let rules = format!(
-            r#"{{"*":"deny","*.env":"deny","*.env.*":"deny","*.env.example":"deny","*.pem":"deny","a\"b\\c":"deny","{uni}":"deny"}}"#
+            r#"{{"*":"deny","*.env.*":"deny","*.pem":"deny","a\"b\\c":"deny","{uni}":"deny","*.env.example":"deny","*.env":"deny"}}"#
         );
         let out = opencode_permission_json(OpencodePin::DiffOnly, &[], &denies);
         assert_eq!(
@@ -7782,13 +7918,16 @@ opencode/x-preview-f-free
         for pin in [OpencodePin::DiffOnly, OpencodePin::ReadOnly] {
             let out = opencode_permission_json(pin, &["gitdesktop"], &denies);
             assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+            assert_denies_follow_allows(&out, &denies);
             for read in [r#""read":{"#, r#""read *":{"#] {
                 // No pattern here holds a `}`, so the first one closes the rule set.
                 let start = out.find(read).unwrap() + read.len();
                 let body = &out[start..start + out[start..].find('}').unwrap()];
                 let at = |k: &str| body.find(&format!(r#""{k}":"#)).unwrap();
-                assert!(at("*.env.example") < at("*.pem"), "{body}");
-                assert!(body.ends_with(&format!(r#""{uni}":"deny""#)), "{body}");
+                assert!(at("*.env.*") < at("*.pem"), "{body}");
+                assert!(at(uni) < at("*.env.example"), "{body}");
+                assert!(at("*.env.example") < at("*.env"), "{body}");
+                assert!(body.ends_with(r#""*.env":"deny""#), "{body}");
             }
         }
     }
@@ -8264,8 +8403,12 @@ opencode/x-preview-f-free
         let global = "home/.config/opencode/opencode.json";
         let pins = |fx: &ConfigFixture| {
             let found = fx.resolve(None).0;
-            [OpencodePin::DiffOnly, OpencodePin::ReadOnly]
-                .map(|pin| opencode_permission_json(pin, &[], &found))
+            let out = [OpencodePin::DiffOnly, OpencodePin::ReadOnly]
+                .map(|pin| opencode_permission_json(pin, &[], &found));
+            for pin in &out {
+                assert_denies_follow_allows(pin, &found);
+            }
+            out
         };
         fx.write(
             global,
@@ -8338,6 +8481,7 @@ opencode/x-preview-f-free
         let open = r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow"}"#;
         let src = r#"{"*":"deny","src/**":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"deny"}"#;
         let index = r#"{"*":"allow","*.env":"deny","*.env.*":"deny","*.env.example":"allow","0 *":"deny","2024 *":"deny","01":"deny"}"#;
+        let env_any = r#"{"*":"allow","*.env":"deny","*.env.example":"allow","*.env.*":"deny"}"#;
         for (body, rules, readonly) in [
             (
                 r#"{"permission":{"*":"deny","grep":{"*":"allow"},"read":"allow"}}"#,
@@ -8374,7 +8518,19 @@ opencode/x-preview-f-free
                 src,
                 ["allow", "deny", "allow"],
             ),
+            // A deny or ask on a carve-out key follows `*.env.example`'s allow.
+            (
+                r#"{"permission":{"read":{"*.env.*":"deny"}}}"#,
+                env_any,
+                ["allow", "allow", "allow"],
+            ),
+            (
+                r#"{"permission":{"read":{"*.env.*":"ask"}}}"#,
+                env_any,
+                ["allow", "allow", "allow"],
+            ),
             // Index-shaped denies are respelled `<digits> *`, deduped; `01` isn't one.
+            // Last, so the JS-order check below reads this row.
             (
                 r#"{"permission":{"read":{"2024":"deny","*":"allow","0":"ask","01":"deny","2024 *":"deny"}}}"#,
                 index,
@@ -8419,6 +8575,22 @@ opencode/x-preview-f-free
         let want = [OpencodePin::DiffOnly, OpencodePin::ReadOnly]
             .map(|pin| opencode_permission_json(pin, &[], &pem));
         assert_eq!(pins(&fx), want);
+        // A user deny or ask on `*.env.*` denies `.env.example` files, as in plain
+        // opencode.
+        for action in ["deny", "ask"] {
+            fx.write(
+                global,
+                &format!(r#"{{"permission":{{"read":{{"*.env.*":"{action}"}}}}}}"#),
+            );
+            for out in pins(&fx) {
+                for rules in read_rule_sets(&out) {
+                    for path in ["x.env.example", ".env.example"] {
+                        assert_eq!(read_verdict(&rules, path), "deny", "{path}: {out}");
+                    }
+                    assert_eq!(read_verdict(&rules, "src/main.rs"), "allow", "{out}");
+                }
+            }
+        }
     }
 
     /// Fails instead of hanging when the resolver blocks on a FIFO at a config path.
@@ -8760,6 +8932,7 @@ opencode/x-preview-f-free
                 variants += 1;
                 let out = opencode_permission_json(pin, servers, read_mirror);
                 assert_eq!(pin_alias_violations(&out), Vec::<String>::new(), "{out}");
+                assert_denies_follow_allows(&out, read_mirror);
                 let entries = pin_entries(&out);
                 let alias_count = entries.iter().filter(|(k, _)| is_alias_key(k)).count();
                 // DiffOnly's grep/glob/list stay denied, so they take no alias.
