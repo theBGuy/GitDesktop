@@ -9,6 +9,7 @@ import { Marked } from "marked";
 import {
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -21,8 +22,8 @@ import {
   type LightboxImage,
 } from "@/components/ui/image-lightbox";
 import { diffLang } from "@/features/diff/diff-lang";
-import { forgeRepoUrl } from "@/lib/git/api";
-import { issueDetailsOptions } from "@/lib/git/queries";
+import { type FileBytes, forgeRepoUrl } from "@/lib/git/api";
+import { fileAtRevOptions, issueDetailsOptions } from "@/lib/git/queries";
 import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { createCardLatch } from "@/lib/hover-card-latch";
@@ -34,10 +35,43 @@ import {
 } from "@/lib/hover-card-timing";
 import { lensKey } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { hljsUpgradeStore, upgradeToFullHljs } from "./markdown-hljs";
+import {
+  ANY_SCHEME,
+  AUTHORITY_PREFIX,
+  captionName,
+  captionReason,
+  createBudgetStore,
+  decodedByteLength,
+  IMAGE_CAPTION_REASON,
+  IMAGE_ICON_PATH,
+  IMAGE_ICON_VIEWBOX,
+  type ImageBudget,
+  type ImageCaptionReason,
+  type ImageFailure,
+  type ImageOwnSrc,
+  imageFate,
+  isRepoRelativeImageUrl,
+  keepsShownImage,
+  LEADING_SEPARATOR,
+  normalizeHref,
+  parseSrcset,
+  REPO_IMAGE_ATTRS,
+  REPO_IMAGE_MAX_IN_FLIGHT,
+  RUN_ATTR,
+  relativeUrlAttrs,
+  renderableImageMime,
+  resolveRepoImagePath,
+  runCapped,
+  SHOWN_SRC_ATTR,
+  type SrcsetCandidate,
+  serializeSrcset,
+  unitNeedsWalk,
+} from "./markdown-images";
 import {
   cachedRefKind,
   isPullRefUrl,
@@ -135,42 +169,6 @@ const BLOB_PATH: Record<ForgeProvider, string> = {
 /** The repo URL's own trailing slash, dropped before the blob path is appended:
  *  a doubled slash mid-path is a segment the forge doesn't serve. */
 const TRAILING_SLASH = /\/+$/;
-
-/** Any scheme at all, in RFC 3986's shape. DOMPurify's default allowlist admits
- *  far more than the two above (`tel:`, `ftp:`, `sms:`, `cid:`, `xmpp:` …), and
- *  a scheme-bearing href is not a repository path, so it never becomes one. */
-const ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
-
-/** Two leading slashes, in either slash. `new URL` reads both `//host/x` and
- *  `\\host\x` against an https base as an AUTHORITY, resolving to that host — so
- *  an href in either shape would otherwise wear a repo-file card naming the
- *  forge while opening somewhere else entirely. Backslashes reach the DOM only
- *  through a body's raw HTML; marked percent-encodes them in its own syntax. */
-const AUTHORITY_PREFIX = /^[\\/]{2}/;
-
-/** Tab, LF, and CR — the URL parser removes these from ANYWHERE in an href. */
-const URL_REMOVED = /[\t\n\r]/g;
-
-/** A single leading separator. Dropped from a root-relative href so it resolves
- *  against the repository root rather than the forge's site root, and tested
- *  again afterwards: one still there means the href carried two, which addresses
- *  something other than a file in this repo. */
-const LEADING_SEPARATOR = /^[\\/]/;
-
-/** An href as the URL parser will read it: those three gone, then the
- *  leading/trailing C0-and-space run stripped (`String.trim` misses C0).
- *  DOMPurify only edge-trims attribute values, so both shapes reach the DOM, and
- *  judging the raw text would judge a different string than the one that
- *  resolves: `/<tab>/evil.com` reads as a path and resolves to an authority.
- *  The edge walk is by code point; a control-character regex class fails lint. */
-function normalizeHref(raw: string): string {
-  const s = raw.replace(URL_REMOVED, "");
-  let start = 0;
-  let end = s.length;
-  while (start < end && s.charCodeAt(start) <= 0x20) start++;
-  while (end > start && s.charCodeAt(end - 1) <= 0x20) end--;
-  return s.slice(start, end);
-}
 
 /** A body's handle on its own card — every field stable for the body's life, so
  *  the object doubles as that body's identity in the latch below. */
@@ -275,19 +273,79 @@ function lightboxImagesIn(root: Element): HTMLImageElement[] {
 function markLightboxImage(img: HTMLImageElement) {
   if (!isLightboxImage(img)) return;
   // The viewer's own caption fallback, so the two name an image identically.
-  // It carries its own http(s) guard, so a data: URI resolves to "" here.
-  const name = img.alt || fileNameFromSrc(img.src);
+  // It carries its own http(s) guard, so a data: URI resolves to "" here; a
+  // repository image is named from the relative URL it was loaded for.
+  const name = img.alt || fileNameFromSrc(img.src) || repoImageFileName(img);
   img.tabIndex = 0;
   img.setAttribute("role", "button");
   img.setAttribute("aria-label", name ? `View image: ${name}` : "View image");
   img.dataset.lightbox = "";
+  lightboxMarked.add(img);
+}
+
+/** Images markLightboxImage marked, so only its own affordances come off. */
+const lightboxMarked = new WeakSet<HTMLImageElement>();
+
+/** Takes markLightboxImage's affordances off an image it marked; true when it
+ *  removed them. */
+function unmarkLightboxImage(img: HTMLImageElement): boolean {
+  if (!lightboxMarked.delete(img)) return false;
+  img.removeAttribute("tabindex");
+  img.removeAttribute("role");
+  img.removeAttribute("aria-label");
+  delete img.dataset.lightbox;
+  return true;
+}
+
+/** Brings a loaded or failed image's affordances in line with whether it
+ *  qualifies now: an image refreshed into a badge-sized one, or one that no
+ *  longer decodes, loses them. Focus on an image that loses them lands on
+ *  `home`. */
+function reconcileLightboxImage(img: HTMLImageElement, home: HTMLElement) {
+  if (isLightboxImage(img)) {
+    markLightboxImage(img);
+    return;
+  }
+  const focused = img.ownerDocument.activeElement === img;
+  if (unmarkLightboxImage(img) && focused) rescueFocus(home);
+}
+
+/**
+ * Lands focus on the rendered body when the node holding it leaves or stops
+ * being focusable, rather than letting it drop to `<body>`. A root with no
+ * tabindex of its own gets -1 for this one landing, taken off again when it
+ * blurs, so a later click on plain text doesn't focus the root.
+ */
+function rescueFocus(home: HTMLElement) {
+  const added = !home.hasAttribute("tabindex");
+  if (added) home.tabIndex = -1;
+  home.focus({ preventScroll: true });
+  if (!added) return;
+  if (home.ownerDocument.activeElement === home)
+    home.addEventListener("blur", () => home.removeAttribute("tabindex"), {
+      once: true,
+    });
+  else home.removeAttribute("tabindex");
+}
+
+/** The file name a repository-loaded image shows, or null for any other: the
+ *  relative candidate a fallback image took from its picture's source, else the
+ *  relative src it was loaded for. An image showing an absolute src names
+ *  itself. */
+function repoImageFileName(img: HTMLImageElement): string | null {
+  if (!img.getAttribute("src")?.startsWith("data:")) return null;
+  const raw = img.getAttribute(SHOWN_SRC_ATTR) ?? img.dataset.repoSrc;
+  return raw === undefined ? null : captionName("", raw);
 }
 
 function toLightboxImage(img: HTMLImageElement): LightboxImage {
-  // `label` stays unset so the viewer falls back to alt, then the filename.
+  // `label` stays unset so the viewer falls back to alt, then the filename,
+  // except for a repository image, whose data: URL names no file.
+  const label = img.alt ? null : repoImageFileName(img);
   return {
     src: img.src,
     alt: img.alt,
+    ...(label === null ? {} : { label }),
     naturalWidth: img.naturalWidth,
     naturalHeight: img.naturalHeight,
   };
@@ -295,6 +353,390 @@ function toLightboxImage(img: HTMLImageElement): LightboxImage {
 
 /** Stable empty set for a viewer that has never been opened. */
 const NO_IMAGES: LightboxImage[] = [];
+
+/** Where a body's repository-relative images load from: the repository at `rev`
+ *  (null = the working tree), resolved against the document's directory. A
+ *  changed `refreshKey` re-reads every image under the same text; a caller whose
+ *  version can't change keeps it constant. */
+export interface MarkdownRepoImages {
+  repoPath: string;
+  rev: string | null;
+  baseDir: string;
+  refreshKey: number;
+}
+
+/**
+ * DOMPurify `afterSanitizeAttributes` hook: moves every repository-relative
+ * image URL off the attribute the webview would load it from, and removes every
+ * other relative URL it would fetch (RELATIVE_URL_ATTRS), which nothing loads.
+ * Resolved against the webview's own origin, such a URL loads the app's files,
+ * never the repository's; the loader effect reads the moved image values
+ * instead. Absolute values stay as DOMPurify left them, so a body without
+ * relative URLs and without `data-repo-*` attributes serializes to the
+ * identical string.
+ * Out of reach by design: CSS fetches (`url()`, `image-set()`) in `style`
+ * attributes, `<style>` and SVG presentation attributes need a CSS parser.
+ */
+function neutralizeRepoImages(node: Element) {
+  for (const attr of REPO_IMAGE_ATTRS) node.removeAttribute(attr);
+  const tag = node.nodeName;
+  for (const attr of relativeUrlAttrs(tag)) {
+    const value = node.getAttribute(attr);
+    if (value !== null && isRepoRelativeImageUrl(value))
+      node.removeAttribute(attr);
+  }
+  if (tag === "IMG") {
+    const src = node.getAttribute("src");
+    if (src !== null && isRepoRelativeImageUrl(src)) {
+      node.setAttribute("data-repo-src", src);
+      node.removeAttribute("src");
+    }
+  }
+  if (tag === "IMG" || tag === "SOURCE") {
+    const srcset = node.getAttribute("srcset");
+    if (
+      srcset !== null &&
+      parseSrcset(srcset).some((c) => isRepoRelativeImageUrl(c.url))
+    ) {
+      node.setAttribute("data-repo-srcset", srcset);
+      node.removeAttribute("srcset");
+    }
+  }
+}
+
+/** A relative image value's fate: the data: URL it loaded as, or why not. */
+type ImageOutcome = { url: string } | { reason: ImageFailure };
+
+/** A `<picture>` with its image and sources, or a lone image or source: the
+ *  loader writes one at once, every srcset before the image's own src, so the
+ *  browser picks a source once. `slot` is the node standing in the document for
+ *  it: its root, or the caption that replaced the root. */
+interface ImageUnit {
+  slot: Element;
+  root: Element;
+  img: HTMLImageElement | null;
+  sources: HTMLSourceElement[];
+}
+
+/** Each caption's original unit root, kept detached so a later run whose read
+ *  succeeds can put it back. */
+const captionedRoots = new WeakMap<Element, Element>();
+
+function imageUnit(root: Element, slot: Element): ImageUnit | null {
+  if (root.nodeName === "PICTURE")
+    return {
+      slot,
+      root,
+      img: root.querySelector("img"),
+      sources: Array.from(
+        root.querySelectorAll<HTMLSourceElement>("source[data-repo-srcset]"),
+      ),
+    };
+  if (root instanceof HTMLImageElement)
+    return { slot, root, img: root, sources: [] };
+  if (root instanceof HTMLSourceElement)
+    return { slot, root, img: null, sources: [root] };
+  return null;
+}
+
+/** Every unit the neutralize hook marked, written or not, and every caption the
+ *  loader left, grouped in document order. */
+function repoImageUnits(body: HTMLElement): ImageUnit[] {
+  const units = new Map<Element, ImageUnit>();
+  for (const node of body.querySelectorAll(
+    "[data-repo-src],[data-repo-srcset],[data-repo-image-caption]",
+  )) {
+    const original = node.hasAttribute("data-repo-image-caption")
+      ? captionedRoots.get(node)
+      : undefined;
+    const root = original ?? node.closest("picture") ?? node;
+    const slot = original === undefined ? root : node;
+    if (units.has(slot)) continue;
+    const unit = imageUnit(root, slot);
+    if (unit) units.set(slot, unit);
+  }
+  return [...units.values()];
+}
+
+/** A neutralized srcset's relative candidates. */
+function relativeCandidates(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return parseSrcset(raw)
+    .map((c) => c.url)
+    .filter(isRepoRelativeImageUrl);
+}
+
+/** An image's own relative values, src first: the first one names a caption. */
+function imgRelativeUrls(img: HTMLImageElement): string[] {
+  const src = img.dataset.repoSrc;
+  return [
+    ...(src === undefined ? [] : [src]),
+    ...relativeCandidates(img.dataset.repoSrcset),
+  ];
+}
+
+/** The relative values a unit loads, in document order (a picture's sources
+ *  come before its image). */
+function unitRelativeUrls(unit: ImageUnit): string[] {
+  return [
+    ...unit.sources.flatMap((s) => relativeCandidates(s.dataset.repoSrcset)),
+    ...(unit.img ? imgRelativeUrls(unit.img) : []),
+  ];
+}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** The inline stand-in for an image that can't be shown: a glyph, then the
+ *  image's name and the reason as plain text. Styled from the body's class list
+ *  (`[data-repo-image-caption]`); not focusable and untitled, since its text is
+ *  the whole message. */
+function imageCaption(
+  doc: Document,
+  name: string,
+  reason: ImageCaptionReason,
+): HTMLSpanElement {
+  const caption = doc.createElement("span");
+  caption.setAttribute("data-repo-image-caption", "");
+  const glyph = doc.createElementNS(SVG_NS, "svg");
+  glyph.setAttribute("viewBox", IMAGE_ICON_VIEWBOX);
+  glyph.setAttribute("fill", "currentColor");
+  glyph.setAttribute("aria-hidden", "true");
+  const path = doc.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", IMAGE_ICON_PATH);
+  glyph.append(path);
+  const text = doc.createElement("span");
+  text.textContent = `${name} · ${IMAGE_CAPTION_REASON[reason]}`;
+  caption.append(glyph, text);
+  return caption;
+}
+
+/** `value` as the element's srcset, or none at all when every candidate went. */
+function writeSrcset(el: Element, value: string) {
+  if (value === "") el.removeAttribute("srcset");
+  else el.setAttribute("srcset", value);
+}
+
+/**
+ * Writes one unit from its settled outcomes and stamps it with `runKey`. A unit
+ * already showing an image keeps it through a failed read (keepsShownImage).
+ * Otherwise each srcset keeps its absolute candidates and the relative ones that
+ * loaded, and imageFate decides the image: kept (taking a source's candidate as
+ * its src when its own failed), or replaced, with any `<picture>` around it, by
+ * a caption that remembers the original so a later run can put it back. Every
+ * node kept keeps its `data-repo-*` value, which the lightbox names it from and
+ * the next run re-reads.
+ */
+function applyImageUnit(
+  unit: ImageUnit,
+  outcomeOf: (raw: string) => ImageOutcome | undefined,
+  runKey: string,
+  home: HTMLElement,
+) {
+  const showing = unit.slot === unit.root && unit.root.hasAttribute(RUN_ATTR);
+  const failures = unitRelativeUrls(unit).flatMap((raw) => {
+    const outcome = outcomeOf(raw);
+    return outcome && "reason" in outcome ? [outcome.reason] : [];
+  });
+  if (keepsShownImage(showing, failures)) {
+    unit.root.setAttribute(RUN_ATTR, runKey);
+    return;
+  }
+  const keep = (raw: string | undefined) => {
+    if (raw === undefined) return null;
+    const kept: SrcsetCandidate[] = [];
+    for (const c of parseSrcset(raw)) {
+      if (!isRepoRelativeImageUrl(c.url)) kept.push(c);
+      else {
+        const outcome = outcomeOf(c.url);
+        if (outcome && "url" in outcome)
+          kept.push({ url: outcome.url, descriptor: c.descriptor });
+      }
+    }
+    return serializeSrcset(kept);
+  };
+  // The root goes back in place of a caption only once it is fully written.
+  const place = () => {
+    if (unit.slot !== unit.root) unit.slot.replaceWith(unit.root);
+    unit.root.setAttribute(RUN_ATTR, runKey);
+  };
+  for (const source of unit.sources)
+    writeSrcset(source, keep(source.dataset.repoSrcset) ?? "");
+  const { img } = unit;
+  if (!img) {
+    place();
+    return;
+  }
+  const keptOwn = keep(img.dataset.repoSrcset);
+  if (keptOwn !== null) writeSrcset(img, keptOwn);
+  const rawSrc = img.dataset.repoSrc;
+  let own: ImageOwnSrc;
+  if (rawSrc === undefined) own = img.hasAttribute("src") ? "absolute" : "none";
+  else {
+    const outcome = outcomeOf(rawSrc);
+    own = outcome && "url" in outcome ? { loaded: outcome.url } : "failed";
+  }
+  const fate = imageFate({
+    own,
+    ownSrcset: img.getAttribute("srcset") ?? "",
+    sourceSrcsets: Array.from(
+      unit.root.querySelectorAll("source"),
+      (s) => s.getAttribute("srcset") ?? "",
+    ),
+  });
+  if (fate !== "caption") {
+    // Setting src in place leaves focus where it is; the lightbox reconciles its
+    // marks when the new src loads.
+    if (fate !== "keep") img.src = fate.keepWithSrc;
+    else if (rawSrc !== undefined) img.removeAttribute("src");
+    const shown =
+      own === "failed" && fate !== "keep"
+        ? fallbackCandidate(unit, fate.keepWithSrc, outcomeOf)
+        : undefined;
+    if (shown === undefined) img.removeAttribute(SHOWN_SRC_ATTR);
+    else img.setAttribute(SHOWN_SRC_ATTR, shown);
+    place();
+    return;
+  }
+  const urls = [
+    ...imgRelativeUrls(img),
+    ...unit.sources.flatMap((s) => relativeCandidates(s.dataset.repoSrcset)),
+  ];
+  let reason: ImageCaptionReason = "notImage";
+  for (const raw of urls) {
+    const outcome = outcomeOf(raw);
+    if (outcome && "reason" in outcome) {
+      reason = captionReason(outcome.reason);
+      break;
+    }
+  }
+  const name = captionName(img.alt, urls[0] ?? "");
+  const caption = imageCaption(img.ownerDocument, name, reason);
+  captionedRoots.set(caption, unit.root);
+  caption.setAttribute(RUN_ATTR, runKey);
+  // Read at the write: only focus still inside the replaced node moves, and
+  // captions aren't focusable.
+  const active = unit.slot.ownerDocument.activeElement;
+  const heldFocus = active !== null && unit.slot.contains(active);
+  unit.slot.replaceWith(caption);
+  // The detached original keeps no lightbox affordance it may not earn back.
+  for (const shelved of unit.root.querySelectorAll("img"))
+    unmarkLightboxImage(shelved);
+  if (unit.root instanceof HTMLImageElement) unmarkLightboxImage(unit.root);
+  if (heldFocus) rescueFocus(home);
+}
+
+/** The relative source candidate whose loaded URL a fallback image took, or
+ *  undefined when it took an absolute one, which names itself. */
+function fallbackCandidate(
+  unit: ImageUnit,
+  url: string,
+  outcomeOf: (raw: string) => ImageOutcome | undefined,
+): string | undefined {
+  return unit.sources
+    .flatMap((s) => relativeCandidates(s.dataset.repoSrcset))
+    .find((raw) => {
+      const outcome = outcomeOf(raw);
+      return outcome !== undefined && "url" in outcome && outcome.url === url;
+    });
+}
+
+const NO_REPO: ImageOutcome = { reason: "noRepo" };
+const NOT_IMAGE: ImageOutcome = { reason: "notImage" };
+const ABSENT: ImageOutcome = { reason: "absent" };
+const TOO_LARGE: ImageOutcome = { reason: "tooLarge" };
+const OVER_BUDGET: ImageOutcome = { reason: "overBudget" };
+
+/** Each rendered body's budget under its refresh key, keyed on the body's
+ *  parsed document so a re-parse or a remount starts fresh. */
+const budgetFor = createBudgetStore();
+
+/**
+ * Resolves a body's neutralized images. With no repository behind the view,
+ * every relative candidate drops and each image left with nothing to show
+ * becomes a caption at once. With one, each distinct path is read once, at most
+ * REPO_IMAGE_MAX_IN_FLIGHT at a time and within `budget`, the body's budget
+ * under `runKey` (budgetFor), and a unit is written once all of its reads settle; a unit
+ * whose paths are all unresolvable is written at once. Only units not yet written
+ * for `runKey` are walked (unitNeedsWalk). Nothing is written once
+ * `isCancelled()` answers true or the unit's node has left the document, so a
+ * read settling after a switch or a newer run paints nothing.
+ */
+function loadRepoImages(
+  root: HTMLElement,
+  repo: {
+    baseDir: string;
+    read: (path: string) => Promise<FileBytes | null>;
+  } | null,
+  runKey: string,
+  budget: ImageBudget,
+  isCancelled: () => boolean,
+) {
+  const outcomes = new Map<string, ImageOutcome>();
+  const outcomeOf = (raw: string): ImageOutcome | undefined => {
+    if (repo === null) return NO_REPO;
+    const path = resolveRepoImagePath(raw, repo.baseDir);
+    return path === null ? NOT_IMAGE : outcomes.get(path);
+  };
+  const apply = (unit: ImageUnit) => {
+    if (!isCancelled() && unit.slot.isConnected)
+      applyImageUnit(unit, outcomeOf, runKey, root);
+  };
+  let waiting: { unit: ImageUnit; paths: string[] }[] = [];
+  for (const unit of repoImageUnits(root)) {
+    if (!unitNeedsWalk(unit.slot.getAttribute(RUN_ATTR) ?? undefined, runKey))
+      continue;
+    const paths: string[] = [];
+    if (repo !== null) {
+      for (const raw of unitRelativeUrls(unit)) {
+        const path = resolveRepoImagePath(raw, repo.baseDir);
+        if (path !== null) paths.push(path);
+      }
+    }
+    if (paths.length === 0) apply(unit);
+    else waiting.push({ unit, paths });
+  }
+  if (repo === null || waiting.length === 0) return;
+  const settle = (path: string, outcome: ImageOutcome) => {
+    outcomes.set(path, outcome);
+    const ready = waiting.filter((w) => w.paths.every((p) => outcomes.has(p)));
+    if (ready.length === 0) return;
+    waiting = waiting.filter((w) => !ready.includes(w));
+    for (const w of ready) apply(w.unit);
+  };
+  const paths = [...new Set(waiting.flatMap((w) => w.paths))];
+  void runCapped(paths, REPO_IMAGE_MAX_IN_FLIGHT, isCancelled, async (path) => {
+    // A path an earlier run under this key admitted still passes: its re-read
+    // isn't charged again, and its verdict stands.
+    if (budget.exhausted() && !budget.admitted(path)) {
+      settle(path, OVER_BUDGET);
+      return;
+    }
+    let outcome: ImageOutcome;
+    try {
+      const bytes = await repo.read(path);
+      if (bytes === null) outcome = ABSENT;
+      else if (
+        !budget.admit(
+          bytes.base64 === null ? 0 : decodedByteLength(bytes.base64),
+          path,
+        )
+      )
+        outcome = OVER_BUDGET;
+      else {
+        const mime = renderableImageMime(bytes, path);
+        if (mime !== null && bytes.base64 !== null)
+          outcome = { url: `data:${mime};base64,${bytes.base64}` };
+        else outcome = bytes.tooLarge ? TOO_LARGE : NOT_IMAGE;
+      }
+    } catch (e) {
+      outcome =
+        isAppError(e) && e.kind === "invalidArgument"
+          ? NOT_IMAGE
+          : { reason: "readFailed" };
+    }
+    settle(path, outcome);
+  });
+}
 
 /**
  * Renders GitHub-flavored Markdown (PR descriptions, comments, AI output).
@@ -312,6 +754,7 @@ export function Markdown({
   children,
   className,
   refs,
+  repoImages,
 }: {
   children: string;
   className?: string;
@@ -319,8 +762,17 @@ export function Markdown({
    *  one in-app. Omitted (or before forge status resolves) the body renders
    *  exactly as it did without the extension. */
   refs?: MarkdownRefs;
+  /** The repository version a document's relative images load from. Omitted,
+   *  no repository stands behind the view, and each such image shows a caption
+   *  instead. */
+  repoImages?: MarkdownRepoImages;
 }) {
   const queryClient = useQueryClient();
+  // Primitives, so a caller building the object each render re-runs nothing.
+  const imagesRepo = repoImages?.repoPath;
+  const imagesRev = repoImages?.rev;
+  const imagesBase = repoImages?.baseDir;
+  const imagesRefresh = repoImages?.refreshKey;
   // Whether this body has forge context, as a primitive: every consumer of the
   // classifier reads THIS rather than re-testing `refs`, so the card, the click,
   // and the cursor walk can't disagree about it — and the walk effect gets a
@@ -355,8 +807,12 @@ export function Markdown({
       // navigation with no anchor for the dispatch below to claim, and the
       // webview ships no CSP to fall back on — so the tags that carry them
       // don't survive sanitization at all.
+      // DOMPurify's hooks live on the shared instance, so the image hook is
+      // installed around this one call and removed with the refs context.
+      DOMPurify.addHook("afterSanitizeAttributes", neutralizeRepoImages);
       return DOMPurify.sanitize(raw, { FORBID_TAGS: ["form", "area", "map"] });
     } finally {
+      DOMPurify.removeHook("afterSanitizeAttributes", neutralizeRepoImages);
       setActiveMarkdownRefs(null);
     }
   }, [children, hljsVersion, refs?.provider, refs?.repoPath, refs?.lens]);
@@ -366,6 +822,54 @@ export function Markdown({
   // which detached the hovercard's anchor and cycled it closed). 19.3 compares
   // the string first; one object per parse keeps the body's DOM stable on both.
   const htmlProp = useMemo(() => ({ __html: html }), [html]);
+
+  // Repository images load from the version shown. A layout effect, so every
+  // caption the walk can decide without a read lands before the first paint.
+  // Each run owns its reads: its cleanup stops new ones from being issued and
+  // keeps any still in flight from writing into the document. A run walks only
+  // units not yet written for the refresh key, so a re-run under the same key
+  // (an `<Activity>` re-show) reads only the units a cancelled run left
+  // unwritten, within the budget that run had spent, and a new key re-reads them
+  // all. A changed repo, rev or directory under identical text needs a fresh
+  // body, which the caller provides by keying this component on them.
+  useLayoutEffect(() => {
+    const root = bodyRef.current;
+    if (!root) return;
+    let cancelled = false;
+    const runKey = String(imagesRefresh ?? 0);
+    const repo =
+      imagesRepo === undefined || imagesBase === undefined
+        ? null
+        : {
+            baseDir: imagesBase,
+            read: async (path: string) => {
+              // gcTime 0: image bytes leave the cache once read. query-core
+              // keeps the longest gcTime a key has seen, so a key an image diff
+              // side also reads keeps that side's.
+              const options = {
+                ...fileAtRevOptions(imagesRepo, imagesRev ?? null, path, {
+                  probeSize: true,
+                }),
+                gcTime: 0,
+              };
+              // fetchQuery joins a read already in flight, which may have
+              // started before this key's change: read again once it settles,
+              // fresh. Nothing is cancelled, since another observer (an image
+              // diff of the same file) may be waiting on that read.
+              const joined =
+                queryClient.getQueryState(options.queryKey)?.fetchStatus ===
+                "fetching";
+              const bytes = await queryClient.fetchQuery(options);
+              if (!joined || cancelled) return bytes;
+              return queryClient.fetchQuery({ ...options, staleTime: 0 });
+            },
+          };
+    const budget = budgetFor(htmlProp, runKey);
+    loadRepoImages(root, repo, runKey, budget, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [htmlProp, imagesRepo, imagesRev, imagesBase, imagesRefresh, queryClient]);
 
   // The preview card's own state, deliberately apart from the click path's
   // `resolving`: hovering a reference must never flip the body's cursors — the
@@ -501,11 +1005,17 @@ export function Markdown({
         a.dataset.inertLink = "";
       else delete a.dataset.inertLink;
     }
-    for (const img of root.querySelectorAll("img")) {
-      const onLoad = () => markLightboxImage(img);
-      img.addEventListener("load", onLoad);
-      offs.push(() => img.removeEventListener("load", onLoad));
-      markLightboxImage(img);
+    for (const img of root.querySelectorAll("img")) markLightboxImage(img);
+    // Delegated in capture (`load` and `error` don't bubble), so an image the
+    // image loader refreshes, or puts back in place of a caption, is reconciled
+    // each time its src settles.
+    const onSettle = (e: Event) => {
+      if (e.target instanceof HTMLImageElement)
+        reconcileLightboxImage(e.target, root);
+    };
+    for (const type of ["load", "error"]) {
+      root.addEventListener(type, onSettle, true);
+      offs.push(() => root.removeEventListener(type, onSettle, true));
     }
     // Expanding a `<details>` qualifies the images inside it, which nothing else
     // re-evaluates — a click would open one the keyboard could never reach.
@@ -950,7 +1460,8 @@ export function Markdown({
         // the same signal for them.
         aria-busy={resolving}
         className={cn(
-          "markdown-body text-xs/relaxed break-words",
+          // outline-none: the image loader may make the root a focus target.
+          "markdown-body text-xs/relaxed break-words outline-none",
           // Margins collapse at the edges so previews/comments have no leading or
           // trailing gap (matches GitHub's rendered-markdown reset).
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
@@ -991,6 +1502,12 @@ export function Markdown({
           // above and outranks the `[&_img]:` block instead of tying with it.
           "[&_img[data-lightbox]]:cursor-zoom-in [&_img[data-lightbox]]:outline-none",
           "[&_img[data-lightbox]:focus-visible]:ring-1 [&_img[data-lightbox]:focus-visible]:ring-ring/50",
+          // A repository image still waiting on its read shows nothing rather
+          // than its alt text; it has a src or srcset once anything loads.
+          "[&_img[data-repo-src]:not([src]):not([srcset])]:hidden [&_img[data-repo-srcset]:not([src]):not([srcset])]:hidden",
+          // The caption the image loader puts in place of an image it can't show.
+          "[&_[data-repo-image-caption]]:inline-flex [&_[data-repo-image-caption]]:max-w-full [&_[data-repo-image-caption]]:items-center [&_[data-repo-image-caption]]:gap-1 [&_[data-repo-image-caption]]:rounded [&_[data-repo-image-caption]]:border [&_[data-repo-image-caption]]:border-border [&_[data-repo-image-caption]]:bg-muted/40 [&_[data-repo-image-caption]]:px-1.5 [&_[data-repo-image-caption]]:py-0.5 [&_[data-repo-image-caption]]:align-middle [&_[data-repo-image-caption]]:text-xs [&_[data-repo-image-caption]]:text-muted-foreground",
+          "[&_[data-repo-image-caption]>svg]:size-3 [&_[data-repo-image-caption]>svg]:shrink-0 [&_[data-repo-image-caption]>span]:min-w-0 [&_[data-repo-image-caption]>span]:line-clamp-2",
           className,
         )}
         dangerouslySetInnerHTML={htmlProp}

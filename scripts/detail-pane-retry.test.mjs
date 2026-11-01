@@ -1,9 +1,9 @@
-// A detail pane's error arm renders only while its read has failed and isn't
-// fetching (resolveDetailPane), so pressing its Retry swaps the arm away in
-// the same render: a disabled state or an in-flight label there never paints.
-// Ladder views copy one another's error arm, so that dead pair spreads by
-// copy; this keeps every rescue-wired Retry (`ref={retryRef}`) in them free
-// of it. Not covered: a Retry wired through another ref name.
+// Rescue-wired Retry buttons (`ref={retryRef}`) in resolveDetailPane callers
+// must stay enabled: disabling a focused button drops focus. In-flight labels
+// are banned where refetch unmounts the error arm. MarkdownPreview may label
+// its Retry in flight because it latches failure into pending, keeping the arm
+// through refetch; its exemption is anchored on that latch declaration.
+// Not covered: a Retry wired through another ref name.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -23,6 +23,29 @@ import {
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DEFINITION = "src/features/conversations/remote-section-state.ts";
 const LADDER_CALL = /(?<![\w$.])resolveDetailPane\s*\(/;
+const IN_FLIGHT_LABEL_EXEMPTIONS = {
+  "src/features/diff/MarkdownPreview.tsx":
+    "const pending = activeQ.isPending && failure === null;",
+};
+
+function hasAnchor(masked, anchor) {
+  return masked.replace(/\s/g, "").includes(anchor.replace(/\s/g, ""));
+}
+
+function exemptionProblems(files, exemptions = IN_FLIGHT_LABEL_EXEMPTIONS) {
+  const problems = [];
+  for (const [rel, anchor] of Object.entries(exemptions)) {
+    const file = files.find((f) => f.rel === rel);
+    if (!file) {
+      problems.push(`${rel}: stale exemption; not a resolveDetailPane( caller`);
+    } else if (!hasAnchor(file.masked, anchor)) {
+      problems.push(
+        `${rel}: exemption's anchor is gone; re-check whether the error arm still outlasts its refetch, then drop the exemption or re-anchor it`,
+      );
+    }
+  }
+  return problems;
+}
 
 /** Every src file that calls the ladder, masked, its definition excluded. */
 function ladderCallers() {
@@ -123,6 +146,24 @@ function textRuns(masked, raw, from, to) {
   return runs;
 }
 
+function retryStrays({ rel, raw, masked }) {
+  const anchor = IN_FLIGHT_LABEL_EXEMPTIONS[rel];
+  const allowLabel = anchor !== undefined && hasAnchor(masked, anchor);
+  const strays = [];
+  for (const { start, end } of retryElements({ rel, masked })) {
+    const span = masked.slice(start, end);
+    for (const m of span.matchAll(/(?<![\w$.-])disabled\b/g))
+      strays.push(`${rel}:${lineOf(raw, start + m.index)}: disabled`);
+    if (allowLabel) continue;
+    for (const run of textRuns(masked, raw, start, end)) {
+      const hit = run.text.search(/Retrying/);
+      if (hit >= 0)
+        strays.push(`${rel}:${lineOf(raw, run.at + hit)}: "Retrying" label`);
+    }
+  }
+  return strays;
+}
+
 const callers = ladderCallers();
 
 test("the ladder's callers and their rescue-wired Retry buttons are found", () => {
@@ -134,24 +175,93 @@ test("the ladder's callers and their rescue-wired Retry buttons are found", () =
   );
 });
 
+test("in-flight label exemptions name current callers with live anchors", () => {
+  assert.deepEqual(exemptionProblems(callers), []);
+});
+
 for (const file of callers) {
-  test(`${file.rel}: a rescue-wired Retry has no disabled state or in-flight label`, () => {
-    const { rel, raw, masked } = file;
-    const strays = [];
-    for (const { start, end } of retryElements(file)) {
-      const span = masked.slice(start, end);
-      for (const m of span.matchAll(/(?<![\w$.-])disabled\b/g))
-        strays.push(`${rel}:${lineOf(raw, start + m.index)}: disabled`);
-      for (const run of textRuns(masked, raw, start, end)) {
-        const hit = run.text.search(/Retrying/);
-        if (hit >= 0)
-          strays.push(`${rel}:${lineOf(raw, run.at + hit)}: "Retrying" label`);
-      }
-    }
+  test(`${file.rel}: a rescue-wired Retry stays enabled and labels in flight only with an anchored exemption`, () => {
+    const strays = retryStrays(file);
     assert.equal(
       strays.length,
       0,
-      `a Retry the error arm unmounts first: ${strays.join("; ")}`,
+      `a Retry violates the enabled/label constraints: ${strays.join("; ")}`,
     );
   });
 }
+
+function withSource(file, raw) {
+  return { ...file, raw, masked: maskNonCode(raw, file.rel.endsWith(".tsx")) };
+}
+
+for (const [rel, anchor] of Object.entries(IN_FLIGHT_LABEL_EXEMPTIONS)) {
+  test(`${rel}: removing or commenting out the anchor revokes the label exemption`, () => {
+    const file = callers.find((f) => f.rel === rel);
+    assert.ok(file, `${rel}: no ladder caller for the control`);
+    assert.ok(
+      file.raw.includes(anchor),
+      "control must replace the declaration",
+    );
+    for (const replacement of [
+      "const pending = activeQ.isPending;",
+      `/* ${anchor} */`,
+    ]) {
+      const mutated = withSource(
+        file,
+        file.raw.replace(anchor, () => replacement),
+      );
+      assert.ok(
+        retryStrays(mutated).some((s) => s.endsWith('"Retrying" label')),
+      );
+      assert.match(
+        exemptionProblems([mutated], { [rel]: anchor }).join("; "),
+        /exemption's anchor is gone/,
+      );
+    }
+    const spaced = withSource(
+      file,
+      file.raw.replace(anchor, () => anchor.replace(/ /g, "\n ")),
+    );
+    assert.deepEqual(exemptionProblems([spaced], { [rel]: anchor }), []);
+    assert.deepEqual(retryStrays(spaced), []);
+  });
+
+  test(`${rel}: the label exemption never permits disabled Retry`, () => {
+    const file = callers.find((f) => f.rel === rel);
+    assert.ok(file, `${rel}: no ladder caller for the control`);
+    const [retry] = retryElements(file);
+    assert.ok(retry, "control needs a rescue-wired Retry");
+    const at = tagEnd(file.masked, retry.start);
+    const mutated = withSource(
+      file,
+      `${file.raw.slice(0, at)} disabled${file.raw.slice(at)}`,
+    );
+    assert.ok(retryStrays(mutated).some((s) => s.endsWith(": disabled")));
+  });
+}
+
+test("non-exempt callers still reject in-flight Retry labels", () => {
+  const file = callers.find(
+    (f) =>
+      !Object.hasOwn(IN_FLIGHT_LABEL_EXEMPTIONS, f.rel) &&
+      retryElements(f).length > 0,
+  );
+  assert.ok(
+    file,
+    "control needs a non-exempt caller with a rescue-wired Retry",
+  );
+  const [retry] = retryElements(file);
+  const at = tagEnd(file.masked, retry.start) + 1;
+  const mutated = withSource(
+    file,
+    `${file.raw.slice(0, at)}Retrying${file.raw.slice(at)}`,
+  );
+  assert.ok(retryStrays(mutated).some((s) => s.endsWith('"Retrying" label')));
+});
+
+test("an exemption for a non-caller is stale", () => {
+  const exemptions = { ...IN_FLIGHT_LABEL_EXEMPTIONS, [DEFINITION]: "unused" };
+  assert.deepEqual(exemptionProblems(callers, exemptions), [
+    `${DEFINITION}: stale exemption; not a resolveDetailPane( caller`,
+  ]);
+});

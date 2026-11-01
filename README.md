@@ -76,7 +76,8 @@ instead, see [Development](#development).
   bulk branch cleanup.
 - **[Markdown, previewed in the diff](#changes-and-commits)**: a
   Raw / Preview toggle renders markdown and MDX changes anywhere the app
-  can read the file locally.
+  can read the file locally, with the repository's own images read from
+  the version you're viewing.
 - **Keyboard-first, privacy-first**: rebindable shortcuts, a command palette,
   keys in the OS keychain, and one switch that
   [hides every AI surface](#ai-configuration).
@@ -159,7 +160,9 @@ Markdown and MDX files add a Raw / Preview toggle to the diff, so you can
 read a doc change as rendered prose (headings, tables, and code blocks) on
 the working tree, commit details, stashes, an agent session's worktree
 changes, a file's history, branch compare, and pull request files when the
-PR's commits are available locally.
+PR's commits are available locally. Images the document links by a relative
+path render from the repository at the version you're viewing, without a
+network request.
 
 ### Branches
 
@@ -1147,7 +1150,8 @@ review via its subscription login. The full list is under
   turns out to be; on GitLab, `#123` opens the issue and `!123` the merge
   request. `@user` opens the profile in your browser. Hover a reference, or
   reach it with Tab, and a **preview card** shows what you'd be opening: the
-  state (Open, Merged, Closed, or Draft), title, and author of an issue or
+  state (Open, Merged, Closed, or Draft; **Open or draft** when GitHub could
+  only confirm that a pull request is open), title, and author of an issue or
   pull request, or the avatar and handle of a person. Bitbucket bodies leave
   references plain, matching Bitbucket itself, and a reference inside a code
   span or fence stays plain text.

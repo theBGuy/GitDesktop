@@ -1,6 +1,7 @@
 import {
   CheckCircleIcon,
   CircleDashedIcon,
+  CircleIcon,
   type Icon,
 } from "@phosphor-icons/react";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
@@ -22,7 +23,7 @@ import {
   useAssignableUsers,
 } from "@/lib/git/queries";
 import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
-import { prPill } from "@/lib/pulls/pr-state";
+import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
@@ -32,6 +33,11 @@ import {
   MarkdownRepoFileCard,
 } from "./markdown-link-card";
 import type { MarkdownRefKind, MarkdownRefs } from "./markdown-refs";
+import {
+  OPEN_OR_DRAFT_VISIBLE,
+  openOrDraftWord,
+  refCardStateChoice,
+} from "./ref-card-state";
 
 /** Why an anchor won't open, which is also which one-line reason its card
  *  shows: no address at all, a same-page fragment, a scheme the app doesn't
@@ -153,6 +159,9 @@ interface RefItem {
   /** Draft qualifies an OPEN pull request only — a merged or closed one reports
    *  its own state even where the forge's `isDraft` lingers. */
   isDraft: boolean;
+  /** Set when the issue read stands in for a failed PR read: it has no draft
+   *  axis, so an OPEN it reports can't rule a draft out. */
+  stateUncertain?: boolean;
   title: string;
   author: string;
   createdAt?: string;
@@ -230,7 +239,9 @@ async function resolveRefItem(
     // The reference DID resolve, so the issue read stands in rather than the card
     // claiming a failure. A kept read already classified this number as a PR by
     // its URL, so it stays pr-flavored: its CLOSED/MERGED take the PR glyphs.
-    if (issue) return { ...issueItem(issue), flavor: "pr" };
+    if (issue) {
+      return { ...issueItem(issue), flavor: "pr", stateUncertain: true };
+    }
     throw e;
   }
 }
@@ -258,6 +269,20 @@ function neutralIssuePill(state: string): StatePill {
     tone: "text-muted-foreground",
     word: `${state} issue`,
   };
+}
+
+/** A resolved reference's state pill: an open stand-in that can't tell open
+ *  from draft says both, a pull request takes `prPill`, an issue `ISSUE_PILL`. */
+function refPill(item: RefItem, noun: PrNoun, openOrDraft: boolean): StatePill {
+  if (openOrDraft) {
+    return {
+      Icon: CircleIcon,
+      tone: "text-muted-foreground",
+      word: openOrDraftWord(noun),
+    };
+  }
+  if (item.flavor === "pr") return prPill(item.state, item.isDraft, noun);
+  return ISSUE_PILL[item.state] ?? neutralIssuePill(item.state);
 }
 
 /** The card's settled maximum, reserved up front: a state row, a `line-clamp-2`
@@ -350,10 +375,8 @@ function RefCardBody({
   if (item === null) {
     return <p className="text-muted-foreground">{`Couldn't load ${label}`}</p>;
   }
-  const pill: StatePill =
-    item.flavor === "pr"
-      ? prPill(item.state, item.isDraft, noun)
-      : (ISSUE_PILL[item.state] ?? neutralIssuePill(item.state));
+  const openOrDraft = refCardStateChoice(item) === "openOrDraft";
+  const pill = refPill(item, noun, openOrDraft);
   const { createdAt } = item;
   return (
     <div className="flex flex-col gap-1.5">
@@ -362,9 +385,13 @@ function RefCardBody({
         {/* The kind rides only here: the visible word names the state alone, so
             it is hidden from a reader rather than announced twice. */}
         <span className="sr-only">{`${pill.word} `}</span>
-        <span className="capitalize" aria-hidden="true">
-          {item.isDraft ? "draft" : item.state.toLowerCase()}
-        </span>
+        {openOrDraft ? (
+          <span aria-hidden="true">{OPEN_OR_DRAFT_VISIBLE}</span>
+        ) : (
+          <span className="capitalize" aria-hidden="true">
+            {item.isDraft ? "draft" : item.state.toLowerCase()}
+          </span>
+        )}
         <span className="text-muted-foreground tabular-nums">{label}</span>
       </p>
       <p className="line-clamp-2 font-medium break-words">{item.title}</p>

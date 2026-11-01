@@ -1,6 +1,7 @@
 import { type QueryClient, useQuery } from "@tanstack/react-query";
 import { usePanelActive } from "@/components/panel-portal";
 import { ignoreLines } from "@/lib/ai/ignore";
+import { shouldRetryQuery } from "@/lib/forge-backoff";
 import {
   REPO_SHELL_GC_TIME,
   REPO_SHELL_WARM_STALE_MS,
@@ -285,18 +286,40 @@ export function useMarkConflictResolved(repo: string) {
   );
 }
 
+/** A full object id, optionally walked back with `~N` / `^N`: the bytes such a
+ *  rev names never change, unlike HEAD, the index (`:0`) or a branch name. */
+const IMMUTABLE_REV = /^(?:[0-9a-f]{40}|[0-9a-f]{64})(?:[~^]\d*)*$/;
+
+/** One file's bytes at a rev (null = the working tree). Shared by the diff
+ *  panes' reads and the markdown image loader's `fetchQuery`, so both run under
+ *  the same options. `probeSize` stays out of the key: either mode answers a
+ *  blob with the same `FileBytes`. An immutable rev never goes stale, which
+ *  keeps it out of the window-focus refetch; invalidation still re-reads it. A
+ *  refusal (`invalidArgument`) isn't retried: it answers the same every time. */
+export function fileAtRevOptions(
+  repo: string,
+  rev: string | null,
+  file: string,
+  opts?: { probeSize?: boolean },
+) {
+  return {
+    queryKey: ["repo", repo, "file-b64", rev ?? "worktree", file] as const,
+    queryFn: () => api.gitFileBase64(repo, rev, file, opts?.probeSize ?? false),
+    networkMode: "always" as const,
+    staleTime: rev !== null && IMMUTABLE_REV.test(rev) ? Infinity : 0,
+    retry: (failureCount: number, error: unknown) =>
+      !(isAppError(error) && error.kind === "invalidArgument") &&
+      shouldRetryQuery(failureCount, error),
+  };
+}
+
 export function useFileAtRev(
   repo: string,
   rev: string | null,
   file: string,
   enabled: boolean,
 ) {
-  return useQuery({
-    queryKey: ["repo", repo, "file-b64", rev ?? "worktree", file] as const,
-    queryFn: () => api.gitFileBase64(repo, rev, file),
-    enabled,
-    networkMode: "always",
-  });
+  return useQuery({ ...fileAtRevOptions(repo, rev, file), enabled });
 }
 
 export function useApplyPatch(repo: string) {

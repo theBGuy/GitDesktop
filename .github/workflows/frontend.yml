@@ -72,7 +72,8 @@ jobs:
       # settings graph, which pulls react plus @tauri-apps/plugin-store, the
       # ts-no-jsx-highlight and hunk-scoped-highlight suites drive highlight.js
       # and @git-diff-view/core's lowlight engine (the hunk-scoped-highlight
-      # suite loads Shiki too), the ai-ignore-filter suite reaches
+      # suite loads Shiki too), markdown-frontmatter-highlight drives both
+      # hljs engines, the ai-ignore-filter suite reaches
       # @tauri-apps/api through the git api barrel, the diff-pane-hold suite
       # server-renders @git-diff-view/react's DiffView through react-dom/server,
       # repo-mutation-invalidation retargets a real react-query MutationObserver,
@@ -81,6 +82,7 @@ jobs:
       # merges the palette's classes over the dialog's through tailwind-merge,
       # focus-refetch drives the window-focus pass and settings-cache-seed the
       # seed factory, both over a real react-query cache.
+      # markdown-url-attrs-allowlist reads dompurify's dist tag and attribute lists.
       # check-enforced-node-suites.mjs fails any suite reading
       # process.env.GD_EXPECT_DEPS that this list leaves out.
       # This installed job is their one enforced run, and GD_EXPECT_DEPS turns an
@@ -88,4 +90,4 @@ jobs:
       - name: Node suites needing node_modules (enforced)
         env:
           GD_EXPECT_DEPS: "1"
-        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs" "scripts/focus-refetch.test.mjs" "scripts/settings-cache-seed.test.mjs"
+        run: node --test "scripts/comment-refs.test.mjs" "scripts/pr-create-lane.test.mjs" "scripts/list-keyboard-nav.test.mjs" "scripts/notification-settings.test.mjs" "scripts/disabled-key-filter.test.mjs" "scripts/ts-no-jsx-highlight.test.mjs" "scripts/hunk-scoped-highlight.test.mjs" "scripts/ai-ignore-filter.test.mjs" "scripts/diff-pane-hold.test.mjs" "scripts/repo-mutation-invalidation.test.mjs" "scripts/started-mutation.test.mjs" "scripts/palette-dialog.test.mjs" "scripts/focus-refetch.test.mjs" "scripts/settings-cache-seed.test.mjs" "scripts/markdown-frontmatter-highlight.test.mjs" "scripts/markdown-url-attrs-allowlist.test.mjs"

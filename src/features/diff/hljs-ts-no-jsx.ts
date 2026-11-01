@@ -1,5 +1,6 @@
 import type { HLJSApi, Language, LanguageFn, Mode } from "highlight.js";
 import javascript from "highlight.js/lib/languages/javascript";
+import markdown from "highlight.js/lib/languages/markdown";
 import typescript from "highlight.js/lib/languages/typescript";
 
 /**
@@ -9,16 +10,19 @@ import typescript from "highlight.js/lib/languages/typescript";
  * plus a later `"</Title>"` turns the rest of a `.ts` file into unhighlighted
  * xml text. A `.ts` file can't contain JSX, so dropping the mode loses nothing.
  * Each typescript, tsx, and javascript grammar also handles comments and regex
- * literals in its params brace and template-substitution modes.
+ * literals in its params brace and template-substitution modes. The same seam
+ * registers a `markdown` that highlights front matter and guards intraword `_`.
  *
  * Must stay free of aliased and app imports:
- * scripts/ts-no-jsx-highlight.test.mjs loads it directly under Node's type
- * stripping, where `@/` paths don't resolve.
+ * scripts/ts-no-jsx-highlight.test.mjs and
+ * scripts/markdown-frontmatter-highlight.test.mjs load it directly under
+ * Node's type stripping, where `@/` paths don't resolve.
  */
 
-// Registry symbols keep both grammar marks stable across HMR re-evaluation.
+// Registry symbols keep the grammar marks stable across HMR re-evaluation.
 const TS_NO_JSX = Symbol.for("gd.hljs.tsNoJsx");
 const JS_PARAMS_COMMENT = Symbol.for("gd.hljs.jsParamsComment");
+const MD_FRONTMATTER = Symbol.for("gd.hljs.mdFrontmatter");
 
 /** javascript.js's JSX mode: an `xml` sub-language entered through fragment /
  *  tag variants. html`` templates embed xml through `starts` and are kept. */
@@ -211,14 +215,97 @@ const typescriptWithJsx: LanguageFn = (hljs) => {
   }
 };
 
+// CommonMark: a `_` run preceded by an ASCII letter or digit can't open
+// emphasis, so snake_case words stay plain. Non-ASCII letters aren't covered:
+// markdown's regexes compile without the `u` flag.
+const INTRAWORD_GUARD = "(?<![A-Za-z0-9]_*)";
+const UNDERSCORE_OPENERS = new Set(["_{2}(?!\\s)", "_(?![_\\s])"]);
+
+/** Guard markdown's `__` strong and `_` emphasis openers (matched by regex
+ *  shape, never by index); returns how many were patched, 0 when none match. */
+export function guardIntrawordUnderscores(root: Mode): number {
+  let patched = 0;
+  const seen = new Set<object>();
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    if (!node || typeof node !== "object" || seen.has(node)) return;
+    seen.add(node);
+    const mode = node as Mode;
+    if (
+      mode.begin instanceof RegExp &&
+      UNDERSCORE_OPENERS.has(mode.begin.source)
+    ) {
+      mode.begin = new RegExp(INTRAWORD_GUARD + mode.begin.source);
+      patched++;
+    }
+    visit(mode.contains);
+    visit(mode.variants);
+    visit(mode.starts);
+  };
+  visit(root);
+  return patched;
+}
+
+// Front matter engages exactly when stripFrontmatter (markdown-preview.ts)
+// strips it: the input's first line is the fence, and a same-fence line closes
+// it with no blank line before. `(?<![\s\S])` pins the BUFFER's start, not the
+// file's: a fence with no closing line (a per-line buffer's) never engages, but
+// a buffer that starts at a fenced mid-file block can. Built per call: hljs
+// compiles modes in place, and two hljs versions load these.
+function frontmatterModes(): Mode[] {
+  return [
+    {
+      begin: /(?<![\s\S])---\r?\n(?=(?:(?!---\r?$)[^\S\n]*\S[^\n]*\n)*---\r?$)/,
+      end: /^---\r?$/,
+      subLanguage: "yaml",
+      relevance: 0,
+    },
+    {
+      begin:
+        /(?<![\s\S])\+\+\+\r?\n(?=(?:(?!\+\+\+\r?$)[^\S\n]*\S[^\n]*\n)*\+\+\+\r?$)/,
+      end: /^\+\+\+\r?$/,
+      subLanguage: "ini",
+      relevance: 0,
+    },
+  ];
+}
+
+/** Stock markdown plus YAML (`---`) / TOML (`+++`) front matter and the
+ *  intraword `_` guard; aliases (md, mkdown, mkd) ride stock. Failure keeps
+ *  stock. */
+export const markdownWithFrontmatter: LanguageFn = (hljs) => {
+  try {
+    const lang = markdown(hljs);
+    guardIntrawordUnderscores(lang as Mode);
+    lang.contains = [...frontmatterModes(), ...(lang.contains ?? [])];
+    return Object.defineProperty(lang, MD_FRONTMATTER, { value: true });
+  } catch {
+    return markdown(hljs);
+  }
+};
+
+/** Whether `lang` is the front-matter markdown this module registers. */
+export function isMdFrontmatter(lang: Language | undefined): boolean {
+  return !!lang && MD_FRONTMATTER in lang;
+}
+
 type Register = (name: string, language: LanguageFn) => void;
 
-/** Register all three grammars through `register`. A throw keeps stock. */
-function registerPatchedJsGrammars(register: Register): void {
+/** Register the tsx, typescript and javascript grammars through `register`,
+ *  plus markdown when `withMarkdown` (an engine lacking markdown gains no new
+ *  id). A throw keeps stock. */
+function registerPatchedJsGrammars(
+  register: Register,
+  withMarkdown: boolean,
+): void {
   try {
     register("tsx", typescriptWithJsx);
     register("typescript", typescriptNoJsx);
     register("javascript", javascriptWithParamsComment);
+    if (withMarkdown) register("markdown", markdownWithFrontmatter);
   } catch {
     // fail soft: ids not yet registered keep their stock grammars
   }
@@ -237,7 +324,7 @@ export function isTsNoJsx(lang: Language | undefined): boolean {
 export function installPatchedJsGrammars(engine: { register: Register }): void {
   try {
     if (TS_NO_JSX in engine) return;
-    registerPatchedJsGrammars(engine.register);
+    registerPatchedJsGrammars(engine.register, true);
     Object.defineProperty(engine, TS_NO_JSX, { value: true });
   } catch {
     // fail soft: ids not yet registered keep their stock grammars
@@ -246,17 +333,20 @@ export function installPatchedJsGrammars(engine: { register: Register }): void {
 
 /**
  * Apply to a highlight.js instance (the markdown `lib/core` singleton) whenever
- * its `typescript` or `javascript` isn't ours — loading the full build restores
- * stock grammars, so this re-checks both registered languages rather than a flag.
+ * its `typescript`, `javascript` or registered `markdown` isn't ours — loading
+ * the full build restores stock grammars, so this re-checks the registered
+ * languages rather than a flag. An instance without markdown isn't given one.
  */
 export function ensurePatchedJsGrammars(hljs: HLJSApi): void {
   try {
+    const md = hljs.getLanguage("markdown");
     if (
       isTsNoJsx(hljs.getLanguage("typescript")) &&
-      isJsParamsComment(hljs.getLanguage("javascript"))
+      isJsParamsComment(hljs.getLanguage("javascript")) &&
+      (!md || isMdFrontmatter(md))
     )
       return;
-    registerPatchedJsGrammars(hljs.registerLanguage);
+    registerPatchedJsGrammars(hljs.registerLanguage, md !== undefined);
   } catch {
     // fail soft: ids not yet registered keep their stock grammars
   }

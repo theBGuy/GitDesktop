@@ -1,6 +1,13 @@
-import { type ReactNode, useLayoutEffect, useMemo, useRef } from "react";
+import {
+  type ReactNode,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { InfoNote } from "@/components/info-note";
 import { Markdown } from "@/components/markdown/markdown";
+import { repoDocBaseDir } from "@/components/markdown/markdown-images";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import {
@@ -15,6 +22,7 @@ import {
 import { presentError } from "@/lib/error-summary";
 import { decodeBase64Utf8 } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
+import { isAppError } from "@/lib/tauri/invoke";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import type { DiffContentRevs } from "./DiffSurface";
 import { useReportPaneSettled } from "./diff-pane-hold";
@@ -109,6 +117,32 @@ export function MarkdownDocPreview({
   const showOld = hasOld && (!hasNew || newAbsent);
   const oldQ = useFileAtRev(repoPath, revs.oldRev ?? null, oldPath, showOld);
   const activeQ = showOld ? oldQ : newQ;
+  // Each refetch of a read that failed with nothing loaded (a refocus, an
+  // invalidation, Retry) resets it to pending with its error cleared. Its last
+  // failure is kept here, so only a first read, or one this mount never saw
+  // fail, holds the paint; a refetch keeps the error arm on screen.
+  const readKey = JSON.stringify(
+    showOld
+      ? [repoPath, revs.oldRev, oldPath]
+      : [repoPath, revs.newRev, filePath],
+  );
+  const [lastFailure, setLastFailure] = useState<{
+    key: string;
+    error: unknown;
+  } | null>(null);
+  if (
+    activeQ.error !== null &&
+    (lastFailure?.key !== readKey || lastFailure.error !== activeQ.error)
+  )
+    setLastFailure({ key: readKey, error: activeQ.error });
+  const failure =
+    activeQ.error ??
+    (activeQ.isPending &&
+    activeQ.errorUpdateCount > 0 &&
+    lastFailure?.key === readKey
+      ? lastFailure.error
+      : null);
+  const pending = activeQ.isPending && failure === null;
   const b64 = activeQ.data?.base64 ?? null;
   // The backend's own refusal (its 20MB cap, far past the preview cap) ships
   // without bytes. Under it, a clearly oversized file is rejected on its base64
@@ -131,22 +165,25 @@ export function MarkdownDocPreview({
   );
   // Gates the file read only: the pending arm below renders nothing. A lazy
   // fence grammar or an embedded image can still repaint after it settles.
-  useReportPaneSettled((!hasNew && !hasOld) || !activeQ.isPending);
+  useReportPaneSettled((!hasNew && !hasOld) || !pending);
 
   // A failed refresh keeps the loaded preview under a notice; only a read with
   // nothing loaded replaces it. A missing file is data (`null`), never an error.
   const pane = resolveDetailPane({
-    pending: activeQ.isPending,
+    pending,
     error: activeQ.isError,
     hasData: activeQ.data !== undefined,
     paused: activeQ.isPaused,
     fetching: activeQ.isFetching,
   });
   const failed = refreshFailed(activeQ);
-  // Retry resets the read to pending, swapping the error arm for the empty
-  // pending arm; every arm renders in the same host, so focus lands there.
+  // A refusal (a linked, non-regular or refused path, or an invalid rev)
+  // answers the same on every read, so it gets no Retry.
+  const refused = isAppError(failure) && failure.kind === "invalidArgument";
+  // The gate tracks Retry's own visibility: it stays mounted while its refetch
+  // runs, and leaves on a success or a refusal, so focus lands on the host.
   const { hostRef, retryRef } = useRetryFocusRescue(
-    pane === "error" && activeQ.isError,
+    pane === "error" && failure !== null && !refused,
   );
   // Degraded content is the same arm, so a failed or recovered refresh never
   // moves focus.
@@ -200,20 +237,23 @@ export function MarkdownDocPreview({
       <DiffPlaceholder
         message="Could not load this file to preview"
         action={
-          activeQ.isError ? (
+          failure !== null ? (
             <div className="flex flex-col items-center gap-2">
               <p className="max-w-md text-center text-xs">
-                {presentError(activeQ.error).summary}
+                {presentError(failure).summary}
               </p>
-              <Button
-                ref={retryRef}
-                variant="outline"
-                size="sm"
-                className="cursor-pointer"
-                onClick={() => void activeQ.refetch()}
-              >
-                Retry
-              </Button>
+              {!refused && (
+                <Button
+                  ref={retryRef}
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  aria-busy={activeQ.isFetching || undefined}
+                  onClick={() => void activeQ.refetch()}
+                >
+                  {activeQ.isFetching ? "Retrying…" : "Retry"}
+                </Button>
+              )}
             </div>
           ) : undefined
         }
@@ -232,6 +272,9 @@ export function MarkdownDocPreview({
   if (cleaned.trim() === "") {
     return shell(<DiffPlaceholder message="Nothing to preview" />);
   }
+  // Images come from the side on screen: its rev, and its own path's directory.
+  const imageRev = (showOld ? revs.oldRev : revs.newRev) ?? null;
+  const imageBaseDir = repoDocBaseDir(showOld ? oldPath : filePath);
   return shell(
     <>
       {showOld && (
@@ -245,10 +288,24 @@ export function MarkdownDocPreview({
       )}
       {/* Same reading measure as the in-app guide's rendered pages. */}
       <div className="mx-auto w-full max-w-2xl p-6">
-        {/* No forge context: repo docs routinely carry repository-relative
-            hrefs (LICENSE, docs/…), and with nothing to resolve them against
-            the renderer leaves them inert with an explanatory card. */}
-        <Markdown>{cleaned}</Markdown>
+        {/* No forge context, so repository-relative links stay inert with an
+            explanatory card; relative images load from the version shown and
+            re-read whenever the document's own read lands again: on refresh
+            for a version that can change, only on invalidation for one that
+            can't (a fetch that deepens a shallow clone). Keyed
+            on that version: the same text at another one needs a fresh body,
+            not one whose images an earlier load already rewrote. */}
+        <Markdown
+          key={JSON.stringify([repoPath, imageRev, imageBaseDir])}
+          repoImages={{
+            repoPath,
+            rev: imageRev,
+            baseDir: imageBaseDir,
+            refreshKey: activeQ.dataUpdatedAt,
+          }}
+        >
+          {cleaned}
+        </Markdown>
       </div>
     </>,
   );
