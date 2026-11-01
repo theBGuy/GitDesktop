@@ -1313,7 +1313,8 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// `chcp` must precede every non-ASCII data byte in the script.
-/// `DisableDelayedExpansion` overrides the registry-configurable default.
+/// `DisableDelayedExpansion` overrides the registry-configurable default for every line
+/// before a `(goto)` self-delete (`CMD_SCRIPT_SELF_DELETE`), which ends the `setlocal`.
 #[cfg(any(windows, test))]
 pub(crate) const CMD_SCRIPT_PRELUDE: &str =
     "@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n";
@@ -1342,7 +1343,9 @@ pub(crate) fn cmd_script_arg(value: &str) -> AppResult<String> {
     Ok(quoted)
 }
 
-/// `tip` must remain app-built ASCII text.
+/// `tip` must remain app-built ASCII text. The script deletes itself on its last
+/// line, since cmd reads a batch file by offset and an earlier delete breaks the
+/// lines after it; a window closed before that line leaves the script in temp.
 #[cfg(any(windows, test))]
 fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<String> {
     let mut line = cmd_script_quoted(bin)?;
@@ -1351,9 +1354,17 @@ fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<St
         line.push_str(&cmd_script_arg(a)?);
     }
     Ok(format!(
-        "{CMD_SCRIPT_PRELUDE}title GitDesktop - container test shell\r\necho {tip}\r\necho.\r\n{line}\r\necho.\r\necho (container exited) Press any key to close...\r\npause >nul\r\n"
+        "{CMD_SCRIPT_PRELUDE}title GitDesktop - container test shell\r\necho {tip}\r\necho.\r\n{line}\r\necho.\r\necho (container exited) Press any key to close...\r\npause >nul\r\n{CMD_SCRIPT_SELF_DELETE}"
     ))
 }
+
+/// A batch file's self-delete: `(goto)` ends the batch context, so the `del` runs
+/// without cmd then failing to read the deleted file (measured on Windows 10 through
+/// `cmd /c start`, whose `cmd /K` console then stays open at a prompt). It also ends the
+/// prelude's `setlocal`, so the `del` runs under cmd's registry default for delayed
+/// expansion: with that on, a `!` in %TEMP% makes the `del` miss and the script stays.
+#[cfg(any(windows, test))]
+const CMD_SCRIPT_SELF_DELETE: &str = "(goto) 2>nul & del \"%~f0\"\r\n";
 
 /// Windows: `start` a temp `.cmd` for a fresh, fully-wired console; a direct
 /// spawn leaves stdio bound to ours, so it cannot take keyboard input.
@@ -1374,7 +1385,9 @@ fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()
     discard_script_on_err(&path, c.spawn().map(|_| ()).map_err(AppError::Io))
 }
 
-/// macOS: write a temp `.command` (Terminal.app runs it on `open`).
+/// macOS: write a temp `.command` (Terminal.app runs it on `open`). It removes itself
+/// first: bash keeps reading the open file, and the file goes even if the window
+/// closes early.
 #[cfg(target_os = "macos")]
 fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()> {
     use std::process::Command;
@@ -1385,7 +1398,7 @@ fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()
         line.push_str(&shell_quote(a));
     }
     let script = format!(
-        "#!/bin/bash\necho 'GitDesktop — container test shell'\necho '{tip}'\n{line}\necho\necho '(container exited)'\n"
+        "#!/bin/bash\nrm -f -- \"$0\"\necho 'GitDesktop — container test shell'\necho '{tip}'\n{line}\necho\necho '(container exited)'\n"
     );
     let path = write_temp_script("gd-container-shell-", ".command", &script, true)
         .map_err(AppError::Io)?;
@@ -1552,6 +1565,36 @@ mod tests {
 
     struct PrivateTempCleanup(Vec<PathBuf>);
 
+    /// Creates the planted `path` exclusively, as a directory holding `Dockerfile` or
+    /// as a file, and registers it in `cleanup` only once this test owns it. A stale
+    /// leftover at `path` is neither owned nor deleted: returns false.
+    fn plant(cleanup: &mut PrivateTempCleanup, path: &std::path::Path, dir: bool) -> bool {
+        use std::io::Write;
+        let exclusive = |file: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(file)
+        };
+        let made: std::io::Result<Option<std::fs::File>> = if dir {
+            std::fs::create_dir(path).map(|()| None)
+        } else {
+            exclusive(path).map(Some)
+        };
+        let handle = match made {
+            Ok(handle) => handle,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return false,
+            Err(e) => panic!("{}: {e}", path.display()),
+        };
+        cleanup.0.push(path.to_path_buf());
+        let mut file = match handle {
+            Some(file) => file,
+            None => exclusive(&path.join("Dockerfile")).unwrap(),
+        };
+        file.write_all(b"PLANTED").unwrap();
+        true
+    }
+
     impl Drop for PrivateTempCleanup {
         fn drop(&mut self) {
             for path in &self.0 {
@@ -1567,9 +1610,12 @@ mod tests {
     #[test]
     fn private_temp_dir_is_fresh_owner_only_and_removed_on_drop() {
         let planted = std::env::temp_dir().join(format!("gd-agent-build-{}-0", std::process::id()));
-        let _cleanup = PrivateTempCleanup(vec![planted.clone()]);
-        std::fs::create_dir_all(&planted).unwrap();
-        std::fs::write(planted.join("Dockerfile"), "PLANTED").unwrap();
+        let mut cleanup = PrivateTempCleanup(Vec::new());
+        let owned = plant(&mut cleanup, &planted, true);
+        // A leftover at the planted path is neither owned nor registered for removal.
+        let mut stale = PrivateTempCleanup(Vec::new());
+        assert!(!plant(&mut stale, &planted, true));
+        assert!(stale.0.is_empty());
         let first = private_temp_dir("gd-agent-build-").unwrap();
         let second = private_temp_dir("gd-agent-build-").unwrap();
         let first_path = first.path().to_path_buf();
@@ -1595,17 +1641,22 @@ mod tests {
         drop(second);
         assert!(!first_path.exists());
         assert!(!second_path.exists());
-        assert_eq!(
-            std::fs::read_to_string(planted.join("Dockerfile")).unwrap(),
-            "PLANTED"
-        );
+        if owned {
+            assert_eq!(
+                std::fs::read_to_string(planted.join("Dockerfile")).unwrap(),
+                "PLANTED"
+            );
+        }
     }
 
     #[test]
     fn private_temp_script_keeps_suffix_body_and_mode() {
         let planted = std::env::temp_dir().join(format!("gd-task-task-abc-{}.mjs", std::process::id()));
-        let mut cleanup = PrivateTempCleanup(vec![planted.clone()]);
-        std::fs::write(&planted, "PLANTED").unwrap();
+        let mut cleanup = PrivateTempCleanup(Vec::new());
+        let owned = plant(&mut cleanup, &planted, false);
+        let mut stale = PrivateTempCleanup(Vec::new());
+        assert!(!plant(&mut stale, &planted, false));
+        assert!(stale.0.is_empty());
         let first = write_temp_script("gd-task-", ".mjs", "BODY", false).unwrap();
         cleanup.0.push(first.clone());
         let second = write_temp_script("gd-task-", ".mjs", "BODY", false).unwrap();
@@ -1634,7 +1685,9 @@ mod tests {
                 );
             }
         }
-        assert_eq!(std::fs::read_to_string(&planted).unwrap(), "PLANTED");
+        if owned {
+            assert_eq!(std::fs::read_to_string(&planted).unwrap(), "PLANTED");
+        }
     }
 
     #[test]
@@ -2135,8 +2188,15 @@ mod tests {
             "echo.\r\n",
             "echo (container exited) Press any key to close...\r\n",
             "pause >nul\r\n",
+            "(goto) 2>nul & del \"%~f0\"\r\n",
         );
-        assert_eq!(container_shell_script(bin, &args, tip).unwrap(), expected);
+        let script = container_shell_script(bin, &args, tip).unwrap();
+        assert_eq!(script, expected);
+        // The self-delete must be the last line: cmd reads the file by offset.
+        assert_eq!(
+            script.trim_end_matches("\r\n").rsplit("\r\n").next(),
+            Some("(goto) 2>nul & del \"%~f0\"")
+        );
     }
 
     #[test]

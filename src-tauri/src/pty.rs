@@ -743,8 +743,8 @@ pub fn pty_close(state: State<'_, PtyState>, id: String) -> AppResult<()> {
 // Dev-only external-terminal fallback: runs a task in the user's OS terminal
 // because the in-app PTY can't spawn under `pnpm tauri dev` on Windows (see the
 // module header). Compiled out of release builds (`debug_assertions`), and the
-// frontend's gate is statically false there. Mirrors
-// `agent_sandbox::launch_container_shell`.
+// frontend's gate is statically false there. Mirrors the launch shape of
+// `agent_sandbox::launch_container_shell`, without its self-deleting script.
 
 #[cfg(all(unix, debug_assertions))]
 fn sh_quote(s: &str) -> String {

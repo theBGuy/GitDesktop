@@ -182,8 +182,8 @@ pub const GD_RESEARCH_AGENT: &str = "gd-research";
 /// `OPENCODE_PERMISSION` pin (DiffOnly or ReadOnly by review mode), which is the
 /// allowlist there: a server's tools are callable only through its `<server>_*` allow
 /// and that allow's `<server>_?*` alias, which also admit any loaded server whose
-/// sanitized name starts with `<server>_`. The pin's `read` also reads the resources of
-/// any connected server. Plan/Research sessions carry the ReadOnly pin with no server
+/// sanitized name starts with `<server>_`. The ReadOnly pin's `read` also reads the
+/// resources of any connected server. Plan/Research sessions carry the ReadOnly pin with no server
 /// allows (they pass no servers) but keep the repo's config, and a global config layer
 /// can still widen either (the residual `opencode_permission_json` documents).
 /// Write-capable sessions auto-approve server tools via `--dangerously-skip-permissions`.

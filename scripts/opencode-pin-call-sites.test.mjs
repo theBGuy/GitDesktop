@@ -411,6 +411,68 @@ test("P6: comments and strings cannot satisfy a pin", () => {
   assert.ok(quoted.some((p) => p.includes("must receive &self_names")));
 });
 
+test("P7: missing anchors, rebinding and bare mentions fail closed", () => {
+  assert.deepEqual(checkPinCallSites(null), [`could not read ${FILE}`]);
+  assert.deepEqual(checkPinCallSites(""), [`could not read ${FILE}`]);
+  assert.deepEqual(checkPinCallSites(`${source}\n"unfinished`), [
+    `could not scan ${FILE}`,
+  ]);
+  assert.ok(
+    checkPinCallSites(
+      mutate((t) => t.replace("let host_extra_env", "let host_env")),
+    ).includes("missing anchor: one let host_extra_env in agent_session"),
+  );
+  assert.ok(
+    checkPinCallSites(
+      mutate((t) => t.replace("fn agent_session(", "fn agent_turn(")),
+    ).includes("missing anchor: fn agent_session"),
+  );
+  assert.ok(
+    checkPinCallSites(
+      mutate((t) =>
+        t.replace(
+          "let container = isolation",
+          "let read_only = false;\n    let container = isolation",
+        ),
+      ),
+    ).includes("agent_session must not rebind read_only"),
+  );
+  assert.ok(
+    checkPinCallSites(
+      mutate((t) =>
+        t.replace(
+          "let self_names: Vec<&str> = self_specs.iter()",
+          "let self_names: Vec<&str> = Vec::<McpServerSpec>::new().iter()",
+        ),
+      ),
+    ).includes(
+      "agent_review must build self_names once, from self_specs.iter()",
+    ),
+  );
+  assert.ok(
+    checkPinCallSites(
+      mutate((t) => `${t}\nconst F: fn() = opencode_session_env;\n`),
+    ).some((p) => p.includes("mentions opencode_session_env without calling")),
+  );
+});
+
+test("P8: only agent_session's own signature anchors read_only", () => {
+  const PARAM = "read_only: bool";
+  const mutant = mutate((t) => {
+    const param = t.indexOf(PARAM, t.indexOf("fn agent_session("));
+    assert.ok(param > 0, "agent_session declares no read_only parameter");
+    return `${t.slice(0, param)}plan_only: bool${t.slice(param + PARAM.length)}`;
+  });
+  // Earlier fns still declare the parameter, so a whole-prefix search would pass.
+  assert.match(
+    mutant.slice(0, mutant.indexOf("fn agent_session(")),
+    /\bread_only: bool\b/,
+  );
+  assert.deepEqual(checkPinCallSites(mutant), [
+    "missing anchor: agent_session's read_only: bool parameter",
+  ]);
+});
+
 test("P9: the mirrored read rules reach each call from the resolver", () => {
   const strip = (problems) => problems.map((p) => p.replace(/^[^ ]+ /, ""));
   assert.deepEqual(
@@ -555,66 +617,4 @@ test("P11: the resolver's dir is each run's --dir and spawn cwd", () => {
     });
     assert.deepEqual(checkPinCallSites(mutant), [refused], to);
   }
-});
-
-test("P7: missing anchors, rebinding and bare mentions fail closed", () => {
-  assert.deepEqual(checkPinCallSites(null), [`could not read ${FILE}`]);
-  assert.deepEqual(checkPinCallSites(""), [`could not read ${FILE}`]);
-  assert.deepEqual(checkPinCallSites(`${source}\n"unfinished`), [
-    `could not scan ${FILE}`,
-  ]);
-  assert.ok(
-    checkPinCallSites(
-      mutate((t) => t.replace("let host_extra_env", "let host_env")),
-    ).includes("missing anchor: one let host_extra_env in agent_session"),
-  );
-  assert.ok(
-    checkPinCallSites(
-      mutate((t) => t.replace("fn agent_session(", "fn agent_turn(")),
-    ).includes("missing anchor: fn agent_session"),
-  );
-  assert.ok(
-    checkPinCallSites(
-      mutate((t) =>
-        t.replace(
-          "let container = isolation",
-          "let read_only = false;\n    let container = isolation",
-        ),
-      ),
-    ).includes("agent_session must not rebind read_only"),
-  );
-  assert.ok(
-    checkPinCallSites(
-      mutate((t) =>
-        t.replace(
-          "let self_names: Vec<&str> = self_specs.iter()",
-          "let self_names: Vec<&str> = Vec::<McpServerSpec>::new().iter()",
-        ),
-      ),
-    ).includes(
-      "agent_review must build self_names once, from self_specs.iter()",
-    ),
-  );
-  assert.ok(
-    checkPinCallSites(
-      mutate((t) => `${t}\nconst F: fn() = opencode_session_env;\n`),
-    ).some((p) => p.includes("mentions opencode_session_env without calling")),
-  );
-});
-
-test("P8: only agent_session's own signature anchors read_only", () => {
-  const PARAM = "read_only: bool";
-  const mutant = mutate((t) => {
-    const param = t.indexOf(PARAM, t.indexOf("fn agent_session("));
-    assert.ok(param > 0, "agent_session declares no read_only parameter");
-    return `${t.slice(0, param)}plan_only: bool${t.slice(param + PARAM.length)}`;
-  });
-  // Earlier fns still declare the parameter, so a whole-prefix search would pass.
-  assert.match(
-    mutant.slice(0, mutant.indexOf("fn agent_session(")),
-    /\bread_only: bool\b/,
-  );
-  assert.deepEqual(checkPinCallSites(mutant), [
-    "missing anchor: agent_session's read_only: bool parameter",
-  ]);
 });

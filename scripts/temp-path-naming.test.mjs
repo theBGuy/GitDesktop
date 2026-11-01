@@ -29,7 +29,7 @@ const EXCLUDED = [
     fn: "ephemeral_review_worktree",
     count: 1,
     reason:
-      "This fn mints the guessable review-worktree path temp_dir()/gd-review-{short}-{nanos}, the same class this test bans, but compare.rs belongs to another lane this release; it is a backlog residual (orchestrator-minted), and this entry goes when the fn moves to tempfile.",
+      "Mints the guessable review-worktree path temp_dir()/gd-review-{short}-{nanos}; remove this entry when ephemeral_review_worktree moves to a private temp dir.",
   },
   {
     file: "git/compare.rs",
