@@ -217,9 +217,6 @@ pub async fn git_run_hook_manager(
     };
     let mut cmd = tokio::process::Command::new(&binary);
     crate::agent::sanitize_child_env(&mut cmd);
-    if let Some(path) = crate::agent::merged_shell_path() {
-        cmd.env("PATH", path);
-    }
     cmd.args(args)
         .current_dir(&repo_path)
         .stdin(std::process::Stdio::null());

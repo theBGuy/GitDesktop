@@ -41,6 +41,7 @@
       "endpoints": [
         "https://github.com/theBGuy/GitDesktop/releases/latest/download/latest.json"
       ],
+      "requireSignedVersion": true,
       "windows": {
         "installMode": "passive"
       }

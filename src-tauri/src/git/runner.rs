@@ -462,13 +462,9 @@ async fn run_git_spawn(
     }
     let git = git_bin().await?;
     let mut cmd = Command::new(&git);
-    // Also covers the credential helpers git spawns in turn.
+    // Also covers the credential helpers git spawns in turn, and puts the login-shell
+    // PATH on hooks, filter drivers, ssh and by-name helpers.
     crate::agent::sanitize_child_env(&mut cmd);
-    // After the sanitize, so the login-shell PATH wins over the AppImage plan's: hooks,
-    // filter drivers, ssh and by-name helpers resolve through it.
-    if let Some(path) = crate::agent::merged_shell_path() {
-        cmd.env("PATH", path);
-    }
     // Git for Windows gates long-path support on core.longpaths — the OS
     // LongPathsEnabled flag alone is not enough (probe-proven). Per-invocation so
     // the user's own git config is never mutated; other platforms ignore the key.

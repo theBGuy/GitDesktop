@@ -178,13 +178,23 @@ pub const GD_RESEARCH_AGENT: &str = "gd-research";
 /// MERGES config layers, so this adds our servers (and the Research agent) on top of
 /// the user's global config. stdio = `"type": "local"` with a single `command` ARRAY
 /// (binary + args joined — opencode has no args field) and an `environment` map; http
-/// = `"type": "remote"`. Tools are auto-exposed and `--dangerously-skip-permissions`
-/// auto-approves them, so no allowlist is needed.
+/// = `"type": "remote"`. Reviews run with project config disabled under agent.rs's
+/// `OPENCODE_PERMISSION` pin (DiffOnly or ReadOnly by review mode), which is the
+/// allowlist there: a server's tools are callable only through its `<server>_*` allow
+/// and that allow's `<server>_?*` alias, which also admit any loaded server whose
+/// sanitized name starts with `<server>_`. The ReadOnly pin's `read` also reads the
+/// resources of any connected server. Plan/Research sessions carry the ReadOnly pin
+/// with no server allows (they pass no servers) but keep the repo's config, and a
+/// global config layer can still widen either (the residual `opencode_permission_json`
+/// documents). Write-capable sessions auto-approve server tools via
+/// `--dangerously-skip-permissions`.
 ///
-/// `research` adds the read-only WEB agent (`GD_RESEARCH_AGENT`): the builtin `plan`
-/// agent is read-only but has NO web tools, and opencode has no permission CLI flags,
-/// so this profile must be defined in config. (`websearch` also needs Exa enabled via
-/// the opencode provider or `OPENCODE_ENABLE_EXA`; `webfetch` always works.)
+/// `research` adds the WEB agent (`GD_RESEARCH_AGENT`): the pin denies web to every
+/// agent (the builtin `plan` allows bash and webfetch by default) and opencode has no
+/// permission CLI flags, so only this agent's own `permission` re-allows web. Its
+/// read-only guarantee is the env pin; in sessions the repo's own opencode config can
+/// re-enable tools. (`websearch` also needs Exa enabled via the opencode provider or
+/// `OPENCODE_ENABLE_EXA`; `webfetch` always works.)
 pub fn build_opencode_config(specs: &[McpServerSpec], research: bool) -> AppResult<Value> {
     let mut servers = Map::new();
     for spec in specs {
@@ -213,10 +223,10 @@ pub fn build_opencode_config(specs: &[McpServerSpec], research: bool) -> AppResu
             GD_RESEARCH_AGENT: {
                 "description": "GitDesktop read-only web research — no file writes.",
                 "mode": "primary",
-                // STRUCTURAL read-only guarantee (matches the builtin `plan` agent):
-                // remove the write surface entirely so it can't be auto-approved by
-                // `--dangerously-skip-permissions` — robust even if a future opencode
-                // tool or an attached MCP server escapes the permission denylist below.
+                // Remove the write surface so `--dangerously-skip-permissions` can't
+                // auto-approve it. A second layer: the read-only guarantee is agent.rs's
+                // `OPENCODE_PERMISSION` pin (builtin `plan` denies edits only), and in
+                // sessions the repo's own opencode config can re-enable tools.
                 "tools": {
                     "write": false,
                     "edit": false,
