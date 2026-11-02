@@ -1,30 +1,32 @@
 // The opencode permission pin only binds when the production call sites in
 // src-tauri/src/agent.rs feed it the run's own inputs: agent_review passes
-// review_env the self-MCP server names and the user's mirrored read rules;
-// both agent_session branches (container, then host) pass opencode_session_env
-// read_only, opencode_research, an OPENCODE_CONFIG (container config_path, host
-// mcp_config_path) and mcp_names, and the host branch the mirrored read rules
-// (the container's opencode loads none of the host's config files). Each input
-// is pinned to its one producer: read_only to the parameter, never rebound;
-// opencode_research, mcp_names and the container config_path to their exact
-// `let`; mcp_config_path to its one `None` declaration, left unnamed between
-// the host read_mirror and the host call. Each read_mirror is built once, from
-// opencode_read_mirror fed the run's OPENCODE_CONFIG and repo_path or
-// worktree_path, in the arm whose run carries the ReadOnly pin (a repo-aware
-// opencode review, a read-only session); the other arm, DiffOnly runs included,
-// mirrors nothing. That path is pinned as the run's spawn cwd (stream_agent in
-// the review and the host session) and its --dir (opencode_review_args; the
-// `run_dir` dir agent_session hands opencode_session_args). The checker is a
-// pure function over the file's text, lexed so comments and strings never
-// satisfy a pin, fed the real file plus in-memory mutants; a `,` before `)` is
-// ignored, so a rustfmt reflow passes. An unreadable file, unterminated lexing,
-// a missing anchor, an extra or missing call, or a bare mention of either env
-// fn fails closed. Out of reach: what the env fns do with their arguments and
-// what run_dir returns (Rust tests pin those), what the per-CLI writes assign
-// mcp_config_path before the mirror, bindings made through a pattern or macro,
-// calls in another file or through a re-export, and which branch runs: the
-// branch is inferred from the `let container_env` / `let host_extra_env`
-// anchors' source order.
+// review_env kind, repo_aware, the run's OPENCODE_CONFIG, the self-MCP server
+// names and the user's mirrored read rules, and opencode_review_args repo_aware
+// and the dir; both agent_session branches (container, then host) pass
+// opencode_session_env read_only, opencode_research, an OPENCODE_CONFIG
+// (container config_path, host mcp_config_path) and mcp_names, and the host
+// branch the mirrored read rules (the container's opencode loads none of the
+// host's config files). Each input is pinned to its one producer: read_only and
+// repo_aware to the parameter, never rebound; opencode_research, mcp_names and
+// the container config_path to their exact `let`; the host mcp_config_path to
+// its one `None` declaration and agent_review's to one non-mut declaration,
+// each left unnamed between its read_mirror and its call. Each read_mirror is
+// built once, from opencode_read_mirror fed the run's OPENCODE_CONFIG and
+// repo_path or worktree_path, in the arm whose run carries the ReadOnly pin (a
+// repo-aware opencode review, a read-only session); the other arm, DiffOnly
+// runs included, mirrors nothing. That path is pinned as the run's spawn cwd
+// (stream_agent in the review and the host session) and its --dir
+// (opencode_review_args; the `run_dir` dir agent_session hands
+// opencode_session_args). The checker, a pure function fed the real file plus
+// in-memory mutants, lexes so comments and strings never satisfy a pin; a `,`
+// before `)` is ignored, so a rustfmt reflow passes. An unreadable file,
+// unterminated lexing, a missing anchor, an extra or missing call, or a bare
+// mention of either env fn fails closed. Out of reach: what the env fns do with
+// their arguments and what run_dir returns (Rust tests pin those), what the
+// per-CLI code assigns each mcp_config_path before its mirror, bindings made
+// through a pattern or macro, calls in another file or through a re-export,
+// and which branch runs: the branch is inferred from the `let container_env` /
+// `let host_extra_env` anchors' source order.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -115,6 +117,8 @@ const MCP_NAMES =
   "let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect()";
 /** The host OPENCODE_CONFIG's one declaration; only the per-CLI writes assign it. */
 const MCP_CONFIG_PATH = "let mut mcp_config_path: Option<String> = None";
+/** agent_review's OPENCODE_CONFIG: bound once, never `mut`. */
+const REVIEW_CONFIG_PATH = "let mcp_config_path: Option<String> =";
 const RESEARCH = "let opencode_research = kind == AgentKind::Opencode && web";
 /** The container OPENCODE_CONFIG, compared in source text: its "opencode" key is a
  *  string literal, which the masked view blanks. */
@@ -178,6 +182,16 @@ function checkPinCallSites(text) {
       problems.push(`${FILE}:${call.line} review_env called from ${call.fn}`);
       continue;
     }
+    // repo_aware picks the pin: `true` gives a diff-only run ReadOnly unmirrored.
+    for (const [at, want] of [
+      [0, "kind"],
+      [1, "repo_aware"],
+      [2, "mcp_config_path.as_deref()"],
+    ])
+      if (call.args[at] !== want)
+        problems.push(
+          `${FILE}:${call.line} review_env must receive ${want}, got ${call.args[at] ?? "nothing"}`,
+        );
     if (call.args[3] !== "&self_names")
       problems.push(
         `${FILE}:${call.line} review_env must receive &self_names, got ${call.args[3] ?? "nothing"}`,
@@ -196,6 +210,10 @@ function checkPinCallSites(text) {
     problems.push(
       "agent_review must pass opencode_review_args &repo_path once",
     );
+  if (reviewDir.length === 1 && reviewDir[0]?.[1] !== "repo_aware")
+    problems.push(
+      `agent_review must pass opencode_review_args repo_aware, got ${reviewDir[0]?.[1] ?? "nothing"}`,
+    );
   const reviewSpawn = callsIn(masked, review, "stream_agent");
   if (reviewSpawn.length !== 1 || reviewSpawn[0]?.[5] !== "&repo_path")
     problems.push("agent_review must spawn stream_agent once, in &repo_path");
@@ -212,6 +230,35 @@ function checkPinCallSites(text) {
     problems.push(
       "agent_review must build self_specs once, from crate::mcp::self_server_spec",
     );
+  if (letStatement(masked, review, "repo_aware").count !== 0)
+    problems.push("agent_review must not rebind repo_aware");
+  // Only agent_review's own signature counts: other fns declare repo_aware too.
+  const reviewSignature = masked.slice(
+    /\bfn agent_review\b/.exec(masked).index,
+    review[0],
+  );
+  if (!/\brepo_aware\s*:\s*bool\b/.test(reviewSignature))
+    problems.push("missing anchor: agent_review's repo_aware: bool parameter");
+  // Only the prefix is compared: the per-CLI body after `=` is out of reach.
+  const reviewConfig = letStatement(masked, review, "mcp_config_path");
+  if (
+    reviewConfig.count !== 1 ||
+    !reviewConfig.text.startsWith(REVIEW_CONFIG_PATH)
+  )
+    problems.push(
+      `agent_review must declare mcp_config_path once, not mut: ${REVIEW_CONFIG_PATH}`,
+    );
+  const reviewCall = calls.review_env.find((c) => c.fn === "agent_review");
+  if (reviewMirror.count === 1 && reviewCall) {
+    const mirrorEnd = masked.indexOf(";", reviewMirror.at);
+    if (
+      mirrorEnd < 0 ||
+      /\bmcp_config_path\b/.test(masked.slice(mirrorEnd, reviewCall.index))
+    )
+      problems.push(
+        "agent_review must not touch mcp_config_path between read_mirror and review_env",
+      );
+  }
 
   // opencode_session_env: the container call, then the host call, both in
   // agent_session, both fed the session's read_only flag and server names.
@@ -794,4 +841,79 @@ test("P13: each OPENCODE_CONFIG and the research flag are bound once", () => {
   ]) {
     assert.deepEqual(checkPinCallSites(mutant), refused);
   }
+});
+
+test("P14: agent_review's pin-choosing inputs are pinned to their producers", () => {
+  const L = `${FILE}:${source.slice(0, source.indexOf(REVIEW_CALL)).split("\n").length} `;
+  const OPENS_MIRROR =
+    "    let read_mirror = if kind == AgentKind::Opencode && repo_aware {";
+  const REVIEW_AT = "    let extra_env = review_env(";
+  const DECLARE =
+    "let mcp_config_path: Option<String> = if self_specs.is_empty() {";
+  const declare = `agent_review must declare mcp_config_path once, not mut: ${REVIEW_CONFIG_PATH}`;
+  const touched =
+    "agent_review must not touch mcp_config_path between read_mirror and review_env";
+  const unique = (t, from) =>
+    assert.equal(t.split(from).length, 2, `not unique: ${from}`);
+  const before = (anchor, line) =>
+    mutate((t) => {
+      unique(t, anchor);
+      return t.replace(anchor, () => `${line}\n${anchor}`);
+    });
+  const swap = (from, to) =>
+    mutate((t) => {
+      unique(t, from);
+      return t.replace(from, () => to);
+    });
+  const call = (from, to) => swap(REVIEW_CALL, REVIEW_CALL.replace(from, to));
+  for (const [mutant, refused] of [
+    [
+      call("repo_aware", "true"),
+      [`${L}review_env must receive repo_aware, got true`],
+    ],
+    [
+      call("repo_aware", "false"),
+      [`${L}review_env must receive repo_aware, got false`],
+    ],
+    [
+      call("mcp_config_path.as_deref()", "None"),
+      [`${L}review_env must receive mcp_config_path.as_deref(), got None`],
+    ],
+    [
+      call("kind", "AgentKind::Claude"),
+      [`${L}review_env must receive kind, got AgentKind::Claude`],
+    ],
+    [
+      swap(
+        "opencode_review_args(&model, repo_aware, &effort, &repo_path)",
+        "opencode_review_args(&model, true, &effort, &repo_path)",
+      ),
+      ["agent_review must pass opencode_review_args repo_aware, got true"],
+    ],
+    [
+      before(OPENS_MIRROR, "    let repo_aware = true;"),
+      ["agent_review must not rebind repo_aware"],
+    ],
+    [
+      before(REVIEW_AT, "    let mcp_config_path: Option<String> = None;"),
+      [declare, touched],
+    ],
+    [before(REVIEW_AT, "    mcp_config_path = None;"), [touched]],
+    [swap(DECLARE, DECLARE.replace("let ", "let mut ")), [declare]],
+  ]) {
+    assert.deepEqual(checkPinCallSites(mutant), refused);
+  }
+  const mutant = mutate((t) => {
+    const at = t.indexOf("repo_aware: bool", t.indexOf("fn agent_review("));
+    assert.ok(at > 0, "agent_review declares no repo_aware parameter");
+    return `${t.slice(0, at)}diff_only: bool${t.slice(at + "repo_aware: bool".length)}`;
+  });
+  // Earlier fns still declare the parameter, so a whole-prefix search would pass.
+  assert.match(
+    mutant.slice(0, mutant.indexOf("fn agent_review(")),
+    /\brepo_aware: bool\b/,
+  );
+  assert.deepEqual(checkPinCallSites(mutant), [
+    "missing anchor: agent_review's repo_aware: bool parameter",
+  ]);
 });
