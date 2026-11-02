@@ -506,7 +506,10 @@ the last list up, with a line above it saying it couldn't refresh.
   Discard… buttons, or Unstage hunk on a staged file's diff. Discard returns the hunk
   to the file's staged version when part of the file is staged, to the last commit
   otherwise, and removes it from an untracked file. To discard a staged hunk, unstage
-  it first.
+  it first. A very large diff opens with up to its first 1,000 lines, and every hunk
+  shown in full keeps its hunk buttons; **Show full diff** at the bottom brings in the
+  rest. A hunk that limit cuts short gets its buttons once the full diff shows; until
+  then, a drag selection still acts on just its visible lines.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
   spanning as many hunks as you like, then stage or discard just those (or unstage
   them, on a staged file's diff). Discarded lines go back where a discarded hunk would:

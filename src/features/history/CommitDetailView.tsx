@@ -589,18 +589,12 @@ export function CommitDetailView({
                     // on it, the row waits rather than claiming out of reach.
                     // A log that failed with nothing loaded (and isn't retrying)
                     // isn't refreshing.
-                    switch (true) {
-                      case isHead:
-                        return null;
-                      case log.data === undefined && refreshFailed(log):
-                        return AMEND_HOLD_HINT["log-unread"];
-                      case logTop === undefined:
-                      case isLatest:
-                      case hash === head?.oid:
-                        return AMEND_HOLD_HINT.refreshing;
-                      default:
-                        return AMEND_HOLD_HINT["not-latest"];
-                    }
+                    if (isHead) return null;
+                    if (log.data === undefined && refreshFailed(log))
+                      return AMEND_HOLD_HINT["log-unread"];
+                    if (logTop === undefined || isLatest || hash === head?.oid)
+                      return AMEND_HOLD_HINT.refreshing;
+                    return AMEND_HOLD_HINT["not-latest"];
                   })()}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={doCheckoutCommit}>

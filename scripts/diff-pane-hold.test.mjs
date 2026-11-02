@@ -968,6 +968,95 @@ for (const file of [...SLOT_HOSTS, "src/features/diff/DiffViewer.tsx"]) {
   });
 }
 
+// The staging view's held-slot freeze and settle report (DiffViewer.tsx's
+// StagingDiffView), read from source: a retained build freezes only while its
+// slot is HELD (a preparing slot is non-interactive too, and must build), and a
+// retained build on screen reports settled through its whole-file reads, so a
+// move mid-read holds the painted pane instead of replacing it.
+function stagingHoldViolations(raw) {
+  const masked = maskNonCode(raw, true);
+  const start = masked.indexOf("function StagingDiffView(");
+  if (start < 0) return ["StagingDiffView not found"];
+  const next = masked.indexOf("\nfunction ", start + 1);
+  const end = next < 0 ? masked.length : next;
+  const code = masked.slice(start, end);
+  const body = code.replace(/\s+/g, " ");
+  const problems = [];
+  const need = (re, what) => {
+    if (!re.test(body)) problems.push(what);
+  };
+  need(
+    /const readsHold = contentHold \|\| contentPending;/,
+    "readsHold is the reads' own hold",
+  );
+  // The phase literal is masked, so its declaration is read back from source
+  // at the same offsets.
+  const decl = /const holdingBuild = [^;]*;/.exec(code);
+  const declText =
+    decl === null
+      ? null
+      : raw.slice(start + decl.index, start + decl.index + decl[0].length);
+  if (
+    declText?.replace(/\s+/g, " ") !==
+    'const holdingBuild = readsHold || phase === "held";'
+  )
+    problems.push("holdingBuild adds exactly the held phase");
+  need(/useRetained\(live, !holdingBuild\)/, "the live unit retains on it");
+  need(
+    /useRetained\(builtDiffFile, !holdingBuild\)/,
+    "the build retains on it",
+  );
+  need(
+    /const holdBlank = readsHold && diffFile === null;/,
+    "a held placeholder never blanks",
+  );
+  const call = body.indexOf("useReportPaneSettled(");
+  if (call < 0) problems.push("no settle report");
+  else {
+    let depth = 0;
+    let end = call + "useReportPaneSettled".length;
+    for (; end < body.length; end++) {
+      if (body[end] === "(") depth++;
+      else if (body[end] === ")" && --depth === 0) break;
+    }
+    const arg = body.slice(call, end);
+    if (/\bcontentPending\b/.test(arg))
+      problems.push("the settle report reads contentPending");
+    if (!/!holdBlank\b/.test(arg))
+      problems.push("the settle report drops holdBlank");
+  }
+  return problems;
+}
+
+test("staging hold: only a held slot freezes its build; a retained build settles", () => {
+  const raw = readFileSync(
+    join(ROOT, "src/features/diff/DiffViewer.tsx"),
+    "utf8",
+  );
+  assert.deepEqual(stagingHoldViolations(raw), []);
+  // Negative controls: each regression the pin exists for is caught.
+  const mutate = (from, to) => {
+    assert.ok(raw.includes(from), `control anchor present: ${from}`);
+    return stagingHoldViolations(raw.replace(from, () => to));
+  };
+  assert.notDeepEqual(
+    mutate('readsHold || phase === "held"', "readsHold || !interactive"),
+    [],
+  );
+  assert.notDeepEqual(
+    mutate('readsHold || phase === "held"', 'readsHold || phase !== "shown"'),
+    [],
+  );
+  assert.notDeepEqual(
+    mutate("!holdForGrammar &&", "!contentPending && !holdForGrammar &&"),
+    [],
+  );
+  assert.notDeepEqual(
+    mutate("const holdBlank = readsHold", "const holdBlank = holdingBuild"),
+    [],
+  );
+});
+
 test("answeredSince: a key with no answer yet never counts as answered", () => {
   assert.equal(
     answeredSince(
