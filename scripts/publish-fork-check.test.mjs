@@ -228,10 +228,12 @@ function routeProblems(route, src) {
   }
 
   // (8) One spelling of the copy and the bound, imported from publish-confirm.
-  // The fork-check sentence is matched file-wide; the generic fragments
+  // The REASON and NOTE sentences are matched file-wide; the generic fragments
   // (`hasn't finished`, `10_000`) only in the route, where they can't collide.
   if (
-    /Checking for a pull request from a fork/.test(src) ||
+    /Checking for a pull request from a fork|The check for a fork pull request/.test(
+      src,
+    ) ||
     /hasn't finished|10_000/.test(body)
   )
     out.push(p("re-spells a PUBLISH_FORK_CHECK_* value"));
@@ -540,17 +542,37 @@ for (const route of ROUTES) {
       ),
       `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
     );
+    failsWith(
+      mutate(real, file, "}, PUBLISH_FORK_CHECK_BOUND_MS);", "}, 10_000);"),
+      `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
+    );
+    failsWith(
+      mutate(
+        real,
+        file,
+        "note: PUBLISH_FORK_CHECK_NOTE",
+        `note: "The check for a fork pull request hasn't finished."`,
+      ),
+      `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
+    );
     // (8) is scoped to the route: the same spelling elsewhere in the file passes
     const outside = {
       ...real,
       [file]: `${real[file]}\nconst other = 10_000;\n`,
     };
     assert.deepEqual(problems(outside), []);
-    // ...but the fork-check sentence is caught anywhere in the file
+    // ...but the REASON and NOTE sentences are caught anywhere in the file
     failsWith(
       {
         ...real,
         [file]: `${real[file]}\nconst other = "Checking for a pull request from a fork";\n`,
+      },
+      `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
+    );
+    failsWith(
+      {
+        ...real,
+        [file]: `${real[file]}\nconst other = "The check for a fork pull request hasn't finished.";\n`,
       },
       `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
     );
