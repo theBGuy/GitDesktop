@@ -15,7 +15,8 @@
 // proves only a code-position invalidation inside the function enclosing the last
 // delete; its control flow (an `if`, an early return) is review's job. Shapes
 // only a parser could split (annotated function heads, quoted or computed option
-// keys, generic arguments with parentheses, aliases) are refused.
+// keys, accessor, method or shorthand options, generic arguments with
+// parentheses, aliases) are refused.
 //
 // Runs in CI's installless `guards` job, so node built-ins ONLY.
 import assert from "node:assert/strict";
@@ -251,16 +252,17 @@ function scanFile(rel, src) {
       const text = masked.slice(a, b).trim();
       if (text.startsWith("..."))
         problems.push(`${at}: a spread in the options the scan can't read`);
-      if (/^["'`[]/.test(text))
+      else if (/^["'`[]/.test(text))
         problems.push(
           `${at}: a quoted or computed option key the scan can't read`,
         );
-      const key = text.match(
-        /^(invalidate|invalidateAfter|localOnly)\b\s*(:?)/,
-      );
+      else if (!/^[A-Za-z_$][\w$]*\s*:/.test(text))
+        problems.push(
+          `${at}: an accessor, method or shorthand option the scan can't read (write \`invalidate: [...]\`)`,
+        );
+      const key = text.match(/^(invalidate|invalidateAfter|localOnly)\s*:/);
       if (!key) continue;
-      const valueAt = key[2] ? a + masked.slice(a, b).indexOf(":") + 1 : a;
-      entries[key[1]] = [valueAt, b];
+      entries[key[1]] = [a + masked.slice(a, b).indexOf(":") + 1, b];
     }
     if (!entries.invalidate) continue;
     if (entries.localOnly)
@@ -368,11 +370,10 @@ function cleanupProblems(src) {
 }
 
 /** Problems over `sources` (rel -> text | null) for the given allowlist, and
- *  the scan's explicit-invalidate hooks by file. */
+ *  the scan's explicit-invalidate hooks (`byHook`). */
 function check(sources, allowlist = ALLOWLIST) {
   const problems = [];
   const byHook = new Map();
-  const perFile = {};
   for (const rel of Object.keys(sources).filter((r) => r.startsWith(QUERIES))) {
     const scan = scanFile(rel, sources[rel]);
     problems.push(...scan.problems);
@@ -387,7 +388,6 @@ function check(sources, allowlist = ALLOWLIST) {
     }
   }
   for (const [hook, { rel, covered }] of byHook) {
-    perFile[rel] = (perFile[rel] ?? 0) + 1;
     if (covered && hook in allowlist)
       problems.push(
         `ALLOWLIST: ${hook} already covers divergence (stale entry)`,
@@ -408,7 +408,7 @@ function check(sources, allowlist = ALLOWLIST) {
     );
   problems.push(...aftermathProblems(sources[AFTERMATH] ?? null));
   problems.push(...cleanupProblems(sources[CLEANUP] ?? null));
-  return { problems, byHook, perFile };
+  return { problems, byHook };
 }
 
 const realSources = () =>
@@ -487,6 +487,9 @@ for (const [name, [from, to]] of Object.entries(ACCEPTED))
       [],
     ));
 
+const UNREADABLE_ENTRY =
+  "an accessor, method or shorthand option the scan can't read";
+
 /** Mutants of the real tree, each with the one problem it must raise. */
 const MUTANTS = {
   "useAddUserWorktree without the key": [
@@ -538,6 +541,44 @@ const MUTANTS = {
   "a computed option key": [
     (s) => mutate(s, WORKTREES, "invalidate: [", "[INVALIDATE]: ["),
     "a quoted or computed option key the scan can't read",
+  ],
+  "a getter option": [
+    (s) =>
+      mutate(
+        s,
+        WORKTREES,
+        ADD_INVALIDATE,
+        "get invalidate() {\n        return [];\n      },",
+      ),
+    UNREADABLE_ENTRY,
+  ],
+  "a setter beside the list": [
+    (s) =>
+      mutate(
+        s,
+        WORKTREES,
+        ADD_INVALIDATE,
+        `set invalidate(v) {},\n      ${ADD_INVALIDATE}`,
+      ),
+    UNREADABLE_ENTRY,
+  ],
+  "a method option": [
+    (s) =>
+      mutate(
+        s,
+        WORKTREES,
+        ADD_INVALIDATE,
+        "invalidate() {\n        return [];\n      },",
+      ),
+    UNREADABLE_ENTRY,
+  ],
+  "a shorthand option": [
+    (s) =>
+      appended(
+        mutate(s, WORKTREES, ADD_INVALIDATE, "invalidate,"),
+        'const invalidate = [repoKeys.branches("")];',
+      ),
+    UNREADABLE_ENTRY,
   ],
   "generic arguments with parentheses": [
     (s) =>
