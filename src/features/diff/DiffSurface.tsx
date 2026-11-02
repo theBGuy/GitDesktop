@@ -13,7 +13,10 @@ import {
 } from "@git-diff-view/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
+  type Ref,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -56,7 +59,10 @@ import {
   DIFF_LINE_CAP,
   DIFF_MAX_LINE_CHARS,
   DIFF_MEGA_LINE_CHARS,
+  HIGHLIGHT_MAX_LINES,
+  highlightCostLength,
   longestLineLength,
+  realLineCount,
   shortenLongLines,
 } from "./cap-diff";
 import { DiffErrorBoundary } from "./DiffErrorBoundary";
@@ -154,6 +160,32 @@ type SideRange = { side: "old" | "new"; from: number; to: number };
 const sideTag = (side: SplitSide): "new" | "old" =>
   side === SplitSide.old ? "old" : "new";
 
+/** A (lineNumber, side)'s counterpart-side line number via the library's
+ *  unified index, or null on any missing step or throw. Module scope: the
+ *  React Compiler can't lower value blocks inside a try/catch. */
+function crossSideLine(
+  viewRef: { readonly current: DiffViewWithMultiSelectRef | null },
+  lineNumber: number,
+  fromSide: "old" | "new",
+  toSide: "old" | "new",
+): number | null {
+  try {
+    const instance = viewRef.current?.getDiffFileInstance();
+    if (!instance) return null;
+    const splitSide = fromSide === "old" ? SplitSide.old : SplitSide.new;
+    const index = instance.getUnifiedLineIndexByLineNumber(
+      lineNumber,
+      splitSide,
+    );
+    if (index == null || index < 0) return null;
+    const item = instance.getUnifiedLine(index);
+    const mapped = toSide === "old" ? item?.oldLineNumber : item?.newLineNumber;
+    return typeof mapped === "number" ? mapped : null;
+  } catch {
+    return null;
+  }
+}
+
 /** User syntax preferences threaded into diff building. */
 export interface SyntaxPrefs {
   syntaxMap?: Record<string, string>;
@@ -172,7 +204,9 @@ export interface DiffContentRevs {
   newRev?: string | null;
 }
 
-/** Lines in a string, allocation-free (mirrors cap-diff's counter). */
+/** `\n`-split segments in a string, allocation-free: a final newline's empty
+ *  segment counts, which the read-back budget and coverage checks rely on.
+ *  Diff-size gates use cap-diff's realLineCount instead. */
 function countLines(s: string): number {
   let n = 1;
   for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++;
@@ -340,6 +374,10 @@ export function overHighlightBudget(
   return textLength > maxChars;
 }
 
+// useShikiRouting's rebuild key while a diff is worker-routed: one stable
+// identity, so a grammar load then never re-triggers a build.
+const WORKER_ROUTED_GRAMMAR_STATE: Record<string, "ready" | "failed"> = {};
+
 // An empty tree for a side whose AST the worker didn't supply; the renderer
 // treats it as "no highlighting" (that side plain — fail-open).
 const EMPTY_WORKER_AST: DiffAST = { type: "root", children: [] };
@@ -373,9 +411,10 @@ function precomputedHighlighter(asts: WorkerAsts): DiffFileHighlighter {
 // Content mode reads and highlights BOTH whole files over IPC (≈2× the hunk
 // path's cost), so it keeps the original, tighter 100KB budget.
 const CONTENT_HIGHLIGHT_MAX_CHARS = 100_000;
-// Content-mode line gate: past this a file isn't read in full (hunk-only path).
-// Deliberately tighter than the 15_000 renderer cap — same 2× reason as above.
-export const HIGHLIGHT_MAX_LINES = 2000;
+
+// Defined in cap-diff.ts (import-free, so its tests can pin it); re-exported for
+// importers of this module.
+export { HIGHLIGHT_MAX_LINES };
 
 // Pin the highlight.js singleton's line cap: the core gates its whole-buffer
 // pass on the RECONSTRUCTED file's line count — the library's default 2000
@@ -446,9 +485,13 @@ export function createDiffFile(
     const file = DiffFile.createInstance(data);
     file.initRaw();
     // Gate on the char budget for the engine this diff routes to (~8× apart —
-    // see the constants). Line count only picks the hljs highlighter: the
+    // see the constants), counting both whole files in content mode since this
+    // pass tokenizes them. Line count only picks the hljs highlighter: the
     // singleton's whole-buffer pass below the cap, the hunk-scoped one past it.
-    if (lang && !overHighlightBudget(text.length, useShiki)) {
+    if (
+      lang &&
+      !overHighlightBudget(highlightCostLength(text.length, content), useShiki)
+    ) {
       if (useShiki) {
         file.initSyntax({ registerHighlighter: shikiDiffHighlighter() });
       } else if (pastSyntaxCap(text)) {
@@ -483,9 +526,9 @@ export function useFileContent(
   oldPath: string,
   diffText: string,
   contentRevs?: DiffContentRevs,
-  // Max diff size before content mode engages. The read-only surface caps its
-  // render at DIFF_LINE_CAP; the staging view renders every hunk regardless, so
-  // it passes the larger highlight budget instead of falling back to hunk-only.
+  // Max diff size before content mode engages: each host's render cap, so a
+  // capped render is never content mode. The staging view passes
+  // stagingContentMaxLines(showFull), its own cap until Show full diff.
   maxDiffLines: number = DIFF_LINE_CAP,
   // Keep the shown build whatever its reads do (a view held on purpose).
   frozen = false,
@@ -493,11 +536,13 @@ export function useFileContent(
   content: { old: string; new: string } | null;
   pending: boolean;
   hold: boolean;
+  /** An enabled side read is fetching, a refetch of cached data included. */
+  fetching: boolean;
 } {
   const oldRev = contentRevs?.oldRev;
   const newRev = contentRevs?.newRev;
   const wantContent =
-    !!repoPath && !!contentRevs && countLines(diffText) <= maxDiffLines;
+    !!repoPath && !!contentRevs && realLineCount(diffText) <= maxDiffLines;
   const oldQ = useFileAtRev(
     repoPath ?? "",
     oldRev ?? null,
@@ -590,13 +635,15 @@ export function useFileContent(
     );
     return () => window.clearTimeout(bound);
   }, [hold, frozen, painted]);
+  const fetching = oldFetching || newFetching;
   return useMemo(
     () => ({
       content: useContent ? { old: oldText, new: newText } : null,
       pending,
       hold,
+      fetching,
     }),
-    [useContent, oldText, newText, pending, hold],
+    [useContent, oldText, newText, pending, hold, fetching],
   );
 }
 
@@ -606,9 +653,10 @@ export function useFileContent(
  * and off-thread worker ASTs for an over-budget Shiki-routed diff. Shared by
  * both {@link createDiffFile} call sites so they apply the same routing rules.
  *
- * Contract: callers must list `grammarState` in their {@link createDiffFile}
- * memo's deps — it's read only via module state (isShikiLang), so listing it
- * explicitly is what forces the rebuild that picks the loaded grammar up.
+ * Contract: the rebuild that picks a loaded grammar up rides `holdForGrammar`
+ * turning false. Callers still list `grammarState` in their
+ * {@link createDiffFile} memo's deps for biome and an uncompiled caller; the
+ * compiler derives a compiled caller's keys from the body and drops it.
  * `workerHighlighter` goes to the view as its `registerHighlighter` prop and
  * must NOT be a build dep: keeping the DiffFile identity stable across the
  * ASTs' arrival is what preserves the view's expansion state.
@@ -664,8 +712,10 @@ export function useShikiRouting({
       grammarState[lang] !== undefined ||
       // Over the Shiki budget (a builtin-Shiki lang is Shiki-routed, so that's
       // the budget that applies) the main thread never tokenizes this file —
-      // the worker loads its own grammar copy. Loading here too would waste the
-      // fetch AND flip grammarState, rebuilding the interim hljs paint to plain.
+      // the worker loads its own grammar copy. Deliberately judged on the diff
+      // text alone, so a content-mode mount fetches in parallel with its reads;
+      // a fetch the content then routes to the worker can't rebuild the paint,
+      // since the returned rebuild key is frozen while worker-routed (below).
       overHighlightBudget(text.length, true)
     )
       return;
@@ -706,7 +756,14 @@ export function useShikiRouting({
   const useShikiWorker =
     !!lang &&
     (isShikiLang(lang) || isBuiltinShikiLang(lang) || tmGrammar != null);
-  const overBudget = !!lang && overHighlightBudget(text.length, useShikiWorker);
+  // Content-aware like createDiffFile's sync gate, so the worker takes exactly
+  // the content-mode paints the main thread won't tokenize.
+  const overBudget =
+    !!lang &&
+    overHighlightBudget(
+      highlightCostLength(text.length, content),
+      useShikiWorker,
+    );
   const workerAsts = useWorkerHighlight({
     // Shiki-routed + over budget only. Don't request while whole-file reads are
     // still settling — the worker input would be built on interim text and
@@ -731,7 +788,13 @@ export function useShikiRouting({
   // budget, hold — so the lazy-grammar rebuild still lands in one paint.
   const holdForGrammar = grammarPending && !overBudget;
 
-  return { holdForGrammar, grammarState, workerHighlighter };
+  // Over budget the main thread never Shiki-tokenizes, so a grammar settling
+  // then must not rebuild the interim paint: the rebuild key stays frozen.
+  return {
+    holdForGrammar,
+    grammarState: overBudget ? WORKER_ROUTED_GRAMMAR_STATE : grammarState,
+    workerHighlighter,
+  };
 }
 
 /** The per-side line -> render() maps the vendored DiffView consumes. */
@@ -868,8 +931,8 @@ function RenderedDiff({
     customLanguages,
   });
 
-  // grammarState: rebuild-trigger dep — see useShikiRouting's contract.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState is an intentional rebuild trigger, read via module state not directly
+  // grammarState: inert once compiled; see useShikiRouting's contract.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState stays listed for the uncompiled path; the rebuild rides holdForGrammar
   const builtDiffFile = useMemo(
     () =>
       blocked || contentPending || holdForGrammar || contentHold
@@ -893,8 +956,10 @@ function RenderedDiff({
       grammarState,
     ],
   );
-  // Through a refresh's hold, the build already on screen.
+  // Through a refresh's hold, the build already on screen, with the worker
+  // highlighting painted on it (the worker answers nothing while held).
   const diffFile = useRetained(builtDiffFile, !contentHold);
+  const shownHighlighter = useRetained(workerHighlighter, !contentHold);
 
   // Per-side extendData maps, keyed by String(line). Memoized for referential
   // stability: the vendored DiffView is store-based and a fresh object each
@@ -1012,32 +1077,13 @@ function RenderedDiff({
     [],
   );
 
-  // Map a (lineNumber, side) to its counterpart-side line number using the
-  // library's unified index. Guards every step (instance/indices may be
-  // null/undefined) and returns null rather than throwing.
   const mapCrossSideLine = useCallback(
     (
       lineNumber: number,
       fromSide: "old" | "new",
       toSide: "old" | "new",
-    ): number | null => {
-      try {
-        const instance = multiSelectRef.current?.getDiffFileInstance();
-        if (!instance) return null;
-        const splitSide = fromSide === "old" ? SplitSide.old : SplitSide.new;
-        const index = instance.getUnifiedLineIndexByLineNumber(
-          lineNumber,
-          splitSide,
-        );
-        if (index == null || index < 0) return null;
-        const item = instance.getUnifiedLine(index);
-        const mapped =
-          toSide === "old" ? item?.oldLineNumber : item?.newLineNumber;
-        return typeof mapped === "number" ? mapped : null;
-      } catch {
-        return null;
-      }
-    },
+    ): number | null =>
+      crossSideLine(multiSelectRef, lineNumber, fromSide, toSide),
     [],
   );
 
@@ -1252,7 +1298,7 @@ function RenderedDiff({
           diffFile={diffFile}
           // Worker ASTs land as a highlighter PROP, not a rebuild: the view's
           // effect applies them to its own clone, so expansion state survives.
-          registerHighlighter={workerHighlighter}
+          registerHighlighter={shownHighlighter}
           diffViewMode={diffViewMode}
           diffViewTheme={isDark ? "dark" : "light"}
           diffViewHighlight
@@ -1279,7 +1325,7 @@ function RenderedDiff({
       ) : (
         <DiffView<{ render: () => ReactNode }>
           diffFile={diffFile}
-          registerHighlighter={workerHighlighter}
+          registerHighlighter={shownHighlighter}
           diffViewMode={diffViewMode}
           diffViewTheme={isDark ? "dark" : "light"}
           diffViewHighlight
@@ -1289,33 +1335,81 @@ function RenderedDiff({
           renderExtendLine={renderExtendLine}
         />
       )}
-      {(hidden > 0 || shortened > 0) && (
-        <div className="flex items-center justify-center gap-3 border-t bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          {hidden > 0 && (
-            <span>
-              {hidden.toLocaleString()} more {hidden === 1 ? "line" : "lines"}{" "}
-              hidden for performance
-            </span>
-          )}
-          {shortened > 0 && (
-            <span>
-              {shortened.toLocaleString()} long{" "}
-              {shortened === 1 ? "line" : "lines"} shortened
-              {hidden > 0 ? "" : " for performance"}
-            </span>
-          )}
-          {hidden > 0 && (
-            <Button
-              size="xs"
-              variant="outline"
-              onClick={() => setShowFull(true)}
-            >
-              Show full diff
-            </Button>
-          )}
-        </div>
-      )}
+      <DiffCapFooter
+        hidden={hidden}
+        shortened={shortened}
+        onShowFull={() => setShowFull(true)}
+      />
     </>
+  );
+}
+
+const SHOW_FULL_DIFF_LABEL = "Show full diff";
+
+/**
+ * The strip under a capped or shortened diff: what was hidden or shortened, and
+ * Show full diff while lines are hidden. The one source of this copy for every
+ * diff host. A host that holds its diff's actions passes `held`/`heldReason`
+ * (the button then explains its hold and keeps its tab stop) and its own
+ * `onButtonKeyDown`; without them the button is a plain Button.
+ */
+export function DiffCapFooter({
+  hidden,
+  shortened,
+  onShowFull,
+  onButtonKeyDown,
+  held,
+  heldReason,
+  buttonRef,
+}: {
+  hidden: number;
+  shortened: number;
+  onShowFull: (e: ReactMouseEvent<HTMLElement>) => void;
+  onButtonKeyDown?: (e: ReactKeyboardEvent<HTMLElement>) => void;
+  held?: boolean;
+  heldReason?: string;
+  buttonRef?: Ref<HTMLButtonElement>;
+}) {
+  if (hidden <= 0 && shortened <= 0) return null;
+  return (
+    <div className="flex items-center justify-center gap-3 border-t bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      {hidden > 0 && (
+        <span>
+          {hidden.toLocaleString()} more {hidden === 1 ? "line" : "lines"}{" "}
+          hidden for performance
+        </span>
+      )}
+      {shortened > 0 && (
+        <span>
+          {shortened.toLocaleString()} long {shortened === 1 ? "line" : "lines"}{" "}
+          shortened
+          {hidden > 0 ? "" : " for performance"}
+        </span>
+      )}
+      {hidden > 0 &&
+        (held === undefined && heldReason === undefined ? (
+          <Button
+            ref={buttonRef}
+            size="xs"
+            variant="outline"
+            onClick={onShowFull}
+          >
+            {SHOW_FULL_DIFF_LABEL}
+          </Button>
+        ) : (
+          <DisabledReasonButton
+            ref={buttonRef}
+            size="xs"
+            variant="outline"
+            disabled={held}
+            reason={heldReason}
+            onKeyDown={onButtonKeyDown}
+            onClick={onShowFull}
+          >
+            {SHOW_FULL_DIFF_LABEL}
+          </DisabledReasonButton>
+        ))}
+    </div>
   );
 }
 

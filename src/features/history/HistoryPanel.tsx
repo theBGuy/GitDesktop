@@ -841,12 +841,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     snapshot,
   });
   // The unpushed set (the top `view.count` of the gated view's HEAD-order
-  // commits), for marking rows. Memoized — the React Compiler won't hoist the
-  // .slice/.map/new Set. The markers clear once the unpushed count (status's
-  // ahead, or the no-upstream count read) reports 0.
-  const unpushedHashes = useMemo(
-    () => new Set(view.commits.slice(0, view.count).map((c) => c.hash)),
-    [view.commits, view.count],
+  // commits), for squash gating. CommitList derives its own row markers from
+  // `view.commits` + `view.count`: this Set is fresh every render, and passing
+  // it would keep the compiler from caching the CommitList element.
+  const unpushedHashes = new Set(
+    view.commits.slice(0, view.count).map((c) => c.hash),
   );
 
   // A failed read never stands in for an answer: "No commits yet" and "No
@@ -871,18 +870,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           hasRows: (searchShown ? searchCommits : commits).length > 0,
         });
   // Each Retry's arm unmounts as its read refetches; focus lands on the shell.
-  const logRescue = useRetryFocusRescue(logLoadFailed);
-  const searchRescue = useRetryFocusRescue(searchLoadFailed);
+  const { hostRef: logHostRef, retryRef: logRetryRef } =
+    useRetryFocusRescue(logLoadFailed);
+  const { hostRef: searchHostRef, retryRef: searchRetryRef } =
+    useRetryFocusRescue(searchLoadFailed);
   // A Load more that fetches the last page unmounts under the user's focus;
   // the same edge rescue lands it on the shell. Each flag is true exactly
   // while its button is mounted (the list arm, in its mode, with a next page).
   const listArm = log.data !== undefined && commits.length > 0;
-  const logMoreRescue = useRetryFocusRescue(
-    listArm && !searchActive && log.hasNextPage,
-  );
-  const searchMoreRescue = useRetryFocusRescue(
-    listArm && searchActive && search.hasNextPage,
-  );
+  const { hostRef: logMoreHostRef, retryRef: logMoreRetryRef } =
+    useRetryFocusRescue(listArm && !searchActive && log.hasNextPage);
+  const { hostRef: searchMoreHostRef, retryRef: searchMoreRetryRef } =
+    useRetryFocusRescue(listArm && searchActive && search.hasNextPage);
   // Pre-mounted at one tree position, never under aria-busy: a live region
   // created together with its text announces unreliably.
   const announcement = logLoadFailed
@@ -893,10 +892,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const shell = (body: ReactNode, header: ReactNode = null) => (
     <div
       ref={(node) => {
-        logRescue.hostRef(node);
-        searchRescue.hostRef(node);
-        logMoreRescue.hostRef(node);
-        searchMoreRescue.hostRef(node);
+        logHostRef(node);
+        searchHostRef(node);
+        logMoreHostRef(node);
+        searchMoreHostRef(node);
       }}
       tabIndex={-1}
       className="flex min-h-0 flex-1 flex-col outline-none"
@@ -931,7 +930,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           {presentError(log.error).summary}
         </p>
         <Button
-          ref={logRescue.retryRef}
+          ref={logRetryRef}
           variant="outline"
           size="sm"
           className="mt-2 cursor-pointer"
@@ -1023,6 +1022,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       setSelected(new Set([hash]));
       setAnchorHash(hash);
     }
+  }
+
+  function onHoverPrefetch(hash: string) {
+    hoverPrefetch(() => prefetchCommit(hash));
   }
 
   // Right-clicking a commit outside the selection collapses the selection
@@ -1131,6 +1134,28 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     view.count,
     view.hasNextPage,
   );
+
+  // CommitList is uncompiled, so a fresh element re-renders it. For the
+  // compiler to cache this one: build it outside the list ternary, from stable
+  // props only (never the per-render `view` or Set), and after deriveEditRange,
+  // the last call the compiler assumes may mutate `view.commits`.
+  const markCommits = view.commits;
+  const markCount = view.count;
+  const markUpstream = head?.upstreamGone ? null : (head?.upstream ?? null);
+  const commitList = (
+    <CommitList
+      scrollEl={scrollEl}
+      commits={visibleCommits}
+      selected={selected}
+      selectedCommitHash={selectedCommitHash}
+      unpushedCommits={markCommits}
+      unpushedCount={markCount}
+      upstream={markUpstream}
+      onRowClick={onRowClick}
+      onHoverPrefetch={onHoverPrefetch}
+    />
+  );
+
   // Waits for agreement like squash: a mismatch may serve a set HEAD has
   // already moved past.
   const canEditHistory = editLen >= 1 && !opInProgress && agreed;
@@ -1277,60 +1302,44 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     // Only HEAD can be amended; a row that IS status's HEAD while the log trails
     // (an outside reset) is waiting on the log, not out of reach.
     const amendHold = ((): keyof typeof AMEND_HOLD_HINT | null => {
-      switch (true) {
-        case isHead:
-          return null;
-        case menuIndex === 0:
-          return "refreshing";
-        case commit.hash === head?.oid:
-          return "refreshing";
-        default:
-          return "not-latest";
-      }
+      if (isHead) return null;
+      if (menuIndex === 0) return "refreshing";
+      if (commit.hash === head?.oid) return "refreshing";
+      return "not-latest";
     })();
     // In precedence order. A row that left the loaded log under the open menu
     // waits like a trailing log does; "already pushed" reads a loaded status
     // only (with no status, isHead is false and an earlier arm answers).
     const undoHold = ((): HeadRowHold | null => {
-      switch (true) {
-        case (menuIndex === 0 && !isHead) ||
-          (commit.hash === head?.oid && !isHead) ||
-          menuIndex < 0:
-          return "refreshing";
-        case isHead && headIsRoot && !rootKnown && !recordsParent.isError:
-          return "checking-parent";
-        case !isHead && menuIndex > 0:
-          return "not-latest";
-        case undoCommit.isPending:
-          return "undoing";
-        case !canUndo:
-          return "already-pushed";
-        case isHead && detachedRoot:
-          return "detached-root";
-        case shallowBoundary:
-          return "shallow-boundary";
-        case headIsRoot &&
-          recordsParent.data === undefined &&
-          recordsParent.isError:
-          return "parent-unread";
-        default:
-          return null;
-      }
+      if (
+        (menuIndex === 0 && !isHead) ||
+        (commit.hash === head?.oid && !isHead) ||
+        menuIndex < 0
+      )
+        return "refreshing";
+      if (isHead && headIsRoot && !rootKnown && !recordsParent.isError)
+        return "checking-parent";
+      if (!isHead && menuIndex > 0) return "not-latest";
+      if (undoCommit.isPending) return "undoing";
+      if (!canUndo) return "already-pushed";
+      if (isHead && detachedRoot) return "detached-root";
+      if (shallowBoundary) return "shallow-boundary";
+      if (
+        headIsRoot &&
+        recordsParent.data === undefined &&
+        recordsParent.isError
+      )
+        return "parent-unread";
+      return null;
     })();
     // The reset pins the HEAD it opens on, so it opens only while the log and
     // status agree on which commit that is.
     const resetAgrees = headAgrees(lastCommit?.hash, head?.oid);
     const resetHold = ((): HeadRowHold | null => {
-      switch (true) {
-        case !resetAgrees:
-          return "refreshing";
-        case menuIndex === 0:
-          return "already-at";
-        case menuIndex < 0:
-          return "refreshing";
-        default:
-          return null;
-      }
+      if (!resetAgrees) return "refreshing";
+      if (menuIndex === 0) return "already-at";
+      if (menuIndex < 0) return "refreshing";
+      return null;
     })();
     return (
       <>
@@ -1492,7 +1501,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               </p>
               <div className="mt-2 flex justify-center gap-2">
                 <Button
-                  ref={searchRescue.retryRef}
+                  ref={searchRetryRef}
                   variant="outline"
                   size="sm"
                   className="cursor-pointer"
@@ -1539,29 +1548,13 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               )}
             </div>
           ) : (
-            // Data-gated child: the useVirtualizer call lives here (never in the
-            // 900-line parent) so (a) HistoryPanel's body keeps compiling under
-            // the React Compiler — useVirtualizer bails its host out — and (b) the
-            // virtualizer only ever mounts once there are rows, dodging the
-            // first-row measureElement race (docs/list-virtualization.md).
-            <CommitList
-              scrollEl={scrollEl}
-              commits={visibleCommits}
-              selected={selected}
-              selectedCommitHash={selectedCommitHash}
-              unpushedHashes={unpushedHashes}
-              upstream={head?.upstreamGone ? null : (head?.upstream ?? null)}
-              onRowClick={onRowClick}
-              onHoverPrefetch={(hash) =>
-                hoverPrefetch(() => prefetchCommit(hash))
-              }
-            />
+            commitList
           )}
           {searchActive ? (
             <div className="space-y-0.5 px-3 py-2 text-center">
               {search.hasNextPage && (
                 <Button
-                  ref={searchMoreRescue.retryRef}
+                  ref={searchMoreRetryRef}
                   variant="ghost"
                   size="xs"
                   className={cn("text-muted-foreground", ARIA_DISABLED_CLASS)}
@@ -1607,7 +1600,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               {log.hasNextPage && (
                 <div className="px-3 py-2 text-center">
                   <Button
-                    ref={logMoreRescue.retryRef}
+                    ref={logMoreRetryRef}
                     variant="ghost"
                     size="xs"
                     className={cn("text-muted-foreground", ARIA_DISABLED_CLASS)}
@@ -1784,7 +1777,8 @@ function CommitList({
   commits,
   selected,
   selectedCommitHash,
-  unpushedHashes,
+  unpushedCommits,
+  unpushedCount,
   upstream,
   onRowClick,
   onHoverPrefetch,
@@ -1793,11 +1787,19 @@ function CommitList({
   commits: CommitSummary[];
   selected: Set<string>;
   selectedCommitHash: string | null;
-  unpushedHashes: Set<string>;
+  /** The gated unpushed view's HEAD-order commits; the top `unpushedCount`
+   *  are marked "not pushed". */
+  unpushedCommits: CommitSummary[];
+  unpushedCount: number;
   upstream: string | null;
   onRowClick: (e: React.MouseEvent, index: number, hash: string) => void;
   onHoverPrefetch: (hash: string) => void;
 }) {
+  // This component is uncompiled (useVirtualizer), so the memo here is manual.
+  const unpushedHashes = useMemo(
+    () => new Set(unpushedCommits.slice(0, unpushedCount).map((c) => c.hash)),
+    [unpushedCommits, unpushedCount],
+  );
   const virtualizer = useVirtualizer({
     count: commits.length,
     getScrollElement: () => scrollEl,

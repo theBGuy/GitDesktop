@@ -5,6 +5,48 @@
 
 /** Past this many lines, a diff is capped to keep the render under ~1 frame. */
 export const DIFF_LINE_CAP = 200;
+/** The staging (Changes) view's cap: it carries per-hunk actions, so it keeps
+ *  more on screen than the read-only surfaces before cutting. */
+export const STAGING_DIFF_LINE_CAP = 1_000;
+/** Content-mode line gate: past this a file isn't read in full (hunk-only
+ *  path). Tighter than the renderer's own cap because content mode reads and
+ *  highlights both whole files. */
+export const HIGHLIGHT_MAX_LINES = 2000;
+
+/** The staging view's content-mode eligibility: within its cap while capped,
+ *  so a render showing capped rows is never content mode, and the full
+ *  highlight gate once the user asked for the full diff. */
+export function stagingContentMaxLines(showFull: boolean): number {
+  return showFull ? HIGHLIGHT_MAX_LINES : STAGING_DIFF_LINE_CAP;
+}
+
+/**
+ * The text length a highlight budget is judged on: content mode tokenizes both
+ * whole files, so their combined length counts when it exceeds the diff's.
+ */
+export function highlightCostLength(
+  textLength: number,
+  content?: { old: string | null; new: string | null } | null,
+): number {
+  if (!content) return textLength;
+  return Math.max(
+    textLength,
+    (content.old?.length ?? 0) + (content.new?.length ?? 0),
+  );
+}
+
+/**
+ * Lines in `text` as a reader counts them: the empty segment after a final
+ * newline is not a line. Allocation-free. Shared by the cap and content-mode
+ * eligibility so the two agree at the boundary.
+ */
+export function realLineCount(text: string): number {
+  let n = 0;
+  for (let k = 0; k < text.length; k++) {
+    if (text.charCodeAt(k) === 10 /* \n */) n++;
+  }
+  return text.length > 0 && text.charCodeAt(text.length - 1) !== 10 ? n + 1 : n;
+}
 
 /** Per-line display cap: any rendered diff line longer than this is hard-shortened. */
 export const DIFF_MAX_LINE_CHARS = 4_000;
@@ -14,7 +56,7 @@ export const DIFF_MEGA_LINE_CHARS = 20_000;
 /**
  * Length (in chars) of the longest line in `text`. Allocation-free scan (no
  * `split` — a single-line minified blob would otherwise build a whole-string
- * array). Mirrors {@link capDiffText}'s own newline-counting style.
+ * array), like {@link realLineCount}.
  */
 export function longestLineLength(text: string): number {
   let longest = 0;
@@ -68,25 +110,49 @@ export function shortenLongLines(
 interface CappedDiff {
   /** The (possibly shortened) unified-diff text to render. */
   text: string;
-  /** Diff lines hidden by the cap; 0 when nothing was cut. */
+  /** Real diff lines hidden by the cap; 0 when nothing was cut. */
   hidden: number;
+  /** Hunks kept intact, in order from the first; every hunk when hidden is 0. */
+  wholeHunks: number;
+  /** The first hunk alone overflowed and was cut mid-body. */
+  cutHunk: boolean;
+}
+
+/** `@@` hunk starts in `text`, allocation-free. */
+function countHunkStarts(text: string): number {
+  let n = 0;
+  for (let k = 0; k < text.length; k++) {
+    if (
+      (k === 0 || text.charCodeAt(k - 1) === 10) /* line start */ &&
+      text.charCodeAt(k) === 64 /* @ */ &&
+      text.charCodeAt(k + 1) === 64
+    )
+      n++;
+  }
+  return n;
 }
 
 /**
- * Cap a unified diff to at most `maxLines` lines so the un-virtualized renderer
- * doesn't mount thousands of rows at once. Cuts on hunk boundaries where it can;
- * a single oversized hunk is cut mid-body with its `@@` header counts rewritten
- * so the result stays a valid hunk the renderer can parse.
+ * Cap a unified diff to at most `maxLines` real lines (see
+ * {@link realLineCount}) so the un-virtualized renderer doesn't mount
+ * thousands of rows at once. Cuts on hunk boundaries where it can; a single
+ * oversized first hunk is cut mid-body with its `@@` header counts rewritten so
+ * the result stays a valid hunk the renderer can parse.
  */
 export function capDiffText(text: string, maxLines: number): CappedDiff {
-  // Count lines without allocating — most diffs fit under the cap and never need
-  // the full split (which builds an array as large as the whole diff).
-  let lineCount = 1;
-  for (let k = 0; k < text.length; k++) {
-    if (text.charCodeAt(k) === 10 /* \n */) lineCount++;
+  // Count without allocating — most diffs fit under the cap and never need the
+  // full split (which builds an array as large as the whole diff).
+  if (realLineCount(text) <= maxLines) {
+    return {
+      text,
+      hidden: 0,
+      wholeHunks: countHunkStarts(text),
+      cutHunk: false,
+    };
   }
-  if (lineCount <= maxLines) return { text, hidden: 0 };
   const lines = text.split("\n");
+  // A final newline's empty segment is not a line: it never counts or renders.
+  const end = text.endsWith("\n") ? lines.length - 1 : lines.length;
 
   // Header = everything before the first hunk (diff --git, index, ---, +++).
   const firstHunk = lines.findIndex((l) => l.startsWith("@@"));
@@ -94,34 +160,43 @@ export function capDiffText(text: string, maxLines: number): CappedDiff {
     // No recognizable hunks — slice raw rather than guess.
     return {
       text: lines.slice(0, maxLines).join("\n"),
-      hidden: lines.length - maxLines,
+      hidden: end - maxLines,
+      wholeHunks: 0,
+      cutHunk: false,
     };
   }
 
   let i = firstHunk;
   let kept = firstHunk; // header lines are always kept
+  let wholeHunks = 0;
 
-  while (i < lines.length) {
+  while (i < end) {
     // This hunk runs from i (an `@@` line) to the next `@@` or EOF.
     let j = i + 1;
-    while (j < lines.length && !lines[j].startsWith("@@")) j++;
+    while (j < end && !lines[j].startsWith("@@")) j++;
     const hunkLen = j - i;
 
     if (kept + hunkLen <= maxLines) {
       kept += hunkLen;
+      wholeHunks++;
       i = j;
       continue;
     }
 
-    if (kept > firstHunk) {
+    if (wholeHunks > 0) {
       // Already kept at least one whole hunk — stop on this clean boundary.
-      return { text: lines.slice(0, i).join("\n"), hidden: lines.length - i };
+      return {
+        text: lines.slice(0, i).join("\n"),
+        hidden: end - i,
+        wholeHunks,
+        cutHunk: false,
+      };
     }
 
     // The very first hunk overflows on its own — keep its header plus as much
     // body as fits, with the `@@` counts rewritten to match what we kept.
     const budget = Math.max(1, maxLines - kept - 1);
-    const body = lines.slice(i + 1, i + 1 + budget);
+    const body = lines.slice(i + 1, Math.min(i + 1 + budget, end));
     const cut = i + 1 + body.length;
     return {
       text: [
@@ -129,11 +204,13 @@ export function capDiffText(text: string, maxLines: number): CappedDiff {
         rewriteHunkHeader(lines[i], body),
         ...body,
       ].join("\n"),
-      hidden: lines.length - cut,
+      hidden: end - cut,
+      wholeHunks: 0,
+      cutHunk: true,
     };
   }
 
-  return { text, hidden: 0 };
+  return { text, hidden: 0, wholeHunks, cutHunk: false };
 }
 
 /** Rewrite a hunk header's line counts to match a truncated body. */

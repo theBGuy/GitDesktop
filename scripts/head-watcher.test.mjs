@@ -365,7 +365,7 @@ function checkDetailAmendArms(detail) {
   const at = detail.indexOf("Amend commit…");
   if (at < 0) return ["CommitDetailView has no Amend row"];
   const row = detail.slice(at, detail.indexOf("</DropdownMenuItem>", at));
-  return /case isHead:\s*return null;\s*case log\.data === undefined && refreshFailed\(log\):\s*return AMEND_HOLD_HINT\["log-unread"\];\s*case logTop === undefined:/.test(
+  return /if\s*\(\s*isHead\s*\)\s*return null;\s*if\s*\(\s*log\.data === undefined\s*&&\s*refreshFailed\(log\)\s*\)\s*return AMEND_HOLD_HINT\["log-unread"\];\s*if\s*\(\s*logTop === undefined\s*\|\|/.test(
     row,
   )
     ? []
@@ -596,7 +596,7 @@ test("the detail Amend row names a failed log read", () => {
   assert.deepEqual(checkDetailAmendArms(detail), []);
   assert.notDeepEqual(
     checkDetailAmendArms(
-      mutate(detail, "case log.data === undefined && refreshFailed(log):", ""),
+      mutate(detail, "if (log.data === undefined && refreshFailed(log))", ""),
     ),
     [],
     "control: the failed-log arm removed",

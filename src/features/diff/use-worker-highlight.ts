@@ -16,6 +16,12 @@ let worker: Worker | null = null;
 let workerUnavailable = false;
 let nextId = 1;
 
+// Module scope: the React Compiler can't lower an update of a module global
+// inside a hook, so the mint lives outside the compiled function.
+function mintRequestId(): number {
+  return nextId++;
+}
+
 // Per-request handlers, keyed by request id, so multiple mounted hook instances
 // share the one worker without leaking listeners: the single onmessage below
 // dispatches each response to (and removes) its handler. A response with no
@@ -128,7 +134,7 @@ export function useWorkerHighlight(
     const w = getWorker();
     if (!w) return null; // unavailable → keeps interim paint
 
-    const id = nextId++;
+    const id = mintRequestId();
     const req: HighlightWorkRequest = {
       id,
       filePath: args.filePath,
