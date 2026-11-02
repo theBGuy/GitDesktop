@@ -295,6 +295,102 @@ export function scrollKeepViolations(raw) {
     "the reveal arm's call is unchanged (never scrolls)",
   );
 
+  // The reveal's scroll reads its own record's latch, which in-pane wheel,
+  // touch and scroll keys set while armReveal's listeners are on.
+  const revealScrolls =
+    reveal === null
+      ? []
+      : calls(src, "target.scrollIntoView", reveal.start, reveal.end);
+  need(
+    reveal !== null &&
+      revealScrolls.length === 1 &&
+      revealScrolls[0].text === nearest &&
+      reveal.code.includes("if (!reveal.tookOver) target.scrollIntoView("),
+    "the reveal scrolls only while its record's tookOver is unset",
+  );
+  const armRev = hookWith(src, "useCallback", view, "revealRef.current = {");
+  if (armRev === null) problems.push("armReveal is not found");
+  else {
+    need(
+      armRev.code.includes("landed: false, tookOver: false, };"),
+      "armReveal's record starts with tookOver unset",
+    );
+    const armText = squash(raw.slice(armRev.start, armRev.end));
+    const passiveOpts =
+      /const (\w+) = \{ capture: true, passive: true \};/.exec(armText);
+    const added = new Map();
+    for (const c of calls(
+      src,
+      "document.addEventListener",
+      armRev.start,
+      armRev.end,
+    )) {
+      const m = /^document\.addEventListener\("(\w+)", (\w+), (.+)\)$/.exec(
+        c.text,
+      );
+      if (m === null) problems.push(`unreadable reveal listener: ${c.text}`);
+      else added.set(m[1], { handler: m[2], opts: m[3] });
+    }
+    need(
+      [...added.keys()].sort().join() ===
+        "focusin,keydown,pointerdown,touchmove,wheel",
+      "armReveal registers the disarm, focusin and the three input latches",
+    );
+    // Raw text: the event names are strings, which the masked body blanks.
+    const disarmAt = masked.indexOf("const disarm = (", armRev.start);
+    const disarmOpen = masked.indexOf("=> {", disarmAt) + 3;
+    const disarmBody =
+      disarmAt < 0 || disarmAt >= armRev.end
+        ? ""
+        : squash(raw.slice(disarmOpen, matchBrace(masked, disarmOpen) + 1));
+    for (const [event, { handler }] of added)
+      need(
+        disarmBody.includes(
+          `document.removeEventListener("${event}", ${handler}, true);`,
+        ),
+        `the reveal's ${event} listener is removed in disarm with capture`,
+      );
+    const isRevealLatch = (name) =>
+      /^\{ const reveal = revealRef\.current; if \(reveal !== null && inScrollPane\(e\.target\)\) reveal\.tookOver = true; \}$/.test(
+        arrowBody(src, name, armRev) ?? "",
+      );
+    for (const event of ["wheel", "touchmove", "keydown"]) {
+      const l = added.get(event);
+      need(
+        l !== undefined && passiveOpts !== null && l.opts === passiveOpts[1],
+        `the reveal's ${event} latch is passive capture`,
+      );
+    }
+    for (const event of ["wheel", "touchmove"]) {
+      const l = added.get(event);
+      need(
+        l !== undefined && isRevealLatch(l.handler),
+        `the reveal's ${event} latches its record for in-pane targets only`,
+      );
+    }
+    const revKey = added.get("keydown");
+    const keyBody =
+      revKey === undefined
+        ? ""
+        : (arrowBody(src, revKey.handler, armRev) ?? "");
+    const keyLatch =
+      /^\{ if \(PANE_SCROLL_KEYS\.has\(e\.key\)\) (\w+)\(e\); \}$/.exec(
+        keyBody,
+      );
+    need(
+      keyLatch !== null && isRevealLatch(keyLatch[1]),
+      "the reveal's keydown latches only PANE_SCROLL_KEYS",
+    );
+    need(
+      armRev.code.includes(
+        "const inScrollPane = (target: EventTarget | null) => target instanceof Node && (scrollPaneRef.current?.contains(target) ?? false);",
+      ) &&
+        viewCode.includes("scrollPaneRef: RefObject<HTMLDivElement | null>;") &&
+        squash(raw).includes("scrollPaneRef={scrollPaneRef}"),
+      "the reveal judges containment against the scrolling pane",
+    );
+  }
+
   // The takeover latches share the pointer drop's effect.
   const drop = calls(
     src,
@@ -457,6 +553,17 @@ test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing 
     ],
     ["if (!pending.tookOver) target.scrollIntoView", "target.scrollIntoView"],
     ["if (!pending.tookOver) footer.scrollIntoView", "footer.scrollIntoView"],
+    // The reveal scrolls ungated, loses a latch or its removal, or judges
+    // containment by the rows container. Indentation keeps each anchor unique.
+    ["if (!reveal.tookOver) target.scrollIntoView", "target.scrollIntoView"],
+    ['      document.addEventListener("wheel", latch, latchOptions);', ""],
+    ['        document.removeEventListener("keydown", latchKey, true);', ""],
+    ["        if (PANE_SCROLL_KEYS.has(e.key)) latch(e);", "        latch(e);"],
+    [
+      "        (scrollPaneRef.current?.contains(target) ?? false);",
+      "        (containerRef.current?.contains(target) ?? false);",
+    ],
+    ["        tookOver: false,", ""],
     // The reveal arms a re-land with no record: its relands never scroll.
     [
       "armReland(index, target, control);",
@@ -466,7 +573,10 @@ test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing 
     ["rowsPending &&", "false &&"],
     ["!displayHunks.some((h) => hunkFirstRow(container, h) !== null)", "true"],
     ["const row = hunkFirstRow(container, h);", "const row = container;"],
-    ["passive: true", "passive: false"],
+    [
+      "const passive = { capture: true, passive: true };",
+      "const passive = { capture: true, passive: false };",
+    ],
     [
       "if (kept) target.focus({ preventScroll: true });",
       "if (kept) target.focus();",

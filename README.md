@@ -140,7 +140,8 @@ and discarding (drag across the line numbers, spanning hunks freely — a drag
 picks up added and removed lines together in either view, Shift keeps it to
 one side, and Ctrl, or Cmd on macOS, adds to a selection), including
 committing or discarding only part of a brand-new (untracked) file. Partial
-staging is for UTF-8 text; other encodings stage and discard as a whole file.
+staging is for UTF-8 text, where a long diff opens with up to 1,000 lines and
+Show full diff loads the rest; other encodings stage and discard as a whole file.
 Stage or unstage a drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`,
 without reaching for the button. Press `Space` on a focused file to stage or
 unstage it. Once the file you're viewing has nothing left to stage, whole or

@@ -1179,6 +1179,7 @@ function WorkingTreeDiff({
               hunkFocusRef={hunkFocusRef}
               focusHeld={confirmClosing}
               focusSink={focusSink}
+              scrollPaneRef={scrollPaneRef}
               showFull={showFull}
               onShowFull={() => setShowFull(true)}
             />
@@ -1677,7 +1678,9 @@ function HunkHeaderBar({
  * own row anchors (its range is single-sided by model, and in split can
  * retarget across panes); only a unified Shift drag, which its range already
  * models exactly, rides it. We paint the `gd-line-selected` highlight
- * ourselves — its own class doesn't apply in this standalone setup.
+ * ourselves — its own class doesn't apply in this standalone setup. Past
+ * `STAGING_DIFF_LINE_CAP` it renders whole hunks only until Show full diff; a
+ * lone first hunk over the cap is cut short and gets no buttons.
  */
 function StagingDiffView({
   repoPath,
@@ -1697,6 +1700,7 @@ function StagingDiffView({
   hunkFocusRef,
   focusHeld,
   focusSink,
+  scrollPaneRef,
   showFull,
   onShowFull,
 }: {
@@ -1729,6 +1733,9 @@ function StagingDiffView({
   /** Where focus lands when this view goes while a hunk action's move is
    *  pending: the action left no hunks, or the file left the pane. */
   focusSink: RefObject<HTMLElement | null>;
+  /** The scrolling pane this view renders in: in-pane input takes over a
+   *  reveal's scroll. */
+  scrollPaneRef: RefObject<HTMLDivElement | null>;
   /** Render past the staging cap (Show full diff was pressed for this file). */
   showFull: boolean;
   onShowFull: () => void;
@@ -1744,14 +1751,12 @@ function StagingDiffView({
   // The hunks parsed from `deferredText`: both resolve in the same deferred
   // render, so the overlay and its buttons pair with the rows on screen.
   const deferredHunks = useDeferredValue(hunks);
-  // The DISPLAY text: capped to whole hunks within the staging budget (until
-  // Show full diff), then over-long lines hard-shortened, so neither a huge diff
-  // nor a 4K–20K-char line freezes the un-virtualized renderer (past the mega
-  // threshold it falls back to the whole-file surface). The cap drops only
-  // trailing lines and shortening keeps line count and numbers, so `text` (the
-  // FULL text) still backs every stamp and patch, and kept rows keep their line
-  // numbers. `displayHunks` are the original hunks with rows on screen (the cut
-  // hunk included); built here so its identity follows the text.
+  // The DISPLAY text, capped to whole hunks (until Show full diff) and with
+  // over-long lines shortened, so the un-virtualized renderer never freezes
+  // (past the mega threshold the whole-file surface takes over). Both keep line
+  // numbers, so the FULL `text` still backs every stamp and patch.
+  // `displayHunks` (the hunks with rows on screen, the cut one included) is
+  // built here so its identity follows the text.
   const live = useMemo(() => {
     const longest = longestLineLength(deferredText);
     const capped = showFull
@@ -1802,13 +1807,12 @@ function StagingDiffView({
     stagingContentMaxLines(showFull),
     frozen,
   );
-  // ONE retained unit, the build on screen: through a refresh's hold or a first
-  // whole-file read (Show full diff's included) the rows, the hunks over them,
-  // their counts and the text a click carries all stay as painted, and so do
-  // the build and its worker highlighting below, under the same predicate. The
-  // parent refuses a click once its live text has moved past that display. A
-  // HELD slot keeps it too, so reads landing under the dim never rebuild it;
-  // only "held": a preparing slot is also non-interactive and must build.
+  // ONE retained unit under one predicate: through a refresh's hold or a first
+  // whole-file read (Show full diff's included), the rows, hunks, counts, the
+  // text a click carries, and the build and worker highlighting below all stay
+  // as painted; the parent refuses a click once its live text moves past it. A
+  // HELD slot keeps it too, so reads under the dim never rebuild it (only
+  // "held": a preparing slot is non-interactive too but must build).
   const readsHold = contentHold || contentPending;
   const holdingBuild = readsHold || phase === "held";
   const {
@@ -1841,55 +1845,84 @@ function StagingDiffView({
      *  one it landed in while the whole-file reads can still rebuild it. */
     from: DiffFile | null;
     landed: boolean;
+    /** The user moved the pane while armed: its landings stop scrolling. */
+    tookOver: boolean;
   } | null>(null);
   const disarmRevealRef = useRef<(() => void) | null>(null);
   const disarmReveal = useCallback(() => disarmRevealRef.current?.(), []);
-  const armReveal = useCallback((focus: HunkFocus, from: DiffFile | null) => {
-    disarmRevealRef.current?.();
-    revealRef.current = {
-      focus,
-      control: "primary",
-      origin: { index: focus.index, button: focus.button },
-      landing: null,
-      from,
-      landed: false,
-    };
-    const onFocusIn = (e: FocusEvent) => {
-      const reveal = revealRef.current;
-      const moved = e.target;
-      if (
-        reveal === null ||
-        moved === reveal.landing ||
-        moved === reveal.focus.button
-      )
-        return;
-      if (moved === reveal.origin.button) {
-        reveal.focus = { ...reveal.focus, ...reveal.origin };
-        reveal.control = "primary";
-        return;
-      }
-      const container = containerRef.current;
-      const hit =
-        moved instanceof Element && container?.contains(moved)
-          ? hunkControlOf(moved)
-          : null;
-      if (hit === null) {
-        disarm();
-        return;
-      }
-      reveal.focus = { ...reveal.focus, index: hit.index, button: hit.button };
-      reveal.control = hit.control;
-    };
-    const disarm = () => {
-      revealRef.current = null;
-      disarmRevealRef.current = null;
-      document.removeEventListener("pointerdown", disarm, true);
-      document.removeEventListener("focusin", onFocusIn, true);
-    };
-    document.addEventListener("pointerdown", disarm, true);
-    document.addEventListener("focusin", onFocusIn, true);
-    disarmRevealRef.current = disarm;
-  }, []);
+  const armReveal = useCallback(
+    (focus: HunkFocus, from: DiffFile | null) => {
+      disarmRevealRef.current?.();
+      revealRef.current = {
+        focus,
+        control: "primary",
+        origin: { index: focus.index, button: focus.button },
+        landing: null,
+        from,
+        landed: false,
+        tookOver: false,
+      };
+      // Input anywhere in the scrolling pane moves it, the hint strip and the
+      // footer included, so containment is judged against the pane.
+      const inScrollPane = (target: EventTarget | null) =>
+        target instanceof Node &&
+        (scrollPaneRef.current?.contains(target) ?? false);
+      const latch = (e: Event) => {
+        const reveal = revealRef.current;
+        if (reveal !== null && inScrollPane(e.target)) reveal.tookOver = true;
+      };
+      const latchKey = (e: KeyboardEvent) => {
+        if (PANE_SCROLL_KEYS.has(e.key)) latch(e);
+      };
+      const onFocusIn = (e: FocusEvent) => {
+        const reveal = revealRef.current;
+        const moved = e.target;
+        if (
+          reveal === null ||
+          moved === reveal.landing ||
+          moved === reveal.focus.button
+        )
+          return;
+        if (moved === reveal.origin.button) {
+          reveal.focus = { ...reveal.focus, ...reveal.origin };
+          reveal.control = "primary";
+          return;
+        }
+        const container = containerRef.current;
+        const hit =
+          moved instanceof Element && container?.contains(moved)
+            ? hunkControlOf(moved)
+            : null;
+        if (hit === null) {
+          disarm();
+          return;
+        }
+        reveal.focus = {
+          ...reveal.focus,
+          index: hit.index,
+          button: hit.button,
+        };
+        reveal.control = hit.control;
+      };
+      const disarm = () => {
+        revealRef.current = null;
+        disarmRevealRef.current = null;
+        document.removeEventListener("pointerdown", disarm, true);
+        document.removeEventListener("focusin", onFocusIn, true);
+        document.removeEventListener("wheel", latch, true);
+        document.removeEventListener("touchmove", latch, true);
+        document.removeEventListener("keydown", latchKey, true);
+      };
+      const latchOptions = { capture: true, passive: true };
+      document.addEventListener("pointerdown", disarm, true);
+      document.addEventListener("focusin", onFocusIn, true);
+      document.addEventListener("wheel", latch, latchOptions);
+      document.addEventListener("touchmove", latch, latchOptions);
+      document.addEventListener("keydown", latchKey, latchOptions);
+      disarmRevealRef.current = disarm;
+    },
+    [scrollPaneRef],
+  );
   const onDisplayedHunkAction = useCallback(
     (hunk: DiffHunk, kind: HunkActionKind, focus: HunkFocus) => {
       // A hunk press is newer intent than a pending reveal.
@@ -1950,14 +1983,11 @@ function StagingDiffView({
     syntaxMap,
     customLanguages,
   });
-  // The diff as displayed: capped past the staging budget until Show full diff
-  // (whole visible hunks keep their buttons, the rest come with the full diff).
-  // Built from the DISPLAY text; the full text still backs every
-  // stage/unstage/discard patch (see WorkingTreeDiff). Null while the build is
-  // held (above): don't build an intermediate diff the arriving reads would
-  // immediately restructure; the retained build stays on screen meanwhile. Also
-  // null in the render pass where the retained text hasn't caught up with
-  // `live` yet: React discards that pass, so a build there is wasted work.
+  // The diff as displayed, built from the DISPLAY text (the full text still
+  // backs every stage/unstage/discard patch; see WorkingTreeDiff). Null while
+  // the build is held, so arriving reads never restructure an intermediate
+  // build (the retained one stays painted), and in the pass where the retained
+  // text lags `live`, which React discards, so a build there is wasted work.
   // grammarState: inert once compiled; see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState stays listed for the uncompiled path; the rebuild rides holdForGrammar
   const builtDiffFile = useMemo(() => {
@@ -2372,12 +2402,11 @@ function StagingDiffView({
     container.style.minHeight = hold ? `${heightRef.current}px` : "";
   }, [rowsPending, displayHunks]);
   // Once the hold releases and the refreshed hunks have hosts, focus moves to
-  // the Stage/Unstage of the hunk now at the press's index, or of the last hunk
-  // when fewer remain; `landHunkFocus` decides whether it moves at all. Past
-  // the last whole hunk of a capped diff it lands on Show full diff instead,
-  // scrolled into view (it sits below every row) unless the user took over the
-  // pane; that stable node no rebuild remounts arms no re-land. A pending
-  // reveal is the newer intent: this waits while one is armed.
+  // the Stage/Unstage of the hunk now at the press's index (or the last hunk);
+  // `landHunkFocus` decides whether it moves at all. Past a capped diff's
+  // last whole hunk it lands on Show full diff instead, scrolled into view
+  // unless the user took over; that stable node arms no re-land. A pending
+  // reveal is newer intent: this waits.
   useLayoutEffect(() => {
     const pending = hunkFocusRef.current;
     const container = containerRef.current;
@@ -2430,16 +2459,12 @@ function StagingDiffView({
     hunkFocusRef,
     armReland,
   ]);
-  // The Show full diff press's focus move. It waits, armed, until a build other
-  // than the one pressed on has measured its hosts (through the whole-file
-  // reads, the grammar and the retained build), then lands on its target: the
-  // first newly revealed hunk's Stage/Unstage, or the hunk button the user
-  // moved to meanwhile, in the new build (clamped like the post-write landing
-  // when the text shrank), scrolled into view since the rebuilt layout can
-  // move it. While the reads can still rebuild (a warm cached build, then the
-  // fresh one), it stays armed on the build it landed in and lands again on
-  // the next. No host two frames past a measure, or a held slot, sends focus
-  // to the sink; `landHunkFocus` judges every move.
+  // After Show full diff, once a build other than the one pressed on measures
+  // its hosts, focus goes to the first revealed hunk's Stage/Unstage (or the
+  // hunk button the user moved to), clamped like the post-write landing and
+  // scrolled into view unless the user took over; it lands again on each
+  // rebuild while the reads run. A held slot, or no host two frames past a
+  // measure, sends it to the sink. `landHunkFocus` gates every move.
   const readsBusy = contentFetching || readsHold;
   useLayoutEffect(() => {
     const reveal = revealRef.current;
@@ -2475,7 +2500,7 @@ function StagingDiffView({
       disarmReveal();
       return;
     }
-    target.scrollIntoView({ block: "nearest" });
+    if (!reveal.tookOver) target.scrollIntoView({ block: "nearest" });
     armReland(index, target, control);
     if (!readsBusy) {
       disarmReveal();
@@ -2540,13 +2565,11 @@ function StagingDiffView({
         anchors.some((a) => a.top >= 0)),
   );
 
-  // A lazy built-in Shiki grammar still loading, or whole-file reads settling
-  // with no build retained to keep painting (a cold mount): render nothing
-  // rather than build a diff we'd immediately restructure or re-highlight (the
-  // single-paint gate). Otherwise the retained build stays on screen through
-  // the reads. Must precede the empty-state placeholder so loading never reads
-  // as "No changes to show". The effects above guard on `!diffFile`, so they
-  // no-op while blank and re-bind on the single build.
+  // The single-paint gate: while a lazy Shiki grammar loads, or a cold mount's
+  // whole-file reads settle with no build retained, render nothing rather than
+  // a diff we'd restructure or re-highlight. It precedes the empty placeholder
+  // so loading never reads as "No changes to show"; the effects above guard on
+  // `!diffFile`, so they no-op while blank and re-bind on the single build.
   if (holdForGrammar || holdBlank) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   // A line-1 hunk has nothing above it to host its buttons — the pane-top bar
