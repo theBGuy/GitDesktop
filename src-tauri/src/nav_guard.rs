@@ -79,7 +79,7 @@ fn is_allowed_navigation(url: &Url, app_origin: &Url, dev_url: Option<&Url>) -> 
 
 fn log_form(url: &Url) -> String {
     // Path, query, fragment and userinfo can carry tokens (reset or magic links):
-    // only scheme, host and port reach stderr, as `scheme://host[:port]/`. An
+    // only scheme, host and port reach stderr, with the path reset to `/`. An
     // opaque URL's path is its whole payload (data:, javascript:): scheme only.
     if url.cannot_be_a_base() {
         return format!("{}:", url.scheme());
@@ -243,6 +243,7 @@ mod tests {
             ("https://example.com:443/x", "https://example.com/"),
             ("file:///C:/Users/me/secret.txt", "file:///"),
             ("file://server/share/secret.txt", "file://server/"),
+            ("foo:/x/secret?q#f", "foo:/"),
             ("data:text/html,x#f", "data:"),
             ("javascript:alert(document.cookie)", "javascript:"),
         ];

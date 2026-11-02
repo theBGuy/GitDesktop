@@ -1,30 +1,30 @@
 // The opencode permission pin only binds when the production call sites in
 // src-tauri/src/agent.rs feed it the run's own inputs: agent_review passes
-// review_env the self-MCP server names and the user's mirrored read rules,
-// and both agent_session branches (container, then host) pass
-// opencode_session_env the session's read_only and opencode_research flags,
-// its own OPENCODE_CONFIG (container config_path, host mcp_config_path) and
-// mcp_names, built whole from the opted-in mcp_specs; the host branch passes
-// the mirrored read rules, the container branch none (its opencode loads
-// none of the host's config files). Each
-// read_mirror is built once, from opencode_read_mirror fed the OPENCODE_CONFIG
-// the run gets and Path::new(&repo_path) / Path::new(&worktree_path), in the arm
-// whose run carries the ReadOnly pin (a repo-aware opencode review, a read-only
-// session); the other arm, DiffOnly runs included, mirrors nothing. That same
-// path is pinned as the run's spawn cwd (the stream_agent cwd argument of the
-// review and of the host session) and its --dir (opencode_review_args' dir;
-// agent_session's `let dir = run_dir(container, &worktree_path)` handed to
-// opencode_session_args). The checker is a pure function over the file's text,
-// lexed so comments and string contents never satisfy a pin, and fed the real
-// file plus in-memory mutants; a `,` before `)` is ignored, so a rustfmt reflow
-// passes. An unreadable file, unterminated lexing, a missing anchor, an extra
-// or missing call, or a bare mention of either env fn fails closed.
-// Out of reach: what review_env and opencode_session_env do with their
-// arguments (the Rust tests pin that), what run_dir returns for a host session
-// (its Rust test pins that), a value reassigned or shadowed through a pattern
-// binding or macro, calls in another file or through a re-export, and which
-// branch actually runs at runtime: the branch is inferred from the
-// `let container_env` / `let host_extra_env` anchors' source order.
+// review_env the self-MCP server names and the user's mirrored read rules;
+// both agent_session branches (container, then host) pass opencode_session_env
+// read_only, opencode_research, an OPENCODE_CONFIG (container config_path, host
+// mcp_config_path) and mcp_names, and the host branch the mirrored read rules
+// (the container's opencode loads none of the host's config files). Each input
+// is pinned to its one producer: read_only to the parameter, never rebound;
+// opencode_research, mcp_names and the container config_path to their exact
+// `let`; mcp_config_path to its one `None` declaration, left unnamed between
+// the host read_mirror and the host call. Each read_mirror is built once, from
+// opencode_read_mirror fed the run's OPENCODE_CONFIG and repo_path or
+// worktree_path, in the arm whose run carries the ReadOnly pin (a repo-aware
+// opencode review, a read-only session); the other arm, DiffOnly runs included,
+// mirrors nothing. That path is pinned as the run's spawn cwd (stream_agent in
+// the review and the host session) and its --dir (opencode_review_args; the
+// `run_dir` dir agent_session hands opencode_session_args). The checker is a
+// pure function over the file's text, lexed so comments and strings never
+// satisfy a pin, fed the real file plus in-memory mutants; a `,` before `)` is
+// ignored, so a rustfmt reflow passes. An unreadable file, unterminated lexing,
+// a missing anchor, an extra or missing call, or a bare mention of either env
+// fn fails closed. Out of reach: what the env fns do with their arguments and
+// what run_dir returns (Rust tests pin those), what the per-CLI writes assign
+// mcp_config_path before the mirror, bindings made through a pattern or macro,
+// calls in another file or through a re-export, and which branch runs: the
+// branch is inferred from the `let container_env` / `let host_extra_env`
+// anchors' source order.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -113,6 +113,13 @@ const RUN_DIR = "let dir = run_dir(container, &worktree_path)";
 /** Every opted-in server's name, so the pin admits each one's tools. */
 const MCP_NAMES =
   "let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect()";
+/** The host OPENCODE_CONFIG's one declaration; only the per-CLI writes assign it. */
+const MCP_CONFIG_PATH = "let mut mcp_config_path: Option<String> = None";
+const RESEARCH = "let opencode_research = kind == AgentKind::Opencode && web";
+/** The container OPENCODE_CONFIG, compared in source text: its "opencode" key is a
+ *  string literal, which the masked view blanks. */
+const CONTAINER_CONFIG =
+  'let config_path = crate::agent_sandbox::container_mcp_config("opencode") .map(|(_, path)| path) .filter(|_| !mcp_specs.is_empty() || opencode_research)';
 
 function checkPinCallSites(text) {
   if (typeof text !== "string" || text.length === 0)
@@ -296,6 +303,43 @@ function checkPinCallSites(text) {
   const mcpNames = letStatement(masked, session, "mcp_names");
   if (mcpNames.count !== 1 || mcpNames.text !== collapse(MCP_NAMES))
     problems.push(`agent_session must build mcp_names once: ${MCP_NAMES}`);
+  const research = letStatement(masked, session, "opencode_research");
+  if (research.count !== 1 || research.text !== RESEARCH)
+    problems.push(
+      `agent_session must build opencode_research once: ${RESEARCH}`,
+    );
+  const configDecl = letStatement(masked, session, "mcp_config_path");
+  if (configDecl.count !== 1 || configDecl.text !== MCP_CONFIG_PATH)
+    problems.push(
+      `agent_session must declare mcp_config_path once: ${MCP_CONFIG_PATH}`,
+    );
+  // A rebind, assignment, take() or &mut between the mirror and the call would
+  // hand the run a different config from the one the mirror read.
+  const hostCall = sessionCalls.find(
+    (c) => c.fn === "agent_session" && branchOf(c) === "host",
+  );
+  if (sessionMirror.count === 1 && hostCall) {
+    const mirrorEnd = masked.indexOf(";", sessionMirror.at);
+    if (
+      mirrorEnd < 0 ||
+      /\bmcp_config_path\b/.test(masked.slice(mirrorEnd, hostCall.index))
+    )
+      problems.push(
+        "agent_session's host branch must not touch mcp_config_path between read_mirror and opencode_session_env",
+      );
+  }
+  if (container.at >= 0 && host.at > container.at) {
+    const config = letStatement(masked, [container.at, host.at], "config_path");
+    const end = masked.indexOf(";", config.at);
+    if (
+      config.count !== 1 ||
+      end < 0 ||
+      collapse(text.slice(config.at, end)) !== CONTAINER_CONFIG
+    )
+      problems.push(
+        `agent_session's container branch must build config_path once: ${CONTAINER_CONFIG}`,
+      );
+  }
   return problems;
 }
 
@@ -687,5 +731,67 @@ test("P12: each branch's research flag, config path and server names are pinned"
       return t.replace(MCP_NAMES, () => producer);
     });
     assert.deepEqual(checkPinCallSites(mutant), [refused], producer);
+  }
+});
+
+test("P13: each OPENCODE_CONFIG and the research flag are bound once", () => {
+  const declare = `agent_session must declare mcp_config_path once: ${MCP_CONFIG_PATH}`;
+  const touched =
+    "agent_session's host branch must not touch mcp_config_path between read_mirror and opencode_session_env";
+  const research = `agent_session must build opencode_research once: ${RESEARCH}`;
+  const container = `agent_session's container branch must build config_path once: ${CONTAINER_CONFIG}`;
+  const unique = (t, from) =>
+    assert.equal(t.split(from).length, 2, `not unique: ${from}`);
+  const before = (anchor, line) =>
+    mutate((t) => {
+      unique(t, anchor);
+      return t.replace(anchor, () => `${line}\n${anchor}`);
+    });
+  const swap = (from, to) =>
+    mutate((t) => {
+      unique(t, from);
+      return t.replace(from, () => to);
+    });
+  const HOST_AT = `        ${HOST_CALL}`;
+  const OPENS_CONTAINER =
+    "let container_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {";
+  for (const [mutant, refused] of [
+    [
+      before(HOST_AT, "        let mcp_config_path: Option<String> = None;"),
+      [declare, touched],
+    ],
+    [before(HOST_AT, "        mcp_config_path = None;"), [touched]],
+    [before(HOST_AT, "        let _ = mcp_config_path.take();"), [touched]],
+    [
+      before(
+        "    let container = isolation",
+        "    let mcp_config_path: Option<String> = None;",
+      ),
+      [declare],
+    ],
+    [swap(`${RESEARCH};`, "let opencode_research = false;"), [research]],
+    [
+      swap(
+        OPENS_CONTAINER,
+        `${OPENS_CONTAINER}\n            let opencode_research = false;`,
+      ),
+      [research],
+    ],
+    [
+      swap(
+        ".filter(|_| !mcp_specs.is_empty() || opencode_research);",
+        ".filter(|_| false);",
+      ),
+      [container],
+    ],
+    [
+      before(
+        `            ${CONTAINER_CALL}`,
+        "            let config_path: Option<String> = None;",
+      ),
+      [container],
+    ],
+  ]) {
+    assert.deepEqual(checkPinCallSites(mutant), refused);
   }
 });
