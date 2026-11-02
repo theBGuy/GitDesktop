@@ -313,10 +313,9 @@ function clearRemoval(repoPath: string, path: string) {
 }
 
 /** Refreshes what a completed removal changed: the manager's list, plus branches
- *  (a removed worktree frees its branch for checkout elsewhere) — the same set
- *  the worktree mutations invalidate. Separate from {@link settleRemoval}
- *  because the promote path refreshes at its removal step while its entry stays
- *  on screen for the rest of the composite. */
+ *  (a removed worktree frees its branch for checkout elsewhere). Separate from
+ *  {@link settleRemoval} because the promote path refreshes at its removal step
+ *  while its entry stays on screen for the rest of the composite. */
 function invalidateAfterRemoval(repoPath: string) {
   void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
   void queryClient.invalidateQueries({ queryKey: repoKeys.branches(repoPath) });

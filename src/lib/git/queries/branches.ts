@@ -288,12 +288,12 @@ export function useRebaseOnto(repo: string) {
  *  `staleTime` is per observer: the branch menu passes one so a reopen spawns
  *  nothing, while CleanupBranchesDialog leaves it unset because its
  *  ahead-0/behind>0 pre-check pre-selects rows for `git branch -D` and must
- *  refetch on open. A window is safe because every in-app ref move invalidates
- *  this key: HEAD moves via `headMoveAftermathKeys`, fetch/pull via the
- *  local-only pass, other branch writes via the repo-subtree default.
- *  Accepted residual: an external move that leaves HEAD alone (terminal
- *  `branch -f`, `fetch x:x`, push, a sibling worktree's commit) stays stale for
- *  up to the window, and Cleanup may paint that older entry until its refetch. */
+ *  refetch on open. A window is safe because every in-app ref move made from
+ *  this checkout invalidates this key (scripts/divergence-invalidation.test.mjs
+ *  guards the writers that pass their own keys). Accepted residual: a move this
+ *  checkout didn't make that leaves its HEAD alone (terminal `branch -f`,
+ *  `push . x:y`, any write from a sibling worktree, in-app ones too) stays stale
+ *  up to the window, and Cleanup may paint it until its refetch. */
 export function useBranchDivergence(
   repo: string,
   base: string | null,

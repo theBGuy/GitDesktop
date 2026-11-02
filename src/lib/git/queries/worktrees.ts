@@ -50,8 +50,8 @@ export function useUserWorktrees(repo: string, enabled = true) {
   });
 }
 
-/** Creates a user worktree. Invalidates the worktree list + branches (a new
- *  branch may have been created). */
+/** Creates a user worktree. Invalidates the worktree list, branches and their
+ *  divergence (a new branch may have been created). */
 export function useAddUserWorktree(repo: string) {
   return useRepoMutation(
     repo,
@@ -69,7 +69,11 @@ export function useAddUserWorktree(repo: string) {
         args.baseRef,
       ),
     {
-      invalidate: [worktreeKey(repo), repoKeys.branches(repo)],
+      invalidate: [
+        worktreeKey(repo),
+        repoKeys.branches(repo),
+        ["repo", repo, "divergence"],
+      ],
       // Local worktree write — never park it offline.
       networkMode: "always",
     },
