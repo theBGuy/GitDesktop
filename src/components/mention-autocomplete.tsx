@@ -1,8 +1,4 @@
-import {
-  CheckCircleIcon,
-  CircleDashedIcon,
-  GitPullRequestIcon,
-} from "@phosphor-icons/react";
+import { CheckCircleIcon, CircleDashedIcon } from "@phosphor-icons/react";
 import {
   type KeyboardEvent,
   type RefObject,
@@ -16,12 +12,17 @@ import {
 import { createPortal } from "react-dom";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { usePanelPortalContainer } from "@/components/panel-portal";
+import {
+  PARTIAL_FAILURE_MESSAGE,
+  showsPartialFailure,
+} from "@/features/conversations/mention-ref-rank";
 import type {
   MentionCandidate,
   MentionSource,
   MentionTrigger,
 } from "@/features/conversations/useMentionCandidates";
 import { eventToBinding } from "@/lib/hotkeys/binding";
+import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { getCaretCoordinates } from "@/lib/textarea-caret";
 import { cn } from "@/lib/utils";
 
@@ -156,7 +157,9 @@ export function useMentionAutocomplete({
   suspended: boolean;
 }) {
   const [token, setToken] = useState<ActiveToken | null>(null);
-  const [index, setIndex] = useState(0);
+  // The highlighted candidate by key, so rows landing above it never move it;
+  // null (and a key that left the list) means the first row.
+  const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Swallows the one onChange an accepted completion produces (see `insert`).
   const skipSync = useRef(false);
@@ -188,8 +191,10 @@ export function useMentionAutocomplete({
   const open = token !== null && !suspended && !!mentions;
   const result = open ? mentions.query(token.trigger, token.query) : null;
   const items = result?.items ?? [];
-  // The list can shrink under a stale index while data arrives.
-  const activeIndex = items.length > 0 ? Math.min(index, items.length - 1) : 0;
+  const activeIndex = Math.max(
+    items.findIndex((c) => c.key === activeKey),
+    0,
+  );
   const rowCount = items.length;
 
   // Re-place the open token's box against the caret it already names. Placement
@@ -277,7 +282,7 @@ export function useMentionAutocomplete({
     // A token at another index is a different one, so the old dismissal lapses.
     dismissed.current = null;
     mentions.onActive();
-    setIndex(0);
+    setActiveKey(null);
     setToken({
       trigger,
       query,
@@ -352,14 +357,13 @@ export function useMentionAutocomplete({
     if (items.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setIndex((i) => (Math.min(i, items.length - 1) + 1) % items.length);
+        setActiveKey(items[(activeIndex + 1) % items.length].key);
         return true;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setIndex(
-          (i) =>
-            (Math.min(i, items.length - 1) - 1 + items.length) % items.length,
+        setActiveKey(
+          items[(activeIndex - 1 + items.length) % items.length].key,
         );
         return true;
       }
@@ -423,42 +427,56 @@ export function useMentionAutocomplete({
         isError={result?.isError ?? false}
         activeIndex={activeIndex}
         ghHost={mentions.ghHost}
+        prNoun={mentions.prNoun}
         token={token}
         onPick={insert}
-        onHover={setIndex}
+        onHover={(i) => setActiveKey(items[i].key)}
       />
     ) : null;
 
   return { textareaProps, sync, onKeyDown, popover };
 }
 
-/** Glyph for a suggested reference: the shape separates an issue from a PR, and
- *  the issue arm mirrors the Issues panel's `StateIcon` (local rather than imported
- *  so the editor doesn't pull the issue-relations module into its chunk). Both
- *  closed-state arms are unreachable while the ref lists request the open state
- *  only; the PR arm distinguishes state by tint alone, so an all-states list would
- *  need a second glyph before it could be trusted to convey one. */
-function RefGlyph({ state, isPr }: { state: string; isPr: boolean }) {
-  if (isPr) {
-    return (
-      <GitPullRequestIcon
-        className={cn(
-          "size-3.5 shrink-0",
-          state === "OPEN" ? "text-success" : "text-merged",
-        )}
-      />
-    );
+type RefGlyphData = NonNullable<MentionCandidate["refGlyph"]>;
+
+/** Glyph for a suggested reference: a PR takes `prPill`, whose shape carries
+ *  its state, and the issue arm mirrors the Issues panel's `StateIcon` (local
+ *  rather than imported so the editor doesn't pull the issue-relations module
+ *  into its chunk). */
+function RefGlyph({
+  refGlyph,
+  noun,
+}: {
+  refGlyph: RefGlyphData;
+  noun: PrNoun;
+}) {
+  if (refGlyph.isPr) {
+    const pill = prPill(refGlyph.state, refGlyph.isDraft, noun);
+    return <pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />;
   }
-  return state === "CLOSED" ? (
+  return refGlyph.state === "CLOSED" ? (
     <CheckCircleIcon className="size-3.5 shrink-0 text-merged" />
   ) : (
     <CircleDashedIcon className="size-3.5 shrink-0 text-success" />
   );
 }
 
+/** An issue row's state as words, mirroring the reference card's issue pill;
+ *  a state this build doesn't know keeps the forge's word. */
+const ISSUE_WORD: Partial<Record<string, string>> = {
+  OPEN: "Open issue",
+  CLOSED: "Closed issue",
+};
+
+/** State AND kind for a reader, on every ref row: the glyph alone is silent. */
+function refStateWord(refGlyph: RefGlyphData, noun: PrNoun): string {
+  if (refGlyph.isPr) return prPill(refGlyph.state, refGlyph.isDraft, noun).word;
+  return ISSUE_WORD[refGlyph.state] ?? `${refGlyph.state} issue`;
+}
+
 /** The one muted row shown when there is nothing to pick. A list still loading
- *  outranks a failed one: a merged list whose halves resolve separately is worth
- *  waiting on before it is called broken. */
+ *  outranks a failed one: a list merged from reads that resolve separately is
+ *  worth waiting on before it is called broken. */
 function emptyMessage(loading: boolean, isError: boolean): string {
   if (loading) return "Loading…";
   return isError ? "Couldn't load suggestions" : "No matches";
@@ -475,6 +493,7 @@ function MentionPopover({
   isError,
   activeIndex,
   ghHost,
+  prNoun,
   token,
   onPick,
   onHover,
@@ -487,6 +506,7 @@ function MentionPopover({
   isError: boolean;
   activeIndex: number;
   ghHost: string | null;
+  prNoun: PrNoun;
   token: ActiveToken;
   onPick: (candidate: MentionCandidate) => void;
   onHover: (i: number) => void;
@@ -552,7 +572,8 @@ function MentionPopover({
             )}
             {c.refGlyph && (
               <>
-                <RefGlyph state={c.refGlyph.state} isPr={c.refGlyph.isPr} />
+                <RefGlyph refGlyph={c.refGlyph} noun={prNoun} />
+                <span className="sr-only">{`${refStateWord(c.refGlyph, prNoun)} `}</span>
                 <span className="shrink-0 font-mono text-muted-foreground">
                   {c.refGlyph.numberLabel}
                 </span>
@@ -564,8 +585,27 @@ function MentionPopover({
                 {c.detail}
               </span>
             )}
+            {/* Open rows stay unmarked; the sr-only word already names the
+                state, so the visible one is hidden from a reader. */}
+            {c.refGlyph &&
+              (c.refGlyph.state !== "OPEN" || c.refGlyph.isDraft) && (
+                <span
+                  aria-hidden="true"
+                  className="ml-auto shrink-0 text-[11px] text-muted-foreground capitalize"
+                >
+                  {c.refGlyph.isDraft && c.refGlyph.state === "OPEN"
+                    ? "draft"
+                    : c.refGlyph.state.toLowerCase()}
+                </span>
+              )}
           </button>
         ))
+      )}
+      {/* Not an option: outside the arrow and activedescendant range. */}
+      {showsPartialFailure(items.length, isError) && (
+        <p className="px-2.5 py-2 text-[11px] text-muted-foreground">
+          {PARTIAL_FAILURE_MESSAGE}
+        </p>
       )}
     </div>,
     portalContainer ?? document.body,

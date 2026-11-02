@@ -1,6 +1,5 @@
 import { type ReactNode, useState } from "react";
 import { IMAGE_CAPTION_REASON } from "@/components/markdown/markdown-images";
-import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import {
   ImageLightbox,
@@ -432,14 +431,8 @@ export function ImageDiff({
   revs: ImageRevs;
 }) {
   return (
-    // ph-no-capture: user image content + path — block from session replay.
+    // ph-no-capture: user image content — block from session replay.
     <div className="ph-no-capture flex h-full flex-col">
-      <div className="border-b px-3 py-1.5">
-        <PathText
-          path={filePath}
-          className="font-mono text-xs text-muted-foreground"
-        />
-      </div>
       <div className="min-h-0 flex-1 overflow-auto">
         <ImagePanes
           repoPath={repoPath}

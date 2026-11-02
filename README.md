@@ -1146,9 +1146,9 @@ review via its subscription login. The full list is under
 - **Mention & reference autocomplete**: on GitHub and GitLab repos, type
   `@` in a comment box, reply, edit, diff line comment, release notes, or a
   local PR or issue's description and comments to pick a person and `#` to
-  pick from the recently updated open issues and pull requests, with arrow
-  keys and Enter to accept. GitLab adds `!` for merge requests; each forge
-  offers only the references it links.
+  pick from recent issues and pull requests, open and closed, each marked
+  with its state; arrow keys and Enter accept. GitLab adds `!` for merge
+  requests; each forge offers only the references it links.
 - **References are links**: `#123` and `@user` in a rendered description,
   comment, review thread, AI review, or release note open what they name. On
   GitHub, `#123` opens that issue or pull request in the app, whichever it

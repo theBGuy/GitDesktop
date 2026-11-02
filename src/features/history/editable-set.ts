@@ -2,6 +2,8 @@
 // agreeing on HEAD. Free of runtime imports so scripts/editable-set.test.mjs
 // loads it under Node's type stripping.
 
+import type { UnpushedBasis } from "@/lib/git/api/status";
+
 export type EditableCommit = { hash: string; isMerge: boolean };
 
 /** Edit history's range cap: the top unpushed commits it offers at most. */
@@ -44,6 +46,10 @@ export type UnpushedSnapshot<C> = {
   branch: string | null;
   commits: C[];
   count: number;
+  /** The no-upstream count read's basis and default branch (null in upstream
+   *  mode), carried so a served count never pairs with a live read's basis. */
+  basis: UnpushedBasis | null;
+  defaultBranch: string | null;
   /** Carried so the edit range's whole-history decrement reads the page state
    *  the snapshot's commits were loaded under. */
   hasNextPage: boolean;
@@ -158,7 +164,8 @@ export function preMoveStale(args: {
  *  agreement, so a mismatched first render never seeds a skewed pair.
  *  Identity contract (what stops the caller's render-time setState): `prev`
  *  when !agreed, or when it matches `live` on repo, branch, `commits`
- *  identity, count and hasNextPage; otherwise the very `live` object. */
+ *  identity, count, basis, defaultBranch and hasNextPage; otherwise the very
+ *  `live` object. */
 export function advanceSnapshot<C>(
   prev: UnpushedSnapshot<C> | null,
   live: UnpushedSnapshot<C>,
@@ -171,6 +178,8 @@ export function advanceSnapshot<C>(
     prev.branch === live.branch &&
     prev.commits === live.commits &&
     prev.count === live.count &&
+    prev.basis === live.basis &&
+    prev.defaultBranch === live.defaultBranch &&
     prev.hasNextPage === live.hasNextPage
   ) {
     return prev;
@@ -189,7 +198,9 @@ export function advanceSnapshot<C>(
  *  Upstream mode caps a served snapshot whose head isn't status's oid at
  *  `max(0, liveAhead - 1)`: a `commit && push` inside one poll reports the
  *  new oid with ahead 0 over the old log, where the uncapped snapshot would
- *  mark pushed commits. No-upstream mode's count is a separate read: no cap. */
+ *  mark pushed commits. No-upstream mode's count is a separate read: no cap.
+ *  `basis` and `defaultBranch` come from the arm that supplied the count, so a
+ *  served snapshot's count never pairs with the live read's basis. */
 export function resolveUnpushedView<C extends { hash: string }>(args: {
   agreed: boolean;
   repo: string;
@@ -199,13 +210,23 @@ export function resolveUnpushedView<C extends { hash: string }>(args: {
   noUpstream: boolean;
   commits: C[];
   count: number;
+  basis: UnpushedBasis | null;
+  defaultBranch: string | null;
   hasNextPage: boolean;
   snapshot: UnpushedSnapshot<C> | null;
-}): { commits: C[]; count: number; hasNextPage: boolean } {
+}): {
+  commits: C[];
+  count: number;
+  basis: UnpushedBasis | null;
+  defaultBranch: string | null;
+  hasNextPage: boolean;
+} {
   if (args.agreed) {
     return {
       commits: args.commits,
       count: args.count,
+      basis: args.basis,
+      defaultBranch: args.defaultBranch,
       hasNextPage: args.hasNextPage,
     };
   }
@@ -222,9 +243,69 @@ export function resolveUnpushedView<C extends { hash: string }>(args: {
       !args.noUpstream && args.statusOid !== snapHead
         ? Math.min(snap.count, Math.max(0, args.liveAhead - 1))
         : snap.count;
-    return { commits: snap.commits, count, hasNextPage: snap.hasNextPage };
+    return {
+      commits: snap.commits,
+      count,
+      basis: snap.basis ?? null,
+      defaultBranch: snap.defaultBranch ?? null,
+      hasNextPage: snap.hasNextPage,
+    };
   }
-  return { commits: args.commits, count: 0, hasNextPage: args.hasNextPage };
+  return {
+    commits: args.commits,
+    count: 0,
+    basis: args.basis,
+    defaultBranch: args.defaultBranch,
+    hasNextPage: args.hasNextPage,
+  };
+}
+
+/** How many of the top unpushed commits wear the row arrow. On the default
+ *  branch of a repo with no remote refs nothing is published anywhere, so no
+ *  row is marked, while squash and Edit history still read the full count. */
+export function arrowCount(
+  count: number,
+  basis: UnpushedBasis | null | undefined,
+): number {
+  return basis === "on-default-branch" ? 0 : count;
+}
+
+/** The branch the arrow's tooltip says the commits are ahead of: the local
+ *  default branch when the count was taken against it, else the upstream. */
+export function arrowUpstream(
+  upstream: string | null,
+  basis: UnpushedBasis | null | undefined,
+  defaultBranch: string | null | undefined,
+): string | null {
+  return basis === "default-branch" ? (defaultBranch ?? null) : upstream;
+}
+
+const NOT_ADJACENT_UNPUSHED = " (must be adjacent and unpushed)";
+
+/** Squash's not-adjacent reason per count basis: counted against the local
+ *  default branch, nothing need be pushed, so the limit it names is the fork. */
+const NOT_ADJACENT_HINT: Record<
+  UnpushedBasis,
+  (defaultBranch: string | null) => string
+> = {
+  remotes: () => NOT_ADJACENT_UNPUSHED,
+  "default-branch": (branch) =>
+    branch === null
+      ? NOT_ADJACENT_UNPUSHED
+      : ` (must be adjacent and ahead of ${branch})`,
+  "on-default-branch": () => NOT_ADJACENT_UNPUSHED,
+  unresolved: () => NOT_ADJACENT_UNPUSHED,
+};
+
+/** The "not-adjacent-unpushed" hold's menu-row reason, from the same view's
+ *  basis the gate's unpushed set came from (null basis = upstream mode). */
+export function notAdjacentSquashHint(
+  basis: UnpushedBasis | null | undefined,
+  defaultBranch: string | null | undefined,
+): string {
+  return basis == null
+    ? NOT_ADJACENT_UNPUSHED
+    : NOT_ADJACENT_HINT[basis](defaultBranch ?? null);
 }
 
 /** Why squash is held, in display precedence order; null = available. */

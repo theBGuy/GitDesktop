@@ -123,6 +123,12 @@ const REFSPEC_ALLOWLIST = [
   },
   {
     file: "git/branches.rs",
+    fn: "git_unpushed_count",
+    rationale:
+      "interpolates only git_default_branch's own output: a remote HEAD's target or the literals main/master",
+  },
+  {
+    file: "git/branches.rs",
     fn: "git_branch_merge_states",
     rationale:
       "validates each pair's head/base with validate_branch_name inline",
