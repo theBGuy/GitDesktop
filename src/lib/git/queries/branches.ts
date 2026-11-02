@@ -281,21 +281,34 @@ export function useRebaseOnto(repo: string) {
   );
 }
 
-/** Ahead/behind of every local branch vs `base`. Gated on `enabled` (it's N rev-list
- *  calls) and keyed under the repo so branch mutations invalidate it. */
+/** Ahead/behind of every local branch vs `base`. Gated on `enabled` (one
+ *  for-each-ref spawn on Git 2.41+, else one rev-list per branch) and keyed
+ *  under the repo so branch mutations invalidate it.
+ *
+ *  `staleTime` is per observer: the branch menu passes one so a reopen spawns
+ *  nothing, while CleanupBranchesDialog leaves it unset because its
+ *  ahead-0/behind>0 pre-check pre-selects rows for `git branch -D` and must
+ *  refetch on open. A window is safe because every in-app ref move made from
+ *  this checkout invalidates this key (scripts/divergence-invalidation.test.mjs
+ *  guards the writers that pass their own keys). Accepted residual: a move this
+ *  checkout didn't make that leaves its HEAD alone (terminal `branch -f`,
+ *  `push . x:y`, any write from a sibling worktree, in-app ones too) stays stale
+ *  up to the window, and Cleanup may paint it until its refetch. */
 export function useBranchDivergence(
   repo: string,
   base: string | null,
   enabled: boolean,
+  staleTime?: number,
 ) {
   return useQuery({
     queryKey: ["repo", repo, "divergence", base] as const,
     queryFn: () => api.gitBranchDivergence(repo, base ?? ""),
     enabled: enabled && Boolean(base),
-    // Local rev-list reads only. react-query's default "online" mode parks the
+    // Local git reads only. react-query's default "online" mode parks the
     // fetch whenever the OS reports no connection, and a parked query is neither
     // loading nor errored — consumers would silently render without divergence.
     networkMode: "always",
+    ...(staleTime === undefined ? {} : { staleTime }),
   });
 }
 

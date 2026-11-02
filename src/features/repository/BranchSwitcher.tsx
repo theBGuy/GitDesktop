@@ -1,3 +1,4 @@
+import type { ContextMenu as ContextMenuPrimitive } from "@base-ui/react/context-menu";
 import { Popover } from "@base-ui/react/popover";
 import {
   ArrowDownIcon,
@@ -13,7 +14,24 @@ import {
   WarningIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  defaultRangeExtractor,
+  type Range,
+  useVirtualizer,
+} from "@tanstack/react-virtual";
+import {
+  type MouseEvent,
+  type ReactNode,
+  type RefObject,
+  type SyntheticEvent,
+  type TouchEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -42,6 +60,7 @@ import {
 } from "@/lib/branch-rules/queries";
 import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
+import { suppressContextMenu } from "@/lib/context-menu";
 import { isDirtyTreeRefusal, presentError } from "@/lib/error-summary";
 import { applyFrozenOrder } from "@/lib/frozen-order";
 import {
@@ -175,6 +194,15 @@ import {
   type PickerMode,
 } from "./BranchMergePickerDialog";
 import {
+  type BranchMenuRow,
+  type BranchMenuTarget,
+  branchMenuPins,
+  buildBranchMenuRows,
+  menuTargetOf,
+  mergePinnedIndexes,
+  rowKeyOf,
+} from "./BranchSwitcherRows";
+import {
   type BranchListMode,
   branchListRetrying,
   branchListState,
@@ -215,6 +243,9 @@ import {
 } from "./PublishPendingBanner";
 import {
   askPublishConfirm,
+  PUBLISH_FORK_CHECK_BOUND_MS,
+  PUBLISH_FORK_CHECK_NOTE,
+  PUBLISH_FORK_CHECK_REASON,
   recordedVisibility,
   useCloseSettled,
   withdrawPublishConfirm,
@@ -419,6 +450,182 @@ function MenuRow({
   );
 }
 
+// First-paint row heights until `measureElement` reads the real ones, all
+// py-1.5: a local row is the skeleton's box (an h-4 name line over an 11px meta
+// line at text-xs's 1/0.75 line-height), a remote row one text-xs line, a
+// section toggle one text-[11px] line at the popup's inherited line-height.
+const BRANCH_ROW_ESTIMATE: Record<
+  BranchMenuRow<Branch, RemoteBranch>["type"],
+  number
+> = {
+  local: 12 + 16 + 2 + 11 / 0.75,
+  "archived-header": 28.5,
+  remote: 28,
+  "remote-header": 28.5,
+};
+
+/** The branch menu's windowed rows. Its own component because `useVirtualizer`
+ *  bails its host out of the React Compiler, which keeps BranchSwitcher's body
+ *  compilable. Mounted only with rows, so the first row's measurement never
+ *  races an empty list. */
+function BranchMenuList({
+  flatRows,
+  activeName,
+  target,
+  focusNonce,
+  filter,
+  popupRef,
+  renderRow,
+}: {
+  flatRows: BranchMenuRow<Branch, RemoteBranch>[];
+  /** The arrow cursor's nav name. */
+  activeName: string | null;
+  /** The shared context menu's target, kept mounted while it anchors the menu. */
+  target: BranchMenuTarget;
+  /** Bumped by keyboard cursor moves only: those scroll and claim focus. */
+  focusNonce: number;
+  /** The applied filter; a change scrolls back to the top. */
+  filter: string;
+  /** The popover popup: a focus claim lands only while focus is inside it. */
+  popupRef: RefObject<HTMLDivElement | null>;
+  renderRow: (row: BranchMenuRow<Branch, RemoteBranch>) => ReactNode;
+}) {
+  // State, not a ref: the virtualizer must see the element the instant it mounts.
+  const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  // Re-minted per row sequence: the virtualizer keys its measurement projection
+  // on this callback's identity, so a stale one paints a row into the previous
+  // occupant's measured slot.
+  const getItemKey = useCallback(
+    (i: number) => rowKeyOf(flatRows[i]),
+    [flatRows],
+  );
+  const count = flatRows.length;
+  // The `data-row` of the row holding DOM focus. State, not a ref: it pins a
+  // row, so a change must re-render the virtualizer's range.
+  const [focusedName, setFocusedName] = useState<string | null>(null);
+  const [activePin, targetPin, archivedPin, remotePin, focusedPin] =
+    branchMenuPins(flatRows, activeName, target, focusedName);
+  // Rows that stay mounted at any scroll position: the cursor row, so an arrow
+  // can claim it; the row holding focus, which must outlive the cursor leaving
+  // it until the claim moves focus on, or focus drops to <body>; the context
+  // menu's anchor while it is open; and both section toggles, so Tab always
+  // reaches them.
+  const rangeExtractor = useCallback(
+    (range: Range) =>
+      mergePinnedIndexes(
+        defaultRangeExtractor(range),
+        [activePin, targetPin, archivedPin, remotePin, focusedPin],
+        count,
+      ),
+    [activePin, targetPin, archivedPin, remotePin, focusedPin, count],
+  );
+  const virtualizer = useVirtualizer({
+    count,
+    getScrollElement: () => scrollEl,
+    estimateSize: (i) => BRANCH_ROW_ESTIMATE[flatRows[i].type],
+    getItemKey,
+    rangeExtractor,
+    // Unrounded: virtual-core rounds each row by default, and these rows'
+    // natural heights are fractional, so a short list would come out taller
+    // than the same rows laid out in flow.
+    measureElement: (el, entry) =>
+      entry?.borderBoxSize[0]?.blockSize ?? el.getBoundingClientRect().height,
+    overscan: 12,
+  });
+
+  // Focus follows the KEYBOARD only, so a click never moves the list under the
+  // pointer. The ref starts at the nonce this list mounted with and is recorded
+  // on every run, so a remount or replay can't claim focus nobody asked for. An
+  // arrow onto a row outside the window mounts it (pinned) and scrolls to it;
+  // the claim gets a few frames to find it and lands only while focus is still
+  // inside the popup.
+  const appliedNonce = useRef(focusNonce);
+  useEffect(() => {
+    const unseen = appliedNonce.current !== focusNonce;
+    appliedNonce.current = focusNonce;
+    if (activePin < 0 || activeName === null || !unseen) return;
+    virtualizer.scrollToIndex(activePin, { align: "auto" });
+    let frame = 0;
+    let tries = 4;
+    const claim = () => {
+      tries -= 1;
+      const row = scrollEl?.querySelector<HTMLElement>(
+        `[data-row="${CSS.escape(activeName)}"]`,
+      );
+      if (row) {
+        const focused = document.activeElement;
+        if (
+          focused !== row &&
+          focused !== null &&
+          popupRef.current?.contains(focused)
+        )
+          row.focus();
+        return;
+      }
+      if (tries === 0) return;
+      frame = requestAnimationFrame(claim);
+    };
+    frame = requestAnimationFrame(claim);
+    return () => cancelAnimationFrame(frame);
+  }, [activePin, activeName, focusNonce, scrollEl, virtualizer, popupRef]);
+
+  // Back to the top when the filter changes the rows; only on a real change,
+  // so a replayed effect keeps the position.
+  const appliedFilter = useRef(filter);
+  useEffect(() => {
+    if (appliedFilter.current === filter) return;
+    appliedFilter.current = filter;
+    virtualizer.scrollToOffset(0);
+  }, [filter, virtualizer]);
+
+  const totalSize = virtualizer.getTotalSize();
+  return (
+    <div
+      ref={setScrollEl}
+      className="overflow-y-auto"
+      // React bubbles focus through portals by component tree, so only a
+      // target inside this element in the DOM counts. A blur onto another row
+      // keeps the name until that row's focus replaces it, never null between.
+      onFocus={(e) => {
+        if (!e.currentTarget.contains(e.target)) return;
+        setFocusedName(
+          e.target.closest("[data-row]")?.getAttribute("data-row") ?? null,
+        );
+      }}
+      onBlur={(e) => {
+        if (
+          !e.currentTarget.contains(e.target) ||
+          (e.relatedTarget instanceof Node &&
+            e.currentTarget.contains(e.relatedTarget))
+        )
+          return;
+        setFocusedName(null);
+      }}
+      // An explicit height, never `max-h`: an unbounded scroll container gives
+      // the virtualizer no viewport and the rows vanish. min() keeps the cap and
+      // still hugs a short list.
+      style={{ height: `min(${totalSize}px, 15rem)` }}
+    >
+      <div className="relative w-full" style={{ height: `${totalSize}px` }}>
+        {virtualizer.getVirtualItems().map((vi) => {
+          const row = flatRows[vi.index];
+          return (
+            <div
+              key={rowKeyOf(row)}
+              data-index={vi.index}
+              ref={virtualizer.measureElement}
+              className="absolute top-0 left-0 w-full"
+              style={{ transform: `translateY(${vi.start}px)` }}
+            >
+              {renderRow(row)}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const status = useRepoStatus(repoPath);
   const branches = useBranches(repoPath);
@@ -526,8 +733,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     remote?: string;
     repo: string;
   } | null>(null);
-  // A publish's fork-PR detection in flight, with the repo it runs in: it paints
-  // the row's spinner and counts as a running push. The ref mirrors it for the
+  // A publish still deciding, with the repo it runs in: from the press until
+  // its prompt, guard, return or fork-PR check settle, it paints the row's
+  // spinner and counts as a running push. The ref mirrors it for the
   // fire-time guard and the hotkey continuations, which a stale render misleads.
   const [publishDetect, setPublishDetect] = useState<PublishDetect | null>(
     null,
@@ -583,8 +791,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // with Delete enabled, and `git branch -D` would destroy a branch the sessions
   // registry still needs to Resume. (Worktrees-side exclusion doesn't cover the
   // branch list, which comes straight from `git for-each-ref`.)
-  const allBranches = (branches.data ?? []).filter(
-    (b) => !b.name.startsWith("gd/session/"),
+  // Memoized by hand: every downstream memo lists `allBranches` as a dep, so
+  // its identity holds per `branches.data` whatever the compiler decides.
+  const allBranches = useMemo(
+    () =>
+      (branches.data ?? []).filter((b) => !b.name.startsWith("gd/session/")),
+    [branches.data],
   );
   // Archived branches are hidden from the list and the merge picker.
   const otherBranches = allBranches.filter((b) => !b.isCurrent && !b.archived);
@@ -612,7 +824,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       ? isMergeMethodAllowed(rulesConfig, currentName, "squash")
       : true);
   // Ahead/behind vs. the default branch, fetched only while the menu is open.
-  const divergence = useBranchDivergence(repoPath, defaultName, open);
+  // A 30s window on this observer only, so a quick reopen spawns no recount
+  // (the hook's comment owns the invalidation contract and its residual).
+  const divergence = useBranchDivergence(repoPath, defaultName, open, 30_000);
   const divByName = useMemo(
     () => new Map((divergence.data ?? []).map((d) => [d.name, d] as const)),
     [divergence.data],
@@ -626,6 +840,37 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   const rewrite = useBranchRewriteStatus(repoPath, rewriteProbe, {
     enabled: rewriteProbe !== null,
   });
+  // The list's one shared row menu: its target by KEY, set together with the
+  // probe above by the list's capture-phase contextmenu handler, before Base UI
+  // opens the menu in that same event. The menu resolves the live row from it on
+  // every render, so labels and handlers follow a refetch.
+  const [menuTarget, setMenuTarget] = useState<BranchMenuTarget>(null);
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
+  // Read by the close-complete callback, which can fire after a reopen during
+  // the exit fade and must not clear the new target.
+  const branchMenuOpenRef = useRef(false);
+  // The right-click that last set the target: a close caused by that same event
+  // is the menu moving to the new row, whose probe is already set.
+  const menuTargetEvent = useRef<Event | null>(null);
+  const branchMenuActions = useRef<ContextMenuPrimitive.Root.Actions>(null);
+  // Bumped by keyboard cursor moves only, so the list scrolls and claims focus
+  // for the arrows and never for a click.
+  const [focusNonce, setFocusNonce] = useState(0);
+  // The popover popup, which bounds where the list may claim focus.
+  const branchPopupRef = useRef<HTMLDivElement>(null);
+  // A closed popover holds no row menu. An item that closes the popover
+  // unmounts the menu mid-fade, so its close callbacks never run to clear these.
+  if (
+    !open &&
+    (menuTarget !== null || rewriteProbe !== null || branchMenuOpen)
+  ) {
+    setMenuTarget(null);
+    setRewriteProbe(null);
+    setBranchMenuOpen(false);
+  }
+  useEffect(() => {
+    if (!open) branchMenuOpenRef.current = false;
+  }, [open]);
   const queryClient = useQueryClient();
 
   // Warm those probes when the POPOVER opens, so a right-click a moment later
@@ -645,11 +890,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // every popover open. The rows past the cap keep the waiting slot, which is
   // exactly what it is for. Four covers the ordinary 0-2 and leaves headroom
   // without turning an open into a burst.
-  const divergedSignature = allBranches
-    .filter((b) => b.upstreamAhead > 0 && b.upstreamBehind > 0)
-    .slice(0, MAX_REWRITE_PREFETCH)
-    .map((b) => b.name)
-    .join("\n");
+  const divergedSignature = useMemo(
+    () =>
+      allBranches
+        .filter((b) => b.upstreamAhead > 0 && b.upstreamBehind > 0)
+        .slice(0, MAX_REWRITE_PREFETCH)
+        .map((b) => b.name)
+        .join("\n"),
+    [allBranches],
+  );
   useEffect(() => {
     if (!open || divergedSignature === "") return;
     for (const name of divergedSignature.split("\n")) {
@@ -834,6 +1083,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     setOrderRepo(repoPath);
     setFrozenOrder(null);
     setActiveBranch(null);
+    setMenuTarget(null);
+    setRewriteProbe(null);
   }
   const snapshotOrder = () =>
     setFrozenOrder(
@@ -856,6 +1107,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // The Try again line unmounts under focus when the rows land; the filter input
   // survives every list state, so it takes the focus back.
   const listRescue = useRetryFocusRescue(open && listState.mode === "failed");
+  const { hostRef: listHostRef, retryRef: listRetryRef } = listRescue;
   // One string for the failure line and the status region, so they can't disagree.
   const listRetrying = branchListRetrying(listState.mode, branches);
   const listLine = listRetrying
@@ -921,6 +1173,52 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // list never reaches a row that isn't on screen.
   const showRemoteSection =
     listState.remoteGroupMayRender && remoteOnly.length > 0;
+  // The one row stream the list windows, headers included, and the arrow stops
+  // beside it. By hand like the chain above: the list re-keys its rows on this
+  // identity.
+  const { flatRows, navNames } = useMemo(
+    () =>
+      buildBranchMenuRows({
+        visibleBranches,
+        archivedBranches,
+        showArchived,
+        remoteOnly,
+        showRemote,
+        showRemoteSection,
+      }),
+    [
+      visibleBranches,
+      archivedBranches,
+      showArchived,
+      remoteOnly,
+      showRemote,
+      showRemoteSection,
+    ],
+  );
+  // The menu target's LIVE row: local by name, remote by its remote and name
+  // pair, so a refetch can't move "Delete on <remote>…" to another remote.
+  const menuLocal =
+    menuTarget?.kind === "local"
+      ? branches.data?.find((b) => b.name === menuTarget.name)
+      : undefined;
+  const menuRemote =
+    menuTarget?.kind === "remote"
+      ? remoteOnly.find(
+          (b) => b.remote === menuTarget.remote && b.name === menuTarget.name,
+        )
+      : undefined;
+  const menuTargetLive = menuLocal !== undefined || menuRemote !== undefined;
+  // What the menu paints: the live row, or the last one it resolved while a
+  // vanished target's menu fades out, so it never shows an empty popup.
+  const shownMenuRow = useRetained<Branch | RemoteBranch | undefined>(
+    menuLocal ?? menuRemote,
+  );
+  // An open menu whose row is gone (deleted, now local, or cleared by a repo
+  // switch) closes before that frame paints. Through the actions handle, so
+  // both close callbacks run.
+  useLayoutEffect(() => {
+    if (branchMenuOpen && !menuTargetLive) branchMenuActions.current?.close();
+  }, [branchMenuOpen, menuTargetLive]);
   // The ref being named, whose committed work the AI fallback describes: the
   // rename target (which need NOT be checked out) or the checked-out branch for
   // a create; null ⇒ both closed. Create names the BRANCH, not the literal
@@ -1042,16 +1340,15 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   );
   // Arrow-key nav over the visible rows (+ archived/remote when expanded); Enter
   // on the focused row checks out via the row button's native click.
-  const navBranches: { name: string }[] = [
-    ...visibleBranches,
-    ...(showArchived ? archivedBranches : []),
-    ...(showRemote && showRemoteSection ? remoteOnly : []),
-  ];
+  const navBranches = navNames;
   const onBranchKeyDown = listKeyboardNav({
     items: navBranches,
-    activeIndex: navBranches.findIndex((b) => b.name === activeBranch),
-    onActivate: (b) => setActiveBranch(b.name),
-    rowKey: (b) => b.name,
+    activeIndex: activeBranch === null ? -1 : navBranches.indexOf(activeBranch),
+    onActivate: (name) => {
+      setActiveBranch(name);
+      setFocusNonce((n) => n + 1);
+    },
+    rowKey: (name) => name,
   });
   // A row focused without the arrows (a context menu's close hands focus back to
   // it, a click, Tab) becomes the arrows' cursor, so the next arrow moves from it.
@@ -1099,9 +1396,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   async function setArchived(name: string, archived: boolean) {
     // Unarchiving is exempt, as in the menu's render hold.
     if (archived && refuseWhileBranchPushes(name)) return;
+    const done = archived ? `Archived ${name}` : `Unarchived ${name}`;
     try {
       await setBranchArchived.mutateAsync({ name, archived });
-      toast.success(archived ? `Archived ${name}` : `Unarchived ${name}`);
+      toast.success(done);
     } catch (e) {
       onError(e);
     }
@@ -1138,7 +1436,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         await checkout.mutateAsync(target.name);
       }
     } catch (e) {
-      opts?.onError?.(e);
+      if (opts !== undefined) {
+        if (opts.onError !== undefined) {
+          opts.onError(e);
+        }
+      }
     }
   }
 
@@ -1193,7 +1495,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         resolvedHere = wts.find(
           (w) => w.branch === name && normPath(w.path) !== activeNorm,
         );
-        wtPath = resolvedHere?.path;
+        if (resolvedHere !== undefined) wtPath = resolvedHere.path;
+        else wtPath = undefined;
       } catch {
         // fall through
       }
@@ -1413,91 +1716,97 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       closeDelete();
       return;
     }
-    // Outside the try, whose finally would close the confirm.
+    // Outside the try, whose `.finally` cleanup would close the confirm.
     if (refuseWhileBranchPushes(deleteTarget)) return;
-    try {
-      // Between freeing its branch and checking it out, a promote leaves that
-      // branch in no checkout, so git would let it be deleted from under it.
-      if (promotionBlocksCheckout(repoPath)) {
-        toast.info(PROMOTION_BLOCKS_CHECKOUT);
-        return;
-      }
-      // git refuses to delete the checked-out branch: move off it first — onto a
-      // branch not already occupied by another worktree (that checkout fails too).
-      if (deleteTarget === currentName) {
-        // Fetch occupancy FRESH: `worktreeByBranch` only observes its query
-        // while the popover or cleanup dialog is open, and even a warm cache
-        // (the header keeps one now) can be stale for a guard this destructive.
-        let occupied: Set<string>;
-        try {
-          const wts = await listUserWorktrees(repoPath);
-          occupied = new Set(
-            wts
-              .filter(
-                (w) => w.branch && normPath(w.path) !== normPath(repoPath),
-              )
-              .map((w) => w.branch),
-          );
-        } catch {
-          occupied = new Set(worktreeByBranch.keys());
-        }
-        // A mutate past an await builds from the observer's CURRENT options, so
-        // the checkout and delete below would act on whichever repo is live now;
-        // a switch during the lookup refuses instead.
-        if (
-          refuseIfSwitched(
-            deleteIn,
-            "nothing was deleted",
-            "before the delete started",
-          )
-        )
-          return;
-        // Inside the try, so the finally's clearTarget closes the confirm on
-        // this refusal; the one before the try leaves it open.
-        if (refuseWhileBranchPushes(deleteTarget)) return;
-        const free = (b: string | null | undefined): b is string =>
-          Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
-        const fallback = free(defaultName)
-          ? defaultName
-          : otherBranches.find((b) => free(b.name))?.name;
-        if (!fallback) {
-          toast.error(
-            "Can't switch off this branch — every other branch is checked out in a worktree.",
-          );
-          clearTarget();
-          return;
-        }
-        // Below the occupancy await, so a promote that started meanwhile counts;
-        // nothing has been written yet, so the delete is refused whole.
+    await (async () => {
+      try {
+        // Between freeing its branch and checking it out, a promote leaves that
+        // branch in no checkout, so git would let it be deleted from under it.
         if (promotionBlocksCheckout(repoPath)) {
           toast.info(PROMOTION_BLOCKS_CHECKOUT);
           return;
         }
-        await checkout.mutateAsync(fallback);
-        // The same for the delete, which starts only after the checkout lands.
-        if (
-          refuseIfSwitched(
-            deleteIn,
-            `${fallback} is checked out and ${deleteTarget} was kept`,
-            `before ${deleteTarget} was deleted`,
+        // git refuses to delete the checked-out branch: move off it first — onto a
+        // branch not already occupied by another worktree (that checkout fails too).
+        if (deleteTarget === currentName) {
+          // Fetch occupancy FRESH: `worktreeByBranch` only observes its query
+          // while the popover or cleanup dialog is open, and even a warm cache
+          // (the header keeps one now) can be stale for a guard this destructive.
+          let occupied: Set<string>;
+          try {
+            const wts = await listUserWorktrees(repoPath);
+            occupied = new Set(
+              wts
+                .filter(
+                  (w) => w.branch && normPath(w.path) !== normPath(repoPath),
+                )
+                .map((w) => w.branch),
+            );
+          } catch {
+            occupied = new Set(worktreeByBranch.keys());
+          }
+          // A mutate past an await builds from the observer's CURRENT options, so
+          // the checkout and delete below would act on whichever repo is live now;
+          // a switch during the lookup refuses instead.
+          if (
+            refuseIfSwitched(
+              deleteIn,
+              "nothing was deleted",
+              "before the delete started",
+            )
           )
-        )
-          return;
-        if (
-          refuseWhileBranchPushes(
-            deleteTarget,
-            `A push is already running — ${fallback} is checked out and ${deleteTarget} was kept.`,
+            return;
+          // Inside the try, so the `.finally` clearTarget closes the confirm on
+          // this refusal; the one before the try leaves it open.
+          if (refuseWhileBranchPushes(deleteTarget)) return;
+          const free = (b: string | null | undefined): b is string =>
+            Boolean(b) && b !== deleteTarget && !occupied.has(b as string);
+          let fallback: string | undefined;
+          if (free(defaultName)) {
+            fallback = defaultName;
+          } else {
+            const found = otherBranches.find((b) => free(b.name));
+            if (found !== undefined) fallback = found.name;
+          }
+          if (!fallback) {
+            toast.error(
+              "Can't switch off this branch — every other branch is checked out in a worktree.",
+            );
+            clearTarget();
+            return;
+          }
+          // Below the occupancy await, so a promote that started meanwhile counts;
+          // nothing has been written yet, so the delete is refused whole.
+          if (promotionBlocksCheckout(repoPath)) {
+            toast.info(PROMOTION_BLOCKS_CHECKOUT);
+            return;
+          }
+          await checkout.mutateAsync(fallback);
+          // The same for the delete, which starts only after the checkout lands.
+          if (
+            refuseIfSwitched(
+              deleteIn,
+              `${fallback} is checked out and ${deleteTarget} was kept`,
+              `before ${deleteTarget} was deleted`,
+            )
           )
-        )
-          return;
+            return;
+          if (
+            refuseWhileBranchPushes(
+              deleteTarget,
+              `A push is already running — ${fallback} is checked out and ${deleteTarget} was kept.`,
+            )
+          )
+            return;
+        }
+        await deleteBranch.mutateAsync(deleteTarget);
+        toast.success(`Deleted ${deleteTarget}`);
+      } catch (e) {
+        onError(e);
       }
-      await deleteBranch.mutateAsync(deleteTarget);
-      toast.success(`Deleted ${deleteTarget}`);
-    } catch (e) {
-      onError(e);
-    } finally {
+    })().finally(() => {
       clearTarget();
-    }
+    });
   }
 
   async function doDeleteRemoteBranch() {
@@ -1516,67 +1825,73 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
-    try {
-      await deleteRemoteBranch.mutateAsync({
-        remote: target.remote,
-        name: target.name,
-      });
-      toast.success(
-        `Deleted ${target.name} on ${target.remote}${landedIn(target.repo).away}`,
-      );
-    } catch (e) {
-      onError(e);
-    } finally {
+    const deleting = (async () => {
+      try {
+        await deleteRemoteBranch.mutateAsync({
+          remote: target.remote,
+          name: target.name,
+        });
+        toast.success(
+          `Deleted ${target.name} on ${target.remote}${landedIn(target.repo).away}`,
+        );
+      } catch (e) {
+        onError(e);
+      }
+    })();
+    await deleting.finally(() => {
       // Functional, for the same reason as the local delete's clear: each open
       // hands a fresh row object, so identity already marks the session.
       setRemoteDeleteTarget((cur) => (cur === target ? null : cur));
-    }
+    });
   }
 
   async function doDiscardAll() {
-    try {
-      if (
-        !discardAllIn ||
-        refuseIfSwitched(discardAllIn, "nothing was discarded")
-      )
-        return;
-      await discardAll.mutateAsync(undefined);
-      toast.success("All changes discarded");
-    } catch (e) {
-      onError(e);
-    } finally {
+    await (async () => {
+      try {
+        if (!discardAllIn) return;
+        if (refuseIfSwitched(discardAllIn, "nothing was discarded")) return;
+        await discardAll.mutateAsync(undefined);
+        toast.success("All changes discarded");
+      } catch (e) {
+        onError(e);
+      }
+    })().finally(() => {
       setDiscardAllIn(null);
-    }
+    });
   }
 
   async function doStashAll() {
-    try {
-      if (!stashAllIn || refuseIfSwitched(stashAllIn, "nothing was stashed"))
-        return;
-      // A new stash buries the recorded backup, so its offer can only refuse.
-      useStashReapplyMarker.getState().clearFor(stashAllIn);
-      await stashAll.mutateAsync(undefined);
-      toast.success("Changes stashed");
-    } catch (e) {
-      onError(e);
-    } finally {
+    await (async () => {
+      try {
+        if (!stashAllIn) return;
+        if (refuseIfSwitched(stashAllIn, "nothing was stashed")) return;
+        // A new stash buries the recorded backup, so its offer can only refuse.
+        useStashReapplyMarker.getState().clearFor(stashAllIn);
+        await stashAll.mutateAsync(undefined);
+        toast.success("Changes stashed");
+      } catch (e) {
+        onError(e);
+      }
+    })().finally(() => {
       setStashAllIn(null);
-    }
+    });
   }
 
   async function doStashPop() {
-    try {
-      if (!stashPopIn || refuseIfSwitched(stashPopIn, "no stash was popped"))
-        return;
-      // A conflict here must not read as the recorded reapply's.
-      useStashReapplyMarker.getState().clearFor(stashPopIn);
-      await stashPop.mutateAsync(undefined);
-      toast.success("Stash restored");
-    } catch (e) {
-      onError(e);
-    } finally {
+    await (async () => {
+      try {
+        if (!stashPopIn) return;
+        if (refuseIfSwitched(stashPopIn, "no stash was popped")) return;
+        // A conflict here must not read as the recorded reapply's.
+        useStashReapplyMarker.getState().clearFor(stashPopIn);
+        await stashPop.mutateAsync(undefined);
+        toast.success("Stash restored");
+      } catch (e) {
+        onError(e);
+      }
+    })().finally(() => {
       setStashPopIn(null);
-    }
+    });
   }
 
   // The picker dialog seeds its own branch + options on open; the switcher only
@@ -1656,15 +1971,16 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // only redo a merge that asked for nothing else — offering it for the
       // others would quietly drop the option the user chose.
       const plain = !squash && !noFf && strategy === "none";
+      const done = squash
+        ? `Squashed ${branch} — changes are staged, review and commit`
+        : `Merged ${branch}`;
       try {
         await mergeBranch.mutateAsync({ branch, squash, noFf, strategy });
-        toast.success(
-          squash
-            ? `Squashed ${branch} — changes are staged, review and commit`
-            : `Merged ${branch}`,
-        );
+        toast.success(done);
       } catch (e) {
-        if (plain && beginMergeRecovery(e, branch)) return;
+        if (plain) {
+          if (beginMergeRecovery(e, branch)) return;
+        }
         onError(e);
       }
     }
@@ -1791,6 +2107,87 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   }
 
+  const defaultBranchRow = allBranches.find((b) => b.name === defaultName);
+  // `patchEqual > 0` is strong evidence, not proof — two sides can apply the
+  // same patch independently. It only WITHHOLDS a merge, so a false read costs
+  // an explained no-op, never a duplicated history.
+  function rewrittenUpstream(status: BranchRewriteStatus) {
+    return status.remoteRewritten === true && status.patchEqual > 0;
+  }
+  function warnRewrittenUpstream(row: Branch, status: BranchRewriteStatus) {
+    // The remedy has to match what the row actually offers: only the
+    // nothing-unique case gets a reset item there. With local-only commits the
+    // row shows a disabled update and no reset, so point at the pull that keeps
+    // them.
+    const remedy = carriesAllLocalCommits(status)
+      ? `Open the branch menu and use the ${row.name} row's reset instead.`
+      : `Switch to ${row.name} and use Pull with rebase — it keeps the ${status.localOnly} commit${status.localOnly === 1 ? "" : "s"} only ${row.name} has.`;
+    toast.warning(
+      `${row.upstream} already carries ${row.name}'s changes under different ids — merging it in would duplicate them.`,
+      { description: remedy, duration: 10000 },
+    );
+  }
+  // The fire-time rewrite probes an update from the default branch needs, each
+  // gated as updateDefaultFromUpstream's is: only a DIVERGED branch can hold a
+  // rewrite (a duplicate takes local commits with patch twins upstream). Merging
+  // the default's diverged upstream (the secondary item's base): that upstream
+  // may carry the default's commits rewritten. Merging a branch's OWN diverged
+  // upstream: only the footer and hotkey reach it, having no own-upstream item
+  // to carry the row's render-time probe (the row menu omits that duplicate).
+  function rewriteProbesFor(target: string, base: string): Branch[] {
+    const rows: Branch[] = [];
+    const def = defaultBranchRow;
+    if (
+      def &&
+      !def.upstreamGone &&
+      def.upstream === base &&
+      def.upstreamAhead > 0 &&
+      def.upstreamBehind > 0
+    )
+      rows.push(def);
+    // The unfiltered list: a checked-out gd/session/* branch still updates
+    // from the hotkey and footer, and still needs its own-row probe.
+    const own = branches.data?.find((b) => b.name === target);
+    if (
+      own &&
+      !own.upstreamGone &&
+      own.upstream === base &&
+      own.upstreamAhead > 0 &&
+      own.upstreamBehind > 0
+    )
+      rows.push(own);
+    return rows;
+  }
+  // Runs the probes against the hook's own cached options; true = withheld
+  // (with a warning) or the repo changed during them (with its notice).
+  async function withheldForRewrite(
+    rows: Branch[],
+    target: string,
+  ): Promise<boolean> {
+    const updateIn = repoPath;
+    const statuses = await Promise.all(
+      rows.map((r) =>
+        queryClient
+          .fetchQuery(branchRewriteStatusOptions(repoPath, r.name))
+          .catch(() => null),
+      ),
+    );
+    if (
+      refuseIfSwitched(
+        updateIn,
+        `${target} wasn't updated`,
+        "before the update started",
+      )
+    )
+      return true;
+    for (const [i, status] of statuses.entries()) {
+      if (status && rewrittenUpstream(status)) {
+        warnRewrittenUpstream(rows[i], status);
+        return true;
+      }
+    }
+    return false;
+  }
   // Pull the latest from the default branch into `target` without switching to
   // it (unless it's already current): fast-forwards when possible, otherwise
   // merges via a throwaway worktree so the working tree — and its watchers —
@@ -1831,20 +2228,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return;
     }
     if (refuseUpdateWhileHolderLeaving(target)) return;
+    let outcome:
+      | Awaited<ReturnType<typeof updateBranchFrom.mutateAsync>>
+      | undefined;
     try {
-      const outcome = await updateBranchFrom.mutateAsync({
+      outcome = await updateBranchFrom.mutateAsync({
         branch: target,
         base,
       });
-      toast.success(
-        outcome.outcome === "up-to-date"
-          ? `${target} is already up to date with ${base}`
-          : `Updated ${target} from ${base}`,
-      );
     } catch (e) {
       if (toastBranchHeld(e)) return;
       if (!beginUpdateRecovery(e, target, base)) onError(e);
+      return;
     }
+    toast.success(
+      outcome.outcome === "up-to-date"
+        ? `${target} is already up to date with ${base}`
+        : `Updated ${target} from ${base}`,
+    );
   }
 
   // An update moves `target`'s ref, which that branch's own push may be sending,
@@ -1870,20 +2271,24 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       return;
     }
     if (refuseUpdateWhileHolderLeaving(target)) return;
+    let outcome:
+      | Awaited<ReturnType<typeof updateBranchFrom.mutateAsync>>
+      | undefined;
     try {
-      const outcome = await updateBranchFrom.mutateAsync({
+      outcome = await updateBranchFrom.mutateAsync({
         branch: target,
         base,
       });
-      toast.success(
-        outcome.outcome === "up-to-date"
-          ? `${target} is already up to date with ${base}`
-          : `Updated ${target} from ${base}`,
-      );
     } catch (e) {
       if (toastBranchHeld(e)) return;
       if (!beginUpdateRecovery(e, target, base)) onError(e);
+      return;
     }
+    toast.success(
+      outcome.outcome === "up-to-date"
+        ? `${target} is already up to date with ${base}`
+        : `Updated ${target} from ${base}`,
+    );
   }
 
   // The remedy for a branch whose upstream already carries its changes under
@@ -1930,83 +2335,87 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    try {
-      if (branch.isCurrent) {
-        // The confirmation above spans an await, and HEAD can move under it — an
-        // out-of-app `git switch`, or the app's own checkout. `reset --hard`
-        // names no branch, so a moved HEAD would rewrite whatever is checked out
-        // NOW to a tip measured for a branch the user is no longer on. The ref
-        // reads live; the captured name is the only branch the confirmation
-        // described. Says so rather than returning quietly: the user just
-        // confirmed a destructive action, and silence there reads as "it
-        // worked". Wording kept in step with the sync controls' twin and with
-        // HistoryDialogs' Reset to commit pre-check.
-        if (currentNameRef.current !== branch.name) {
-          toast.info(
-            "HEAD moved while the dialog was open — nothing was reset.",
-          );
-          return;
-        }
-        // An outside fetch can move the upstream while the prompt sits open, so
-        // the reset re-measures before it acts. A read that joins one in flight
-        // may have begun before that fetch's ref write and return the older tip;
-        // the reset then lands on the tip the probe proved carries every local
-        // commit.
-        let fresh: BranchRewriteStatus;
-        try {
-          fresh = await queryClient.fetchQuery({
-            ...branchRewriteStatusOptions(repoPath, branch.name),
-            staleTime: 0,
-          });
-        } catch (e) {
-          toastErrorWithNote(e, "Nothing was reset.");
-          return;
-        }
-        if (refuseIfSwitched(resetIn, "nothing was reset")) return;
-        // A push can start during the re-read; the reset moves the tip it sends.
-        if (refuseWhileBranchPushes(branch.name)) return;
-        // No measurable upstream tip proves nothing moved.
-        if (fresh.upstreamTip === null) {
+    if (branch.isCurrent) {
+      // The confirmation above spans an await, and HEAD can move under it — an
+      // out-of-app `git switch`, or the app's own checkout. `reset --hard`
+      // names no branch, so a moved HEAD would rewrite whatever is checked out
+      // NOW to a tip measured for a branch the user is no longer on. The ref
+      // reads live; the captured name is the only branch the confirmation
+      // described. Says so rather than returning quietly: the user just
+      // confirmed a destructive action, and silence there reads as "it
+      // worked". Wording kept in step with the sync controls' twin and with
+      // HistoryDialogs' Reset to commit pre-check.
+      if (currentNameRef.current !== branch.name) {
+        toast.info("HEAD moved while the dialog was open — nothing was reset.");
+        return;
+      }
+      // An outside fetch can move the upstream while the prompt sits open, so
+      // the reset re-measures before it acts. A read that joins one in flight
+      // may have begun before that fetch's ref write and return the older tip;
+      // the reset then lands on the tip the probe proved carries every local
+      // commit.
+      let fresh: BranchRewriteStatus;
+      try {
+        fresh = await queryClient.fetchQuery({
+          ...branchRewriteStatusOptions(repoPath, branch.name),
+          staleTime: 0,
+        });
+      } catch (e) {
+        toastErrorWithNote(e, "Nothing was reset.");
+        return;
+      }
+      if (refuseIfSwitched(resetIn, "nothing was reset")) return;
+      // A push can start during the re-read; the reset moves the tip it sends.
+      if (refuseWhileBranchPushes(branch.name)) return;
+      // No measurable upstream tip proves nothing moved.
+      if (fresh.upstreamTip === null) {
+        toast.info(UNCONFIRMED_NOTICE(base, branch.name));
+        return;
+      }
+      if (fresh.upstreamTip !== tip) {
+        toast.info(UPSTREAM_MOVED_NOTICE(base));
+        return;
+      }
+      // Same upstream tip, but the read no longer proves the upstream carries
+      // every commit: name a local move only when the read measured one, since
+      // an unknown verdict (a failed reflog walk) proves nothing moved. A local
+      // move that is still carried proceeds, and the backend's pin refuses it.
+      if (!carriesAllLocalCommits(fresh)) {
+        if (fresh.localTip !== null && fresh.localTip !== localTip) {
+          toast.info(LOCAL_MOVED_NOTICE(branch.name));
+        } else {
           toast.info(UNCONFIRMED_NOTICE(base, branch.name));
-          return;
         }
-        if (fresh.upstreamTip !== tip) {
-          toast.info(UPSTREAM_MOVED_NOTICE(base));
-          return;
-        }
-        // Same upstream tip, but the read no longer proves the upstream carries
-        // every commit: name a local move only when the read measured one, since
-        // an unknown verdict (a failed reflog walk) proves nothing moved. A local
-        // move that is still carried proceeds, and the backend's pin refuses it.
-        if (!carriesAllLocalCommits(fresh)) {
-          if (fresh.localTip !== null && fresh.localTip !== localTip) {
-            toast.info(LOCAL_MOVED_NOTICE(branch.name));
-          } else {
-            toast.info(UNCONFIRMED_NOTICE(base, branch.name));
-          }
-          return;
-        }
-        // A promote can start during the re-read.
-        if (promotionBlocksCheckout(repoPath)) {
-          toast.info(PROMOTION_BLOCKS_CHECKOUT);
-          return;
-        }
+        return;
+      }
+      // A promote can start during the re-read.
+      if (promotionBlocksCheckout(repoPath)) {
+        toast.info(PROMOTION_BLOCKS_CHECKOUT);
+        return;
+      }
+      try {
         await hardReset.mutateAsync({
           hash: tip,
           expectedHead: localTip,
           expectedBranch: branch.name,
         });
-      } else {
+      } catch (e) {
+        onError(e);
+        return;
+      }
+    } else {
+      try {
         await resetToUpstream.mutateAsync({
           branch: branch.name,
           expectedTip: tip,
           expectedLocalTip: localTip,
         });
+      } catch (e) {
+        onError(e);
+        return;
       }
-      toast.success(`Reset ${branch.name} to ${base}`);
-    } catch (e) {
-      onError(e);
     }
+    toast.success(`Reset ${branch.name} to ${base}`);
   }
 
   // Push a branch's ref without checking it out — the outbound counterpart of
@@ -2040,8 +2449,11 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // One push at a time, re-checked where each network-lock route fires: a menu
   // can be stale under the pointer, and the backend would queue the route behind
   // the push for up to a minute. The shared cache check, plus this switcher's
-  // own fork-PR detection, read live from its ref.
-  function pushAlreadyActive(): boolean {
+  // own fork-PR detection, read live from its ref. The publish that owns the
+  // detection passes it as `mine`: its own check is not another push.
+  function pushAlreadyActive(mine?: PublishDetect): boolean {
+    if (publishDetectRef.current === mine)
+      return refuseWhilePushRuns(queryClient, repoPath);
     if (publishDetectRef.current?.repo === repoPath) {
       toast.info(BRANCH_PUSH_ACTIVE_MESSAGE);
       return true;
@@ -2078,9 +2490,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
 
   // Publishing a branch that is really a local copy of a fork PR's head pushes a
   // separate copy to this repo and leaves the PR untouched — check for that
-  // first, and let the guard offer the fork instead. Advisory: a detection
-  // failure is indistinguishable from no match and falls through to the publish
-  // confirm.
+  // before publishing, and let the guard offer the fork instead. Advisory: a
+  // detection failure is indistinguishable from no match and falls through to
+  // the publish confirm.
   async function beginPublishBranch(branch: Branch, remote?: string) {
     const publishIn = repoPath;
     const mine: PublishDetect = {
@@ -2090,34 +2502,56 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     };
     publishDetectRef.current = mine;
     setPublishDetect(mine);
-    const match = await forgeDetectForkPrForBranch(repoPath, branch.name).catch(
-      () => null,
-    );
-    // Compare-and-clear, so a newer detection (in another repo) keeps its slot.
-    // Before any dispatch: the push's own guard must not see this detection.
-    if (publishDetectRef.current === mine) publishDetectRef.current = null;
-    setPublishDetect((cur) => (cur === mine ? null : cur));
-    // `push` builds from the live repo's options once the detection resolves,
-    // while the branch and the fork match belong to this one: a switch during
-    // the round-trip refuses rather than publish there.
-    const { live, away } = landedIn(publishIn);
-    if (!live) {
-      toast.info(
-        `Didn't publish ${branch.name}${away} — you switched repositories before the push started.`,
-      );
-      return;
-    }
-    if (match) {
-      // The guard dialog takes over from the list, and from this switcher's own
-      // publish prompt when a repeat press matched while it was up.
-      withdrawPublishConfirm(publishAsk);
+    // The fork-PR check runs alongside the local reads, in two phases: before
+    // the ask its settle only records, and the decision reads that record after
+    // the last await; once the prompt is up, a settle swaps it for the guard or
+    // releases its hold. A holder object, so the record keeps its type across
+    // the awaits.
+    let asked: ConfirmRequest | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const probe = { settled: false, found: null as ForkPrMatch | null };
+    // The row holds from the press until the prompt (the modal is the
+    // exclusion from then on), the guard, a return, or the check's settle,
+    // whichever is first. Compare-and-clear, so a newer detection (in another
+    // repo) keeps its slot.
+    let marked = true;
+    const releaseMark = () => {
+      if (!marked) return;
+      marked = false;
+      if (publishDetectRef.current === mine) publishDetectRef.current = null;
+      setPublishDetect((cur) => (cur === mine ? null : cur));
+    };
+    // The guard dialog takes over from the list.
+    const openGuard = (match: ForkPrMatch) => {
       setOpen(false);
       setForkGuard({ match, branch, remote, repo: publishIn });
-      return;
-    }
-    // A push that started during the detection refuses before any prompt.
-    if (pushAlreadyActive() || refuseWhilePublishing(queryClient, repoPath))
-      return;
+    };
+    // A match lands only on this press's own prompt, still showing, in the repo
+    // it was asked in; anything later is dropped without a word.
+    const onPromptSettle = (m: ForkPrMatch | null) => {
+      clearTimeout(timer);
+      if (m === null) {
+        useConfirm.getState().setRequestHold(asked, {});
+        return;
+      }
+      if (
+        asked !== null &&
+        useConfirm.getState().request === asked &&
+        landedIn(publishIn).live
+      ) {
+        withdrawPublishConfirm(publishAsk);
+        openGuard(m);
+      }
+    };
+    const check = forgeDetectForkPrForBranch(publishIn, branch.name)
+      .catch(() => null)
+      .then((m) => {
+        probe.settled = true;
+        probe.found = m;
+        releaseMark();
+        if (asked !== null) onPromptSettle(m);
+        return m;
+      });
     // A named publish with no remote goes to origin (the backend's default). A
     // branch the destination already has (as of the last fetch) only
     // fast-forwards and tracks, so only a create asks first; the list mirrors the
@@ -2136,7 +2570,18 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       gitRemoteUrl(publishIn, destination).catch(() => null),
       gitRemotePushUrl(publishIn, destination).catch(() => null),
     ]);
-    if (switchedAway()) return;
+    if (switchedAway()) {
+      releaseMark();
+      return;
+    }
+    // A push that started during the reads refuses before any prompt.
+    if (
+      pushAlreadyActive(mine) ||
+      refuseWhilePublishing(queryClient, repoPath)
+    ) {
+      releaseMark();
+      return;
+    }
     const presence = presenceUnderUrls(
       remoteHasBranch(list, destination, branch.name),
       fetchUrl,
@@ -2153,8 +2598,21 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       // when it asks. Without a prompt the list stays open while the row pushes.
       setOpen(false);
       await listClose.waitClosed();
-      if (switchedAway()) return;
-      const ok = await askPublishConfirm(
+      if (switchedAway()) {
+        releaseMark();
+        return;
+      }
+      // The decision point: nothing awaits between here and the ask, so a
+      // match that settled while the list closed opens the guard instead.
+      releaseMark();
+      if (probe.settled && probe.found) {
+        // Also takes over from this switcher's own publish prompt when a
+        // repeat press matched while it was up.
+        withdrawPublishConfirm(publishAsk);
+        openGuard(probe.found);
+        return;
+      }
+      const answer = askPublishConfirm(
         {
           branch: branch.name,
           remote: destination,
@@ -2167,10 +2625,46 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
           upstreamBranch: branch.upstreamRemoteRef?.startsWith("refs/heads/")
             ? branch.upstreamRemoteRef.slice("refs/heads/".length)
             : null,
+          heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON,
         },
         publishAsk,
       );
+      asked = publishAsk.current;
+      // Past the bound Publish frees with a note; the hold's identity pin
+      // makes a fire on a gone prompt a no-op.
+      if (!probe.settled) {
+        timer = setTimeout(() => {
+          if (!probe.settled)
+            useConfirm
+              .getState()
+              .setRequestHold(asked, { note: PUBLISH_FORK_CHECK_NOTE });
+        }, PUBLISH_FORK_CHECK_BOUND_MS);
+        void answer.finally(() => clearTimeout(timer));
+      }
+      const ok = await answer;
       if (!ok) return;
+    } else {
+      // No prompt to hold, so the check decides before the push, and the
+      // refusals re-run after it: it can take the backend's whole bound.
+      const match = await check;
+      releaseMark();
+      // `push` builds from the live repo's options once the detection
+      // resolves, while the branch and the fork match belong to this one: a
+      // switch during the round-trip refuses rather than publish there.
+      const { live, away } = landedIn(publishIn);
+      if (!live) {
+        toast.info(
+          `Didn't publish ${branch.name}${away} — you switched repositories before the push started.`,
+        );
+        return;
+      }
+      if (pushAlreadyActive() || refuseWhilePublishing(queryClient, repoPath))
+        return;
+      if (match) {
+        withdrawPublishConfirm(publishAsk);
+        openGuard(match);
+        return;
+      }
     }
     // runPushBranch re-checks offline and running pushes at its own entry.
     void runPushBranch(
@@ -2195,6 +2689,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    const copyRemote = remote ?? "origin";
     const pushedIn = repoPath;
     try {
       await push.mutateAsync({
@@ -2206,7 +2701,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       const copy = pushSuccessCopy({
         outcome,
         branch: branch.name,
-        remote: remote ?? "origin",
+        remote: copyRemote,
         tracks: true,
         away,
       });
@@ -2274,7 +2769,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     (p.mutationId !== null && Object.hasOwn(pushLatch, p.mutationId)
       ? pushLatch[p.mutationId]
       : null);
-  // A detection of THIS repo counts as a push: the publish it decides is next.
+  // A publish of THIS repo still deciding counts as a push (see `publishDetect`
+  // for when it lets go): the push it decides comes next.
   const detectingBranch =
     publishDetect !== null && publishDetect.repo === repoPath
       ? publishDetect.branch
@@ -2356,17 +2852,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // `disabled` expression tests them. Null where the label already carries the
   // reason — a row must not say it twice.
   const renameCurrentBlockedReason = (() => {
-    switch (true) {
-      // A rename moves the ref the running push is sending.
-      case currentRowPushing:
-        return branchPushHoldReason(pushPaused);
-      case headUnread !== null:
-        return headUnread;
-      case currentName !== null && isSessionBranchName(currentName):
-        return "Agent-session branches can't be renamed — renaming one breaks the session's Resume.";
-      default:
-        return "HEAD is detached — there's no current branch to rename.";
-    }
+    // A rename moves the ref the running push is sending.
+    if (currentRowPushing) return branchPushHoldReason(pushPaused);
+    if (headUnread !== null) return headUnread;
+    if (currentName !== null && isSessionBranchName(currentName))
+      return "Agent-session branches can't be renamed — renaming one breaks the session's Resume.";
+    return "HEAD is detached — there's no current branch to rename.";
   })();
   const deleteCurrentBlockedReason = (() => {
     if (!currentName)
@@ -2493,17 +2984,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // read confirms both, since the backend re-reads tracking when it pushes.
     const pushIn = repoPath;
     pushHotkeyChecking.current = true;
-    let fresh: BranchHead;
-    try {
-      // The factory's queryFn straight, never fetchQuery: that joins an
-      // in-flight poll, which may have been spawned before the press.
-      fresh = (await repoStatusOptions(pushIn).queryFn()).branch;
-    } catch {
-      toast.info("Couldn't confirm the current branch — nothing was pushed.");
-      return;
-    } finally {
+    let fresh: BranchHead | undefined;
+    await (async () => {
+      try {
+        // The factory's queryFn straight, never fetchQuery: that joins an
+        // in-flight poll, which may have been spawned before the press.
+        fresh = (await repoStatusOptions(pushIn).queryFn()).branch;
+      } catch {
+        toast.info("Couldn't confirm the current branch — nothing was pushed.");
+      }
+    })().finally(() => {
       pushHotkeyChecking.current = false;
-    }
+    });
+    if (fresh === undefined) return;
     // `push` follows the live repo, so a switch during the read refuses.
     if (
       refuseIfSwitched(pushIn, "nothing was pushed", "before the push started")
@@ -2530,17 +3023,19 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     if (pushHotkeyChecking.current) return;
     const pushIn = repoPath;
     pushHotkeyChecking.current = true;
-    let freshRows: Branch[];
-    try {
-      // The api read straight, never fetchQuery: that can join a refetch spawned
-      // before the press.
-      freshRows = await gitBranches(pushIn);
-    } catch {
-      toast.info("Couldn't confirm the branch — nothing was pushed.");
-      return;
-    } finally {
+    let freshRows: Branch[] | undefined;
+    await (async () => {
+      try {
+        // The api read straight, never fetchQuery: that can join a refetch spawned
+        // before the press.
+        freshRows = await gitBranches(pushIn);
+      } catch {
+        toast.info("Couldn't confirm the branch — nothing was pushed.");
+      }
+    })().finally(() => {
       pushHotkeyChecking.current = false;
-    }
+    });
+    if (freshRows === undefined) return;
     if (
       refuseIfSwitched(pushIn, "nothing was pushed", "before the push started")
     )
@@ -2682,7 +3177,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     setOpen(false);
     setCleanupOpen(true);
   });
-  const defaultBranchRow = allBranches.find((b) => b.name === defaultName);
   // What the update items merge, as of the last fetch: the default's own
   // upstream tip when the local default is strictly behind it.
   const updateSources = defaultName
@@ -2725,86 +3219,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     )
       return;
     void doUpdateFromUpstream(row.name, row.upstream);
-  }
-  // `patchEqual > 0` is strong evidence, not proof — two sides can apply the
-  // same patch independently. It only WITHHOLDS a merge, so a false read costs
-  // an explained no-op, never a duplicated history.
-  function rewrittenUpstream(status: BranchRewriteStatus) {
-    return status.remoteRewritten === true && status.patchEqual > 0;
-  }
-  function warnRewrittenUpstream(row: Branch, status: BranchRewriteStatus) {
-    // The remedy has to match what the row actually offers: only the
-    // nothing-unique case gets a reset item there. With local-only commits the
-    // row shows a disabled update and no reset, so point at the pull that keeps
-    // them.
-    const remedy = carriesAllLocalCommits(status)
-      ? `Open the branch menu and use the ${row.name} row's reset instead.`
-      : `Switch to ${row.name} and use Pull with rebase — it keeps the ${status.localOnly} commit${status.localOnly === 1 ? "" : "s"} only ${row.name} has.`;
-    toast.warning(
-      `${row.upstream} already carries ${row.name}'s changes under different ids — merging it in would duplicate them.`,
-      { description: remedy, duration: 10000 },
-    );
-  }
-  // The fire-time rewrite probes an update from the default branch needs, each
-  // gated as updateDefaultFromUpstream's is: only a DIVERGED branch can hold a
-  // rewrite (a duplicate takes local commits with patch twins upstream). Merging
-  // the default's diverged upstream (the secondary item's base): that upstream
-  // may carry the default's commits rewritten. Merging a branch's OWN diverged
-  // upstream: only the footer and hotkey reach it, having no own-upstream item
-  // to carry the row's render-time probe (the row menu omits that duplicate).
-  function rewriteProbesFor(target: string, base: string): Branch[] {
-    const rows: Branch[] = [];
-    const def = defaultBranchRow;
-    if (
-      def &&
-      !def.upstreamGone &&
-      def.upstream === base &&
-      def.upstreamAhead > 0 &&
-      def.upstreamBehind > 0
-    )
-      rows.push(def);
-    // The unfiltered list: a checked-out gd/session/* branch still updates
-    // from the hotkey and footer, and still needs its own-row probe.
-    const own = branches.data?.find((b) => b.name === target);
-    if (
-      own &&
-      !own.upstreamGone &&
-      own.upstream === base &&
-      own.upstreamAhead > 0 &&
-      own.upstreamBehind > 0
-    )
-      rows.push(own);
-    return rows;
-  }
-  // Runs the probes against the hook's own cached options; true = withheld
-  // (with a warning) or the repo changed during them (with its notice).
-  async function withheldForRewrite(
-    rows: Branch[],
-    target: string,
-  ): Promise<boolean> {
-    const updateIn = repoPath;
-    const statuses = await Promise.all(
-      rows.map((r) =>
-        queryClient
-          .fetchQuery(branchRewriteStatusOptions(repoPath, r.name))
-          .catch(() => null),
-      ),
-    );
-    if (
-      refuseIfSwitched(
-        updateIn,
-        `${target} wasn't updated`,
-        "before the update started",
-      )
-    )
-      return true;
-    for (const [i, status] of statuses.entries()) {
-      if (status && rewrittenUpstream(status)) {
-        warnRewrittenUpstream(rows[i], status);
-        return true;
-      }
-    }
-    return false;
   }
   useHotkeyAction(
     "update-default-from-upstream",
@@ -2880,7 +3294,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     const noNewerOpen = repoOpenWatermark();
     try {
       const wts = await listUserWorktrees(repoPath);
-      if (useUiStore.getState().repoPath !== repoPath || !noNewerOpen()) return;
+      if (useUiStore.getState().repoPath !== repoPath) return;
+      if (!noNewerOpen()) return;
       const main = wts.find((w) => w.isMain);
       if (!main) {
         toast.error("Couldn't find the main workspace for this repository.");
@@ -2901,13 +3316,20 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       const wts = await listUserWorktrees(repoPath);
       if (useUiStore.getState().repoPath !== repoPath) return;
       const here = wts.find((w) => normPath(w.path) === normPath(repoPath));
-      if (!here || here.isMain) {
-        toast.info(
-          "Open a linked worktree to promote its branch to the main workspace.",
-        );
+      const notLinked =
+        "Open a linked worktree to promote its branch to the main workspace.";
+      if (here === undefined) {
+        toast.info(notLinked);
         return;
       }
-      if (here.isDetached || !here.branch) {
+      if (here.isMain) {
+        toast.info(notLinked);
+        return;
+      }
+      let hereNoBranch = false;
+      if (here.isDetached) hereNoBranch = true;
+      if (!here.branch) hereNoBranch = true;
+      if (hereNoBranch) {
         toast.info("This worktree has no branch to promote.");
         return;
       }
@@ -2928,9 +3350,281 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
   });
 
-  // Shared by the visible list and the Archived section.
+  // One branch's in-flight state, holding worktree and PR, read alike by its
+  // row and by its items in the shared context menu.
+  const branchRowFacts = (branch: Branch) => {
+    // An update in flight on THIS row holds only its own update items.
+    const rowUpdateBase = updatingBase.get(branch.name);
+    // A push (or its fork check) in flight on THIS row holds the items that
+    // move or remove its ref; other rows hold only what would queue behind it.
+    const rowDetecting = detectingBranch === branch.name;
+    const rowPush = pushOnBranch(branch.name);
+    // The worktree (other than the active checkout) this branch occupies, when
+    // any — the row's whole worktree menu group hangs off it, and it narrows the
+    // object those items act on.
+    const rowWorktree = (userWorktrees.data ?? []).find(
+      (w) => w.path === worktreeByBranch.get(branch.name),
+    );
+    return {
+      rowUpdateBase,
+      rowUpdating: rowUpdateBase !== undefined,
+      rowDetecting,
+      rowPush,
+      rowWorktree,
+      // `worktreeByBranch` admits the main workspace (it's a worktree to git,
+      // and any checkout other than the active one qualifies), so the strings
+      // that NAME this row's holding checkout come from the record instead of
+      // saying "worktree" flat.
+      rowCopy: rowCheckoutCopy(rowWorktree?.isMain),
+      pr: prByBranch.get(branch.name),
+    };
+  };
+
+  // Shared by the visible list and the Archived section. Paints the row only:
+  // its items live in the list's one shared context menu (`renderBranchMenu`).
   const renderBranchRow = (branch: Branch) => {
     const div = divByName.get(branch.name);
+    const {
+      rowUpdateBase,
+      rowUpdating,
+      rowDetecting,
+      rowPush,
+      rowWorktree,
+      rowCopy,
+      pr,
+    } = branchRowFacts(branch);
+    const rowSpinnerLabel = (() => {
+      if (rowUpdating) return `Updating from ${rowUpdateBase}`;
+      if (rowDetecting)
+        return branchPublishLabel(publishDetect?.remote ?? null);
+      if (rowPush !== undefined) return branchPushLabel(rowPush, branch);
+      return null;
+    })();
+    return (
+      <button
+        type="button"
+        data-row={branch.name}
+        className="flex w-full flex-col gap-y-0.5 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+        onFocus={() => focusRow(branch.name)}
+        onClick={(e) => {
+          // The PR chip is part of this button (no nested control), so a
+          // click on it is routed here; Enter on the row still switches.
+          if (
+            pr &&
+            e.target instanceof Element &&
+            e.target.closest("[data-pr-chip]")
+          ) {
+            openPrChip(pr.select);
+            return;
+          }
+          if (!branch.isCurrent) void switchTo(branch.name);
+        }}
+      >
+        <span className="flex w-full items-center gap-2">
+          <span
+            className="min-w-0 flex-1 truncate"
+            onMouseEnter={clipTitle(branch.name)}
+          >
+            {branch.name}
+            {branch.name === defaultName && (
+              <span className="ml-1.5 text-[10px] text-muted-foreground">
+                default
+              </span>
+            )}
+          </span>
+          {branch.isCurrent && <CheckIcon className="size-3.5 shrink-0" />}
+        </span>
+        <span className="flex w-full items-center gap-2">
+          {pr &&
+            (() => {
+              const Icon = PR_AUDIT_ICON[pr.state];
+              const label = prChipLabel(pr);
+              // Not a control of its own: the row's click routing opens
+              // it, the row menu reaches it by keyboard, and its words
+              // join the row's accessible name.
+              return (
+                <span
+                  role="img"
+                  data-pr-chip
+                  aria-label={label}
+                  title={`${label} — open in the PRs tab`}
+                  className={cn(
+                    "flex shrink-0 cursor-pointer items-center gap-0.5 text-[11px] tabular-nums hover:underline",
+                    PR_AUDIT_TONE[pr.state],
+                  )}
+                >
+                  <Icon className="size-3" weight="bold" />
+                  {pr.label}
+                </span>
+              );
+            })()}
+          {rowWorktree && (
+            <span
+              className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
+              title={rowCopy.title(rowWorktree.path)}
+            >
+              <TreeStructureIcon className="size-3" weight="bold" />
+              {rowCopy.noun}
+            </span>
+          )}
+          {/* Two distinct indicators: the sync indicator shows the
+              branch's OWN upstream state in ARROW vocabulary (matching
+              the header's Push/Pull counts); the divergence indicator
+              shows drift from the DEFAULT branch as `+N −M {default}`
+              TEXT so it can't be mistaken for unpushed work. Sync is
+              skipped on a remoteless repo. */}
+          {remoteNames.length > 0 &&
+            (() => {
+              // A branch tracking a REMOVED remote offers neither Push
+              // nor Publish, so arrows would imply an action the menu
+              // can't honor — muted marker with a no-action title
+              // instead. The `isLocalUpstream` conjunct keeps a
+              // LOCAL-upstream branch (git's `%(upstream:remotename)`
+              // reads `.`) out of this case so its truthful arrows still
+              // show below.
+              if (
+                branch.upstream &&
+                !branch.upstreamGone &&
+                !isLocalUpstream(branch.upstreamRemote) &&
+                !remoteNames.includes(branch.upstreamRemote)
+              ) {
+                const label = `Tracks ${branch.upstream}, but that remote is no longer configured.`;
+                return (
+                  <span
+                    role="img"
+                    aria-label={label}
+                    className="flex shrink-0 items-center text-muted-foreground"
+                    title={label}
+                  >
+                    <CloudSlashIcon className="size-3" />
+                  </span>
+                );
+              }
+              if (branch.upstream && !branch.upstreamGone) {
+                if (branch.upstreamAhead === 0 && branch.upstreamBehind === 0) {
+                  // In sync with the upstream — silence means synced.
+                  return null;
+                }
+                const parts: string[] = [];
+                if (branch.upstreamAhead > 0)
+                  parts.push(`${branch.upstreamAhead} to push`);
+                if (branch.upstreamBehind > 0)
+                  parts.push(`${branch.upstreamBehind} to pull`);
+                const label = `${parts.join(", ")} — vs ${branch.upstream}`;
+                return (
+                  <span
+                    // No text color: inherits the row foreground (a step
+                    // stronger than the muted divergence) and follows the
+                    // hover accent-foreground automatically. The arrow SVGs are
+                    // aria-hidden, so the span carries the name for readers —
+                    // role="img" because aria-label is not valid (nor reliably
+                    // announced) on a generic span.
+                    role="img"
+                    aria-label={label}
+                    className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums"
+                    title={label}
+                  >
+                    {branch.upstreamAhead > 0 && (
+                      <span className="flex items-center gap-0.5">
+                        <ArrowUpIcon className="size-3" weight="bold" />
+                        {branch.upstreamAhead}
+                      </span>
+                    )}
+                    {branch.upstreamBehind > 0 && (
+                      <span className="flex items-center gap-0.5">
+                        <ArrowDownIcon className="size-3" weight="bold" />
+                        {branch.upstreamBehind}
+                      </span>
+                    )}
+                  </span>
+                );
+              }
+              if (branch.upstreamGone) {
+                const label = `Upstream ${branch.upstream} was deleted on the remote — likely merged. ${secondaryClickCapitalized} to publish again or delete.`;
+                return (
+                  <span
+                    role="img"
+                    aria-label={label}
+                    className="flex shrink-0 items-center text-muted-foreground"
+                    title={label}
+                  >
+                    <CloudXIcon className="size-3" />
+                  </span>
+                );
+              }
+              // !branch.upstream
+              const publishHint = `Local only — never published. ${secondaryClickCapitalized} to publish.`;
+              return (
+                <span
+                  role="img"
+                  aria-label={publishHint}
+                  className="flex shrink-0 items-center text-muted-foreground"
+                  title={publishHint}
+                >
+                  <CloudSlashIcon className="size-3" />
+                </span>
+              );
+            })()}
+          {div &&
+            (div.ahead > 0 || div.behind > 0) &&
+            (() => {
+              const parts: string[] = [];
+              if (div.ahead > 0)
+                parts.push(
+                  `${div.ahead} commit${div.ahead === 1 ? "" : "s"} ahead of ${defaultName}`,
+                );
+              if (div.behind > 0)
+                // Behind-only must still name the base: role="img" hides the
+                // visible {defaultName} child from AT, so the label is all
+                // a reader gets. Skipped when the ahead part named it already.
+                parts.push(
+                  `${div.behind} commit${div.behind === 1 ? "" : "s"} behind${div.ahead > 0 ? "" : ` ${defaultName}`}`,
+                );
+              const label = parts.join(", ");
+              return (
+                <span
+                  role="img"
+                  aria-label={label}
+                  className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
+                  title={label}
+                >
+                  {div.ahead > 0 && <span>+{div.ahead}</span>}
+                  {div.behind > 0 && <span>{`−${div.behind}`}</span>}
+                  <span>{defaultName}</span>
+                </span>
+              );
+            })()}
+          {/* The spinner takes the date's auto margin so the two sit
+              together in the row's right cluster. One slot: an update
+              in flight wins over a push. */}
+          {rowSpinnerLabel !== null && (
+            <span
+              role="img"
+              aria-label={rowSpinnerLabel}
+              className="ml-auto flex shrink-0 items-center text-muted-foreground"
+              title={rowSpinnerLabel}
+            >
+              <CircleNotchIcon className="size-3 animate-spin" />
+            </span>
+          )}
+          {branch.lastCommitDate && (
+            <span
+              className={cn(
+                "shrink-0 text-[11px] text-muted-foreground",
+                rowSpinnerLabel === null && "ml-auto",
+              )}
+            >
+              <RelativeTime date={branch.lastCommitDate} />
+            </span>
+          )}
+        </span>
+      </button>
+    );
+  };
+
+  // A local row's items in the shared context menu, for the LIVE row the
+  // menu's target resolves to on this render.
+  const renderBranchMenu = (branch: Branch) => {
     const canUpdate = Boolean(defaultName) && branch.name !== defaultName;
     // The update-from-default items, minus one whose base is this row's OWN
     // upstream: the own-upstream item offers that same merge, and it carries
@@ -2945,13 +3639,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // A promotion branch takes its changes through promotions, so the one-click
     // update from the default branch is withheld.
     const rowPromotion = isPromotionBranch(rulesConfig, branch.name);
-    // An update in flight on THIS row holds only its own update items.
-    const rowUpdateBase = updatingBase.get(branch.name);
-    const rowUpdating = rowUpdateBase !== undefined;
-    // A push (or its fork check) in flight on THIS row holds the items that
-    // move or remove its ref; other rows hold only what would queue behind it.
-    const rowDetecting = detectingBranch === branch.name;
-    const rowPush = pushOnBranch(branch.name);
+    const { rowUpdating, rowDetecting, rowPush, rowWorktree, rowCopy, pr } =
+      branchRowFacts(branch);
     const rowPushing = rowDetecting || rowPush !== undefined;
     // The push item's own hold: its parked copy says the push waits offline.
     const rowPushReason = pendingItemReason(
@@ -2963,35 +3652,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       ? branchPushHoldItemReason(true)
       : "pushing…";
     const pushRunningReason = branchPushHoldItemReason(pushPaused);
-    const rowSpinnerLabel = (() => {
-      switch (true) {
-        case rowUpdating:
-          return `Updating from ${rowUpdateBase}`;
-        case rowDetecting:
-          return branchPublishLabel(publishDetect?.remote ?? null);
-        case rowPush !== undefined:
-          return branchPushLabel(rowPush, branch);
-        default:
-          return null;
-      }
-    })();
     // Archiving hides a branch from the branch surfaces, so it's refused for a
     // branch that is somewhere in use: the one you're on, the default, and one
     // another worktree has checked out. Unarchiving is never refused — an
     // archived branch can be checked out, and this is its only way back.
     const archiveLabel = branch.archived ? "Unarchive" : "Archive";
-    // The worktree (other than the active checkout) this branch occupies, when
-    // any — the row's whole worktree menu group hangs off it, and it narrows the
-    // object those items act on.
-    const rowWorktree = (userWorktrees.data ?? []).find(
-      (w) => w.path === worktreeByBranch.get(branch.name),
-    );
     const inWorktree = rowWorktree !== undefined;
-    // `worktreeByBranch` admits the main workspace (it's a worktree to git, and
-    // any checkout other than the active one qualifies), so the strings that NAME
-    // this row's holding checkout come from the record instead of saying
-    // "worktree" flat.
-    const rowCopy = rowCheckoutCopy(rowWorktree?.isMain);
     // A natively-disabled menu item swallows its tooltip, so the items `busy`
     // alone holds carry the reason in the label. A structural reason always
     // wins — this arm shows only where nothing else explains the dimming.
@@ -3141,554 +3807,309 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       rowRewrite?.remoteRewritten === true &&
       rowRewrite.localOnly > 0 &&
       rowRewrite.patchEqual > 0;
-    const pr = prByBranch.get(branch.name);
     return (
-      <ContextMenu
-        key={branch.name}
-        onOpenChange={(menuOpen) => {
-          if (menuOpen) setRewriteProbe(rowDiverged ? branch.name : null);
-          // Functional, not a captured read: right-clicking a second row closes
-          // this menu in the SAME tick the other one opens, and a batched
-          // comparison against the pre-update value would clear the new row's
-          // probe on the way out.
-          else setRewriteProbe((cur) => (cur === branch.name ? null : cur));
-        }}
-      >
-        <ContextMenuTrigger
-          render={
-            <button
-              type="button"
-              data-row={branch.name}
-              className="flex w-full flex-col gap-y-0.5 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-              onFocus={() => focusRow(branch.name)}
-              onClick={(e) => {
-                // The PR chip is part of this button (no nested control), so a
-                // click on it is routed here; Enter on the row still switches.
-                if (
-                  pr &&
-                  e.target instanceof Element &&
-                  e.target.closest("[data-pr-chip]")
-                ) {
-                  openPrChip(pr.select);
-                  return;
+      <>
+        {(rowUpdateSources.length > 0 ||
+          (branch.upstream && branch.upstreamBehind > 0) ||
+          pushable ||
+          publishable) && (
+          <>
+            {rowUpdateSources.map((source) => (
+              <ContextMenuItem
+                key={source.base}
+                className={MENU_HELD_ROW_CLASS}
+                disabled={rowUpdateHeld || rowPromotion || rowWorktreeRemoving}
+                onClick={() => {
+                  fallThroughGuardUntil.current = Date.now() + 300;
+                  void doUpdateFromDefault(branch.name, source.base);
+                }}
+              >
+                {rowPromotion
+                  ? `${source.label} (promotion branch)`
+                  : wtLabel(source.label, updateHeldReason)}
+              </ContextMenuItem>
+            ))}
+            {/* Pull the branch's own upstream in without switching — the star
+                use case is the default branch after a PR merged upstream. An
+                upstream that already carries this branch's changes under other
+                ids replaces it: merging there duplicates them rather than
+                syncing. The waiting arm comes FIRST so the slot can never be
+                enabled while its identity is still in flight. */}
+            {branch.upstream &&
+              branch.upstreamBehind > 0 &&
+              (() => {
+                const base = branch.upstream;
+                // No onClick at all, not merely `disabled`: a pointer already
+                // aimed here when the menu painted must be a hard no-op.
+                if (rowProbePending) {
+                  return (
+                    <ContextMenuItem disabled>
+                      Update from {base} (checking the remote…)
+                    </ContextMenuItem>
+                  );
                 }
-                if (!branch.isCurrent) void switchTo(branch.name);
-              }}
-            >
-              <span className="flex w-full items-center gap-2">
-                <span
-                  className="min-w-0 flex-1 truncate"
-                  onMouseEnter={clipTitle(branch.name)}
-                >
-                  {branch.name}
-                  {branch.name === defaultName && (
-                    <span className="ml-1.5 text-[10px] text-muted-foreground">
-                      default
-                    </span>
-                  )}
-                </span>
-                {branch.isCurrent && (
-                  <CheckIcon className="size-3.5 shrink-0" />
-                )}
-              </span>
-              <span className="flex w-full items-center gap-2">
-                {pr &&
-                  (() => {
-                    const Icon = PR_AUDIT_ICON[pr.state];
-                    const label = prChipLabel(pr);
-                    // Not a control of its own: the row's click routing opens
-                    // it, the row menu reaches it by keyboard, and its words
-                    // join the row's accessible name.
-                    return (
-                      <span
-                        role="img"
-                        data-pr-chip
-                        aria-label={label}
-                        title={`${label} — open in the PRs tab`}
-                        className={cn(
-                          "flex shrink-0 cursor-pointer items-center gap-0.5 text-[11px] tabular-nums hover:underline",
-                          PR_AUDIT_TONE[pr.state],
-                        )}
-                      >
-                        <Icon className="size-3" weight="bold" />
-                        {pr.label}
-                      </span>
-                    );
-                  })()}
-                {rowWorktree && (
-                  <span
-                    className="flex shrink-0 items-center gap-0.5 text-[11px] text-muted-foreground"
-                    title={rowCopy.title(rowWorktree.path)}
-                  >
-                    <TreeStructureIcon className="size-3" weight="bold" />
-                    {rowCopy.noun}
-                  </span>
-                )}
-                {/* Two distinct indicators: the sync indicator shows the
-                    branch's OWN upstream state in ARROW vocabulary (matching
-                    the header's Push/Pull counts); the divergence indicator
-                    shows drift from the DEFAULT branch as `+N −M {default}`
-                    TEXT so it can't be mistaken for unpushed work. Sync is
-                    skipped on a remoteless repo. */}
-                {remoteNames.length > 0 &&
-                  (() => {
-                    // A branch tracking a REMOVED remote offers neither Push
-                    // nor Publish, so arrows would imply an action the menu
-                    // can't honor — muted marker with a no-action title
-                    // instead. The `isLocalUpstream` conjunct keeps a
-                    // LOCAL-upstream branch (git's `%(upstream:remotename)`
-                    // reads `.`) out of this case so its truthful arrows still
-                    // show below.
-                    if (
-                      branch.upstream &&
-                      !branch.upstreamGone &&
-                      !isLocalUpstream(branch.upstreamRemote) &&
-                      !remoteNames.includes(branch.upstreamRemote)
-                    ) {
-                      const label = `Tracks ${branch.upstream}, but that remote is no longer configured.`;
-                      return (
-                        <span
-                          role="img"
-                          aria-label={label}
-                          className="flex shrink-0 items-center text-muted-foreground"
-                          title={label}
-                        >
-                          <CloudSlashIcon className="size-3" />
-                        </span>
-                      );
+                if (resetTip) {
+                  const holder = worktreeByBranch.get(branch.name);
+                  // A reset rewrites the ref a running push is sending.
+                  const resetSuffix = (() => {
+                    switch (true) {
+                      case inWorktree:
+                        return ` (checked out in ${holder})`;
+                      case rowPushing:
+                        return ` (${rowPushHeldReason})`;
+                      default:
+                        return busySuffix;
                     }
-                    if (branch.upstream && !branch.upstreamGone) {
-                      if (
-                        branch.upstreamAhead === 0 &&
-                        branch.upstreamBehind === 0
-                      ) {
-                        // In sync with the upstream — silence means synced.
-                        return null;
-                      }
-                      const parts: string[] = [];
-                      if (branch.upstreamAhead > 0)
-                        parts.push(`${branch.upstreamAhead} to push`);
-                      if (branch.upstreamBehind > 0)
-                        parts.push(`${branch.upstreamBehind} to pull`);
-                      const label = `${parts.join(", ")} — vs ${branch.upstream}`;
-                      return (
-                        <span
-                          // No text color: inherits the row foreground (a step
-                          // stronger than the muted divergence) and follows the
-                          // hover accent-foreground automatically. The arrow SVGs are
-                          // aria-hidden, so the span carries the name for readers —
-                          // role="img" because aria-label is not valid (nor reliably
-                          // announced) on a generic span.
-                          role="img"
-                          aria-label={label}
-                          className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums"
-                          title={label}
-                        >
-                          {branch.upstreamAhead > 0 && (
-                            <span className="flex items-center gap-0.5">
-                              <ArrowUpIcon className="size-3" weight="bold" />
-                              {branch.upstreamAhead}
-                            </span>
-                          )}
-                          {branch.upstreamBehind > 0 && (
-                            <span className="flex items-center gap-0.5">
-                              <ArrowDownIcon className="size-3" weight="bold" />
-                              {branch.upstreamBehind}
-                            </span>
-                          )}
-                        </span>
-                      );
-                    }
-                    if (branch.upstreamGone) {
-                      const label = `Upstream ${branch.upstream} was deleted on the remote — likely merged. ${secondaryClickCapitalized} to publish again or delete.`;
-                      return (
-                        <span
-                          role="img"
-                          aria-label={label}
-                          className="flex shrink-0 items-center text-muted-foreground"
-                          title={label}
-                        >
-                          <CloudXIcon className="size-3" />
-                        </span>
-                      );
-                    }
-                    // !branch.upstream
-                    const publishHint = `Local only — never published. ${secondaryClickCapitalized} to publish.`;
-                    return (
-                      <span
-                        role="img"
-                        aria-label={publishHint}
-                        className="flex shrink-0 items-center text-muted-foreground"
-                        title={publishHint}
-                      >
-                        <CloudSlashIcon className="size-3" />
-                      </span>
-                    );
-                  })()}
-                {div &&
-                  (div.ahead > 0 || div.behind > 0) &&
-                  (() => {
-                    const parts: string[] = [];
-                    if (div.ahead > 0)
-                      parts.push(
-                        `${div.ahead} commit${div.ahead === 1 ? "" : "s"} ahead of ${defaultName}`,
-                      );
-                    if (div.behind > 0)
-                      // Behind-only must still name the base: role="img" hides the
-                      // visible {defaultName} child from AT, so the label is all
-                      // a reader gets. Skipped when the ahead part named it already.
-                      parts.push(
-                        `${div.behind} commit${div.behind === 1 ? "" : "s"} behind${div.ahead > 0 ? "" : ` ${defaultName}`}`,
-                      );
-                    const label = parts.join(", ");
-                    return (
-                      <span
-                        role="img"
-                        aria-label={label}
-                        className="flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground tabular-nums"
-                        title={label}
-                      >
-                        {div.ahead > 0 && <span>+{div.ahead}</span>}
-                        {div.behind > 0 && <span>{`−${div.behind}`}</span>}
-                        <span>{defaultName}</span>
-                      </span>
-                    );
-                  })()}
-                {/* The spinner takes the date's auto margin so the two sit
-                    together in the row's right cluster. One slot: an update
-                    in flight wins over a push. */}
-                {rowSpinnerLabel !== null && (
-                  <span
-                    role="img"
-                    aria-label={rowSpinnerLabel}
-                    className="ml-auto flex shrink-0 items-center text-muted-foreground"
-                    title={rowSpinnerLabel}
-                  >
-                    <CircleNotchIcon className="size-3 animate-spin" />
-                  </span>
-                )}
-                {branch.lastCommitDate && (
-                  <span
-                    className={cn(
-                      "shrink-0 text-[11px] text-muted-foreground",
-                      rowSpinnerLabel === null && "ml-auto",
-                    )}
-                  >
-                    <RelativeTime date={branch.lastCommitDate} />
-                  </span>
-                )}
-              </span>
-            </button>
-          }
-        />
-        <ContextMenuContent className="min-w-48">
-          {(rowUpdateSources.length > 0 ||
-            (branch.upstream && branch.upstreamBehind > 0) ||
-            pushable ||
-            publishable) && (
-            <>
-              {rowUpdateSources.map((source) => (
-                <ContextMenuItem
-                  key={source.base}
-                  className={MENU_HELD_ROW_CLASS}
-                  disabled={
-                    rowUpdateHeld || rowPromotion || rowWorktreeRemoving
-                  }
-                  onClick={() => {
-                    fallThroughGuardUntil.current = Date.now() + 300;
-                    void doUpdateFromDefault(branch.name, source.base);
-                  }}
-                >
-                  {rowPromotion
-                    ? `${source.label} (promotion branch)`
-                    : wtLabel(source.label, updateHeldReason)}
-                </ContextMenuItem>
-              ))}
-              {/* Pull the branch's own upstream in without switching — the star
-                  use case is the default branch after a PR merged upstream. An
-                  upstream that already carries this branch's changes under other
-                  ids replaces it: merging there duplicates them rather than
-                  syncing. The waiting arm comes FIRST so the slot can never be
-                  enabled while its identity is still in flight. */}
-              {branch.upstream &&
-                branch.upstreamBehind > 0 &&
-                (() => {
-                  const base = branch.upstream;
-                  // No onClick at all, not merely `disabled`: a pointer already
-                  // aimed here when the menu painted must be a hard no-op.
-                  if (rowProbePending) {
-                    return (
-                      <ContextMenuItem disabled>
-                        Update from {base} (checking the remote…)
-                      </ContextMenuItem>
-                    );
-                  }
-                  if (resetTip) {
-                    const holder = worktreeByBranch.get(branch.name);
-                    // A reset rewrites the ref a running push is sending.
-                    const resetSuffix = (() => {
-                      switch (true) {
-                        case inWorktree:
-                          return ` (checked out in ${holder})`;
-                        case rowPushing:
-                          return ` (${rowPushHeldReason})`;
-                        default:
-                          return busySuffix;
-                      }
-                    })();
-                    return (
-                      <ContextMenuItem
-                        className={MENU_HELD_ROW_CLASS}
-                        disabled={busy || inWorktree || rowPushing}
-                        onClick={() =>
-                          void doResetToUpstream(
-                            branch,
-                            resetTip.tip,
-                            resetTip.localTip,
-                          )
-                        }
-                      >
-                        Reset to {base}…{resetSuffix}
-                      </ContextMenuItem>
-                    );
-                  }
-                  if (rowMixedRewrite) {
-                    return (
-                      <ContextMenuItem disabled>
-                        Update from {base} ({base} already carries these changes
-                        under different ids — a merge would duplicate them)
-                      </ContextMenuItem>
-                    );
-                  }
+                  })();
                   return (
                     <ContextMenuItem
                       className={MENU_HELD_ROW_CLASS}
-                      disabled={rowUpdateHeld || rowWorktreeRemoving}
-                      onClick={() => {
-                        fallThroughGuardUntil.current = Date.now() + 300;
-                        void doUpdateFromUpstream(branch.name, base);
-                      }}
+                      disabled={busy || inWorktree || rowPushing}
+                      onClick={() =>
+                        void doResetToUpstream(
+                          branch,
+                          resetTip.tip,
+                          resetTip.localTip,
+                        )
+                      }
                     >
-                      {wtLabel(`Update from ${base}`, updateHeldReason)}
+                      Reset to {base}…{resetSuffix}
                     </ContextMenuItem>
                   );
-                })()}
-              {/* Sync-out below sync-in. Push a branch's ref to origin without
-                  checking it out — works even when the branch is checked out in
-                  another worktree, since a push touches refs, never a working
-                  tree (hence deliberately NO inWorktree gate). Diverged branches
-                  push disabled with the reason in the label; the "Update from"
-                  item above is their remedy. */}
-              {pushable && (
+                }
+                if (rowMixedRewrite) {
+                  return (
+                    <ContextMenuItem disabled>
+                      Update from {base} ({base} already carries these changes
+                      under different ids — a merge would duplicate them)
+                    </ContextMenuItem>
+                  );
+                }
+                return (
+                  <ContextMenuItem
+                    className={MENU_HELD_ROW_CLASS}
+                    disabled={rowUpdateHeld || rowWorktreeRemoving}
+                    onClick={() => {
+                      fallThroughGuardUntil.current = Date.now() + 300;
+                      void doUpdateFromUpstream(branch.name, base);
+                    }}
+                  >
+                    {wtLabel(`Update from ${base}`, updateHeldReason)}
+                  </ContextMenuItem>
+                );
+              })()}
+            {/* Sync-out below sync-in. Push a branch's ref to origin without
+                checking it out — works even when the branch is checked out in
+                another worktree, since a push touches refs, never a working
+                tree (hence deliberately NO inWorktree gate). Diverged branches
+                push disabled with the reason in the label; the "Update from"
+                item above is their remedy. */}
+            {pushable && (
+              <ContextMenuItem
+                className={MENU_HELD_ROW_CLASS}
+                disabled={pushItemDisabled || branch.upstreamBehind > 0}
+                onClick={() => {
+                  // The list stays open under the closing menu.
+                  fallThroughGuardUntil.current = Date.now() + 300;
+                  doPushBranch(branch);
+                }}
+              >
+                {branch.upstreamBehind > 0
+                  ? `Push to ${branch.upstream} (diverged)`
+                  : `Push to ${branch.upstream}${pushItemSuffix}`}
+              </ContextMenuItem>
+            )}
+            {/* Publish an unpushed / upstream-deleted branch: one remote → a
+                single item ("Publish branch" for origin), multiple → one flat
+                item per remote (origin first), each passing its explicit
+                destination. */}
+            {publishRemotes.length === 1 ? (
+              <ContextMenuItem
+                className={MENU_HELD_ROW_CLASS}
+                disabled={pushItemDisabled}
+                onClick={() => {
+                  fallThroughGuardUntil.current = Date.now() + 300;
+                  doPushBranch(branch, publishRemotes[0]);
+                }}
+              >
+                {publishRemotes[0] === "origin"
+                  ? `Publish branch${pushItemSuffix}`
+                  : `Publish to ${publishRemotes[0]}${pushItemSuffix}`}
+              </ContextMenuItem>
+            ) : (
+              publishRemotes.map((r) => (
                 <ContextMenuItem
-                  className={MENU_HELD_ROW_CLASS}
-                  disabled={pushItemDisabled || branch.upstreamBehind > 0}
-                  onClick={() => {
-                    // The list stays open under the closing menu.
-                    fallThroughGuardUntil.current = Date.now() + 300;
-                    doPushBranch(branch);
-                  }}
-                >
-                  {branch.upstreamBehind > 0
-                    ? `Push to ${branch.upstream} (diverged)`
-                    : `Push to ${branch.upstream}${pushItemSuffix}`}
-                </ContextMenuItem>
-              )}
-              {/* Publish an unpushed / upstream-deleted branch: one remote → a
-                  single item ("Publish branch" for origin), multiple → one flat
-                  item per remote (origin first), each passing its explicit
-                  destination. */}
-              {publishRemotes.length === 1 ? (
-                <ContextMenuItem
+                  key={r}
                   className={MENU_HELD_ROW_CLASS}
                   disabled={pushItemDisabled}
                   onClick={() => {
                     fallThroughGuardUntil.current = Date.now() + 300;
-                    doPushBranch(branch, publishRemotes[0]);
+                    doPushBranch(branch, r);
                   }}
                 >
-                  {publishRemotes[0] === "origin"
-                    ? `Publish branch${pushItemSuffix}`
-                    : `Publish to ${publishRemotes[0]}${pushItemSuffix}`}
+                  Publish to {r}
+                  {pushItemSuffix}
+                </ContextMenuItem>
+              ))
+            )}
+            <ContextMenuSeparator />
+          </>
+        )}
+        {pr && (
+          <ContextMenuItem onClick={() => openPrChip(pr.select)}>
+            {pr.select.kind === "local"
+              ? "View local pull request"
+              : `View ${prNoun} ${pr.label}`}
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
+          disabled={rowUpdating || rowPushing}
+          onClick={() => openRename(branch.name)}
+        >
+          Rename branch…
+          {(() => {
+            switch (true) {
+              case rowUpdating:
+                return " (updating…)";
+              case rowPushing:
+                return ` (${rowPushHeldReason})`;
+              default:
+                return "";
+            }
+          })()}
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() => copyText(branch.name, "Branch name copied")}
+        >
+          Copy branch name
+        </ContextMenuItem>
+        <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
+          disabled={archiveBlockedReason !== null}
+          onClick={() => void setArchived(branch.name, !branch.archived)}
+        >
+          {archiveBlockedReason === null
+            ? archiveLabel
+            : `${archiveLabel} (${archiveBlockedReason})`}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        {rowWorktree && (
+          <>
+            <ContextMenuItem
+              disabled={rowWorktreeRemoving}
+              onClick={() => {
+                if (refuseWhileLeaving(rowWorktree.path, rowWorktreeRemoving))
+                  return;
+                setOpen(false);
+                void openWorktree(rowWorktree.path);
+              }}
+            >
+              {wtLabel(rowCopy.open)}
+            </ContextMenuItem>
+            {/* Copying a path acts on nothing, so a removal doesn't block it. */}
+            <ContextMenuItem
+              onClick={() => copyText(rowWorktree.path, "Path copied")}
+            >
+              Copy path
+            </ContextMenuItem>
+            <ContextMenuItem
+              // git worktree move refuses the main worktree and a locked one;
+              // it doesn't wait on an update running inside, so that holds too.
+              disabled={
+                rowWorktree.isMain ||
+                rowWorktree.isLocked ||
+                rowWorktreeRemoving ||
+                rowUpdating
+              }
+              onClick={() => {
+                setOpen(false);
+                setRenameWorktreeTarget(rowWorktree);
+              }}
+            >
+              {wtLabel("Rename worktree…", renameWorktreeBlockedReason)}
+            </ContextMenuItem>
+            {!rowWorktree.isMain &&
+              (rowWorktree.isLocked ? (
+                <ContextMenuItem
+                  // In-place state change: the list refreshes via the
+                  // mutation's invalidation, so the popover stays open.
+                  disabled={rowWorktreeRemoving}
+                  onClick={() => {
+                    // The menu can outlive the state that disabled this item,
+                    // and a promote's claim never re-renders it.
+                    if (
+                      refuseWhileLeaving(rowWorktree.path, rowWorktreeRemoving)
+                    )
+                      return;
+                    void doUnlockWorktree(rowWorktree.path);
+                  }}
+                >
+                  {wtLabel("Unlock")}
                 </ContextMenuItem>
               ) : (
-                publishRemotes.map((r) => (
-                  <ContextMenuItem
-                    key={r}
-                    className={MENU_HELD_ROW_CLASS}
-                    disabled={pushItemDisabled}
-                    onClick={() => {
-                      fallThroughGuardUntil.current = Date.now() + 300;
-                      doPushBranch(branch, r);
-                    }}
-                  >
-                    Publish to {r}
-                    {pushItemSuffix}
-                  </ContextMenuItem>
-                ))
-              )}
-              <ContextMenuSeparator />
-            </>
-          )}
-          {pr && (
-            <ContextMenuItem onClick={() => openPrChip(pr.select)}>
-              {pr.select.kind === "local"
-                ? "View local pull request"
-                : `View ${prNoun} ${pr.label}`}
-            </ContextMenuItem>
-          )}
-          <ContextMenuItem
-            className={MENU_HELD_ROW_CLASS}
-            disabled={rowUpdating || rowPushing}
-            onClick={() => openRename(branch.name)}
-          >
-            Rename branch…
-            {(() => {
-              switch (true) {
-                case rowUpdating:
-                  return " (updating…)";
-                case rowPushing:
-                  return ` (${rowPushHeldReason})`;
-                default:
-                  return "";
-              }
-            })()}
-          </ContextMenuItem>
-          <ContextMenuItem
-            onClick={() => copyText(branch.name, "Branch name copied")}
-          >
-            Copy branch name
-          </ContextMenuItem>
-          <ContextMenuItem
-            className={MENU_HELD_ROW_CLASS}
-            disabled={archiveBlockedReason !== null}
-            onClick={() => void setArchived(branch.name, !branch.archived)}
-          >
-            {archiveBlockedReason === null
-              ? archiveLabel
-              : `${archiveLabel} (${archiveBlockedReason})`}
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          {rowWorktree && (
-            <>
-              <ContextMenuItem
-                disabled={rowWorktreeRemoving}
-                onClick={() => {
-                  if (refuseWhileLeaving(rowWorktree.path, rowWorktreeRemoving))
-                    return;
-                  setOpen(false);
-                  void openWorktree(rowWorktree.path);
-                }}
-              >
-                {wtLabel(rowCopy.open)}
-              </ContextMenuItem>
-              {/* Copying a path acts on nothing, so a removal doesn't block it. */}
-              <ContextMenuItem
-                onClick={() => copyText(rowWorktree.path, "Path copied")}
-              >
-                Copy path
-              </ContextMenuItem>
-              <ContextMenuItem
-                // git worktree move refuses the main worktree and a locked one;
-                // it doesn't wait on an update running inside, so that holds too.
-                disabled={
-                  rowWorktree.isMain ||
-                  rowWorktree.isLocked ||
-                  rowWorktreeRemoving ||
-                  rowUpdating
-                }
-                onClick={() => {
-                  setOpen(false);
-                  setRenameWorktreeTarget(rowWorktree);
-                }}
-              >
-                {wtLabel("Rename worktree…", renameWorktreeBlockedReason)}
-              </ContextMenuItem>
-              {!rowWorktree.isMain &&
-                (rowWorktree.isLocked ? (
-                  <ContextMenuItem
-                    // In-place state change: the list refreshes via the
-                    // mutation's invalidation, so the popover stays open.
-                    disabled={rowWorktreeRemoving}
-                    onClick={() => {
-                      // The menu can outlive the state that disabled this item,
-                      // and a promote's claim never re-renders it.
-                      if (
-                        refuseWhileLeaving(
-                          rowWorktree.path,
-                          rowWorktreeRemoving,
-                        )
-                      )
-                        return;
-                      void doUnlockWorktree(rowWorktree.path);
-                    }}
-                  >
-                    {wtLabel("Unlock")}
-                  </ContextMenuItem>
-                ) : (
-                  <ContextMenuItem
-                    disabled={rowWorktreeRemoving}
-                    onClick={() => {
-                      setOpen(false);
-                      setLockWorktreeTarget(rowWorktree);
-                    }}
-                  >
-                    {wtLabel("Lock…")}
-                  </ContextMenuItem>
-                ))}
-              {/* Promote moves this worktree's branch into the main workspace,
-                  so it needs a linked worktree with a branch. */}
-              {!rowWorktree.isMain && !rowWorktree.isDetached && (
                 <ContextMenuItem
-                  disabled={
-                    rowWorktree.isLocked || rowWorktreeRemoving || rowUpdating
-                  }
+                  disabled={rowWorktreeRemoving}
                   onClick={() => {
                     setOpen(false);
-                    setPromoteTarget(rowWorktree);
+                    setLockWorktreeTarget(rowWorktree);
                   }}
                 >
-                  {wtLabel("Promote to main workspace…", promoteBlockedReason)}
+                  {wtLabel("Lock…")}
                 </ContextMenuItem>
-              )}
+              ))}
+            {/* Promote moves this worktree's branch into the main workspace,
+                so it needs a linked worktree with a branch. */}
+            {!rowWorktree.isMain && !rowWorktree.isDetached && (
               <ContextMenuItem
-                // A removal mid-update races it: removal doesn't wait on the update's lock.
                 disabled={
-                  rowWorktree.isMain || rowWorktreeRemoving || rowUpdating
+                  rowWorktree.isLocked || rowWorktreeRemoving || rowUpdating
                 }
                 onClick={() => {
                   setOpen(false);
-                  setRemoveWorktreeTarget(rowWorktree);
+                  setPromoteTarget(rowWorktree);
                 }}
               >
-                {wtLabel("Delete worktree…", deleteWorktreeBlockedReason)}
+                {wtLabel("Promote to main workspace…", promoteBlockedReason)}
               </ContextMenuItem>
-              <ContextMenuSeparator />
-            </>
-          )}
-          <ContextMenuItem
-            className={MENU_HELD_ROW_CLASS}
-            disabled={deletionBlocked || inWorktree || rowPushing}
-            onClick={() => {
-              setOpen(false);
-              openDelete(branch.name);
-            }}
-          >
-            {(() => {
-              switch (true) {
-                case deletionBlocked:
-                  return "Delete branch… (protected)";
-                case inWorktree:
-                  return `Delete branch… (${rowCopy.held})`;
-                case rowPushing:
-                  return `Delete branch… (${rowPushHeldReason})`;
-                default:
-                  return "Delete branch…";
+            )}
+            <ContextMenuItem
+              // A removal mid-update races it: removal doesn't wait on the update's lock.
+              disabled={
+                rowWorktree.isMain || rowWorktreeRemoving || rowUpdating
               }
-            })()}
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+              onClick={() => {
+                setOpen(false);
+                setRemoveWorktreeTarget(rowWorktree);
+              }}
+            >
+              {wtLabel("Delete worktree…", deleteWorktreeBlockedReason)}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+          </>
+        )}
+        <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
+          disabled={deletionBlocked || inWorktree || rowPushing}
+          onClick={() => {
+            setOpen(false);
+            openDelete(branch.name);
+          }}
+        >
+          {(() => {
+            switch (true) {
+              case deletionBlocked:
+                return "Delete branch… (protected)";
+              case inWorktree:
+                return `Delete branch… (${rowCopy.held})`;
+              case rowPushing:
+                return `Delete branch… (${rowPushHeldReason})`;
+              default:
+                return "Delete branch…";
+            }
+          })()}
+        </ContextMenuItem>
+      </>
     );
   };
 
@@ -3696,84 +4117,171 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // down" glyph). Clicking checks it out, which `git switch` turns into a local
   // tracking branch — routed through `switchTo` so in-progress changes are handled.
   const renderRemoteRow = (branch: RemoteBranch) => {
+    return (
+      <button
+        type="button"
+        data-row={branch.name}
+        title={`Check out ${branch.name} — creates a local branch tracking ${branch.remote}/${branch.name}`}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
+        onFocus={() => focusRow(branch.name)}
+        onClick={() => void switchTo(branch.name, branch.remote)}
+      >
+        <CloudArrowDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="min-w-0 flex-1 truncate">{branch.name}</span>
+        {multipleRemotes && (
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            {branch.remote}
+          </span>
+        )}
+        {branch.lastCommitDate && (
+          <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+            <RelativeTime date={branch.lastCommitDate} />
+          </span>
+        )}
+      </button>
+    );
+  };
+
+  // A remote-only row's items in the shared context menu, for the LIVE row.
+  const renderRemoteMenu = (branch: RemoteBranch) => {
     // A protected name is protected on the remote too — reuse the local rule.
     const deletionBlocked = isDeletionBlocked(rulesConfig, branch.name);
     return (
-      <ContextMenu key={`remote/${branch.remote}/${branch.name}`}>
-        <ContextMenuTrigger
-          render={
-            <button
-              type="button"
-              data-row={branch.name}
-              title={`Check out ${branch.name} — creates a local branch tracking ${branch.remote}/${branch.name}`}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus-visible:bg-accent focus-visible:text-accent-foreground focus-visible:outline-none"
-              onFocus={() => focusRow(branch.name)}
-              onClick={() => void switchTo(branch.name, branch.remote)}
-            >
-              <CloudArrowDownIcon className="size-3.5 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{branch.name}</span>
-              {multipleRemotes && (
-                <span className="shrink-0 text-[11px] text-muted-foreground">
-                  {branch.remote}
-                </span>
-              )}
-              {branch.lastCommitDate && (
-                <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
-                  <RelativeTime date={branch.lastCommitDate} />
-                </span>
-              )}
-            </button>
+      <>
+        <ContextMenuItem
+          onClick={() => void switchTo(branch.name, branch.remote)}
+        >
+          Check out
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() => copyText(branch.name, "Branch name copied")}
+        >
+          Copy branch name
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        {/* The Remote section dedupes a name across remotes to one row, so
+            this targets THIS row's remote; after invalidation a same-name row
+            from another remote may reappear. That's expected. */}
+        {/* Held here and at the confirm; the handler still re-checks, since
+            the connection can drop between render and press. */}
+        <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
+          // A remote delete is a push, so it would queue on the network lock.
+          disabled={
+            deletionBlocked || pushActive || !!offlineHold || publishActive
           }
-        />
-        <ContextMenuContent className="min-w-48">
-          <ContextMenuItem
-            onClick={() => void switchTo(branch.name, branch.remote)}
-          >
-            Check out
-          </ContextMenuItem>
-          <ContextMenuItem
-            onClick={() => copyText(branch.name, "Branch name copied")}
-          >
-            Copy branch name
-          </ContextMenuItem>
-          <ContextMenuSeparator />
-          {/* The Remote section dedupes a name across remotes to one row, so
-              this targets THIS row's remote; after invalidation a same-name row
-              from another remote may reappear. That's expected. */}
-          {/* Held here and at the confirm; the handler still re-checks, since
-              the connection can drop between render and press. */}
-          <ContextMenuItem
-            className={MENU_HELD_ROW_CLASS}
-            // A remote delete is a push, so it would queue on the network lock.
-            disabled={
-              deletionBlocked || pushActive || !!offlineHold || publishActive
+          onClick={() => {
+            setOpen(false);
+            setRemoteDeleteTarget({
+              remote: branch.remote,
+              name: branch.name,
+              repo: repoPath,
+            });
+          }}
+        >
+          {(() => {
+            switch (true) {
+              case deletionBlocked:
+                return `Delete on ${branch.remote}… (protected)`;
+              case publishActive:
+                return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`;
+              case pushActive:
+                return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`;
+              default:
+                return `Delete on ${branch.remote}…${offlineSuffix}`;
             }
-            onClick={() => {
-              setOpen(false);
-              setRemoteDeleteTarget({
-                remote: branch.remote,
-                name: branch.name,
-                repo: repoPath,
-              });
-            }}
-          >
-            {(() => {
-              switch (true) {
-                case deletionBlocked:
-                  return `Delete on ${branch.remote}… (protected)`;
-                case publishActive:
-                  return `Delete on ${branch.remote}… (${PUBLISH_HOLD_ITEM_REASON})`;
-                case pushActive:
-                  return `Delete on ${branch.remote}… (${branchPushHoldItemReason(pushPaused)})`;
-                default:
-                  return `Delete on ${branch.remote}…${offlineSuffix}`;
-              }
-            })()}
-          </ContextMenuItem>
-        </ContextMenuContent>
-      </ContextMenu>
+          })()}
+        </ContextMenuItem>
+      </>
     );
   };
+
+  // The shared context menu's items for whichever row it was opened on.
+  const renderShownMenu = (row: Branch | RemoteBranch) => {
+    if ("remote" in row) return renderRemoteMenu(row);
+    return renderBranchMenu(row);
+  };
+
+  // The windowed list's row renderer: the branch rows above and the two section
+  // toggles with their counts.
+  const renderBranchMenuRow = (row: BranchMenuRow<Branch, RemoteBranch>) => {
+    switch (row.type) {
+      case "local":
+        return renderBranchRow(row.branch);
+      case "remote":
+        return renderRemoteRow(row.branch);
+      case "archived-header":
+        return (
+          <button
+            type="button"
+            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            <CaretDownIcon
+              className={`size-3 transition-transform ${
+                showArchived ? "" : "-rotate-90"
+              }`}
+              weight="bold"
+            />
+            Archived ({archivedBranches.length})
+          </button>
+        );
+      case "remote-header":
+        return (
+          <button
+            type="button"
+            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground"
+            onClick={() => setShowRemote((v) => !v)}
+            title="Branches on your remotes you haven't checked out yet"
+          >
+            <CaretDownIcon
+              className={`size-3 transition-transform ${
+                showRemote ? "" : "-rotate-90"
+              }`}
+              weight="bold"
+            />
+            Remote ({remoteOnly.length})
+          </button>
+        );
+    }
+  };
+
+  // Aims the shared menu at the row an event landed on, setting the target
+  // and its probe together; false when it landed on no row (a section toggle).
+  function aimBranchMenu(e: SyntheticEvent<HTMLElement>) {
+    const rowEl = (e.target as Element).closest<HTMLElement>("[data-index]");
+    const row =
+      rowEl && e.currentTarget.contains(rowEl)
+        ? flatRows[Number(rowEl.dataset.index)]
+        : undefined;
+    const target = menuTargetOf(row);
+    if (target === null) return false;
+    setMenuTarget(target);
+    setRewriteProbe(
+      row?.type === "local" &&
+        row.branch.upstreamAhead > 0 &&
+        row.branch.upstreamBehind > 0
+        ? row.branch.name
+        : null,
+    );
+    return true;
+  }
+  // Capture phase, so the target and its probe are both set before Base UI's
+  // own handler opens the menu in this same event. A right-click on no row
+  // opens nothing.
+  function handleBranchContextMenu(e: MouseEvent<HTMLElement>) {
+    if (!aimBranchMenu(e)) {
+      suppressContextMenu(e);
+      return;
+    }
+    menuTargetEvent.current = e.nativeEvent;
+  }
+  // A touch long-press opens the menu from Base UI's own timer with no
+  // contextmenu event, so the touch's start aims it. On no row, stopping the
+  // event keeps Base UI's same-element listener from arming that timer.
+  function handleBranchTouchStart(e: TouchEvent<HTMLElement>) {
+    if (!aimBranchMenu(e)) e.stopPropagation();
+  }
 
   // Sticky, never `isError`: a never-loaded query that errored goes back to
   // pending on every refetch, which would flip the trigger back to its skeleton.
@@ -3840,49 +4348,46 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                 <GitBranchIcon data-icon="inline-start" />
               )}
               {(() => {
-                switch (true) {
-                  case status.data !== undefined:
-                    return (
+                if (status.data !== undefined)
+                  return (
+                    <span
+                      className="min-w-0 truncate"
+                      // Sits under the wrapper's conditional title — a static
+                      // or blanked title here would suppress that tooltip.
+                      onMouseEnter={clipTitle(currentLabel)}
+                    >
+                      {currentLabel}
+                    </span>
+                  );
+                // A failed read holds still until the poll heals it, in the
+                // skeleton's width so the caret doesn't move between them.
+                if (failedRead)
+                  return (
+                    <>
                       <span
-                        className="min-w-0 truncate"
-                        // Sits under the wrapper's conditional title — a static
-                        // or blanked title here would suppress that tooltip.
-                        onMouseEnter={clipTitle(currentLabel)}
+                        aria-hidden
+                        className="inline-block w-[9ch] shrink-0 text-muted-foreground"
                       >
-                        {currentLabel}
+                        —
                       </span>
-                    );
-                  // A failed read holds still until the poll heals it, in the
-                  // skeleton's width so the caret doesn't move between them.
-                  case failedRead:
-                    return (
-                      <>
-                        <span
-                          aria-hidden
-                          className="inline-block w-[9ch] shrink-0 text-muted-foreground"
-                        >
-                          —
-                        </span>
-                        <span className="sr-only">
-                          {STATUS_READ_FAILED_REASON}
-                        </span>
-                      </>
-                    );
-                  // The bar holds the label floor's width, so the settled name
-                  // moves the header less. A span wearing the house Skeleton's
-                  // classes: the vendored Skeleton is a div, which a button's
-                  // phrasing content can't hold.
-                  default:
-                    return (
-                      <>
-                        <span
-                          aria-hidden
-                          className="inline-block h-3 w-[9ch] shrink-0 animate-pulse rounded-none bg-muted"
-                        />
-                        <span className="sr-only">{STATUS_PENDING_REASON}</span>
-                      </>
-                    );
-                }
+                      <span className="sr-only">
+                        {STATUS_READ_FAILED_REASON}
+                      </span>
+                    </>
+                  );
+                // The bar holds the label floor's width, so the settled name
+                // moves the header less. A span wearing the house Skeleton's
+                // classes: the vendored Skeleton is a div, which a button's
+                // phrasing content can't hold.
+                return (
+                  <>
+                    <span
+                      aria-hidden
+                      className="inline-block h-3 w-[9ch] shrink-0 animate-pulse rounded-none bg-muted"
+                    />
+                    <span className="sr-only">{STATUS_PENDING_REASON}</span>
+                  </>
+                );
               })()}
               {/* The compact header drops the badge rather than budget it in
                   the label floor: the label already reads "detached @", and
@@ -3906,6 +4411,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
             className="isolate z-50"
           >
             <Popover.Popup
+              ref={branchPopupRef}
               className="w-108 rounded-none bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10"
               // Arrow keys move through the branch rows whether focus is on the
               // filter input, a row, or the popup itself (Esc/Tab pass through).
@@ -3960,7 +4466,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
               )}
               <div className="border-b p-2">
                 <Input
-                  ref={listRescue.hostRef}
+                  ref={listHostRef}
                   value={branchFilter}
                   onChange={(e) => setBranchFilter(e.target.value)}
                   placeholder="Filter branches"
@@ -3968,69 +4474,105 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                   autoComplete="off"
                 />
               </div>
-              <div className="max-h-60 overflow-y-auto">
-                {listState.mode === "pending" && <BranchRowSkeletons />}
-                {listState.mode === "failed" && (
-                  <div className="flex items-center gap-2 px-3 py-4 text-xs">
-                    <span className="min-w-0 flex-1 text-muted-foreground">
-                      {listLine}
-                    </span>
-                    <BranchListRetry
-                      retrying={listRetrying}
-                      retryRef={listRescue.retryRef}
-                      onRetry={() => void branches.refetch()}
+              <ContextMenu
+                actionsRef={branchMenuActions}
+                onOpenChange={(menuOpen, details) => {
+                  branchMenuOpenRef.current = menuOpen;
+                  setBranchMenuOpen(menuOpen);
+                  // The closing menu's probe goes with it, unless this close is
+                  // the right-click that just moved the menu to another row.
+                  if (!menuOpen && details.event !== menuTargetEvent.current)
+                    setRewriteProbe(null);
+                }}
+                // The target outlives the close until the exit fade ends, so the
+                // fading popup keeps its items.
+                onOpenChangeComplete={(menuOpen) => {
+                  if (!menuOpen && !branchMenuOpenRef.current)
+                    setMenuTarget(null);
+                }}
+              >
+                {listState.mode === "ready" && flatRows.length > 0 ? (
+                  <ContextMenuTrigger
+                    render={
+                      <div
+                        onContextMenuCapture={handleBranchContextMenu}
+                        onTouchStartCapture={handleBranchTouchStart}
+                      />
+                    }
+                  >
+                    {/* Keyed on the repo: a held cross-repo landing under an
+                        open menu keeps serving rows, and a persisted
+                        virtualizer would keep the old offset and compute an
+                        empty range. */}
+                    <BranchMenuList
+                      key={repoPath}
+                      flatRows={flatRows}
+                      activeName={activeBranch}
+                      target={menuTarget}
+                      focusNonce={focusNonce}
+                      filter={bq}
+                      popupRef={branchPopupRef}
+                      renderRow={renderBranchMenuRow}
                     />
+                  </ContextMenuTrigger>
+                ) : (
+                  <div className="max-h-60 overflow-y-auto">
+                    {listState.mode === "pending" && <BranchRowSkeletons />}
+                    {listState.mode === "failed" && (
+                      <div className="flex items-center gap-2 px-3 py-4 text-xs">
+                        <span className="min-w-0 flex-1 text-muted-foreground">
+                          {listLine}
+                        </span>
+                        <BranchListRetry
+                          retrying={listRetrying}
+                          retryRef={listRetryRef}
+                          onRetry={() => void branches.refetch()}
+                        />
+                      </div>
+                    )}
+                    {listState.mode === "ready" &&
+                      visibleBranches.length === 0 &&
+                      archivedBranches.length === 0 &&
+                      remoteOnly.length === 0 && (
+                        <p className="px-3 py-4 text-center text-xs text-muted-foreground">
+                          {branchFilter.trim()
+                            ? `No branches match "${branchFilter.trim()}"`
+                            : "No branches"}
+                        </p>
+                      )}
                   </div>
                 )}
-                {listState.mode === "ready" &&
-                  visibleBranches.length === 0 &&
-                  archivedBranches.length === 0 &&
-                  remoteOnly.length === 0 && (
-                    <p className="px-3 py-4 text-center text-xs text-muted-foreground">
-                      {branchFilter.trim()
-                        ? `No branches match "${branchFilter.trim()}"`
-                        : "No branches"}
-                    </p>
-                  )}
-                {visibleBranches.map(renderBranchRow)}
-                {archivedBranches.length > 0 && (
-                  <>
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                      onClick={() => setShowArchived((v) => !v)}
-                    >
-                      <CaretDownIcon
-                        className={`size-3 transition-transform ${
-                          showArchived ? "" : "-rotate-90"
-                        }`}
-                        weight="bold"
-                      />
-                      Archived ({archivedBranches.length})
-                    </button>
-                    {showArchived && archivedBranches.map(renderBranchRow)}
-                  </>
-                )}
-                {showRemoteSection && (
-                  <>
-                    <button
-                      type="button"
-                      className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-                      onClick={() => setShowRemote((v) => !v)}
-                      title="Branches on your remotes you haven't checked out yet"
-                    >
-                      <CaretDownIcon
-                        className={`size-3 transition-transform ${
-                          showRemote ? "" : "-rotate-90"
-                        }`}
-                        weight="bold"
-                      />
-                      Remote ({remoteOnly.length})
-                    </button>
-                    {showRemote && remoteOnly.map(renderRemoteRow)}
-                  </>
-                )}
-              </div>
+                <ContextMenuContent
+                  className="min-w-48"
+                  // Back to the targeted row, kept mounted while the menu is
+                  // open: the shared trigger around the list takes no focus.
+                  // Only while focus is still in the menu or nowhere, never
+                  // pulled back from where the user took it during the fade.
+                  finalFocus={() => {
+                    const focused = document.activeElement;
+                    if (
+                      focused !== null &&
+                      focused !== document.body &&
+                      focused.closest('[data-slot="context-menu-content"]') ===
+                        null
+                    )
+                      return false;
+                    const row =
+                      menuTarget &&
+                      branchPopupRef.current?.querySelector<HTMLElement>(
+                        `[data-row="${CSS.escape(menuTarget.name)}"]`,
+                      );
+                    // Base UI restores focus with preventScroll, so a row the
+                    // list scrolled away from would take focus out of view.
+                    row?.scrollIntoView({ block: "nearest" });
+                    return row ?? true;
+                  }}
+                >
+                  {open &&
+                    shownMenuRow !== undefined &&
+                    renderShownMenu(shownMenuRow)}
+                </ContextMenuContent>
+              </ContextMenu>
               <div className="border-t py-1">
                 <MenuRow onClick={openCreate}>New branch…</MenuRow>
                 <MenuRow

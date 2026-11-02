@@ -16,6 +16,7 @@ import { useConfirm } from "@/lib/stores/confirm";
  */
 export function ConfirmDialogHost() {
   const request = useConfirm((s) => s.request);
+  const requestHold = useConfirm((s) => s.requestHold);
   const answer = useConfirm((s) => s.answer);
 
   // One host serves every prompt, so the box must re-seed per request rather
@@ -33,6 +34,16 @@ export function ConfirmDialogHost() {
   // prompt that is already open.
   const offlineHold = useOfflineHold();
 
+  // Reserved for the request's whole life, so the reason→note→empty swaps never
+  // move the buttons; the dialog's only live region. A span: the body renders
+  // inside DialogDescription's <p>.
+  const holdLine =
+    requestHold === null ? null : (
+      <span aria-live="polite" className="mt-2 block min-h-[1lh]">
+        {requestHold.reason ?? requestHold.note}
+      </span>
+    );
+
   return (
     <ConfirmDialog
       open={request !== null}
@@ -40,24 +51,30 @@ export function ConfirmDialogHost() {
       onConfirm={() => answer(true, checked)}
       title={request?.title ?? ""}
       body={
-        checkboxLabel === undefined ? (
+        checkboxLabel === undefined && holdLine === null ? (
           (request?.body ?? "")
         ) : (
           <>
             {request?.body}
-            <label className="mt-3 flex cursor-pointer items-center gap-2 text-foreground">
-              <Checkbox
-                checked={checked}
-                onCheckedChange={(next) => setChecked(next === true)}
-              />
-              {checkboxLabel}
-            </label>
+            {holdLine}
+            {checkboxLabel === undefined ? null : (
+              <label className="mt-3 flex cursor-pointer items-center gap-2 text-foreground">
+                <Checkbox
+                  checked={checked}
+                  onCheckedChange={(next) => setChecked(next === true)}
+                />
+                {checkboxLabel}
+              </label>
+            )}
           </>
         )
       }
       confirmLabel={request?.confirmLabel ?? ""}
       confirmVariant={request?.confirmVariant ?? "default"}
-      heldReason={request?.holdOffline ? offlineHold : undefined}
+      // The offline hold outranks the request's: that write refuses, never parks.
+      heldReason={
+        (request?.holdOffline ? offlineHold : undefined) ?? requestHold?.reason
+      }
     />
   );
 }
