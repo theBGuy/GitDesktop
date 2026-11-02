@@ -1,32 +1,39 @@
 // The opencode permission pin only binds when the production call sites in
 // src-tauri/src/agent.rs feed it the run's own inputs: agent_review passes
 // review_env kind, repo_aware, the run's OPENCODE_CONFIG, the self-MCP server
-// names and the user's mirrored read rules, and opencode_review_args repo_aware
-// and the dir; both agent_session branches (container, then host) pass
+// names and the mirrored read rules, and opencode_review_args repo_aware and
+// the dir; both agent_session branches (container, then host) pass
 // opencode_session_env read_only, opencode_research, an OPENCODE_CONFIG
-// (container config_path, host mcp_config_path) and mcp_names, and the host
-// branch the mirrored read rules (the container's opencode loads none of the
-// host's config files). Each input is pinned to its one producer: read_only and
-// repo_aware to the parameter, never rebound; opencode_research, mcp_names and
-// the container config_path to their exact `let`; the host mcp_config_path to
-// its one `None` declaration and agent_review's to one non-mut declaration,
-// each left unnamed between its read_mirror and its call. Each read_mirror is
-// built once, from opencode_read_mirror fed the run's OPENCODE_CONFIG and
-// repo_path or worktree_path, in the arm whose run carries the ReadOnly pin (a
-// repo-aware opencode review, a read-only session); the other arm, DiffOnly
-// runs included, mirrors nothing. That path is pinned as the run's spawn cwd
-// (stream_agent in the review and the host session) and its --dir
-// (opencode_review_args; the `run_dir` dir agent_session hands
-// opencode_session_args). The checker, a pure function fed the real file plus
-// in-memory mutants, lexes so comments and strings never satisfy a pin; a `,`
-// before `)` is ignored, so a rustfmt reflow passes. An unreadable file,
-// unterminated lexing, a missing anchor, an extra or missing call, or a bare
-// mention of either env fn fails closed. Out of reach: what the env fns do with
-// their arguments and what run_dir returns (Rust tests pin those), what the
-// per-CLI code assigns each mcp_config_path before its mirror, bindings made
-// through a pattern or macro, calls in another file or through a re-export,
-// and which branch runs: the branch is inferred from the `let container_env` /
-// `let host_extra_env` anchors' source order.
+// (container config_path, host mcp_config_path), mcp_names, and on the host the
+// mirrored read rules, which the container's opencode never reads. Each input
+// is pinned to its one producer: kind, repo_aware and read_only to a parameter
+// declared without `mut` and never rebound (agent_session's kind to its one
+// non-mut `let`); opencode_research, mcp_names, self_names and the container
+// config_path to their exact `let`; the host mcp_config_path to its one `None`
+// declaration and agent_review's to one non-mut declaration, each unnamed
+// between its read_mirror and its call. Each run's env vector is named only by
+// its `let` and its spawn argument. Each read_mirror is built once, by
+// opencode_read_mirror from the run's OPENCODE_CONFIG and repo_path or
+// worktree_path, in the ReadOnly-pinned arm (a repo-aware opencode review, a
+// read-only session); the other arm mirrors nothing. That path is also the
+// run's spawn cwd and --dir (opencode_review_args, or the `run_dir` dir
+// opencode_session_args gets). The checker lexes, so comments and strings never
+// satisfy a pin, and ignores a `,` before `)`, so a rustfmt reflow passes. An
+// unreadable file, unfinished lexing, a missing anchor, an extra or missing
+// call, or a bare env-fn mention fails closed. Contract: ordinary edits are
+// caught; these deliberate shapes are not, and code review owns them: what the
+// env fns, run_dir and stream_agent do with their inputs, what the per-CLI code
+// assigns each mcp_config_path, the container's client-side extra_env, calls in
+// another file or via a re-export, an early return spawning another way (an
+// aliased stream_agent, a raw Command, a spawn outside the pinned branch), cfg
+// and cfg_attr attributes, macros (macro_rules!, stringify! and friends),
+// closures and async blocks, nested, shadowing or decoy fn and use items (a
+// same-named fn included), conditional or dead wrappers around a pinned
+// statement or call (if false, match arms, cfg!()), raw identifiers (r#name),
+// pattern bindings (let ref, parenthesized or tuple patterns, match, if-let and
+// closure-parameter shadows), raw pointers and unsafe writes, non-ASCII
+// identifiers, and which branch runs (read from the order of the container_env
+// and host_extra_env lets).
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -105,6 +112,39 @@ function callsIn(masked, [from, to], name) {
   );
 }
 
+/** `name` is a parameter of `fn`'s own signature, typed `type`, never `mut` (so
+ *  nothing can assign it) and never rebound by a `let` in `body`. */
+function pinParameter(masked, fn, body, name, type, problems) {
+  if (letStatement(masked, body, name).count !== 0)
+    problems.push(`${fn} must not rebind ${name}`);
+  // Only the fn's own signature counts: other fns declare the same names.
+  const signature = masked.slice(
+    new RegExp(`\\bfn ${fn}\\b`).exec(masked).index,
+    body[0],
+  );
+  const declared = new RegExp(
+    `(\\bmut\\s+)?\\b${name}\\s*:\\s*${type}\\b`,
+  ).exec(signature);
+  if (!declared)
+    problems.push(`missing anchor: ${fn}'s ${name}: ${type} parameter`);
+  else if (declared[1]) problems.push(`${fn} must declare ${name} without mut`);
+}
+
+/** An env vector is named exactly twice in `body`, by its one `let` (opening
+ *  with `head`) and its spawn argument, so nothing between them can shadow,
+ *  mutate, reassign or narrow it. `bound.count !== 1` is the caller's anchor. */
+function pinEnvVector(masked, fn, body, bound, name, head, problems) {
+  const uses = [
+    ...masked.slice(...body).matchAll(new RegExp(`\\b${name}\\b`, "g")),
+  ].length;
+  if (uses !== 2)
+    problems.push(
+      `${fn} must use ${name} exactly twice (its let, its spawn argument), saw ${uses}`,
+    );
+  if (bound.count === 1 && !bound.text.startsWith(head))
+    problems.push(`${fn} must build ${name}: ${head}`);
+}
+
 /** The whitespace-collapsed `let read_mirror` each fn holds, up to its `;`: the
  *  resolver, fed the run's OPENCODE_CONFIG and --dir, in the ReadOnly-pinned arm. */
 const REVIEW_MIRROR =
@@ -119,6 +159,18 @@ const MCP_NAMES =
 const MCP_CONFIG_PATH = "let mut mcp_config_path: Option<String> = None";
 /** agent_review's OPENCODE_CONFIG: bound once, never `mut`. */
 const REVIEW_CONFIG_PATH = "let mcp_config_path: Option<String> =";
+/** Every self-MCP server's name, so the review's pin admits each one's tools. */
+const SELF_NAMES =
+  "let self_names: Vec<&str> = self_specs.iter().map(|s| s.name.as_str()).collect()";
+/** agent_session's kind: one non-mut `let`, so nothing can assign it. */
+const SESSION_KIND = "let kind = match agent.as_str() {";
+/** Each run's env vector opens its one `let` with these (the rest is pinned
+ *  through the env fn's call). */
+const REVIEW_ENV = "let extra_env = review_env(";
+const CONTAINER_ENV =
+  "let container_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {";
+const HOST_ENV =
+  "let host_extra_env: Vec<(&str, String)> = if kind == AgentKind::Opencode {";
 const RESEARCH = "let opencode_research = kind == AgentKind::Opencode && web";
 /** The container OPENCODE_CONFIG, compared in source text: its "opencode" key is a
  *  string literal, which the masked view blanks. */
@@ -217,11 +269,26 @@ function checkPinCallSites(text) {
   const reviewSpawn = callsIn(masked, review, "stream_agent");
   if (reviewSpawn.length !== 1 || reviewSpawn[0]?.[5] !== "&repo_path")
     problems.push("agent_review must spawn stream_agent once, in &repo_path");
-  const selfNames = letStatement(masked, review, "self_names");
-  if (selfNames.count !== 1 || !/=\s*self_specs\.iter\(\)/.test(selfNames.text))
+  // stream_agent's 12th parameter is the child's environment.
+  if (reviewSpawn.length === 1 && reviewSpawn[0]?.[11] !== "&extra_env")
     problems.push(
-      "agent_review must build self_names once, from self_specs.iter()",
+      `agent_review must spawn stream_agent with &extra_env, got ${reviewSpawn[0]?.[11] ?? "nothing"}`,
     );
+  const reviewEnv = letStatement(masked, review, "extra_env");
+  if (reviewEnv.count !== 1)
+    problems.push("missing anchor: one let extra_env in agent_review");
+  pinEnvVector(
+    masked,
+    "agent_review",
+    review,
+    reviewEnv,
+    "extra_env",
+    REVIEW_ENV,
+    problems,
+  );
+  const selfNames = letStatement(masked, review, "self_names");
+  if (selfNames.count !== 1 || selfNames.text !== collapse(SELF_NAMES))
+    problems.push(`agent_review must build self_names once: ${SELF_NAMES}`);
   const selfSpecs = letStatement(masked, review, "self_specs");
   if (
     selfSpecs.count !== 1 ||
@@ -230,15 +297,8 @@ function checkPinCallSites(text) {
     problems.push(
       "agent_review must build self_specs once, from crate::mcp::self_server_spec",
     );
-  if (letStatement(masked, review, "repo_aware").count !== 0)
-    problems.push("agent_review must not rebind repo_aware");
-  // Only agent_review's own signature counts: other fns declare repo_aware too.
-  const reviewSignature = masked.slice(
-    /\bfn agent_review\b/.exec(masked).index,
-    review[0],
-  );
-  if (!/\brepo_aware\s*:\s*bool\b/.test(reviewSignature))
-    problems.push("missing anchor: agent_review's repo_aware: bool parameter");
+  pinParameter(masked, "agent_review", review, "kind", "AgentKind", problems);
+  pinParameter(masked, "agent_review", review, "repo_aware", "bool", problems);
   // Only the prefix is compared: the per-CLI body after `=` is out of reach.
   const reviewConfig = letStatement(masked, review, "mcp_config_path");
   if (
@@ -338,15 +398,43 @@ function checkPinCallSites(text) {
     problems.push(
       "agent_session's host branch must spawn stream_agent once, in &worktree_path",
     );
-  if (letStatement(masked, session, "read_only").count !== 0)
-    problems.push("agent_session must not rebind read_only");
-  // Only agent_session's own signature counts: other fns declare read_only too.
-  const signature = masked.slice(
-    /\bfn agent_session\b/.exec(masked).index,
-    session[0],
+  if (hostSpawn.length === 1 && hostSpawn[0]?.[11] !== "&host_extra_env")
+    problems.push(
+      `agent_session's host branch must spawn stream_agent with &host_extra_env, got ${hostSpawn[0]?.[11] ?? "nothing"}`,
+    );
+  // build_run_args' 9th parameter becomes the container's `-e` environment.
+  const runArgs =
+    container.at >= 0 && host.at > container.at
+      ? callsIn(masked, [container.at, host.at], "build_run_args")
+      : [];
+  if (runArgs.length !== 1 || runArgs[0]?.[8] !== "&container_env")
+    problems.push(
+      "agent_session's container branch must pass build_run_args &container_env once",
+    );
+  pinEnvVector(
+    masked,
+    "agent_session",
+    session,
+    container,
+    "container_env",
+    CONTAINER_ENV,
+    problems,
   );
-  if (!/\bread_only\s*:\s*bool\b/.test(signature))
-    problems.push("missing anchor: agent_session's read_only: bool parameter");
+  pinEnvVector(
+    masked,
+    "agent_session",
+    session,
+    host,
+    "host_extra_env",
+    HOST_ENV,
+    problems,
+  );
+  pinParameter(masked, "agent_session", session, "read_only", "bool", problems);
+  const sessionKind = letStatement(masked, session, "kind");
+  if (sessionKind.count !== 1 || !sessionKind.text.startsWith(SESSION_KIND))
+    problems.push(
+      `agent_session must declare kind once, not mut: ${SESSION_KIND}`,
+    );
   const mcpNames = letStatement(masked, session, "mcp_names");
   if (mcpNames.count !== 1 || mcpNames.text !== collapse(MCP_NAMES))
     problems.push(`agent_session must build mcp_names once: ${MCP_NAMES}`);
@@ -550,9 +638,7 @@ test("P7: missing anchors, rebinding and bare mentions fail closed", () => {
           "let self_names: Vec<&str> = Vec::<McpServerSpec>::new().iter()",
         ),
       ),
-    ).includes(
-      "agent_review must build self_names once, from self_specs.iter()",
-    ),
+    ).includes(`agent_review must build self_names once: ${SELF_NAMES}`),
   );
   assert.ok(
     checkPinCallSites(
@@ -916,4 +1002,208 @@ test("P14: agent_review's pin-choosing inputs are pinned to their producers", ()
   assert.deepEqual(checkPinCallSites(mutant), [
     "missing anchor: agent_review's repo_aware: bool parameter",
   ]);
+});
+
+test("P15: pinned parameters, env vectors and self_names admit no ordinary edit", () => {
+  const unique = (t, from) =>
+    assert.equal(t.split(from).length, 2, `not unique: ${from}`);
+  const swap = (from, to) => (t) => {
+    unique(t, from);
+    return t.replace(from, () => to);
+  };
+  const before = (anchor, line) => swap(anchor, `${line}\n${anchor}`);
+  const after = (anchor, line) => swap(anchor, `${anchor}\n${line}`);
+  // Retypes `name: type` in fn's own signature, past the earlier fns' copies.
+  const param = (fn, name, type, to) => (t) => {
+    const at = t.indexOf(`${name}: ${type}`, t.indexOf(`fn ${fn}(`));
+    assert.ok(at > 0, `${fn} declares no ${name}: ${type}`);
+    return `${t.slice(0, at)}${to}${t.slice(at + `${name}: ${type}`.length)}`;
+  };
+  const mut = (fn, name, type) => param(fn, name, type, `mut ${name}: ${type}`);
+  const all =
+    (...edits) =>
+    (t) =>
+      edits.reduce((text, edit) => edit(text), t);
+  const OPENS_REVIEW_ENV = "    let extra_env = review_env(";
+  const OPENS_HOST_ENV = `    ${HOST_ENV}`;
+  const OPENS_CONTAINER_ENV = `        ${CONTAINER_ENV}`;
+  const REVIEW_ENV_LET = `    let extra_env = ${REVIEW_CALL};`;
+  const CONTAINER_ENV_LET = `${CONTAINER_CALL}\n        } else {\n            Vec::new()\n        };`;
+  const HOST_ENV_LET = `${HOST_CALL}\n    } else {\n        Vec::new()\n    };`;
+  const twice = (fn, name, saw) =>
+    `${fn} must use ${name} exactly twice (its let, its spawn argument), saw ${saw}`;
+  const reviewAnchor = "missing anchor: one let extra_env in agent_review";
+  const containerAnchor =
+    "missing anchor: one let container_env in agent_session";
+  const hostAnchor = "missing anchor: one let host_extra_env in agent_session";
+  const reviewBuild = `agent_review must build extra_env: ${REVIEW_ENV}`;
+  const containerBuild = `agent_session must build container_env: ${CONTAINER_ENV}`;
+  const hostBuild = `agent_session must build host_extra_env: ${HOST_ENV}`;
+  const sessionKind = `agent_session must declare kind once, not mut: ${SESSION_KIND}`;
+  const SHADOW = (name, indent) =>
+    `${indent}let ${name}: Vec<(&str, String)> = Vec::new();`;
+  const RETAIN = (name, indent) =>
+    `${indent}${name}.retain(|(k, _)| *k != "OPENCODE_PERMISSION");`;
+  const PUSH = (name, indent) =>
+    `${indent}${name}.push(("OPENCODE_PERMISSION", "{}".to_string()));`;
+  const mutLet = (opens, name) =>
+    swap(opens, opens.replace(`let ${name}`, `let mut ${name}`));
+  for (const [id, edit, refused] of [
+    [
+      "review mut repo_aware, assigned",
+      all(
+        mut("agent_review", "repo_aware", "bool"),
+        before(OPENS_REVIEW_ENV, "    repo_aware = true;"),
+      ),
+      ["agent_review must declare repo_aware without mut"],
+    ],
+    [
+      "review mut kind, assigned",
+      all(
+        mut("agent_review", "kind", "AgentKind"),
+        before(OPENS_REVIEW_ENV, "    kind = AgentKind::Copilot;"),
+      ),
+      ["agent_review must declare kind without mut"],
+    ],
+    [
+      "review kind rebound",
+      before(OPENS_REVIEW_ENV, "    let kind = AgentKind::Copilot;"),
+      ["agent_review must not rebind kind"],
+    ],
+    [
+      "review kind parameter renamed",
+      param("agent_review", "kind", "AgentKind", "flavor: AgentKind"),
+      ["missing anchor: agent_review's kind: AgentKind parameter"],
+    ],
+    [
+      "session mut read_only, assigned",
+      all(
+        mut("agent_session", "read_only", "bool"),
+        before(OPENS_HOST_ENV, "    read_only = false;"),
+      ),
+      ["agent_session must declare read_only without mut"],
+    ],
+    [
+      "session kind rebound",
+      before(OPENS_HOST_ENV, "    let kind = AgentKind::Copilot;"),
+      [sessionKind],
+    ],
+    [
+      "session mut kind",
+      swap(SESSION_KIND, SESSION_KIND.replace("let ", "let mut ")),
+      [sessionKind],
+    ],
+    [
+      "review env shadowed",
+      after(REVIEW_ENV_LET, SHADOW("extra_env", "    ")),
+      [reviewAnchor, twice("agent_review", "extra_env", 3)],
+    ],
+    [
+      "review env retained",
+      all(
+        after(REVIEW_ENV_LET, RETAIN("extra_env", "    ")),
+        mutLet(OPENS_REVIEW_ENV, "extra_env"),
+      ),
+      [twice("agent_review", "extra_env", 3), reviewBuild],
+    ],
+    [
+      "review env pushed",
+      all(
+        after(REVIEW_ENV_LET, PUSH("extra_env", "    ")),
+        mutLet(OPENS_REVIEW_ENV, "extra_env"),
+      ),
+      [twice("agent_review", "extra_env", 3), reviewBuild],
+    ],
+    [
+      "review spawn env &[]",
+      swap(
+        "        &extra_env,\n        &on_event,",
+        "        &[],\n        &on_event,",
+      ),
+      [
+        "agent_review must spawn stream_agent with &extra_env, got &[]",
+        twice("agent_review", "extra_env", 1),
+      ],
+    ],
+    [
+      "container env shadowed",
+      after(CONTAINER_ENV_LET, SHADOW("container_env", "        ")),
+      [containerAnchor, twice("agent_session", "container_env", 3)],
+    ],
+    [
+      "container env retained",
+      all(
+        mutLet(OPENS_CONTAINER_ENV, "container_env"),
+        after(CONTAINER_ENV_LET, RETAIN("container_env", "        ")),
+      ),
+      [twice("agent_session", "container_env", 3), containerBuild],
+    ],
+    [
+      "container env pushed",
+      all(
+        mutLet(OPENS_CONTAINER_ENV, "container_env"),
+        after(CONTAINER_ENV_LET, PUSH("container_env", "        ")),
+      ),
+      [twice("agent_session", "container_env", 3), containerBuild],
+    ],
+    [
+      "container run env &[]",
+      swap("            &container_env,\n", "            &[],\n"),
+      [
+        "agent_session's container branch must pass build_run_args &container_env once",
+        twice("agent_session", "container_env", 1),
+      ],
+    ],
+    [
+      "container env condition swapped",
+      swap(
+        OPENS_CONTAINER_ENV,
+        OPENS_CONTAINER_ENV.replace("Opencode", "Claude"),
+      ),
+      [containerBuild],
+    ],
+    [
+      "host env shadowed",
+      after(HOST_ENV_LET, SHADOW("host_extra_env", "    ")),
+      [hostAnchor, twice("agent_session", "host_extra_env", 3)],
+    ],
+    [
+      "host env retained",
+      all(
+        mutLet(OPENS_HOST_ENV, "host_extra_env"),
+        after(HOST_ENV_LET, RETAIN("host_extra_env", "    ")),
+      ),
+      [twice("agent_session", "host_extra_env", 3), hostBuild],
+    ],
+    [
+      "host env pushed",
+      all(
+        mutLet(OPENS_HOST_ENV, "host_extra_env"),
+        after(HOST_ENV_LET, PUSH("host_extra_env", "    ")),
+      ),
+      [twice("agent_session", "host_extra_env", 3), hostBuild],
+    ],
+    [
+      "host spawn env &[]",
+      swap("        &host_extra_env,\n", "        &[],\n"),
+      [
+        "agent_session's host branch must spawn stream_agent with &host_extra_env, got &[]",
+        twice("agent_session", "host_extra_env", 1),
+      ],
+    ],
+    [
+      "host env condition swapped",
+      swap(OPENS_HOST_ENV, OPENS_HOST_ENV.replace("Opencode", "Claude")),
+      [hostBuild],
+    ],
+    [
+      "self_names chained",
+      swap(
+        SELF_NAMES,
+        SELF_NAMES.replace(".collect()", '.chain(["filesystem"]).collect()'),
+      ),
+      [`agent_review must build self_names once: ${SELF_NAMES}`],
+    ],
+  ])
+    assert.deepEqual(checkPinCallSites(mutate(edit)), refused, id);
 });
