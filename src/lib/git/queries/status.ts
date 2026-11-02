@@ -60,9 +60,11 @@ export function useWorkingLineStats(repo: string, enabled: boolean) {
 }
 
 /** The "unpublished" count for a branch with no upstream, where `branch.ahead` is
- *  undefined: commits on HEAD not on any remote, or, in a repo with no remote refs,
- *  not on the local default branch; `basis` says which. `enabled` fires it only in
- *  that case. Keyed under the repo so commit/push/fetch invalidation refetches it. */
+ *  undefined: commits on HEAD not on any remote-tracking ref whenever a remote is
+ *  configured or such a ref resolves. Without either, the commits past the local
+ *  default branch when one verifies and HEAD isn't on it, else every HEAD commit;
+ *  `basis` says which. `enabled` fires it only in that case. Keyed under the repo
+ *  so commit/push/fetch invalidation refetches it. */
 export function useUnpushedCount(repo: string, enabled: boolean) {
   return useQuery({
     queryKey: repoKeys.unpushedCount(repo),

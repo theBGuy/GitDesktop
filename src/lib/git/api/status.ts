@@ -9,9 +9,11 @@ export const gitStatus = (repoPath: string) =>
 export const gitWorkingLineStats = (repoPath: string) =>
   invoke<WorkingLineStats>("git_working_line_stats", { repoPath });
 
-/** What `git_unpushed_count` counted against: the remote-tracking refs, or,
- *  with none, the local default branch (`on-default-branch` = HEAD is it, so
- *  the count is every commit) or nothing resolvable (`unresolved`). */
+/** What `git_unpushed_count` counted against: `remotes` (`--not --remotes`)
+ *  whenever a remote is configured or a remote-tracking ref resolves. Otherwise
+ *  the commits past the local default branch when one verifies and HEAD isn't
+ *  on it (`default-branch`), else every HEAD commit: `on-default-branch` when
+ *  HEAD is that branch, `unresolved` when no default verifies. */
 export type UnpushedBasis =
   | "remotes"
   | "default-branch"

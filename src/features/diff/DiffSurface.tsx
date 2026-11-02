@@ -1633,9 +1633,9 @@ export function DiffContent({
   );
 
   // Every arm renders this shell: the notice where retained data shows, then
-  // the path row, then the arm's body. The row is one row of one height in
-  // every arm, so an arm swap never moves the body; its controls render only
-  // over a text diff (`showsToolbar`).
+  // the path row, then the arm's body. The row has one height in every arm,
+  // so only a visible (degraded) notice coming or going moves the body on an
+  // arm swap; its controls render only over a text diff (`showsToolbar`).
   // ph-no-capture: blocks the whole pane (file path + diff body) from session
   // replay — this is user code/paths. See src/components/Redacted.tsx.
   const shell = (body: ReactNode, notice: ReactNode = null) => (

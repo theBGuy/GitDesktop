@@ -137,8 +137,8 @@ impl GitDesktopMcp {
                        100, closed up to 100 per state (200 total, newest-created first); \
                        Bitbucket a full page. Per-call ceiling with `limit`: GitHub 1000; \
                        GitLab open 100, closed up to 500 per state (closed and merged, \
-                       newest-created first), capped at the newest 500 overall once either \
-                       state fills five full pages; Bitbucket 50. A larger `limit` \
+                       newest-created first), capped at the newest 500 overall when either state \
+                       needs a sixth page to cover `limit`; Bitbucket 50. A larger `limit` \
                        returns the ceiling. Open rows carry a `stack` object \
                        ({id, position, size}, position 1 = bottom and merges first) when the \
                        PR belongs to a stack — GitHub stacks, or a chain of GitLab MRs each \

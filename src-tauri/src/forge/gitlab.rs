@@ -1142,8 +1142,9 @@ fn matches_client_axes(
 /// a deeper page could still displace the cutoff row. `order_by=created_at&sort=desc`
 /// documents no secondary key, so a deeper page is older-or-EQUAL at the boundary: a
 /// TIE keeps the leg walking (a same-timestamp row can outrank a kept one on the id
-/// tiebreak in [`sort_filtered_rows`]), and tie-heavy repos walk to the horizon and are
-/// refused by design. An absent `limit` always deepens. Pure.
+/// tiebreak in [`sort_filtered_rows`]), and tie-heavy repos walk to the horizon: a
+/// filtered list is refused there by design, the unfiltered closed list keeps its newest
+/// min(limit, 500) rows. An absent `limit` always deepens. Pure.
 fn leg_needs_deeper(kept_created_at: &[&str], page_oldest: &str, limit: Option<u32>) -> bool {
     let Some(limit) = limit.map(|n| n as usize).filter(|n| *n > 0) else {
         return true;

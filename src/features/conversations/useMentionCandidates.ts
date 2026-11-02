@@ -230,12 +230,12 @@ export function useMentionCandidates({
         isError: prsError,
       };
     }
-    // `#`: GitHub merges both lists into its shared number space; GitLab's `#`
-    // addresses issues alone.
     const allIssueRows = refInputRows(
       issueRows(issueData),
       issueRows(closedIssueData),
     );
+    // `#`: GitHub merges issue and PR rows into its shared number space;
+    // GitLab's `#` addresses issues alone.
     const rows =
       provider === "github" ? [...allIssueRows, ...allPrRows] : allIssueRows;
     return {

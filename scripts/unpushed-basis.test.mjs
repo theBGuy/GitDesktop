@@ -4,6 +4,8 @@
 // tooltip names the local default branch when the count was taken against it,
 // and a served snapshot's count always pairs with its own basis, never the
 // live read's. Snapshots built before the basis fields existed stay tolerated.
+// A count whose basis contradicts status's branch (a same-tip switch moves no
+// oid) neither agrees nor stays unread.
 //
 // The squash hold names the local default branch as its limit only on that
 // basis. HistoryPanel's wiring of the helpers is pinned by source shape (code
@@ -22,9 +24,12 @@ import {
   advanceSnapshot,
   arrowCount,
   arrowUpstream,
+  countBasisAgrees,
   deriveEditRange,
   notAdjacentSquashHint,
   resolveUnpushedView,
+  statusLogAction,
+  viewAgrees,
 } from "../src/features/history/editable-set.ts";
 import { maskNonCode } from "./lib/ts-mask.mjs";
 
@@ -191,6 +196,143 @@ test("the not-adjacent squash hint names the default branch only on its basis", 
   assert.equal(notAdjacentSquashHint("default-branch", null), UNPUSHED);
 });
 
+test("countBasisAgrees ties only the default-branch bases to status's branch", () => {
+  // Status branch: equal to the count's default, different, detached, pending.
+  const STATUS = ["master", "feature", null, undefined];
+  const want = {
+    remotes: [true, true, true, true],
+    "default-branch": [false, true, true, true],
+    "on-default-branch": [true, false, false, false],
+    unresolved: [true, true, true, true],
+  };
+  for (const basis of BASES) {
+    STATUS.forEach((branch, i) => {
+      assert.equal(
+        countBasisAgrees(basis, "master", branch),
+        want[basis][i],
+        `${basis} vs ${branch}`,
+      );
+    });
+  }
+  // No count read yet (or upstream mode): branch-independent.
+  for (const basis of [null, undefined]) {
+    for (const branch of STATUS) {
+      assert.equal(countBasisAgrees(basis, undefined, branch), true);
+    }
+  }
+});
+
+const agreeing = (over = {}) => ({
+  logHead: "c2",
+  statusOid: "c2",
+  noUpstream: true,
+  countIsError: false,
+  countAt: 1000,
+  logAt: 900,
+  countBasis: "on-default-branch",
+  countDefault: "master",
+  statusBranch: "master",
+  ...over,
+});
+
+test("viewAgrees fails a count taken on the other side of a same-tip switch", () => {
+  assert.equal(viewAgrees(agreeing()), true);
+  // master -> feature: the full on-default-branch count is stale.
+  assert.equal(viewAgrees(agreeing({ statusBranch: "feature" })), false);
+  // feature -> master: the fork-point count is stale.
+  assert.equal(
+    viewAgrees(
+      agreeing({ countBasis: "default-branch", statusBranch: "master" }),
+    ),
+    false,
+  );
+  assert.equal(
+    viewAgrees(
+      agreeing({ countBasis: "default-branch", statusBranch: "feature" }),
+    ),
+    true,
+  );
+  // Detached HEAD counts past the default branch.
+  assert.equal(
+    viewAgrees(agreeing({ countBasis: "default-branch", statusBranch: null })),
+    true,
+  );
+  assert.equal(viewAgrees(agreeing({ statusBranch: null })), false);
+  // The remotes basis holds across branches; upstream mode never reads it.
+  assert.equal(
+    viewAgrees(
+      agreeing({
+        countBasis: "remotes",
+        countDefault: null,
+        statusBranch: "x",
+      }),
+    ),
+    true,
+  );
+  assert.equal(
+    viewAgrees(agreeing({ noUpstream: false, statusBranch: "feature" })),
+    true,
+  );
+});
+
+const syncing = (over = {}) => ({
+  oid: "c2",
+  oidChanged: false,
+  logHead: "c2",
+  logHasData: true,
+  logIsFetching: false,
+  logAt: 900,
+  statusAt: 1500,
+  noUpstream: true,
+  countIsError: false,
+  countIsFetching: false,
+  countAt: 1000,
+  countBasis: "on-default-branch",
+  countDefault: "master",
+  statusBranch: "master",
+  ...over,
+});
+
+const actionsOf = (args) => [...(statusLogAction(args) ?? [])].sort();
+
+test("statusLogAction re-reads a branch-contradicted count once a newer status reading contradicts it", () => {
+  assert.deepEqual(actionsOf(syncing()), []);
+  // A count older than the status reading that moved off its branch.
+  assert.deepEqual(actionsOf(syncing({ statusBranch: "feature" })), [
+    "refresh-count",
+  ]);
+  assert.deepEqual(
+    actionsOf(
+      syncing({ countBasis: "default-branch", statusBranch: "master" }),
+    ),
+    ["refresh-count"],
+  );
+  // A status reading that lags a fresher count never loops refetches.
+  assert.deepEqual(
+    actionsOf(syncing({ statusBranch: "feature", countAt: 1500 })),
+    [],
+  );
+  assert.deepEqual(
+    actionsOf(syncing({ statusBranch: "feature", countAt: 1600 })),
+    [],
+  );
+  // A read already in flight must land.
+  assert.deepEqual(
+    actionsOf(syncing({ statusBranch: "feature", countIsFetching: true })),
+    [],
+  );
+  // An observed oid change already covers the count.
+  assert.deepEqual(
+    actionsOf(syncing({ statusBranch: "feature", oidChanged: true })),
+    ["refresh-head-set", "refresh-side-keys"],
+  );
+  // Upstream mode never reads the count.
+  assert.deepEqual(
+    actionsOf(syncing({ statusBranch: "feature", noUpstream: false })),
+    [],
+  );
+});
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PANEL = "src/features/history/HistoryPanel.tsx";
 const panelSource = () =>
@@ -331,5 +473,70 @@ test("HistoryPanel derives the arrows and the squash hint from the resolved view
     ),
     "arrow-count",
     "a commented-out copy",
+  );
+});
+
+/** The count-basis args both agreement call sites must pass, so the gate and
+ *  the sync read one countBasisAgrees call. */
+const BASIS_ARGS = [
+  "countBasis:unpushedVsRemotes.data?.basis",
+  "countDefault:unpushedVsRemotes.data?.defaultBranch",
+  "statusBranch:head?.name",
+];
+
+/** Problems with the call sites' basis args; empty = pinned. Each call's
+ *  object literal runs to its first `})` (none of its values nests one). */
+function checkBasisArgs(src) {
+  const code = squeeze(maskNonCode(src, true));
+  const problems = [];
+  for (const callee of ["statusLogAction", "viewAgrees"]) {
+    const calls = code.split(`${callee}({`);
+    if (calls.length !== 2) {
+      problems.push(
+        `basis-args: ${PANEL}: expected one ${callee} call, found ${calls.length - 1}`,
+      );
+      continue;
+    }
+    const literal = `${calls[1].slice(0, calls[1].indexOf("})"))},`;
+    for (const arg of BASIS_ARGS) {
+      if (!literal.includes(`${arg},`))
+        problems.push(`basis-args: ${PANEL}: ${callee} misses \`${arg}\``);
+    }
+  }
+  return problems;
+}
+
+test("HistoryPanel passes the count's basis and status's branch to both agreement calls", () => {
+  const src = panelSource();
+  assert.deepEqual(checkBasisArgs(src), []);
+
+  assertFailsOn(
+    checkBasisArgs(
+      mutate(
+        src,
+        "\n        countBasis: unpushedVsRemotes.data?.basis,\n",
+        "\n",
+      ),
+    ),
+    "basis-args",
+    "the sync drops the basis",
+  );
+  assertFailsOn(
+    checkBasisArgs(
+      mutate(src, "\n    statusBranch: head?.name,\n  });", "\n  });"),
+    ),
+    "basis-args",
+    "the gate drops status's branch",
+  );
+  assertFailsOn(
+    checkBasisArgs(
+      mutate(
+        src,
+        "\n    countDefault: unpushedVsRemotes.data?.defaultBranch,\n    statusBranch",
+        "\n    // countDefault: unpushedVsRemotes.data?.defaultBranch,\n    statusBranch",
+      ),
+    ),
+    "basis-args",
+    "a commented-out default",
   );
 });

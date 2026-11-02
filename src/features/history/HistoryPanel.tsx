@@ -224,8 +224,9 @@ const SQUASH_HOLD_HINT: Record<
 // log when status saw a new HEAD first, refreshes the side reads and the rest
 // of the HEAD-dependent families once per observed HEAD move (outside commits,
 // resets, checkouts and rebases, and in-app moves alike), and retries a
-// no-upstream count older than the log or the recheck interval. Its own
-// observers keep the 5 s status poll from re-rendering any panel.
+// no-upstream count older than the log, the recheck interval, or a status
+// branch its basis contradicts. Its own observers keep the 5 s status poll from
+// re-rendering any panel.
 // RepositoryView mounts it outside every tab's <Activity>, keyed on the repo
 // to reset its last-seen oid: log readers on every tab rely on it, the commit
 // detail view's Amend gate and its "refreshing history" hint included.
@@ -259,6 +260,9 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
         countIsError: unpushedVsRemotes.isError,
         countIsFetching: unpushedVsRemotes.isFetching,
         countAt: unpushedVsRemotes.dataUpdatedAt,
+        countBasis: unpushedVsRemotes.data?.basis,
+        countDefault: unpushedVsRemotes.data?.defaultBranch,
+        statusBranch: head?.name,
       });
       if (!actions) return;
       if (actions.has("refetch-log")) {
@@ -789,9 +793,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // (ahead of its upstream). Unpublished branch (no upstream) → count them
   // against the remotes, NOT `commits.length`: the fork point and everything
   // below it live on `origin/<base>` and are already published, so only the
-  // branch's own commits are unpushed. A repo with no remote refs counts
-  // against its local default branch instead, and on that branch itself only
-  // the row arrows drop (`arrowCount`). (Queried only in the no-upstream case.)
+  // branch's own commits are unpushed. A repo with no configured remote and no
+  // resolving remote-tracking ref counts against its local default branch
+  // instead, and on that branch itself only the row arrows drop (`arrowCount`).
+  // (Queried only in the no-upstream case.)
   // Drives both the rewrite gating below and the per-row "not pushed" marker.
   // A gone upstream counts as no upstream so the `unpushedVsRemotes` fallback
   // engages and the per-row "not pushed" markers reflect what's truly published.
@@ -813,7 +818,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // The count (status's ahead, or the no-upstream count read) and the log's
   // commits refetch apart: the unpushed consumers below read them only as a
   // pair both vouched for — the log's head is status's HEAD, and a no-upstream
-  // count read is unerrored and at least as fresh as the log.
+  // count read is unerrored, at least as fresh as the log, and taken on the
+  // branch status reports (a same-tip switch moves no oid).
   const agreed = viewAgrees({
     logHead: commits[0]?.hash,
     statusOid: head?.oid,
@@ -821,6 +827,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     countIsError: unpushedVsRemotes.isError,
     countAt: unpushedVsRemotes.dataUpdatedAt,
     logAt: log.dataUpdatedAt,
+    countBasis: unpushedVsRemotes.data?.basis,
+    countDefault: unpushedVsRemotes.data?.defaultBranch,
+    statusBranch: head?.name,
   });
   // The last agreeing unpushed view, advanced only on agreement so a
   // mismatch window in which the log still starts at its head keeps serving

@@ -55,10 +55,28 @@ export type UnpushedSnapshot<C> = {
   hasNextPage: boolean;
 };
 
+/** Whether a no-upstream count's basis still describes status's current branch
+ *  (null when detached). The two default-branch bases depend on whether HEAD is
+ *  the default branch by exact name, as the Rust side decides it, so a same-tip
+ *  switch that moves no oid still invalidates them; every other basis, and a
+ *  missing count, is branch-independent. */
+export function countBasisAgrees(
+  basis: UnpushedBasis | null | undefined,
+  defaultBranch: string | null | undefined,
+  statusBranch: string | null | undefined,
+): boolean {
+  if (basis === "on-default-branch") {
+    return statusBranch != null && statusBranch === defaultBranch;
+  }
+  if (basis === "default-branch") return statusBranch !== defaultBranch;
+  return true;
+}
+
 /** The agreement predicate the unpushed set and the squash / Edit history
  *  gates read: the log's head equals status's oid, and in no-upstream mode
- *  the count read is not errored and at least as fresh as the log (it
- *  carries no HEAD, so freshness is its only axis). */
+ *  the count read is not errored, at least as fresh as the log, and taken on
+ *  the branch status reports ({@link countBasisAgrees}); it carries no HEAD
+ *  oid, so freshness and that branch axis are what tie it to the log. */
 export function viewAgrees(args: {
   logHead: string | undefined;
   statusOid: string | null | undefined;
@@ -66,9 +84,17 @@ export function viewAgrees(args: {
   countIsError: boolean;
   countAt: number;
   logAt: number;
+  countBasis: UnpushedBasis | null | undefined;
+  countDefault: string | null | undefined;
+  statusBranch: string | null | undefined;
 }): boolean {
   if (!headAgrees(args.logHead, args.statusOid)) return false;
-  return !args.noUpstream || (!args.countIsError && args.countAt >= args.logAt);
+  return (
+    !args.noUpstream ||
+    (!args.countIsError &&
+      args.countAt >= args.logAt &&
+      countBasisAgrees(args.countBasis, args.countDefault, args.statusBranch))
+  );
 }
 
 export type StatusLogAction =
@@ -92,10 +118,12 @@ export const NO_UPSTREAM_COUNT_RECHECK_MS = 30_000;
  *    stale side and isn't already fetching — at most one call per status
  *    reading, so a log-first window can't loop.
  *  - 'refresh-count': heads agree in no-upstream mode and the count is
- *    errored, older than the log, or {@link NO_UPSTREAM_COUNT_RECHECK_MS} older
- *    than the status reading; never while the count is fetching (a read slower
- *    than one poll must land) or beside 'refresh-side-keys' (which already
- *    covers it).
+ *    errored, older than the log, {@link NO_UPSTREAM_COUNT_RECHECK_MS} older
+ *    than the status reading, or older than a status reading whose branch its
+ *    basis contradicts ({@link countBasisAgrees}; a status lagging a fresher
+ *    count must not loop refetches); never while the count is fetching (a read
+ *    slower than one poll must land) or beside 'refresh-side-keys' (which
+ *    already covers it).
  *  Null when nothing fires. */
 export function statusLogAction(args: {
   oid: string | null | undefined;
@@ -109,6 +137,9 @@ export function statusLogAction(args: {
   countIsError: boolean;
   countIsFetching: boolean;
   countAt: number;
+  countBasis: UnpushedBasis | null | undefined;
+  countDefault: string | null | undefined;
+  statusBranch: string | null | undefined;
 }): ReadonlySet<StatusLogAction> | null {
   const actions = new Set<StatusLogAction>();
   const heads = headAgrees(args.logHead, args.oid);
@@ -130,7 +161,13 @@ export function statusLogAction(args: {
     args.noUpstream &&
     (args.countIsError ||
       args.countAt < args.logAt ||
-      args.statusAt - args.countAt >= NO_UPSTREAM_COUNT_RECHECK_MS) &&
+      args.statusAt - args.countAt >= NO_UPSTREAM_COUNT_RECHECK_MS ||
+      (!countBasisAgrees(
+        args.countBasis,
+        args.countDefault,
+        args.statusBranch,
+      ) &&
+        args.countAt < args.statusAt)) &&
     !args.countIsFetching &&
     !args.oidChanged
   ) {
@@ -261,8 +298,9 @@ export function resolveUnpushedView<C extends { hash: string }>(args: {
 }
 
 /** How many of the top unpushed commits wear the row arrow. On the default
- *  branch of a repo with no remote refs nothing is published anywhere, so no
- *  row is marked, while squash and Edit history still read the full count. */
+ *  branch of a repo with no configured remote and no remote-tracking refs
+ *  nothing is published anywhere, so no row is marked, while squash and Edit
+ *  history still read the full count. */
 export function arrowCount(
   count: number,
   basis: UnpushedBasis | null | undefined,

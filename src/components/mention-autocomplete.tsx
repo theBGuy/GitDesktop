@@ -134,8 +134,9 @@ function place(
 /**
  * GitHub-style `@`/`#`/`!` completion for a textarea: token detection, the caret-
  * anchored listbox, and the keyboard contract the popover owns while a token is
- * open. Opt-in — with no `mentions` source nothing is rendered, listened to, or
- * queried, which is what keeps the surfaces that don't wire it byte-identical.
+ * open. Opt-in — with no `mentions` source nothing is listened to or queried and
+ * only an empty, visually hidden announcer renders (portalled, out of the host's
+ * layout), so the surfaces that don't wire it behave and look as before.
  *
  * Ported from the session composer's mention mechanics; two details there are
  * load-bearing and kept verbatim: rows commit on `mousedown` with `preventDefault`
@@ -172,6 +173,7 @@ export function useMentionAutocomplete({
     null,
   );
   const listId = useId();
+  const portalContainer = usePanelPortalContainer();
 
   // Render-time reset, not an effect — neither state may survive a commit. A
   // popover must never paint over a preview pane or a frozen editor; and external
@@ -417,22 +419,41 @@ export function useMentionAutocomplete({
       }
     : undefined;
 
-  const popover =
-    open && token ? (
-      <MentionPopover
-        listId={listId}
-        listRef={listRef}
-        items={items}
-        loading={result?.loading ?? false}
-        isError={result?.isError ?? false}
-        activeIndex={activeIndex}
-        ghHost={mentions.ghHost}
-        prNoun={mentions.prNoun}
-        token={token}
-        onPick={insert}
-        onHover={(i) => setActiveKey(items[i].key)}
-      />
-    ) : null;
+  const status = result
+    ? statusLine(items.length, result.loading, result.isError)
+    : null;
+
+  // The announcer lives as long as the composer: a live region inserted together
+  // with its text is not announced, so it must exist before a popover opens on a
+  // line. Closing empties it, so re-opening on the same line is announced again.
+  // Portalled like the popover: a trailing child would break the host's
+  // `space-y` stack, which leaves its last child's margin off.
+  const announcer = createPortal(
+    <div role="status" className="sr-only">
+      {status}
+    </div>,
+    portalContainer ?? document.body,
+  );
+
+  const popover = (
+    <>
+      {announcer}
+      {open && token ? (
+        <MentionPopover
+          listId={listId}
+          listRef={listRef}
+          items={items}
+          status={status}
+          activeIndex={activeIndex}
+          ghHost={mentions.ghHost}
+          prNoun={mentions.prNoun}
+          token={token}
+          onPick={insert}
+          onHover={(i) => setActiveKey(items[i].key)}
+        />
+      ) : null}
+    </>
+  );
 
   return { textareaProps, sync, onKeyDown, popover };
 }
@@ -482,6 +503,17 @@ function emptyMessage(loading: boolean, isError: boolean): string {
   return isError ? "Couldn't load suggestions" : "No matches";
 }
 
+/** The line under the options, if any; the announcer and the visible line both
+ *  read this one result so they can never disagree. */
+function statusLine(
+  count: number,
+  loading: boolean,
+  isError: boolean,
+): string | null {
+  if (count === 0) return emptyMessage(loading, isError);
+  return showsPartialFailure(count, isError) ? PARTIAL_FAILURE_MESSAGE : null;
+}
+
 /** The caret-anchored suggestion listbox. Portalled out and fixed-positioned:
  *  the composer sits inside overflow containers that would clip it. It lands in
  *  the surrounding tab panel when there is one, so hiding that panel conceals it. */
@@ -489,8 +521,7 @@ function MentionPopover({
   listId,
   listRef,
   items,
-  loading,
-  isError,
+  status,
   activeIndex,
   ghHost,
   prNoun,
@@ -501,9 +532,8 @@ function MentionPopover({
   listId: string;
   listRef: RefObject<HTMLDivElement | null>;
   items: MentionCandidate[];
-  loading: boolean;
-  /** A backing list failed — say so instead of reporting a confident "No matches". */
-  isError: boolean;
+  /** The line under the options; the hook's announcer reads it out. */
+  status: string | null;
   activeIndex: number;
   ghHost: string | null;
   prNoun: PrNoun;
@@ -524,9 +554,6 @@ function MentionPopover({
   return createPortal(
     <div
       ref={listRef}
-      id={listId}
-      role="listbox"
-      aria-label="Mention suggestions"
       // Dragging the list's own scrollbar must not blur the textarea, which would
       // dismiss the popover out from under the drag.
       onMouseDown={(e) => e.preventDefault()}
@@ -539,12 +566,8 @@ function MentionPopover({
       }}
       className="z-50 w-72 overflow-y-auto border bg-popover shadow-md ring-1 ring-foreground/10"
     >
-      {items.length === 0 ? (
-        <p className="px-2.5 py-2 text-[11px] text-muted-foreground">
-          {emptyMessage(loading, isError)}
-        </p>
-      ) : (
-        items.map((c, i) => (
+      <div id={listId} role="listbox" aria-label="Mention suggestions">
+        {items.map((c, i) => (
           <button
             key={c.key}
             id={`${listId}-${i}`}
@@ -585,8 +608,8 @@ function MentionPopover({
                 {c.detail}
               </span>
             )}
-            {/* Open rows stay unmarked; the sr-only word already names the
-                state, so the visible one is hidden from a reader. */}
+            {/* Open non-draft rows stay unmarked; the sr-only word already
+                names the state, so the visible one is hidden from a reader. */}
             {c.refGlyph &&
               (c.refGlyph.state !== "OPEN" || c.refGlyph.isDraft) && (
                 <span
@@ -599,12 +622,16 @@ function MentionPopover({
                 </span>
               )}
           </button>
-        ))
-      )}
-      {/* Not an option: outside the arrow and activedescendant range. */}
-      {showsPartialFailure(items.length, isError) && (
-        <p className="px-2.5 py-2 text-[11px] text-muted-foreground">
-          {PARTIAL_FAILURE_MESSAGE}
+        ))}
+      </div>
+      {/* Outside the listbox, which may own options alone; hidden from a reader,
+          who hears it through the hook's announcer instead. */}
+      {status !== null && (
+        <p
+          aria-hidden="true"
+          className="px-2.5 py-2 text-[11px] text-muted-foreground"
+        >
+          {status}
         </p>
       )}
     </div>,
