@@ -2,9 +2,11 @@
 // src-tauri/src/agent.rs feed it the run's own inputs: agent_review passes
 // review_env the self-MCP server names and the user's mirrored read rules,
 // and both agent_session branches (container, then host) pass
-// opencode_session_env the session's read_only flag and its opted-in server
-// names; the host branch passes the mirrored read rules, the container
-// branch none (its opencode loads none of the host's config files). Each
+// opencode_session_env the session's read_only and opencode_research flags,
+// its own OPENCODE_CONFIG (container config_path, host mcp_config_path) and
+// mcp_names, built whole from the opted-in mcp_specs; the host branch passes
+// the mirrored read rules, the container branch none (its opencode loads
+// none of the host's config files). Each
 // read_mirror is built once, from opencode_read_mirror fed the OPENCODE_CONFIG
 // the run gets and Path::new(&repo_path) / Path::new(&worktree_path), in the arm
 // whose run carries the ReadOnly pin (a repo-aware opencode review, a read-only
@@ -108,6 +110,9 @@ const REVIEW_MIRROR =
 const HOST_MIRROR =
   "let read_mirror = if read_only { opencode_read_mirror(mcp_config_path.as_deref(), Path::new(&worktree_path)) } else { OpencodeReadMirror::default() }";
 const RUN_DIR = "let dir = run_dir(container, &worktree_path)";
+/** Every opted-in server's name, so the pin admits each one's tools. */
+const MCP_NAMES =
+  "let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).collect()";
 
 function checkPinCallSites(text) {
   if (typeof text !== "string" || text.length === 0)
@@ -236,6 +241,17 @@ function checkPinCallSites(text) {
       problems.push(
         `${FILE}:${call.line} ${branch} opencode_session_env must receive read_only, got ${call.args[0] ?? "nothing"}`,
       );
+    if (call.args[1] !== "opencode_research")
+      problems.push(
+        `${FILE}:${call.line} ${branch} opencode_session_env must receive opencode_research, got ${call.args[1] ?? "nothing"}`,
+      );
+    // Each branch hands the run its own OPENCODE_CONFIG: the container's mounted
+    // path, the host's generated file.
+    const configPath = branch === "host" ? "mcp_config_path" : "config_path";
+    if (call.args[2] !== configPath)
+      problems.push(
+        `${FILE}:${call.line} ${branch} opencode_session_env must receive ${configPath}, got ${call.args[2] ?? "nothing"}`,
+      );
     if (call.args[3] !== "&mcp_names")
       problems.push(
         `${FILE}:${call.line} ${branch} opencode_session_env must receive &mcp_names, got ${call.args[3] ?? "nothing"}`,
@@ -278,10 +294,8 @@ function checkPinCallSites(text) {
   if (!/\bread_only\s*:\s*bool\b/.test(signature))
     problems.push("missing anchor: agent_session's read_only: bool parameter");
   const mcpNames = letStatement(masked, session, "mcp_names");
-  if (mcpNames.count !== 1 || !/=\s*mcp_specs\.iter\(\)/.test(mcpNames.text))
-    problems.push(
-      "agent_session must build mcp_names once, from mcp_specs.iter()",
-    );
+  if (mcpNames.count !== 1 || mcpNames.text !== collapse(MCP_NAMES))
+    problems.push(`agent_session must build mcp_names once: ${MCP_NAMES}`);
   return problems;
 }
 
@@ -630,5 +644,48 @@ test("P11: the resolver's dir is each run's --dir and spawn cwd", () => {
       return t.replace(from, () => to);
     });
     assert.deepEqual(checkPinCallSites(mutant), [refused], to);
+  }
+});
+
+test("P12: each branch's research flag, config path and server names are pinned", () => {
+  const strip = (problems) => problems.map((p) => p.replace(/^[^ ]+ /, ""));
+  for (const [call, branch] of [
+    [CONTAINER_CALL, "container"],
+    [HOST_CALL, "host"],
+  ]) {
+    const problems = checkPinCallSites(
+      mutate((t) =>
+        t.replace(call, () => call.replace("opencode_research", "false")),
+      ),
+    );
+    assert.deepEqual(strip(problems), [
+      `${branch} opencode_session_env must receive opencode_research, got false`,
+    ]);
+  }
+  const swapped = mutate((t) =>
+    t
+      .replace(HOST_CALL, () =>
+        HOST_CALL.replace("mcp_config_path", "config_path"),
+      )
+      .replace(CONTAINER_CALL, () =>
+        CONTAINER_CALL.replace("config_path", "mcp_config_path"),
+      ),
+  );
+  assert.deepEqual(strip(checkPinCallSites(swapped)), [
+    "container opencode_session_env must receive config_path, got mcp_config_path",
+    "host opencode_session_env must receive mcp_config_path, got config_path",
+  ]);
+  const refused = `agent_session must build mcp_names once: ${MCP_NAMES}`;
+  for (const producer of [
+    "let mcp_names: Vec<&str> = mcp_specs.iter().take(1).map(|s| s.name.as_str()).collect()",
+    "let mcp_names: Vec<&str> = mcp_specs.iter().map(|s| s.name.as_str()).skip(1).collect()",
+    'let mcp_names: Vec<&str> = vec!["gitdesktop"]',
+    "let mcp_names: Vec<&str> = Vec::new()",
+  ]) {
+    const mutant = mutate((t) => {
+      assert.equal(t.split(MCP_NAMES).length, 2, `not unique: ${MCP_NAMES}`);
+      return t.replace(MCP_NAMES, () => producer);
+    });
+    assert.deepEqual(checkPinCallSites(mutant), [refused], producer);
   }
 });

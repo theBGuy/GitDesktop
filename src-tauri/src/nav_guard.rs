@@ -78,13 +78,14 @@ fn is_allowed_navigation(url: &Url, app_origin: &Url, dev_url: Option<&Url>) -> 
 }
 
 fn log_form(url: &Url) -> String {
-    // Query, fragment and userinfo can carry tokens/credentials: only scheme,
-    // host, port and path may reach stderr. An opaque URL's path is its whole
-    // payload (data:, javascript:), so only its scheme is logged.
+    // Path, query, fragment and userinfo can carry tokens (reset or magic links):
+    // only scheme, host and port reach stderr, as `scheme://host[:port]/`. An
+    // opaque URL's path is its whole payload (data:, javascript:): scheme only.
     if url.cannot_be_a_base() {
         return format!("{}:", url.scheme());
     }
     let mut url = url.clone();
+    url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
     let _ = url.set_username("");
@@ -218,17 +219,30 @@ mod tests {
     }
 
     #[test]
-    fn log_form_strips_query_fragment_and_userinfo() {
+    fn log_form_keeps_only_scheme_host_and_port() {
         const CASES: &[(&str, &str)] = &[
             (
                 "https://evil.example/cb?code=abc123#x",
-                "https://evil.example/cb",
+                "https://evil.example/",
             ),
             (
                 "https://u:p@evil.example:8443/a/b?x=1",
-                "https://evil.example:8443/a/b",
+                "https://evil.example:8443/",
             ),
             ("https://example.com/", "https://example.com/"),
+            ("https://example.com", "https://example.com/"),
+            (
+                "https://example.com/reset/tok_abc123/confirm",
+                "https://example.com/",
+            ),
+            (
+                "https://example.com/magic%2Flink%3Ftok%3Dabc",
+                "https://example.com/",
+            ),
+            ("http://[::1]:1420/login/abc123", "http://[::1]:1420/"),
+            ("https://example.com:443/x", "https://example.com/"),
+            ("file:///C:/Users/me/secret.txt", "file:///"),
+            ("file://server/share/secret.txt", "file://server/"),
             ("data:text/html,x#f", "data:"),
             ("javascript:alert(document.cookie)", "javascript:"),
         ];
