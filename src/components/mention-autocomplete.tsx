@@ -32,13 +32,17 @@ const ALL_TRIGGERS = "@#!";
 
 /** `w-72` — the popover's fixed width, needed before it is laid out to clamp it. */
 const POPOVER_WIDTH = 288;
-/** Ceiling the viewport clamp works down from, in px: no class carries it, the
- *  placement applies the clamped result as an inline `maxHeight`. */
-const MAX_LIST_HEIGHT = 224;
+/** Ceiling the viewport clamp works down from, in px: eight 28px ref rows plus
+ *  the box's 1px borders, so a full list needs no scrollbar. No class carries it;
+ *  the placement applies the clamped result as an inline `maxHeight`. */
+const MAX_LIST_HEIGHT = 226;
 /** Keeps the popover off the viewport edges. */
 const GUTTER = 8;
 /** Enough of a row to estimate the list's height before it renders. */
 const ROW_HEIGHT = 28;
+/** The pinned status line under rows (padding, one 11px line, its border-t):
+ *  the scroll region gives it up, so placement has to reserve it too. */
+const FOOTER_HEIGHT = 34;
 /** Floor under the computed `maxHeight` on whichever side is chosen, so a caret
  *  with almost no room still shows a usable list — at extreme heights it wins over
  *  the gutter and the box overhangs the viewport edge. No input to the flip test. */
@@ -95,6 +99,8 @@ function place(
   textarea: HTMLTextAreaElement,
   caret: number,
   rowCount: number,
+  /** A status line shows under the rows (not in place of them). */
+  footed: boolean,
 ): Omit<ActiveToken, "trigger" | "query" | "start"> {
   const rect = textarea.getBoundingClientRect();
   const coords = getCaretCoordinates(textarea, caret);
@@ -106,7 +112,7 @@ function place(
   );
   const wanted = Math.min(
     MAX_LIST_HEIGHT,
-    Math.max(rowCount, 1) * ROW_HEIGHT + GUTTER,
+    Math.max(rowCount, 1) * ROW_HEIGHT + (footed ? FOOTER_HEIGHT : 0) + GUTTER,
   );
   const spaceBelow = window.innerHeight - caretBottom - 2 - GUTTER;
   const spaceAbove = caretTop - 2 - GUTTER;
@@ -198,6 +204,10 @@ export function useMentionAutocomplete({
     0,
   );
   const rowCount = items.length;
+  const status = result
+    ? statusLine(items.length, result.loading, result.isError)
+    : null;
+  const footed = rowCount > 0 && status !== null;
 
   // Re-place the open token's box against the caret it already names. Placement
   // measures the DOM, so it must run from the effect rather than from a state
@@ -206,19 +216,19 @@ export function useMentionAutocomplete({
     if (!token) return;
     setToken({
       ...token,
-      ...place(ta, token.start + 1 + token.query.length, rowCount),
+      ...place(ta, token.start + 1 + token.query.length, rowCount, footed),
     });
   });
 
   // The lazy queries only enable as the first token opens, so a token is always
   // placed against an empty list first; re-place once the candidates land, before
   // paint, or the box keeps the flip and height it chose for zero rows.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `rowCount` is the trigger — the effect event reads it live, so dropping it here would stop the re-place from ever running.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `rowCount` and `footed` are the triggers — the effect event reads them live, so dropping them here would stop the re-place from ever running.
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!open || !ta) return;
     rePlace(ta);
-  }, [open, rowCount, textareaRef]);
+  }, [open, rowCount, footed, textareaRef]);
 
   useEffect(() => {
     if (!open) return;
@@ -285,11 +295,18 @@ export function useMentionAutocomplete({
     dismissed.current = null;
     mentions.onActive();
     setActiveKey(null);
+    const found = mentions.query(trigger, query);
+    const count = found.items.length;
     setToken({
       trigger,
       query,
       start,
-      ...place(ta, caret, mentions.query(trigger, query).items.length),
+      ...place(
+        ta,
+        caret,
+        count,
+        count > 0 && statusLine(count, found.loading, found.isError) !== null,
+      ),
     });
   }
 
@@ -419,17 +436,20 @@ export function useMentionAutocomplete({
       }
     : undefined;
 
-  const status = result
-    ? statusLine(items.length, result.loading, result.isError)
-    : null;
-
   // The announcer lives as long as the composer: a live region inserted together
   // with its text is not announced, so it must exist before a popover opens on a
   // line. Closing empties it, so re-opening on the same line is announced again.
   // Portalled like the popover: a trailing child would break the host's
-  // `space-y` stack, which leaves its last child's margin off.
+  // `space-y` stack, which leaves its last child's margin off. The explicit
+  // aria-live keeps it audible under a modal: Base UI aria-hides every body child
+  // but `[aria-live]` ones, and the portal target can be body.
   const announcer = createPortal(
-    <div role="status" className="sr-only">
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="sr-only"
+    >
       {status}
     </div>,
     portalContainer ?? document.body,
@@ -564,72 +584,79 @@ function MentionPopover({
         bottom: token.bottom ?? undefined,
         maxHeight: token.maxHeight,
       }}
-      className="z-50 w-72 overflow-y-auto border bg-popover shadow-md ring-1 ring-foreground/10"
+      className="z-50 flex w-72 flex-col border bg-popover shadow-md ring-1 ring-foreground/10"
     >
-      <div id={listId} role="listbox" aria-label="Mention suggestions">
-        {items.map((c, i) => (
-          <button
-            key={c.key}
-            id={`${listId}-${i}`}
-            role="option"
-            aria-selected={i === activeIndex}
-            type="button"
-            // Selection rides aria-activedescendant on the textarea, which keeps
-            // focus; a portalled row in the tab order would be reachable behind it.
-            tabIndex={-1}
-            // mousedown (not click) so the textarea doesn't blur before the insert
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onPick(c);
-            }}
-            onMouseMove={() => onHover(i)}
-            className={cn(
-              "flex w-full min-w-0 items-center gap-1.5 px-2.5 py-1.5 text-left text-xs",
-              i === activeIndex
-                ? "bg-accent text-accent-foreground"
-                : "hover:bg-muted/60",
-            )}
-          >
-            {c.user && (
-              <ForgeUserAvatar user={c.user} ghHost={ghHost} decorative />
-            )}
-            {c.refGlyph && (
-              <>
-                <RefGlyph refGlyph={c.refGlyph} noun={prNoun} />
-                <span className="sr-only">{`${refStateWord(c.refGlyph, prNoun)} `}</span>
-                <span className="shrink-0 font-mono text-muted-foreground">
-                  {c.refGlyph.numberLabel}
-                </span>
-              </>
-            )}
-            <span className="truncate">{c.label}</span>
-            {c.detail && (
-              <span className="truncate text-[11px] text-muted-foreground">
-                {c.detail}
-              </span>
-            )}
-            {/* Open non-draft rows stay unmarked; the sr-only word already
-                names the state, so the visible one is hidden from a reader. */}
-            {c.refGlyph &&
-              (c.refGlyph.state !== "OPEN" || c.refGlyph.isDraft) && (
-                <span
-                  aria-hidden="true"
-                  className="ml-auto shrink-0 text-[11px] text-muted-foreground capitalize"
-                >
-                  {c.refGlyph.isDraft && c.refGlyph.state === "OPEN"
-                    ? "draft"
-                    : c.refGlyph.state.toLowerCase()}
+      {/* Only the rows scroll: the status line under them stays pinned in view,
+          and this region gives up its height under the same maxHeight. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div id={listId} role="listbox" aria-label="Mention suggestions">
+          {items.map((c, i) => (
+            <button
+              key={c.key}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === activeIndex}
+              type="button"
+              // Selection rides aria-activedescendant on the textarea, which keeps
+              // focus; a portalled row in the tab order would be reachable behind it.
+              tabIndex={-1}
+              // mousedown (not click) so the textarea doesn't blur before the insert
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onPick(c);
+              }}
+              onMouseMove={() => onHover(i)}
+              className={cn(
+                "flex w-full min-w-0 items-center gap-1.5 px-2.5 py-1.5 text-left text-xs",
+                i === activeIndex
+                  ? "bg-accent text-accent-foreground"
+                  : "hover:bg-muted/60",
+              )}
+            >
+              {c.user && (
+                <ForgeUserAvatar user={c.user} ghHost={ghHost} decorative />
+              )}
+              {c.refGlyph && (
+                <>
+                  <RefGlyph refGlyph={c.refGlyph} noun={prNoun} />
+                  <span className="sr-only">{`${refStateWord(c.refGlyph, prNoun)} `}</span>
+                  <span className="shrink-0 font-mono text-muted-foreground">
+                    {c.refGlyph.numberLabel}
+                  </span>
+                </>
+              )}
+              <span className="truncate">{c.label}</span>
+              {c.detail && (
+                <span className="truncate text-[11px] text-muted-foreground">
+                  {c.detail}
                 </span>
               )}
-          </button>
-        ))}
+              {/* Open non-draft rows stay unmarked; the sr-only word already
+                  names the state, so the visible one is hidden from a reader. */}
+              {c.refGlyph &&
+                (c.refGlyph.state !== "OPEN" || c.refGlyph.isDraft) && (
+                  <span
+                    aria-hidden="true"
+                    className="ml-auto shrink-0 text-[11px] text-muted-foreground capitalize"
+                  >
+                    {c.refGlyph.isDraft && c.refGlyph.state === "OPEN"
+                      ? "draft"
+                      : c.refGlyph.state.toLowerCase()}
+                  </span>
+                )}
+            </button>
+          ))}
+        </div>
       </div>
       {/* Outside the listbox, which may own options alone; hidden from a reader,
           who hears it through the hook's announcer instead. */}
       {status !== null && (
         <p
           aria-hidden="true"
-          className="px-2.5 py-2 text-[11px] text-muted-foreground"
+          className={cn(
+            "shrink-0 px-2.5 py-2 text-[11px] text-muted-foreground",
+            items.length > 0 && "border-t",
+          )}
         >
           {status}
         </p>

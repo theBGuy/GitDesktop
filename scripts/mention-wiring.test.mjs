@@ -6,8 +6,10 @@
 // (`activeKey`), never a position, and its listbox owns only the options. The
 // empty and partial-failure line is announced by one sr-only role=status the
 // hook renders for the composer's whole life (a live region inserted with its
-// text is not announced); the popover's visible copy after the listbox is
-// aria-hidden.
+// text is not announced), with an explicit aria-live so a modal's aria-hiding
+// of body children spares it; the popover's visible copy is an aria-hidden
+// footer pinned after the scroll region that holds the listbox, so it never
+// scrolls out of view.
 //
 // Not testable here: what a screen reader announces, and the popover's paint.
 // Those need the live app. Runs install-free: node built-ins only.
@@ -68,12 +70,17 @@ export const PINS = {
   ACTIVE_KEY: "the highlight derives from activeKey via findIndex",
   LISTBOX_OPTIONS: "the listbox owns only role=option buttons",
   ANNOUNCER:
-    "one sr-only role=status, rendered unconditionally by the hook, reading the status line",
+    "one sr-only polite atomic role=status, rendered unconditionally by the hook, reading the status line",
   VISIBLE_LINE:
-    "the popover's line is aria-hidden, after the listbox, classes unchanged, and no role=status",
+    "the popover's line is an aria-hidden footer after the scroll region, which alone scrolls and holds the listbox; border-t only over rows; no role=status",
 };
 
-const LINE_CLASS = 'className="px-2.5 py-2 text-[11px] text-muted-foreground"';
+// Compared flattened, so the formatter may wrap the call.
+const LINE_CLASS =
+  'className={cn("shrink-0 px-2.5 py-2 text-[11px] text-muted-foreground", items.length > 0 && "border-t")}';
+const SCROLL_CLASS = 'className="min-h-0 flex-1 overflow-y-auto"';
+/** The value of a raw opening tag's literal className, or null. */
+const classOf = (node) => /\sclassName="([^"]*)"/.exec(node.tag)?.[1] ?? null;
 
 export function candidatesViolations(raw) {
   const masked = maskNonCode(raw, false);
@@ -221,15 +228,26 @@ export function popoverViolations(raw) {
 
   const lines = all.filter((n) => n.name === "p");
   const line = lines.length === 1 ? lines[0] : null;
+  const scroll = popover?.children[0] ?? null;
+  const outer = popover === null ? null : classOf(popover);
   need(
     popover !== null &&
       listbox !== null &&
       line !== null &&
-      popover.children.includes(listbox) &&
-      popover.children.includes(line) &&
-      line.start > listbox.end &&
+      scroll !== null &&
+      // The box is a non-scrolling column: [scroll region, footer].
+      outer !== null &&
+      /(^|\s)flex-col(\s|$)/.test(outer) &&
+      !/overflow/.test(outer) &&
+      popover.children.length === 2 &&
+      popover.children[1] === line &&
+      scroll.name === "div" &&
+      scroll.tag.includes(SCROLL_CLASS) &&
+      scroll.children.length === 1 &&
+      scroll.children[0] === listbox &&
+      line.start > scroll.end &&
       line.tag.includes('aria-hidden="true"') &&
-      line.tag.includes(LINE_CLASS) &&
+      flat(line.tag).includes(flat(LINE_CLASS)) &&
       flat(masked.slice(openEnd(line), masked.indexOf("</p>", line.start))) ===
         "{status}" &&
       all.every((n) => !hasRole(n, "status")),
@@ -253,6 +271,8 @@ export function popoverViolations(raw) {
       region !== null &&
       hasRole(region, "status") &&
       region.tag.includes('className="sr-only"') &&
+      region.tag.includes('aria-live="polite"') &&
+      region.tag.includes('aria-atomic="true"') &&
       flat(masked.slice(portalOpen, region.start)) === "(" &&
       flat(
         masked.slice(openEnd(region), masked.indexOf("</div>", region.start)),
@@ -357,12 +377,20 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   );
 
   const LIST_OPEN =
-    '      <div id={listId} role="listbox" aria-label="Mention suggestions">\n';
-  const LIST_CLOSE = "        ))}\n      </div>\n";
+    '        <div id={listId} role="listbox" aria-label="Mention suggestions">\n';
+  const LIST_CLOSE = "          ))}\n        </div>\n";
+  const SCROLL_CLOSE = "        </div>\n      </div>\n";
   const REGION =
-    '    <div role="status" className="sr-only">\n      {status}\n    </div>';
-  const LINE = `      {status !== null && (\n        <p\n          aria-hidden="true"\n          ${LINE_CLASS}\n        >\n          {status}\n        </p>\n      )}\n`;
-  for (const anchor of [LIST_OPEN, LIST_CLOSE, `${REGION},\n`, LINE])
+    '    <div\n      role="status"\n      aria-live="polite"\n      aria-atomic="true"\n      className="sr-only"\n    >\n      {status}\n    </div>';
+  const LINE =
+    '      {status !== null && (\n        <p\n          aria-hidden="true"\n          className={cn(\n            "shrink-0 px-2.5 py-2 text-[11px] text-muted-foreground",\n            items.length > 0 && "border-t",\n          )}\n        >\n          {status}\n        </p>\n      )}\n';
+  for (const anchor of [
+    LIST_OPEN,
+    LIST_CLOSE,
+    SCROLL_CLOSE,
+    `${REGION},\n`,
+    LINE,
+  ])
     assert.equal(raw.split(anchor).length, 2, `one anchor: ${anchor}`);
   const moved = (block, from, to) =>
     raw.replace(block, () => "").replace(from, () => to);
@@ -370,17 +398,21 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   // A message line back inside the listbox.
   mutate(
     LIST_CLOSE,
-    '        ))}\n        <p className="px-2.5">x</p>\n      </div>\n',
+    '          ))}\n          <p className="px-2.5">x</p>\n        </div>\n',
     PINS.LISTBOX_OPTIONS,
   );
   // The announcer moved inside the listbox.
   caught(
-    moved(`${REGION},\n`, LIST_CLOSE, `        ))}\n${REGION}\n      </div>\n`),
+    moved(
+      `${REGION},\n`,
+      LIST_CLOSE,
+      `          ))}\n${REGION}\n        </div>\n`,
+    ),
     PINS.LISTBOX_OPTIONS,
     "announcer inside the listbox",
   );
   // The old shape: role and id back on the scroll container.
-  mutate(LIST_OPEN, "      <div>\n", PINS.LISTBOX_OPTIONS);
+  mutate(LIST_OPEN, "        <div>\n", PINS.LISTBOX_OPTIONS);
 
   // The announcer mounted only with text, at either end of the portal.
   mutate(
@@ -418,16 +450,17 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   // A second region beside the popover's line.
   mutate(LINE, `${REGION}\n${LINE}`, PINS.ANNOUNCER);
   // The announcer visible, or no longer a live region.
+  mutate('      className="sr-only"\n    >', "    >", PINS.ANNOUNCER);
   mutate(
-    '<div role="status" className="sr-only">',
-    '<div role="status">',
+    '      role="status"\n      aria-live',
+    "      aria-live",
     PINS.ANNOUNCER,
   );
-  mutate(
-    '<div role="status" className="sr-only">',
-    '<div className="sr-only">',
-    PINS.ANNOUNCER,
-  );
+  // The announcer without its explicit politeness (a modal aria-hides it), or
+  // interrupting the reader instead.
+  mutate('      aria-live="polite"\n', "", PINS.ANNOUNCER);
+  mutate('aria-live="polite"', 'aria-live="assertive"', PINS.ANNOUNCER);
+  mutate('      aria-atomic="true"\n', "", PINS.ANNOUNCER);
   // The announcer reading something other than the shared status line.
   mutate(
     "      {status}\n    </div>,\n",
@@ -447,9 +480,10 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
     '<p\n          role="status"\n          aria-hidden="true"\n',
     PINS.VISIBLE_LINE,
   );
-  // The visible line moved into the listbox, or ahead of it.
+  // The visible line moved into the listbox, ahead of it, or back inside the
+  // scroll region, where eight rows push it below the fold.
   caught(
-    moved(LINE, LIST_CLOSE, `        ))}\n  ${LINE}      </div>\n`),
+    moved(LINE, LIST_CLOSE, `          ))}\n  ${LINE}        </div>\n`),
     PINS.VISIBLE_LINE,
     "visible line inside the listbox",
   );
@@ -458,8 +492,21 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
     PINS.VISIBLE_LINE,
     "visible line ahead of the listbox",
   );
-  // The visible line restyled, or showing something else.
-  mutate(LINE_CLASS, LINE_CLASS.replace("py-2", "py-1"), PINS.VISIBLE_LINE);
+  caught(
+    moved(LINE, SCROLL_CLOSE, `        </div>\n${LINE}      </div>\n`),
+    PINS.VISIBLE_LINE,
+    "visible line inside the scroll region",
+  );
+  // The outer box scrolling again, which would carry the footer with the rows.
+  mutate(
+    'className="z-50 flex w-72 flex-col ',
+    'className="z-50 flex w-72 flex-col overflow-y-auto ',
+    PINS.VISIBLE_LINE,
+  );
+  // The visible line restyled, bordered with no rows above it, or showing
+  // something else.
+  mutate('"shrink-0 px-2.5 py-2 ', '"shrink-0 px-2.5 py-1 ', PINS.VISIBLE_LINE);
+  mutate('items.length > 0 && "border-t"', '"border-t"', PINS.VISIBLE_LINE);
   mutate(
     "          {status}\n        </p>\n",
     '          {"No matches"}\n        </p>\n',
