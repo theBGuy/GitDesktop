@@ -733,8 +733,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     remote?: string;
     repo: string;
   } | null>(null);
-  // A publish's fork-PR detection in flight, with the repo it runs in: it paints
-  // the row's spinner and counts as a running push. The ref mirrors it for the
+  // A publish still deciding, with the repo it runs in: from the press until
+  // its prompt, guard, return or fork-PR check settle, it paints the row's
+  // spinner and counts as a running push. The ref mirrors it for the
   // fire-time guard and the hotkey continuations, which a stale render misleads.
   const [publishDetect, setPublishDetect] = useState<PublishDetect | null>(
     null,
@@ -790,8 +791,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // with Delete enabled, and `git branch -D` would destroy a branch the sessions
   // registry still needs to Resume. (Worktrees-side exclusion doesn't cover the
   // branch list, which comes straight from `git for-each-ref`.)
-  // Memoized by hand: this component doesn't compile under the React Compiler,
-  // and every downstream memo lists `allBranches` as a dep.
+  // Memoized by hand: every downstream memo lists `allBranches` as a dep, so
+  // its identity holds per `branches.data` whatever the compiler decides.
   const allBranches = useMemo(
     () =>
       (branches.data ?? []).filter((b) => !b.name.startsWith("gd/session/")),
@@ -823,7 +824,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       ? isMergeMethodAllowed(rulesConfig, currentName, "squash")
       : true);
   // Ahead/behind vs. the default branch, fetched only while the menu is open.
-  // A 30s window on this observer only, so a quick reopen spawns no rev-lists
+  // A 30s window on this observer only, so a quick reopen spawns no recount
   // (the hook's comment owns the invalidation contract and its residual).
   const divergence = useBranchDivergence(repoPath, defaultName, open, 30_000);
   const divByName = useMemo(
@@ -2768,7 +2769,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     (p.mutationId !== null && Object.hasOwn(pushLatch, p.mutationId)
       ? pushLatch[p.mutationId]
       : null);
-  // A detection of THIS repo counts as a push: the publish it decides is next.
+  // A publish of THIS repo still deciding counts as a push (see `publishDetect`
+  // for when it lets go): the push it decides comes next.
   const detectingBranch =
     publishDetect !== null && publishDetect.repo === repoPath
       ? publishDetect.branch

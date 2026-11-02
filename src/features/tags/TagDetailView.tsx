@@ -93,6 +93,10 @@ import { tagReleasePhase } from "./tag-detail-phase";
  *  mutation), so the line names the operation, not the pressed row's write. */
 const ASSET_DELETE_PENDING_REASON = "Deleting an asset…";
 
+/** The plain view's line while this tag's first release read runs, and the
+ *  reason its dialog openers hold for it. */
+const CHECKING_RELEASE_COPY = "Checking for a release…";
+
 export function TagDetailView({
   repoPath,
   tag,
@@ -236,9 +240,9 @@ export function TagDetailView({
   const tagInfo = tagList.data?.find((t) => t.name === tag);
   const listedRelease = (releaseList.data ?? []).find((r) => r.tagName === tag);
   const isLatest = listedRelease?.isLatest ?? false;
-  // A tag switch paints the PREVIOUS tag's release as placeholder data (success,
-  // never `isLoading`, even disabled), so every release write holds on this until
-  // the two agree. Read off `rel`, so a placeholder it drops holds nothing.
+  // The release arm admits only a release named for this tag, but placeholder
+  // data can still be one: this tag's older answer, served back after a reset
+  // cleared its read. Every release write holds on it until the read settles.
   const relStale = rel !== undefined && release.isPlaceholderData;
   const staleDim = relStale && "opacity-80";
   // Why the rendered release can't be acted on at all — it gates DOWNLOAD too,
@@ -291,11 +295,12 @@ export function TagDetailView({
   // tag with a release; only this tag's own release (never another tag's
   // placeholder) reaches the release arm. `isFetched` keeps a post-404 refetch
   // from counting as a first load.
+  const detailFirstLoad = release.isFetching && !release.isFetched;
   const { phase, checkingLine, errorLine, latchLocal } = tagReleasePhase({
     ghReady,
     listLoading: releaseList.isLoading,
     listHasRelease: listedRelease !== undefined,
-    detailFirstLoad: release.isFetching && !release.isFetched,
+    detailFirstLoad,
     detailFetching: release.isFetching,
     detailErrored: release.isError,
     heldRelease: rel !== undefined && rel.tagName === tag,
@@ -377,8 +382,8 @@ export function TagDetailView({
   // Shared by both provider arms, which differ in what is actually lost: GitHub's
   // uploaded binary is gone for good, while a GitLab asset link can be re-added.
   async function onDeleteAsset(assetName: string, kind: "asset" | "link") {
-    // The name comes off the rendered release, which is the previous tag's
-    // during a switch — refuse before the confirm can name the wrong asset.
+    // The name comes off the rendered release, which may be an older answer
+    // still settling, so refuse before the confirm can name a gone asset.
     if (relStale) return;
     const deleteIn = repoPath;
     const ok = await useConfirm.getState().ask({
@@ -511,7 +516,7 @@ export function TagDetailView({
 
     const saveEdit = async () => {
       // `draft`/`latest` below are read off the rendered release at submit
-      // time, so a switch behind the open dialog holds the save.
+      // time, so an older answer behind the open dialog holds the save.
       if (relStale || refuseWhileOffline()) return;
       // Empty notes leave the body untouched (the edit skips `--notes`), so
       // there's nothing to carry into the manifest either.
@@ -1029,12 +1034,17 @@ export function TagDetailView({
         <div className="flex items-start gap-2">
           <h2 className="font-mono text-sm font-medium">{tag}</h2>
           <span className="flex-1" />
+          {/* Both dialog openers hold through the first release read: a release
+              landing swaps in the release view, which would unmount the dialog. */}
           {ghReady && canCreate && (
             <DisabledReasonButton
               variant="outline"
               size="xs"
-              disabled={writeBlocked}
-              reason={writeReason}
+              disabled={writeBlocked || detailFirstLoad}
+              reason={
+                writeReason ??
+                (detailFirstLoad ? CHECKING_RELEASE_COPY : undefined)
+              }
               onClick={() => setCreateReleaseOpen(true)}
             >
               Create release
@@ -1068,7 +1078,7 @@ export function TagDetailView({
             its end. */}
         {checkingLine && (
           <p className="text-[11px] text-muted-foreground">
-            Checking for a release…
+            {CHECKING_RELEASE_COPY}
           </p>
         )}
         {errorLine && (
@@ -1113,16 +1123,18 @@ export function TagDetailView({
           Push tag
         </DisabledReasonButton>
         <span className="flex-1" />
-        <Button
+        <DisabledReasonButton
           variant="outline"
           size="sm"
+          disabled={detailFirstLoad}
+          reason={detailFirstLoad ? CHECKING_RELEASE_COPY : undefined}
           onClick={() => {
             setDeleteTagRemote(false);
             setDeleteTagOpen(true);
           }}
         >
           Delete tag
-        </Button>
+        </DisabledReasonButton>
       </div>
 
       <CreateReleaseDialog

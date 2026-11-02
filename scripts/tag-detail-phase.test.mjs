@@ -5,12 +5,17 @@
 // (offline) read shows neither a line nor a skeleton. Inputs are the query
 // flags TagDetailView feeds in; `paints` replays the view's per-tag latch.
 //
+// The source pins at the bottom hold TagDetailView.tsx's plain-arm dialog
+// openers (Create release, Delete tag) on the same first-load flag: a release
+// landing mid-dialog would swap arms and unmount the dialog.
+//
 // Not testable here: the focus rescues across the swap and the Retry, and what
 // react-query actually reports for each read shape. Those need the live app.
 //
 // The import reaches straight into `src/` under Node's type stripping, so the
 // module must stay free of runtime imports.
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { tagReleasePhase } from "../src/features/tags/tag-detail-phase.ts";
 
@@ -326,5 +331,88 @@ test("every input combination keeps the invariants", () => {
     // A paused read (neither fetching) never shows the checking line.
     if (!i.listLoading && !i.detailFetching)
       assert.equal(out.checkingLine, false, at);
+  }
+});
+
+// --- source pins on TagDetailView.tsx -------------------------------------
+
+const SOURCE = new URL(
+  "../src/features/tags/TagDetailView.tsx",
+  import.meta.url,
+);
+const squash = (s) => s.replace(/\s+/g, "");
+const ELLIPSIS = String.fromCharCode(0x2026);
+
+function sourceProblems(raw) {
+  const flat = squash(raw);
+  const problems = [];
+  const need = (cond, what) => {
+    if (!cond) problems.push(what);
+  };
+  // One flag feeds the phase model and both holds.
+  need(
+    flat.includes(
+      "constdetailFirstLoad=release.isFetching&&!release.isFetched;",
+    ),
+    "detailFirstLoad derived from the release read",
+  );
+  need(
+    /tagReleasePhase\(\{[^}]*\bdetailFirstLoad,/.test(flat),
+    "detailFirstLoad fed to tagReleasePhase",
+  );
+  // The checking line and the holds' reason share one string.
+  need(
+    flat.includes(
+      '{checkingLine&&(<pclassName="text-[11px]text-muted-foreground">{CHECKING_RELEASE_COPY}</p>)}',
+    ),
+    "checking line renders CHECKING_RELEASE_COPY",
+  );
+  // The write block keeps precedence over the hold's reason.
+  need(
+    flat.includes(
+      "disabled={writeBlocked||detailFirstLoad}reason={writeReason??(detailFirstLoad?CHECKING_RELEASE_COPY:undefined)}onClick={()=>setCreateReleaseOpen(true)}",
+    ),
+    "Create release holds through the first release read",
+  );
+  need(
+    flat.includes(
+      "disabled={detailFirstLoad}reason={detailFirstLoad?CHECKING_RELEASE_COPY:undefined}onClick={()=>{setDeleteTagRemote(false);setDeleteTagOpen(true);}}",
+    ),
+    "Delete tag holds through the first release read",
+  );
+  return problems;
+}
+
+test("TagDetailView.tsx holds both plain-arm dialog openers", () => {
+  assert.deepEqual(sourceProblems(readFileSync(SOURCE, "utf8")), []);
+});
+
+test("the source pins catch their mutants", () => {
+  const real = readFileSync(SOURCE, "utf8").replace(/\r\n/g, "\n");
+  const mutants = [
+    // Create release without the hold
+    ["disabled={writeBlocked || detailFirstLoad}", "disabled={writeBlocked}"],
+    // Create release's reason dropping the hold arm
+    [
+      "writeReason ??\n                (detailFirstLoad ? CHECKING_RELEASE_COPY : undefined)",
+      "writeReason",
+    ],
+    // Delete tag without the hold
+    ["          disabled={detailFirstLoad}\n", ""],
+    // Delete tag's reason gone
+    [
+      "          reason={detailFirstLoad ? CHECKING_RELEASE_COPY : undefined}\n",
+      "",
+    ],
+    // the checking line re-spelling its copy
+    [
+      "            {CHECKING_RELEASE_COPY}\n",
+      `            Checking for a release${ELLIPSIS}\n`,
+    ],
+  ];
+  for (const [from, to] of mutants) {
+    assert.ok(real.includes(from), `mutant anchor missing: ${from}`);
+    const problems = sourceProblems(real.replace(from, () => to));
+    assert.ok(problems.length > 0, `mutant not caught: ${from}`);
   }
 });

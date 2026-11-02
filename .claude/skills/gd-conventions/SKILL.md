@@ -105,10 +105,9 @@ through `setRequestHold(target, hold)` (same store): identity-pinned, a no-op
 once the request moved on; `holdOffline` outranks the hold's reason; and the
 reason/note line is reserved from open so it never moves the buttons, and it is
 the dialog's one polite live region (the publish routes' fork-PR check is the
-reference). Commit-level
-destructive prompts (checkout, revert, cherry-pick, undo) share their wording
-through `src/features/history/commit-confirms.ts`: a new route to one of those
-ops imports the existing prompt, never re-spells it.
+reference). Commit-level destructive prompts (checkout, revert, cherry-pick,
+undo) share their wording through `src/features/history/commit-confirms.ts`: a
+new route to one of those ops imports the existing prompt, never re-spells it.
 Staging-over-conflict-markers prompts likewise live in
 `src/features/repository/conflict-confirms.ts`: the generic stage gate and
 Mark resolved both build theirs there.

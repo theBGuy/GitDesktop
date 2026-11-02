@@ -246,9 +246,10 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const forkGuardSeq = useRef(0);
   const closeForkGuard = (token: number) =>
     setForkGuard((g) => (g?.token === token ? { ...g, open: false } : g));
-  // In-flight fork-PR detections, counted per repo: each holds its own repo's
-  // Push and no other, so a switch mid-probe neither holds the new repo nor
-  // releases the old one before its probe settles. The ref mirrors the map for
+  // Publish presses still deciding, counted per repo: each holds its own repo's
+  // Push and no other, from the press until its prompt, guard, return or
+  // fork-PR check settle, so a switch mid-decision neither holds the new repo
+  // nor releases the old one early. The ref mirrors the map for
   // fire-time reads in handlers (render reads the state); both are written
   // together, only through `shiftDetections`.
   const [detections, setDetections] = useState<

@@ -1573,7 +1573,9 @@ things follow from that (**GitHub** only — the fork model here is GitHub's):
   while GitDesktop looks for that pull request and holds **Publish** for up to 10
   seconds; the offer takes the prompt's place as soon as the pull request turns up. A
   **Publish** pressed after those 10 seconds, before the pull request turns up, goes
-  ahead without the offer, and so does any publish while GitDesktop can't reach GitHub.
+  ahead without the offer, and so does a publish whose check itself fails (for example
+  when GitHub's API can't be reached or the GitHub CLI is signed out). Offline,
+  **Publish** waits for the connection.
 
 ## Review comments
 

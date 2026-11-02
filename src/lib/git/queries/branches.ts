@@ -281,8 +281,9 @@ export function useRebaseOnto(repo: string) {
   );
 }
 
-/** Ahead/behind of every local branch vs `base`. Gated on `enabled` (it's N rev-list
- *  calls) and keyed under the repo so branch mutations invalidate it.
+/** Ahead/behind of every local branch vs `base`. Gated on `enabled` (one
+ *  for-each-ref spawn on Git 2.41+, else one rev-list per branch) and keyed
+ *  under the repo so branch mutations invalidate it.
  *
  *  `staleTime` is per observer: the branch menu passes one so a reopen spawns
  *  nothing, while CleanupBranchesDialog leaves it unset because its
@@ -303,7 +304,7 @@ export function useBranchDivergence(
     queryKey: ["repo", repo, "divergence", base] as const,
     queryFn: () => api.gitBranchDivergence(repo, base ?? ""),
     enabled: enabled && Boolean(base),
-    // Local rev-list reads only. react-query's default "online" mode parks the
+    // Local git reads only. react-query's default "online" mode parks the
     // fetch whenever the OS reports no connection, and a parked query is neither
     // loading nor errored — consumers would silently render without divergence.
     networkMode: "always",

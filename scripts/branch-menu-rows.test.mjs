@@ -3,8 +3,9 @@
 // across kinds, and the range extractor's pins must never repeat a window index
 // or leave the list's bounds (virtual-core checks neither). The source pins at
 // the bottom hold BranchSwitcher.tsx to the wiring those helpers rely on: the
-// hand-memoized flatten and row-key callback, the shared context menu's
-// target/probe ordering, and the session-branch filters staying upstream.
+// hand-memoized flatten and row-key callback, the focused-row pin's tracking,
+// the shared context menu's target/probe ordering and its scroll-on-return, and
+// the session-branch filters staying upstream.
 //
 // The import reaches straight into `src/` through Node's default type
 // stripping, which resolves no bundler aliases, so `BranchSwitcherRows.ts` must
@@ -284,8 +285,8 @@ function sourceProblems(raw) {
   const need = (cond, what) => {
     if (!cond) problems.push(what);
   };
-  // The flatten is memoized by hand on exactly its inputs: the component does
-  // not compile, so nothing else memoizes it, and the list re-keys on it.
+  // The flatten is memoized by hand on exactly its inputs: the list re-keys its
+  // rows on its identity, which must not rest on the compiler's choices.
   need(
     flat.includes(
       "const{flatRows,navNames}=useMemo(()=>buildBranchMenuRows({visibleBranches,archivedBranches,showArchived,remoteOnly,showRemote,showRemoteSection,}),[visibleBranches,archivedBranches,showArchived,remoteOnly,showRemote,showRemoteSection,],);",
@@ -308,6 +309,36 @@ function sourceProblems(raw) {
       "mergePinnedIndexes(defaultRangeExtractor(range),[activePin,targetPin,archivedPin,remotePin,focusedPin],count,)",
     ),
     "rangeExtractor merges the pins",
+  );
+  // The focused pin reads the row holding DOM focus, which the list container
+  // tracks: focus landing on a row names it, focus leaving the list clears it.
+  need(
+    flat.includes(
+      "const[activePin,targetPin,archivedPin,remotePin,focusedPin]=branchMenuPins(flatRows,activeName,target,focusedName);",
+    ),
+    "focusedPin read from focusedName",
+  );
+  need(
+    flat.includes(
+      'onFocus={(e)=>{if(!e.currentTarget.contains(e.target))return;setFocusedName(e.target.closest("[data-row]")?.getAttribute("data-row")??null,);}}',
+    ),
+    "list onFocus sets focusedName from the row",
+  );
+  need(
+    flat.includes(
+      "onBlur={(e)=>{if(!e.currentTarget.contains(e.target)||(e.relatedTargetinstanceofNode&&e.currentTarget.contains(e.relatedTarget)))return;setFocusedName(null);}}",
+    ),
+    "list onBlur clears focusedName only when focus leaves the list",
+  );
+  // The context menu's focus return scrolls the row into view first: Base UI
+  // restores focus with preventScroll.
+  const finalFocus = span(text, "finalFocus={() => {", "return row ?? true;");
+  need(
+    finalFocus !== null &&
+      squash(finalFocus).endsWith(
+        'row?.scrollIntoView({block:"nearest"});returnrow??true;',
+      ),
+    "finalFocus scrolls the returned row into view",
   );
   need(
     flat.includes("<BranchMenuListkey={repoPath}"),
@@ -443,6 +474,20 @@ test("the source pins catch their mutants", () => {
     ],
     // the session filter moved off the memo
     ['!b.name.startsWith("gd/session/")', "true"],
+    // the list no longer telling the pin which row holds focus
+    [
+      '        setFocusedName(\n          e.target.closest("[data-row]")?.getAttribute("data-row") ?? null,\n        );\n',
+      "",
+    ],
+    // a blur onto another row clearing the name in between
+    [
+      "          (e.relatedTarget instanceof Node &&\n            e.currentTarget.contains(e.relatedTarget))\n",
+      "          false\n",
+    ],
+    // focus leaving the list keeping a stale name
+    ["        setFocusedName(null);\n", ""],
+    // the context menu returning focus to a row out of view
+    ['                    row?.scrollIntoView({ block: "nearest" });\n', ""],
   ];
   for (const [from, to] of mutants) {
     assert.ok(real.includes(from), `mutant anchor missing: ${from}`);
