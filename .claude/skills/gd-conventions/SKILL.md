@@ -99,7 +99,13 @@ host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm
 dialog. A prompt is repo-scoped by default: switching or closing the repository
 while it is open cancels it (the caller gets `false`, an info toast names what
 didn't happen). Prompts that act outside the open repository (quit/update,
-recents, Settings, Explore, task deletion) pass `scope: "app"`. Commit-level
+recents, Settings, Explore, task deletion) pass `scope: "app"`. A prompt whose
+confirm button must hold or annotate LIVE asks with `heldReason` and updates
+through `setRequestHold(target, hold)` (same store): identity-pinned, a no-op
+once the request moved on; `holdOffline` outranks the hold's reason; and the
+reason/note line is reserved from open so it never moves the buttons, and it is
+the dialog's one polite live region (the publish routes' fork-PR check is the
+reference). Commit-level
 destructive prompts (checkout, revert, cherry-pick, undo) share their wording
 through `src/features/history/commit-confirms.ts`: a new route to one of those
 ops imports the existing prompt, never re-spells it.

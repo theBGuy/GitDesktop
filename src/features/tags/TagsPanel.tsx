@@ -61,21 +61,16 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
   // create flag (GitHub + GitLab — the dialog hides the GitHub-only toggles there).
   const ghReady = forgeFeatureReady(gh.data, "releases");
   const canCreateRelease = forgeFeatureReady(gh.data, "releaseCreate");
-  const releaseReason = (() => {
-    const probe = forgeProbeState(gh);
-    switch (true) {
-      case canCreateRelease:
-        return undefined;
-      case probe !== null:
-        return forgeProbeReason(probe, "publish a release");
-      case gh.data?.provider === "gitlab" && Boolean(gh.data?.installed):
-        return "Sign in with the GitLab CLI (glab) to publish a release.";
-      case gh.data?.provider === "gitlab":
-        return "Install the GitLab CLI (glab) to publish a release.";
-      default:
-        return "Connect this repository to GitHub or GitLab to publish a release.";
-    }
-  })();
+  const probe = forgeProbeState(gh);
+  const releaseReason = canCreateRelease
+    ? undefined
+    : probe !== null
+      ? forgeProbeReason(probe, "publish a release")
+      : gh.data?.provider === "gitlab" && gh.data?.installed
+        ? "Sign in with the GitLab CLI (glab) to publish a release."
+        : gh.data?.provider === "gitlab"
+          ? "Install the GitLab CLI (glab) to publish a release."
+          : "Connect this repository to GitHub or GitLab to publish a release.";
   const tagList = useTagList(repoPath);
   const releaseList = useReleaseList(repoPath, ghReady);
   const status = useRepoStatus(repoPath);

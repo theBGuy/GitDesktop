@@ -13,6 +13,16 @@ import {
  *  withdraw its own prompt (and never another surface's confirm). */
 export type PublishAskSlot = { current: ConfirmRequest | null };
 
+/** Holds Publish while the fork-PR check is still running at open. */
+export const PUBLISH_FORK_CHECK_REASON =
+  "Checking for a pull request from a fork…";
+/** Replaces the reason once the bound frees Publish with the check unsettled;
+ *  true whether or not the offline hold is active. */
+export const PUBLISH_FORK_CHECK_NOTE =
+  "The check for a fork pull request hasn't finished.";
+/** How long an unsettled fork-PR check may hold Publish. */
+export const PUBLISH_FORK_CHECK_BOUND_MS = 10_000;
+
 /** Shows the shared confirm before a push that would create `branch` on
  *  `remote`; resolves true = publish. Cancel takes the initial focus (rendered
  *  first, no `initialFocus`), so a reflexive Enter backs out. Spelled as one
@@ -36,6 +46,9 @@ export function askPublishConfirm(
     upstreamBranch: string | null;
     /** The name created on the remote when it differs from `branch`. */
     createdBranch?: string;
+    /** Opens with Publish held for this reason; the caller updates or releases
+     *  it through `setRequestHold` on the request left in `slot`. */
+    heldReason?: string;
   },
   slot: PublishAskSlot,
 ): Promise<boolean> {
@@ -64,6 +77,7 @@ export function askPublishConfirm(
     ),
     confirmLabel: "Publish",
     holdOffline: true,
+    heldReason: opts.heldReason,
   });
   // `ask` installs its request synchronously.
   const asked = useConfirm.getState().request;

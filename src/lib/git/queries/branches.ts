@@ -282,11 +282,22 @@ export function useRebaseOnto(repo: string) {
 }
 
 /** Ahead/behind of every local branch vs `base`. Gated on `enabled` (it's N rev-list
- *  calls) and keyed under the repo so branch mutations invalidate it. */
+ *  calls) and keyed under the repo so branch mutations invalidate it.
+ *
+ *  `staleTime` is per observer: the branch menu passes one so a reopen spawns
+ *  nothing, while CleanupBranchesDialog leaves it unset because its
+ *  ahead-0/behind>0 pre-check pre-selects rows for `git branch -D` and must
+ *  refetch on open. A window is safe because every in-app ref move invalidates
+ *  this key: HEAD moves via `headMoveAftermathKeys`, fetch/pull via the
+ *  local-only pass, other branch writes via the repo-subtree default.
+ *  Accepted residual: an external move that leaves HEAD alone (terminal
+ *  `branch -f`, `fetch x:x`, push, a sibling worktree's commit) stays stale for
+ *  up to the window, and Cleanup may paint that older entry until its refetch. */
 export function useBranchDivergence(
   repo: string,
   base: string | null,
   enabled: boolean,
+  staleTime?: number,
 ) {
   return useQuery({
     queryKey: ["repo", repo, "divergence", base] as const,
@@ -296,6 +307,7 @@ export function useBranchDivergence(
     // fetch whenever the OS reports no connection, and a parked query is neither
     // loading nor errored — consumers would silently render without divergence.
     networkMode: "always",
+    ...(staleTime === undefined ? {} : { staleTime }),
   });
 }
 

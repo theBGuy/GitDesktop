@@ -117,6 +117,9 @@ import {
 } from "./PublishRepoControl";
 import {
   askPublishConfirm,
+  PUBLISH_FORK_CHECK_BOUND_MS,
+  PUBLISH_FORK_CHECK_NOTE,
+  PUBLISH_FORK_CHECK_REASON,
   recordedVisibility,
   useCloseSettled,
   withdrawPublishConfirm,
@@ -244,11 +247,21 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   const closeForkGuard = (token: number) =>
     setForkGuard((g) => (g?.token === token ? { ...g, open: false } : g));
   // In-flight fork-PR detections, counted per repo: each holds its own repo's
-  // sync bar and no other, so a switch mid-probe neither holds the new repo nor
-  // releases the old one before its probe settles.
+  // Push and no other, so a switch mid-probe neither holds the new repo nor
+  // releases the old one before its probe settles. The ref mirrors the map for
+  // fire-time reads in handlers (render reads the state); both are written
+  // together, only through `shiftDetections`.
   const [detections, setDetections] = useState<
     Readonly<Record<string, number>>
   >({});
+  const detectionsRef = useRef<Readonly<Record<string, number>>>({});
+  const shiftDetections = (repo: string, by: 1 | -1) => {
+    const n = (detectionsRef.current[repo] ?? 0) + by;
+    const next = { ...detectionsRef.current, [repo]: n };
+    if (n <= 0) delete next[repo];
+    detectionsRef.current = next;
+    setDetections(next);
+  };
   const detecting = (detections[repoPath] ?? 0) > 0;
   // The mismatch Push menu, controlled so the push hotkey and the palette open
   // it too. Its destinations are pinned when it opens, with the repo they belong
@@ -320,7 +333,6 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     headerPushPending ||
     updateUpstream.isPending ||
     hardReset.isPending ||
-    detecting ||
     recovery.pending ||
     pullDropGuard.pending;
   const busy = ownBusy || otherPushRunning;
@@ -359,6 +371,12 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     remoteNewExists,
   };
   const sync = deriveSyncControls(syncInput);
+  // A fork-PR check holds Push alone, at both of its render sites; derive's own
+  // holds outrank the check's reason, so a pull alongside one names the sync.
+  const pushHold =
+    detecting && !sync.push.disabled
+      ? { disabled: true, reason: PUBLISH_FORK_CHECK_REASON }
+      : sync.push;
   // The hotkeys follow the bar's OWN holds, so a press during another surface's
   // push reaches its fire-time refusal instead of doing nothing.
   const hotkeys = deriveSyncControls({ ...syncInput, busy: ownBusy }).hotkeys;
@@ -400,8 +418,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     // Auto-fetch carries its own connectivity gate (auto-fetch.ts), and waits out
     // a push through `busy` without a word.
     if (!silent && (refuseWhileOffline() || refuseWhilePushing())) return;
+    const run = silent ? autoFetch : fetchRemote;
     try {
-      await (silent ? autoFetch : fetchRemote).mutateAsync(undefined);
+      await run.mutateAsync(undefined);
       markFetched(repoPath);
     } catch (e) {
       if (!silent) onError(e);
@@ -572,40 +591,44 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     const updatedIn = repoPath;
+    let outcome:
+      | Awaited<ReturnType<typeof updateUpstream.mutateAsync>>
+      | undefined;
     try {
-      const outcome = await updateUpstream.mutateAsync(undefined);
-      const originNote = originNoteFor(updatedIn);
-      const ref = `upstream/${outcome.branch}`;
-      if (outcome.kind === "up-to-date") {
-        toast.success(`Already up to date with ${ref}.`);
-      } else if (outcome.kind === "fast-forwarded") {
-        toast.success(`Fast-forwarded to ${ref}.`);
-      } else if (
-        outcome.kind === "dirty-blocked" &&
-        (!mounted.current || originNote !== undefined)
-      ) {
-        // Unmounted mid-update, or the user has left this repo: a recovery
-        // prompt would go unseen or land on the wrong repo, so say what blocked
-        // the merge instead, naming the repo when it is no longer on screen.
-        toast(
-          `Didn't update from ${ref} — uncommitted changes are in the way. Commit or stash them, then update again.`,
-          { description: originNote },
-        );
-      } else if (outcome.kind === "dirty-blocked") {
-        // The merge was refused, not attempted-and-broken: recover from the
-        // already-resolved ref, so confirming costs no second fetch.
-        recovery.begin({
-          operationLabel: "update",
-          detail: ref,
-          reappliedMessage: `Updated from ${ref} and reapplied your changes.`,
-          plainMessage: `Merged ${ref} into your branch.`,
-          run: { op: "merge", ref: outcome.ref },
-        });
-      } else {
-        toast.success(`Merged ${ref} into your branch.`);
-      }
+      outcome = await updateUpstream.mutateAsync(undefined);
     } catch (e) {
       onError(e);
+    }
+    if (outcome === undefined) return;
+    const originNote = originNoteFor(updatedIn);
+    const ref = `upstream/${outcome.branch}`;
+    if (outcome.kind === "up-to-date") {
+      toast.success(`Already up to date with ${ref}.`);
+    } else if (outcome.kind === "fast-forwarded") {
+      toast.success(`Fast-forwarded to ${ref}.`);
+    } else if (
+      outcome.kind === "dirty-blocked" &&
+      (!mounted.current || originNote !== undefined)
+    ) {
+      // Unmounted mid-update, or the user has left this repo: a recovery
+      // prompt would go unseen or land on the wrong repo, so say what blocked
+      // the merge instead, naming the repo when it is no longer on screen.
+      toast(
+        `Didn't update from ${ref} — uncommitted changes are in the way. Commit or stash them, then update again.`,
+        { description: originNote },
+      );
+    } else if (outcome.kind === "dirty-blocked") {
+      // The merge was refused, not attempted-and-broken: recover from the
+      // already-resolved ref, so confirming costs no second fetch.
+      recovery.begin({
+        operationLabel: "update",
+        detail: ref,
+        reappliedMessage: `Updated from ${ref} and reapplied your changes.`,
+        plainMessage: `Merged ${ref} into your branch.`,
+        run: { op: "merge", ref: outcome.ref },
+      });
+    } else {
+      toast.success(`Merged ${ref} into your branch.`);
     }
   }
 
@@ -720,8 +743,11 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
-    try {
-      const guard = await push.mutateAsync({
+    let guard: PushGuard | undefined;
+    // The push starts here, outside the try: the compiler refuses its
+    // variables' value blocks inside one, and the push scans read them inline.
+    const pushed = (async () => {
+      guard = await push.mutateAsync({
         setUpstream: branch === undefined && !hasUpstream,
         force,
         branch,
@@ -730,29 +756,33 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         // keeps that branch held after a checkout; the current one is held too.
         startedOn: branch === undefined ? headNameRef.current : undefined,
       });
-      const { away } = landedIn(repoPath);
-      // The outcome toast claims only the pre-push decision (the push IPC
-      // reports no create signal); the force toast's two degraded guard values
-      // are the only post-push facts reported.
-      if (force)
-        toast.success(`Force pushed${away}`, {
-          description: FORCE_PUSH_DEGRADED[guard],
-        });
-      else if (outcome !== undefined && branch !== undefined) {
-        const copy = pushSuccessCopy({
-          outcome,
-          branch,
-          remote: "origin",
-          tracks: true,
-          away,
-        });
-        if (copy) toast.success(copy.title, { description: copy.description });
-      }
-      closeForceConfirm();
+    })();
+    try {
+      await pushed;
     } catch (e) {
       onError(e);
       closeForceConfirm();
     }
+    if (guard === undefined) return;
+    const { away } = landedIn(repoPath);
+    // The outcome toast claims only the pre-push decision (the push IPC
+    // reports no create signal); the force toast's two degraded guard values
+    // are the only post-push facts reported.
+    if (force)
+      toast.success(`Force pushed${away}`, {
+        description: FORCE_PUSH_DEGRADED[guard],
+      });
+    else if (outcome !== undefined && branch !== undefined) {
+      const copy = pushSuccessCopy({
+        outcome,
+        branch,
+        remote: "origin",
+        tracks: true,
+        away,
+      });
+      if (copy) toast.success(copy.title, { description: copy.description });
+    }
+    closeForceConfirm();
   }
 
   // HEAD can move while the confirm sits open; the branch it opened on is the
@@ -777,19 +807,21 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     const branch = confirm.branch;
     forceChecking.current = true;
     setForceReading(true);
-    let readName: string | null;
-    try {
-      // The factory's queryFn straight, never fetchQuery: that joins an
-      // in-flight poll, which may have been spawned before the click.
-      readName = (await repoStatusOptions(confirmRepo).queryFn()).branch.name;
-    } catch {
-      toast.info("Couldn't confirm the current branch — nothing was pushed.");
-      if (forceConfirmRef.current === confirm) closeForceConfirm();
-      return;
-    } finally {
+    let readName: string | null | undefined;
+    await (async () => {
+      try {
+        // The factory's queryFn straight, never fetchQuery: that joins an
+        // in-flight poll, which may have been spawned before the click.
+        readName = (await repoStatusOptions(confirmRepo).queryFn()).branch.name;
+      } catch {
+        toast.info("Couldn't confirm the current branch — nothing was pushed.");
+        if (forceConfirmRef.current === confirm) closeForceConfirm();
+      }
+    })().finally(() => {
       forceChecking.current = false;
       setForceReading(false);
-    }
+    });
+    if (readName === undefined) return;
     // `push` follows the live repo, so a switch during the read refuses.
     if (refuseIfSwitched(confirmRepo, "nothing was pushed")) return;
     // Cancelled or reopened during the read: that click no longer stands.
@@ -827,6 +859,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
   // pushes, which need one) are correct as they stand and never ask.
   async function beginPush(force: boolean) {
     if (refuseWhileOffline()) return;
+    // A repeat press before the held Push renders: the press in flight owns it.
+    if ((detectionsRef.current[repoPath] ?? 0) > 0) return;
     const branch = head?.name;
     const facts = {
       upstream: head?.upstream ?? null,
@@ -855,30 +889,27 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       return;
     }
     const pushedIn = repoPath;
-    setDetections((d) => ({ ...d, [pushedIn]: (d[pushedIn] ?? 0) + 1 }));
-    const match = await forgeDetectForkPrForBranch(repoPath, branch).catch(
-      () => null,
-    );
-    setDetections((d) => {
-      const { [pushedIn]: n = 0, ...rest } = d;
-      return n > 1 ? { ...rest, [pushedIn]: n - 1 } : rest;
-    });
-    // `push` follows the live repo, while the branch name, the fork match and
-    // the decision to publish all belong to the old one: a switch during the
-    // round-trip refuses rather than publish there.
-    const { live, away } = landedIn(pushedIn);
-    if (!live) {
-      toast.info(
-        `Didn't publish ${branch}${away} — you switched repositories before the push started.`,
-      );
-      return;
-    }
+    // The fork-PR check runs alongside the local reads, in two phases: before
+    // the ask its settle only records, and the decision reads that record after
+    // the last await; once the prompt is up, a settle swaps it for the guard or
+    // releases its hold. A holder object, so the record keeps its type across
+    // the awaits.
+    let asked: ConfirmRequest | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const probe = { settled: false, found: null as ForkPrMatch | null };
+    // Push holds from the press until the prompt (the modal is the exclusion
+    // from then on), the guard, a return, or the check's settle, whichever is
+    // first; once per press, so the per-repo count can't drop twice.
+    let marked = true;
+    shiftDetections(pushedIn, 1);
+    const releaseMark = () => {
+      if (!marked) return;
+      marked = false;
+      shiftDetections(pushedIn, -1);
+    };
     // Every route from here pushes `branch` by name, so a HEAD that moved
     // during the round-trip changes nothing: the match still describes it.
-    if (match) {
-      // A repeat press can match while this bar's own publish prompt is still
-      // up; the guard replaces it rather than stacking over it.
-      withdrawPublishConfirm(publishAsk);
+    const openGuard = (match: ForkPrMatch) => {
       forkGuardSeq.current += 1;
       setForkGuard({
         token: forkGuardSeq.current,
@@ -887,11 +918,33 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         branch,
         open: true,
       });
-      return;
-    }
-    // A push that started during the detection refuses before any prompt.
-    if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
-      return;
+    };
+    // A match lands only on this press's own prompt, still showing, in the repo
+    // it was asked in; anything later is dropped without a word.
+    const onPromptSettle = (m: ForkPrMatch | null) => {
+      clearTimeout(timer);
+      if (m === null) {
+        useConfirm.getState().setRequestHold(asked, {});
+        return;
+      }
+      if (
+        asked !== null &&
+        useConfirm.getState().request === asked &&
+        landedIn(pushedIn).live
+      ) {
+        withdrawPublishConfirm(publishAsk);
+        openGuard(m);
+      }
+    };
+    const check = forgeDetectForkPrForBranch(pushedIn, branch)
+      .catch(() => null)
+      .then((m) => {
+        probe.settled = true;
+        probe.found = m;
+        releaseMark();
+        if (asked !== null) onPromptSettle(m);
+        return m;
+      });
     // The HEAD arm publishes to origin. A branch origin already has (as of the
     // last fetch) only fast-forwards and tracks, so only a create asks first;
     // the list mirrors origin's FETCH side, so a differing push URL asks too.
@@ -909,8 +962,15 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         "nothing was published",
         "before the push started",
       )
-    )
+    ) {
+      releaseMark();
       return;
+    }
+    // A push that started during the reads refuses before any prompt.
+    if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath)) {
+      releaseMark();
+      return;
+    }
     const presence = presenceUnderUrls(
       remoteHasBranch(list, "origin", branch),
       fetchUrl,
@@ -921,7 +981,16 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       remoteHasSameName: presence,
     });
     if (create) {
-      const ok = await askPublishConfirm(
+      // The decision point: nothing awaits between here and the ask.
+      releaseMark();
+      if (probe.settled && probe.found) {
+        // A repeat press can match while this bar's own publish prompt is
+        // still up; the guard replaces it rather than stacking over it.
+        withdrawPublishConfirm(publishAsk);
+        openGuard(probe.found);
+        return;
+      }
+      const answer = askPublishConfirm(
         {
           branch,
           remote: "origin",
@@ -932,10 +1001,46 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
           goneUpstream: facts.upstreamGone,
           upstreamRemote: head?.upstreamRemote ?? null,
           upstreamBranch: head?.upstreamBranch ?? null,
+          heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON,
         },
         publishAsk,
       );
+      asked = publishAsk.current;
+      // Past the bound Publish frees with a note; the hold's identity pin
+      // makes a fire on a gone prompt a no-op.
+      if (!probe.settled) {
+        timer = setTimeout(() => {
+          if (!probe.settled)
+            useConfirm
+              .getState()
+              .setRequestHold(asked, { note: PUBLISH_FORK_CHECK_NOTE });
+        }, PUBLISH_FORK_CHECK_BOUND_MS);
+        void answer.finally(() => clearTimeout(timer));
+      }
+      const ok = await answer;
       if (!ok) return;
+    } else {
+      // No prompt to hold, so the check decides before the push, and the
+      // refusals re-run after it: it can take the backend's whole bound.
+      const match = await check;
+      releaseMark();
+      // `push` follows the live repo, while the branch name, the fork match and
+      // the decision to publish all belong to the old one: a switch during the
+      // round-trip refuses rather than publish there.
+      const { live, away } = landedIn(pushedIn);
+      if (!live) {
+        toast.info(
+          `Didn't publish ${branch}${away} — you switched repositories before the push started.`,
+        );
+        return;
+      }
+      if (refuseWhilePushing() || refuseWhilePublishing(queryClient, repoPath))
+        return;
+      if (match) {
+        withdrawPublishConfirm(publishAsk);
+        openGuard(match);
+        return;
+      }
     }
     // Pushes `branch` by name: a HEAD that moved under the prompt publishes the
     // branch it named. doPush re-checks offline and running pushes itself.
@@ -1012,6 +1117,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       refuseWhilePublishing(queryClient, repoPath)
     )
       return;
+    const destination =
+      pushBranch === branch ? {} : { remoteBranch: pushBranch };
     try {
       // Sets no upstream, exactly like the bare push it stands in for.
       await push.mutateAsync({
@@ -1025,7 +1132,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
         outcome: pushOutcome({ willPublish: true, create, presence }),
         branch,
         remote: pushRemote,
-        ...(pushBranch === branch ? {} : { remoteBranch: pushBranch }),
+        ...destination,
         tracks: false,
         away: landedIn(pushedIn).away,
       });
@@ -1064,7 +1171,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
       toast.info("HEAD moved — nothing was pushed.");
       return;
     }
-    try {
+    // Runs outside the try that catches it: the compiler refuses its value
+    // blocks inside one, and the push scans read its writes where they are.
+    const pushing = (async () => {
       if (target === "tracked") {
         await push.mutateAsync({
           setUpstream: false,
@@ -1151,6 +1260,9 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             : pushSuccessCopy({ outcome, branch, remote, tracks: true, away });
         if (copy) toast.success(copy.title, { description: copy.description });
       }
+    })();
+    try {
+      await pushing;
     } catch (e) {
       onError(e);
     }
@@ -1240,7 +1352,7 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
     () => {
       if (!refuseWhilePushing()) pressPush();
     },
-    hotkeys.push && !publishPending,
+    hotkeys.push && !publishPending && !detecting,
   );
   // Palette-only (defaultBinding: null) and gated on the fork's `upstream`
   // remote existing (and not detached), so it hides itself when there's nothing
@@ -1442,8 +1554,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
                   ref={pushControlRef}
                   variant="outline"
                   size="sm"
-                  disabled={sync.push.disabled}
-                  reason={sync.push.reason}
+                  disabled={pushHold.disabled}
+                  reason={pushHold.reason}
                   title={pushTitle}
                   aria-label={sync.pushName}
                   aria-keyshortcuts={pushKeyshortcuts}
@@ -1500,8 +1612,8 @@ export function SyncControls({ repoPath }: { repoPath: string }) {
             ref={pushControlRef}
             variant="outline"
             size="sm"
-            disabled={sync.push.disabled}
-            reason={sync.push.reason}
+            disabled={pushHold.disabled}
+            reason={pushHold.reason}
             title={pushTitle}
             aria-label={sync.pushName}
             aria-keyshortcuts={pushKeyshortcuts}

@@ -25,6 +25,18 @@ interface ConfirmOptions {
    *  if the open repository changes or closes while it is up. `"app"` prompts
    *  act outside the open repository and survive a switch. */
   scope?: ConfirmScope;
+  /** Opens the prompt with its confirm button held for this reason and reserves
+   *  the request's hold line under the body; the asker updates or releases it
+   *  through `setRequestHold`. The offline hold outranks it. */
+  heldReason?: string;
+}
+
+/** A live hold on ONE request's confirm button. `reason` holds the button and
+ *  shows in the reserved line; `note` shows there once the button is free. `{}`
+ *  keeps the line reserved, empty. */
+export interface ConfirmHold {
+  reason?: string;
+  note?: ReactNode;
 }
 
 interface CheckedConfirmOptions extends ConfirmOptions {
@@ -58,6 +70,13 @@ export interface ConfirmRequest {
 
 interface ConfirmState {
   request: ConfirmRequest | null;
+  /** The current request's hold, kept beside it so the request's identity never
+   *  changes while it is open. `null` = no hold line (asked without
+   *  `heldReason`). */
+  requestHold: ConfirmHold | null;
+  /** Replaces the hold of `target`; a no-op unless `target` is still the open
+   *  request, so a late update can't reach another prompt. */
+  setRequestHold: (target: ConfirmRequest | null, hold: ConfirmHold) => void;
   /** Open the confirm dialog and resolve when the user answers. Called from
    *  non-JSX code (hooks, event handlers) that can't render a dialog itself. */
   ask: (opts: ConfirmOptions) => Promise<boolean>;
@@ -81,7 +100,7 @@ export const useConfirm = create<ConfirmState>()((set, get) => {
   const open = (
     options: ConfirmOptions & Partial<CheckedConfirmOptions>,
   ): Promise<ConfirmAnswer> => {
-    const { scope, ...opts } = options;
+    const { scope, heldReason, ...opts } = options;
     // A new ask supersedes any in-flight one — cancel the old so its awaiter
     // doesn't hang forever.
     get().request?.resolve(false, false);
@@ -93,16 +112,22 @@ export const useConfirm = create<ConfirmState>()((set, get) => {
           ...opts,
           stamp: confirmStamp(scope, useUiStore.getState().repoPath),
           resolve: (ok, checked) => {
-            set({ request: null });
+            set({ request: null, requestHold: null });
             resolve({ ok, checked });
           },
         },
+        requestHold: heldReason ? { reason: heldReason } : null,
       });
     });
   };
 
   return {
     request: null,
+    requestHold: null,
+    setRequestHold: (target, hold) => {
+      if (target !== null && get().request === target)
+        set({ requestHold: hold });
+    },
     ask: (opts) => open(opts).then((a) => a.ok),
     askChecked: open,
     answer: (ok, checked = false) => get().request?.resolve(ok, checked),

@@ -1569,7 +1569,11 @@ things follow from that (**GitHub** only — the fork model here is GitHub's):
   work, GitDesktop offers to push your commits to its **branch on the fork** instead,
   wiring up the remote it needs — the pull request picks them up. That takes the contributor's
   *Allow edits by maintainers*; without it the offer says so, and publishing to your
-  own remote anyway is still one click away.
+  own remote anyway is still one click away. When publishing asks first, its prompt opens
+  while GitDesktop looks for that pull request and holds **Publish** for up to 10
+  seconds; the offer takes the prompt's place as soon as the pull request turns up. A
+  **Publish** pressed after those 10 seconds, before the pull request turns up, goes
+  ahead without the offer, and so does any publish while GitDesktop can't reach GitHub.
 
 ## Review comments
 
