@@ -227,9 +227,12 @@ function routeProblems(route, src) {
     from = i + step.length;
   }
 
-  // (8) One spelling of the copy and the bound.
+  // (8) One spelling of the copy and the bound, imported from publish-confirm.
+  // The fork-check sentence is matched file-wide; the generic fragments
+  // (`hasn't finished`, `10_000`) only in the route, where they can't collide.
   if (
-    /Checking for a pull request from a fork|hasn't finished|10_000/.test(src)
+    /Checking for a pull request from a fork/.test(src) ||
+    /hasn't finished|10_000/.test(body)
   )
     out.push(p("re-spells a PUBLISH_FORK_CHECK_* value"));
   const imp = src.match(/import \{([^}]*)\} from "\.\/publish-confirm";/);
@@ -535,6 +538,20 @@ for (const route of ROUTES) {
         "heldReason: probe.settled ? undefined : PUBLISH_FORK_CHECK_REASON",
         'heldReason: probe.settled ? undefined : "Checking for a pull request from a fork"',
       ),
+      `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
+    );
+    // (8) is scoped to the route: the same spelling elsewhere in the file passes
+    const outside = {
+      ...real,
+      [file]: `${real[file]}\nconst other = 10_000;\n`,
+    };
+    assert.deepEqual(problems(outside), []);
+    // ...but the fork-check sentence is caught anywhere in the file
+    failsWith(
+      {
+        ...real,
+        [file]: `${real[file]}\nconst other = "Checking for a pull request from a fork";\n`,
+      },
       `${fn}: re-spells a PUBLISH_FORK_CHECK_* value`,
     );
     failsWith(

@@ -3350,14 +3350,49 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     }
   });
 
+  // One branch's in-flight state, holding worktree and PR, read alike by its
+  // row and by its items in the shared context menu.
+  const branchRowFacts = (branch: Branch) => {
+    // An update in flight on THIS row holds only its own update items.
+    const rowUpdateBase = updatingBase.get(branch.name);
+    // A push (or its fork check) in flight on THIS row holds the items that
+    // move or remove its ref; other rows hold only what would queue behind it.
+    const rowDetecting = detectingBranch === branch.name;
+    const rowPush = pushOnBranch(branch.name);
+    // The worktree (other than the active checkout) this branch occupies, when
+    // any — the row's whole worktree menu group hangs off it, and it narrows the
+    // object those items act on.
+    const rowWorktree = (userWorktrees.data ?? []).find(
+      (w) => w.path === worktreeByBranch.get(branch.name),
+    );
+    return {
+      rowUpdateBase,
+      rowUpdating: rowUpdateBase !== undefined,
+      rowDetecting,
+      rowPush,
+      rowWorktree,
+      // `worktreeByBranch` admits the main workspace (it's a worktree to git,
+      // and any checkout other than the active one qualifies), so the strings
+      // that NAME this row's holding checkout come from the record instead of
+      // saying "worktree" flat.
+      rowCopy: rowCheckoutCopy(rowWorktree?.isMain),
+      pr: prByBranch.get(branch.name),
+    };
+  };
+
   // Shared by the visible list and the Archived section. Paints the row only:
   // its items live in the list's one shared context menu (`renderBranchMenu`).
   const renderBranchRow = (branch: Branch) => {
     const div = divByName.get(branch.name);
-    const rowUpdateBase = updatingBase.get(branch.name);
-    const rowUpdating = rowUpdateBase !== undefined;
-    const rowDetecting = detectingBranch === branch.name;
-    const rowPush = pushOnBranch(branch.name);
+    const {
+      rowUpdateBase,
+      rowUpdating,
+      rowDetecting,
+      rowPush,
+      rowWorktree,
+      rowCopy,
+      pr,
+    } = branchRowFacts(branch);
     const rowSpinnerLabel = (() => {
       if (rowUpdating) return `Updating from ${rowUpdateBase}`;
       if (rowDetecting)
@@ -3365,11 +3400,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (rowPush !== undefined) return branchPushLabel(rowPush, branch);
       return null;
     })();
-    const rowWorktree = (userWorktrees.data ?? []).find(
-      (w) => w.path === worktreeByBranch.get(branch.name),
-    );
-    const rowCopy = rowCheckoutCopy(rowWorktree?.isMain);
-    const pr = prByBranch.get(branch.name);
     return (
       <button
         type="button"
@@ -3609,13 +3639,8 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // A promotion branch takes its changes through promotions, so the one-click
     // update from the default branch is withheld.
     const rowPromotion = isPromotionBranch(rulesConfig, branch.name);
-    // An update in flight on THIS row holds only its own update items.
-    const rowUpdateBase = updatingBase.get(branch.name);
-    const rowUpdating = rowUpdateBase !== undefined;
-    // A push (or its fork check) in flight on THIS row holds the items that
-    // move or remove its ref; other rows hold only what would queue behind it.
-    const rowDetecting = detectingBranch === branch.name;
-    const rowPush = pushOnBranch(branch.name);
+    const { rowUpdating, rowDetecting, rowPush, rowWorktree, rowCopy, pr } =
+      branchRowFacts(branch);
     const rowPushing = rowDetecting || rowPush !== undefined;
     // The push item's own hold: its parked copy says the push waits offline.
     const rowPushReason = pendingItemReason(
@@ -3632,18 +3657,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     // another worktree has checked out. Unarchiving is never refused — an
     // archived branch can be checked out, and this is its only way back.
     const archiveLabel = branch.archived ? "Unarchive" : "Archive";
-    // The worktree (other than the active checkout) this branch occupies, when
-    // any — the row's whole worktree menu group hangs off it, and it narrows the
-    // object those items act on.
-    const rowWorktree = (userWorktrees.data ?? []).find(
-      (w) => w.path === worktreeByBranch.get(branch.name),
-    );
     const inWorktree = rowWorktree !== undefined;
-    // `worktreeByBranch` admits the main workspace (it's a worktree to git, and
-    // any checkout other than the active one qualifies), so the strings that NAME
-    // this row's holding checkout come from the record instead of saying
-    // "worktree" flat.
-    const rowCopy = rowCheckoutCopy(rowWorktree?.isMain);
     // A natively-disabled menu item swallows its tooltip, so the items `busy`
     // alone holds carry the reason in the label. A structural reason always
     // wins — this arm shows only where nothing else explains the dimming.
@@ -3793,7 +3807,6 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       rowRewrite?.remoteRewritten === true &&
       rowRewrite.localOnly > 0 &&
       rowRewrite.patchEqual > 0;
-    const pr = prByBranch.get(branch.name);
     return (
       <>
         {(rowUpdateSources.length > 0 ||
@@ -4183,6 +4196,12 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     );
   };
 
+  // The shared context menu's items for whichever row it was opened on.
+  const renderShownMenu = (row: Branch | RemoteBranch) => {
+    if ("remote" in row) return renderRemoteMenu(row);
+    return renderBranchMenu(row);
+  };
+
   // The windowed list's row renderer: the branch rows above and the two section
   // toggles with their counts.
   const renderBranchMenuRow = (row: BranchMenuRow<Branch, RemoteBranch>) => {
@@ -4549,11 +4568,9 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
                     return row ?? true;
                   }}
                 >
-                  {open && shownMenuRow !== undefined
-                    ? "remote" in shownMenuRow
-                      ? renderRemoteMenu(shownMenuRow)
-                      : renderBranchMenu(shownMenuRow)
-                    : null}
+                  {open &&
+                    shownMenuRow !== undefined &&
+                    renderShownMenu(shownMenuRow)}
                 </ContextMenuContent>
               </ContextMenu>
               <div className="border-t py-1">

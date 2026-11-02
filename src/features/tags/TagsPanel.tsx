@@ -23,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Spinner } from "@/components/ui/spinner";
 import {
+  type ForgeProbe,
   forgeFeatureReady,
   forgeProbeReason,
   forgeProbeState,
@@ -34,7 +35,7 @@ import {
   useRepoStatus,
   useTagList,
 } from "@/lib/git/queries";
-import type { ReleaseInfo } from "@/lib/git/types";
+import type { ForgeStatus, ReleaseInfo } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
@@ -54,6 +55,24 @@ function ReleaseBadges({ release }: { release: ReleaseInfo }) {
   );
 }
 
+/** Why publishing a release is held, or undefined when it isn't. A probe answer
+ *  outranks the setup arms: with no status, the provider is unknown. */
+function releaseReasonFor(
+  canCreate: boolean,
+  probe: ForgeProbe | null,
+  status: ForgeStatus | undefined,
+): string | undefined {
+  if (canCreate) return undefined;
+  if (probe !== null) return forgeProbeReason(probe, "publish a release");
+  if (status?.provider === "gitlab" && status.installed) {
+    return "Sign in with the GitLab CLI (glab) to publish a release.";
+  }
+  if (status?.provider === "gitlab") {
+    return "Install the GitLab CLI (glab) to publish a release.";
+  }
+  return "Connect this repository to GitHub or GitLab to publish a release.";
+}
+
 export function TagsPanel({ repoPath }: { repoPath: string }) {
   const gh = useForgeStatus(repoPath);
   // Release READS are provider-neutral (GitHub + GitLab); the badge/detail light up
@@ -62,15 +81,7 @@ export function TagsPanel({ repoPath }: { repoPath: string }) {
   const ghReady = forgeFeatureReady(gh.data, "releases");
   const canCreateRelease = forgeFeatureReady(gh.data, "releaseCreate");
   const probe = forgeProbeState(gh);
-  const releaseReason = canCreateRelease
-    ? undefined
-    : probe !== null
-      ? forgeProbeReason(probe, "publish a release")
-      : gh.data?.provider === "gitlab" && gh.data?.installed
-        ? "Sign in with the GitLab CLI (glab) to publish a release."
-        : gh.data?.provider === "gitlab"
-          ? "Install the GitLab CLI (glab) to publish a release."
-          : "Connect this repository to GitHub or GitLab to publish a release.";
+  const releaseReason = releaseReasonFor(canCreateRelease, probe, gh.data);
   const tagList = useTagList(repoPath);
   const releaseList = useReleaseList(repoPath, ghReady);
   const status = useRepoStatus(repoPath);
