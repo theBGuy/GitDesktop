@@ -223,6 +223,14 @@ export function scrollKeepViolations(raw) {
       ),
     "a kept landing scrolls only while tookOver is unset",
   );
+  const landFooter = landing && arrowBody(src, "landFooter", landing);
+  need(
+    landFooter !== null &&
+      /^\{ if \(footer === null \|\| !landHunkFocus\(pending, footer\)\) return; if \(!pending\.tookOver\) footer\.scrollIntoView\(\{ block: " ?" \}\); \}$/.test(
+        landFooter,
+      ),
+    "the footer landing scrolls only while tookOver is unset",
+  );
   const nearest = 'target.scrollIntoView({ block: "nearest" })';
   const landScrolls =
     landing === null
@@ -448,6 +456,7 @@ test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing 
       "scrollCycleRef.current = null; const inPane = (target",
     ],
     ["if (!pending.tookOver) target.scrollIntoView", "target.scrollIntoView"],
+    ["if (!pending.tookOver) footer.scrollIntoView", "footer.scrollIntoView"],
     // The reveal arms a re-land with no record: its relands never scroll.
     [
       "armReland(index, target, control);",

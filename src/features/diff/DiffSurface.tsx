@@ -204,8 +204,9 @@ export interface DiffContentRevs {
   newRev?: string | null;
 }
 
-/** `\n`-split segments in a string, allocation-free: a final newline's empty
- *  segment counts, which the read-back budget and coverage checks rely on.
+/** `\n`-split segments in a string, allocation-free. A final newline's empty
+ *  segment counts too: the coverage check is unaffected (it compares against
+ *  the last real line) and the read-back budget errs one line tight.
  *  Diff-size gates use cap-diff's realLineCount instead. */
 function countLines(s: string): number {
   let n = 1;
@@ -412,10 +413,6 @@ function precomputedHighlighter(asts: WorkerAsts): DiffFileHighlighter {
 // path's cost), so it keeps the original, tighter 100KB budget.
 const CONTENT_HIGHLIGHT_MAX_CHARS = 100_000;
 
-// Defined in cap-diff.ts (import-free, so its tests can pin it); re-exported for
-// importers of this module.
-export { HIGHLIGHT_MAX_LINES };
-
 // Pin the highlight.js singleton's line cap: the core gates its whole-buffer
 // pass on the RECONSTRUCTED file's line count — the library's default 2000
 // would drop a small edit deep in a big file. Placeholder lines tokenize at
@@ -467,7 +464,8 @@ export function createDiffFile(
     // Built-in Shiki grammars load lazily (useShikiRouting kicks that off), so
     // this synchronous build can only route to Shiki once the grammar is already
     // loaded. Until then a built-in Shiki language falls back to highlight.js /
-    // plain; useShikiRouting's grammarState triggers the rebuild that picks it up.
+    // plain; the rebuild that picks it up rides useShikiRouting's
+    // `holdForGrammar` turning false.
     const useShiki = lang ? isShikiLang(lang) : false;
     const data = {
       oldFile: {
@@ -714,8 +712,9 @@ export function useShikiRouting({
       // the budget that applies) the main thread never tokenizes this file —
       // the worker loads its own grammar copy. Deliberately judged on the diff
       // text alone, so a content-mode mount fetches in parallel with its reads;
-      // a fetch the content then routes to the worker can't rebuild the paint,
-      // since the returned rebuild key is frozen while worker-routed (below).
+      // a fetch the content then routes to the worker can't rebuild the paint:
+      // over budget `holdForGrammar` stays false, so its settle flips nothing
+      // (the frozen rebuild key below backstops an uncompiled caller).
       overHighlightBudget(text.length, true)
     )
       return;
@@ -789,7 +788,9 @@ export function useShikiRouting({
   const holdForGrammar = grammarPending && !overBudget;
 
   // Over budget the main thread never Shiki-tokenizes, so a grammar settling
-  // then must not rebuild the interim paint: the rebuild key stays frozen.
+  // then must not rebuild the interim paint. `holdForGrammar` staying false
+  // holds that for compiled callers, whose memo keys drop `grammarState`; the
+  // frozen key backstops an uncompiled caller that still keys on it.
   return {
     holdForGrammar,
     grammarState: overBudget ? WORKER_ROUTED_GRAMMAR_STATE : grammarState,

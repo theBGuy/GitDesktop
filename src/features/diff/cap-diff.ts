@@ -9,8 +9,9 @@ export const DIFF_LINE_CAP = 200;
  *  more on screen than the read-only surfaces before cutting. */
 export const STAGING_DIFF_LINE_CAP = 1_000;
 /** Content-mode line gate: past this a file isn't read in full (hunk-only
- *  path). Tighter than the renderer's own cap because content mode reads and
- *  highlights both whole files. */
+ *  path). Tighter than the renderer's syntax cap (SYNTAX_LINE_CAP, 15,000, in
+ *  shiki-highlighter.ts) because content mode reads and highlights both whole
+ *  files. */
 export const HIGHLIGHT_MAX_LINES = 2000;
 
 /** The staging view's content-mode eligibility: within its cap while capped,

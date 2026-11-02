@@ -2375,9 +2375,9 @@ function StagingDiffView({
   // the Stage/Unstage of the hunk now at the press's index, or of the last hunk
   // when fewer remain; `landHunkFocus` decides whether it moves at all. Past
   // the last whole hunk of a capped diff it lands on Show full diff instead,
-  // scrolled into view since it sits below every row, a stable node no rebuild
-  // remounts, so it arms no re-land. A pending reveal is the newer intent:
-  // this waits while one is armed.
+  // scrolled into view (it sits below every row) unless the user took over the
+  // pane; that stable node no rebuild remounts arms no re-land. A pending
+  // reveal is the newer intent: this waits while one is armed.
   useLayoutEffect(() => {
     const pending = hunkFocusRef.current;
     const container = containerRef.current;
@@ -2387,8 +2387,8 @@ function StagingDiffView({
       hunkFocusRef.current = null;
       const footer = showFullRef.current;
       const landFooter = () => {
-        if (footer !== null && landHunkFocus(pending, footer))
-          footer.scrollIntoView({ block: "nearest" });
+        if (footer === null || !landHunkFocus(pending, footer)) return;
+        if (!pending.tookOver) footer.scrollIntoView({ block: "nearest" });
       };
       if (!pending.viaConfirm) landFooter();
       // A frame past the confirm's unmount, so the move lands after its return.
