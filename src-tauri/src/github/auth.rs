@@ -221,8 +221,8 @@ fn gh_configured_from(hosts: Option<&str>, env_token: Option<&str>) -> bool {
 /// beats silently hiding a source the user has signed in to.
 pub(crate) async fn gh_has_configured_host() -> bool {
     // The app's environment is inherited by every gh child (`sanitize_child_env`
-    // rewrites only PWD and the AppImage library paths), so a token here is a
-    // token gh will use.
+    // rewrites only PWD, the AppImage library paths, and on macOS/Linux PATH plus
+    // its merged marker), so a token here is a token gh will use.
     let env_token = GH_TOKEN_VARS
         .iter()
         .find_map(|var| std::env::var(var).ok().filter(|t| !t.trim().is_empty()));

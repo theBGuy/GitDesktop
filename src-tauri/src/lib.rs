@@ -26,6 +26,7 @@ mod local_prs;
 mod mcp;
 mod mcp_launcher;
 mod mcp_server;
+mod nav_guard;
 mod oplog;
 mod path_launcher;
 mod pty;
@@ -73,6 +74,7 @@ pub fn run() {
         None => builder,
     };
     builder
+        .plugin(nav_guard::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_notification::init())
@@ -132,9 +134,10 @@ pub fn run() {
                 tauri::async_runtime::spawn_blocking(|| {
                     git::compare::sweep_stale_persistent_review_worktrees();
                 });
-                // Capture the login shell's PATH for git children (a Finder/Dock
-                // launch inherits launchd's minimal one). Fire-and-forget: spawns use
-                // the inherited PATH until it lands.
+                // Capture the login shell's PATH for children spawned through
+                // sanitize_child_env (a Finder/Dock launch inherits launchd's minimal
+                // one). Fire-and-forget: most spawns use the inherited PATH until it
+                // lands; agent spawns briefly wait for an executing capture.
                 #[cfg(not(windows))]
                 tauri::async_runtime::spawn(async {
                     agent::prime_shell_path().await;

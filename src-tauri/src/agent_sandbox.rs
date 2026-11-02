@@ -20,7 +20,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -46,10 +45,59 @@ const CUSTOM_IMAGE_PREFIX: &str = "gitdesktop-agent-custom";
 /// arbitrary — gated by confirm-to-build, never auto-run.
 const CUSTOM_DOCKERFILE_FROM: &str = "FROM gitdesktop-agent:latest";
 
-/// Monotonic suffix for build-context temp dirs, so two concurrent builds (two Settings
-/// panels, or two repos) never share a context dir and overwrite each other's Dockerfile —
-/// `process::id()` alone is constant for the process, so it can't disambiguate concurrent calls.
-static BUILD_CTX_SEQ: AtomicU64 = AtomicU64::new(0);
+/// A randomly named, exclusively created dir under the system temp dir (0o700 on
+/// unix), removed when the guard drops — a guessable name in a shared temp dir can be
+/// pre-created or swapped by another local user before we write into it.
+pub(crate) fn private_temp_dir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    builder.tempdir()
+}
+
+/// Writes `body` to a fresh, exclusively created `<prefix><random><suffix>` temp file
+/// and keeps it: its consumer (an interpreter or a terminal) opens it by path after we
+/// return, so the handle is closed first and deletion is the caller's job. Unix mode
+/// is 0o600, or 0o700 when `executable`.
+pub(crate) fn write_temp_script(
+    prefix: &str,
+    suffix: &str,
+    body: &str,
+    executable: bool,
+) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix).suffix(suffix);
+    #[cfg(unix)]
+    {
+        if executable {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
+    let mut file = builder.tempfile()?;
+    file.as_file_mut().write_all(body.as_bytes())?;
+    file.into_temp_path().keep().map_err(|e| e.error)
+}
+
+/// Passes a launcher's spawn result through, removing the kept script it was handed
+/// when the spawn failed: nothing will ever read it. A launched script stays.
+#[cfg(any(windows, target_os = "macos", debug_assertions, test))]
+pub(crate) fn discard_script_on_err<T, E>(
+    path: &std::path::Path,
+    spawned: Result<T, E>,
+) -> Result<T, E> {
+    if spawned.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    spawned
+}
 
 /// npm package for a **container-capable** agent. `None` for an agent we can't run
 /// in the container.
@@ -596,14 +644,9 @@ pub async fn agent_container_prepare(
     // Write the Dockerfile into an empty temp context dir and build from it,
     // rather than piping it on stdin — `build -` reads stdin differently across
     // Docker and Podman, so a real (tiny) context dir is the portable form.
-    let ctx = std::env::temp_dir().join(format!(
-        "gd-agent-build-{}-{}",
-        std::process::id(),
-        BUILD_CTX_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&ctx)?;
-    std::fs::write(ctx.join("Dockerfile"), &dockerfile)?;
-    let ctx_str = ctx.to_string_lossy().into_owned();
+    let ctx = private_temp_dir("gd-agent-build-")?;
+    std::fs::write(ctx.path().join("Dockerfile"), &dockerfile)?;
+    let ctx_str = ctx.path().to_string_lossy().into_owned();
 
     let mut build_args: Vec<String> =
         vec!["build".into(), "-t".into(), IMAGE.into(), "--label".into(), label];
@@ -616,7 +659,7 @@ pub async fn agent_container_prepare(
     build_args.push(ctx_str);
 
     let result = run_build(&bin, &build_args).await;
-    let _ = std::fs::remove_dir_all(&ctx); // clean the context regardless
+    let _ = ctx.close(); // clean the context regardless
     result
 }
 
@@ -899,14 +942,9 @@ pub async fn agent_build_custom_image(
     })?;
     let tag = derived_tag(&id, &dockerfile);
 
-    let ctx = std::env::temp_dir().join(format!(
-        "gd-agent-custom-{}-{}",
-        std::process::id(),
-        BUILD_CTX_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&ctx)?;
-    std::fs::write(ctx.join("Dockerfile"), &dockerfile)?;
-    let ctx_str = ctx.to_string_lossy().into_owned();
+    let ctx = private_temp_dir("gd-agent-custom-")?;
+    std::fs::write(ctx.path().join("Dockerfile"), &dockerfile)?;
+    let ctx_str = ctx.path().to_string_lossy().into_owned();
 
     // No `--pull`: the FROM is the LOCAL managed base, not a registry image (a pull would
     // fail). `--no-cache` on rebuild re-runs the RUN layers to pick up tool updates.
@@ -923,7 +961,7 @@ pub async fn agent_build_custom_image(
     build_args.push(ctx_str);
 
     let result = run_build(&bin, &build_args).await;
-    let _ = std::fs::remove_dir_all(&ctx);
+    let _ = ctx.close();
     result
 }
 
@@ -1275,7 +1313,8 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// `chcp` must precede every non-ASCII data byte in the script.
-/// `DisableDelayedExpansion` overrides the registry-configurable default.
+/// `DisableDelayedExpansion` overrides the registry-configurable default for every line
+/// before a `(goto)` self-delete (`CMD_SCRIPT_SELF_DELETE`), which ends the `setlocal`.
 #[cfg(any(windows, test))]
 pub(crate) const CMD_SCRIPT_PRELUDE: &str =
     "@echo off\r\nchcp 65001 >nul\r\nsetlocal DisableDelayedExpansion\r\n";
@@ -1304,7 +1343,9 @@ pub(crate) fn cmd_script_arg(value: &str) -> AppResult<String> {
     Ok(quoted)
 }
 
-/// `tip` must remain app-built ASCII text.
+/// `tip` must remain app-built ASCII text. The script deletes itself on its last
+/// line, since cmd reads a batch file by offset and an earlier delete breaks the
+/// lines after it; a window closed before that line leaves the script in temp.
 #[cfg(any(windows, test))]
 fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<String> {
     let mut line = cmd_script_quoted(bin)?;
@@ -1313,9 +1354,17 @@ fn container_shell_script(bin: &str, args: &[String], tip: &str) -> AppResult<St
         line.push_str(&cmd_script_arg(a)?);
     }
     Ok(format!(
-        "{CMD_SCRIPT_PRELUDE}title GitDesktop - container test shell\r\necho {tip}\r\necho.\r\n{line}\r\necho.\r\necho (container exited) Press any key to close...\r\npause >nul\r\n"
+        "{CMD_SCRIPT_PRELUDE}title GitDesktop - container test shell\r\necho {tip}\r\necho.\r\n{line}\r\necho.\r\necho (container exited) Press any key to close...\r\npause >nul\r\n{CMD_SCRIPT_SELF_DELETE}"
     ))
 }
+
+/// A batch file's self-delete: `(goto)` ends the batch context, so the `del` runs
+/// without cmd then failing to read the deleted file (measured on Windows 10 through
+/// `cmd /c start`, whose `cmd /K` console then stays open at a prompt). It also ends the
+/// prelude's `setlocal`, so the `del` runs under cmd's registry default for delayed
+/// expansion: with that on, a `!` in %TEMP% makes the `del` miss and the script stays.
+#[cfg(any(windows, test))]
+const CMD_SCRIPT_SELF_DELETE: &str = "(goto) 2>nul & del \"%~f0\"\r\n";
 
 /// Windows: `start` a temp `.cmd` for a fresh, fully-wired console; a direct
 /// spawn leaves stdio bound to ours, so it cannot take keyboard input.
@@ -1328,19 +1377,19 @@ fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let script = container_shell_script(bin, args, tip)?;
-    let path = std::env::temp_dir()
-        .join(format!("gd-container-shell-{}.cmd", std::process::id()));
-    std::fs::write(&path, script).map_err(AppError::Io)?;
+    let path =
+        write_temp_script("gd-container-shell-", ".cmd", &script, false).map_err(AppError::Io)?;
     let mut c = Command::new("cmd");
     c.raw_arg(format!("/c start \"GitDesktop\" \"{}\"", path.display()));
     c.creation_flags(CREATE_NO_WINDOW);
-    c.spawn().map(|_| ()).map_err(AppError::Io)
+    discard_script_on_err(&path, c.spawn().map(|_| ()).map_err(AppError::Io))
 }
 
-/// macOS: write a temp `.command` (Terminal.app runs it on `open`).
+/// macOS: write a temp `.command` (Terminal.app runs it on `open`). It removes itself
+/// first: bash keeps reading the open file, and the file goes even if the window
+/// closes early.
 #[cfg(target_os = "macos")]
 fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()> {
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     let mut line = shell_quote(bin);
@@ -1349,19 +1398,12 @@ fn launch_container_shell(bin: &str, args: &[String], tip: &str) -> AppResult<()
         line.push_str(&shell_quote(a));
     }
     let script = format!(
-        "#!/bin/bash\necho 'GitDesktop — container test shell'\necho '{tip}'\n{line}\necho\necho '(container exited)'\n"
+        "#!/bin/bash\nrm -f -- \"$0\"\necho 'GitDesktop — container test shell'\necho '{tip}'\n{line}\necho\necho '(container exited)'\n"
     );
-    let path = std::env::temp_dir()
-        .join(format!("gd-container-shell-{}.command", std::process::id()));
-    std::fs::write(&path, script).map_err(AppError::Io)?;
-    let mut perm = std::fs::metadata(&path).map_err(AppError::Io)?.permissions();
-    perm.set_mode(0o755);
-    std::fs::set_permissions(&path, perm).map_err(AppError::Io)?;
-    Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map(|_| ())
-        .map_err(AppError::Io)
+    let path = write_temp_script("gd-container-shell-", ".command", &script, true)
+        .map_err(AppError::Io)?;
+    let spawned = Command::new("open").arg(&path).spawn();
+    discard_script_on_err(&path, spawned.map(|_| ()).map_err(AppError::Io))
 }
 
 /// Linux: run the command in the first available terminal emulator (`-e bash -c`),
@@ -1407,7 +1449,7 @@ pub(crate) fn build_run_args(
     // Host path to the shared npm cache to mount at `~/.npm` (None = don't mount).
     npm_cache_src: Option<&str>,
     // Extra container env (`-e K=V`) — e.g. opencode's `OPENCODE_CONFIG`. Values are
-    // non-secret (a path); a secret is passed by-name instead (see Copilot's token).
+    // non-secret (paths, the permission pin, feature flags); secrets go by name.
     container_env: &[(&str, String)],
     inner: &[String],
 ) -> Vec<String> {
@@ -1435,8 +1477,8 @@ pub(crate) fn build_run_args(
         args.push("-e".into());
         args.push("COPILOT_GITHUB_TOKEN".into());
     }
-    // Extra container env (`-e K=V`) — e.g. opencode's `OPENCODE_CONFIG` pointing at
-    // the mounted MCP config. Paths, never secrets (those go by-name, above).
+    // Extra container env (`-e K=V`), e.g. opencode's `OPENCODE_CONFIG`: non-secret
+    // values (paths, the permission pin, feature flags); secrets go by name, above.
     for (k, v) in container_env {
         args.push("-e".into());
         args.push(format!("{k}={v}"));
@@ -1504,6 +1546,149 @@ pub(crate) fn build_run_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discard_script_on_err_removes_only_an_unlaunched_script() {
+        let kept = write_temp_script("gd-test-kept-", ".cmd", "x", false).unwrap();
+        let ok: Result<(), ()> = Ok(());
+        assert_eq!(discard_script_on_err(&kept, ok), Ok(()));
+        assert!(kept.exists(), "a launched script stays for its reader");
+        let _ = std::fs::remove_file(&kept);
+
+        let failed = write_temp_script("gd-test-failed-", ".cmd", "x", true).unwrap();
+        assert_eq!(
+            discard_script_on_err(&failed, Err::<(), _>("spawn")),
+            Err("spawn")
+        );
+        assert!(!failed.exists(), "a failed spawn leaves no script behind");
+    }
+
+    struct PrivateTempCleanup(Vec<PathBuf>);
+
+    /// Creates the planted `path` exclusively, as a directory holding `Dockerfile` or
+    /// as a file, and registers it in `cleanup` only once this test owns it. A stale
+    /// leftover at `path` is neither owned nor deleted: returns false.
+    fn plant(cleanup: &mut PrivateTempCleanup, path: &std::path::Path, dir: bool) -> bool {
+        use std::io::Write;
+        let exclusive = |file: &std::path::Path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(file)
+        };
+        let made: std::io::Result<Option<std::fs::File>> = if dir {
+            std::fs::create_dir(path).map(|()| None)
+        } else {
+            exclusive(path).map(Some)
+        };
+        let handle = match made {
+            Ok(handle) => handle,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return false,
+            Err(e) => panic!("{}: {e}", path.display()),
+        };
+        cleanup.0.push(path.to_path_buf());
+        let mut file = match handle {
+            Some(file) => file,
+            None => exclusive(&path.join("Dockerfile")).unwrap(),
+        };
+        file.write_all(b"PLANTED").unwrap();
+        true
+    }
+
+    impl Drop for PrivateTempCleanup {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(path);
+                } else {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn private_temp_dir_is_fresh_owner_only_and_removed_on_drop() {
+        let planted = std::env::temp_dir().join(format!("gd-agent-build-{}-0", std::process::id()));
+        let mut cleanup = PrivateTempCleanup(Vec::new());
+        let owned = plant(&mut cleanup, &planted, true);
+        // A leftover at the planted path is neither owned nor registered for removal.
+        let mut stale = PrivateTempCleanup(Vec::new());
+        assert!(!plant(&mut stale, &planted, true));
+        assert!(stale.0.is_empty());
+        let first = private_temp_dir("gd-agent-build-").unwrap();
+        let second = private_temp_dir("gd-agent-build-").unwrap();
+        let first_path = first.path().to_path_buf();
+        let second_path = second.path().to_path_buf();
+        assert_ne!(first_path, second_path);
+        for path in [&first_path, &second_path] {
+            assert_ne!(path, &planted);
+            assert!(path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("gd-agent-build-"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o700
+                );
+            }
+        }
+        drop(first);
+        drop(second);
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+        if owned {
+            assert_eq!(
+                std::fs::read_to_string(planted.join("Dockerfile")).unwrap(),
+                "PLANTED"
+            );
+        }
+    }
+
+    #[test]
+    fn private_temp_script_keeps_suffix_body_and_mode() {
+        let planted = std::env::temp_dir().join(format!("gd-task-task-abc-{}.mjs", std::process::id()));
+        let mut cleanup = PrivateTempCleanup(Vec::new());
+        let owned = plant(&mut cleanup, &planted, false);
+        let mut stale = PrivateTempCleanup(Vec::new());
+        assert!(!plant(&mut stale, &planted, false));
+        assert!(stale.0.is_empty());
+        let first = write_temp_script("gd-task-", ".mjs", "BODY", false).unwrap();
+        cleanup.0.push(first.clone());
+        let second = write_temp_script("gd-task-", ".mjs", "BODY", false).unwrap();
+        cleanup.0.push(second.clone());
+        let command = write_temp_script("gd-x-", ".command", "#!/bin/bash\n", true).unwrap();
+        cleanup.0.push(command.clone());
+        assert_ne!(first, second);
+        assert_ne!(first, planted);
+        assert_ne!(second, planted);
+        for (path, suffix, body) in [
+            (&first, ".mjs", "BODY"),
+            (&second, ".mjs", "BODY"),
+            (&command, ".command", "#!/bin/bash\n"),
+        ] {
+            assert!(path.exists());
+            assert!(path.to_string_lossy().ends_with(suffix));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for (path, mode) in [(&first, 0o600), (&second, 0o600), (&command, 0o700)] {
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    mode
+                );
+            }
+        }
+        if owned {
+            assert_eq!(std::fs::read_to_string(&planted).unwrap(), "PLANTED");
+        }
+    }
 
     #[test]
     fn mount_source_posix_is_unchanged() {
@@ -2003,8 +2188,15 @@ mod tests {
             "echo.\r\n",
             "echo (container exited) Press any key to close...\r\n",
             "pause >nul\r\n",
+            "(goto) 2>nul & del \"%~f0\"\r\n",
         );
-        assert_eq!(container_shell_script(bin, &args, tip).unwrap(), expected);
+        let script = container_shell_script(bin, &args, tip).unwrap();
+        assert_eq!(script, expected);
+        // The self-delete must be the last line: cmd reads the file by offset.
+        assert_eq!(
+            script.trim_end_matches("\r\n").rsplit("\r\n").next(),
+            Some("(goto) 2>nul & del \"%~f0\"")
+        );
     }
 
     #[test]

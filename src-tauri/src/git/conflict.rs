@@ -561,19 +561,13 @@ pub(crate) async fn git_checkout_conflict_side_core(
 /// paths never surface).
 #[tauri::command]
 pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
-    let dir = std::env::temp_dir().join(format!(
-        "gd-conflict-diff-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    ));
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(AppError::Io)?;
-    let old_path = dir.join("ours");
-    let new_path = dir.join("proposed");
+    let dir =
+        tokio::task::spawn_blocking(|| crate::agent_sandbox::private_temp_dir("gd-conflict-diff-"))
+            .await
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+            .map_err(AppError::Io)?;
+    let old_path = dir.path().join("ours");
+    let new_path = dir.path().join("proposed");
     let result = async {
         tokio::fs::write(&old_path, &old).await.map_err(AppError::Io)?;
         tokio::fs::write(&new_path, &new).await.map_err(AppError::Io)?;
@@ -602,7 +596,7 @@ pub async fn git_diff_contents(old: String, new: String) -> AppResult<String> {
         Ok(out.stdout_lossy())
     }
     .await;
-    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let _ = tokio::task::spawn_blocking(move || dir.close()).await;
     result
 }
 
@@ -624,6 +618,24 @@ pub(crate) async fn resolve_for_test(repo: &str, path: &str, content: &str) {
 mod tests {
     use super::*;
     use crate::git::runner::run_git;
+
+    #[tokio::test]
+    async fn private_temp_diff_contents_concurrent_calls_stay_separate() {
+        let (first, second) = tokio::join!(
+            git_diff_contents("first-old\n".into(), "first-new\n".into()),
+            git_diff_contents("second-old\n".into(), "second-new\n".into()),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(first.contains("\n-first-old\n"));
+        assert!(first.contains("\n+first-new\n"));
+        assert!(!first.contains("second-old"));
+        assert!(!first.contains("second-new"));
+        assert!(second.contains("\n-second-old\n"));
+        assert!(second.contains("\n+second-new\n"));
+        assert!(!second.contains("first-old"));
+        assert!(!second.contains("first-new"));
+    }
 
     #[tokio::test]
     async fn conflict_commands_refuse_git_dir_paths() {
