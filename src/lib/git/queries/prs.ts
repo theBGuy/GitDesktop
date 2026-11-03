@@ -111,8 +111,9 @@ export function usePrList(
 }
 
 /** `usePrList` read through `forge_pr_list_page`, so the page carries its
- *  horizon flag (`PrListPage.capped`) beside the rows. The PR panel is its only
- *  caller; same options and the same reasons as `usePrList`'s. */
+ *  horizon flag (`PrListPage.capped`) beside the rows. Its callers are the PR
+ *  panel and the stack offer, which shares the panel's default Open page; same
+ *  options and the same reasons as `usePrList`'s. */
 export function usePrListPage(
   repo: string,
   enabled: boolean,

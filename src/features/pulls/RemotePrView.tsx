@@ -171,7 +171,7 @@ import {
   usePrBaseDivergence,
   usePrDetails,
   usePrDiff,
-  usePrList,
+  usePrListPage,
   usePrMergeability,
   usePrReactions,
   usePrReviewThreads,
@@ -1284,7 +1284,7 @@ export function RemotePrView({
     !details.data?.stack &&
     !(details.data?.stackUnknown ?? false) &&
     !details.data?.crossRepository;
-  const offerList = usePrList(
+  const offerList = usePrListPage(
     repoPath,
     offerEnabled,
     "open",
@@ -1297,7 +1297,7 @@ export function RemotePrView({
   // The offer's own expansion lives in the component; the palette twins reach it
   // through this handle so both entry points land on the same Confirm button.
   const offerRef = useRef<StackOfferHandle>(null);
-  const openPrs = offerEnabled ? (offerList.data ?? []) : [];
+  const openPrs = offerEnabled ? (listPageRows(offerList.data) ?? []) : [];
   const currentRow = openPrs.find((p) => p.number === shownNumber);
   const stackOffer = currentRow ? detectStackOffer(currentRow, openPrs) : null;
   // The offer's members in the same bottom→top order, dropped if a member has

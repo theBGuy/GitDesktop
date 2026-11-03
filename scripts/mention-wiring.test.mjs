@@ -67,6 +67,7 @@ export const PINS = {
   CLOSED_READS: "closed issue and PR reads beside the open ones",
   NO_STATE_FILTER: "issueRows/prRows apply no state filter",
   OPEN_FIRST: "refInputRows takes the open rows first",
+  BANG_ALL_PRS: "the ! trigger lists open and closed PRs",
   ACTIVE_KEY: "the highlight derives from activeKey via findIndex",
   LISTBOX_OPTIONS: "the listbox owns only role=option buttons",
   ANNOUNCER:
@@ -143,6 +144,14 @@ export function candidatesViolations(raw) {
         "refInputRows(prRows(prData),prRows(closedPrData))",
       ]),
     PINS.OPEN_FIRST,
+  );
+
+  // Matched on raw text: masking blanks the template-literal label.
+  need(
+    calls(raw, masked, "refCandidates").some(
+      (c) => c.text === "refCandidates(allPrRows(),text,(r)=>`!${r.number}`)",
+    ),
+    PINS.BANG_ALL_PRS,
   );
   return problems;
 }
@@ -284,7 +293,6 @@ export function popoverViolations(raw) {
       flat(masked.slice(leadAt, portalAt)) === "constannouncer=wired?" &&
       flat(masked.slice(portalClose + 1, stmtEnd + 1)) === ":null;" &&
       code.includes("constwired=!!mentions&&mentions.triggers.length>0;") &&
-      region !== null &&
       hasRole(region, "status") &&
       region.tag.includes('className="sr-only"') &&
       region.tag.includes('aria-live="polite"') &&
@@ -375,6 +383,11 @@ test("each candidates pin fails when its wiring is undone (in memory)", () => {
     "issueRows(issueData),\n      issueRows(closedIssueData),",
     "issueRows(closedIssueData),\n      issueRows(issueData),",
     PINS.OPEN_FIRST,
+  );
+  mutate(
+    "refCandidates(allPrRows(), text, (r) => `!${r.number}`)",
+    "refCandidates(prRows(prData), text, (r) => `!${r.number}`)",
+    PINS.BANG_ALL_PRS,
   );
 });
 

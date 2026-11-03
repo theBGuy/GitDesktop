@@ -709,7 +709,10 @@ function checkRemoteListState(raw) {
   const view = views[VIEW];
   if (view) {
     const open = constStatement(view, "openPrs");
-    if (open !== "const openPrs = offerEnabled ? (offerList.data ?? []) : [];")
+    if (
+      open !==
+      "const openPrs = offerEnabled ? (listPageRows(offerList.data) ?? []) : [];"
+    )
       problems.push(
         `${VIEW}: openPrs must stay the raw open page (the detector's guards read it), got ${JSON.stringify(open)}`,
       );
@@ -1196,8 +1199,8 @@ test("a filtered stack-offer page, or an unfiled fork note, fails", () => {
   assertFlags(
     mutate(realSources(), VIEW, (t) =>
       t.replace(
-        "const openPrs = offerEnabled ? (offerList.data ?? []) : [];",
-        'const openPrs = offerEnabled\n    ? (offerList.data ?? []).filter((p) => remoteStateMatches(p.state, "open"))\n    : [];',
+        "const openPrs = offerEnabled ? (listPageRows(offerList.data) ?? []) : [];",
+        'const openPrs = offerEnabled\n    ? (listPageRows(offerList.data) ?? []).filter((p) => remoteStateMatches(p.state, "open"))\n    : [];',
       ),
     ),
     "openPrs must stay the raw open page",
