@@ -509,7 +509,9 @@ the last list up, with a line above it saying it couldn't refresh.
   it first. A very large diff opens with up to its first 1,000 lines, and every hunk
   shown in full keeps its hunk buttons; **Show full diff** at the bottom brings in the
   rest. A hunk that limit cuts short gets its buttons once the full diff shows; until
-  then, a drag selection still acts on just its visible lines.
+  then, a drag selection still acts on just its visible lines. Staging, unstaging or
+  discarding a hunk keeps your place in the diff, with keyboard focus on the hunk now in
+  that spot.
 - **Line-level staging** — drag across the line-number gutter to select specific lines,
   spanning as many hunks as you like, then stage or discard just those (or unstage
   them, on a staged file's diff). Discarded lines go back where a discarded hunk would:
@@ -520,8 +522,9 @@ the last list up, with a line above it saying it couldn't refresh.
   replacing it; a plain drag starts a fresh one.
   {{kbd:stage-selected-lines}} stages the selection (or unstages it, on a staged file's
   diff) without reaching for the button, and the command palette offers **Clear line
-  selection**. A file whose change isn't UTF-8 text stages, unstages and discards only
-  as a whole, keeping every byte exact; its diff says so.
+  selection**. Acting on a selection from its bar, clearing it included, keeps keyboard
+  focus in the diff. A file whose change isn't UTF-8 text stages, unstages and discards
+  only as a whole, keeping every byte exact; its diff says so.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
   for **Stage / Unstage / Discard / Stash** of the whole selection — or use the command
   palette ({{kbd:command-palette}}) for Stage / Unstage selected files.
@@ -870,7 +873,10 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   with the reason: another push or publish, merging into the current branch, updating the
   current branch, deleting a branch on a remote, and the sync bar's **Fetch**, **Pull**
   and **Push**. The branch menu's shortcuts say why instead of starting, and so does a
-  press in a menu that was already open when the push started.
+  press in a menu that was already open when the push started. A dialog that was already
+  open checks again when you confirm it, so renaming, deleting, archiving or cleaning up
+  branches, resetting a branch to its upstream, and retrying a pull, merge or rebase from
+  its prompt leave the running push to finish.
 - The **Remote** section lists branches on your remotes you haven't checked out locally
   yet — click one to check it out (creating a local tracking branch), or {{secondaryclick}} to
   **Delete on _origin_…**, a server-side delete that removes the branch from the remote for
@@ -1734,7 +1740,8 @@ release notes, squash message, script, publish, or repo settings),
 ## GitLab merge requests
 
 Point the app at a **GitLab** repo and the same tab lists its **merge requests** (open and
-closed/merged) next to any local PRs. Open one for the description, comments, commits, and a
+closed/merged) next to any local PRs. Its **Closed** tab holds merged and closed merge
+requests together, newest first. Open one for the description, comments, commits, and a
 highlighted **diff** (with an **Open on GitLab** link) — and the GitLab MR writes:
 **comment** on it (and **edit** or **delete** your own comments), **close / reopen** it
 (closing asks first; either way your drafted comment posts alongside, as

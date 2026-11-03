@@ -103,7 +103,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Push or publish a branch to any remote — no checkout needed, with its progress on the branch's row",
+      "Push or publish a branch to any remote — no checkout needed, with its progress on the branch's row; publishing a new branch asks first and names where it's going",
   },
   {
     group: "Branches & history",
@@ -648,7 +648,7 @@ export const capabilities: Capability[] = [
   {
     group: "Keyboard & Markdown",
     label:
-      "@mention & #reference autocomplete, plus !123 on GitLab — GitHub & GitLab comments, replies, release notes, local PRs & issues",
+      "@mention & #reference autocomplete, plus !123 on GitLab, with open, closed and merged work marked by state — GitHub & GitLab comments, replies, release notes, local PRs & issues",
   },
   {
     group: "Keyboard & Markdown",

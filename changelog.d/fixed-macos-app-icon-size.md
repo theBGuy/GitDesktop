@@ -1,2 +1,2 @@
-- **macOS app icon sized like its neighbors.** The icon now matches other apps
-  in the Dock and Applications folder instead of looking oversized.
+- On macOS, the app icon is sized to match other apps in the Dock and the
+  Applications folder.

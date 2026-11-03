@@ -198,7 +198,9 @@ default's name), and a PR badge.
 - **No-checkout and remote-branch ops**: update a branch *without* checking
   it out (from the default branch or its own upstream, e.g. to bring the
   default current after a merged PR), and check out or delete remote-only
-  branches straight from the switcher's Remote section.
+  branches straight from the switcher's Remote section. Updating from the
+  default branch merges its upstream tip when your local copy is behind, and
+  the menu and toast name the commit it merges.
 - **Push or publish without switching**: from the switcher's context menu,
   push a branch that's ahead of the remote it tracks (its own remote, not
   just `origin`) or publish an unpushed one, choosing the remote when
@@ -1118,7 +1120,7 @@ agents read this repo through GitDesktop.
   - **`--allow-git-write`**: recoverable git ops (stage, commit, branch,
     push/pull/fetch, stash, merge, rebase, revert, cherry-pick, tags)
   - **`--allow-destructive`**: the irreversible ones (discard, reset,
-    force-push, delete branch/tag)
+    force-push, drop a stash, delete branch/tag)
 - **Generation recipes**: hands a connected agent the fully assembled
   commit-message, PR-description, or branch-name prompt (the same context
   the in-app features build) to complete with its own model, as recipe

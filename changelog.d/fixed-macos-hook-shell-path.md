@@ -1,4 +1,4 @@
-- **Git hooks and agents find your tools on macOS and Linux.** Commits,
+- On macOS and Linux, git hooks and agents find your tools. Commits,
   pushes and the other git operations GitDesktop runs now see your login
   shell's PATH, so hooks that call node, npx, or pre-commit work when
   GitDesktop is launched from Finder, the Dock, or a Linux desktop launcher,

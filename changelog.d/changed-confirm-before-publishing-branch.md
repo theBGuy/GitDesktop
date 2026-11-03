@@ -7,7 +7,4 @@
   afterwards says **Published** only when the last fetch showed the branch
   was new to the remote, and **Pushed** otherwise; publishing from the sync
   bar now shows it too. The confirmation opens as soon as the local checks
-  finish, while the fork pull-request check runs alongside: **Publish** is
-  held for up to 10 seconds with the reason shown, then becomes available
-  with a note when the check hasn't finished, and a match still swaps in the
-  fork option.
+  finish, with the fork pull-request check running alongside.
