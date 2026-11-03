@@ -199,6 +199,25 @@ export interface PrInfo {
   crossRepository?: boolean;
 }
 
+/** One `forge_pr_list_page` read: the rows plus whether the read stopped at its
+ *  horizon. Only GitLab's unfiltered closed walk can report `capped`; every
+ *  other provider and read says false. */
+export interface PrListPage {
+  rows: PrInfo[];
+  capped: boolean;
+}
+
+/** The rows of a cached list page in either shape the `pr-list` prefix holds:
+ *  `usePrList` caches bare arrays and `usePrListPage` caches `PrListPage`
+ *  structs, so every raw reader of that prefix's data extracts through this.
+ *  Undefined for anything else. */
+export function listPageRows<R>(
+  page: R[] | { rows: R[] } | undefined,
+): R[] | undefined {
+  if (Array.isArray(page)) return page;
+  return page && Array.isArray(page.rows) ? page.rows : undefined;
+}
+
 /** A PR's rolled-up CI signal for the list-row icon. "none" = no checks; "neutral" =
  *  finished without a verdict (a cancelled pipeline). On GitHub it comes only from
  *  the red-row confirm, since GitHub's own rollup enum folds cancelled into FAILURE

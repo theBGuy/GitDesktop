@@ -235,7 +235,8 @@ default's name), and a PR badge.
 ### History
 
 Paged, filterable history with rich commit detail, commit-author avatars, and
-an at-a-glance marker on every commit that hasn't been pushed yet. Per-file
+an at-a-glance marker on every commit that hasn't been pushed yet (with no
+remote, the commits your branch adds on top of `main` or `master`). Per-file
 history and line blame are reachable from any file list (History, pull
 requests, Compare) or the command palette, pinned at that commit or branch
 where it applies; each blame line's commit gets a hover-card preview and a
@@ -1146,9 +1147,9 @@ review via its subscription login. The full list is under
 - **Mention & reference autocomplete**: on GitHub and GitLab repos, type
   `@` in a comment box, reply, edit, diff line comment, release notes, or a
   local PR or issue's description and comments to pick a person and `#` to
-  pick from the recently updated open issues and pull requests, with arrow
-  keys and Enter to accept. GitLab adds `!` for merge requests; each forge
-  offers only the references it links.
+  pick from recent issues and pull requests, open and closed, each marked
+  with its state; arrow keys and Enter accept. GitLab adds `!` for merge
+  requests; each forge offers only the references it links.
 - **References are links**: `#123` and `@user` in a rendered description,
   comment, review thread, AI review, or release note open what they name. On
   GitHub, `#123` opens that issue or pull request in the app, whichever it

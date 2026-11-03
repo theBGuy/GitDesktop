@@ -126,9 +126,12 @@ import {
 import { EditHistoryDialog } from "./EditHistoryDialog";
 import {
   advanceSnapshot,
+  arrowCount,
+  arrowUpstream,
   deriveEditRange,
   headAgrees,
   isNoUpstream,
+  notAdjacentSquashHint,
   observeHeadOid,
   preMoveStale,
   resolveUnpushedView,
@@ -206,20 +209,24 @@ const PICK_ONTO_HOLD_HINT: Record<PickOntoHold, string> = {
 
 /** Squash's menu-row reason per hold. The filter arm names the easy-to-miss
  *  case: a range that looks adjacent in the filtered view isn't adjacent in
- *  history. "refreshing" is built at render: it depends on the count read. */
-const SQUASH_HOLD_HINT: Record<Exclude<SquashHold, "refreshing">, string> = {
+ *  history. "refreshing" and "not-adjacent-unpushed" are built at render: they
+ *  depend on the count read. */
+const SQUASH_HOLD_HINT: Record<
+  Exclude<SquashHold, "refreshing" | "not-adjacent-unpushed">,
+  string
+> = {
   op: OP_IN_PROGRESS_HINT,
   "filter-hides-range":
     " (clear the filter — a squash range must be adjacent in history)",
-  "not-adjacent-unpushed": " (must be adjacent and unpushed)",
 };
 
 // Keeps the log and its side reads in step with status's HEAD: refetches the
 // log when status saw a new HEAD first, refreshes the side reads and the rest
 // of the HEAD-dependent families once per observed HEAD move (outside commits,
 // resets, checkouts and rebases, and in-app moves alike), and retries a
-// no-upstream count older than the log or the recheck interval. Its own
-// observers keep the 5 s status poll from re-rendering any panel.
+// no-upstream count older than the log, the recheck interval, or a status
+// branch its basis contradicts. Its own observers keep the 5 s status poll from
+// re-rendering any panel.
 // RepositoryView mounts it outside every tab's <Activity>, keyed on the repo
 // to reset its last-seen oid: log readers on every tab rely on it, the commit
 // detail view's Amend gate and its "refreshing history" hint included.
@@ -253,6 +260,9 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
         countIsError: unpushedVsRemotes.isError,
         countIsFetching: unpushedVsRemotes.isFetching,
         countAt: unpushedVsRemotes.dataUpdatedAt,
+        countBasis: unpushedVsRemotes.data?.basis,
+        countDefault: unpushedVsRemotes.data?.defaultBranch,
+        statusBranch: head?.name,
       });
       if (!actions) return;
       if (actions.has("refetch-log")) {
@@ -783,7 +793,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // (ahead of its upstream). Unpublished branch (no upstream) → count them
   // against the remotes, NOT `commits.length`: the fork point and everything
   // below it live on `origin/<base>` and are already published, so only the
-  // branch's own commits are unpushed. (Queried only in the no-upstream case.)
+  // branch's own commits are unpushed. A repo with no configured remote and no
+  // resolving remote-tracking ref counts against its local default branch
+  // instead, and on that branch itself only the row arrows drop (`arrowCount`).
+  // (Queried only in the no-upstream case.)
   // Drives both the rewrite gating below and the per-row "not pushed" marker.
   // A gone upstream counts as no upstream so the `unpushedVsRemotes` fallback
   // engages and the per-row "not pushed" markers reflect what's truly published.
@@ -794,13 +807,19 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // snapshot (or mark nothing) and squash / Edit history hold.
   const unpushedCount = head
     ? noUpstream
-      ? (unpushedVsRemotes.data ?? 0)
+      ? (unpushedVsRemotes.data?.count ?? 0)
       : head.ahead
     : 0;
+  // What the no-upstream count was taken against, read from the same answer as
+  // the count so the two always pair; null in upstream mode.
+  const countRead = head && noUpstream ? unpushedVsRemotes.data : undefined;
+  const unpushedBasis = countRead?.basis ?? null;
+  const unpushedDefault = countRead?.defaultBranch ?? null;
   // The count (status's ahead, or the no-upstream count read) and the log's
   // commits refetch apart: the unpushed consumers below read them only as a
   // pair both vouched for — the log's head is status's HEAD, and a no-upstream
-  // count read is unerrored and at least as fresh as the log.
+  // count read is unerrored, at least as fresh as the log, and taken on the
+  // branch status reports (a same-tip switch moves no oid).
   const agreed = viewAgrees({
     logHead: commits[0]?.hash,
     statusOid: head?.oid,
@@ -808,6 +827,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     countIsError: unpushedVsRemotes.isError,
     countAt: unpushedVsRemotes.dataUpdatedAt,
     logAt: log.dataUpdatedAt,
+    countBasis: unpushedVsRemotes.data?.basis,
+    countDefault: unpushedVsRemotes.data?.defaultBranch,
+    statusBranch: head?.name,
   });
   // The last agreeing unpushed view, advanced only on agreement so a
   // mismatch window in which the log still starts at its head keeps serving
@@ -823,6 +845,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       branch: head?.name ?? null,
       commits,
       count: unpushedCount,
+      basis: unpushedBasis,
+      defaultBranch: unpushedDefault,
       hasNextPage: log.hasNextPage,
     },
     agreed,
@@ -837,6 +861,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     noUpstream,
     commits,
     count: unpushedCount,
+    basis: unpushedBasis,
+    defaultBranch: unpushedDefault,
     hasNextPage: log.hasNextPage,
     snapshot,
   });
@@ -1096,11 +1122,15 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const refreshingHint = countUnchecked
     ? UNPUSHED_UNCHECKED_HINT
     : HISTORY_REFRESHING_HINT;
-  const squashDisabledHint = !squashHold
-    ? ""
-    : squashHold === "refreshing"
-      ? refreshingHint
-      : SQUASH_HOLD_HINT[squashHold];
+  const squashHints: Record<SquashHold, string> = {
+    ...SQUASH_HOLD_HINT,
+    refreshing: refreshingHint,
+    "not-adjacent-unpushed": notAdjacentSquashHint(
+      view.basis,
+      view.defaultBranch,
+    ),
+  };
+  const squashDisabledHint = squashHold ? squashHints[squashHold] : "";
   const squashMax = selectedIndices.at(-1) ?? -1;
 
   function openSquash() {
@@ -1140,8 +1170,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // props only (never the per-render `view` or Set), and after deriveEditRange,
   // the last call the compiler assumes may mutate `view.commits`.
   const markCommits = view.commits;
-  const markCount = view.count;
-  const markUpstream = head?.upstreamGone ? null : (head?.upstream ?? null);
+  const markCount = arrowCount(view.count, view.basis);
+  const markUpstream = arrowUpstream(
+    head?.upstreamGone ? null : (head?.upstream ?? null),
+    view.basis,
+    view.defaultBranch,
+  );
   const commitList = (
     <CommitList
       scrollEl={scrollEl}

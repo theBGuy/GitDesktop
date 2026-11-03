@@ -1,5 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { listPageRows } from "@/lib/git/types";
 import {
   filterRemoteRows,
   type LocalRemoteState,
@@ -101,15 +102,18 @@ export function useLocalRemoteFilter<
   // first read would never be picked up.
   const optionRows = ((): R[] => {
     if (!optionSourcePrefix) return stateRemote;
-    const pages = queryClient.getQueriesData<R[]>({
+    const pages = queryClient.getQueriesData<
+      R[] | { rows: R[]; capped: boolean }
+    >({
       predicate: (q) =>
         optionSourcePrefix.every((part, i) => q.queryKey[i] === part),
     });
     let rows = stateRemote;
     // Cached pages are settled reads of this state, lagging rows included.
     for (const [, page] of pages) {
-      if (page && page !== remotes)
-        rows = mergeRows(rows, filterRemoteRows(page, stateFilter, false));
+      const pageRows = listPageRows(page);
+      if (pageRows && pageRows !== remotes)
+        rows = mergeRows(rows, filterRemoteRows(pageRows, stateFilter, false));
     }
     return rows;
   })();

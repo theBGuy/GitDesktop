@@ -16,6 +16,7 @@ import type {
   IssueDetails,
   PrDetails,
   PrInfo,
+  PrListPage,
   PrThreadOut,
   RemoteLens,
   ReviewThreadsOut,
@@ -515,6 +516,19 @@ function patchPrListState(
     (page) => {
       const next = patchRowState(page, number, state);
       return next === page ? undefined : next;
+    },
+  );
+  // `usePrListPage` caches `PrListPage` structs under the same prefix, which the
+  // write above passes over whole; this one re-files their rows, same bail.
+  queryClient.setQueriesData<PrListPage>(
+    {
+      queryKey: repoKeys.prList(repo),
+      predicate: (q) => q.queryKey[3] === lens && q.queryKey[7] === "page",
+    },
+    (page) => {
+      if (!page) return undefined;
+      const rows = patchRowState(page.rows, number, state);
+      return !rows || rows === page.rows ? undefined : { ...page, rows };
     },
   );
 }

@@ -276,6 +276,18 @@ interface HunkFocus {
  *  re-land don't scroll, so neither pulls the view back from them. */
 type PendingHunkFocus = HunkFocus & { tookOver: boolean };
 
+/** A selection-bar press (index 0: the bar has no hunks), stamped with the
+ *  pane it was pressed in so a rescue never lands in a different one. */
+type SelectionPress = HunkFocus & {
+  repoPath: string;
+  path: string;
+  staged: boolean;
+};
+
+/** A selection-bar rescue: `settled` once its write succeeded (a Clear has no
+ *  write), when the bar's unmount may hand focus to the sink. Never scrolls. */
+type SelectionFocus = SelectionPress & { settled: boolean };
+
 /** Keys that scroll the pane from a focused hunk button without activating it.
  *  Space activates every focusable control in the pane, so it is not one. */
 const PANE_SCROLL_KEYS = new Set([
@@ -516,6 +528,9 @@ function WorkingTreeDiff({
   // `hunkFocusRef`) so view input in the landing's frame or its re-land window
   // still latches; the next write replaces it.
   const scrollCycleRef = useRef<PendingHunkFocus | null>(null);
+  // The selection bar's rescue, apart from `hunkFocusRef`: the hunk landing
+  // would aim it at a hunk button.
+  const selectionFocusRef = useRef<SelectionFocus | null>(null);
   // The scrolling pane the hunks render in: only input inside it can take over
   // a landing's scroll.
   const scrollPaneRef = useRef<HTMLDivElement>(null);
@@ -528,6 +543,7 @@ function WorkingTreeDiff({
   useEffect(() => {
     const drop = () => {
       hunkFocusRef.current = null;
+      selectionFocusRef.current = null;
     };
     const inPane = (target: EventTarget | null) =>
       target instanceof Node &&
@@ -557,6 +573,8 @@ function WorkingTreeDiff({
       document.removeEventListener("touchmove", latch, true);
       document.removeEventListener("keydown", latchKey, true);
       document.removeEventListener("focusin", latchFocus, true);
+      // An <Activity> re-show replays this effect: a stale rescue must not fire.
+      selectionFocusRef.current = null;
     };
   }, []);
   // The Discard confirm is closing: Base UI returns focus from the popup's
@@ -737,6 +755,7 @@ function WorkingTreeDiff({
     mutate: () => Promise<unknown>,
     focus: HunkFocus | null,
     kind: HunkActionKind,
+    rescue: SelectionPress | null = null,
   ) {
     if (writingRef.current) return;
     // A diff gone from the cache refuses too, silently: it has no flag to name.
@@ -750,10 +769,26 @@ function WorkingTreeDiff({
     const pending = focus === null ? null : { ...focus, tookOver: false };
     hunkFocusRef.current = pending;
     scrollCycleRef.current = pending;
+    // Every accepted write replaces the rescue, so a stale one never fires.
+    const armed = rescue === null ? null : { ...rescue, settled: false };
+    selectionFocusRef.current = armed;
     const wait = statusWaitFor(kind, untracked);
     const keeps = kind !== "discard";
     setWrite({ keeps, settled: null });
-    await settleWrite(mutate, clearSelection, onError, () => {
+    const succeeded = () => {
+      // Before the clear, whose commit is where the rescue fires.
+      if (armed !== null && selectionFocusRef.current === armed)
+        armed.settled = true;
+      clearSelection();
+    };
+    // A failed write keeps its selection, so the bar stays: a rescue left armed
+    // would fire on some later, unrelated unmount.
+    const failed = (e: unknown) => {
+      if (armed !== null && selectionFocusRef.current === armed)
+        selectionFocusRef.current = null;
+      onError(e);
+    };
+    await settleWrite(mutate, succeeded, failed, () => {
       // The mutation's settle has already invalidated the reads, so any answer
       // past the marks taken here describes the tree after this write. Every
       // entry under the diff's prefix is marked: the untracked axis can move
@@ -792,7 +827,10 @@ function WorkingTreeDiff({
 
   // Stage/unstage/discard the file-wide line selection. `build_partial_patch`
   // already distributes a multi-hunk selection, so hand it the WHOLE diff.
-  function applySelection(opts: { cached: boolean; reverse: boolean }) {
+  function applySelection(
+    opts: { cached: boolean; reverse: boolean },
+    rescue: SelectionPress | null,
+  ) {
     if (!selection || !diff.data) return;
     const diffText = diff.data.text;
     const selected = selection;
@@ -800,20 +838,57 @@ function WorkingTreeDiff({
       () => applyPartial.mutateAsync({ diffText, selected, ...opts }),
       null,
       writeKind(opts),
+      rescue,
     );
   }
 
   // Discard lines from an untracked (new) file: remove just those new-side line
   // numbers from the file. A new file is all additions, so there's nothing to
   // reverse-apply (reverse-applying its patch would delete the whole file).
-  function discardLines(lines: number[], focus: HunkFocus | null) {
+  function discardLines(
+    lines: number[],
+    focus: HunkFocus | null,
+    rescue: SelectionPress | null = null,
+  ) {
     if (lines.length === 0) return;
     const path = file.path;
     void runWrite(
       () => discardUntracked.mutateAsync({ path, lines }),
       focus,
       "discard",
+      rescue,
     );
+  }
+
+  // A selection-bar press on `button`, for the rescue its route arms.
+  function selectionPress(
+    button: HTMLElement,
+    viaConfirm: boolean,
+  ): SelectionPress {
+    return {
+      index: 0,
+      button,
+      hadFocus: document.activeElement === button,
+      viaConfirm,
+      repoPath,
+      path: file.path,
+      staged: file.staged,
+    };
+  }
+
+  // A selection hotkey rescues only focus it strands: on a bar control (the
+  // bar's own tabIndex=-1 span survives the swap), or, for a write, whose
+  // rebuild remounts the hunks, on a hunk button. Elsewhere it isn't the pane's.
+  function hotkeyPress(forWrite: boolean): SelectionPress | null {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return null;
+    const bar = controlsRef.current;
+    const onBar = active !== bar && bar?.contains(active) === true;
+    const onHunk =
+      forWrite &&
+      hunkControlOf(active) !== null &&
+      scrollPaneRef.current?.contains(active) === true;
+    return onBar || onHunk ? selectionPress(active, false) : null;
   }
 
   // A whole-hunk action, fired by the per-hunk buttons with the diff text that
@@ -881,12 +956,18 @@ function WorkingTreeDiff({
   // and while the non-staging fallback renders.
   useHotkeyAction(
     "stage-selected-lines",
-    () => applySelection({ cached: true, reverse: file.staged }),
+    () =>
+      applySelection({ cached: true, reverse: file.staged }, hotkeyPress(true)),
     interactive && hunkMode && selection !== null && !busy && discard === null,
   );
   useHotkeyAction(
     "clear-line-selection",
-    clearSelection,
+    () => {
+      const press = hotkeyPress(false);
+      selectionFocusRef.current =
+        press === null ? null : { ...press, settled: true };
+      clearSelection();
+    },
     interactive && hunkMode && selection !== null && !busy && discard === null,
   );
   // Only this toolbar's own arm registers: while no hunk view is shown, the
@@ -925,6 +1006,31 @@ function WorkingTreeDiff({
   // guards above never fire for it; leaving hunk mode clears both here.
   if (!hunkMode && selectionState !== null) setSelectionState(null);
   if (!hunkMode && discard !== null) setDiscard(null);
+  // The selection bar's rescue lands once its write settled (a Clear at its
+  // press) and the bar is gone, on the pane's sink under the landing rule. A
+  // mid-write liveText drift or hunk-mode exit leaves focus on <body> until the
+  // settle, then the rescue lands if these gates still hold; a write that fails
+  // after such an unmount clears the record and focus stays on <body>. No
+  // dependency array: it keys on ref state set outside render.
+  useLayoutEffect(() => {
+    const rescue = selectionFocusRef.current;
+    if (rescue === null) return;
+    if (
+      !interactive ||
+      rescue.repoPath !== repoPath ||
+      rescue.path !== file.path ||
+      rescue.staged !== file.staged
+    ) {
+      selectionFocusRef.current = null;
+      return;
+    }
+    if (!rescue.settled || selection !== null || confirmClosing) return;
+    selectionFocusRef.current = null;
+    const land = () => landHunkFocus(rescue, focusSink.current);
+    if (!rescue.viaConfirm) land();
+    // A frame past the confirm's unmount, so the move lands after its return.
+    else requestAnimationFrame(land);
+  });
 
   if (shownView === null) {
     return (
@@ -992,8 +1098,11 @@ function WorkingTreeDiff({
                   reason={UPDATING_DIFF_REASON}
                   title={selectionTitle}
                   aria-keyshortcuts={selectionKeyshortcuts}
-                  onClick={() =>
-                    applySelection({ cached: true, reverse: true })
+                  onClick={(e) =>
+                    applySelection(
+                      { cached: true, reverse: true },
+                      selectionPress(e.currentTarget, false),
+                    )
                   }
                 >
                   Unstage
@@ -1007,8 +1116,11 @@ function WorkingTreeDiff({
                     reason={UPDATING_DIFF_REASON}
                     title={selectionTitle}
                     aria-keyshortcuts={selectionKeyshortcuts}
-                    onClick={() =>
-                      applySelection({ cached: true, reverse: false })
+                    onClick={(e) =>
+                      applySelection(
+                        { cached: true, reverse: false },
+                        selectionPress(e.currentTarget, false),
+                      )
                     }
                   >
                     Stage
@@ -1019,7 +1131,9 @@ function WorkingTreeDiff({
                     className="text-destructive"
                     disabled={busy}
                     reason={UPDATING_DIFF_REASON}
-                    onClick={() =>
+                    onClick={(e) => {
+                      // Armed only when the confirm runs, so Cancel arms none.
+                      const press = selectionPress(e.currentTarget, true);
                       setDiscard({
                         label: `${selection.length} selected ${selection.length === 1 ? "line" : "lines"}`,
                         restores: discardRestores,
@@ -1031,11 +1145,15 @@ function WorkingTreeDiff({
                                   .filter((s) => s.side === "new")
                                   .map((s) => s.line),
                                 null,
+                                press,
                               )
                           : () =>
-                              applySelection({ cached: false, reverse: true }),
-                      })
-                    }
+                              applySelection(
+                                { cached: false, reverse: true },
+                                press,
+                              ),
+                      });
+                    }}
                   >
                     Discard…
                   </DisabledReasonButton>
@@ -1046,7 +1164,13 @@ function WorkingTreeDiff({
                 size="xs"
                 disabled={busy}
                 reason={UPDATING_DIFF_REASON}
-                onClick={clearSelection}
+                onClick={(e) => {
+                  selectionFocusRef.current = {
+                    ...selectionPress(e.currentTarget, false),
+                    settled: true,
+                  };
+                  clearSelection();
+                }}
               >
                 Clear
               </DisabledReasonButton>

@@ -3005,34 +3005,137 @@ pub async fn commit_on_remote(repo_path: String, sha: String) -> AppResult<bool>
     Ok(!out.stdout_lossy().trim().is_empty())
 }
 
-/// Count of commits reachable from `HEAD` but not from any remote-tracking ref —
-/// i.e. unpublished anywhere. The History tab uses this to mark "not pushed" rows on
-/// a branch with NO upstream, where "ahead of upstream" is undefined: the fork point
-/// and everything below it live on `origin/<base>` and ARE published. A repo with no
-/// remotes yields the full `HEAD` count. Only an unborn `HEAD` maps to `0`; any other
-/// failed run is an Err, never a defaulted count. The healthy path is one spawn: the
-/// unborn probe runs only after rev-list fails.
+/// What git_unpushed_count counted against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum UnpushedBasis {
+    Remotes,
+    DefaultBranch,
+    OnDefaultBranch,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnpushedCount {
+    pub count: u32,
+    pub basis: UnpushedBasis,
+    /// Some only for DefaultBranch and OnDefaultBranch.
+    pub default_branch: Option<String>,
+}
+
+/// Commits on `HEAD` the History tab marks "not pushed" on a branch with NO upstream,
+/// and what they were counted against. With any object-resolving remote-tracking ref,
+/// or any configured remote, it counts `HEAD --not --remotes` (`Remotes`; every
+/// commit while nothing was fetched). With no configured remote it counts past the
+/// verified local default branch (`DefaultBranch`, detached HEAD included); on that
+/// branch itself, or with no verifiable default, every `HEAD` commit counts
+/// (`OnDefaultBranch` hides the arrows only; `Unresolved` keeps them). Only an unborn
+/// `HEAD` answers 0; any failed run, the remote listing included, is an Err. Spawns:
+/// the ref probe and rev-list, plus the remote listing when no remote ref resolved.
+/// The no-remote paths add git_default_branch's up to 4 (no remote to sweep), run
+/// concurrently with the HEAD-branch read, then the verify (only when a default
+/// resolved).
 #[tauri::command]
-pub async fn git_unpushed_count(repo_path: String) -> AppResult<u32> {
+pub async fn git_unpushed_count(repo_path: String) -> AppResult<UnpushedCount> {
     let failed =
         |text: String| AppError::Command(format!("couldn't count the unpushed commits.\n{text}"));
-    // Only an unborn HEAD answers 0.
-    let out = match crate::git::history::read_unless_unborn(
-        &repo_path,
-        &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+    // A dangling refs/remotes/*/HEAD symref prints nothing here, matching what
+    // `--remotes` can exclude; `--count` applies after that skip (git 2.51.1).
+    let probe = run_git_raw(
+        Some(&repo_path),
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--format=%(objectname)",
+            "refs/remotes",
+        ],
         DEFAULT_TIMEOUT,
     )
     .await
-    {
-        Ok(Some(out)) => out,
-        Ok(None) => return Ok(0),
-        Err(e) => return Err(failed(e.to_string())),
+    .map_err(|e| failed(e.to_string()))?;
+    if probe.code != 0 {
+        return Err(failed(probe.full_failure_text()));
+    }
+    let has_remote_refs = probe.stdout_lossy().lines().any(|l| !l.trim().is_empty());
+    // A configured remote with nothing fetched yet has received none of HEAD, so it
+    // keeps the remotes basis; a failed listing errs rather than reading as none.
+    let has_remote = has_remote_refs
+        || !crate::git::remote::git_remotes(repo_path.clone())
+            .await
+            .map_err(|e| failed(e.to_string()))?
+            .is_empty();
+
+    let mut default_ref = None;
+    let (basis, default_branch) = if has_remote {
+        (UnpushedBasis::Remotes, None)
+    } else {
+        // Independent reads, joined so the count's latency after a commit isn't
+        // their sum; boxed to keep the command future small.
+        let (default, head) = tokio::join!(
+            Box::pin(git_default_branch(repo_path.clone())),
+            Box::pin(current_branch_name(&repo_path)),
+        );
+        let default = default.map_err(|e| failed(e.to_string()))?;
+        let head = head.map_err(|e| failed(e.to_string()))?;
+        match default {
+            None => (UnpushedBasis::Unresolved, None),
+            Some(name) => {
+                // Only git_default_branch's main/master fallback verifies its ref; a
+                // remote HEAD's target can name a branch with no local ref.
+                let full = format!("refs/heads/{name}");
+                let verify = run_git_raw(
+                    Some(&repo_path),
+                    &["rev-parse", "--verify", "--quiet", &full],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .map_err(|e| failed(e.to_string()))?;
+                match verify.code {
+                    0 => {
+                        if head.as_deref() == Some(name.as_str()) {
+                            (UnpushedBasis::OnDefaultBranch, Some(name))
+                        } else {
+                            default_ref = Some(full);
+                            (UnpushedBasis::DefaultBranch, Some(name))
+                        }
+                    }
+                    1 => (UnpushedBasis::Unresolved, None),
+                    _ => return Err(failed(verify.full_failure_text())),
+                }
+            }
+        }
     };
+
+    let mut args = vec!["rev-list", "--count", "HEAD"];
+    match (&basis, &default_ref) {
+        (UnpushedBasis::Remotes, _) => args.extend(["--not", "--remotes"]),
+        (_, Some(full)) => args.extend(["--not", full.as_str()]),
+        _ => {}
+    }
+    // Only an unborn HEAD answers 0.
+    let out =
+        match crate::git::history::read_unless_unborn(&repo_path, &args, DEFAULT_TIMEOUT).await {
+            Ok(Some(out)) => out,
+            Ok(None) => {
+                return Ok(UnpushedCount {
+                    count: 0,
+                    basis,
+                    default_branch,
+                })
+            }
+            Err(e) => return Err(failed(e.to_string())),
+        };
     let stdout = out.stdout_lossy();
-    stdout
+    let count = stdout
         .trim()
         .parse()
-        .map_err(|_| failed(format!("unexpected rev-list output: {}", stdout.trim())))
+        .map_err(|_| failed(format!("unexpected rev-list output: {}", stdout.trim())))?;
+    Ok(UnpushedCount {
+        count,
+        basis,
+        default_branch,
+    })
 }
 
 /// A process-unique suffix for the throwaway worktree directory name.
@@ -3070,6 +3173,7 @@ mod tests {
         read_refs_with_push_destination,
     };
     use super::{RenamePhase, RenamePhaseHook, RENAME_PHASE_HOOK};
+    use super::{UnpushedBasis, UnpushedCount};
     use crate::error::AppError;
     use crate::git::runner::LOCK_WAIT_TIMEOUT;
     use crate::git::runner::{
@@ -9286,21 +9390,246 @@ mod tests {
         assert!(!super::commit_on_remote(repo.clone(), local).await.unwrap());
     }
 
+    /// Expected `git_unpushed_count` answer: (count, basis, default branch).
+    async fn assert_unpushed(repo: &str, count: u32, basis: UnpushedBasis, default: Option<&str>) {
+        let got = super::git_unpushed_count(repo.to_string()).await.unwrap();
+        assert_eq!(
+            got,
+            UnpushedCount {
+                count,
+                basis,
+                default_branch: default.map(str::to_string),
+            }
+        );
+    }
+
+    async fn commit_empty(repo: &str, message: &str) {
+        run(repo, &["commit", "-q", "--allow-empty", "-m", message]).await;
+    }
+
+    /// A seed commit plus one more, on a branch named `master`.
+    async fn init_master_repo(repo: &str) {
+        init_repo(repo, "r.txt").await;
+        run(repo, &["branch", "-m", "master"]).await;
+        commit_empty(repo, "two").await;
+    }
+
     #[tokio::test]
     async fn unpushed_count_reads_zero_on_an_unborn_head() {
         let (_base, base) = temp_base("unpushed-unborn");
         let repo = base.to_string_lossy().into_owned();
         run(&repo, &["init", "-q"]).await;
-        assert_eq!(super::git_unpushed_count(repo).await.unwrap(), 0);
+        // No main/master ref exists before the first commit.
+        assert_unpushed(&repo, 0, UnpushedBasis::Unresolved, None).await;
     }
 
     #[tokio::test]
-    async fn unpushed_count_counts_every_commit_without_a_remote() {
-        let (_base, base) = temp_base("unpushed-no-remote");
+    async fn unpushed_count_excludes_remote_tracking_refs() {
+        let (_base, base) = temp_base("unpushed-remotes");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        commit_empty(&repo, "local").await;
+        assert_unpushed(&repo, 1, UnpushedBasis::Remotes, None).await;
+    }
+
+    /// The probe's `--count=1` must apply after for-each-ref skips the dangling
+    /// symref that sorts ahead of the real remote ref.
+    #[tokio::test]
+    async fn unpushed_count_probe_sees_a_remote_ref_behind_a_dangling_head() {
+        let (_base, base) = temp_base("unpushed-dangling-first");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/aaa/HEAD",
+                "refs/remotes/aaa/master",
+            ],
+        )
+        .await;
+        run(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]).await;
+        commit_empty(&repo, "local").await;
+        assert_unpushed(&repo, 1, UnpushedBasis::Remotes, None).await;
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_stops_at_the_default_branch_fork_point_without_a_remote() {
+        let (_base, base) = temp_base("unpushed-fork-point");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(&repo, &["switch", "-q", "-c", "feature"]).await;
+        for message in ["f1", "f2", "f3"] {
+            commit_empty(&repo, message).await;
+        }
+        assert_unpushed(&repo, 3, UnpushedBasis::DefaultBranch, Some("master")).await;
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_reaches_every_commit_on_the_default_branch() {
+        let (_base, base) = temp_base("unpushed-on-default");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        commit_empty(&repo, "three").await;
+        assert_unpushed(&repo, 3, UnpushedBasis::OnDefaultBranch, Some("master")).await;
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_counts_every_commit_without_a_default_branch() {
+        let (_base, base) = temp_base("unpushed-unresolved");
         let repo = base.to_string_lossy().into_owned();
         init_repo(&repo, "r.txt").await;
-        run(&repo, &["commit", "-q", "--allow-empty", "-m", "two"]).await;
-        assert_eq!(super::git_unpushed_count(repo).await.unwrap(), 2);
+        run(&repo, &["branch", "-m", "topic"]).await;
+        commit_empty(&repo, "two").await;
+        assert_unpushed(&repo, 2, UnpushedBasis::Unresolved, None).await;
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_counts_a_whole_orphan_branch() {
+        let (_base, base) = temp_base("unpushed-orphan");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(&repo, &["switch", "-q", "--orphan", "lone"]).await;
+        commit_empty(&repo, "o1").await;
+        commit_empty(&repo, "o2").await;
+        assert_unpushed(&repo, 2, UnpushedBasis::DefaultBranch, Some("master")).await;
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_counts_a_detached_head_past_the_default_branch() {
+        let (_base, base) = temp_base("unpushed-detached");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(&repo, &["switch", "-q", "-c", "feature"]).await;
+        commit_empty(&repo, "f1").await;
+        let sha = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        run(&repo, &["checkout", "-q", "--detach", &sha]).await;
+        assert_unpushed(&repo, 1, UnpushedBasis::DefaultBranch, Some("master")).await;
+    }
+
+    /// A dangling `refs/remotes/origin/HEAD` resolves no ref, so the no-remote arms
+    /// answer; its target names a default that verifies locally.
+    #[tokio::test]
+    async fn unpushed_count_treats_a_dangling_remote_head_as_no_remote() {
+        let (_base, base) = temp_base("unpushed-dangling-verified");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/master",
+            ],
+        )
+        .await;
+        assert_unpushed(&repo, 2, UnpushedBasis::OnDefaultBranch, Some("master")).await;
+    }
+
+    /// The dangling symref's target has no local branch, so the default doesn't
+    /// verify and every commit counts, even though a local master exists.
+    #[tokio::test]
+    async fn unpushed_count_is_unresolved_when_the_default_does_not_verify() {
+        let (_base, base) = temp_base("unpushed-dangling-unverified");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .await;
+        assert_unpushed(&repo, 2, UnpushedBasis::Unresolved, None).await;
+    }
+
+    /// A configured remote nothing was fetched from or pushed to yet.
+    async fn add_unfetched_origin(repo: &str) {
+        run(repo, &["remote", "add", "origin", "../unfetched.git"]).await;
+    }
+
+    /// With a remote configured, the default-branch basis never applies: nothing has
+    /// reached that remote, so every commit counts and keeps its arrow.
+    #[tokio::test]
+    async fn unpushed_count_counts_every_commit_on_the_default_branch_of_an_unfetched_remote() {
+        let (_base, base) = temp_base("unpushed-unfetched-default");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        add_unfetched_origin(&repo).await;
+        commit_empty(&repo, "three").await;
+        assert_unpushed(&repo, 3, UnpushedBasis::Remotes, None).await;
+    }
+
+    #[tokio::test]
+    async fn unpushed_count_counts_every_commit_on_a_feature_branch_of_an_unfetched_remote() {
+        let (_base, base) = temp_base("unpushed-unfetched-feature");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        add_unfetched_origin(&repo).await;
+        run(&repo, &["switch", "-q", "-c", "feature"]).await;
+        commit_empty(&repo, "f1").await;
+        assert_unpushed(&repo, 3, UnpushedBasis::Remotes, None).await;
+    }
+
+    /// A dangling remote HEAD beside a configured remote still leaves the remote's
+    /// basis in charge, even though its target names a local branch.
+    #[tokio::test]
+    async fn unpushed_count_keeps_the_remote_basis_behind_a_dangling_head_of_a_configured_remote() {
+        let (_base, base) = temp_base("unpushed-unfetched-dangling");
+        let repo = base.to_string_lossy().into_owned();
+        init_master_repo(&repo).await;
+        add_unfetched_origin(&repo).await;
+        run(
+            &repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/master",
+            ],
+        )
+        .await;
+        assert_unpushed(&repo, 2, UnpushedBasis::Remotes, None).await;
+    }
+
+    #[test]
+    fn unpushed_count_wire_shape() {
+        let cases = [
+            (
+                UnpushedBasis::Remotes,
+                None,
+                r#"{"count":4,"basis":"remotes","defaultBranch":null}"#,
+            ),
+            (
+                UnpushedBasis::DefaultBranch,
+                Some("main"),
+                r#"{"count":4,"basis":"default-branch","defaultBranch":"main"}"#,
+            ),
+            (
+                UnpushedBasis::OnDefaultBranch,
+                Some("main"),
+                r#"{"count":4,"basis":"on-default-branch","defaultBranch":"main"}"#,
+            ),
+            (
+                UnpushedBasis::Unresolved,
+                None,
+                r#"{"count":4,"basis":"unresolved","defaultBranch":null}"#,
+            ),
+        ];
+        for (basis, default, want) in cases {
+            let json = serde_json::to_string(&UnpushedCount {
+                count: 4,
+                basis,
+                default_branch: default.map(str::to_string),
+            })
+            .unwrap();
+            assert_eq!(json, want);
+            for snake in ["default_branch", "on_default_branch", "OnDefaultBranch"] {
+                assert!(!json.contains(snake), "{json}");
+            }
+        }
     }
 
     #[tokio::test]

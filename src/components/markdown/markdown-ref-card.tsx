@@ -22,7 +22,12 @@ import {
   repoKeys,
   useAssignableUsers,
 } from "@/lib/git/queries";
-import type { IssueDetails, PrDetails, RemoteLens } from "@/lib/git/types";
+import {
+  type IssueDetails,
+  listPageRows,
+  type PrDetails,
+  type RemoteLens,
+} from "@/lib/git/types";
 import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { parseableDate } from "@/lib/time";
 import { useRetained } from "@/lib/use-retained";
@@ -127,12 +132,15 @@ export function cachedRefKind(
   lens: RemoteLens,
   number: number,
 ): "pr" | "issue" | null {
+  type Row = { number: number };
   const holds = (family: typeof repoKeys.prList | typeof repoKeys.issueList) =>
     queryClient
-      .getQueriesData<{ number: number }[]>({
+      .getQueriesData<Row[] | { rows: Row[]; capped: boolean }>({
         queryKey: [...family(repoPath), lens],
       })
-      .some(([, rows]) => rows?.some((row) => row.number === number));
+      .some(([, page]) =>
+        listPageRows(page)?.some((row) => row.number === number),
+      );
   if (holds(repoKeys.prList)) return "pr";
   if (holds(repoKeys.issueList)) return "issue";
   return null;

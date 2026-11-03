@@ -1,9 +1,15 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { PrDetails, PrInfo, RemoteLens } from "@/lib/git/types";
+import type {
+  PrDetails,
+  PrInfo,
+  PrListPage,
+  RemoteLens,
+} from "@/lib/git/types";
 // Relative and extensioned, not the `@/` alias: `scripts/pr-create-lane.test.mjs`
 // imports this module directly under Node's type stripping, which resolves no
 // path aliases and no extensionless specifiers.
 import { normPath } from "../git/path.ts";
+import { listPageRows } from "../git/types/prs.ts";
 import {
   markPrCreateArmed,
   prCreateStartedAt,
@@ -24,10 +30,11 @@ export const GUARD_RELEASE_TIMEOUT_MS = 20_000;
  *  session waiting for a row that isn't coming. */
 export const HOLD_LONGSTOP_MS = 30 * 60_000;
 
-/** `usePrList`'s key down to its lens: index 3 is the lens, index 4 the
- *  open/closed state. Indices 4+ (state, limit, filter) stay free, so every
- *  permutation on screen counts; the lens stays pinned, since a bare number is
- *  only valid under the lens that produced it. */
+/** The PR list key down to its lens (`usePrList` and `usePrListPage` alike):
+ *  index 3 is the lens, index 4 the open/closed state. Indices 4+ (state, limit,
+ *  filter, the page marker) stay free, so every permutation on screen counts;
+ *  the lens stays pinned, since a bare number is only valid under the lens that
+ *  produced it. */
 function matchesPrList(
   key: readonly unknown[],
   repoPath: string,
@@ -56,10 +63,10 @@ function matchesPrList(
  */
 function pageVerdict(
   key: readonly unknown[],
-  rows: PrInfo[] | undefined,
+  page: PrInfo[] | PrListPage | undefined,
   number: number,
 ): "none" | "release" | "settle" {
-  const row = rows?.find((p) => p.number === number);
+  const row = listPageRows(page)?.find((p) => p.number === number);
   if (!row) return "none";
   if (row.state !== "OPEN") return "settle";
   return key[4] === "open" ? "release" : "none";
@@ -183,7 +190,7 @@ export function armPrCreateHandOff(
       return;
     const verdict = pageVerdict(
       event.query.queryKey,
-      event.query.state.data as PrInfo[] | undefined,
+      event.query.state.data as PrInfo[] | PrListPage | undefined,
       create.number,
     );
     if (verdict === "settle") settle();
@@ -197,11 +204,11 @@ export function armPrCreateHandOff(
   );
   longStopTimer = setTimeout(settle, opts?.longStopMs ?? HOLD_LONGSTOP_MS);
 
-  const cached = queryClient.getQueriesData<PrInfo[]>({
+  const cached = queryClient.getQueriesData<PrInfo[] | PrListPage>({
     predicate: (q) => matchesPrList(q.queryKey, create.repoPath, create.lens),
   });
-  const verdicts = cached.map(([key, rows]) =>
-    pageVerdict(key, rows, create.number),
+  const verdicts = cached.map(([key, page]) =>
+    pageVerdict(key, page, create.number),
   );
   if (verdicts.includes("settle")) settle();
   else if (verdicts.includes("release")) releaseGuard();

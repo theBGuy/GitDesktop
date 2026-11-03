@@ -34,8 +34,9 @@ struct PrListArgs {
     /// "open" (default) or "closed".
     #[serde(default)]
     state: Option<String>,
-    /// Max pull requests to return. Omit for the provider default (GitHub ~30; GitLab
-    /// and Bitbucket a full page).
+    /// Max pull requests to return. Omit for the provider default: GitHub ~30;
+    /// GitLab open 100, closed up to 100 per state (200 total, newest-created first);
+    /// Bitbucket a full page.
     #[serde(default)]
     limit: Option<u32>,
 }
@@ -132,10 +133,13 @@ impl GitDesktopMcp {
     #[tool(
         description = "List pull requests from the repository's forge (GitHub, GitLab, or \
                        Bitbucket, per its remote). `state` is \"open\" (default) or \"closed\". \
-                       Without `limit`, returns the provider default (GitHub ~30; GitLab and \
-                       Bitbucket a full page); pass `limit` to raise or lower that cap. Per-call \
-                       ceiling: GitHub 1000, GitLab 100, Bitbucket 50 — a larger `limit` returns \
-                       the ceiling (no pagination). Open rows carry a `stack` object \
+                       Without `limit`, returns the provider default: GitHub ~30; GitLab open \
+                       100, closed up to 100 per state (200 total, newest-created first); \
+                       Bitbucket a full page. Per-call ceiling with `limit`: GitHub 1000; \
+                       GitLab open 100, closed up to 500 per state (closed and merged, \
+                       newest-created first), capped at the newest 500 overall when either state \
+                       needs a sixth page to cover `limit`; Bitbucket 50. A larger `limit` \
+                       returns the ceiling. Open rows carry a `stack` object \
                        ({id, position, size}, position 1 = bottom and merges first) when the \
                        PR belongs to a stack — GitHub stacks, or a chain of GitLab MRs each \
                        targeting the next one's source branch; null otherwise. On GitHub, \

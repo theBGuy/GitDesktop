@@ -91,8 +91,8 @@ has read one clamped index even when the list shrinks under it. They step with
 from the clamped cursor (don't move them onto `stepHighlight`: it clamps at the
 ends). `scripts/palette-highlight.test.mjs` pins each one, uniform
 palette-shaped pickers in `CALL_SITES` and the rest in per-site `SITE_PINS`.
-Not adopters: `mention-autocomplete.tsx` clamps inline to the same effect, and
-`listKeyboardNav` lists are a separate primitive.
+Not adopters: `mention-autocomplete.tsx` keys its highlight by candidate (a later
+read's rows can land above it); `listKeyboardNav` lists are a separate primitive.
 Destructive paths stay behind confirmation via the
 shared `useConfirm`/`ConfirmDialogHost` primitive (`src/lib/stores/confirm.ts`,
 host in `src/components/confirm-dialog-host.tsx`) — never a bespoke confirm

@@ -13,6 +13,7 @@ import {
 } from "@git-diff-view/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
+  Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -1577,13 +1578,50 @@ export function DiffContent({
   const canPreview =
     showsToolbar && canPreviewMarkdown(filePath, repoPath, previewRevs);
   const previewOn = canPreview && mdView === "preview";
-  useFocusOnControlsSwap(previewOn, controlsRef);
-  // A refetch can take the toolbar away (the file emptied, a mode-only change
-  // left), unmounting the control that held focus: it lands on the arm that
-  // replaced it.
+  // Each capture node records whether it held focus in its own ref cleanup,
+  // which runs before that node's removal: never React's deletion order between
+  // siblings, nor a blur event that removal may not fire.
+  const paneHeldFocus = useRef(false);
+  const captureHeldRef = useCallback(
+    (node: HTMLElement | null) => () => {
+      if (node !== null && node.contains(document.activeElement))
+        paneHeldFocus.current = true;
+    },
+    [],
+  );
+  // A load or a refetch can take the toolbar away (a new selection, the file
+  // emptied, a mode-only change left): only focus the pane held as that subtree
+  // left lands on the replacing arm's body (the path-row controls over an
+  // image), and focus on <body> or outside the pane never moves. Declared ahead
+  // of the Preview rescue, whose landing persists across arms, so a swap that
+  // drops both lands on the new body.
   const armLandingRef = useRef<HTMLDivElement | null>(null);
-  useFocusOnControlsSwap(showsToolbar, armLandingRef);
-  // Bringing the toolbar back unmounts that arm: only focus it held as it left
+  const armRescueRef = useRef<HTMLElement | null>(null);
+  const previewRescueRef = useRef<HTMLElement | null>(null);
+  const prevSwapRef = useRef({ path: filePath, toolbar: showsToolbar });
+  // No dependency array: it derives both rescue refs and consumes the record
+  // every commit, after that commit's ref cleanups wrote it and before the
+  // hooks below run (react-dom 19.3.1 commit order). The Preview rescue also
+  // passes a same-file Raw/Preview toggle from <body>; another file's swap
+  // passes only held focus. The toolbar rescue falls back to the controls,
+  // since the image arm renders no landing.
+  useLayoutEffect(() => {
+    const held = paneHeldFocus.current;
+    const sameToolbarFile =
+      showsToolbar &&
+      prevSwapRef.current.toolbar &&
+      prevSwapRef.current.path === filePath;
+    armRescueRef.current = held
+      ? (armLandingRef.current ?? controlsRef.current)
+      : null;
+    previewRescueRef.current =
+      held || sameToolbarFile ? controlsRef.current : null;
+    prevSwapRef.current = { path: filePath, toolbar: showsToolbar };
+    paneHeldFocus.current = false;
+  });
+  useFocusOnControlsSwap(showsToolbar, armRescueRef);
+  useFocusOnControlsSwap(previewOn, previewRescueRef);
+  // Bringing the toolbar back unmounts that body: only focus it held as it left
   // (read in its ref cleanup, which runs before removal) lands on the toolbar's
   // own landing, so a cold load or another file's swap never takes focus.
   const armHeldFocus = useRef(false);
@@ -1619,33 +1657,138 @@ export function DiffContent({
     () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
     interactive && canPreview,
   );
-  // The two arms below that render nothing: a pending read (a parked one says
-  // so instead) and another key's retained data. Every other arm's own markup
-  // is final. The children report their own gates: ImagePanes its reads and
-  // image decodes, MarkdownDocPreview its file read, RenderedDiff its inputs
-  // and first row.
+  // The two arms below with a blank body: a pending read (a parked one says so
+  // instead) and another key's retained data. Every other arm's own markup is
+  // final. The children report their own gates: ImagePanes its reads and image
+  // decodes, MarkdownDocPreview its file read, RenderedDiff its inputs and
+  // first row.
   useReportPaneSettled(
     !(isPending && !isPaused) &&
       !(data !== undefined && data.filePath !== filePath),
   );
 
+  // Every arm renders this shell: the notice where retained data shows, then
+  // the path row, then the arm's body. The row has one height in every arm,
+  // so only a visible (degraded) notice coming or going moves the body on an
+  // arm swap; its controls render only over a text diff (`showsToolbar`).
+  // ph-no-capture: blocks the whole pane (file path + diff body) from session
+  // replay — this is user code/paths. See src/components/Redacted.tsx.
+  const shell = (body: ReactNode, notice: ReactNode = null) => (
+    <div
+      ref={paneRef}
+      className="ph-no-capture @container/diff-pane flex h-full flex-col"
+    >
+      {notice !== null && (
+        <span className="contents" ref={captureHeldRef}>
+          {notice}
+        </span>
+      )}
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
+        <PathText
+          path={filePath}
+          className="flex-1 font-mono text-xs text-muted-foreground"
+        />
+        {/* ~200px of unshrinkable text, so it shows only where the pane has the
+            room; the sr-only twin carries it at every width, and `aria-hidden`
+            on the visible copy keeps the two from announcing twice. Hidden in
+            Preview, which reads the full file rather than the truncated diff. */}
+        {showsToolbar && data?.isTruncated && !previewOn && (
+          <>
+            <span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">
+              (truncated — diff too large)
+            </span>
+            <span className="sr-only">(truncated — diff too large)</span>
+          </>
+        )}
+        {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so
+            the row keeps one height in every arm: an extensionless file keeps
+            only the xs (h-6) mode toggle, and the arms without controls keep
+            none. tabIndex/outline-none make it a silent landing spot for focus
+            when the picker closes with its trigger already hidden, or when the
+            toolbar comes back. */}
+        <span
+          ref={controlsRef}
+          tabIndex={-1}
+          className="flex min-h-7 shrink-0 items-center gap-1.5 outline-none"
+        >
+          {canPreview && (
+            <span className="contents" ref={captureHeldRef}>
+              <MarkdownViewToggle view={mdView} onChange={setMdView} />
+            </span>
+          )}
+          {/* The picker and Unified/Split configure the raw diff, so they
+              leave the cluster while Preview is up (the same swap this row
+              already does for the working-tree selection actions). */}
+          {showsToolbar && !previewOn && (
+            <span className="contents" ref={captureHeldRef}>
+              {/* The only variable-width control here (its label follows the
+                  language name), so it's the one that goes under @md — leaving
+                  the row a fixed floor. It must stay laid out while its popup
+                  is open, though: Base UI anchors to the trigger, and a
+                  display:none trigger positions the popup at 0,0.
+                  `empty:hidden` keeps the row's gap off an extensionless file,
+                  where the picker renders nothing. */}
+              <span
+                ref={langWrapRef}
+                className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex"
+              >
+                <DiffLanguagePicker
+                  filePath={filePath}
+                  open={langOpen}
+                  onOpenChange={(open) => {
+                    setLangOpen(open);
+                    if (!open) returnFocusIfTriggerHidden();
+                  }}
+                />
+              </span>
+              <DiffModeToggle splitDisabled={narrowPane} />
+            </span>
+          )}
+        </span>
+      </div>
+      {body}
+    </div>
+  );
+  // Every arm but the text and image ones is a focus landing for a toolbar
+  // swap: its body, a sibling of the row, never an ancestor of a scroller (it
+  // would take every click into it, so the image arm's body isn't one). Each
+  // arm's body is keyed apart, since the text body reusing this node would
+  // drop its tabIndex under held focus. `busy` marks a blank, loading body.
+  const landing = (content: ReactNode, busy = false) => (
+    <div
+      key="arm-landing"
+      ref={armRef}
+      tabIndex={-1}
+      aria-busy={busy || undefined}
+      className="min-h-0 flex-1 outline-none"
+    >
+      {content}
+    </div>
+  );
+
   // Diffs load near-instantly from local git, so a skeleton only adds a flash
-  // and a layout shift on the way to the real content — render nothing until
-  // it's ready. A read parked offline would render nothing forever, so it says
-  // why instead.
+  // and a layout shift on the way to the real content: the body stays blank
+  // under the path row until it's ready. A read parked offline would stay
+  // blank forever, so it says why instead.
   if (isPending) {
-    return isPaused ? (
-      <DiffPlaceholder message={offlinePendingMessage("this diff")} />
-    ) : null;
+    return shell(
+      isPaused
+        ? landing(
+            <DiffPlaceholder message={offlinePendingMessage("this diff")} />,
+          )
+        : landing(null, true),
+    );
   }
   // Every backend diff command echoes the requested path back verbatim, so a
   // mismatch means `data` is a stale placeholder from the previously selected
   // file's key. Re-scope this if the backend ever normalizes the path it returns.
-  if (data && data.filePath !== filePath) return null;
-  // Only a failure with nothing to show replaces the pane: react-query keeps the
+  if (data && data.filePath !== filePath) return shell(landing(null, true));
+  // Only a failure with nothing to show replaces the body: react-query keeps the
   // last good diff beside `isError`, and that stays up under a notice.
   if (!data) {
-    return <DiffPlaceholder message="Could not load diff for this file" />;
+    return shell(
+      landing(<DiffPlaceholder message="Could not load diff for this file" />),
+    );
   }
   // The old side's whole-file reads follow the diff's own pairing. A placeholder
   // never lends its `oldPath`: it is another key's diff (another commit's, for
@@ -1671,57 +1814,54 @@ export function DiffContent({
     />
   );
   // The binary, image, empty and header-only arms draw retained data too, so
-  // they carry the same notice as the text diff. A placeholder arm is the
-  // focus landing for a toolbar swap (not the image arm: a focusable ancestor
-  // would take every click into its scroller), keyed apart from the toolbar
-  // arm, whose reuse of the node would drop its tabIndex under held focus.
-  const withNotice = (arm: ReactNode, landing = true) => (
-    <div
-      key={landing ? "arm-landing" : "arm-image"}
-      ref={landing ? armRef : undefined}
-      tabIndex={landing ? -1 : undefined}
-      className="flex h-full flex-col outline-none"
-    >
-      {notice}
-      <div className="min-h-0 flex-1">{arm}</div>
-    </div>
-  );
+  // they carry the same notice as the text diff.
   if (data.isBinary) {
     if (repoPath && imageRevs && imageMime(filePath)) {
-      return withNotice(
-        <ImageDiff
-          repoPath={repoPath}
-          filePath={filePath}
-          oldPath={oldSidePath}
-          revs={imageRevs}
-        />,
-        false,
+      return shell(
+        <div key="arm-image" className="min-h-0 flex-1">
+          <ImageDiff
+            repoPath={repoPath}
+            filePath={filePath}
+            oldPath={oldSidePath}
+            revs={imageRevs}
+          />
+        </div>,
+        notice,
       );
     }
-    return withNotice(
-      <DiffPlaceholder message="Binary file — no text diff available" />,
+    return shell(
+      landing(
+        <DiffPlaceholder message="Binary file — no text diff available" />,
+      ),
+      notice,
     );
   }
   if (emptyDiff) {
     // An untracked empty file's --no-index diff is header-only, which the arm
     // below names; an empty answer for one still never reads as unchanged.
-    return withNotice(
-      <DiffPlaceholder
-        message={
-          stagingSide === "untracked"
-            ? headerOnlyMessage({ kind: "new-empty" })
-            : "No changes to show"
-        }
-      />,
+    return shell(
+      landing(
+        <DiffPlaceholder
+          message={
+            stagingSide === "untracked"
+              ? headerOnlyMessage({ kind: "new-empty" })
+              : "No changes to show"
+          }
+        />,
+      ),
+      notice,
     );
   }
   // Ahead of the preview arms, so a new empty Markdown file never opens Preview.
   if (headerOnly !== null) {
-    return withNotice(
-      <DiffPlaceholder
-        message={headerOnlyMessage(headerOnly)}
-        action={<HeaderOnlyDetail diff={headerOnly} />}
-      />,
+    return shell(
+      landing(
+        <DiffPlaceholder
+          message={headerOnlyMessage(headerOnly)}
+          action={<HeaderOnlyDetail diff={headerOnly} />}
+        />,
+      ),
+      notice,
     );
   }
 
@@ -1731,74 +1871,8 @@ export function DiffContent({
     repoPath && imageRevs && filePath.toLowerCase().endsWith(".svg"),
   );
 
-  return (
-    // ph-no-capture: blocks the whole pane (file path + diff body) from session
-    // replay — this is user code/paths. See src/components/Redacted.tsx.
-    <div
-      ref={paneRef}
-      className="ph-no-capture @container/diff-pane flex h-full flex-col"
-    >
-      {notice}
-      <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        <PathText
-          path={filePath}
-          className="flex-1 font-mono text-xs text-muted-foreground"
-        />
-        {/* ~200px of unshrinkable text, so it shows only where the pane has the
-            room; the sr-only twin carries it at every width, and `aria-hidden`
-            on the visible copy keeps the two from announcing twice. Hidden in
-            Preview, which reads the full file rather than the truncated diff. */}
-        {data.isTruncated && !previewOn && (
-          <>
-            <span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">
-              (truncated — diff too large)
-            </span>
-            <span className="sr-only">(truncated — diff too large)</span>
-          </>
-        )}
-        {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so an
-            extensionless file — where the picker renders nothing and only the
-            xs (h-6) mode toggle remains — doesn't shrink the row by 4px.
-            tabIndex/outline-none make it a silent landing spot for focus when
-            the picker closes with its trigger already hidden. */}
-        <span
-          ref={controlsRef}
-          tabIndex={-1}
-          className="flex min-h-7 shrink-0 items-center gap-1.5 outline-none"
-        >
-          {canPreview && (
-            <MarkdownViewToggle view={mdView} onChange={setMdView} />
-          )}
-          {/* The picker and Unified/Split configure the raw diff, so they
-              leave the cluster while Preview is up (the same swap this row
-              already does for the working-tree selection actions). */}
-          {!previewOn && (
-            <>
-              {/* The only variable-width control here (its label follows the
-                  language name), so it's the one that goes under @md — leaving
-                  the row a fixed floor. It must stay laid out while its popup
-                  is open, though: Base UI anchors to the trigger, and a
-                  display:none trigger positions the popup at 0,0.
-                  `empty:hidden` keeps the row's gap off an extensionless file,
-                  where the picker renders nothing. */}
-              <span
-                ref={langWrapRef}
-                className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex"
-              >
-                <DiffLanguagePicker
-                  filePath={filePath}
-                  open={langOpen}
-                  onOpenChange={(open) => {
-                    setLangOpen(open);
-                    if (!open) returnFocusIfTriggerHidden();
-                  }}
-                />
-              </span>
-              <DiffModeToggle splitDisabled={narrowPane} />
-            </>
-          )}
-        </span>
-      </div>
+  return shell(
+    <Fragment key="arm-text">
       {/* Not gated on Preview, unlike the truncated label: the whole-file
           staging rule holds whichever view is up. */}
       {stagingSide !== undefined && data.undecodable && (
@@ -1806,17 +1880,20 @@ export function DiffContent({
           {UNDECODABLE_NOTE_COPY[stagingSide]}
         </InfoNote>
       )}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">
         {previewOn && repoPath && previewRevs ? (
           // Passed the raw revs, not the truncation-stripped pair below:
           // preview reads the file, not the diff, so it works on exactly the
-          // truncated diffs content mode gives up on.
-          <MarkdownDocPreview
-            repoPath={repoPath}
-            filePath={filePath}
-            oldPath={oldSidePath}
-            revs={previewRevs}
-          />
+          // truncated diffs content mode gives up on. Its own capture node,
+          // since the scroller persists when only Preview leaves.
+          <span className="contents" ref={captureHeldRef}>
+            <MarkdownDocPreview
+              repoPath={repoPath}
+              filePath={filePath}
+              oldPath={oldSidePath}
+              revs={previewRevs}
+            />
+          </span>
         ) : (
           <>
             {svgPreview && repoPath && imageRevs && (
@@ -1848,13 +1925,14 @@ export function DiffContent({
           </>
         )}
       </div>
-    </div>
+    </Fragment>,
+    notice,
   );
 }
 
-/** A rename or copy's two ends under its header-only message (the toolbar,
- *  the only other full-path row, isn't shown), and the mode change when one
- *  rides along. Nothing for the other kinds. */
+/** A rename or copy's two ends under its header-only message (the path row
+ *  above names only the file, and shows no controls here), and the mode
+ *  change when one rides along. Nothing for the other kinds. */
 function HeaderOnlyDetail({ diff }: { diff: HeaderOnlyDiff }) {
   if (diff.kind !== "rename" && diff.kind !== "copy") return null;
   const mode = modeChangeMessage(diff);

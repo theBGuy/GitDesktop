@@ -202,7 +202,7 @@ export const ALLOWLIST = [
       "query read: lens-wide review state",
     ],
     ["gh", "useForgeStatus", ["isPending"], QUERY],
-    ["prList", "usePrList", ["isPending"], QUERY],
+    ["prList", "usePrListPage", ["isPending"], QUERY],
   ]),
   ...entries("src/features/history/HistoryDialogs.tsx", "ResetCommitDialog", [
     ["resetMutation", "useResetToCommit", ["isPending"], WORKING_TREE],

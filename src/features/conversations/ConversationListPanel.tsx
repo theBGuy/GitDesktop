@@ -21,7 +21,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ForgeNotReady } from "@/features/repository/ForgeNotReady";
 import { cn } from "@/lib/utils";
-import { LoadMoreRow } from "./LoadMoreRow";
+import { ListCapNote, LoadMoreRow } from "./LoadMoreRow";
 import {
   DEGRADED_ACTION_CLASS,
   type ListNoticeCause,
@@ -415,6 +415,10 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   loadingMore?: boolean;
   /** How many remote items are currently loaded (shown in the row). */
   remoteCount?: number;
+  /** The settled remote read stopped at its provider's horizon: a static note
+   *  takes the Load more row's slot whatever `hasMore` says, since another page
+   *  would re-read the same horizon. */
+  remoteCapped?: boolean;
   /** Create dialogs etc. rendered after the list. */
   children?: ReactNode;
 }) {
@@ -481,6 +485,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
     onLoadMore,
     loadingMore,
     remoteCount,
+    remoteCapped,
     children,
   } = props;
 
@@ -913,12 +918,17 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
 
           {/* "Load more" for the remote section, at the very bottom of the list.
               Only the remote list paginates (local + Jira load in full). */}
-          {hasMore && onLoadMore && (
-            <LoadMoreRow
-              count={remoteCount ?? 0}
-              loading={loadingMore ?? false}
-              onLoadMore={onLoadMore}
-            />
+          {remoteCapped ? (
+            <ListCapNote count={remoteCount ?? 0} noun={remoteNoun} />
+          ) : (
+            hasMore &&
+            onLoadMore && (
+              <LoadMoreRow
+                count={remoteCount ?? 0}
+                loading={loadingMore ?? false}
+                onLoadMore={onLoadMore}
+              />
+            )
           )}
         </div>
       </ScrollArea>

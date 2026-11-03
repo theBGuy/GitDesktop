@@ -729,8 +729,10 @@ refresh and a **Retry**. A file that fails to blame says why and offers **Retry*
 history and the **Blame file…** picker work the same way: a failed refresh keeps what's
 shown, and a list that can't load says why and offers **Retry**.
 
-> History-rewriting actions (reset, Edit history, squash) only ever touch **unpushed**
-> commits, and a push of rewritten history becomes a safe
+> History-rewriting actions (Edit history, squash) only ever touch **unpushed** commits
+> (in a repository with no remote, the commits your branch adds on top of \`main\` or
+> \`master\`, or every commit while you're on that branch), and a push of rewritten
+> history becomes a safe
 > **force-with-lease --force-if-includes** push (the second flag needs Git 2.30+ — see
 > *Syncing & conflicts*).`,
   },
@@ -1389,11 +1391,12 @@ tabs and a formatting toolbar (bold, italic, headings, quote, code, links, and b
 / numbered / task lists, with {{key:mod+b}} / {{key:mod+i}} / {{key:mod+k}}); press
 {{key:mod+enter}} to submit a comment or save an edit. The same editor is everywhere
 you write Markdown — issues, discussions, and release notes. On **GitHub** and
-**GitLab** repos, typing **@** suggests people and **#** suggests the recently updated
-**open** issues and pull requests (on GitLab, **#** covers issues and **!** covers
-merge requests). That works in the comment box at the bottom of a pull request, issue,
-discussion, or commit, in replies, edits, line comments on a diff, and release notes,
-and in a local pull request's or issue's description and comment box; arrow keys move
+**GitLab** repos, typing **@** suggests people and **#** suggests recent issues and
+pull requests, open and closed, each marked with its state (on GitLab, **#** covers
+issues and **!** covers merge requests). That works in the comment box
+at the bottom of a pull request, issue, discussion, or commit, in replies,
+edits, line comments on a diff, and release notes, and in a local pull
+request's or issue's description and comment box; arrow keys move
 through the list, Enter or Tab accepts, and Esc dismisses it. The comment box itself
 folds to a one-line strip when you want more of the thread on screen: the caret at the
 left of its button row collapses it, and clicking the strip (or starting a quote reply)

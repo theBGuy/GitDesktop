@@ -110,6 +110,58 @@ export function usePrList(
   });
 }
 
+/** `usePrList` read through `forge_pr_list_page`, so the page carries its
+ *  horizon flag (`PrListPage.capped`) beside the rows. Its callers are the PR
+ *  panel and the stack offer, which shares the panel's default Open page; same
+ *  options and the same reasons as `usePrList`'s. */
+export function usePrListPage(
+  repo: string,
+  enabled: boolean,
+  state: api.PrStateFilter,
+  limit: number | undefined,
+  lens: RemoteLens,
+  filter: RemoteListFilter | null = null,
+  refetchIntervalMs: number | false = false,
+) {
+  return useQuery({
+    // Indices 0-6 are `usePrList`'s key, so every prefix and positional reader of
+    // the family covers these pages. The trailing marker keeps the two payload
+    // shapes in separate entries when a caller's arguments coincide with the
+    // panel's (BranchSwitcher's closed scan).
+    queryKey: [
+      ...repoKeys.prList(repo),
+      lens,
+      state,
+      limit ?? null,
+      remoteListFilterKey(filter),
+      "page",
+    ] as const,
+    queryFn: () => api.forgePrListPage(repo, state, limit, lens, filter),
+    enabled,
+    staleTime: 30_000,
+    retry: (failureCount, err) =>
+      !(isAppError(err) && err.kind === "invalidArgument") &&
+      shouldRetryQuery(failureCount, err),
+    // `usePrList`'s placeholder rule over the page's rows. The kept page's
+    // `capped` rides along; the panel never reads it from a placeholder.
+    placeholderData: (prev, prevQuery) => {
+      const page = keepPreviousDataForKeyAxes(repo, [[3, lens]])(
+        prev,
+        prevQuery,
+      );
+      if (!page) return undefined;
+      const rows = filterPlaceholderRows(
+        page.rows,
+        state,
+        prevQuery?.queryKey[4],
+      );
+      return rows && (rows === page.rows ? page : { ...page, rows });
+    },
+    refetchInterval: refetchIntervalMs,
+    refetchIntervalInBackground: false,
+  });
+}
+
 /** Hydrates PR-list rows with each PR's CI rollup, keyed by number. Runs SEPARATELY from
  *  `usePrList` — a full rollup expansion inside the list query 504s on large GitHub
  *  repos. CALLER CONTRACT: idle this hook while the list serves placeholder rows

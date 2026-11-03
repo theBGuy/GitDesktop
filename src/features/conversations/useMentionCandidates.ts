@@ -15,7 +15,14 @@ import type {
   PrInfo,
   RemoteLens,
 } from "@/lib/git/types";
-import { remoteStateMatches } from "@/lib/remote-state-filter";
+import { PR_NOUN, type PrNoun } from "@/lib/pulls/pr-state";
+import {
+  MAX_ROWS,
+  type RefRow,
+  rankRefs,
+  refInputRows,
+  textRank,
+} from "./mention-ref-rank";
 
 export type { MentionTrigger };
 
@@ -30,14 +37,22 @@ export interface MentionCandidate {
   detail?: string;
   /** Present on user rows — drives ForgeUserAvatar. */
   user?: ForgeUserRef;
-  /** Present on ref rows — drives the mono number and the state glyph. */
-  refGlyph?: { numberLabel: string; state: string; isPr: boolean };
+  /** Present on ref rows — drives the mono number, the state glyph and the
+   *  state word, open or closed alike. */
+  refGlyph?: {
+    numberLabel: string;
+    state: string;
+    isPr: boolean;
+    isDraft: boolean;
+  };
 }
 
 export interface MentionSource {
   triggers: readonly MentionTrigger[];
   /** GitHub host for login-derived avatars; `null` off GitHub. */
   ghHost: string | null;
+  /** The forge's word for a pull request, spoken in each PR row's state word. */
+  prNoun: PrNoun;
   /** The same forge context, shaped for the markdown renderer so a body can
    *  linkify the references this source helps write. Undefined while forge status
    *  is unresolved or there's no hosted remote; present signed out, where links
@@ -56,30 +71,6 @@ export interface MentionSource {
 
 /** No provider resolved yet: the source is inert (no triggers, no queries). */
 const NO_TRIGGERS: readonly MentionTrigger[] = [];
-
-/** How many rows the popover shows, applied after ranking. */
-const MAX_ROWS = 8;
-
-const NUMERIC = /^\d+$/;
-
-/** A ref candidate before it becomes a row — the two lists share one ordering. */
-interface RefRow {
-  number: number;
-  title: string;
-  state: string;
-  isPr: boolean;
-  /** The freshest timestamp the source carries, for the recency ordering. */
-  sortAt: string;
-}
-
-/** Prefix matches outrank substring matches; -1 drops the row. `needle` must
- *  already be lower-cased. */
-function textRank(haystack: string, needle: string): 0 | 1 | -1 {
-  if (!needle) return 0;
-  const i = haystack.toLowerCase().indexOf(needle);
-  if (i === 0) return 0;
-  return i > 0 ? 1 : -1;
-}
 
 function rankUsers(
   users: ForgeUserRef[],
@@ -114,30 +105,12 @@ function rankUsers(
   }));
 }
 
-function rankRefs(
+function refCandidates(
   rows: RefRow[],
   query: string,
   numberLabel: (row: RefRow) => string,
 ): MentionCandidate[] {
-  const numeric = NUMERIC.test(query);
-  const needle = query.toLowerCase();
-  const scored: { row: RefRow; rank: number }[] = [];
-  for (const row of rows) {
-    if (numeric) {
-      if (String(row.number).startsWith(query)) scored.push({ row, rank: 0 });
-      continue;
-    }
-    const rank = textRank(row.title, needle);
-    if (rank !== -1) scored.push({ row, rank });
-  }
-  scored.sort((a, b) => {
-    if (a.rank !== b.rank) return a.rank - b.rank;
-    // Equal timestamps must compare equal, not -1 both ways: an inconsistent
-    // comparator lets the sort permute rows that should hold their input order.
-    if (a.row.sortAt === b.row.sortAt) return 0;
-    return a.row.sortAt < b.row.sortAt ? 1 : -1;
-  });
-  return scored.slice(0, MAX_ROWS).map(({ row }) => ({
+  return rankRefs(rows, query).map((row) => ({
     key: `${row.isPr ? "pr" : "issue"}:${row.number}`,
     insert: String(row.number),
     label: row.title,
@@ -145,39 +118,39 @@ function rankRefs(
       numberLabel: numberLabel(row),
       state: row.state,
       isPr: row.isPr,
+      isDraft: row.isDraft,
     },
   }));
 }
 
-// Both lists are the open reads, whose membership can lag a close or merge the
-// row's own state already shows; a completion never offers a closed ref.
+// Rows keep the state they report, whichever read returned them: a read's
+// membership can lag a close or merge, and ranking reads each row's own state.
 const issueRows = (list: IssueInfo[] | undefined): RefRow[] =>
-  (list ?? [])
-    .filter((i) => remoteStateMatches(i.state, "open"))
-    .map((i) => ({
-      number: i.number,
-      title: i.title,
-      state: i.state,
-      isPr: false,
-      sortAt: i.updatedAt,
-    }));
+  (list ?? []).map((i) => ({
+    number: i.number,
+    title: i.title,
+    state: i.state,
+    isPr: false,
+    isDraft: false,
+    sortAt: i.updatedAt,
+  }));
 
 const prRows = (list: PrInfo[] | undefined): RefRow[] =>
   // `PrInfo` carries no `updatedAt`, so PR rows order by their open date.
-  (list ?? [])
-    .filter((p) => remoteStateMatches(p.state, "open"))
-    .map((p) => ({
-      number: p.number,
-      title: p.title,
-      state: p.state,
-      isPr: true,
-      sortAt: p.createdAt,
-    }));
+  (list ?? []).map((p) => ({
+    number: p.number,
+    title: p.title,
+    state: p.state,
+    isPr: true,
+    isDraft: p.isDraft,
+    sortAt: p.createdAt,
+  }));
 
 /**
  * The per-surface data behind the comment composers' `@`/`#`/`!` autocomplete:
  * which triggers this forge autolinks, and a pure filter over the cached
- * candidates each one offers. Strictly lazy — the three underlying queries stay
+ * candidates each one offers, open and closed refs alike. Strictly lazy — the
+ * five underlying queries (users, plus open and closed issues and PRs) stay
  * disabled until the first trigger token opens, so mounting a PR view costs
  * nothing until someone actually types one.
  */
@@ -205,24 +178,36 @@ export function useMentionCandidates({
 
   const users = useAssignableUsers(repoPath, wantsUsers, lens);
   const issues = useIssueList(repoPath, wantsIssues, "open", 50, lens);
+  const closedIssues = useIssueList(repoPath, wantsIssues, "closed", 50, lens);
   const prs = usePrList(repoPath, wantsPrs, "open", 50, lens);
+  const closedPrs = usePrList(repoPath, wantsPrs, "closed", 50, lens);
   const ghHost = useForgeGhHost(repoPath);
 
   const onActive = useCallback(() => setActive(true), []);
 
   // The data/loading/error triples below are the only query state `query`
   // closes over — never the query result objects, which re-identify every
-  // render and would churn this source's identity downstream. Both list queries also leave
-  // state and limit free in their placeholder comparators, so a panel's closed-tab
-  // rows can be served here until this key's own fetch lands: placeholder rows
-  // read as "still loading" rather than suggesting a closed issue the completion
-  // promised would be open.
+  // render and would churn this source's identity downstream. A placeholder
+  // page (another state's or limit's rows) reads as still loading, not as this
+  // key's answer, which it would mis-rank and could double against its twin.
   const issueData = issues.isPlaceholderData ? undefined : issues.data;
+  const closedIssueData = closedIssues.isPlaceholderData
+    ? undefined
+    : closedIssues.data;
   const prData = prs.isPlaceholderData ? undefined : prs.data;
-  const issuesLoading = issues.isLoading || issues.isPlaceholderData;
-  const prsLoading = prs.isLoading || prs.isPlaceholderData;
-  const issuesError = issues.isError;
-  const prsError = prs.isError;
+  const closedPrData = closedPrs.isPlaceholderData ? undefined : closedPrs.data;
+  const issuesLoading =
+    issues.isLoading ||
+    issues.isPlaceholderData ||
+    closedIssues.isLoading ||
+    closedIssues.isPlaceholderData;
+  const prsLoading =
+    prs.isLoading ||
+    prs.isPlaceholderData ||
+    closedPrs.isLoading ||
+    closedPrs.isPlaceholderData;
+  const issuesError = issues.isError || closedIssues.isError;
+  const prsError = prs.isError || closedPrs.isError;
   const userData = users.data;
   const usersLoading = users.isLoading;
   const usersError = users.isError;
@@ -236,21 +221,26 @@ export function useMentionCandidates({
         isError: usersError,
       };
     }
+    // A number both reads returned keeps the open read's row whenever it
+    // matches. Built only by the arms that show PRs: GitLab's `#` never does.
+    const allPrRows = () => refInputRows(prRows(prData), prRows(closedPrData));
     if (trigger === "!") {
       return {
-        items: rankRefs(prRows(prData), text, (r) => `!${r.number}`),
+        items: refCandidates(allPrRows(), text, (r) => `!${r.number}`),
         loading: prsLoading,
         isError: prsError,
       };
     }
-    // `#`: GitHub merges both lists into its shared number space; GitLab's `#`
-    // addresses issues alone.
+    const allIssueRows = refInputRows(
+      issueRows(issueData),
+      issueRows(closedIssueData),
+    );
+    // `#`: GitHub merges issue and PR rows into its shared number space;
+    // GitLab's `#` addresses issues alone.
     const rows =
-      provider === "github"
-        ? [...issueRows(issueData), ...prRows(prData)]
-        : issueRows(issueData);
+      provider === "github" ? [...allIssueRows, ...allPrRows()] : allIssueRows;
     return {
-      items: rankRefs(rows, text, (r) => `#${r.number}`),
+      items: refCandidates(rows, text, (r) => `#${r.number}`),
       loading: issuesLoading || (provider === "github" && prsLoading),
       isError: issuesError || (provider === "github" && prsError),
     };
@@ -259,6 +249,7 @@ export function useMentionCandidates({
   return {
     triggers,
     ghHost,
+    prNoun: provider ? PR_NOUN[provider] : "pull request",
     refs: provider ? { provider, repoPath, lens } : undefined,
     onActive,
     query,

@@ -171,7 +171,7 @@ import {
   usePrBaseDivergence,
   usePrDetails,
   usePrDiff,
-  usePrList,
+  usePrListPage,
   usePrMergeability,
   usePrReactions,
   usePrReviewThreads,
@@ -206,8 +206,10 @@ import {
   type ApprovalState,
   type ForgeProvider,
   type ForgeUserRef,
+  listPageRows,
   type PrDetails,
   type PrInfo,
+  type PrListPage,
   type PrThreadOut,
   prHeadSha,
   providerLabel,
@@ -381,7 +383,7 @@ const BUSY_HOLD_FALLBACK_REASON = "Another operation is in progress";
 
 /** The PR's row in any cached list page of this repo and lens, for the loading
  *  frame: its title, state, author and branches are what the header's first rows
- *  wrap around. `usePrList`'s key carries the lens at index 3, and a fork numbers
+ *  wrap around. The list key carries the lens at index 3, and a fork numbers
  *  its pull requests independently of its parent. */
 function cachedPrRow(
   queryClient: QueryClient,
@@ -389,10 +391,12 @@ function cachedPrRow(
   lens: RemoteLens,
   number: number,
 ): PrInfo | undefined {
-  for (const [key, rows] of queryClient.getQueriesData<PrInfo[]>({
+  const pages = queryClient.getQueriesData<PrInfo[] | PrListPage>({
     queryKey: repoKeys.prList(repo),
-  })) {
-    if (key[3] !== lens || !Array.isArray(rows)) continue;
+  });
+  for (const [key, page] of pages) {
+    const rows = listPageRows(page);
+    if (key[3] !== lens || !rows) continue;
     const row = rows.find((r) => r.number === number);
     if (row) return row;
   }
@@ -1280,7 +1284,7 @@ export function RemotePrView({
     !details.data?.stack &&
     !(details.data?.stackUnknown ?? false) &&
     !details.data?.crossRepository;
-  const offerList = usePrList(
+  const offerList = usePrListPage(
     repoPath,
     offerEnabled,
     "open",
@@ -1293,7 +1297,7 @@ export function RemotePrView({
   // The offer's own expansion lives in the component; the palette twins reach it
   // through this handle so both entry points land on the same Confirm button.
   const offerRef = useRef<StackOfferHandle>(null);
-  const openPrs = offerEnabled ? (offerList.data ?? []) : [];
+  const openPrs = offerEnabled ? (listPageRows(offerList.data) ?? []) : [];
   const currentRow = openPrs.find((p) => p.number === shownNumber);
   const stackOffer = currentRow ? detectStackOffer(currentRow, openPrs) : null;
   // The offer's members in the same bottom→top order, dropped if a member has

@@ -1,8 +1,4 @@
-import {
-  CheckCircleIcon,
-  CircleDashedIcon,
-  GitPullRequestIcon,
-} from "@phosphor-icons/react";
+import { CheckCircleIcon, CircleDashedIcon } from "@phosphor-icons/react";
 import {
   type KeyboardEvent,
   type RefObject,
@@ -16,12 +12,18 @@ import {
 import { createPortal } from "react-dom";
 import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { usePanelPortalContainer } from "@/components/panel-portal";
+import {
+  PARTIAL_FAILURE_MESSAGE,
+  showsPartialFailure,
+} from "@/features/conversations/mention-ref-rank";
 import type {
   MentionCandidate,
   MentionSource,
   MentionTrigger,
 } from "@/features/conversations/useMentionCandidates";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { eventToBinding } from "@/lib/hotkeys/binding";
+import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { getCaretCoordinates } from "@/lib/textarea-caret";
 import { cn } from "@/lib/utils";
 
@@ -31,13 +33,18 @@ const ALL_TRIGGERS = "@#!";
 
 /** `w-72` — the popover's fixed width, needed before it is laid out to clamp it. */
 const POPOVER_WIDTH = 288;
-/** Ceiling the viewport clamp works down from, in px: no class carries it, the
- *  placement applies the clamped result as an inline `maxHeight`. */
-const MAX_LIST_HEIGHT = 224;
+/** Ceiling the viewport clamp works down from, in px: eight 28px ref rows plus
+ *  the box's 1px borders, so a full list scrolls only when the pinned status
+ *  line takes its share. No class carries it; the placement applies the
+ *  clamped result as an inline `maxHeight`. */
+const MAX_LIST_HEIGHT = 226;
 /** Keeps the popover off the viewport edges. */
 const GUTTER = 8;
 /** Enough of a row to estimate the list's height before it renders. */
 const ROW_HEIGHT = 28;
+/** The pinned status line under rows (padding, one 11px line, its border-t):
+ *  the scroll region gives it up, so placement has to reserve it too. */
+const FOOTER_HEIGHT = 34;
 /** Floor under the computed `maxHeight` on whichever side is chosen, so a caret
  *  with almost no room still shows a usable list — at extreme heights it wins over
  *  the gutter and the box overhangs the viewport edge. No input to the flip test. */
@@ -94,6 +101,8 @@ function place(
   textarea: HTMLTextAreaElement,
   caret: number,
   rowCount: number,
+  /** A status line shows under the rows (not in place of them). */
+  footed: boolean,
 ): Omit<ActiveToken, "trigger" | "query" | "start"> {
   const rect = textarea.getBoundingClientRect();
   const coords = getCaretCoordinates(textarea, caret);
@@ -105,7 +114,7 @@ function place(
   );
   const wanted = Math.min(
     MAX_LIST_HEIGHT,
-    Math.max(rowCount, 1) * ROW_HEIGHT + GUTTER,
+    Math.max(rowCount, 1) * ROW_HEIGHT + (footed ? FOOTER_HEIGHT : 0) + GUTTER,
   );
   const spaceBelow = window.innerHeight - caretBottom - 2 - GUTTER;
   const spaceAbove = caretTop - 2 - GUTTER;
@@ -133,8 +142,9 @@ function place(
 /**
  * GitHub-style `@`/`#`/`!` completion for a textarea: token detection, the caret-
  * anchored listbox, and the keyboard contract the popover owns while a token is
- * open. Opt-in — with no `mentions` source nothing is rendered, listened to, or
- * queried, which is what keeps the surfaces that don't wire it byte-identical.
+ * open. Opt-in — with no `mentions` source, or one offering no trigger, nothing
+ * is listened to, queried or rendered, so the surfaces that don't wire it behave
+ * and look as before.
  *
  * Ported from the session composer's mention mechanics; two details there are
  * load-bearing and kept verbatim: rows commit on `mousedown` with `preventDefault`
@@ -156,7 +166,9 @@ export function useMentionAutocomplete({
   suspended: boolean;
 }) {
   const [token, setToken] = useState<ActiveToken | null>(null);
-  const [index, setIndex] = useState(0);
+  // The highlighted candidate by key, so rows landing above it never move it;
+  // null (and a key that left the list) means the first row.
+  const [activeKey, setActiveKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   // Swallows the one onChange an accepted completion produces (see `insert`).
   const skipSync = useRef(false);
@@ -169,16 +181,19 @@ export function useMentionAutocomplete({
     null,
   );
   const listId = useId();
+  const portalContainer = usePanelPortalContainer();
 
   // Render-time reset, not an effect — neither state may survive a commit. A
-  // popover must never paint over a preview pane or a frozen editor; and external
-  // writes to `value` (a submit clearing the draft, a quote-reply fill, an
-  // error restore) never reach `sync`, so the token's validity derives from
+  // popover must never paint over a preview pane, a frozen editor or a source
+  // that lost its triggers (signed out, which also unmounts the announcer); and
+  // external writes to `value` (a submit clearing the draft, a quote-reply fill,
+  // an error restore) never reach `sync`, so the token's validity derives from
   // `value` rather than from the events that set it.
   if (
     token &&
     (suspended ||
       !mentions ||
+      mentions.triggers.length === 0 ||
       value.slice(token.start, token.start + 1 + token.query.length) !==
         token.trigger + token.query)
   ) {
@@ -188,9 +203,15 @@ export function useMentionAutocomplete({
   const open = token !== null && !suspended && !!mentions;
   const result = open ? mentions.query(token.trigger, token.query) : null;
   const items = result?.items ?? [];
-  // The list can shrink under a stale index while data arrives.
-  const activeIndex = items.length > 0 ? Math.min(index, items.length - 1) : 0;
+  const activeIndex = Math.max(
+    items.findIndex((c) => c.key === activeKey),
+    0,
+  );
   const rowCount = items.length;
+  const status = result
+    ? statusLine(items.length, result.loading, result.isError)
+    : null;
+  const footed = rowCount > 0 && status !== null;
 
   // Re-place the open token's box against the caret it already names. Placement
   // measures the DOM, so it must run from the effect rather than from a state
@@ -199,19 +220,19 @@ export function useMentionAutocomplete({
     if (!token) return;
     setToken({
       ...token,
-      ...place(ta, token.start + 1 + token.query.length, rowCount),
+      ...place(ta, token.start + 1 + token.query.length, rowCount, footed),
     });
   });
 
   // The lazy queries only enable as the first token opens, so a token is always
   // placed against an empty list first; re-place once the candidates land, before
   // paint, or the box keeps the flip and height it chose for zero rows.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `rowCount` is the trigger — the effect event reads it live, so dropping it here would stop the re-place from ever running.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `rowCount` and `footed` are the triggers — the effect event reads them live, so dropping them here would stop the re-place from ever running.
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!open || !ta) return;
     rePlace(ta);
-  }, [open, rowCount, textareaRef]);
+  }, [open, rowCount, footed, textareaRef]);
 
   useEffect(() => {
     if (!open) return;
@@ -277,12 +298,19 @@ export function useMentionAutocomplete({
     // A token at another index is a different one, so the old dismissal lapses.
     dismissed.current = null;
     mentions.onActive();
-    setIndex(0);
+    setActiveKey(null);
+    const found = mentions.query(trigger, query);
+    const count = found.items.length;
     setToken({
       trigger,
       query,
       start,
-      ...place(ta, caret, mentions.query(trigger, query).items.length),
+      ...place(
+        ta,
+        caret,
+        count,
+        count > 0 && statusLine(count, found.loading, found.isError) !== null,
+      ),
     });
   }
 
@@ -352,14 +380,13 @@ export function useMentionAutocomplete({
     if (items.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        setIndex((i) => (Math.min(i, items.length - 1) + 1) % items.length);
+        setActiveKey(items[(activeIndex + 1) % items.length].key);
         return true;
       }
       if (e.key === "ArrowUp") {
         e.preventDefault();
-        setIndex(
-          (i) =>
-            (Math.min(i, items.length - 1) - 1 + items.length) % items.length,
+        setActiveKey(
+          items[(activeIndex - 1 + items.length) % items.length].key,
         );
         return true;
       }
@@ -413,55 +440,105 @@ export function useMentionAutocomplete({
       }
     : undefined;
 
-  const popover =
-    open && token ? (
-      <MentionPopover
-        listId={listId}
-        listRef={listRef}
-        items={items}
-        loading={result?.loading ?? false}
-        isError={result?.isError ?? false}
-        activeIndex={activeIndex}
-        ghHost={mentions.ghHost}
-        token={token}
-        onPick={insert}
-        onHover={setIndex}
-      />
-    ) : null;
+  // The announcer lives as long as a wired composer: a live region inserted
+  // together with its text is not announced, so it must exist before a popover
+  // opens on a line, and no token opens before `wired` is true. Closing empties
+  // it, so re-opening on the same line is announced again. Portalled like the
+  // popover: a trailing child would break the host's `space-y` stack, which
+  // leaves its last child's margin off. The explicit aria-live keeps it audible
+  // under a modal: Base UI aria-hides every body child but `[aria-live]` ones,
+  // and the portal target can be body.
+  const announcer = wired
+    ? createPortal(
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
+          {status}
+        </div>,
+        portalContainer ?? document.body,
+      )
+    : null;
+
+  const popover = (
+    <>
+      {announcer}
+      {open && token ? (
+        <MentionPopover
+          listId={listId}
+          listRef={listRef}
+          items={items}
+          status={status}
+          activeIndex={activeIndex}
+          ghHost={mentions.ghHost}
+          prNoun={mentions.prNoun}
+          token={token}
+          onPick={insert}
+          onHover={(i) => setActiveKey(items[i].key)}
+        />
+      ) : null}
+    </>
+  );
 
   return { textareaProps, sync, onKeyDown, popover };
 }
 
-/** Glyph for a suggested reference: the shape separates an issue from a PR, and
- *  the issue arm mirrors the Issues panel's `StateIcon` (local rather than imported
- *  so the editor doesn't pull the issue-relations module into its chunk). Both
- *  closed-state arms are unreachable while the ref lists request the open state
- *  only; the PR arm distinguishes state by tint alone, so an all-states list would
- *  need a second glyph before it could be trusted to convey one. */
-function RefGlyph({ state, isPr }: { state: string; isPr: boolean }) {
-  if (isPr) {
-    return (
-      <GitPullRequestIcon
-        className={cn(
-          "size-3.5 shrink-0",
-          state === "OPEN" ? "text-success" : "text-merged",
-        )}
-      />
-    );
+type RefGlyphData = NonNullable<MentionCandidate["refGlyph"]>;
+
+/** Glyph for a suggested reference: a PR takes `prPill`, whose shape carries
+ *  its state, and the issue arm mirrors the Issues panel's `StateIcon` (local
+ *  rather than imported so the editor doesn't pull the issue-relations module
+ *  into its chunk). */
+function RefGlyph({
+  refGlyph,
+  noun,
+}: {
+  refGlyph: RefGlyphData;
+  noun: PrNoun;
+}) {
+  if (refGlyph.isPr) {
+    const pill = prPill(refGlyph.state, refGlyph.isDraft, noun);
+    return <pill.Icon className={cn("size-3.5 shrink-0", pill.tone)} />;
   }
-  return state === "CLOSED" ? (
+  return refGlyph.state === "CLOSED" ? (
     <CheckCircleIcon className="size-3.5 shrink-0 text-merged" />
   ) : (
     <CircleDashedIcon className="size-3.5 shrink-0 text-success" />
   );
 }
 
+/** An issue row's state as words, mirroring the reference card's issue pill;
+ *  a state this build doesn't know keeps the forge's word. */
+const ISSUE_WORD: Partial<Record<string, string>> = {
+  OPEN: "Open issue",
+  CLOSED: "Closed issue",
+};
+
+/** State AND kind for a reader, on every ref row: the glyph alone is silent. */
+function refStateWord(refGlyph: RefGlyphData, noun: PrNoun): string {
+  if (refGlyph.isPr) return prPill(refGlyph.state, refGlyph.isDraft, noun).word;
+  return ISSUE_WORD[refGlyph.state] ?? `${refGlyph.state} issue`;
+}
+
 /** The one muted row shown when there is nothing to pick. A list still loading
- *  outranks a failed one: a merged list whose halves resolve separately is worth
- *  waiting on before it is called broken. */
+ *  outranks a failed one: a list merged from reads that resolve separately is
+ *  worth waiting on before it is called broken. */
 function emptyMessage(loading: boolean, isError: boolean): string {
   if (loading) return "Loading…";
   return isError ? "Couldn't load suggestions" : "No matches";
+}
+
+/** The line under the options, if any; the announcer and the visible line both
+ *  read this one result so they can never disagree. */
+function statusLine(
+  count: number,
+  loading: boolean,
+  isError: boolean,
+): string | null {
+  if (count === 0) return emptyMessage(loading, isError);
+  return showsPartialFailure(count, isError) ? PARTIAL_FAILURE_MESSAGE : null;
 }
 
 /** The caret-anchored suggestion listbox. Portalled out and fixed-positioned:
@@ -471,10 +548,10 @@ function MentionPopover({
   listId,
   listRef,
   items,
-  loading,
-  isError,
+  status,
   activeIndex,
   ghHost,
+  prNoun,
   token,
   onPick,
   onHover,
@@ -482,11 +559,11 @@ function MentionPopover({
   listId: string;
   listRef: RefObject<HTMLDivElement | null>;
   items: MentionCandidate[];
-  loading: boolean;
-  /** A backing list failed — say so instead of reporting a confident "No matches". */
-  isError: boolean;
+  /** The line under the options; the hook's announcer reads it out. */
+  status: string | null;
   activeIndex: number;
   ghHost: string | null;
+  prNoun: PrNoun;
   token: ActiveToken;
   onPick: (candidate: MentionCandidate) => void;
   onHover: (i: number) => void;
@@ -504,9 +581,6 @@ function MentionPopover({
   return createPortal(
     <div
       ref={listRef}
-      id={listId}
-      role="listbox"
-      aria-label="Mention suggestions"
       // Dragging the list's own scrollbar must not blur the textarea, which would
       // dismiss the popover out from under the drag.
       onMouseDown={(e) => e.preventDefault()}
@@ -517,55 +591,87 @@ function MentionPopover({
         bottom: token.bottom ?? undefined,
         maxHeight: token.maxHeight,
       }}
-      className="z-50 w-72 overflow-y-auto border bg-popover shadow-md ring-1 ring-foreground/10"
+      className="z-50 flex w-72 flex-col border bg-popover shadow-md ring-1 ring-foreground/10"
     >
-      {items.length === 0 ? (
-        <p className="px-2.5 py-2 text-[11px] text-muted-foreground">
-          {emptyMessage(loading, isError)}
-        </p>
-      ) : (
-        items.map((c, i) => (
-          <button
-            key={c.key}
-            id={`${listId}-${i}`}
-            role="option"
-            aria-selected={i === activeIndex}
-            type="button"
-            // Selection rides aria-activedescendant on the textarea, which keeps
-            // focus; a portalled row in the tab order would be reachable behind it.
-            tabIndex={-1}
-            // mousedown (not click) so the textarea doesn't blur before the insert
-            onMouseDown={(e) => {
-              e.preventDefault();
-              onPick(c);
-            }}
-            onMouseMove={() => onHover(i)}
-            className={cn(
-              "flex w-full min-w-0 items-center gap-1.5 px-2.5 py-1.5 text-left text-xs",
-              i === activeIndex
-                ? "bg-accent text-accent-foreground"
-                : "hover:bg-muted/60",
-            )}
-          >
-            {c.user && (
-              <ForgeUserAvatar user={c.user} ghHost={ghHost} decorative />
-            )}
-            {c.refGlyph && (
-              <>
-                <RefGlyph state={c.refGlyph.state} isPr={c.refGlyph.isPr} />
-                <span className="shrink-0 font-mono text-muted-foreground">
-                  {c.refGlyph.numberLabel}
-                </span>
-              </>
-            )}
-            <span className="truncate">{c.label}</span>
-            {c.detail && (
-              <span className="truncate text-[11px] text-muted-foreground">
-                {c.detail}
+      {/* Only the rows scroll: the status line under them stays pinned in view,
+          and this region gives up its height under the same maxHeight. */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div id={listId} role="listbox" aria-label="Mention suggestions">
+          {items.map((c, i) => (
+            <button
+              key={c.key}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === activeIndex}
+              type="button"
+              // Selection rides aria-activedescendant on the textarea, which keeps
+              // focus; a portalled row in the tab order would be reachable behind it.
+              tabIndex={-1}
+              // mousedown (not click) so the textarea doesn't blur before the insert
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onPick(c);
+              }}
+              onMouseMove={() => onHover(i)}
+              className={cn(
+                "flex w-full min-w-0 items-center gap-1.5 px-2.5 py-1.5 text-left text-xs",
+                i === activeIndex
+                  ? "bg-accent text-accent-foreground"
+                  : "hover:bg-muted/60",
+              )}
+            >
+              {c.user && (
+                <ForgeUserAvatar user={c.user} ghHost={ghHost} decorative />
+              )}
+              {c.refGlyph && (
+                <>
+                  <RefGlyph refGlyph={c.refGlyph} noun={prNoun} />
+                  <span className="sr-only">{`${refStateWord(c.refGlyph, prNoun)} `}</span>
+                  <span className="shrink-0 font-mono text-muted-foreground">
+                    {c.refGlyph.numberLabel}
+                  </span>
+                </>
+              )}
+              <span className="truncate" onMouseEnter={clipTitleFromText}>
+                {c.label}
               </span>
-            )}
-          </button>
-        ))
+              {c.detail && (
+                <span
+                  className="truncate text-[11px] text-muted-foreground"
+                  onMouseEnter={clipTitleFromText}
+                >
+                  {c.detail}
+                </span>
+              )}
+              {/* Open non-draft rows stay unmarked; the sr-only word already
+                  names the state, so the visible one is hidden from a reader. */}
+              {c.refGlyph &&
+                (c.refGlyph.state !== "OPEN" || c.refGlyph.isDraft) && (
+                  <span
+                    aria-hidden="true"
+                    className="ml-auto shrink-0 text-[11px] text-muted-foreground capitalize"
+                  >
+                    {c.refGlyph.isDraft && c.refGlyph.state === "OPEN"
+                      ? "draft"
+                      : c.refGlyph.state.toLowerCase()}
+                  </span>
+                )}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* Outside the listbox, which may own options alone; hidden from a reader,
+          who hears it through the hook's announcer instead. */}
+      {status !== null && (
+        <p
+          aria-hidden="true"
+          className={cn(
+            "shrink-0 px-2.5 py-2 text-[11px] text-muted-foreground",
+            items.length > 0 && "border-t",
+          )}
+        >
+          {status}
+        </p>
       )}
     </div>,
     portalContainer ?? document.body,

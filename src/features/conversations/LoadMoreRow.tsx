@@ -41,3 +41,27 @@ export function LoadMoreRow(props: {
     </div>
   );
 }
+
+/** Takes the Load more row's slot when the list's read stopped at its horizon,
+ *  where another page would re-read the same rows. Same box and hierarchy as
+ *  LoadMoreRow, but static text: nothing to focus or announce. */
+export function ListCapNote(props: {
+  /** How many items are currently loaded. */
+  count: number;
+  /** The list's plural noun ("merge requests"). */
+  noun: string;
+}) {
+  const { count, noun } = props;
+  return (
+    <div className="border-t p-2">
+      <div className="flex flex-col items-center gap-0.5 px-3 py-2">
+        <span className="text-xs font-medium tabular-nums">
+          Showing the newest {count.toLocaleString()}
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          Use Filters to reach older {noun}
+        </span>
+      </div>
+    </div>
+  );
+}
