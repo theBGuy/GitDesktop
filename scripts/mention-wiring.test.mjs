@@ -297,6 +297,7 @@ export function popoverViolations(raw) {
       region.tag.includes('className="sr-only"') &&
       region.tag.includes('aria-live="polite"') &&
       region.tag.includes('aria-atomic="true"') &&
+      !region.tag.includes("aria-hidden") &&
       flat(masked.slice(portalOpen, region.start)) === "(" &&
       flat(
         masked.slice(openEnd(region), masked.indexOf("</div>", region.start)),
@@ -526,6 +527,12 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   mutate('          aria-live="polite"\n', "", PINS.ANNOUNCER);
   mutate('aria-live="polite"', 'aria-live="assertive"', PINS.ANNOUNCER);
   mutate('          aria-atomic="true"\n', "", PINS.ANNOUNCER);
+  // The announcer hidden from assistive technology.
+  mutate(
+    '          aria-atomic="true"\n',
+    '          aria-atomic="true"\n          aria-hidden="true"\n',
+    PINS.ANNOUNCER,
+  );
   // The announcer reading something other than the shared status line.
   mutate(
     "          {status}\n        </div>,\n",
