@@ -12,6 +12,187 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.13.8] - 2026-11-03
+
+### Changed
+
+- Publishing a branch from the sync bar or the branch list now asks first: a
+  push that would create the branch on a remote names the branch and its
+  destination before anything is sent, with **Cancel** focused so a stray
+  Enter backs out. A branch the remote already has (as of the last fetch)
+  just pushes, as before. When a push goes somewhere other than the branch
+  it tracks, the **Push** button's tooltip names where it goes. The toast
+  afterwards says **Published** only when the last fetch showed the branch
+  was new to the remote, and **Pushed** otherwise; publishing from the sync
+  bar now shows it too. The confirmation opens as soon as the local checks
+  finish, with the fork pull-request check running alongside.
+- The MCP `drop_stash` tool takes the stash's `sha` (which `list_stashes` now
+  returns) instead of an index, and targets that stash wherever it sits in the
+  list. It refuses when that stash is already gone and reports when the list
+  shifts under the drop.
+- Typing `#` in a comment, or `!` on GitLab, also suggests closed issues and
+  merged or closed pull requests, and marks each suggestion with its state,
+  drafts included, so you can link finished work without looking up its number.
+  Open ones still come first when they match equally well, and the list says so
+  when some suggestions couldn't load.
+- Updates install only when their signature names the version being
+  offered, so an older release can't be passed off as a newer one. The app
+  window also can't be navigated away to another site, and external links
+  still open in your browser.
+- **Update from the default branch** now merges the default branch's own
+  upstream (`origin/<default>` in the common case) when your local default is
+  behind it, and its menu items and toasts name the tip that was merged. When
+  the local default has commits its upstream lacks, the menu item says how
+  many, and a second item offers the upstream.
+
+### Fixed
+
+- Blame attributes every line in repositories that use the SHA-256 object
+  format.
+- Renaming, deleting, archiving or cleaning up branches, resetting a branch
+  to its upstream, and retrying a pull, merge or rebase from its prompt now
+  check for a running push when you confirm, so a push that started while
+  the dialog was open is left to finish. After a **Clean up branches**
+  batch that partly fails, the branches you unchecked stay unchecked. The
+  **Show branches** shortcut does nothing while you're working in a dialog.
+- The branch menu opens, filters and moves between rows quickly in
+  repositories with hundreds of local branches and thousands of remote ones,
+  and with Git 2.41 or later, how far each branch is ahead of and behind the
+  default branch arrives in a fraction of the time. After you switch to a
+  repository, the menu shows placeholders while its branches load, offers Try
+  again if they can't be read, and holds its order as it fills in. Closing a
+  branch's context menu brings that branch back into view when the list
+  scrolled while the menu was open.
+- Accepting a conflict region, or an AI proposal, keeps edits made to the file
+  outside GitDesktop: when the file changed on disk after it was read, the
+  accept writes nothing and says so. The conflict editor re-reads the file, and
+  the AI proposal stays on screen to regenerate.
+- When one side of a conflict deleted a file that isn't UTF-8 text and you
+  edited the surviving copy, the conflict editor recognizes your edit and offers
+  **Mark resolved** to keep it.
+- The conflict editor and **Resolve with AI** refuse a conflicted file that is
+  reached through a symbolic link or junction, so the file the link points to
+  stays out of AI prompts and isn't overwritten by an accept. **Accept all
+  current** and **Accept all incoming** still resolve a conflicted symbolic link
+  by replacing or removing the link itself (a Windows folder link stays refused).
+- Switching back to GitDesktop with a past commit's diff open keeps that diff on
+  screen as it was, without reloading its files.
+- The diff pane keeps its file header in place while the next diff loads, so it
+  stays put as you move through commits, stashes or pull request files, and
+  binary, image and empty files show their path in the same header.
+- Diffs in the app stay readable when you've set up an external diff tool
+  for git (such as difftastic): the app now always shows its own diff
+  view.
+- In a file's history, **Load more** adds the next older commits, each listed
+  once.
+- Image diffs and Markdown previews tell a file that couldn't be read apart from
+  one that isn't in that version, and offer **Retry** when reading it again
+  could help.
+- GitLab merge request diffs label renames and mode changes the way local
+  diffs do, and on GitLab versions that report omitted diffs (gitlab.com
+  included), pure renames, mode-only changes and new or deleted empty files
+  are labelled too. On GitHub pull requests with more than 300 files, renamed
+  and empty files show as renames and empty files.
+- On GitLab, the **Closed** tab of the merge request list shows merged and
+  closed merge requests together, newest first, and **Load more** reaches
+  further back in both. Once the list holds the newest 500, a note at its end
+  says so and points to **Filters** for older ones.
+- Choosing Keep editing in the Settings unsaved-changes prompt leaves the
+  notification you clicked unread, ready to open again.
+- In a repository with no remote, **History** marks as not pushed only the
+  commits your branch adds on top of the default branch (`main` or `master`),
+  and squash and **Edit history** stay within those commits. On the default
+  branch itself no commit is marked, and squash and **Edit history** still
+  work on its commits.
+- Staging, unstaging or discarding a hunk keeps your place in the **Changes**
+  diff, with keyboard focus on the hunk now in that spot. Staging, unstaging,
+  discarding or clearing selected lines from the diff's selection bar keeps
+  keyboard focus in the diff too, so you can carry on without tabbing back in.
+- Warning text in the light theme uses a deeper amber that meets WCAG AA
+  contrast on every surface it appears on, tinted banners and chips included.
+- Pull request and issue lists keep each item under the tab for its own state
+  while a page is still loading, and linked-issue suggestions draw only from
+  issues that are still open. Merging, closing or reopening an item now takes
+  it off its old tab in every filter and preset at once, and the issue pickers
+  list each issue once.
+- On macOS, the app icon is sized to match other apps in the Dock and the
+  Applications folder.
+- On macOS with close-to-tray on, reopening the app from the Dock or Finder
+  brings back the hidden window.
+- On macOS and Linux, git hooks and agents find your tools. Commits,
+  pushes and the other git operations GitDesktop runs now see your login
+  shell's PATH, so hooks that call node, npx, or pre-commit work when
+  GitDesktop is launched from Finder, the Dock, or a Linux desktop launcher,
+  and keep working after an in-app update relaunch. The Hooks dialog's
+  install commands resolve the same way. Agent sessions and AI reviews that
+  run on your machine (not in a container) get the same PATH, as do the
+  built-in terminal and GitDesktop's MCP server when another app starts it.
+  If reading that PATH fails at launch, GitDesktop tries again a minute
+  later.
+- Markdown diffs highlight a file's YAML or TOML front matter as YAML/TOML, and
+  keep snake_case words in plain text. MDX diffs highlight their front matter
+  too.
+- Markdown previews of repository files show the repository's own images, GIFs
+  and `<picture>` sources included, read from the version you're viewing; a
+  preview of your working tree shows an image you changed on disk once you
+  switch back to it. Everywhere else Markdown is rendered (Explore, pull
+  requests, issues, comments, discussions, releases and more), an image with a
+  relative link shows its alt text or file name and the reason it can't load
+  there.
+- Jumping to a pull request, issue, workflow run, or agent session in another
+  repository, or to that repository itself (from notifications or My work),
+  now lands with the repository's local details already in place, the way
+  switching repos from the picker does.
+- AI reviews and AI-written text (commit messages, PR descriptions, branch
+  names, Debug with AI) that run on opencode use only read-only tools,
+  whatever the repository's own opencode settings say. On opencode,
+  diff-only reviews and generated commit messages, PR descriptions and
+  branch names can't open your files at all, so your AI-ignore patterns
+  hold for them. Claude reviews and read-only Plan and Research sessions
+  ignore the repository's own Claude settings and hooks, so reviewing a
+  pull request can't run commands it adds. Copilot's diff-only review runs
+  without write or shell access. opencode Plan and Research sessions use
+  read-only tools too (plus web search and fetch in Research), unless the
+  repository's own opencode config or plugins change them.
+- **Fetch**, **Pull** and background auto-fetch stay available while
+  GitDesktop checks whether a branch you're publishing belongs to a fork's
+  pull request; only **Push** is busy during the check.
+- Publishing a repository now stays visible until it finishes: the
+  Publish button shows it running, a status line at the top of the
+  repository tracks it after you close the dialog, and a second publish
+  can't start while one is in flight. Until it finishes, pushes from the
+  sync bar and the branch list, new pull requests, tag pushes, and remote
+  branch or tag deletions stop with a note that a publish is running, in
+  that repository and in any of its worktrees.
+- Pull-request reference cards say **Open or draft** when the available details
+  can't tell the two apart.
+- Renamed files show as renames when you open them one at a time in History,
+  Compare, staged changes, agent sessions and stashes: you see only what
+  actually changed, image previews show the file as it was before the rename,
+  and unstaging a hunk of a staged rename keeps the rename. A file's history
+  shows each commit under the name the file had then, so commits from before a
+  rename show their changes too. The MCP `commit_diff` and `working_diff` tools
+  pair renames the same way.
+- Unsaved automation rule edits stay put when you switch Settings panels, from
+  the sidebar or from a shortcut that opens another Settings panel, and the
+  footer's Save and Discard now cover them from any other panel.
+- With git's `log.showSignature` setting turned on, signed commits read
+  correctly in commit details and their file lists, file history and Insights,
+  and rewording or squashing unpushed commits keeps each commit's full
+  message.
+- Very large diffs open right away in **Changes**: the diff shows up to its first
+  1,000 lines, every hunk shown in full keeps its hunk buttons, and **Show full
+  diff** at the bottom brings in the rest.
+- In **View stashes**, Drop targets only the stash you picked, and the file
+  list and diffs stay on that stash, even when another tool adds or drops a
+  stash while the dialog is open. If the list changes mid-drop, a message
+  reports the result.
+- A tag without a release shows its details the moment you select it. While
+  GitDesktop is still checking whether a tag has a release, the tag's own
+  details stay on screen, and the release replaces them once it loads.
+- Toasts now stay clear of a docked action bar or comment box when nearby
+  panes move it.
+
 ## [0.13.7] - 2026-10-28
 
 ### Changed
@@ -5391,7 +5572,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.7...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.8...HEAD
+[0.13.8]: https://github.com/theBGuy/GitDesktop/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/theBGuy/GitDesktop/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/theBGuy/GitDesktop/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/theBGuy/GitDesktop/compare/v0.13.4...v0.13.5
