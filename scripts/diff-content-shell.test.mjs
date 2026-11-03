@@ -219,14 +219,233 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
   // A swap that drops both the toolbar and Preview lands on the new body: the
   // toolbar's rescue is declared, so its layout effect runs, ahead of the
   // Preview rescue, whose controls landing persists across arms.
-  const swaps = calls(masked, "useFocusOnControlsSwap", body).map((at) =>
+  const swapAt = calls(masked, "useFocusOnControlsSwap", body);
+  const swaps = swapAt.map((at) =>
     flat(masked.slice(at, masked.indexOf(")", at) + 1)),
   );
   need(
     swaps.length === 2 &&
-      swaps[0] === "useFocusOnControlsSwap(showsToolbar,armLandingRef)" &&
-      swaps[1] === "useFocusOnControlsSwap(previewOn,controlsRef)",
+      swaps[0] === "useFocusOnControlsSwap(showsToolbar,armRescueRef)" &&
+      swaps[1] === "useFocusOnControlsSwap(previewOn,previewRescueRef)",
     "the toolbar's focus rescue runs before the Preview rescue",
+  );
+
+  // Both rescues move only focus the pane held as a subtree left: one depless
+  // gate effect, declared ahead of both, derives their refs from the record
+  // and consumes it every commit.
+  const gates = calls(masked, "useLayoutEffect", body)
+    .map((at) => {
+      const close = matchBrace(masked, masked.indexOf("(", at));
+      return {
+        at,
+        close,
+        code: close < 0 ? "" : flat(masked.slice(at, close + 1)),
+      };
+    })
+    .filter((g) => g.code.includes("constheld=paneHeldFocus.current;"));
+  if (gates.length !== 1) {
+    problems.push("the held-focus gate effect is found once in DiffContent");
+  } else {
+    const [gate] = gates;
+    const g = gate.code;
+    need(
+      g.includes("armRescueRef.current=held?armLandingRef.current:null;"),
+      "the toolbar rescue derives from the held record",
+    );
+    need(
+      /^useLayoutEffect\(\(\)=>\{.*\}\)$/.test(g),
+      "the held-focus gate takes no dependency array",
+    );
+    need(
+      swapAt.length === 2 && swapAt.every((at) => gate.at < at),
+      "the held-focus gate is declared ahead of both swap rescues",
+    );
+    const sameAt = g.indexOf(
+      "constsameToolbarFile=showsToolbar&&prevSwapRef.current.toolbar&&prevSwapRef.current.path===filePath;",
+    );
+    need(
+      sameAt >= 0 &&
+        g.includes(
+          "previewRescueRef.current=held||sameToolbarFile?controlsRef.current:null;",
+        ),
+      "the Preview rescue derives from the held record or a same-file toggle",
+    );
+    const prevWrites = g.split(
+      "prevSwapRef.current={path:filePath,toolbar:showsToolbar}",
+    );
+    need(
+      sameAt >= 0 && prevWrites.length === 2 && prevWrites[0].length > sameAt,
+      "the Preview rescue's previous-commit record is written once, after its read",
+    );
+    const heldAt = g.indexOf("constheld=paneHeldFocus.current;");
+    const resetAt = g.indexOf("paneHeldFocus.current=false;");
+    need(resetAt >= 0, "the held-focus gate consumes the record");
+    need(
+      resetAt > heldAt && g.split("paneHeldFocus.current").length === 3,
+      "the held record is consumed after its one read",
+    );
+  }
+
+  // The record is written only in a capture node's ref cleanup, and only when
+  // that node held focus; every focus-containment read sits in a ref cleanup.
+  const cleanupOf = (decl, arrow) => {
+    const d = decl.exec(masked.slice(body.open, body.close));
+    if (d === null) return null;
+    const call = body.open + d.index + d[0].length - 1;
+    const callClose = matchBrace(masked, call);
+    const head = masked.indexOf(arrow, call);
+    if (callClose < 0 || head < 0 || head > callClose) return null;
+    const open = head + arrow.length - 1;
+    const close = matchBrace(masked, open);
+    return close < 0
+      ? null
+      : { open, close, decl: { open: call, close: callClose } };
+  };
+  const capture = cleanupOf(
+    /\bconst\s+captureHeldRef\s*=\s*useCallback\(/,
+    "=> () => {",
+  );
+  const armCleanup = cleanupOf(
+    /\bconst\s+armRef\s*=\s*useCallback\(/,
+    "return () => {",
+  );
+  need(
+    capture !== null &&
+      flat(masked.slice(capture.open, capture.close + 1)) ===
+        "{if(node!==null&&node.contains(document.activeElement))paneHeldFocus.current=true;}" &&
+      /,\[\],?\)$/.test(
+        flat(masked.slice(capture.decl.open, capture.decl.close + 1)),
+      ),
+    "the held record is written in a guarded ref cleanup",
+  );
+  const inCleanup = (at) =>
+    [capture, armCleanup].some(
+      (c) => c !== null && at > c.open && at < c.close,
+    );
+  const writes = [
+    ...masked
+      .slice(body.open, body.close)
+      .matchAll(/paneHeldFocus\.current\s*=\s*true\b/g),
+  ].map((m) => body.open + m.index);
+  const containment = [
+    ...masked
+      .slice(body.open, body.close)
+      .matchAll(/\bcontains\(\s*document\.activeElement\s*\)/g),
+  ].map((m) => body.open + m.index);
+  need(
+    armCleanup !== null &&
+      writes.length === 1 &&
+      [...writes, ...containment].every(inCleanup),
+    "focus is read and recorded only in ref cleanups",
+  );
+  // Any assignment form, whatever its right-hand side: the record has exactly
+  // two writers, the guarded cleanup's `true` and the gate's reset.
+  const recordWrites = [
+    ...masked
+      .slice(body.open, body.close)
+      .matchAll(
+        /(?<![\w$.])paneHeldFocus\.current\s*(?:\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=(?!=)/g,
+      ),
+  ].map((m) => body.open + m.index);
+  const writeIs = (at, text) =>
+    flat(masked.slice(at, masked.indexOf(";", at) + 1)) === text;
+  const gateSpan = gates.length === 1 ? gates[0] : null;
+  need(
+    recordWrites.length === 2 &&
+      capture !== null &&
+      recordWrites.some(
+        (at) =>
+          at > capture.open &&
+          at < capture.close &&
+          writeIs(at, "paneHeldFocus.current=true;"),
+      ) &&
+      gateSpan !== null &&
+      gateSpan.close > gateSpan.at &&
+      recordWrites.some(
+        (at) =>
+          at > gateSpan.at &&
+          at < gateSpan.close &&
+          writeIs(at, "paneHeldFocus.current=false;"),
+      ),
+    "the held record has exactly two writes: the cleanup's true and the gate's reset",
+  );
+
+  // The five nodes that can hold focus and leave on a watched flip: the text
+  // scroller, the Preview body, both toolbar clusters, and the notice.
+  need(
+    codeOccurrences(surfaceRaw, masked, "ref={captureHeldRef}", body).length ===
+      5,
+    "five capture nodes carry captureHeldRef",
+  );
+  // Each capture node at its own placement, so a ref moved to another node
+  // keeps the count and still trips. The ref and the node it wraps must both
+  // be code, never a comment quoting them.
+  const captureAt = (source, child) => {
+    const re = new RegExp(source, "dg");
+    const hits = [...surfaceRaw.slice(body.open, body.close).matchAll(re)]
+      .map((m) => ({
+        ref: body.open + m.indices.groups.ref[0],
+        child: body.open + m.indices.groups.child[0],
+      }))
+      .filter(
+        (h) =>
+          masked.startsWith("ref={captureHeldRef}", h.ref) &&
+          masked.startsWith(child, h.child),
+      );
+    return hits.length === 1 ? hits[0].ref : -1;
+  };
+  const CONTENTS = String.raw`<span\s+className="contents"\s+(?<ref>ref=\{captureHeldRef\})>\s*`;
+  const placements = [
+    [
+      captureAt(
+        String.raw`<div\s+(?<ref>ref=\{captureHeldRef\})\s+className="min-h-0 flex-1 overflow-auto">\s*(?<child>\{previewOn\b)`,
+        "{previewOn",
+      ),
+      "the text scroller is a capture node",
+    ],
+    [
+      captureAt(
+        String.raw`${CONTENTS}(?<child><MarkdownDocPreview\b)`,
+        "<MarkdownDocPreview",
+      ),
+      "the Preview body renders inside a capture node",
+    ],
+    [
+      captureAt(
+        String.raw`${CONTENTS}(?<child><MarkdownViewToggle\b)`,
+        "<MarkdownViewToggle",
+      ),
+      "the view toggle renders inside a capture node",
+    ],
+    [
+      // The lazy run stops at the picker wrapper's own close, so the capture
+      // span wraps both the picker and Unified/Split.
+      captureAt(
+        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*<DiffModeToggle\b[^>]*\/>\s*<\/span>`,
+        "<span",
+      ),
+      "the language picker and mode toggle render inside a capture node",
+    ],
+    [
+      captureAt(
+        String.raw`\{notice\s*!==\s*null\s*&&\s*\(\s*${CONTENTS}(?<child>\{notice\})`,
+        "{notice}",
+      ),
+      "the notice's capture node is placed",
+    ],
+  ];
+  for (const [at, what] of placements) need(at >= 0, what);
+  need(
+    shellClose > shellOpen &&
+      flat(masked.slice(shellOpen, shellClose)).split("{notice}").length ===
+        2 &&
+      /\{notice!==null&&\(<spanclassName="contents"ref=\{captureHeldRef\}>\{notice\}<\/span>\)\}/.test(
+        flat(surfaceRaw.slice(shellOpen, shellClose)),
+      ) &&
+      flat(masked.slice(shellOpen, shellClose)).includes(
+        "ref={captureHeldRef}>{notice}</span>",
+      ),
+    "the shell's notice renders inside a capture node",
   );
 
   // (c) Regression-only (true pre-fix too). One settle report, ahead of the
@@ -390,11 +609,217 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "  useFocusOnControlsSwap(showsToolbar, armLandingRef);\n  useFocusOnControlsSwap(previewOn, controlsRef);",
-      "  useFocusOnControlsSwap(previewOn, controlsRef);\n  useFocusOnControlsSwap(showsToolbar, armLandingRef);",
+      "  useFocusOnControlsSwap(showsToolbar, armRescueRef);\n  useFocusOnControlsSwap(previewOn, previewRescueRef);",
+      "  useFocusOnControlsSwap(previewOn, previewRescueRef);\n  useFocusOnControlsSwap(showsToolbar, armRescueRef);",
     ),
     image,
     "the toolbar's focus rescue runs before the Preview rescue",
+  );
+  // The held-focus gate: either rescue ungated, displaced or re-depped.
+  const GATE_WRITE =
+    "    prevSwapRef.current = { path: filePath, toolbar: showsToolbar };\n";
+  const HELD_READ = "    const held = paneHeldFocus.current;\n";
+  const RESET = "    paneHeldFocus.current = false;\n";
+  caught(
+    swap(
+      surface,
+      "armRescueRef.current = held ? armLandingRef.current : null;",
+      "armRescueRef.current = armLandingRef.current;",
+    ),
+    image,
+    "the toolbar rescue derives from the held record",
+  );
+  caught(
+    swap(
+      surface,
+      "useFocusOnControlsSwap(showsToolbar, armRescueRef);",
+      "useFocusOnControlsSwap(showsToolbar, armLandingRef);",
+    ),
+    image,
+    "the toolbar's focus rescue runs before the Preview rescue",
+  );
+  caught(
+    swap(surface, `${RESET}  });`, `${RESET}  }, []);`),
+    image,
+    "the held-focus gate takes no dependency array",
+  );
+  caught(
+    swap(
+      swap(
+        surface,
+        "  });\n  useFocusOnControlsSwap(showsToolbar, armRescueRef);\n",
+        "  });\n",
+      ),
+      `  useLayoutEffect(() => {\n${HELD_READ}`,
+      `  useFocusOnControlsSwap(showsToolbar, armRescueRef);\n  useLayoutEffect(() => {\n${HELD_READ}`,
+    ),
+    image,
+    "the held-focus gate is declared ahead of both swap rescues",
+  );
+  caught(
+    swap(
+      surface,
+      "previewRescueRef.current =\n      held || sameToolbarFile ? controlsRef.current : null;",
+      "previewRescueRef.current = controlsRef.current;",
+    ),
+    image,
+    "the Preview rescue derives from the held record or a same-file toggle",
+  );
+  caught(
+    swap(
+      surface,
+      "prevSwapRef.current.toolbar &&\n      prevSwapRef.current.path === filePath;",
+      "prevSwapRef.current.toolbar;",
+    ),
+    image,
+    "the Preview rescue derives from the held record or a same-file toggle",
+  );
+  caught(
+    swap(
+      surface,
+      "useFocusOnControlsSwap(previewOn, previewRescueRef);",
+      "useFocusOnControlsSwap(previewOn, controlsRef);",
+    ),
+    image,
+    "the toolbar's focus rescue runs before the Preview rescue",
+  );
+  caught(
+    swap(swap(surface, GATE_WRITE, ""), HELD_READ, `${HELD_READ}${GATE_WRITE}`),
+    image,
+    "the Preview rescue's previous-commit record is written once, after its read",
+  );
+  caught(
+    swap(surface, GATE_WRITE, ""),
+    image,
+    "the Preview rescue's previous-commit record is written once, after its read",
+  );
+  // The record taken outside a ref cleanup, or unguarded.
+  caught(
+    swap(
+      surface,
+      HELD_READ,
+      `    paneHeldFocus.current =\n      armLandingRef.current?.contains(document.activeElement) === true;\n${HELD_READ}`,
+    ),
+    image,
+    "focus is read and recorded only in ref cleanups",
+  );
+  caught(
+    swap(
+      surface,
+      "      if (node !== null && node.contains(document.activeElement))\n        paneHeldFocus.current = true;",
+      "      paneHeldFocus.current = true;",
+    ),
+    image,
+    "the held record is written in a guarded ref cleanup",
+  );
+  // A lost capture node, or a record that is never or too early consumed.
+  caught(
+    swap(
+      surface,
+      '<div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">',
+      '<div className="min-h-0 flex-1 overflow-auto">',
+    ),
+    image,
+    "five capture nodes carry captureHeldRef",
+  );
+  caught(
+    swap(
+      surface,
+      '<span className="contents" ref={captureHeldRef}>\n          {notice}',
+      '<span className="contents">\n          {notice}',
+    ),
+    image,
+    "the shell's notice renders inside a capture node",
+  );
+  caught(
+    swap(surface, RESET, ""),
+    image,
+    "the held-focus gate consumes the record",
+  );
+  caught(
+    swap(swap(surface, RESET, ""), HELD_READ, `${RESET}${HELD_READ}`),
+    image,
+    "the held record is consumed after its one read",
+  );
+  // A capture ref moved to another node: the count holds at five, the
+  // placement trips.
+  const unref = (raw, from) =>
+    swap(raw, from, from.replace(" ref={captureHeldRef}", ""));
+  caught(
+    swap(
+      unref(
+        surface,
+        '<div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">',
+      ),
+      '<InfoNote className="shrink-0">',
+      '<InfoNote ref={captureHeldRef} className="shrink-0">',
+    ),
+    image,
+    "the text scroller is a capture node",
+  );
+  caught(
+    swap(
+      unref(
+        surface,
+        '<span className="contents" ref={captureHeldRef}>\n            <MarkdownDocPreview',
+      ),
+      '<div className="border-b">\n                <ImagePanes',
+      '<div ref={captureHeldRef} className="border-b">\n                <ImagePanes',
+    ),
+    image,
+    "the Preview body renders inside a capture node",
+  );
+  caught(
+    swap(
+      unref(
+        surface,
+        '<span className="contents" ref={captureHeldRef}>\n              <MarkdownViewToggle',
+      ),
+      '<span className="sr-only">(truncated',
+      '<span className="sr-only" ref={captureHeldRef}>(truncated',
+    ),
+    image,
+    "the view toggle renders inside a capture node",
+  );
+  caught(
+    swap(
+      unref(
+        surface,
+        '<span className="contents" ref={captureHeldRef}>\n              {/* The only variable-width',
+      ),
+      '<span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">',
+      '<span aria-hidden ref={captureHeldRef} className="hidden shrink-0 @2xl/diff-pane:inline">',
+    ),
+    image,
+    "the language picker and mode toggle render inside a capture node",
+  );
+  // The record written from outside its two writers, by any right-hand side.
+  caught(
+    swap(
+      surface,
+      "  useFocusOnControlsSwap(showsToolbar, armRescueRef);\n",
+      "  paneHeldFocus.current = Boolean(armLandingRef.current);\n  useFocusOnControlsSwap(showsToolbar, armRescueRef);\n",
+    ),
+    image,
+    "the held record has exactly two writes",
+  );
+  caught(
+    swap(
+      surface,
+      "    armLandingRef.current = node;\n",
+      "    armLandingRef.current = node;\n    paneHeldFocus.current ||= node !== null;\n",
+    ),
+    image,
+    "the held record has exactly two writes",
+  );
+  caught(
+    swap(
+      surface,
+      "  const paneHeldFocus = useRef(false);\n",
+      "  const paneHeldFocus = useRef(false);\n  paneHeldFocus.current = false;\n",
+    ),
+    image,
+    "the held record has exactly two writes",
   );
   // Fail closed on a component the scan can't find.
   caught(

@@ -1578,14 +1578,45 @@ export function DiffContent({
   const canPreview =
     showsToolbar && canPreviewMarkdown(filePath, repoPath, previewRevs);
   const previewOn = canPreview && mdView === "preview";
+  // Each capture node records whether it held focus in its own ref cleanup,
+  // which runs before that node's removal: never React's deletion order between
+  // siblings, nor a blur event that removal may not fire.
+  const paneHeldFocus = useRef(false);
+  const captureHeldRef = useCallback(
+    (node: HTMLElement | null) => () => {
+      if (node !== null && node.contains(document.activeElement))
+        paneHeldFocus.current = true;
+    },
+    [],
+  );
   // A load or a refetch can take the toolbar away (a new selection, the file
-  // emptied, a mode-only change left), unmounting the control that held focus:
-  // it lands on the body of the arm that replaced it. Declared ahead of the
-  // Preview rescue, whose landing persists across arms, so a swap that drops
-  // both lands on the new body.
+  // emptied, a mode-only change left): only focus the pane held as that subtree
+  // left lands on the replacing arm's body, and focus on <body> or outside the
+  // pane never moves. Declared ahead of the Preview rescue, whose landing
+  // persists across arms, so a swap that drops both lands on the new body.
   const armLandingRef = useRef<HTMLDivElement | null>(null);
-  useFocusOnControlsSwap(showsToolbar, armLandingRef);
-  useFocusOnControlsSwap(previewOn, controlsRef);
+  const armRescueRef = useRef<HTMLElement | null>(null);
+  const previewRescueRef = useRef<HTMLElement | null>(null);
+  const prevSwapRef = useRef({ path: filePath, toolbar: showsToolbar });
+  // No dependency array: it derives both rescue refs and consumes the record
+  // every commit, after that commit's ref cleanups wrote it and before the
+  // hooks below run (react-dom 19.3.1 commit order). The Preview rescue also
+  // passes a same-file Raw/Preview toggle from <body>; another file's swap
+  // passes only held focus.
+  useLayoutEffect(() => {
+    const held = paneHeldFocus.current;
+    const sameToolbarFile =
+      showsToolbar &&
+      prevSwapRef.current.toolbar &&
+      prevSwapRef.current.path === filePath;
+    armRescueRef.current = held ? armLandingRef.current : null;
+    previewRescueRef.current =
+      held || sameToolbarFile ? controlsRef.current : null;
+    prevSwapRef.current = { path: filePath, toolbar: showsToolbar };
+    paneHeldFocus.current = false;
+  });
+  useFocusOnControlsSwap(showsToolbar, armRescueRef);
+  useFocusOnControlsSwap(previewOn, previewRescueRef);
   // Bringing the toolbar back unmounts that body: only focus it held as it left
   // (read in its ref cleanup, which runs before removal) lands on the toolbar's
   // own landing, so a cold load or another file's swap never takes focus.
@@ -1643,7 +1674,11 @@ export function DiffContent({
       ref={paneRef}
       className="ph-no-capture @container/diff-pane flex h-full flex-col"
     >
-      {notice}
+      {notice !== null && (
+        <span className="contents" ref={captureHeldRef}>
+          {notice}
+        </span>
+      )}
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
         <PathText
           path={filePath}
@@ -1673,13 +1708,15 @@ export function DiffContent({
           className="flex min-h-7 shrink-0 items-center gap-1.5 outline-none"
         >
           {canPreview && (
-            <MarkdownViewToggle view={mdView} onChange={setMdView} />
+            <span className="contents" ref={captureHeldRef}>
+              <MarkdownViewToggle view={mdView} onChange={setMdView} />
+            </span>
           )}
           {/* The picker and Unified/Split configure the raw diff, so they
               leave the cluster while Preview is up (the same swap this row
               already does for the working-tree selection actions). */}
           {showsToolbar && !previewOn && (
-            <>
+            <span className="contents" ref={captureHeldRef}>
               {/* The only variable-width control here (its label follows the
                   language name), so it's the one that goes under @md — leaving
                   the row a fixed floor. It must stay laid out while its popup
@@ -1701,7 +1738,7 @@ export function DiffContent({
                 />
               </span>
               <DiffModeToggle splitDisabled={narrowPane} />
-            </>
+            </span>
           )}
         </span>
       </div>
@@ -1839,17 +1876,20 @@ export function DiffContent({
           {UNDECODABLE_NOTE_COPY[stagingSide]}
         </InfoNote>
       )}
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">
         {previewOn && repoPath && previewRevs ? (
           // Passed the raw revs, not the truncation-stripped pair below:
           // preview reads the file, not the diff, so it works on exactly the
-          // truncated diffs content mode gives up on.
-          <MarkdownDocPreview
-            repoPath={repoPath}
-            filePath={filePath}
-            oldPath={oldSidePath}
-            revs={previewRevs}
-          />
+          // truncated diffs content mode gives up on. Its own capture node,
+          // since the scroller persists when only Preview leaves.
+          <span className="contents" ref={captureHeldRef}>
+            <MarkdownDocPreview
+              repoPath={repoPath}
+              filePath={filePath}
+              oldPath={oldSidePath}
+              revs={previewRevs}
+            />
+          </span>
         ) : (
           <>
             {svgPreview && repoPath && imageRevs && (

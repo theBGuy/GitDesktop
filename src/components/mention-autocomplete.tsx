@@ -33,8 +33,9 @@ const ALL_TRIGGERS = "@#!";
 /** `w-72` — the popover's fixed width, needed before it is laid out to clamp it. */
 const POPOVER_WIDTH = 288;
 /** Ceiling the viewport clamp works down from, in px: eight 28px ref rows plus
- *  the box's 1px borders, so a full list needs no scrollbar. No class carries it;
- *  the placement applies the clamped result as an inline `maxHeight`. */
+ *  the box's 1px borders, so a full list scrolls only when the pinned status
+ *  line takes its share. No class carries it; the placement applies the
+ *  clamped result as an inline `maxHeight`. */
 const MAX_LIST_HEIGHT = 226;
 /** Keeps the popover off the viewport edges. */
 const GUTTER = 8;
