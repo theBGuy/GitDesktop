@@ -5,8 +5,8 @@
 // first row). mention-autocomplete.tsx keys the highlight on the candidate
 // (`activeKey`), never a position, and its listbox owns only the options. The
 // empty and partial-failure line is announced by one sr-only role=status the
-// hook renders for the composer's whole life (a live region inserted with its
-// text is not announced), with an explicit aria-live so a modal's aria-hiding
+// hook renders for a wired composer's whole life (a live region inserted with
+// its text is not announced), with an explicit aria-live so a modal's aria-hiding
 // of body children spares it; the popover's visible copy is an aria-hidden
 // footer pinned after the scroll region that holds the listbox, so it never
 // scrolls out of view.
@@ -70,7 +70,7 @@ export const PINS = {
   ACTIVE_KEY: "the highlight derives from activeKey via findIndex",
   LISTBOX_OPTIONS: "the listbox owns only role=option buttons",
   ANNOUNCER:
-    "one sr-only polite atomic role=status, rendered unconditionally by the hook, reading the status line",
+    "one sr-only polite atomic role=status, rendered by the hook whenever it is wired, reading the status line",
   VISIBLE_LINE:
     "the popover's line is an aria-hidden footer after the scroll region, which alone scrolls and holds the listbox; border-t only over rows; no role=status",
 };
@@ -98,8 +98,17 @@ export function candidatesViolations(raw) {
     reads
       .filter((r) => r.name === name)
       .map((r) => /"(open|closed)"/.exec(r.text)?.[1] ?? null);
+  // The closed twins enable with their open reads, never on a gate of their own.
+  const textOf = (name) =>
+    JSON.stringify(reads.filter((r) => r.name === name).map((r) => r.text));
   need(
     JSON.stringify(stateOf("issues")) === '["open"]' &&
+      textOf("closedIssues") ===
+        JSON.stringify([
+          'useIssueList(repoPath,wantsIssues,"closed",50,lens)',
+        ]) &&
+      textOf("closedPrs") ===
+        JSON.stringify(['usePrList(repoPath,wantsPrs,"closed",50,lens)']) &&
       JSON.stringify(stateOf("closedIssues")) === '["closed"]' &&
       JSON.stringify(stateOf("prs")) === '["open"]' &&
       JSON.stringify(stateOf("closedPrs")) === '["closed"]' &&
@@ -258,16 +267,23 @@ export function popoverViolations(raw) {
   let regions = 0;
   for (const m of raw.matchAll(/role="status"/g))
     if (masked.startsWith("role=", m.index)) regions++;
-  // `const announcer = createPortal(<region>, …)`: a statement of its own, so
-  // no `cond &&` or ternary can sit between the hook and the region.
-  const portalAt = masked.indexOf("const announcer = createPortal(");
-  const portalOpen = portalAt + "const announcer = createPortal".length;
+  // `const announcer = wired ? createPortal(<region>, …) : null;`: a statement
+  // of its own whose only gate is `wired`, so the region mounts before any
+  // token opens and never together with its text (open, token or status).
+  const leadAt = masked.indexOf("const announcer =");
+  const portalAt = leadAt < 0 ? -1 : masked.indexOf("createPortal(", leadAt);
+  const portalOpen = portalAt + "createPortal".length;
   const portalClose = portalAt < 0 ? -1 : matchBrace(masked, portalOpen);
   const portal =
     portalClose < 0 ? null : jsxTree(raw, masked, portalOpen, portalClose);
   const region = portal?.children.length === 1 ? portal.children[0] : null;
+  const stmtEnd = portalClose < 0 ? -1 : masked.indexOf(";", portalClose);
   need(
     regions === 1 &&
+      region !== null &&
+      flat(masked.slice(leadAt, portalAt)) === "constannouncer=wired?" &&
+      flat(masked.slice(portalClose + 1, stmtEnd + 1)) === ":null;" &&
+      code.includes("constwired=!!mentions&&mentions.triggers.length>0;") &&
       region !== null &&
       hasRole(region, "status") &&
       region.tag.includes('className="sr-only"') &&
@@ -288,6 +304,10 @@ export function popoverViolations(raw) {
       code.includes("return{textareaProps,sync,onKeyDown,popover};") &&
       code.includes(
         "conststatus=result?statusLine(items.length,result.loading,result.isError):null;",
+      ) &&
+      // The partial-failure arm of the line both the announcer and footer read.
+      code.includes(
+        "returnshowsPartialFailure(count,isError)?PARTIAL_FAILURE_MESSAGE:null;",
       ) &&
       /<MentionPopover[^>]*\bstatus=\{status\}/.test(code),
     PINS.ANNOUNCER,
@@ -318,6 +338,17 @@ test("each candidates pin fails when its wiring is undone (in memory)", () => {
   mutate(
     'usePrList(repoPath, wantsPrs, "closed"',
     'usePrList(repoPath, wantsPrs, "open"',
+    PINS.CLOSED_READS,
+  );
+  // A closed read that never enables.
+  mutate(
+    'useIssueList(repoPath, wantsIssues, "closed"',
+    'useIssueList(repoPath, false, "closed"',
+    PINS.CLOSED_READS,
+  );
+  mutate(
+    'usePrList(repoPath, wantsPrs, "closed"',
+    'usePrList(repoPath, false, "closed"',
     PINS.CLOSED_READS,
   );
   mutate(
@@ -381,7 +412,7 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   const LIST_CLOSE = "          ))}\n        </div>\n";
   const SCROLL_CLOSE = "        </div>\n      </div>\n";
   const REGION =
-    '    <div\n      role="status"\n      aria-live="polite"\n      aria-atomic="true"\n      className="sr-only"\n    >\n      {status}\n    </div>';
+    '        <div\n          role="status"\n          aria-live="polite"\n          aria-atomic="true"\n          className="sr-only"\n        >\n          {status}\n        </div>';
   const LINE =
     '      {status !== null && (\n        <p\n          aria-hidden="true"\n          className={cn(\n            "shrink-0 px-2.5 py-2 text-[11px] text-muted-foreground",\n            items.length > 0 && "border-t",\n          )}\n        >\n          {status}\n        </p>\n      )}\n';
   for (const anchor of [
@@ -417,12 +448,29 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   // The announcer mounted only with text, at either end of the portal.
   mutate(
     `${REGION},\n`,
-    `    status !== null && (\n${REGION}\n    ),\n`,
+    `        status !== null && (\n${REGION}\n        ),\n`,
     PINS.ANNOUNCER,
   );
   mutate(
-    "const announcer = createPortal(",
-    "const announcer = status !== null && createPortal(",
+    "const announcer = wired\n",
+    "const announcer = wired && status !== null\n",
+    PINS.ANNOUNCER,
+  );
+  // The announcer gated on the popover's open state instead of `wired`, on a
+  // `wired` that waits for a token, or rendering something when unwired.
+  mutate(
+    "const announcer = wired\n",
+    "const announcer = open\n",
+    PINS.ANNOUNCER,
+  );
+  mutate(
+    "const wired = !!mentions && mentions.triggers.length > 0;",
+    "const wired = !!mentions && mentions.triggers.length > 0 && token !== null;",
+    PINS.ANNOUNCER,
+  );
+  mutate(
+    "    : null;\n\n  const popover",
+    "    : <span />;\n\n  const popover",
     PINS.ANNOUNCER,
   );
   // The announcer gated with the popover, behind a ternary, or rendered twice.
@@ -450,21 +498,31 @@ test("each popover pin fails when its structure is undone (in memory)", () => {
   // A second region beside the popover's line.
   mutate(LINE, `${REGION}\n${LINE}`, PINS.ANNOUNCER);
   // The announcer visible, or no longer a live region.
-  mutate('      className="sr-only"\n    >', "    >", PINS.ANNOUNCER);
   mutate(
-    '      role="status"\n      aria-live',
-    "      aria-live",
+    '          className="sr-only"\n        >',
+    "        >",
+    PINS.ANNOUNCER,
+  );
+  mutate(
+    '          role="status"\n          aria-live',
+    "          aria-live",
     PINS.ANNOUNCER,
   );
   // The announcer without its explicit politeness (a modal aria-hides it), or
   // interrupting the reader instead.
-  mutate('      aria-live="polite"\n', "", PINS.ANNOUNCER);
+  mutate('          aria-live="polite"\n', "", PINS.ANNOUNCER);
   mutate('aria-live="polite"', 'aria-live="assertive"', PINS.ANNOUNCER);
-  mutate('      aria-atomic="true"\n', "", PINS.ANNOUNCER);
+  mutate('          aria-atomic="true"\n', "", PINS.ANNOUNCER);
   // The announcer reading something other than the shared status line.
   mutate(
-    "      {status}\n    </div>,\n",
-    '      {items.length === 0 ? "No matches" : null}\n    </div>,\n',
+    "          {status}\n        </div>,\n",
+    '          {items.length === 0 ? "No matches" : null}\n        </div>,\n',
+    PINS.ANNOUNCER,
+  );
+  // The partial-failure line dropped: rows over a failed read say nothing.
+  mutate(
+    "return showsPartialFailure(count, isError) ? PARTIAL_FAILURE_MESSAGE : null;",
+    "return null;",
     PINS.ANNOUNCER,
   );
   mutate(

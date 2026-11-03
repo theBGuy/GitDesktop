@@ -235,7 +235,8 @@ default's name), and a PR badge.
 ### History
 
 Paged, filterable history with rich commit detail, commit-author avatars, and
-an at-a-glance marker on every commit that hasn't been pushed yet. Per-file
+an at-a-glance marker on every commit that hasn't been pushed yet (with no
+remote, the commits your branch adds on top of `main` or `master`). Per-file
 history and line blame are reachable from any file list (History, pull
 requests, Compare) or the command palette, pinned at that commit or branch
 where it applies; each blame line's commit gets a hover-card preview and a

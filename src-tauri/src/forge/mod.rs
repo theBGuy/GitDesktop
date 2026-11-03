@@ -1356,6 +1356,42 @@ pub async fn forge_pr_list(
     }
 }
 
+/// One [`forge_pr_list_page`] answer: the rows plus whether a read horizon cut them.
+#[derive(serde::Serialize)]
+pub struct PrListPage {
+    pub rows: Vec<crate::github::pr::PrInfo>,
+    /// True only when GitLab's unfiltered Closed walk stopped at its horizon and the
+    /// horizon clamped the requested limit; every other provider and read says false.
+    /// It means the walk stopped there, never that older rows were proven to exist: a
+    /// leg holding exactly its horizon's rows and nothing older still reports true.
+    pub capped: bool,
+}
+
+/// [`forge_pr_list`] with the cap flag the list panel needs to tell a horizon-limited
+/// page from a complete one. Same arguments, same lens rule (see [`forge_pr_list`]).
+#[tauri::command]
+pub async fn forge_pr_list_page(
+    repo_path: String,
+    state: String,
+    limit: Option<u32>,
+    lens: Option<String>,
+    filter: Option<model::RemoteListFilter>,
+) -> AppResult<PrListPage> {
+    let (rows, capped) = match detect_non_github(&repo_path).await {
+        Some((Provider::GitLab, _)) => {
+            gitlab::list_prs_page(&repo_path, &state, limit, filter.as_ref()).await?
+        }
+        Some((Provider::Bitbucket, _)) => {
+            (bitbucket::list_prs(&repo_path, &state, limit).await?, false)
+        }
+        _ => (
+            github::list_prs(&repo_path, &state, limit, lens, filter).await?,
+            false,
+        ),
+    };
+    Ok(PrListPage { rows, capped })
+}
+
 /// The viewer's own review state for the PRs a [`forge_pr_list`] call with the same
 /// arguments would return — the input to the list's "not reviewed / updated since my
 /// review / reviewed" grouping. A number ABSENT from the map means NOT reviewed, so

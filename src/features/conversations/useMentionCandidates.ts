@@ -221,11 +221,12 @@ export function useMentionCandidates({
         isError: usersError,
       };
     }
-    // A number both reads returned keeps the open read's row.
-    const allPrRows = refInputRows(prRows(prData), prRows(closedPrData));
+    // A number both reads returned keeps the open read's row whenever it
+    // matches. Built only by the arms that show PRs: GitLab's `#` never does.
+    const allPrRows = () => refInputRows(prRows(prData), prRows(closedPrData));
     if (trigger === "!") {
       return {
-        items: refCandidates(allPrRows, text, (r) => `!${r.number}`),
+        items: refCandidates(allPrRows(), text, (r) => `!${r.number}`),
         loading: prsLoading,
         isError: prsError,
       };
@@ -237,7 +238,7 @@ export function useMentionCandidates({
     // `#`: GitHub merges issue and PR rows into its shared number space;
     // GitLab's `#` addresses issues alone.
     const rows =
-      provider === "github" ? [...allIssueRows, ...allPrRows] : allIssueRows;
+      provider === "github" ? [...allIssueRows, ...allPrRows()] : allIssueRows;
     return {
       items: refCandidates(rows, text, (r) => `#${r.number}`),
       loading: issuesLoading || (provider === "github" && prsLoading),

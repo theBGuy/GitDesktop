@@ -395,6 +395,7 @@ pub fn run() {
             forge::forge_repo_readme,
             forge::forge_provider_features,
             forge::forge_pr_list,
+            forge::forge_pr_list_page,
             forge::forge_pr_list_ci,
             forge::forge_pr_poll,
             forge::forge_prs_for_branch,

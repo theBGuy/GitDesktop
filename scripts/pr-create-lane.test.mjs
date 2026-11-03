@@ -379,6 +379,60 @@ test("a closed or merged row settles the lane too", async (t) => {
   assert.equal(entryFor(head), undefined);
 });
 
+/** `usePrListPage`'s key: `usePrList`'s seven parts plus the `"page"` marker.
+ *  Both shapes share the prefix for good, so the watcher must read either. */
+const pageKey = (state, opts) => [...listKey(state, opts), "page"];
+/** A `PrListPage` struct, as `forge_pr_list_page` returns it. */
+const listPage = (rows, capped = false) => ({ rows, capped });
+
+test("a struct page releases and settles exactly as an array page", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const head = "feature-struct";
+  startPrCreate(REPO, head, "main", display("Struct page"));
+  markPrCreated(REPO, head, { number: 505, url: "https://x/505" });
+  armPrCreateHandOff(
+    qc,
+    {
+      repoPath: REPO,
+      head,
+      lens: LENS,
+      number: 505,
+      startedAt: entryFor(head).startedAt,
+    },
+    // Out of reach, so every verdict below is the page's and not a timer's.
+    { guardTimeoutMs: 10_000, longStopMs: 10_000 },
+  );
+
+  await publish(qc, pageKey("open"), listPage([row(505)], true));
+  const held = entryFor(head);
+  assert.ok(held, "an open-axis struct page keeps the place");
+  assert.equal(held.guardReleased, true, "and releases the guard");
+  await publish(qc, pageKey("closed"), listPage([row(505, "CLOSED")]));
+  assert.equal(entryFor(head), undefined, "a closed struct row settles");
+});
+
+test("a struct page cached before arming is read at arm time", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const head = "feature-struct-cached";
+  startPrCreate(REPO, head, "main", display("Cached struct page"));
+  markPrCreated(REPO, head, { number: 606, url: "https://x/606" });
+  qc.setQueryData(pageKey("closed"), listPage([row(606, "MERGED")]));
+  armPrCreateHandOff(
+    qc,
+    {
+      repoPath: REPO,
+      head,
+      lens: LENS,
+      number: 606,
+      startedAt: entryFor(head).startedAt,
+    },
+    { guardTimeoutMs: 10_000, longStopMs: 10_000 },
+  );
+  assert.equal(entryFor(head), undefined, "no cache event needed");
+});
+
 test("a closed-axis OPEN row and another lens's page hold nothing back", async (t) => {
   if (!deps) return t.skip(NEEDS_DEPS);
   const qc = new QueryClient();

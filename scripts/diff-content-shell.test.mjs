@@ -1,8 +1,9 @@
 // Pins the diff pane's one shell (src/features/diff/DiffSurface.tsx), read from
 // source: every DiffContent arm, loading and stale-path included, renders the
-// notice slot, the file's path row and its body, so the header holds still
-// while the next diff loads. ImageDiff (ImageDiff.tsx) draws no path row of its
-// own, leaving the shell's row the only one over an image.
+// file's path row and its body, so the header holds still while the next diff
+// loads, and every arm that draws retained data passes the shell its notice.
+// ImageDiff (ImageDiff.tsx) draws no path row of its own, leaving the shell's
+// row the only one over an image.
 //
 // Not testable here: rendered row height, where focus lands across an arm swap,
 // and the hold's promotion timing. Those need the live app.
@@ -137,6 +138,80 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
     "the shell is declared once at component level, ahead of every arm",
   );
 
+  // Every arm that draws retained data passes the notice as the shell's second
+  // argument, so a failed refresh never shows that data without it; the blank
+  // and failed arms (pending, stale path, no data) pass none.
+  const shellArgs = (at) => {
+    const open = masked.indexOf("(", at);
+    const close = open < 0 ? -1 : matchBrace(masked, open);
+    if (close < 0) return null;
+    const args = [];
+    let depth = 0;
+    let from = open + 1;
+    for (let i = open + 1; i < close; i++) {
+      const c = masked[i];
+      if ("([{".includes(c)) depth++;
+      else if (")]}".includes(c)) depth--;
+      else if (c === "," && depth === 0) {
+        args.push(flat(masked.slice(from, i)));
+        from = i + 1;
+      }
+    }
+    args.push(flat(masked.slice(from, close)));
+    return args.filter((a) => a !== "");
+  };
+  /** The first component-level return after `guard`'s first match, or -1. */
+  const armReturn = (guard) => {
+    const g = guard.exec(masked.slice(body.open, body.close));
+    return g === null
+      ? -1
+      : (returns.find((r) => r > body.open + g.index) ?? -1);
+  };
+  const imageAt = armReturn(
+    /\bif\s*\(\s*repoPath\s*&&\s*imageRevs\s*&&\s*imageMime\s*\(\s*filePath\s*\)\s*\)/,
+  );
+  const headerOnlyAt = armReturn(/\bif\s*\(\s*headerOnly\s*!==\s*null\s*\)/);
+  const textAt = returns[returns.length - 1];
+  const arms = [
+    ["pending", armReturn(/\bif\s*\(\s*isPending\s*\)/), false],
+    [
+      "stale-path",
+      armReturn(/\bif\s*\(\s*data\s*&&\s*data\.filePath\s*!==\s*filePath\s*\)/),
+      false,
+    ],
+    ["no-data", armReturn(/\bif\s*\(\s*!\s*data\s*\)/), false],
+    ["image", imageAt, true],
+    // The binary placeholder is the image guard's else branch.
+    [
+      "binary placeholder",
+      imageAt < 0 ? -1 : (returns.find((r) => r > imageAt) ?? -1),
+      true,
+    ],
+    ["empty", armReturn(/\bif\s*\(\s*emptyDiff\s*\)/), true],
+    ["header-only", headerOnlyAt, true],
+    ["text", headerOnlyAt >= 0 && textAt > headerOnlyAt ? textAt : -1, true],
+  ];
+  need(
+    arms.every(([, at]) => at >= 0) &&
+      new Set(arms.map(([, at]) => at)).size === arms.length &&
+      returns.length === arms.length,
+    "every DiffContent return is one of the eight named arms",
+  );
+  for (const [name, at, data] of arms) {
+    if (at < 0) continue;
+    const args = shellArgs(at);
+    if (data)
+      need(
+        args !== null && args.length === 2 && args[1] === "notice",
+        `the ${name} arm passes the notice to the shell`,
+      );
+    else
+      need(
+        args !== null && args.length === 1,
+        `the ${name} arm passes the shell no notice`,
+      );
+  }
+
   // (b) Regression-only (true pre-fix too). One path-row literal in
   // DiffContent, naming the selected file: never a per-arm copy.
   const rows = occurrences(surfaceRaw, ROW, body);
@@ -249,7 +324,9 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
     const [gate] = gates;
     const g = gate.code;
     need(
-      g.includes("armRescueRef.current=held?armLandingRef.current:null;"),
+      g.includes(
+        "armRescueRef.current=held?(armLandingRef.current??controlsRef.current):null;",
+      ),
       "the toolbar rescue derives from the held record",
     );
     need(
@@ -479,7 +556,7 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
   return problems;
 }
 
-test("diff shell: every arm renders the notice slot, path row and body", () => {
+test("diff shell: every arm returns through the shell, each data arm with its notice", () => {
   assert.deepEqual(diffShellViolations(read(SURFACE), read(IMAGE)), []);
 });
 
@@ -623,8 +700,18 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      "armRescueRef.current = held ? armLandingRef.current : null;",
-      "armRescueRef.current = armLandingRef.current;",
+      "armRescueRef.current = held\n      ? (armLandingRef.current ?? controlsRef.current)\n      : null;",
+      "armRescueRef.current = armLandingRef.current ?? controlsRef.current;",
+    ),
+    image,
+    "the toolbar rescue derives from the held record",
+  );
+  // The image arm's held focus falling to <body> again.
+  caught(
+    swap(
+      surface,
+      "      ? (armLandingRef.current ?? controlsRef.current)\n",
+      "      ? armLandingRef.current\n",
     ),
     image,
     "the toolbar rescue derives from the held record",
@@ -820,6 +907,74 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     ),
     image,
     "the held record has exactly two writes",
+  );
+  // A data arm dropping its notice, or a blank arm taking one: each names its
+  // arm.
+  const NOTICE_TAIL = ",\n      notice,\n    );\n  }\n";
+  for (const [arm, from, to] of [
+    ["image", "        </div>,\n        notice,\n", "        </div>,\n"],
+    [
+      "binary placeholder",
+      `      )${NOTICE_TAIL}  if (emptyDiff)`,
+      "      ),\n    );\n  }\n  if (emptyDiff)",
+    ],
+    [
+      "empty",
+      `      )${NOTICE_TAIL}  // Ahead of the preview arms`,
+      "      ),\n    );\n  }\n  // Ahead of the preview arms",
+    ],
+    [
+      "header-only",
+      `      )${NOTICE_TAIL}\n  // SVGs are text`,
+      "      ),\n    );\n  }\n\n  // SVGs are text",
+    ],
+    ["text", "    </Fragment>,\n    notice,\n", "    </Fragment>,\n"],
+  ])
+    caught(
+      swap(surface, from, to),
+      image,
+      `the ${arm} arm passes the notice to the shell`,
+    );
+  caught(
+    swap(
+      surface,
+      "    </Fragment>,\n    notice,\n",
+      "    </Fragment>,\n    null,\n",
+    ),
+    image,
+    "the text arm passes the notice to the shell",
+  );
+  for (const [arm, from, to] of [
+    [
+      "pending",
+      "        : landing(null, true),\n    );",
+      "        : landing(null, true),\n      notice,\n    );",
+    ],
+    [
+      "stale-path",
+      "return shell(landing(null, true));",
+      "return shell(landing(null, true), notice);",
+    ],
+    [
+      "no-data",
+      'for this file" />),\n    );',
+      'for this file" />),\n      notice,\n    );',
+    ],
+  ])
+    caught(
+      swap(surface, from, to),
+      image,
+      `the ${arm} arm passes the shell no notice`,
+    );
+  // A ninth arm the pins above don't name.
+  caught(
+    swap(
+      surface,
+      "  if (emptyDiff) {\n",
+      "  if (narrowPane) return shell(null);\n  if (emptyDiff) {\n",
+    ),
+    image,
+    "every DiffContent return is one of the eight named arms",
   );
   // Fail closed on a component the scan can't find.
   caught(

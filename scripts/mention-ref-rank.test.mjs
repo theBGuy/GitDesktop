@@ -1,8 +1,8 @@
 // Pins the composer's reference ranking (src/features/conversations/
 // mention-ref-rank.ts): text rank first, then open-before-closed, then recency;
-// a number both the open and closed reads returned keeps the first (open) row;
-// the slice applies after dedupe and ordering. The open tier must agree with
-// the Open tab's predicate (src/lib/remote-state-filter.ts).
+// a number both the open and closed reads returned keeps the first (open) row
+// that matches the query; the slice applies after dedupe and ordering. The open
+// tier must agree with the Open tab's predicate (src/lib/remote-state-filter.ts).
 //
 // The imports reach straight into `src/` under Node's type stripping, so both
 // modules must stay free of runtime imports.
@@ -63,6 +63,36 @@ test("a number in both reads renders once, the open page's row winning", () => {
   );
   assert.equal(ranked.length, 1);
   assert.equal(ranked[0].state, "OPEN");
+});
+
+test("an open twin the query misses does not hide a matching closed twin", () => {
+  const rows = refInputRows(
+    [row(7, "Old name", "OPEN", "2026-10-01T00:00:00Z", { isPr: true })],
+    [
+      row(7, "Renamed widget", "MERGED", "2026-10-02T00:00:00Z", {
+        isPr: true,
+      }),
+    ],
+  );
+  const ranked = rankRefs(rows, "widget");
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].state, "MERGED");
+  assert.equal(ranked[0].title, "Renamed widget");
+});
+
+test("a numeric query matching both twins keeps the open row", () => {
+  const rows = refInputRows(
+    [row(7, "Old name", "OPEN", "2026-10-01T00:00:00Z", { isPr: true })],
+    [
+      row(7, "Renamed widget", "MERGED", "2026-10-02T00:00:00Z", {
+        isPr: true,
+      }),
+    ],
+  );
+  const ranked = rankRefs(rows, "7");
+  assert.equal(ranked.length, 1);
+  assert.equal(ranked[0].state, "OPEN");
+  assert.equal(ranked[0].title, "Old name");
 });
 
 test("an issue and a PR sharing a number are two rows", () => {

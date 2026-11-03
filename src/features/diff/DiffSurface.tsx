@@ -1591,9 +1591,10 @@ export function DiffContent({
   );
   // A load or a refetch can take the toolbar away (a new selection, the file
   // emptied, a mode-only change left): only focus the pane held as that subtree
-  // left lands on the replacing arm's body, and focus on <body> or outside the
-  // pane never moves. Declared ahead of the Preview rescue, whose landing
-  // persists across arms, so a swap that drops both lands on the new body.
+  // left lands on the replacing arm's body (the path-row controls over an
+  // image), and focus on <body> or outside the pane never moves. Declared ahead
+  // of the Preview rescue, whose landing persists across arms, so a swap that
+  // drops both lands on the new body.
   const armLandingRef = useRef<HTMLDivElement | null>(null);
   const armRescueRef = useRef<HTMLElement | null>(null);
   const previewRescueRef = useRef<HTMLElement | null>(null);
@@ -1602,14 +1603,17 @@ export function DiffContent({
   // every commit, after that commit's ref cleanups wrote it and before the
   // hooks below run (react-dom 19.3.1 commit order). The Preview rescue also
   // passes a same-file Raw/Preview toggle from <body>; another file's swap
-  // passes only held focus.
+  // passes only held focus. The toolbar rescue falls back to the controls,
+  // since the image arm renders no landing.
   useLayoutEffect(() => {
     const held = paneHeldFocus.current;
     const sameToolbarFile =
       showsToolbar &&
       prevSwapRef.current.toolbar &&
       prevSwapRef.current.path === filePath;
-    armRescueRef.current = held ? armLandingRef.current : null;
+    armRescueRef.current = held
+      ? (armLandingRef.current ?? controlsRef.current)
+      : null;
     previewRescueRef.current =
       held || sameToolbarFile ? controlsRef.current : null;
     prevSwapRef.current = { path: filePath, toolbar: showsToolbar };

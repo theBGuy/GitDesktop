@@ -729,8 +729,10 @@ refresh and a **Retry**. A file that fails to blame says why and offers **Retry*
 history and the **Blame file…** picker work the same way: a failed refresh keeps what's
 shown, and a list that can't load says why and offers **Retry**.
 
-> History-rewriting actions (reset, Edit history, squash) only ever touch **unpushed**
-> commits, and a push of rewritten history becomes a safe
+> History-rewriting actions (Edit history, squash) only ever touch **unpushed** commits
+> (in a repository with no remote, the commits your branch adds on top of \`main\` or
+> \`master\`, or every commit while you're on that branch), and a push of rewritten
+> history becomes a safe
 > **force-with-lease --force-if-includes** push (the second flag needs Git 2.30+ — see
 > *Syncing & conflicts*).`,
   },

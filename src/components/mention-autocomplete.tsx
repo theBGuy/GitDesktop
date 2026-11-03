@@ -21,6 +21,7 @@ import type {
   MentionSource,
   MentionTrigger,
 } from "@/features/conversations/useMentionCandidates";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { eventToBinding } from "@/lib/hotkeys/binding";
 import { type PrNoun, prPill } from "@/lib/pulls/pr-state";
 import { getCaretCoordinates } from "@/lib/textarea-caret";
@@ -141,9 +142,9 @@ function place(
 /**
  * GitHub-style `@`/`#`/`!` completion for a textarea: token detection, the caret-
  * anchored listbox, and the keyboard contract the popover owns while a token is
- * open. Opt-in — with no `mentions` source nothing is listened to or queried and
- * only an empty, visually hidden announcer renders (portalled, out of the host's
- * layout), so the surfaces that don't wire it behave and look as before.
+ * open. Opt-in — with no `mentions` source, or one offering no trigger, nothing
+ * is listened to, queried or rendered, so the surfaces that don't wire it behave
+ * and look as before.
  *
  * Ported from the session composer's mention mechanics; two details there are
  * load-bearing and kept verbatim: rows commit on `mousedown` with `preventDefault`
@@ -183,14 +184,16 @@ export function useMentionAutocomplete({
   const portalContainer = usePanelPortalContainer();
 
   // Render-time reset, not an effect — neither state may survive a commit. A
-  // popover must never paint over a preview pane or a frozen editor; and external
-  // writes to `value` (a submit clearing the draft, a quote-reply fill, an
-  // error restore) never reach `sync`, so the token's validity derives from
+  // popover must never paint over a preview pane, a frozen editor or a source
+  // that lost its triggers (signed out, which also unmounts the announcer); and
+  // external writes to `value` (a submit clearing the draft, a quote-reply fill,
+  // an error restore) never reach `sync`, so the token's validity derives from
   // `value` rather than from the events that set it.
   if (
     token &&
     (suspended ||
       !mentions ||
+      mentions.triggers.length === 0 ||
       value.slice(token.start, token.start + 1 + token.query.length) !==
         token.trigger + token.query)
   ) {
@@ -437,24 +440,27 @@ export function useMentionAutocomplete({
       }
     : undefined;
 
-  // The announcer lives as long as the composer: a live region inserted together
-  // with its text is not announced, so it must exist before a popover opens on a
-  // line. Closing empties it, so re-opening on the same line is announced again.
-  // Portalled like the popover: a trailing child would break the host's
-  // `space-y` stack, which leaves its last child's margin off. The explicit
-  // aria-live keeps it audible under a modal: Base UI aria-hides every body child
-  // but `[aria-live]` ones, and the portal target can be body.
-  const announcer = createPortal(
-    <div
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
-      className="sr-only"
-    >
-      {status}
-    </div>,
-    portalContainer ?? document.body,
-  );
+  // The announcer lives as long as a wired composer: a live region inserted
+  // together with its text is not announced, so it must exist before a popover
+  // opens on a line, and no token opens before `wired` is true. Closing empties
+  // it, so re-opening on the same line is announced again. Portalled like the
+  // popover: a trailing child would break the host's `space-y` stack, which
+  // leaves its last child's margin off. The explicit aria-live keeps it audible
+  // under a modal: Base UI aria-hides every body child but `[aria-live]` ones,
+  // and the portal target can be body.
+  const announcer = wired
+    ? createPortal(
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
+          {status}
+        </div>,
+        portalContainer ?? document.body,
+      )
+    : null;
 
   const popover = (
     <>
@@ -626,9 +632,14 @@ function MentionPopover({
                   </span>
                 </>
               )}
-              <span className="truncate">{c.label}</span>
+              <span className="truncate" onMouseEnter={clipTitleFromText}>
+                {c.label}
+              </span>
               {c.detail && (
-                <span className="truncate text-[11px] text-muted-foreground">
+                <span
+                  className="truncate text-[11px] text-muted-foreground"
+                  onMouseEnter={clipTitleFromText}
+                >
                   {c.detail}
                 </span>
               )}

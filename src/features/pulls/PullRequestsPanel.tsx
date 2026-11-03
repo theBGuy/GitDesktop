@@ -60,12 +60,13 @@ import {
   useHoverPrefetch,
   usePendingRepoWrites,
   usePrefetchPr,
-  usePrList,
   usePrListCi,
   usePrListMergeability,
+  usePrListPage,
   usePrReviewState,
 } from "@/lib/git/queries";
 import {
+  listPageRows,
   providerLabel,
   type ReviewStateEntry,
   remoteListFilterKey,
@@ -234,7 +235,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // covered by the same skeletons a cold load already shows (a held query reports
   // `isPending`, which is what `listPending` below renders), and the gate always
   // opens — see the hook's note on why neither leg can wedge.
-  const prList = usePrList(
+  const prList = usePrListPage(
     repoPath,
     ghReady && listFilter.scopeReady,
     stateFilter,
@@ -244,6 +245,12 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     holdPollMs,
   );
   const loadMore = more.observe(prList);
+  // Every row read below takes this one extraction, so the strip, the rows and
+  // the option source all see the cached page's own `rows` reference.
+  const prRows = listPageRows(prList.data);
+  // Only a settled read may claim the horizon: a placeholder carries another
+  // tab's or limit's flag.
+  const capped = prList.data?.capped === true && !prList.isPlaceholderData;
   // Row CI icons hydrate separately from the list, so the list paints immediately; the
   // backend routes GitHub/GitLab/Bitbucket, so `ghReady` is the readiness gate. Idle
   // while the list serves placeholder rows (tab switch or Load more): otherwise the
@@ -254,7 +261,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     ghReady && !prList.isPlaceholderData,
     stateFilter,
     limit,
-    prList.data,
+    prRows,
     lens,
   );
   const ciMap = prListCi.data;
@@ -276,7 +283,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
       !prList.isPlaceholderData,
     stateFilter,
     limit,
-    prList.data,
+    prRows,
     lens,
     listFilter.filter,
   );
@@ -343,14 +350,14 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     labelCount,
   } = useLocalRemoteFilter({
     locals: localPrs.data ?? [],
-    remotes: prList.data ?? [],
+    remotes: prRows ?? [],
     stateFilter,
     remotesArePlaceholder: prList.isPlaceholderData,
     authorFilter: listFilter.authorFilter,
     labelFilter: listFilter.labelFilter,
     mineActive: listFilter.mineActive,
     labelsServerSide: listFilter.labelsServerSide,
-    // `usePrList`'s key up to the state axis: every cached page for this lens and
+    // The list key up to the state axis: every cached page for this lens and
     // state feeds the author/label options and counts, whatever limit or filter
     // produced it, so they don't collapse to the active filter.
     optionSourcePrefix: [...repoKeys.prList(repoPath), lens, stateFilter],
@@ -728,7 +735,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // done, not that it should linger. Per entry by its OWN number, so one
   // create's arrival never hides a still-creating sibling.
   // Deliberately NOT gated on `isPlaceholderData`: the strip and the rows render
-  // from the SAME `prList.data`, so a placeholder page holding the number is
+  // from the SAME `prRows`, so a placeholder page holding the number is
   // already painting that row — gating here would show both at once.
   // Entries persist past their guard release, so this predicate is also what
   // RE-shows the strip when a pre-settle refetch loses the number again — the
@@ -741,7 +748,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
             c.lens === lens &&
             !(
               c.phase === "created" &&
-              (prList.data?.some((p) => p.number === c.number) ?? false)
+              (prRows?.some((p) => p.number === c.number) ?? false)
             ),
         )
       : [];
@@ -752,7 +759,7 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
   // panel's own filtered page still lacks the row. Pre-arm, containment only
   // hides the strip; the entry and banner stay until the flow ends. Both derives
   // are pure store functions, where their own tests reach them.
-  const containedCreates = containedHolds(creates, prList.data, {
+  const containedCreates = containedHolds(creates, prRows, {
     open: stateFilter === "open",
     lens,
     isPlaceholder: prList.isPlaceholderData,
@@ -1199,7 +1206,8 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
         // limit (compared against the raw loaded count, not the filtered view).
         // A grow in flight serves the previous page, shorter than the new limit,
         // so the row stays mounted and busy then, even while the read is parked.
-        hasMore={loadMore.growing || (prList.data?.length ?? 0) === limit}
+        hasMore={loadMore.growing || (prRows?.length ?? 0) === limit}
+        remoteCapped={capped}
         remoteCount={stateRemote.length}
         loadingMore={prList.isFetching || loadMore.growing}
         onLoadMore={() => setLimit((n) => n + PAGE_SIZE)}

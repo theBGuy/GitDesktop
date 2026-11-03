@@ -35,8 +35,8 @@ export function refStateTier(state: string): 0 | 1 {
 }
 
 /** One kind's ranking input: the open read's rows ahead of the closed read's,
- *  the order `rankRefs`'s first-wins dedupe relies on to keep the open read's
- *  row for a number both reads returned. */
+ *  the order `rankRefs`'s dedupe (first matching row wins) relies on to keep
+ *  the open read's row for a number both reads returned. */
 export function refInputRows(
   openRows: RefRow[],
   closedRows: RefRow[],
@@ -59,8 +59,9 @@ export function showsPartialFailure(
 
 /**
  * Match, dedupe and order ref rows: text rank first, then state tier, then
- * recency. Input comes from `refInputRows`, so a number both reads returned
- * keeps the open read's row; each row then ranks on its own state.
+ * recency. Input comes from `refInputRows`, and the first matching row wins, so
+ * a number both reads returned keeps the open read's row whenever it matches;
+ * each row then ranks on its own state.
  */
 export function rankRefs(rows: RefRow[], query: string): RefRow[] {
   const numeric = NUMERIC.test(query);
@@ -70,11 +71,14 @@ export function rankRefs(rows: RefRow[], query: string): RefRow[] {
   for (const row of rows) {
     const id = `${row.isPr}:${row.number}`;
     if (seen.has(id)) continue;
-    seen.add(id);
     let rank: 0 | 1 | -1;
     if (numeric) rank = String(row.number).startsWith(query) ? 0 : -1;
     else rank = textRank(row.title, needle);
-    if (rank !== -1) scored.push({ row, rank, tier: refStateTier(row.state) });
+    if (rank === -1) continue;
+    // Only a matching row claims its number: a twin whose title the query
+    // misses must not hide one it matches.
+    seen.add(id);
+    scored.push({ row, rank, tier: refStateTier(row.state) });
   }
   scored.sort((a, b) => {
     if (a.rank !== b.rank) return a.rank - b.rank;
