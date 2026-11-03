@@ -1,6 +1,6 @@
 ---
 title: "git status shows every file as modified? It's usually line endings"
-description: "git status lists files you never edited. git diff tells you why, from CRLF line endings to the executable bit, and how to clear each case for good."
+description: "git status lists files you never edited. git diff shows why, from CRLF line endings to the executable bit, and each cause has its own lasting fix."
 pubDate: 2026-11-04
 author: theBGuy
 pillar: git-safety
@@ -42,12 +42,13 @@ anything. If yours shows only `old mode` and `new mode` lines, skip to the
 
 ## Two Gits disagree about one folder
 
-Git shows diffs in a terminal through a pager, usually `less`, and `less`
-prints a carriage return (CR) as `^M`. A CR is the first byte of a Windows
-line ending (CRLF), while Unix-style endings are a bare line feed (LF).
-The repository stores this file with LF endings and the copy on disk has
-CRLF. The side the `^M` lands on says which is which: the `+` lines come
-from the working file.
+`^M` is a carriage return (CR), the first byte of a Windows line ending
+(CRLF); Unix-style endings are a bare line feed (LF). In a terminal, where
+Git colors its output by default, it highlights a CR at the end of an
+added line as trailing whitespace, and `less`, the usual pager, displays
+the highlighted CR as `^M`. The repository stores this file with LF
+endings and the copy on disk has CRLF, which is why the `^M` sits on the
+`+` lines: they come from the working file.
 
 The CRs are Git for Windows' doing. Its installer preselects the
 line-ending choice that sets `core.autocrlf=true` in Git's system config,
@@ -88,11 +89,10 @@ $ git status --short
 ```
 
 The files and the index are identical on both sides; only the setting
-differs. No system or global config file reaches both Gits, so each
-machine would need its own setting. The clone's own `.git/config` is
-shared, and running `git config core.autocrlf true` inside it makes
-WSL agree for this one checkout. A rule committed to the repository
-reaches every clone.
+differs. No system or global config file reaches both Gits, so each Git
+would need its own setting. The clone's own `.git/config` is shared, and
+running `git config core.autocrlf true` inside it makes WSL agree for this
+one checkout. A rule committed to the repository reaches every clone.
 
 ## Modified in `git status`, empty in `git diff`
 
@@ -172,7 +172,7 @@ $ git status --short
 $ touch scripts/release.sh
 $ git status --short
  M scripts/release.sh
-$ git diff
+$ git diff --ws-error-highlight=all
 warning: in the working copy of 'scripts/release.sh', CRLF will be replaced by LF the next time Git touches it
 diff --git a/scripts/release.sh b/scripts/release.sh
 index 0003b37..b29d6e2 100644
@@ -196,12 +196,16 @@ fresh clone usually lists the file straight away: Git writes the files and
 the index within the same second, doesn't trust a timestamp that ties with
 the index's own, and reads the file to be sure.
 
-The `^M` is on the `-` side now, and the CRs are in the repository's copy.
-The `text` attribute tells Git to convert CRLF to LF whenever the file
-goes into the index. Your copy converts to LF and stops matching the CRLF
-copy in the repository. The warning describes that conversion: once you
-commit the LF version, every checkout writes the script with LF. Restoring
-the file doesn't help:
+A plain `git diff` would show the removed and added lines with identical
+text here: by default Git highlights a trailing CR only on added lines,
+and `less` deletes a CR that comes straight before the newline.
+`--ws-error-highlight=all` marks the removed lines too, and the `^M` on
+the `-` side shows the CRs are in the repository's copy. The `text`
+attribute tells Git to convert CRLF to LF whenever the file goes into
+the index. Your copy converts to LF and stops matching the CRLF copy in
+the repository. The warning describes that conversion: once you commit
+the LF version, every checkout writes the script with LF. Restoring the
+file doesn't help:
 
 ```sh
 $ git restore scripts/release.sh
@@ -323,11 +327,13 @@ that, `git update-index --chmod=+x` records a mode change you want.
 
 ## Or don't do any of this
 
-In [GitDesktop](/features/), the Git runner drops Git's per-file
-line-ending warnings from the output it captures, so when a command fails,
-its error isn't buried under one warning for every file it touched. The
-diff pane names a mode-only change in words, "File is now executable", and
-a list of files that all say so points straight at `core.fileMode`.
+The `.gitattributes` line is still yours to write, since
+[GitDesktop](/features/) has no control for it. Its Git runner does
+cut the noise: it drops Git's per-file line-ending warnings from the
+output it captures, so when a command fails, its error isn't buried
+under one warning for every file it touched. The diff pane also
+names a mode-only change in words, "File is now executable", and a
+list of files that all say so points straight at `core.fileMode`.
 
 The line-ending setting is under **Settings → Git → Line endings**. It
 writes your global `core.autocrlf`, which still decides line endings for
