@@ -25,6 +25,15 @@ use crate::state::AppState;
 /// the backstop.
 const RESOLVE_MAX_BYTES: usize = 256_000;
 
+/// Twin of ConflictFileView.tsx's NOT_CONFLICTED_COPY, pinned equal by
+/// scripts/conflict-walk-refusal.test.mjs: the pane matches this refusal by text.
+pub(crate) const NOT_CONFLICTED_REFUSAL: &str = "This file is no longer conflicted.";
+
+/// Twins of conflict-prefilter.ts's TOO_LARGE_REFUSAL and BINARY_REFUSAL, pinned
+/// equal by scripts/conflict-prefilter.test.mjs: "Resolve all" skips by this text.
+pub(crate) const RESOLVE_TOO_LARGE_REFUSAL: &str = "file is too large for AI conflict resolution";
+pub(crate) const RESOLVE_BINARY_REFUSAL: &str = "binary file — resolve this conflict by hand";
+
 /// The clean and marked versions of one conflicted file.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -342,16 +351,12 @@ pub async fn git_conflict_sides(
             Err(e) => return Err(AppError::Io(e)),
         };
     if working_bytes.len() > RESOLVE_MAX_BYTES {
-        return Err(AppError::InvalidArgument(
-            "file is too large for AI conflict resolution".into(),
-        ));
+        return Err(AppError::InvalidArgument(RESOLVE_TOO_LARGE_REFUSAL.into()));
     }
     // A binary conflict (a NUL byte, git's own text/binary heuristic) can't be
     // merged as text — a resolution would write garbage UTF-8 over the file.
     if working_bytes.contains(&0) {
-        return Err(AppError::InvalidArgument(
-            "binary file — resolve this conflict by hand".into(),
-        ));
+        return Err(AppError::InvalidArgument(RESOLVE_BINARY_REFUSAL.into()));
     }
     // Byte truth, never the decoded text: a genuine U+FFFD is valid UTF-8.
     let working_undecodable = std::str::from_utf8(&working_bytes).is_err();
@@ -530,18 +535,25 @@ pub(crate) async fn git_checkout_conflict_side_core(
         run_git(Some(&repo_path), &["rm", "--", &spec], DEFAULT_TIMEOUT).await?;
         return Ok(());
     }
-    // Nothing unmerged and nothing on disk: an accept landing after this path was
-    // already resolved AS A REMOVAL. `checkout` would exit 1 on the missing
-    // pathspec and put raw git text in a toast, so settle for the state the user
-    // asked for. Positive knowledge of absence only — a resolved path whose file
-    // still exists keeps today's harmless checkout no-op.
-    if stages.is_empty()
-        && matches!(
+    // A stage-0 checkout restores the staged copy over unstaged edits. Refuse
+    // unless the path is known absent from both the disk and the index, when a
+    // repeat accept settles a removal; a stage-0 entry means it was resolved.
+    if stages.is_empty() {
+        if matches!(
             tokio::fs::try_exists(Path::new(&repo_path).join(&path)).await,
             Ok(false)
-        )
-    {
-        return Ok(());
+        ) {
+            let staged = run_git(
+                Some(&repo_path),
+                &["ls-files", "-s", "--", &spec],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if staged.stdout_lossy().trim().is_empty() {
+                return Ok(());
+            }
+        }
+        return Err(AppError::InvalidArgument(NOT_CONFLICTED_REFUSAL.into()));
     }
 
     run_git(
@@ -1162,7 +1174,7 @@ mod tests {
 
     /// The guard on the deletion arm: `git rm` exits 0 and DELETES an
     /// already-resolved path (measured, git 2.51.1), so a second accept on a file
-    /// whose conflict is gone must stay the harmless no-op it is today.
+    /// whose conflict is gone must refuse and leave the file as it is.
     #[tokio::test]
     async fn a_resolved_path_is_never_removed_by_a_second_accept() {
         let (_dir, repo) = conflicted_repo("md-double-fire", "file.txt", &[]).await;
@@ -1172,9 +1184,11 @@ mod tests {
             .unwrap();
 
         // The stale second click: same side, conflict already gone.
-        git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
-            .await
-            .unwrap();
+        let err =
+            git_checkout_conflict_side_core(&state, repo.clone(), "file.txt".into(), "ours".into())
+                .await
+                .unwrap_err();
+        assert!(matches!(err, AppError::InvalidArgument(m) if m == NOT_CONFLICTED_REFUSAL));
 
         assert_eq!(
             std::fs::read_to_string(Path::new(&repo).join("file.txt"))
@@ -1183,6 +1197,90 @@ mod tests {
             "ours\n",
             "the resolved file survives a repeat accept"
         );
+    }
+
+    #[tokio::test]
+    async fn checkout_side_refuses_resolved_paths_and_preserves_unstaged_edits() {
+        for side in ["ours", "theirs"] {
+            let (_dir, repo) = conflicted_repo("resolved-edits", "file.txt", &[]).await;
+            let file = Path::new(&repo).join("file.txt");
+            std::fs::write(&file, "resolved outside the app\n").unwrap();
+            run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            assert!(stdout_of(&repo, &["ls-files", "-u", "--", "file.txt"])
+                .await
+                .trim()
+                .is_empty());
+            let index_before = stdout_of(&repo, &["ls-files", "-s", "--", "file.txt"]).await;
+            assert!(!index_before.trim().is_empty());
+            std::fs::write(&file, "unstaged edits after resolution\n").unwrap();
+
+            let state = AppState::default();
+            let result = git_checkout_conflict_side_core(
+                &state,
+                repo.clone(),
+                "file.txt".into(),
+                side.into(),
+            )
+            .await;
+
+            assert_eq!(
+                std::fs::read_to_string(&file)
+                    .unwrap()
+                    .replace("\r\n", "\n"),
+                "unstaged edits after resolution\n",
+                "{side} must preserve unstaged edits"
+            );
+            assert_eq!(
+                stdout_of(&repo, &["ls-files", "-s", "--", "file.txt"]).await,
+                index_before,
+                "{side} must preserve the index entry"
+            );
+            assert!(matches!(
+                result,
+                Err(AppError::InvalidArgument(m)) if m == NOT_CONFLICTED_REFUSAL
+            ));
+        }
+    }
+
+    /// No stages and no file is not enough to settle as a taken removal: a path
+    /// resolved at stage 0 and then deleted from disk must refuse, leaving the
+    /// index entry and the absent file as they were.
+    #[tokio::test]
+    async fn a_resolved_then_deleted_path_refuses_both_sides() {
+        let (_dir, repo) = conflicted_repo("resolved-deleted", "file.txt", &[]).await;
+        let file = Path::new(&repo).join("file.txt");
+        run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let index_before = stdout_of(&repo, &["ls-files", "-s", "--", "file.txt"]).await;
+        assert!(!index_before.trim().is_empty());
+
+        let state = AppState::default();
+        for side in ["ours", "theirs"] {
+            let result = git_checkout_conflict_side_core(
+                &state,
+                repo.clone(),
+                "file.txt".into(),
+                side.into(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(AppError::InvalidArgument(ref m)) if m == NOT_CONFLICTED_REFUSAL
+                ),
+                "{side} must refuse a resolved path"
+            );
+            assert_eq!(
+                stdout_of(&repo, &["ls-files", "-s", "--", "file.txt"]).await,
+                index_before,
+                "{side} must preserve the index entry"
+            );
+            assert!(!file.exists(), "{side} must leave the file absent");
+        }
     }
 
     /// The aftermath of a taken removal: no stages left AND no file, so the

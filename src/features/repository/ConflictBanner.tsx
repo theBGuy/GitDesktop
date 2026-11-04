@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
+import { PREFILTER_READ_REASON } from "@/lib/git/conflict-prefilter";
 import {
   useDropStashBySha,
   useOpAbort,
@@ -171,6 +172,8 @@ export function ConflictBanner({
   const aiEnabled = useAiEnabled();
   const reviewConfigured = useReviewConfigured();
   const startAll = useConflictResolve((s) => s.startAll);
+  const retireWalk = useConflictResolve((s) => s.retire);
+  const prefilterHold = useConflictResolve((s) => s.prefiltering === repoPath);
   const [confirmAbort, setConfirmAbort] = useState(false);
   const stashCount = useStashCount(repoPath);
   const marker = useStashReapplyMarker((s) => s.marker);
@@ -274,6 +277,9 @@ export function ConflictBanner({
   }
 
   async function doAbort(target: RepoOp) {
+    // A walk or prefilter on this tree must not land on the files the abort
+    // puts back.
+    retireWalk(repoPath);
     try {
       await abortOp.mutateAsync(target);
       setConfirmAbort(false);
@@ -424,17 +430,24 @@ export function ConflictBanner({
               blank line. */}
           <div className="ml-auto flex shrink-0 items-center gap-1.5 empty:hidden">
             {canResolveWithAi && (
-              <Button
+              <DisabledReasonButton
                 size="xs"
                 variant="ghost"
                 className={AI_ICON_ONLY}
-                title={aiLabel}
+                // The reason owns the hover text while held.
+                title={prefilterHold ? undefined : aiLabel}
                 aria-label={aiLabel}
+                disabled={prefilterHold}
+                reason={PREFILTER_READ_REASON}
                 onClick={() => startAll(conflictedPaths, repoPath)}
               >
-                <SparkleIcon data-icon="inline-start" />
+                {prefilterHold ? (
+                  <Spinner aria-hidden data-icon="inline-start" />
+                ) : (
+                  <SparkleIcon data-icon="inline-start" />
+                )}
                 <span data-slot="ai-label">{aiLabel}</span>
-              </Button>
+              </DisabledReasonButton>
             )}
             {resolvedShown && (
               <>

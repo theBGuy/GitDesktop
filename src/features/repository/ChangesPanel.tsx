@@ -6,7 +6,11 @@ import {
   StackIcon,
   TreeViewIcon,
 } from "@phosphor-icons/react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  defaultRangeExtractor,
+  type Range,
+  useVirtualizer,
+} from "@tanstack/react-virtual";
 import {
   type FocusEvent,
   type KeyboardEvent,
@@ -41,6 +45,7 @@ import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
 import { markNeedsConfirm } from "@/lib/git/conflict-parse";
+import { SIDES_READ_CHUNK } from "@/lib/git/conflict-prefilter";
 import {
   aiExcludePatternLinesForPath,
   globLiteralPath,
@@ -63,7 +68,10 @@ import {
   useUntrack,
   useWorkingLineStats,
 } from "@/lib/git/queries";
-import { reservedDeviceName } from "@/lib/git/reserved-device-name";
+import {
+  pathHasReservedComponent,
+  reservedDeviceName,
+} from "@/lib/git/reserved-device-name";
 import type { ChangeKind, FileEntry, RepoStatus } from "@/lib/git/types";
 import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -80,16 +88,32 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
-import { useUiStore } from "@/lib/stores/ui";
+import { type SelectedFile, useUiStore } from "@/lib/stores/ui";
 import { ignoreToast, toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
-import { ChangesContextMenuItems, type MenuTarget } from "./ChangesContextMenu";
+import { mergePinnedIndexes } from "./BranchSwitcherRows";
+import {
+  bulkRowTargets,
+  excludeConflicted,
+  isConflictedEntry,
+  leftAloneSentence,
+  rowEntry,
+} from "./bulk-row-targets";
+import {
+  ChangesContextMenuItems,
+  type FolderMenuCounts,
+  type MenuTarget,
+} from "./ChangesContextMenu";
 import { ChangesEmptyState } from "./ChangesEmptyState";
 import { ConflictBanner } from "./ConflictBanner";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
-import { collapseDiscardEntries } from "./discard-targets";
 import { FileRow, MARKER_CHECK_PENDING } from "./FileRow";
+import {
+  entriesUnderFolder,
+  parseFolderRowKey,
+  rowAfterFolderLeaves,
+} from "./folder-stage-targets";
 import {
   cursorAfterAdvance,
   dialogClaimStep,
@@ -106,6 +130,13 @@ import {
   statusReadFailed,
   useRetainedStatusError,
 } from "./StatusReadError";
+import {
+  advanceLanding,
+  type ChangesSection,
+  pruneCollapsedSectionKeys,
+  rowKeySection,
+} from "./section-collapse";
+import { selectionFollowingShownFile } from "./shown-file-follow";
 import { STATUS_READ_FAILED_REASON } from "./sync-controls-state";
 
 /** The pathspecs that unstage one entry — a staged rename is "delete old path +
@@ -123,14 +154,6 @@ function unstagePaths(entry: FileEntry): string[] {
 function canStage(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) === null;
 }
-
-function isConflicted(entry: FileEntry): boolean {
-  return entry.unstaged === "conflicted" || entry.staged === "conflicted";
-}
-
-/** Sides reads in flight at once: each spawns several git processes, and a
- *  Stage all can cover hundreds of conflicts. */
-const SIDES_READ_CHUNK = 4;
 
 /** Whether a stage of `conflicted` may go ahead: true when no file still holds
  *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
@@ -177,10 +200,22 @@ function isReservedName(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) !== null;
 }
 
+/** The backend leaves an untracked path with a reserved device name in ANY
+ *  component out of a path stash (git can't remove it), so no Stash count
+ *  includes one. Component-wise like the backend's exclude, not `isReservedName`,
+ *  which reads only the file name. */
+function staysOutOfStash(entry: FileEntry): boolean {
+  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);
+}
+
 /** Appended to a multi-file discard confirm: the recycle bin refuses a reserved
  *  device name, so the backend removes those outright. */
 const RESERVED_DISCARD_NOTE =
   ' Files with Windows-reserved names (like "nul") skip the recycle bin and are deleted permanently.';
+/** Appended to a stash confirm: git can't remove an untracked reserved device
+ *  name, so the backend leaves those files out of the stash. */
+const RESERVED_STASH_NOTE =
+  ' New files with Windows-reserved names (like "nul") can\'t be stashed and stay in your working tree.';
 
 type FilterKind = "included" | "excluded" | "new" | "modified" | "deleted";
 
@@ -209,9 +244,21 @@ const FILTER_LABELS: Record<FilterKind, string> = {
 /** Target of a discard/stash confirm dialog: specific files (one row or a
  *  multi-selection) or the whole working tree, with the repo it opened in (the
  *  panel outlives a repo switch, and a confirm answered after one refuses).
- *  Null = no dialog open. */
+ *  `split` (stash only) marks a file whose unselected side or twin goes too,
+ *  captured at request time since the selection clears before the dialog's
+ *  exit animation ends. Null = no dialog open. */
 type ChangeActionScope =
-  | { kind: "files"; entries: FileEntry[]; repo: string }
+  | {
+      kind: "files";
+      entries: FileEntry[];
+      repo: string;
+      split?: boolean;
+      /** Set only by the folder routes: the dialog names this directory. */
+      folder?: string;
+      /** Captured at request: files the action leaves alone, omitted when both
+       *  are 0. `conflicted` is Discard-only; the folder Stash passes 0. */
+      leftAlone?: { hidden: number; conflicted: number };
+    }
   | { kind: "all"; repo: string }
   | null;
 
@@ -286,18 +333,35 @@ function rowKeyOf(row: FlatRow): string {
   return keyOf(row.entry.path, row.staged);
 }
 
-const DIALOG_SELECTOR = '[role="dialog"],[role="alertdialog"]';
+/** Popups whose close hands focus back: any dialog or menu in the app, the
+ *  row's own context menu among them, so an action fired from one keeps the
+ *  list's claim. Another popup's hold ends once its close lands live focus. */
+const CLAIM_HOLD_SELECTOR =
+  '[role="dialog"],[role="alertdialog"],[role="menu"]';
 
 /** Where focus sits for an advance that wants to land it (see
  *  {@link dialogClaimStep}). */
 function waitingFocus(): WaitingFocus {
   if (focusIsOrphaned()) return "orphaned";
-  return document.activeElement?.closest(DIALOG_SELECTOR) ? "dialog" : "other";
+  return document.activeElement?.closest(CLAIM_HOLD_SELECTOR)
+    ? "dialog"
+    : "other";
 }
 
 /** How long an advance waits for a closing dialog to hand focus back: a time
  *  bound (frame rates vary), well past the confirm's 100 ms exit animation. */
 const DIALOG_CLAIM_MS = 500;
+
+/** How often a focus claim re-checks while a popup stays open: nothing can land
+ *  before it closes, so a frame-rate poll would only burn work. */
+const DIALOG_HOLD_POLL_MS = 100;
+
+/** Whether focus sits in a popup that is still open; Base UI marks a closing
+ *  popup `data-closed` for its exit animation, and the claim bound starts then. */
+function focusInOpenPopup(): boolean {
+  const popup = document.activeElement?.closest(CLAIM_HOLD_SELECTOR);
+  return popup ? !popup.hasAttribute("data-closed") : false;
+}
 
 /** Whether `path` has a record on the given side of `entries` — side-aware,
  *  since Git can list one path as two records (a staged `D.` beside a `?`). */
@@ -324,13 +388,29 @@ function isFileKey(key: string): boolean {
  *  source. Toggled into the live region so a repeated message re-announces. */
 const ZWSP = String.fromCharCode(0x200b);
 
-/** What left its section in an advance announcement: a file row, or a focused
- *  header control whose whole section emptied. */
-type AdvanceLead = "unstaged" | "staged" | "header:unstaged" | "header:staged";
+/** What left its section in an advance announcement: a file row, a focused
+ *  folder row whose files all left (`folder-hidden:` while the filter still
+ *  hides some of its files), or a focused header control whose whole section
+ *  emptied. */
+type AdvanceLead =
+  | "unstaged"
+  | "staged"
+  | "folder:unstaged"
+  | "folder:staged"
+  | "folder-hidden:unstaged"
+  | "folder-hidden:staged"
+  | "header:unstaged"
+  | "header:staged";
 
 const ADVANCE_LEADS: Record<AdvanceLead, (path: string) => string> = {
   unstaged: (path) => `${path} has no unstaged changes left.`,
   staged: (path) => `${path} has no staged changes left.`,
+  "folder:unstaged": (path) => `${path} has no unstaged changes left.`,
+  "folder:staged": (path) => `${path} has no staged changes left.`,
+  "folder-hidden:unstaged": (path) =>
+    `${path} has no visible unstaged changes left.`,
+  "folder-hidden:staged": (path) =>
+    `${path} has no visible staged changes left.`,
   "header:unstaged": () => "Nothing left in Changes.",
   "header:staged": () => "Nothing left in Staged.",
 };
@@ -351,14 +431,121 @@ const ADVANCE_TAILS: Record<
   none: (_, entryCount) => ` ${restingDiffMessage(false, entryCount, false)}.`,
 };
 
-/** Splits a folder row key back into its section and directory path. */
-const FOLDER_ROW_KEY_RE = /^folder:(staged|unstaged):(.+)$/;
-
 /** The indent level a row sits at; headers and list-mode files are at the root. */
 function rowDepth(row: FlatRow): number {
   if (row.type === "header") return 0;
   if (row.type === "folder") return row.depth;
   return row.depth ?? 0;
+}
+
+/** A section's collapsed directories, its `"<section>:"` prefix stripped. */
+function sectionCollapsed(
+  collapsedFolders: Set<string>,
+  section: "staged" | "unstaged",
+): Set<string> {
+  const prefix = `${section}:`;
+  return new Set(
+    [...collapsedFolders]
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => k.slice(prefix.length)),
+  );
+}
+
+/** The filtered sections and the rows they flatten to. Pure in its inputs so
+ *  the panel memoizes it: selection and cursor churn never rebuild the rows
+ *  (the React Compiler bails on ChangesPanel, so nothing else memoizes it). */
+function buildChangeRows(
+  entries: FileEntry[],
+  text: string,
+  activeKinds: Set<FilterKind>,
+  treeMode: boolean,
+  collapsedFolders: Set<string>,
+  collapsedSections: Set<ChangesSection>,
+) {
+  function visible(entry: FileEntry): boolean {
+    if (text && !entry.path.toLowerCase().includes(text)) return false;
+    if (activeKinds.size === 0) return true;
+    for (const k of activeKinds) if (FILTER_PREDICATES[k](entry)) return true;
+    return false;
+  }
+  const unstagedEntries = entries.filter(
+    (e) => e.unstaged !== null && visible(e),
+  );
+  const stagedEntries = entries.filter((e) => e.staged !== null && visible(e));
+
+  // One flattened list (section headers + their files) drives a single
+  // virtualizer, so a working tree with thousands of changed files only renders
+  // a window of rows instead of mounting every row (which used to crash). Tree
+  // mode swaps each section's flat run for a compacted directory tree; the
+  // filter has already been applied, so folder counts describe what's listed.
+  const flatRows: FlatRow[] = [];
+  function pushSection(
+    section: "staged" | "unstaged",
+    sectionEntries: FileEntry[],
+  ) {
+    if (sectionEntries.length === 0) return;
+    const staged = section === "staged";
+    flatRows.push({ type: "header", section, count: sectionEntries.length });
+    // Before the view-mode branch, so a collapsed section hides in both modes.
+    if (collapsedSections.has(section)) return;
+    if (!treeMode) {
+      for (const entry of sectionEntries)
+        flatRows.push({ type: "file", entry, staged });
+      return;
+    }
+    const collapsed = sectionCollapsed(collapsedFolders, section);
+    // A rename is placed by its NEW path; the old one is only the label's left
+    // half, and the row's identity is the new path everywhere else too.
+    for (const row of flattenPathTree(
+      sectionEntries,
+      (e) => e.path,
+      collapsed,
+    )) {
+      if (row.kind === "folder") {
+        flatRows.push({
+          type: "folder",
+          section,
+          path: row.path,
+          label: row.label,
+          depth: row.depth,
+          count: row.fileCount,
+          collapsed: collapsed.has(row.path),
+        });
+      } else {
+        flatRows.push({
+          type: "file",
+          entry: row.item,
+          staged,
+          depth: row.depth,
+        });
+      }
+    }
+  }
+  pushSection("staged", stagedEntries);
+  pushSection("unstaged", unstagedEntries);
+
+  // The navigable rows in render order (headers excepted), so ArrowUp/Down walk
+  // the cursor across both sections — and, in tree mode, across folder rows.
+  const navRows = flatRows.filter((r) => r.type !== "header");
+  // The advance's inputs: the file rows on screen in nav order (filter-hidden
+  // rows and collapsed folders' children are already out), and the subset a
+  // successor may be — a conflicted file never is.
+  const navFileKeys: string[] = [];
+  const advanceEligible = new Set<string>();
+  for (const r of navRows) {
+    if (r.type !== "file") continue;
+    const key = rowKeyOf(r);
+    navFileKeys.push(key);
+    if (!isConflictedEntry(r.entry)) advanceEligible.add(key);
+  }
+  return {
+    unstagedEntries,
+    stagedEntries,
+    flatRows,
+    navRows,
+    navFileKeys,
+    advanceEligible,
+  };
 }
 
 export function ChangesPanel({
@@ -405,15 +592,41 @@ export function ChangesPanel({
   // whose diff is shown; `anchorKey` is the pivot for shift-range selection.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [anchorKey, setAnchorKey] = useState<string | null>(null);
+  // Bumped by every writer that installs a NEW selection (a click, a range, an
+  // arrow move, a stage's advance, the shown-file follow), never by a prune: a
+  // prune only shrinks the selection the user made, so it is still theirs.
+  const selectionGen = useRef(0);
+  /** A clear after an await: only while no newer selection replaced the one
+   *  the action started from, and only in the repo it started in (the panel
+   *  outlives a repo switch, and keys are side + path alone). */
+  function clearSelectionIfUnchanged(gen: number, repo: string) {
+    if (selectionGen.current !== gen || !landedIn(repo).live) return;
+    setSelectedKeys(new Set());
+  }
+  // The shown file as the panel itself last wrote it (the store keeps the very
+  // object): any other value came from a route outside the panel, and the
+  // multi-selection follows it there.
+  const ownShownWrite = useRef<SelectedFile | null>(null);
+  // The shown file the follow effect last saw, so it acts only on a change.
+  const shownSeen = useRef(selectedFile);
   // Tree mode's collapsed directories, keyed `"<section>:<dirPath>"`. Session-local
   // by design: the changes list is ephemeral, so a collapse outlives neither a
   // repo switch nor a restart.
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(
     new Set(),
   );
+  // The collapsed Staged / Changes sections. Session-local like folder
+  // collapse (no settings key): reset on a repo switch, gone on restart.
+  const [collapsedSections, setCollapsedSections] = useState<
+    Set<ChangesSection>
+  >(new Set());
   // The nav cursor when it rests on a folder row (which has no diff to show, so
   // `selectedFile` stays where it was). Null = the cursor follows `selectedFile`.
   const [activeFolderKey, setActiveFolderKey] = useState<string | null>(null);
+  // Re-minted when focus landing on a file row moves the cursor off that row,
+  // onto the shown file: that commit's cursor change must not scroll the list,
+  // which would carry the row out from under a press still in progress.
+  const [focusCursorMove, setFocusCursorMove] = useState<object>(() => ({}));
   const [filterText, setFilterText] = useState("");
   const [activeKinds, setActiveKinds] = useState<Set<FilterKind>>(new Set());
   const [stashesOpen, setStashesOpen] = useState(false);
@@ -450,6 +663,11 @@ export function ChangesPanel({
   // The row focus sat in when that claim was armed; null = focus was not on a
   // row (a background arm, with the caret in the filter or outside the list).
   const pendingFocusSource = useRef<string | null>(null);
+  // A fresh object per arm, so a loop waiting on one claim can tell it from a
+  // later arm of the same key.
+  const pendingFocusToken = useRef<object | null>(null);
+  // The claim was armed by a view flip: the only kind that waits out a dialog.
+  const pendingFocusFromFlip = useRef(false);
   // Set for a claim whose row is NOT the cursor (an advance landing focus on a
   // row it does not select): the cursor when it was armed, so only a NEWER
   // cursor move makes it stale. Null = an ordinary cursor claim.
@@ -464,6 +682,10 @@ export function ChangesPanel({
   // and while a dialog (the marker confirm) holds focus; cleared when focus
   // moves anywhere else, so an advance never takes focus it did not own.
   const listFocusRef = useRef<string | null>(null);
+  // The row DOM focus is in, as state: it outranks the cursor as the roving tab
+  // stop (an advance can focus a row it doesn't select). Null once focus leaves
+  // the list, so Tab re-enters at the cursor.
+  const [focusedRowKey, setFocusedRowKey] = useState<string | null>(null);
   // Single-file toggles that settled but whose row the status read has not
   // moved yet: a second press in that window would act on the stale row.
   // Cleared whenever a status fetch completes, changed or not (a no-op stage
@@ -507,7 +729,7 @@ export function ChangesPanel({
     },
     [rescueHostRef],
   );
-  const conflictedPaths = entries.filter(isConflicted).map((e) => e.path);
+  const conflictedPaths = entries.filter(isConflictedEntry).map((e) => e.path);
   const canResolveConflicts =
     aiEnabled && reviewConfigured && conflictedPaths.length > 0;
 
@@ -563,17 +785,34 @@ export function ChangesPanel({
   const proposeCount = canCompareDefault ? (aheadOfDefault.data ?? 0) : 0;
 
   const text = filterText.trim().toLowerCase();
-  function visible(entry: FileEntry): boolean {
-    if (text && !entry.path.toLowerCase().includes(text)) return false;
-    if (activeKinds.size === 0) return true;
-    for (const k of activeKinds) if (FILTER_PREDICATES[k](entry)) return true;
-    return false;
-  }
-
-  const unstagedEntries = entries.filter(
-    (e) => e.unstaged !== null && visible(e),
+  // Keyed on the build's raw inputs only; `settings.data?.changesViewMode` is
+  // the `viewMode` declared below.
+  const {
+    unstagedEntries,
+    stagedEntries,
+    flatRows,
+    navRows,
+    navFileKeys,
+    advanceEligible,
+  } = useMemo(
+    () =>
+      buildChangeRows(
+        status.data?.entries ?? [],
+        text,
+        activeKinds,
+        settings.data?.changesViewMode === "tree",
+        collapsedFolders,
+        collapsedSections,
+      ),
+    [
+      status.data?.entries,
+      text,
+      activeKinds,
+      settings.data?.changesViewMode,
+      collapsedFolders,
+      collapsedSections,
+    ],
   );
-  const stagedEntries = entries.filter((e) => e.staged !== null && visible(e));
   // What "Stage all" can actually reach: the excluded rows stay listed, each
   // wearing its own explanation, so skipping them needs no toast.
   const stageableUnstaged = unstagedEntries.filter(canStage);
@@ -587,101 +826,40 @@ export function ChangesPanel({
   const activeKey = selectedFile
     ? keyOf(selectedFile.path, selectedFile.staged)
     : null;
-  // One entry per status record behind the multi-selection, so a path Git
-  // splits (a staged `D.` beside an untracked `?`) contributes both: unstage
-  // needs the `D.` record, while discard collapses to one target per path.
-  const selectedPaths = new Set(
-    [...selectedKeys].map((k) => k.slice(k.indexOf(":") + 1)),
-  );
-  const selectedEntries = entries.filter((e) => selectedPaths.has(e.path));
-  const selectionCount = selectedEntries.length;
-  const discardableSelected = collapseDiscardEntries(selectedEntries);
-  const stageableSelected = selectedEntries.filter(canStage);
-  // Untracking only applies to files git already tracks (not fresh untracked
-  // files or brand-new staged adds) — mirrors FileRow's per-file rule.
-  const selectedTracked = selectedEntries.filter(
-    (e) => e.unstaged !== "untracked" && e.staged !== "added",
-  );
+  // Row actions act on the selected rows' own records, so a staged row never
+  // drags in its path's unstaged side or untracked twin; path-level actions
+  // (stash, ignore, untrack, exclude) take each selected path once.
+  const bulk = bulkRowTargets(selectedKeys, entries);
+  const stageableSelected = bulk.unstagedRows.filter(canStage);
+  const selectedDiscard = excludeConflicted(bulk.unstagedRows);
+  const stashablePathCount = bulk.pathEntries.filter(
+    (e) => !staysOutOfStash(e),
+  ).length;
+  // Any unmerged entry makes git refuse every path stash, so Stash waits.
+  const anyConflicted = conflictedPaths.length > 0;
 
   /** A section's collapsed directories, its `"<section>:"` prefix stripped. */
   function collapsedIn(section: "staged" | "unstaged"): Set<string> {
-    const prefix = `${section}:`;
-    return new Set(
-      [...collapsedFolders]
-        .filter((k) => k.startsWith(prefix))
-        .map((k) => k.slice(prefix.length)),
-    );
+    return sectionCollapsed(collapsedFolders, section);
   }
 
-  // One flattened list (section headers + their files) drives a single
-  // virtualizer, so a working tree with thousands of changed files only renders
-  // a window of rows instead of mounting every row (which used to crash). Tree
-  // mode swaps each section's flat run for a compacted directory tree; the
-  // filter has already been applied, so folder counts describe what's listed.
-  const flatRows: FlatRow[] = [];
-  function pushSection(
-    section: "staged" | "unstaged",
-    sectionEntries: FileEntry[],
-  ) {
-    if (sectionEntries.length === 0) return;
-    const staged = section === "staged";
-    flatRows.push({ type: "header", section, count: sectionEntries.length });
-    if (!treeMode) {
-      for (const entry of sectionEntries)
-        flatRows.push({ type: "file", entry, staged });
-      return;
-    }
-    const collapsed = collapsedIn(section);
-    // A rename is placed by its NEW path; the old one is only the label's left
-    // half, and the row's identity is the new path everywhere else too.
-    for (const row of flattenPathTree(
-      sectionEntries,
-      (e) => e.path,
-      collapsed,
-    )) {
-      if (row.kind === "folder") {
-        flatRows.push({
-          type: "folder",
-          section,
-          path: row.path,
-          label: row.label,
-          depth: row.depth,
-          count: row.fileCount,
-          collapsed: collapsed.has(row.path),
-        });
-      } else {
-        flatRows.push({
-          type: "file",
-          entry: row.item,
-          staged,
-          depth: row.depth,
-        });
-      }
-    }
-  }
-  pushSection("staged", stagedEntries);
-  pushSection("unstaged", unstagedEntries);
-
-  // The navigable rows in render order (headers excepted), so ArrowUp/Down walk
-  // the cursor across both sections — and, in tree mode, across folder rows.
-  const navRows = flatRows.filter((r) => r.type !== "header");
   // The cursor may rest on a folder, which owns no diff; file rows keep pointing
   // at `selectedFile`, so selection behaviour is unchanged.
   const cursorKey = activeFolderKey ?? activeKey;
   const navIndex = cursorKey
     ? navRows.findIndex((r) => rowKeyOf(r) === cursorKey)
     : -1;
-  // The advance's inputs: the file rows on screen in nav order (filter-hidden
-  // rows and collapsed folders' children are already out), and the subset a
-  // successor may be — a conflicted file never is.
-  const navFileKeys: string[] = [];
-  const advanceEligible = new Set<string>();
-  for (const r of navRows) {
-    if (r.type !== "file") continue;
-    const key = rowKeyOf(r);
-    navFileKeys.push(key);
-    if (!isConflicted(r.entry)) advanceEligible.add(key);
-  }
+  // The list's one roving tab stop, so Tab enters at the row the user is on and
+  // leaves in one step: the focused row, else the cursor, else the first row.
+  // Header and toolbar controls keep their own stops.
+  const tabStopKey: string | null =
+    focusedRowKey !== null && navRows.some((r) => rowKeyOf(r) === focusedRowKey)
+      ? focusedRowKey
+      : navIndex !== -1
+        ? cursorKey
+        : navRows.length > 0
+          ? rowKeyOf(navRows[0])
+          : null;
 
   /** Moves the cursor to `row` (at `to` in `navRows`); `shift` extends the
    *  selection from the anchor. Folder rows take the cursor alone. */
@@ -701,6 +879,7 @@ export function ChangesPanel({
       if (a !== -1) {
         const [lo, hi] = a <= to ? [a, to] : [to, a];
         // Folder rows contribute no keys: a range spans the files it covers.
+        selectionGen.current += 1;
         setSelectedKeys(
           new Set(
             navRows
@@ -712,14 +891,15 @@ export function ChangesPanel({
         return;
       }
     }
+    selectionGen.current += 1;
     setSelectedKeys(new Set([key]));
     setAnchorKey(key);
   }
 
-  /** Focus + reveal a row the horizontal keys moved the cursor to (the vertical
-   *  keys get this from `listKeyboardNav` itself). A jump past the virtualizer's
-   *  overscan window finds no node, so it defers instead: unfocused, the row the
-   *  user came from unmounts and every arrow key goes dead. */
+  /** Focus + reveal a row the arrow keys moved the cursor to. A jump past the
+   *  virtualizer's overscan window finds no node, so it defers instead:
+   *  unfocused, the row the user came from unmounts and every arrow key goes
+   *  dead. */
   function focusRow(key: string) {
     const el = listRef.current?.querySelector<HTMLElement>(
       `[data-row="${CSS.escape(key)}"]`,
@@ -738,13 +918,17 @@ export function ChangesPanel({
    *  already has focus, and arm nothing for the window exit. `untilMode` holds
    *  the claim until that view mode is on screen (see {@link claimPendingFocus}).
    *  `cursorAtArm` arms a NON-cursor claim: a row focus belongs on that the
-   *  cursor does not name, which the child scrolls to on its own. */
+   *  cursor does not name, which the child scrolls to on its own. Returns the
+   *  arm's token (see `pendingFocusToken`). */
   function deferFocusRow(
     key: string,
     untilMode?: "list" | "tree",
     opts?: { cursorAtArm: string | null },
-  ) {
+  ): object {
+    const token = {};
     pendingFocusKey.current = key;
+    pendingFocusToken.current = token;
+    pendingFocusFromFlip.current = untilMode !== undefined;
     pendingFocusMode.current = untilMode ?? null;
     pendingFocusCursorAtArm.current = opts
       ? { cursor: opts.cursorAtArm }
@@ -755,12 +939,15 @@ export function ChangesPanel({
     // while the caret is outside the list — they stay orphan-only.
     const from = focusedNavRow();
     pendingFocusSource.current = from ? rowKeyOf(from.row) : null;
+    return token;
   }
 
   /** A claim and its source row retire together — nothing reads one without the
    *  other. */
   function clearPendingFocus() {
     pendingFocusKey.current = null;
+    pendingFocusToken.current = null;
+    pendingFocusFromFlip.current = false;
     pendingFocusSource.current = null;
     pendingFocusCursorAtArm.current = null;
     // A settled claim must not re-scroll the list on an <Activity> re-show.
@@ -809,6 +996,14 @@ export function ChangesPanel({
       from !== null &&
       rowKeyOf(from.row) === pendingFocusSource.current;
     if (!focusIsOrphaned() && !atSource) {
+      // A flip's claim waits out the dialog holding focus (the palette closing
+      // after dispatch) instead of retiring. Its source is dropped, so focus
+      // the dialog hands back to that row never reads as "never moved": the
+      // kept claim lands only on orphaned focus. Other claims retire as before.
+      if (pendingFocusFromFlip.current && waitingFocus() === "dialog") {
+        pendingFocusSource.current = null;
+        return false;
+      }
       clearPendingFocus();
       return true;
     }
@@ -820,6 +1015,9 @@ export function ChangesPanel({
     el.focus();
     return true;
   }
+  // The claim as of the latest render, for the view flip's dialog-settle loop:
+  // that loop outlives the render that armed it, whose view mode is pre-flip.
+  const claimPendingFocusLatest = useEffectEvent(() => claimPendingFocus());
 
   function moveCursor(row: FlatRow, to: number) {
     activateRow(row, to, false);
@@ -858,12 +1056,17 @@ export function ChangesPanel({
   const arrowLeft = treeMode ? onArrowLeft : undefined;
   const arrowRight = treeMode ? onArrowRight : undefined;
   // Up/Down walk the rows across both sections; Shift extends from the anchor,
-  // a plain arrow collapses to the single active row.
+  // a plain arrow collapses to the single active row. Focus goes through
+  // `focusRow`, not the helper's `rowKey`, whose focus silently skips a target
+  // the virtualizer hasn't mounted (a jump from no cursor with the list
+  // scrolled away).
   const navKeyDown = listKeyboardNav({
     items: navRows,
     activeIndex: navIndex,
-    rowKey: rowKeyOf,
-    onActivate: activateRow,
+    onActivate: (row, to, shift) => {
+      activateRow(row, to, shift);
+      focusRow(rowKeyOf(row));
+    },
   });
 
   /** The navigable row DOM focus sits in, resolved from the DOM at use rather
@@ -915,6 +1118,7 @@ export function ChangesPanel({
   function trackListFocusIn(e: FocusEvent) {
     if (!(e.target instanceof Element)) return;
     const row = e.target.closest("[data-row]")?.getAttribute("data-row");
+    setFocusedRowKey(row ?? null);
     if (row) {
       listFocusRef.current = row;
       return;
@@ -928,13 +1132,18 @@ export function ChangesPanel({
   /** Drops the claim when focus moves to a live control outside the list. A
    *  null `relatedTarget` keeps it: an unmount, a window blur, and also a click
    *  on non-focusable content (diff text), after which a later advance with
-   *  focus orphaned may pull focus back into the list. A dialog keeps it too:
-   *  the marker confirm must not cost the row its successor. */
+   *  focus orphaned may pull focus back into the list. Any dialog or menu keeps
+   *  it too (`CLAIM_HOLD_SELECTOR`): the marker confirm or the row's own menu
+   *  must not cost the row its successor. */
   function trackListFocusOut(e: FocusEvent) {
     const next = e.relatedTarget;
+    // Focus leaving the list hands the tab stop back to the cursor. A stale key
+    // is harmless anyway: tabStopKey only honors one still in navRows.
+    if (!(next instanceof Element) || !e.currentTarget.contains(next))
+      setFocusedRowKey(null);
     if (!(next instanceof Element) || !next.isConnected) return;
     if (e.currentTarget.contains(next)) return;
-    if (next.closest(DIALOG_SELECTOR)) return;
+    if (next.closest(CLAIM_HOLD_SELECTOR)) return;
     listFocusRef.current = null;
   }
 
@@ -961,19 +1170,48 @@ export function ChangesPanel({
   /** The same, for a target the filter or a folded folder hides: the silent
    *  tabIndex=-1 span above the list takes focus instead — never `landingRef`,
    *  which resolves to the tree-view toggle while the toolbar is up, where the
-   *  next Space would flip the saved view mode. True when a ROW takes focus (it
+   *  next Space would flip the saved view mode. A target inside a collapsed
+   *  section (or, with none, a collapsed `fallbackSection`) lands on that
+   *  section's toggle instead. True when a row or toggle takes focus (either
    *  announces itself), false for the landing. */
   function focusAdvanceTarget(
     key: string | null,
     cursorAfter: string | null,
+    fallbackSection: ChangesSection | null,
   ): boolean {
-    if (key !== null && navFileKeys.includes(key)) {
-      focusAdvancedRow(key, cursorAfter);
+    const landing = advanceLanding(
+      key,
+      navRows.map(rowKeyOf),
+      collapsedSections,
+      fallbackSection,
+    );
+    if (landing.kind === "row") {
+      focusAdvancedRow(landing.key, cursorAfter);
       return true;
+    }
+    if (landing.kind === "toggle") {
+      // Unmounted when the virtualizer has scrolled the header away.
+      const toggle = listRef.current?.querySelector<HTMLElement>(
+        `[data-section-toggle="${landing.section}"]`,
+      );
+      if (toggle) {
+        toggle.focus();
+        return true;
+      }
     }
     markerLandingRef.current?.focus();
     return false;
   }
+  // The landing as of the latest render, for the advance's focus plans: one
+  // that waits out a dialog runs frames later and must aim at the rows (and
+  // collapsed sections) on screen then, not those of the transition's render.
+  const focusAdvanceTargetLatest = useEffectEvent(
+    (
+      key: string | null,
+      cursorAfter: string | null,
+      fallbackSection: ChangesSection | null,
+    ) => focusAdvanceTarget(key, cursorAfter, fallbackSection),
+  );
 
   // The status transition: a tracked row (the selection, and independently the
   // row focus sits on) that left its section opens the next file in its place —
@@ -998,9 +1236,10 @@ export function ChangesPanel({
   // lets this effect read the order the user last saw.
   const prevNav = useRef<{
     keys: string[];
+    rowKeys: string[];
     hadStaged: boolean;
     hadUnstaged: boolean;
-  }>({ keys: [], hadStaged: false, hadUnstaged: false });
+  }>({ keys: [], rowKeys: [], hadStaged: false, hadUnstaged: false });
   const onStatusTransition = useEffectEvent(
     (
       data: RepoStatus | undefined,
@@ -1114,6 +1353,8 @@ export function ChangesPanel({
               staged: nextSide.staged,
               untracked: nextEntry.unstaged === "untracked",
             });
+            noteOwnShownWrite();
+            selectionGen.current += 1;
             setSelectedKeys((keys) => selectionAfterAdvance(keys, key, next));
             setAnchorKey(next);
             const cursor = cursorAfterAdvance(
@@ -1138,7 +1379,8 @@ export function ChangesPanel({
             // The last file follows itself into the other section, focused but
             // not selected.
             const target = next ?? keyOf(selected.path, !selected.staged);
-            focusPlan = () => focusAdvanceTarget(target, cursorAfter);
+            focusPlan = () =>
+              focusAdvanceTargetLatest(target, cursorAfter, null);
           }
         }
       }
@@ -1155,7 +1397,7 @@ export function ChangesPanel({
           const target =
             nextFileKey(prevKeys, focusKey, advanceEligible) ??
             keyOf(path, !staged);
-          focusPlan = () => focusAdvanceTarget(target, cursorAfter);
+          focusPlan = () => focusAdvanceTargetLatest(target, cursorAfter, null);
         }
       } else if (
         focusKey?.startsWith("header:") &&
@@ -1185,7 +1427,71 @@ export function ChangesPanel({
             navFileKeys.find(
               (k) => k.startsWith(otherPrefix) && advanceEligible.has(k),
             ) ?? null;
-          focusPlan = () => focusAdvanceTarget(target, cursorAfter);
+          // A collapsed other section has no rows: its toggle takes focus.
+          const other = staged ? "unstaged" : "staged";
+          focusPlan = () =>
+            focusAdvanceTargetLatest(target, cursorAfter, other);
+        }
+      } else if (
+        focusKey !== null &&
+        !headMoved &&
+        !walkActive &&
+        landable(focusKey) &&
+        prevNav.current.rowKeys.includes(focusKey)
+      ) {
+        // A focused folder row whose files all left its section. A row still at
+        // or under its directory means a re-key instead, which the folder-cursor
+        // backstop owns.
+        const folder = parseFolderRowKey(focusKey);
+        const nowRowKeys = navRows.map(rowKeyOf);
+        const survives = (key: string) => {
+          if (folder === null) return false;
+          const sub = parseFolderRowKey(key);
+          const row = sub
+            ? { staged: sub.section === "staged", path: sub.path }
+            : isFileKey(key)
+              ? splitFileKey(key)
+              : null;
+          return (
+            row !== null &&
+            row.staged === (folder.section === "staged") &&
+            (row.path === folder.path || row.path.startsWith(`${folder.path}/`))
+          );
+        };
+        if (folder && !nowRowKeys.some(survives)) {
+          // No row at or under the folder survived, so any same-side
+          // descendant still in the new read is one the filter hides.
+          const hiddenLeft = entriesUnderFolder(
+            nowEntries.filter(
+              (e) =>
+                (folder.section === "staged" ? e.staged : e.unstaged) !== null,
+            ),
+            (e) => e.path,
+            folder.path,
+          ).length;
+          lead = {
+            key: `${hiddenLeft > 0 ? "folder-hidden" : "folder"}:${folder.section}`,
+            path: folder.path,
+          };
+          const target = rowAfterFolderLeaves(
+            prevNav.current.rowKeys,
+            focusKey,
+            nowRowKeys,
+          );
+          // The cursor moves here, so the claim's `cursorAtArm` names the row
+          // the cursor will actually be on.
+          if (target !== null && parseFolderRowKey(target)) {
+            setActiveFolderKey(target);
+            cursorAfter = target;
+          } else if (activeFolderKey === focusKey) {
+            setActiveFolderKey((cur) => (cur === focusKey ? null : cur));
+            if (cursorAfter === focusKey)
+              cursorAfter = selectionCleared ? null : activeKey;
+          }
+          // With no row left to take focus, a collapsed other section's toggle.
+          const other = folder.section === "staged" ? "unstaged" : "staged";
+          focusPlan = () =>
+            focusAdvanceTargetLatest(target, cursorAfter, other);
         }
       }
 
@@ -1243,6 +1549,7 @@ export function ChangesPanel({
     if (status.data === undefined) return;
     prevNav.current = {
       keys: navFileKeys,
+      rowKeys: navRows.map(rowKeyOf),
       hadStaged: stagedEntries.length > 0,
       hadUnstaged: unstagedEntries.length > 0,
     };
@@ -1272,6 +1579,29 @@ export function ChangesPanel({
       return next.size === prev.size ? prev : next;
     });
   }, [status.data]);
+  // A shown file the panel didn't write (the conflict walk's starts and moves)
+  // takes the multi-selection with it, so the highlight marks the file on
+  // screen. Keyed on the shown file alone: a selection-only change, a section
+  // collapse included, never runs it.
+  const followShownFile = useEffectEvent(
+    (prev: SelectedFile | null, next: SelectedFile | null) => {
+      const follow = selectionFollowingShownFile({
+        prevKey: prev ? keyOf(prev.path, prev.staged) : null,
+        nextKey: next ? keyOf(next.path, next.staged) : null,
+        panelWrote: next === ownShownWrite.current,
+        visibleKeys: navFileKeys,
+      });
+      if (follow === null) return;
+      selectionGen.current += 1;
+      setSelectedKeys(follow.keys);
+      setAnchorKey(follow.anchor);
+    },
+  );
+  useEffect(() => {
+    const prev = shownSeen.current;
+    shownSeen.current = selectedFile;
+    followShownFile(prev, selectedFile);
+  }, [selectedFile]);
   // Collapse state and the folder cursor name directories of the repo they were
   // made in. Guarded on the path actually changing: <Activity> replays effects
   // on every tab show, and an unguarded reset would drop the user's collapses.
@@ -1280,8 +1610,18 @@ export function ChangesPanel({
     if (prevRepo.current === repoPath) return;
     prevRepo.current = repoPath;
     setCollapsedFolders(new Set());
+    setCollapsedSections(new Set());
     setActiveFolderKey(null);
   }, [repoPath]);
+  // The re-keyed folder row the backstop lands focus on once a closing dialog
+  // hands focus back, and the stale key it replaced; null = no wait running.
+  const folderClaimTarget = useRef<{ key: string; from: string } | null>(null);
+  // The live cursor and rows for that wait, which outlives the render that
+  // armed it.
+  const activeFolderKeyLatest = useEffectEvent(() => activeFolderKey);
+  const folderRowListedLatest = useEffectEvent((key: string) =>
+    flatRows.some((r) => rowKeyOf(r) === key),
+  );
   // The backstop for a folder cursor whose row was re-keyed: whenever
   // `activeFolderKey` stops resolving, it is re-keyed to the surviving row or
   // cleared. Every re-key source lands here — external status churn changing
@@ -1291,10 +1631,15 @@ export function ChangesPanel({
   // biome-ignore lint/correctness/useExhaustiveDependencies: the cursor key stopped resolving
   useEffect(() => {
     if (activeFolderKey === null || navIndex !== -1) return;
-    const parsed = FOLDER_ROW_KEY_RE.exec(activeFolderKey);
+    const parsed = parseFolderRowKey(activeFolderKey);
     if (!parsed) return;
-    const section = parsed[1] as "staged" | "unstaged";
-    const dir = parsed[2];
+    const { section, path: dir } = parsed;
+    const staleKey = activeFolderKey;
+    // A collapsed section lists no folder rows, so there is nothing to re-key to.
+    if (collapsedSections.has(section)) {
+      setActiveFolderKey((cur) => (cur === staleKey ? null : cur));
+      return;
+    }
     // A re-key only ever extends the chain downward (a shortened chain keeps its
     // key), so the survivor is the first row at or under the stale directory.
     const nextKey = findFolderRowKey(
@@ -1303,11 +1648,62 @@ export function ChangesPanel({
       (p) => p === dir || p.startsWith(`${dir}/`),
     );
     // Null = the folder's files are gone entirely; the cursor just clears.
-    setActiveFolderKey(nextKey);
+    // Compare-and-set: the status transition's folder arm may already have
+    // moved the cursor in a layout effect this passive effect runs behind.
+    setActiveFolderKey((cur) => (cur === staleKey ? nextKey : cur));
     // Post-commit the old row is already unmounted, so orphaned focus is the
     // whole signal — a caret parked in the filter input during a background
     // refresh must stay where it is.
-    if (nextKey !== null && focusIsOrphaned()) focusRow(nextKey);
+    if (nextKey !== null && focusIsOrphaned()) {
+      // Landed focus retires any wait still aimed at an older survivor.
+      folderClaimTarget.current = null;
+      focusRow(nextKey);
+    }
+    // A closing confirm will hand focus back to the dead row: land on the
+    // survivor once that return orphans it. No cleanup cancels the loop (this
+    // effect re-runs on its own cursor write); a newer re-key re-aims it.
+    if (nextKey !== null && waitingFocus() === "dialog") {
+      const looping = folderClaimTarget.current !== null;
+      folderClaimTarget.current = { key: nextKey, from: staleKey };
+      if (looping) return;
+      const firedOn = repoPath;
+      // Timed from the dialog's close, not the re-key: a confirm stays open as
+      // long as the user reads it.
+      let deadline: number | null = null;
+      const step = () => {
+        const target = folderClaimTarget.current;
+        // The cursor reads `from` until the re-key's write commits, and null
+        // once an advance cleared it while the row stays listed (landing focus
+        // moves it back); any other key means a newer move left this stale.
+        const live = activeFolderKeyLatest();
+        if (
+          target === null ||
+          (live !== target.key &&
+            live !== target.from &&
+            !(live === null && folderRowListedLatest(target.key))) ||
+          useUiStore.getState().repoPath !== firedOn
+        ) {
+          folderClaimTarget.current = null;
+          return;
+        }
+        const waiting = waitingFocus();
+        // Nothing can land while the dialog stays open, so poll slowly there.
+        if (waiting === "dialog" && focusInOpenPopup()) {
+          deadline = null;
+          window.setTimeout(step, DIALOG_HOLD_POLL_MS);
+          return;
+        }
+        deadline ??= performance.now() + DIALOG_CLAIM_MS;
+        const verdict = dialogClaimStep(waiting, performance.now(), deadline);
+        if (verdict === "wait") {
+          requestAnimationFrame(step);
+          return;
+        }
+        folderClaimTarget.current = null;
+        if (verdict === "claim") focusRow(target.key);
+      };
+      requestAnimationFrame(step);
+    }
   }, [activeFolderKey, navIndex]);
   const mutating = stage.isPending || unstage.isPending || checking;
   const onError = (e: unknown) => toastError(e);
@@ -1327,6 +1723,15 @@ export function ChangesPanel({
       staged,
       untracked: entry.unstaged === "untracked",
     });
+    noteOwnShownWrite();
+  }
+
+  /** Records the shown file the panel just wrote. The store's set is
+   *  synchronous, so the read is the panel's own object; every panel write of
+   *  a file calls this right after, or the follow effect would treat it as an
+   *  outside move. */
+  function noteOwnShownWrite() {
+    ownShownWrite.current = useUiStore.getState().selectedFile;
   }
 
   // Click selection with modifier support: plain = single, Ctrl/Cmd = toggle,
@@ -1347,6 +1752,7 @@ export function ChangesPanel({
       if (a !== -1 && b !== -1) {
         const [lo, hi] = a <= b ? [a, b] : [b, a];
         // Folder rows contribute no keys: a range spans the files it covers.
+        selectionGen.current += 1;
         setSelectedKeys(
           new Set(
             navRows
@@ -1359,6 +1765,7 @@ export function ChangesPanel({
       }
     }
     if (mods.ctrlOrMeta) {
+      selectionGen.current += 1;
       setSelectedKeys((prev) => {
         const next = new Set(prev);
         if (next.has(key)) next.delete(key);
@@ -1368,6 +1775,7 @@ export function ChangesPanel({
       setAnchorKey(key);
       return;
     }
+    selectionGen.current += 1;
     setSelectedKeys(new Set([key]));
     setAnchorKey(key);
   }
@@ -1386,6 +1794,16 @@ export function ChangesPanel({
     const row = navRows.find((r) => rowKeyOf(r) === key);
     if (!row) return;
     setActiveFolderKey(row.type === "folder" ? key : null);
+    // Clearing the folder cursor moves it to the shown file, which a pointer
+    // press can sit far from. An arrow move has already shown the row it
+    // focuses, so its cursor lands here and keeps its scroll.
+    const shown = useUiStore.getState().selectedFile;
+    if (
+      row.type === "file" &&
+      activeFolderKey !== null &&
+      (shown === null || keyOf(shown.path, shown.staged) !== key)
+    )
+      setFocusCursorMove({});
   }
 
   /** Every stage route's one `git add` (no await unless a target is conflicted);
@@ -1395,7 +1813,7 @@ export function ChangesPanel({
    *  whether it staged. */
   async function stageGuarded(targets: FileEntry[]): Promise<boolean> {
     const pathspecs = targets.map((e) => literalPathspec(e.path));
-    const conflicted = targets.filter(isConflicted);
+    const conflicted = targets.filter(isConflictedEntry);
     if (conflicted.length === 0) {
       await stage.mutateAsync(pathspecs);
       return true;
@@ -1549,6 +1967,64 @@ export function ChangesPanel({
     toggleFolder(row.section, row.path, true);
   }
 
+  // Collapse or expand a whole section. Its rows leave navigation, so the
+  // selection, a folder cursor and a pending focus claim inside it go too; the
+  // shown diff survives, as it does behind a collapsed folder.
+  function toggleSection(section: ChangesSection) {
+    const collapsing = !collapsedSections.has(section);
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (collapsing) next.add(section);
+      else next.delete(section);
+      return next;
+    });
+    if (!collapsing) return;
+    setSelectedKeys((prev) =>
+      pruneCollapsedSectionKeys(prev, new Set([section])),
+    );
+    if (activeFolderKey !== null && rowKeySection(activeFolderKey) === section)
+      setActiveFolderKey(null);
+    const claim = pendingFocusKey.current;
+    if (claim !== null && rowKeySection(claim) === section) clearPendingFocus();
+  }
+
+  /** Lands a view flip's focus once the dialog that held it at dispatch (the
+   *  palette) hands it back, mirroring the advance's dialog wait: the armed claim
+   *  if there is one, else the toggle that owns the swap. Only orphaned focus is
+   *  ever taken; live focus elsewhere, a repo switch, a newer claim or the
+   *  deadline retires the loop, clearing only the claim it was started for.
+   *  `armed` is the token of the claim THIS flip armed (null: none), never a
+   *  read of whatever claim happens to be pending. */
+  function settleFlipFocusAfterDialog(armed: object | null) {
+    const firedOn = repoPath;
+    const deadline = performance.now() + DIALOG_CLAIM_MS;
+    const ownClaim = () =>
+      armed !== null && pendingFocusToken.current === armed;
+    const drop = () => {
+      if (ownClaim()) clearPendingFocus();
+    };
+    const step = () => {
+      if (useUiStore.getState().repoPath !== firedOn) return;
+      if (armed !== null && !ownClaim()) return;
+      const verdict = dialogClaimStep(
+        waitingFocus(),
+        performance.now(),
+        deadline,
+      );
+      if (verdict === "wait") requestAnimationFrame(step);
+      else if (verdict === "drop") drop();
+      else if (armed === null) viewToggleRef.current?.focus();
+      else if (!claimPendingFocusLatest()) {
+        // The claimed row may mount, or the flip's settings write land, a frame
+        // late; orphaned focus never makes dialogClaimStep drop, so the
+        // deadline bounds these retries.
+        if (performance.now() < deadline) requestAnimationFrame(step);
+        else drop();
+      }
+    };
+    requestAnimationFrame(step);
+  }
+
   function toggleViewMode() {
     if (!settings.data) return;
     const nextMode = treeMode ? "list" : "tree";
@@ -1560,16 +2036,31 @@ export function ChangesPanel({
     // route by cursor: a parked FOLDER cursor exists only leaving tree mode; a
     // file cursor a collapse will swallow exists only entering it; every other
     // surviving file cursor takes the deferred claim last.
+    // The palette closes before it dispatches, so its dialog still holds focus
+    // here and hands it back only after the flip has re-keyed the rows: every arm
+    // treats that as landable and the settle loop below lands it.
+    const inDialog = waitingFocus() === "dialog";
+    let armed: object | null = null;
     let swallowedByCollapse = false;
+    // A selection inside a collapsed section has no row in either layout, so
+    // no arm claims it; where focus needs a home the view toggle takes it
+    // (under the palette, through the settle loop).
+    const selectionHidden =
+      selectedFile !== null &&
+      collapsedSections.has(selectedFile.staged ? "staged" : "unstaged");
     if (treeMode) {
       // Leaving tree mode: the folder rows go, so a cursor parked on one takes
       // the file row the list keeps, or the control that owns the swap. The
       // claim is DEFERRED: the file row is mounted in the old layout, but the
       // flip's reorder can carry it out of the window — focusing it now would
       // arm nothing for that exit.
-      if (activeFolderKey !== null && focusLeavingRow(activeFolderKey)) {
-        if (activeKey !== null) deferFocusRow(activeKey, nextMode);
-        else viewToggleRef.current?.focus();
+      if (
+        activeFolderKey !== null &&
+        (inDialog || focusLeavingRow(activeFolderKey))
+      ) {
+        if (activeKey !== null && !selectionHidden)
+          armed = deferFocusRow(activeKey, nextMode);
+        else if (!inDialog) viewToggleRef.current?.focus();
       }
     } else {
       // Collapse state outlives list mode by design, so entering tree mode can
@@ -1578,13 +2069,13 @@ export function ChangesPanel({
       // The same collapse can swallow the focused file row: park the cursor on
       // the folder that now stands for it. That folder row cannot exist before
       // the flip, so the claim is armed for it outright.
-      if (selectedFile && activeKey !== null) {
+      if (selectedFile && activeKey !== null && !selectionHidden) {
         const section = selectedFile.staged ? "staged" : "unstaged";
         const collapsed = collapsedIn(section);
         swallowedByCollapse = [...collapsed].some((dir) =>
           selectedFile.path.startsWith(`${dir}/`),
         );
-        if (swallowedByCollapse && focusLeavingRow(activeKey)) {
+        if (swallowedByCollapse && (inDialog || focusLeavingRow(activeKey))) {
           const swallowing = findFolderRowKey(
             section,
             collapsed,
@@ -1593,8 +2084,8 @@ export function ChangesPanel({
           );
           if (swallowing !== null) {
             setActiveFolderKey(swallowing);
-            deferFocusRow(swallowing, nextMode);
-          } else viewToggleRef.current?.focus();
+            armed = deferFocusRow(swallowing, nextMode);
+          } else if (!inDialog) viewToggleRef.current?.focus();
         }
       }
     }
@@ -1604,11 +2095,13 @@ export function ChangesPanel({
     // window; if the row never moves, focus survives and the claim no-ops.
     if (
       !swallowedByCollapse &&
+      !selectionHidden &&
       activeFolderKey === null &&
       activeKey !== null &&
-      focusLeavingRow(activeKey)
+      (inDialog || focusLeavingRow(activeKey))
     )
-      deferFocusRow(activeKey, nextMode);
+      armed = deferFocusRow(activeKey, nextMode);
+    if (inDialog) settleFlipFocusAfterDialog(armed);
     void saveSettings
       .mutateAsync({ ...settings.data, changesViewMode: nextMode })
       .catch(() => undefined);
@@ -1661,11 +2154,15 @@ export function ChangesPanel({
   function handleContextMenu(e: MouseEvent) {
     const rowEl = (e.target as HTMLElement).closest("[data-row]");
     const key = rowEl?.getAttribute("data-row");
-    // A directory row carries no file actions, so it takes the whole-tree menu.
-    if (key && !key.startsWith("folder:")) {
+    const folder = key ? parseFolderRowKey(key) : null;
+    if (folder) {
+      setMenuTarget({ kind: "folder", ...folder, repo: repoPath });
+      return;
+    }
+    if (key && isFileKey(key)) {
       const staged = key.startsWith("staged:");
       const path = key.slice(key.indexOf(":") + 1);
-      const entry = entries.find((en) => en.path === path);
+      const entry = rowEntry(entries, path, staged);
       if (entry) {
         setMenuTarget({ kind: "row", entry, staged });
         return;
@@ -1684,55 +2181,216 @@ export function ChangesPanel({
       .catch(onError);
   }
 
-  // Bulk stage/unstage of the selection. Direction comes from the section the
-  // row was right-clicked in; re-staging an already-staged path (or vice versa)
-  // is a harmless git no-op, so every selected file ends up in that state.
+  // A folder's stage and unstage act on its SHOWN files (the row's "(N)"),
+  // resolved now from the live lists, and only on the side the folder sits in.
+  // `repo` is where the gesture started (the menu's right-click, or the
+  // palette's fire); the folder key latches like handleToggle's file key.
+  function stageFolderIn(dir: string, repo: string) {
+    const key = `folder:unstaged:${dir}`;
+    if (pendingLeaveKeys.current.has(key)) return;
+    if (refuseIfSwitched(repo, "nothing was staged")) return;
+    const targets = entriesUnderFolder(
+      unstagedEntries,
+      (e) => e.path,
+      dir,
+    ).filter(canStage);
+    if (targets.length === 0) return;
+    void stageGuarded(targets)
+      .then((ok) => {
+        if (ok && landedIn(repo).live) pendingLeaveKeys.current.add(key);
+      })
+      .catch(onError);
+  }
+
+  function unstageFolderIn(dir: string, repo: string) {
+    const key = `folder:staged:${dir}`;
+    if (pendingLeaveKeys.current.has(key)) return;
+    if (refuseIfSwitched(repo, "nothing was unstaged")) return;
+    const targets = entriesUnderFolder(stagedEntries, (e) => e.path, dir);
+    if (targets.length === 0) return;
+    void unstage
+      .mutateAsync(targets.flatMap(unstagePaths))
+      .then(() => {
+        if (landedIn(repo).live) pendingLeaveKeys.current.add(key);
+      })
+      .catch(onError);
+  }
+
+  // The palette's folder actions act on the folder cursor as of the fire.
+  const folderCursor =
+    treeMode && activeFolderKey !== null
+      ? parseFolderRowKey(activeFolderKey)
+      : null;
+  // Both folder counts below are memoized by hand: the compiler bails on this
+  // component, and each is an O(n) walk of lists sized for 20k rows that would
+  // otherwise re-run on every render while their inputs hold.
+  // primary = what the cursor's Stage/Unstage reaches; Discard leaves
+  // conflicted files out, Stash leaves out what the backend won't stash.
+  const folderCursorTargets = useMemo(() => {
+    const cursor =
+      treeMode && activeFolderKey !== null
+        ? parseFolderRowKey(activeFolderKey)
+        : null;
+    if (cursor === null) return { primary: 0, discardable: 0, stashable: 0 };
+    const staged = cursor.section === "staged";
+    const shown = entriesUnderFolder(
+      staged ? stagedEntries : unstagedEntries,
+      (e) => e.path,
+      cursor.path,
+    );
+    return {
+      primary: staged ? shown.length : shown.filter(canStage).length,
+      discardable: staged
+        ? 0
+        : shown.filter((e) => !isConflictedEntry(e)).length,
+      stashable: shown.filter((e) => !staysOutOfStash(e)).length,
+    };
+  }, [treeMode, activeFolderKey, stagedEntries, unstagedEntries]);
+
+  // The menu's counts for a right-clicked folder, from the same live lists, so
+  // a poll while the menu is open updates them. Hidden = same-side files under
+  // the folder that the filter leaves out; conflicted = the shown files
+  // Discard leaves alone.
+  const folderCounts = useMemo((): FolderMenuCounts | null => {
+    if (menuTarget?.kind !== "folder") return null;
+    const staged = menuTarget.section === "staged";
+    const shown = entriesUnderFolder(
+      staged ? stagedEntries : unstagedEntries,
+      (e) => e.path,
+      menuTarget.path,
+    );
+    const sameSide = entriesUnderFolder(
+      entries.filter((e) => (staged ? e.staged : e.unstaged) !== null),
+      (e) => e.path,
+      menuTarget.path,
+    );
+    return {
+      fileCount: shown.length,
+      stageableCount: staged ? 0 : shown.filter(canStage).length,
+      hiddenCount: sameSide.length - shown.length,
+      conflictedCount: shown.filter(isConflictedEntry).length,
+      stashableCount: shown.filter((e) => !staysOutOfStash(e)).length,
+    };
+  }, [menuTarget, entries, stagedEntries, unstagedEntries]);
+
+  // Bulk stage/unstage act only on the selected rows of their own side: a file
+  // with staged and unstaged edits keeps the side the user didn't select.
   async function stageSelected() {
     if (stageableSelected.length === 0) return;
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
-      if (await stageGuarded(stageableSelected)) setSelectedKeys(new Set());
+      if (await stageGuarded(stageableSelected))
+        clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
   }
 
   async function unstageSelected() {
-    if (selectionCount === 0) return;
+    if (bulk.stagedRows.length === 0) return;
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
-      await unstage.mutateAsync(selectedEntries.flatMap(unstagePaths));
-      setSelectedKeys(new Set());
+      await unstage.mutateAsync(bulk.stagedRows.flatMap(unstagePaths));
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
   }
 
   function requestDiscardSelected() {
-    if (discardableSelected.length > 0)
+    const conflicted = selectedDiscard.conflicted.length;
+    if (selectedDiscard.targets.length > 0)
       setDiscardScope({
         kind: "files",
-        entries: discardableSelected,
+        entries: selectedDiscard.targets,
         repo: repoPath,
+        leftAlone: conflicted > 0 ? { hidden: 0, conflicted } : undefined,
       });
   }
 
   function requestStashSelected() {
-    if (selectionCount > 0)
+    if (bulk.pathEntries.length > 0)
       setStashScope({
         kind: "files",
-        entries: selectedEntries,
+        entries: bulk.pathEntries,
         repo: repoPath,
+        split: bulk.splitPaths.length > 0,
       });
   }
 
-  // Bulk ignore: add a `/path` line per selected file (any kind). The Rust side
-  // de-dupes and skips lines already present.
+  // A folder's Discard and Stash act on its shown files through the
+  // selection's own target assembly, so twins, renames and splits resolve the
+  // same way. Hidden = same-side files under it that the filter leaves out.
+  function folderActionTargets(section: "staged" | "unstaged", dir: string) {
+    const staged = section === "staged";
+    const shown = entriesUnderFolder(
+      staged ? stagedEntries : unstagedEntries,
+      (e) => e.path,
+      dir,
+    );
+    const sameSide = entriesUnderFolder(
+      entries.filter((e) => (staged ? e.staged : e.unstaged) !== null),
+      (e) => e.path,
+      dir,
+    );
+    const keys = new Set(shown.map((e) => keyOf(e.path, staged)));
+    return {
+      rows: bulkRowTargets(keys, entries),
+      hidden: sameSide.length - shown.length,
+    };
+  }
+
+  // `repo` is where the gesture started; the confirm dialog is the double-fire
+  // guard, so no folder key latches here.
+  function requestDiscardFolder(dir: string, repo: string) {
+    if (refuseIfSwitched(repo, "nothing was discarded")) return;
+    const { rows, hidden } = folderActionTargets("unstaged", dir);
+    const { targets, conflicted } = excludeConflicted(rows.unstagedRows);
+    if (targets.length === 0) return;
+    setDiscardScope({
+      kind: "files",
+      entries: targets,
+      repo,
+      folder: dir,
+      leftAlone:
+        hidden > 0 || conflicted.length > 0
+          ? { hidden, conflicted: conflicted.length }
+          : undefined,
+    });
+  }
+
+  function requestStashFolder(
+    section: "staged" | "unstaged",
+    dir: string,
+    repo: string,
+  ) {
+    if (refuseIfSwitched(repo, "nothing was stashed")) return;
+    const { rows, hidden } = folderActionTargets(section, dir);
+    if (rows.pathEntries.length === 0) return;
+    setStashScope({
+      kind: "files",
+      entries: rows.pathEntries,
+      repo,
+      split: rows.splitPaths.length > 0,
+      folder: dir,
+      leftAlone: hidden > 0 ? { hidden, conflicted: 0 } : undefined,
+    });
+  }
+
+  // Bulk ignore: add a `/path` line per selected file (any kind), one per path
+  // so a split file can't read as a false partial. The Rust side skips lines
+  // already present.
   async function ignoreSelected() {
-    if (selectionCount === 0) return;
-    const patterns = selectedEntries.map((e) => `/${globLiteralPath(e.path)}`);
+    if (bulk.pathEntries.length === 0) return;
+    const patterns = bulk.pathEntries.map((e) => `/${globLiteralPath(e.path)}`);
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       const added = await appendIgnore.mutateAsync(patterns);
       toast.success(ignoreToast(added, patterns.length, ".gitignore"));
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -1743,21 +2401,23 @@ export function ChangesPanel({
   // A path holding `\` contributes a second line, so the count below is LINES,
   // which is what the toast names. The Rust side skips lines already in EFFECT.
   async function aiExcludeSelected() {
-    if (selectionCount === 0) return;
+    if (bulk.pathEntries.length === 0) return;
     // Deduped: a literal `weird\name.env` and a real `weird/name.env` both emit
     // the `/`-separated line, and the duplicate would read as a false partial
     // ("Added 2 of 3") once the Rust side collapses it.
     const patterns = [
       ...new Set(
-        selectedEntries.flatMap((e) => aiExcludePatternLinesForPath(e.path)),
+        bulk.pathEntries.flatMap((e) => aiExcludePatternLinesForPath(e.path)),
       ),
     ];
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       const added = await appendAiIgnore.mutateAsync(patterns);
       toast.success(
         ignoreToast(added, patterns.length, ".gitdesktop/aiignore"),
       );
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -1766,18 +2426,19 @@ export function ChangesPanel({
   // Bulk untrack: `git rm --cached` the tracked files in the selection (kept on
   // disk) + add their ignore lines, in one shot.
   async function untrackSelected() {
-    if (selectedTracked.length === 0) return;
+    const tracked = bulk.trackedPathEntries;
+    if (tracked.length === 0) return;
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       await untrack.mutateAsync({
-        pathspecs: selectedTracked.map((e) => literalPathspec(e.path)),
-        ignorePatterns: selectedTracked.map(
-          (e) => `/${globLiteralPath(e.path)}`,
-        ),
+        pathspecs: tracked.map((e) => literalPathspec(e.path)),
+        ignorePatterns: tracked.map((e) => `/${globLiteralPath(e.path)}`),
       });
       toast.success(
-        `Untracked ${selectedTracked.length} files — kept on disk, added to .gitignore`,
+        `Untracked ${tracked.length} file${tracked.length === 1 ? "" : "s"} — kept on disk, added to .gitignore`,
       );
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -1789,9 +2450,16 @@ export function ChangesPanel({
       setDiscardScope(null);
       return;
     }
+    // Cancel stays live while a write is pending, so a newer scope and a newer
+    // selection may exist by the time this one settles: close only the scope
+    // being confirmed, and clear only a selection nobody replaced since.
+    const confirming = discardScope;
+    const gen = selectionGen.current;
     const finish = () => {
-      setDiscardScope(null);
-      setSelectedKeys(new Set());
+      setDiscardScope((cur) => (cur === confirming ? null : cur));
+      // A folder action leaves an unrelated selection alone, like folder Stage.
+      if (confirming.kind !== "files" || confirming.folder === undefined)
+        clearSelectionIfUnchanged(gen, confirming.repo);
     };
     if (discardScope.kind === "all") {
       try {
@@ -1828,15 +2496,22 @@ export function ChangesPanel({
       setStashScope(null);
       return;
     }
-    // A new stash buries the recorded backup, so its offer can only refuse.
-    useStashReapplyMarker.getState().clearFor(stashScope.repo);
+    // As in confirmDiscard: close only this scope, and clear only a selection
+    // nobody replaced since.
+    const confirming = stashScope;
+    const gen = selectionGen.current;
     const finish = () => {
-      setStashScope(null);
-      setSelectedKeys(new Set());
+      setStashScope((cur) => (cur === confirming ? null : cur));
+      // A folder action leaves an unrelated selection alone, like folder Stage.
+      if (confirming.kind !== "files" || confirming.folder === undefined)
+        clearSelectionIfUnchanged(gen, confirming.repo);
     };
     if (stashScope.kind === "all") {
       try {
         await stashAll.mutateAsync(undefined);
+        // A new stash buries the recorded backup, so a refused stash leaves its
+        // offer; git's "No local changes to save" also resolves and clears it.
+        useStashReapplyMarker.getState().clearFor(stashScope.repo);
         toast.success("Changes stashed");
         finish();
       } catch (e) {
@@ -1848,17 +2523,19 @@ export function ChangesPanel({
     const targets = stashScope.entries.map((e) => e.path);
     try {
       // Literal pathspecs so a `[slug]`-style path can't sweep a sibling's work
-      // into the stash; `targets` stays raw for the toast below.
+      // into the stash.
       const matched = await stashPaths.mutateAsync(
         targets.map(literalPathspec),
       );
       // `matched` is false when the paths matched nothing, so no stash exists to
       // report — the selection no longer had changes when git ran.
       if (matched) {
+        useStashReapplyMarker.getState().clearFor(stashScope.repo);
+        const stashed = stashScope.entries.filter((e) => !staysOutOfStash(e));
         toast.success(
-          targets.length === 1
-            ? `Stashed ${targets[0]}`
-            : `Stashed ${targets.length} files`,
+          stashed.length === 1
+            ? `Stashed ${stashed[0].path}`
+            : `Stashed ${stashed.length} files`,
         );
       } else {
         toast.info("Nothing to stash");
@@ -1883,12 +2560,63 @@ export function ChangesPanel({
   useHotkeyAction(
     "stage-selected-files",
     () => void stageSelected(),
-    !mutating && stageableSelected.some((e) => e.unstaged !== null),
+    !mutating && stageableSelected.length > 0,
   );
   useHotkeyAction(
     "unstage-selected-files",
     () => void unstageSelected(),
-    !mutating && selectedEntries.some((e) => e.staged !== null),
+    !mutating && bulk.stagedRows.length > 0,
+  );
+  useHotkeyAction(
+    "stage-folder",
+    () => {
+      if (folderCursor?.section === "unstaged")
+        stageFolderIn(folderCursor.path, repoPath);
+    },
+    !mutating &&
+      folderCursor?.section === "unstaged" &&
+      folderCursorTargets.primary > 0,
+  );
+  useHotkeyAction(
+    "unstage-folder",
+    () => {
+      if (folderCursor?.section === "staged")
+        unstageFolderIn(folderCursor.path, repoPath);
+    },
+    !mutating &&
+      folderCursor?.section === "staged" &&
+      folderCursorTargets.primary > 0,
+  );
+  // A fire over an open or settling confirm would swap the scope under it.
+  const noConfirm =
+    discardScope === null &&
+    stashScope === null &&
+    !discardPaths.isPending &&
+    !stashPaths.isPending &&
+    !discardAll.isPending &&
+    !stashAll.isPending;
+  useHotkeyAction(
+    "discard-folder",
+    () => {
+      if (folderCursor?.section === "unstaged")
+        requestDiscardFolder(folderCursor.path, repoPath);
+    },
+    !mutating &&
+      noConfirm &&
+      folderCursor?.section === "unstaged" &&
+      folderCursorTargets.discardable > 0,
+  );
+  useHotkeyAction(
+    "stash-folder",
+    () => {
+      if (folderCursor !== null)
+        requestStashFolder(folderCursor.section, folderCursor.path, repoPath);
+    },
+    !mutating &&
+      noConfirm &&
+      !anyConflicted &&
+      folderCursor !== null &&
+      folderCursorTargets.stashable > 0,
   );
   useHotkeyAction(
     "focus-filter",
@@ -1902,15 +2630,53 @@ export function ChangesPanel({
   );
   // Resolve the selected conflicted file with AI, or start an all-conflicts run
   // when the selection isn't a conflict. Palette-only (no default binding).
+  // The enable keys on the polled status, which lags a resolve made outside the
+  // app, so the activation re-reads status once before it starts anything. A
+  // second fire while that read is out is dropped: it would start a second run.
+  const resolveCheckInFlight = useRef(false);
+  async function resolveConflictsWithAi() {
+    if (resolveCheckInFlight.current) return;
+    const firedOn = repoPath;
+    const target = selectedFile;
+    const cached = conflictedPaths;
+    const firedAt = Date.now();
+    // The press is the request, so it bumps here, once: the start after the
+    // re-read lands on this claim without bumping again, and any interaction
+    // during the read retires it.
+    useUiStore.getState().noteUserInteraction();
+    const claimedEpoch = useUiStore.getState().interactionEpoch;
+    resolveCheckInFlight.current = true;
+    const result = await status.refetch();
+    resolveCheckInFlight.current = false;
+    if (
+      refuseIfSwitched(
+        firedOn,
+        "the AI resolve didn't start",
+        "while re-checking for conflicts",
+      )
+    )
+      return;
+    if (useUiStore.getState().interactionEpoch !== claimedEpoch) return;
+    // Fail toward unknown: a failed re-read never says "no conflicts", so it
+    // proceeds on the last successful read. A refetch another fetch cancelled
+    // resolves with the observer's PRE-refetch result, still a success, so only
+    // data stamped at or after the fire counts as the re-read.
+    const fresh =
+      result.isSuccess && result.data && result.dataUpdatedAt >= firedAt
+        ? result.data.entries.filter(isConflictedEntry).map((e) => e.path)
+        : cached;
+    if (fresh.length === 0) {
+      // The store's startAll would no-op silently on an empty set.
+      toast.info("No conflicted files left to resolve.");
+      return;
+    }
+    if (target && fresh.includes(target.path))
+      startResolveOne(target.path, firedOn, { claimedEpoch });
+    else startResolveAll(fresh, firedOn, { claimedEpoch });
+  }
   useHotkeyAction(
     "resolve-conflict-ai",
-    () => {
-      if (selectedFile && conflictedPaths.includes(selectedFile.path)) {
-        startResolveOne(selectedFile.path, repoPath);
-      } else {
-        startResolveAll(conflictedPaths, repoPath);
-      }
-    },
+    () => void resolveConflictsWithAi(),
     canResolveConflicts,
   );
 
@@ -1998,42 +2764,77 @@ export function ChangesPanel({
   const discardHasReserved = (
     shownDiscardScope?.kind === "all" ? entries : discardFiles
   ).some((e) => e.unstaged === "untracked" && isReservedName(e));
+  const discardFolder =
+    shownDiscardScope?.kind === "files" ? shownDiscardScope.folder : undefined;
+  // What the action leaves alone, as " <sentence>" or "".
+  const leftAloneOf = (scope: ChangeActionScope): string => {
+    const left =
+      scope?.kind === "files"
+        ? leftAloneSentence(
+            scope.leftAlone?.hidden ?? 0,
+            scope.leftAlone?.conflicted ?? 0,
+          )
+        : "";
+    return left ? ` ${left}` : "";
+  };
+  const discardLeft = leftAloneOf(shownDiscardScope);
   const discardBody = ((): string => {
     switch (true) {
       case shownDiscardScope?.kind === "all":
         return `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+      // One target takes the file wording below, even from a folder.
+      case discardFolder !== undefined && discardFiles.length >= 2:
+        return `Changes to ${discardFiles.length} files in ${discardFolder} will be discarded. Tracked files are restored and untracked files move to the recycle bin.${discardLeft} This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
       // Per-file discard restores the worktree from the INDEX, so a file with
       // staged changes lands on its staged version, not the last commit.
       case discardOne !== null &&
         discardOne.unstaged !== "untracked" &&
         discardOne.staged !== null:
-        return `Unstaged changes to ${discardOne.path} will be discarded, returning it to its staged version. Its staged changes are kept. This cannot be undone.`;
+        return `Unstaged changes to ${discardOne.path} will be discarded, returning it to its staged version. Its staged changes are kept.${discardLeft} This cannot be undone.`;
       case discardOne !== null && discardOne.unstaged !== "untracked":
-        return `Unstaged changes to ${discardOne.path} will be restored to the last committed version. This cannot be undone.`;
+        return `Unstaged changes to ${discardOne.path} will be restored to the last committed version.${discardLeft} This cannot be undone.`;
       case discardOne !== null && discardHasReserved:
-        return `${discardOne.path} is untracked. Its Windows-reserved name can't go to the recycle bin, so it will be deleted permanently.`;
+        return `${discardOne.path} is untracked. Its Windows-reserved name can't go to the recycle bin, so it will be deleted permanently.${discardLeft}`;
       case discardOne !== null:
-        return `${discardOne.path} is untracked — it will be moved to the recycle bin.`;
+        return `${discardOne.path} is untracked — it will be moved to the recycle bin.${discardLeft}`;
       default:
-        return `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+        return `Changes to ${discardFiles.length} files will be discarded — tracked files are restored and untracked files moved to the recycle bin.${discardLeft} This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
     }
   })();
 
   const stashFiles =
     shownStashScope?.kind === "files" ? shownStashScope.entries : [];
   const stashOne = stashFiles.length === 1 ? stashFiles[0] : null;
+  const stashN = stashFiles.filter((e) => !staysOutOfStash(e)).length;
   const stashTitle =
     shownStashScope?.kind === "all"
       ? "Stash all changes?"
       : stashOne
         ? "Stash change?"
-        : `Stash ${stashFiles.length} changes?`;
+        : `Stash ${stashN} change${stashN === 1 ? "" : "s"}?`;
+  const stashSplitNote =
+    shownStashScope?.kind === "files" && shownStashScope.split
+      ? " A stash takes each file whole, staged and unstaged changes alike."
+      : "";
+  // The backend leaves these out of a path stash: git can't remove them.
+  const stashReservedNote = stashFiles.some(staysOutOfStash)
+    ? RESERVED_STASH_NOTE
+    : "";
+  const stashFolder =
+    shownStashScope?.kind === "files" ? shownStashScope.folder : undefined;
+  // The file, folder and selection Stash items never offer a path stash with
+  // nothing stashable; `stashN === 0` stays as the fallback for any route that
+  // still opens one. (Stash all explains a reserved-only tree itself.)
   const stashBody =
     shownStashScope?.kind === "all"
       ? 'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.'
-      : stashOne
-        ? `${stashOne.path} is saved to the stash and removed from your working tree. "Pop latest stash" restores it.`
-        : `${stashFiles.length} selected files are saved to the stash and removed from your working tree. "Pop latest stash" restores them.`;
+      : stashN === 0
+        ? `Nothing will be stashed.${stashReservedNote}`
+        : stashFolder !== undefined
+          ? `${stashN} file${stashN === 1 ? "" : "s"} in ${stashFolder} ${stashN === 1 ? "is" : "are"} saved to the stash and removed from your working tree. "Pop latest stash" restores ${stashN === 1 ? "it" : "them"}.${stashSplitNote}${leftAloneOf(shownStashScope)}${stashReservedNote}`
+          : stashOne
+            ? `${stashOne.path} is saved to the stash and removed from your working tree. "Pop latest stash" restores it.${stashSplitNote}${stashReservedNote}`
+            : `${stashN} selected file${stashN === 1 ? " is" : "s are"} saved to the stash and removed from your working tree. "Pop latest stash" restores ${stashN === 1 ? "it" : "them"}.${stashSplitNote}${stashReservedNote}`;
 
   // One row's inner content, closing over the panel's selection/mutation state.
   // Passed to the virtualized list so all that state stays here and only the
@@ -2051,9 +2852,25 @@ export function ChangesPanel({
           )}
         >
           <h3 className="py-1 text-xs font-medium text-muted-foreground">
-            {row.section === "staged"
-              ? `Staged (${row.count})`
-              : `Changes (${row.count})`}
+            {/* A non-option inside the listbox, with no aria-controls: every row
+              is a flat virtualized sibling (no group to own) and a collapsed
+              section's rows unmount. aria-expanded carries the state. */}
+            <button
+              type="button"
+              data-section-toggle={row.section}
+              aria-expanded={!collapsedSections.has(row.section)}
+              className="flex cursor-pointer items-center gap-1 hover:text-foreground"
+              onClick={() => toggleSection(row.section)}
+            >
+              {collapsedSections.has(row.section) ? (
+                <CaretRightIcon className="size-3 shrink-0" />
+              ) : (
+                <CaretDownIcon className="size-3 shrink-0" />
+              )}
+              {row.section === "staged"
+                ? `Staged (${row.count})`
+                : `Changes (${row.count})`}
+            </button>
           </h3>
           <DisabledReasonButton
             variant="ghost"
@@ -2089,7 +2906,7 @@ export function ChangesPanel({
           aria-label={`${row.path} — ${row.count} ${
             row.count === 1 ? "file" : "files"
           }, ${row.collapsed ? "collapsed" : "expanded"}`}
-          tabIndex={0}
+          tabIndex={rowKeyOf(row) === tabStopKey ? 0 : -1}
           className="flex cursor-pointer items-center gap-1 py-1 pr-2 text-xs text-muted-foreground hover:bg-muted/60"
           style={{ paddingLeft: 8 + row.depth * 12 }}
           onClick={() => handleFolderActivate(row)}
@@ -2130,6 +2947,7 @@ export function ChangesPanel({
           selectedFile?.path === row.entry.path &&
           selectedFile.staged === row.staged
         }
+        tabStop={keyOf(row.entry.path, row.staged) === tabStopKey}
         treeDisplay={treeMode}
         indentPx={treeMode ? (row.depth ?? 0) * 12 : undefined}
         onSelect={handleSelect}
@@ -2306,7 +3124,10 @@ export function ChangesPanel({
                 activeKinds={activeKinds}
                 viewMode={viewMode}
                 collapsedFolders={collapsedFolders}
+                collapsedSections={collapsedSections}
                 activeRowKey={cursorKey}
+                focusCursorMove={focusCursorMove}
+                tabStopKey={tabStopKey}
                 nothingMatches={nothingMatches}
                 onClearFilter={() => {
                   setFilterText("");
@@ -2334,11 +3155,40 @@ export function ChangesPanel({
                         )
                       : false
                   }
-                  selectionCount={selectionCount}
-                  discardSelectionCount={discardableSelected.length}
-                  stageableSelectionCount={stageableSelected.length}
-                  selectedTrackedCount={selectedTracked.length}
+                  rowCount={bulk.rowCount}
+                  stagedRowCount={bulk.stagedRows.length}
+                  unstagedRowCount={bulk.unstagedRows.length}
+                  stageableCount={stageableSelected.length}
+                  pathCount={bulk.pathEntries.length}
+                  stashablePathCount={stashablePathCount}
+                  trackedPathCount={bulk.trackedPathEntries.length}
+                  discardableCount={selectedDiscard.targets.length}
+                  anyConflicted={anyConflicted}
+                  folderCounts={folderCounts}
                   actions={{
+                    stageFolder: () => {
+                      if (menuTarget?.kind === "folder")
+                        stageFolderIn(menuTarget.path, menuTarget.repo);
+                    },
+                    unstageFolder: () => {
+                      if (menuTarget?.kind === "folder")
+                        unstageFolderIn(menuTarget.path, menuTarget.repo);
+                    },
+                    discardFolder: () => {
+                      if (
+                        menuTarget?.kind === "folder" &&
+                        menuTarget.section === "unstaged"
+                      )
+                        requestDiscardFolder(menuTarget.path, menuTarget.repo);
+                    },
+                    stashFolder: () => {
+                      if (menuTarget?.kind === "folder")
+                        requestStashFolder(
+                          menuTarget.section,
+                          menuTarget.path,
+                          menuTarget.repo,
+                        );
+                    },
                     discardAll: () =>
                       setDiscardScope({ kind: "all", repo: repoPath }),
                     stashAll: () =>
@@ -2357,11 +3207,16 @@ export function ChangesPanel({
                         entries: [entry],
                         repo: repoPath,
                       }),
-                    stashFile: (entry) =>
+                    stashFile: (entry, staged) =>
                       setStashScope({
                         kind: "files",
                         entries: [entry],
                         repo: repoPath,
+                        split:
+                          bulkRowTargets(
+                            new Set([keyOf(entry.path, staged)]),
+                            entries,
+                          ).splitPaths.length > 0,
                       }),
                     viewHistory: setHistoryPath,
                     blame: setBlamePath,
@@ -2463,7 +3318,10 @@ function VirtualizedChangeList({
   activeKinds,
   viewMode,
   collapsedFolders,
+  collapsedSections,
   activeRowKey,
+  focusCursorMove,
+  tabStopKey,
   nothingMatches,
   onClearFilter,
   onListKeyDown,
@@ -2487,8 +3345,15 @@ function VirtualizedChangeList({
   viewMode: (typeof CHANGES_VIEW_MODES)[number];
   /** A `getItemKey` identity input, not read directly. */
   collapsedFolders: Set<string>;
+  /** A `getItemKey` identity input; a change also skips one cursor scroll. */
+  collapsedSections: Set<ChangesSection>;
   /** The cursor row — a file or (tree mode) a folder — kept scrolled into view. */
   activeRowKey: string | null;
+  /** Re-minted with a cursor change that focus caused; that change skips the
+   *  cursor scroll, since the focused row is already mounted and in view. */
+  focusCursorMove: object;
+  /** The list's roving tab stop, kept mounted at any scroll position. */
+  tabStopKey: string | null;
   nothingMatches: boolean;
   onClearFilter: () => void;
   onListKeyDown: (e: KeyboardEvent) => void;
@@ -2533,7 +3398,8 @@ function VirtualizedChangeList({
   // virtual-core 3.17.8), while never re-minting leaves a pure permutation —
   // stage one file, count unchanged — painting each header into the previous
   // occupant's slot. These deps are the sequence's only inputs: the entries, the
-  // filter, and (tree mode) the layout and which directories are collapsed.
+  // filter, (tree mode) the layout and which directories are collapsed, and
+  // which sections are collapsed.
   const flatRowsRef = useRef(flatRows);
   flatRowsRef.current = flatRows;
   // biome-ignore lint/correctness/useExhaustiveDependencies: deps re-mint the identity; the ref supplies the rows
@@ -2542,10 +3408,22 @@ function VirtualizedChangeList({
       const row = flatRowsRef.current[index];
       return row ? rowKeyOf(row) : index;
     },
-    [entries, text, activeKinds, viewMode, collapsedFolders],
+    [entries, text, activeKinds, viewMode, collapsedFolders, collapsedSections],
+  );
+  // The rows' roving tab stop stays MOUNTED: scrolled past the overscan window
+  // it would unmount, leaving every mounted row at tabIndex -1, and Tab would
+  // skip every row. Mounted at its offset, Tab still enters at that row.
+  const tabStopIndex = tabStopKey
+    ? flatRows.findIndex((r) => rowKeyOf(r) === tabStopKey)
+    : -1;
+  const count = flatRows.length;
+  const rangeExtractor = useCallback(
+    (range: Range) =>
+      mergePinnedIndexes(defaultRangeExtractor(range), [tabStopIndex], count),
+    [tabStopIndex, count],
   );
   const rowVirtualizer = useVirtualizer({
-    count: flatRows.length,
+    count,
     getScrollElement: () => scrollEl,
     estimateSize: (i) => {
       const r = flatRows[i];
@@ -2559,6 +3437,7 @@ function VirtualizedChangeList({
     // between indexes, and an index key hands a section header the height
     // measured for whatever row sat there before, so the next row overlaps it.
     getItemKey,
+    rangeExtractor,
     overscan: 16,
   });
   // Flat index of the cursor row, so we can keep it scrolled into view under
@@ -2576,10 +3455,21 @@ function VirtualizedChangeList({
   // which is what a flip-armed claim waits for: the cursor's row can sit at the
   // same index in both layouts (a root-level file above the section that held
   // the folders), and that claim would then never be re-offered.
+  const sectionsSeen = useRef(collapsedSections);
+  const focusMoveSeen = useRef(focusCursorMove);
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
   useEffect(() => {
     if (activeFlatIndex < 0) return;
-    rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
+    // A section toggle shifts the cursor's index (or reveals its row) without
+    // moving the cursor; scrolling there would carry the clicked toggle out of
+    // the window and drop focus to <body>. A cursor move that focus caused
+    // skips too: the scroll would carry the pressed row out from under the
+    // pointer, so the click lands elsewhere.
+    if (
+      sectionsSeen.current === collapsedSections &&
+      focusMoveSeen.current === focusCursorMove
+    )
+      rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
     let frame = 0;
     let tries = 3;
     const claim = () => {
@@ -2590,6 +3480,15 @@ function VirtualizedChangeList({
     frame = requestAnimationFrame(claim);
     return () => cancelAnimationFrame(frame);
   }, [activeFlatIndex, activeRowKey, viewMode]);
+  // Every commit, after the effect above compared against the previous one, so
+  // a toggle's (or a focus move's) skip lasts its own commit even when that
+  // effect never ran.
+  useEffect(() => {
+    sectionsSeen.current = collapsedSections;
+  });
+  useEffect(() => {
+    focusMoveSeen.current = focusCursorMove;
+  });
   const focusTargetIndex = focusTargetKey
     ? flatRows.findIndex((r) => rowKeyOf(r) === focusTargetKey)
     : -1;

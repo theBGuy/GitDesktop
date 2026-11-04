@@ -18,9 +18,23 @@ const RESERVED_STEM = /^(?:con|prn|aux|nul|(?:com|lpt)[1-9¹²³])$/i;
 export function reservedDeviceName(path: string): string | null {
   if (!isWindows) return null;
   const name = path.slice(path.lastIndexOf("/") + 1);
-  // Win32 strips trailing dots and spaces off a final component, so `nul.txt`
-  // and `nul ` are the device too: the stem is everything before the first dot,
-  // trailing spaces trimmed.
+  return isReservedComponent(name) ? name : null;
+}
+
+/**
+ * Whether ANY "/"-separated segment of `path` is a reserved device name: a
+ * reserved DIRECTORY makes everything beneath it unreachable by plain path too.
+ * Mirrors the backend's `path_has_reserved_component` (src-tauri/src/fsops.rs),
+ * which the path stash excludes on. Always false off Windows.
+ */
+export function pathHasReservedComponent(path: string): boolean {
+  return isWindows && path.split("/").some(isReservedComponent);
+}
+
+/** Whether one path component names a device. Win32 strips trailing dots and
+ *  spaces off a component, so `nul.txt` and `nul ` are the device too: the
+ *  stem is everything before the first dot, trailing spaces trimmed. */
+function isReservedComponent(name: string): boolean {
   const stem = name.split(".")[0].replace(/ +$/, "");
-  return RESERVED_STEM.test(stem) ? name : null;
+  return RESERVED_STEM.test(stem);
 }

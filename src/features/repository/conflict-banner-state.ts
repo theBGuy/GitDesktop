@@ -195,3 +195,41 @@ export function deriveStashBannerState(args: {
     clearMarker: false,
   };
 }
+
+/** The conflict ordinal a per-region accept lands on in the post-write file:
+ *  the region that took the accepted one's place, else the new last one; null
+ *  when no regions remain. */
+export function landingOrdinal(accepted: number, count: number): number | null {
+  return count <= 0 ? null : Math.min(accepted, count - 1);
+}
+
+/** Keys that scroll a conflict pane. One pressed inside it while a write's
+ *  landing is pending means the user took the pane over: the landing yields. */
+export const PANE_SCROLL_KEYS: ReadonlySet<string> = new Set([
+  "ArrowUp",
+  "ArrowDown",
+  "PageUp",
+  "PageDown",
+  "Home",
+  "End",
+  " ",
+]);
+
+// Twins of src-tauri/src/git/conflict.rs's conflict_path_refusal sentence and
+// its CONFLICT_LINKED_LEAF reason, and of ConflictFileView's own declarations;
+// scripts/conflict-walk-refusal.test.mjs pins all three congruent.
+export const CONFLICT_PATH_REFUSAL_PREFIX = "Can't resolve the conflict in";
+export const CONFLICT_LINKED_LEAF_TAIL =
+  " — it's a symbolic link. Nothing was changed.";
+
+/** A backend path-gate refusal, which no retry can heal, or null for any other
+ *  failure. `linkedLeaf` matches the whole sentence tail, so a linked-ancestor
+ *  reason never reads as a link at the path itself. */
+export function conflictPathRefusal(
+  kind: string,
+  summary: string,
+): { summary: string; linkedLeaf: boolean } | null {
+  if (kind !== "invalidArgument") return null;
+  if (!summary.startsWith(CONFLICT_PATH_REFUSAL_PREFIX)) return null;
+  return { summary, linkedLeaf: summary.endsWith(CONFLICT_LINKED_LEAF_TAIL) };
+}

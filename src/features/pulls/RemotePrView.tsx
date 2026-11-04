@@ -239,6 +239,7 @@ import { remoteStateMatches } from "@/lib/remote-state-filter";
 import { useRepoLens } from "@/lib/repo-lens/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
+import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { queuedMergeKey, useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -1766,6 +1767,8 @@ export function RemotePrView({
     const target = resolve ?? findResolve.data;
     if (!target) return;
     if (!(await useConfirm.getState().ask(DISCARD_RESOLVE_CONFIRM))) return;
+    // At the request, so a failed discard still ends its tree's AI run.
+    useConflictResolve.getState().retire(target.worktreePath);
     try {
       await abortRemotePrResolve.mutateAsync({
         worktreePath: target.worktreePath,
@@ -2408,12 +2411,21 @@ export function RemotePrView({
     setDeleteBranch(false);
     edit.setOpen(false);
   };
+  // The tree of a takeover left by a PR switch, whose AI walk and prefilter
+  // the effect below retires: a store write can't run during render.
+  const [leftResolve, setLeftResolve] = useState<string | null>(null);
   if (entityKey !== lastEntity) {
     setLastEntity(entityKey);
     // The conflict-resolution takeover too, held or not.
+    if (resolve) setLeftResolve(resolve.worktreePath);
     setResolve(null);
     closePerPrDialogs();
   }
+  useEffect(() => {
+    if (leftResolve === null) return;
+    useConflictResolve.getState().retire(leftResolve);
+    setLeftResolve(null);
+  }, [leftResolve]);
   // The edit dialog's in-flight generation belongs to the PR it was started on; the
   // cancel is imperative, so it rides an effect rather than the block above.
   useCancelOnIdentityChange(entityKey, prGen.cancel);

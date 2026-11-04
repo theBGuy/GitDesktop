@@ -875,6 +875,18 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "next-conflict",
+    label: "Next conflict",
+    category: "Changes",
+    defaultBinding: "f7",
+  },
+  {
+    id: "previous-conflict",
+    label: "Previous conflict",
+    category: "Changes",
+    defaultBinding: "shift+f7",
+  },
+  {
     id: "mark-conflict-resolved",
     label: "Mark conflict resolved",
     category: "Changes",
@@ -919,6 +931,30 @@ export const ACTIONS = [
   {
     id: "unstage-selected-files",
     label: "Unstage selected files",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "stage-folder",
+    label: "Stage folder",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "unstage-folder",
+    label: "Unstage folder",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "discard-folder",
+    label: "Discard changes in folder…",
+    category: "Changes",
+    defaultBinding: null,
+  },
+  {
+    id: "stash-folder",
+    label: "Stash changes in folder…",
     category: "Changes",
     defaultBinding: null,
   },

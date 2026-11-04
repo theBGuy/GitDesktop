@@ -8,8 +8,11 @@ import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
+import { useWalkSelfHeal } from "@/features/repository/use-walk-self-heal";
+import { PREFILTER_READ_REASON } from "@/lib/git/conflict-prefilter";
 import {
   useAbortRemotePrResolve,
   useFinishRemotePrResolve,
@@ -87,6 +90,10 @@ export function ResolveRemotePrView({
   const startAll = useConflictResolve((s) => s.startAll);
   const activePath = useConflictResolve((s) => s.activePath);
   const scopePath = useConflictResolve((s) => s.scopePath);
+  const retireWalk = useConflictResolve((s) => s.retire);
+  const prefilterHold = useConflictResolve(
+    (s) => s.prefiltering === worktreePath,
+  );
   // Only this worktree's walk drives this surface.
   const walkActive = scopePath === worktreePath ? activePath : null;
 
@@ -105,11 +112,17 @@ export function ResolveRemotePrView({
     initedFor.current = worktreePath;
     const walk = useConflictResolve.getState();
     if (walk.scopePath === worktreePath) walk.stop();
-    if (aiPaths && aiPaths.length > 0) startAll(aiPaths, worktreePath);
+    if (aiPaths && aiPaths.length > 0) {
+      startAll(aiPaths, worktreePath, { seeded: true });
+    }
   }, [aiPaths, startAll, worktreePath]);
 
   const conflicted = conflictedEntries(status.data?.entries ?? []);
   const conflictedPaths = conflicted.map((e) => e.path);
+  useWalkSelfHeal(
+    worktreePath,
+    status.data && !status.isPlaceholderData ? conflictedPaths : null,
+  );
 
   // Keep a valid selection: default to the first conflict, and drop it once that
   // file is resolved (leaves the list). Following `walkActive` lets an AI
@@ -132,6 +145,10 @@ export function ResolveRemotePrView({
   // Gated on a SUCCESSFUL read: an errored status query (a worktree that vanished
   // underneath us) leaves no entries, which would otherwise read as "all resolved".
   const done = status.isSuccess && remaining === 0;
+  // The conflict pane's landing, outside it: each pane hands focus here as it
+  // unmounts, and focus on <body> lands here when the all-resolved line swaps in.
+  const paneSinkRef = useRef<HTMLSpanElement>(null);
+  useFocusOnControlsSwap(done, paneSinkRef);
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
   const busy = finish.isPending || abort.isPending;
   // Finish pushes, so it holds offline rather than park — a parked push would
@@ -145,6 +162,7 @@ export function ResolveRemotePrView({
   // sit over a worktree the backend had already consumed.
   async function onFinish() {
     if (refuseWhileOffline()) return;
+    retireWalk(worktreePath);
     try {
       const outcome = await finish.mutateAsync({
         head,
@@ -167,6 +185,7 @@ export function ResolveRemotePrView({
 
   async function onAbort() {
     if (!(await useConfirm.getState().ask(DISCARD_RESOLVE_CONFIRM))) return;
+    retireWalk(worktreePath);
     try {
       await abort.mutateAsync({ worktreePath });
       toast.success("Resolution discarded");
@@ -201,15 +220,20 @@ export function ResolveRemotePrView({
         </span>
         <div className="flex items-center gap-1.5">
           {canResolveWithAi && (
-            <Button
+            <DisabledReasonButton
               size="xs"
               variant="ghost"
-              disabled={busy}
+              disabled={busy || prefilterHold}
+              reason={prefilterHold ? PREFILTER_READ_REASON : undefined}
               onClick={() => startAll(conflictedPaths, worktreePath)}
             >
-              <SparkleIcon data-icon="inline-start" />
+              {prefilterHold ? (
+                <Spinner aria-hidden data-icon="inline-start" />
+              ) : (
+                <SparkleIcon data-icon="inline-start" />
+              )}
               {remaining === 1 ? "Resolve with AI" : "Resolve all with AI"}
-            </Button>
+            </DisabledReasonButton>
           )}
           <Button
             variant="outline"
@@ -285,6 +309,7 @@ export function ResolveRemotePrView({
           )}
         </div>
         <div className="min-h-0 flex-1">
+          <span ref={paneSinkRef} tabIndex={-1} className="sr-only" />
           {done ? (
             <div className="flex h-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
               All conflicts resolved — Finish to push the updated branch.
@@ -295,12 +320,14 @@ export function ResolveRemotePrView({
                 key={selectedPath}
                 repoPath={worktreePath}
                 path={selectedPath}
+                focusSink={paneSinkRef}
               />
             ) : (
               <ConflictFileView
                 key={selectedPath}
                 repoPath={worktreePath}
                 path={selectedPath}
+                focusSink={paneSinkRef}
               />
             )
           ) : null}

@@ -526,10 +526,25 @@ the last list up, with a line above it saying it couldn't refresh.
   focus in the diff. A file whose change isn't UTF-8 text stages, unstages and discards
   only as a whole, keeping every byte exact; its diff says so.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
-  for **Stage / Unstage / Discard / Stash** of the whole selection — or use the command
-  palette ({{kbd:command-palette}}) for Stage / Unstage selected files.
+  to act on the selection. Each menu action shows how many selected items it applies
+  to, and one that applies to none is left out of the menu; the exception is **Stage**,
+  which stays in view but unavailable when every selected unstaged file has a name
+  Windows reserves. **Stage** and **Discard** take the selected unstaged rows, and
+  **Unstage** the selected staged ones. **Stash**{{ai}}, **Exclude from AI**{{/ai}} and
+  **Ignore** count each selected file once, and a stash takes the whole file, staged and
+  unstaged changes alike, even when only one of its rows is selected. **Untrack** covers
+  the selected files Git can untrack, skipping new files and staged deletions.
+  **Discard** leaves selected conflicted files out and shows "N of M" when it does;
+  **Stash** is unavailable while any file in the repository is conflicted. The command
+  palette ({{kbd:command-palette}}) offers Stage / Unstage selected files too.
 - Filter the list by path, or by category (new / modified / deleted, included /
   excluded) with the funnel button.
+- Click the **Staged** or **Changes** heading to collapse that section, and again to
+  bring it back ({{key:enter}} or {{key:space}} on the focused heading does the same).
+  The heading keeps its file count, and **Stage all** / **Unstage all** still act on
+  every file in a collapsed section. Collapsing drops the section's files from a
+  multi-selection and leaves the diff you have open on screen. Both sections open
+  again when you switch repositories.
 - The **Directory tree view** button in the filter row swaps the flat list for a
   compacted directory tree: single-child folder chains merge into one row, and shared
   prefixes roll up. Click a folder to collapse or expand it ({{key:enter}} or
@@ -537,9 +552,20 @@ the last list up, with a line above it saying it couldn't refresh.
   alike, ← folds the folder you're on or jumps to its parent, and → unfolds a
   folder or steps inside it. Collapsing a folder drops its hidden files from a
   multi-selection, and the diff you have open stays open. Selection, staging,
-  and filtering behave the same in both views; file rows keep their
-  {{secondaryclick}} menu, while a folder row opens the whole-list menu. Your
-  choice is remembered for every repository. *Toggle directory tree view* in
+  and filtering behave the same in both views, and file rows keep their
+  {{secondaryclick}} menu. A folder row's {{secondaryclick}} menu stages, discards
+  or stashes the files shown under it (in Staged: unstages or stashes them), and can
+  copy the folder's path or **Show in Explorer**. Its stage, unstage, discard and
+  stash items count the files they apply to; **Discard** and **Stash** are left out
+  when they'd apply to none, and **Stage** stays unavailable when every file shown
+  has a name Windows reserves. **Discard** leaves conflicted files for the conflict editor
+  and its confirm says how many it skipped. **Stash** stays unavailable, marked
+  "resolve conflicts first", while any file is conflicted. When the filter hides
+  some of the folder's files, the menu says how many it leaves alone. *Stage
+  folder*, *Unstage folder*, *Discard changes in folder* and *Stash changes in
+  folder* in the command palette do the same for the folder you've arrowed to.
+  The view you pick is remembered for every
+  repository. *Toggle directory tree view* in
   the command palette ({{kbd:command-palette}}) flips it too (palette-only by
   default — bind a key in **Settings → Keyboard**).
 - **Discard all changes…** clears the whole working tree after a confirm. It sits on the
@@ -631,9 +657,9 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 > (\`nul\`, \`con\`, \`com3\`): the recycle bin can't take one, so those are removed
 > permanently. On Windows git can't stage such a file at all, so its **Stage**
 > control explains that rather than failing, and **Stage all** stages everything else.
-> **Stash all** works around them too: everything else is stashed and the reserved-named
-> file stays put; if they're the only changes, Stash all explains why nothing can be
-> stashed.`,
+> **Stash** works around them too, whether it's **Stash all** or a stash of selected
+> files or a folder: everything else is stashed and the reserved-named file stays put;
+> if they're the only changes, Stash all explains why nothing can be stashed.`,
   },
   {
     id: "history",
@@ -1190,7 +1216,13 @@ editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)
 **Accept current**, **Accept incoming**, or **Both**, and the header adds whole-file
 **Accept all current** / **Accept all incoming** and **Open in editor**. Those whole-file
 accepts ask first, since taking a side replaces the file wholesale, conflict regions you
-already settled by hand included. A conflicted file that isn't UTF-8 text skips the
+already settled by hand included. A strip above the regions counts the conflicts left, and
+its **Previous** and **Next** buttons ({{kbd:previous-conflict}} / {{kbd:next-conflict}},
+also in the command palette as **Previous conflict** and **Next conflict**) take you from
+one region to the next, wrapping around at either end; each region's header names its
+place ("Conflict 2 of 3"). When the first conflict starts below the visible part of the
+file, the editor scrolls down to it as it opens.
+A conflicted file that isn't UTF-8 text skips the
 per-region accepts and resolves through the whole-file accepts or your editor, keeping its
 bytes exact. If the file changed on disk after the editor read it (saved from another
 editor, say), **Accept current**, **Accept incoming**, and **Both** write nothing: a message
@@ -1228,12 +1260,15 @@ says so and the button reads **Accept**: it writes the file but leaves it unstag
 moves on. The file stays listed as conflicted: finish it in the conflict editor, or
 remove the markers yourself and **Mark resolved**. When the markers left can't be split
 into regions, **Mark resolved** is offered right away and asks before staging them. The
-banner's sparkle button (**Resolve all with AI** on hover) walks every conflict in turn —
-the walk keeps its place while you peek at another tab (switching repositories ends it).
-It runs on any provider, including local Ollama and keyless Claude Code / Codex agents, and
-skips files matched by your AI ignore patterns. A conflict that includes text that isn't
-UTF-8 isn't sent to the model either; resolve it with the whole-file accepts or your
-editor.{{/ai}}`,
+banner's sparkle button (**Resolve all with AI** on hover) reads the conflicted files first,
+showing a spinner while it does, then walks them in turn. It always leaves out files that
+are already resolved. With more than one file it also leaves out binary files, files too
+large for AI, symbolic links and files reached through one, files your AI ignore patterns
+exclude or whose names aren't readable text, and files with text that isn't UTF-8. One
+notice says what it skipped. The walk keeps its place while you peek at another tab (switching
+repositories ends it). It runs on any provider, including local Ollama and keyless Claude
+Code / Codex agents. A conflict that includes text that isn't UTF-8 is never sent to the
+model; resolve it with the whole-file accepts or your editor.{{/ai}}`,
   },
   {
     id: "pull-requests",
