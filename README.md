@@ -134,7 +134,12 @@ A unified or split diff with syntax highlighting, collapsible surrounding
 context, and image diffing. Filter the changes list by path or category, and
 read a file's `+added -deleted` line counts without opening it. Show that
 list flat or as a compacted directory tree: collapsible folders, single-child
-folder chains merged into one row, and arrow keys that walk and fold it. The
+folder chains merged into one row, arrow keys that walk and fold it, and a
+folder context menu that stages, unstages, discards or stashes the files
+shown under it (Discard skips conflicted files, and Stash waits until no file
+is conflicted). The
+Staged and Changes sections collapse too, keeping their counts and their
+Stage all / Unstage all buttons. The
 working-tree diff is one whole-file view with hunk- and line-level staging
 and discarding (drag across the line numbers, spanning hunks freely — a drag
 picks up added and removed lines together in either view, Shift keeps it to
@@ -308,7 +313,8 @@ pulling stay manual.
   whole-file Accept all current / incoming and Open in editor, and Mark
   resolved to stage a file exactly as it stands on disk when you settled it
   outside the app (edited, emptied, or deleted while both sides still have
-  a version of it).
+  a version of it). A count shows how many conflicts are left, and
+  Previous / Next (`Shift`+`F7` / `F7`) jump from one region to the next.
 - **AI conflict resolution**: one more option there. Ask your model to merge
   a file, review the proposal as a diff, and accept it (per file or all at
   once). Multi-provider, runs on local Ollama or a keyless Claude Code /

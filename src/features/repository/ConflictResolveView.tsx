@@ -7,12 +7,15 @@ import {
 } from "@phosphor-icons/react";
 import {
   type ReactNode,
+  type RefObject,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
+import { ignoreHeldEnter } from "@/components/confirm-swap-focus";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
@@ -20,6 +23,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { GitDiffView } from "@/features/diff/DiffSurfaceLazy";
 import { HighlightedCode } from "@/features/diff/HighlightedCode";
 import { SPLIT_MIN_CONTAINER_PX } from "@/features/diff/split-threshold";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import {
   buildConflictPrompt,
   extractResolvedContent,
@@ -28,6 +32,7 @@ import {
 import { aiExcludePatterns } from "@/lib/ai/ignore";
 import { PROVIDER_LABELS } from "@/lib/ai/providers";
 import { useAiTextStream } from "@/lib/ai/stream";
+import { presentError } from "@/lib/error-summary";
 import { readRepoInstructions } from "@/lib/git/api";
 import {
   type ConflictSides,
@@ -36,13 +41,22 @@ import {
   diffContents,
 } from "@/lib/git/conflict";
 import { hasConflictMarkers } from "@/lib/git/conflict-parse";
+import {
+  type ConflictBlockReason,
+  conflictAiBlockReason,
+} from "@/lib/git/conflict-prefilter";
 import { useResolveConflict } from "@/lib/git/queries";
 import { useReviewConfigured, useSettings } from "@/lib/settings/queries";
-import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import {
+  useConflictResolve,
+  walkGeneration,
+} from "@/lib/stores/conflict-resolve";
+import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
+import { conflictPathRefusal, PANE_SCROLL_KEYS } from "./conflict-banner-state";
 import { useRefuseIfMoved } from "./use-refuse-if-moved";
 
 type Phase = "loading" | "streaming" | "ready" | "blocked" | "idle";
@@ -50,37 +64,47 @@ type ViewKey = "diff" | "proposed" | "ours" | "theirs" | "base";
 
 const baseName = (path: string) => path.split("/").pop() || path;
 
-/** Why a file never reaches the model. Byte safety outranks the ignore
- *  patterns: a non-UTF-8 file names its own reason even when also ignored. */
-type BlockedReason =
-  | "undecodable"
-  | "blobUndecodable"
-  | "unreadableName"
-  | "ignored";
-
-function blockedReason(sides: ConflictSides | null): BlockedReason {
-  if (sides?.workingUndecodable) return "undecodable";
-  if (sides?.undecodable) return "blobUndecodable";
-  if (sides?.aiIgnored.unreadable) return "unreadableName";
-  return "ignored";
+/** Why a file never reaches the model, in the shared gate's priority. */
+function blockedReason(sides: ConflictSides | null): ConflictBlockReason {
+  return (sides && conflictAiBlockReason(sides)) ?? "excluded";
 }
 
 /** The non-UTF-8 arms name the byte-safe actions as the conflict editor words
  *  them, in place of the generic by-hand sentence the other two end with. */
-const BLOCKED_COPY: Record<BlockedReason, (fileName: string) => ReactNode> = {
+const BLOCKED_COPY: Record<
+  ConflictBlockReason,
+  (fileName: string) => ReactNode
+> = {
   undecodable: () =>
     "This file isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Use Accept all current or Accept all incoming in the conflict editor, or resolve it in your own editor.",
-  blobUndecodable: () =>
+  partUndecodable: () =>
     "Part of this conflict isn't UTF-8 text, so it isn't sent to a model: a text resolution couldn't keep its bytes exact. Resolve it in the conflict editor, whose accepts keep the file's bytes exact, or in your own editor.",
   unreadableName: () =>
     "This file's name can't be read as text, so it isn't sent to a model. Resolve it by hand in your editor, then stage it.",
-  ignored: (fileName) => (
+  excluded: (fileName) => (
     <>
       <span className="font-mono">{fileName}</span> matches your AI ignore
       patterns, so it isn't sent to a model. Resolve it by hand in your editor,
       then stage it.
     </>
   ),
+};
+
+/** A path-gate refusal's closing guidance, worded as the conflict editor words
+ *  it: only a link at the path itself keeps Accept all there. */
+const PATH_REFUSAL_GUIDANCE = {
+  leaf: "Accept all current or incoming in the conflict editor can still resolve it: git replaces or removes the link itself, not what it points to.",
+  other: "Resolve it in your editor or a terminal.",
+} as const;
+
+/** Where focus goes once Accept settles without leaving this view, pinned to
+ *  the file it was armed for and the element focused at the press. */
+type LandRequest = {
+  repoPath: string;
+  path: string;
+  kind: "region" | "header";
+  ordinal?: number;
+  pressed: HTMLElement | null;
 };
 
 /**
@@ -94,9 +118,13 @@ const BLOCKED_COPY: Record<BlockedReason, (fileName: string) => ReactNode> = {
 export function ConflictResolveView({
   repoPath,
   path,
+  focusSink,
 }: {
   repoPath: string;
   path: string;
+  /** The host's landing outside this view, which outlives it: an accept or a
+   *  walk step unmounts the view. */
+  focusSink?: RefObject<HTMLElement | null>;
 }) {
   const settings = useSettings();
   const reviewAi = settings.data?.reviewAi;
@@ -109,6 +137,12 @@ export function ConflictResolveView({
 
   const [phase, setPhase] = useState<Phase>("loading");
   const [sides, setSides] = useState<ConflictSides | null>(null);
+  // A backend path-gate refusal from the sides read: it can't heal on a retry,
+  // so the blocked screen names it instead of offering Try again.
+  const [pathRefusal, setPathRefusal] = useState<{
+    summary: string;
+    linkedLeaf: boolean;
+  } | null>(null);
   const [proposed, setProposed] = useState("");
   const [previewDiff, setPreviewDiff] = useState<string | null>(null);
   const [view, setView] = useState<ViewKey>("diff");
@@ -138,6 +172,54 @@ export function ConflictResolveView({
   // The action bar is mounted in every phase.
   const actionBarRef = useRef<HTMLDivElement>(null);
   useToastClearance(actionBarRef, true);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const resolveSinkRef = useRef<HTMLSpanElement>(null);
+  // Armed by an Accept that refused and left this view up; consumed by the
+  // landing effect below once the hold drops.
+  const [landRequest, setLandRequest] = useState<LandRequest | null>(null);
+  // Set at Accept's press, cleared when its landing runs or when the user takes
+  // the view over first (a click, wheel, touch or scroll key in it), so focus
+  // that input left on <body> never reads as the accept's to move.
+  const landPendingRef = useRef(false);
+  const takeOverLanding = () => {
+    landPendingRef.current = false;
+  };
+  // The blocked screen drops Try again; focus on it would fall to <body>.
+  useFocusOnControlsSwap(phase === "blocked", resolveSinkRef);
+
+  // Focus inside a view the host unmounts falls to <body>; the host's sink
+  // outlives the view. Runs before React detaches this subtree.
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    return () => {
+      if (root?.contains(document.activeElement))
+        focusSink?.current?.focus({ preventScroll: true });
+    };
+  }, [focusSink]);
+
+  // Waits out the hold, so the Accept button is enabled again. Consumed
+  // whether or not it lands: it never takes focus the user moved elsewhere or
+  // took over the view from.
+  const acceptBusy = resolve.isPending || accepting;
+  useLayoutEffect(() => {
+    if (landRequest === null || acceptBusy) return;
+    setLandRequest(null);
+    const pending = landPendingRef.current;
+    landPendingRef.current = false;
+    if (!pending) return;
+    if (landRequest.repoPath !== repoPath || landRequest.path !== path) return;
+    const active = document.activeElement;
+    if (
+      active !== null &&
+      active !== document.body &&
+      active !== landRequest.pressed
+    )
+      return;
+    const pressed = landRequest.pressed;
+    (pressed?.isConnected ? pressed : resolveSinkRef.current)?.focus({
+      preventScroll: true,
+    });
+  }, [landRequest, acceptBusy, repoPath, path]);
 
   const markersLeft = phase === "ready" && hasConflictMarkers(proposed);
 
@@ -147,6 +229,7 @@ export function ConflictResolveView({
     cancel();
     reset();
     setSides(null);
+    setPathRefusal(null);
     setProposed("");
     setPreviewDiff(null);
     setPhase("loading");
@@ -165,14 +248,24 @@ export function ConflictResolveView({
     } catch (e) {
       if (gen === genRef.current && !interruptedRef.current) {
         runningRef.current = false;
-        toastError(e);
-        setPhase("idle");
+        // Only a path-gate refusal blocks; any other failure can heal, so it
+        // keeps its toast and Try again. The blocked body names the refusal.
+        const refusal = isAppError(e)
+          ? conflictPathRefusal(e.kind, presentError(e).summary)
+          : null;
+        if (refusal !== null) {
+          setPathRefusal(refusal);
+          setPhase("blocked");
+        } else {
+          toastError(e);
+          setPhase("idle");
+        }
       }
       return;
     }
     if (gen !== genRef.current || interruptedRef.current) return;
     setSides(resolved);
-    if (resolved.undecodable || resolved.aiIgnored.ignored) {
+    if (conflictAiBlockReason(resolved) !== null) {
       runningRef.current = false;
       setPhase("blocked");
       return;
@@ -276,9 +369,31 @@ export function ConflictResolveView({
   // has no listeners — the walk would stall pinned to an already-resolved file.
   async function accept() {
     if (acceptingRef.current) return;
+    // Captured before any await: the hold disables the button and Chromium
+    // blurs it to <body>. The refusal arms keep this view up and land focus.
+    landPendingRef.current = true;
+    const active = document.activeElement;
+    const pressed =
+      active instanceof HTMLElement && rootRef.current?.contains(active)
+        ? active
+        : null;
+    const land = () =>
+      setLandRequest({ repoPath, path, kind: "header", pressed });
+    // A settled accept unmounts this view (the walk advances or the host drops
+    // the staged file) while the disabled button's focus sits on <body>, where
+    // the unmount hand-off can't see it: hand it to the host's sink first.
+    const handOff = () => {
+      landPendingRef.current = false;
+      const now = document.activeElement;
+      if (now === null || now === document.body || now === pressed)
+        (focusSink?.current ?? resolveSinkRef.current)?.focus({
+          preventScroll: true,
+        });
+    };
     acceptingRef.current = true;
     setAccepting(true);
     const gen = genRef.current;
+    const walkGen = walkGeneration();
     const acceptIn = repoPath;
     // A staged file with markers left would ride Continue's commit, so a
     // marker-bearing proposal is written unstaged. It still leaves this view: the
@@ -299,6 +414,7 @@ export function ConflictResolveView({
         toast.info(
           `${baseName(path)} couldn't be re-read — nothing was written.`,
         );
+        land();
         return;
       }
       // A belt: `accepting` holds every control that could retire this accept
@@ -321,6 +437,7 @@ export function ConflictResolveView({
             ? changedOnDiskCopy(baseName(path))
             : `Part of the conflict in ${baseName(path)} isn't UTF-8 text, so the proposal wasn't applied. Resolve it in the conflict editor instead; its accepts keep the file's bytes exact.`,
         );
+        land();
         return;
       }
       // A hash mismatch alone still goes to the backend, whose guard lets a
@@ -335,17 +452,26 @@ export function ConflictResolveView({
       // and refreshes the expected hash.
       if (outcome.kind === "changedOnDisk") {
         toast.info(changedOnDiskCopy(baseName(path)));
+        land();
         return;
       }
       // This continuation can outlive the walk that armed it (another surface armed
       // its own walk, or the repo-switch clear fired) during the mutation, so both
       // the wording and the advance come from a fresh read gated on it still
-      // being ours.
+      // being ours. The generation check also refuses a walk re-armed over this
+      // same file (a Resolve all pressed during the write, or a self-heal that
+      // already advanced past it), so one accept never advances twice.
       const walk = useConflictResolve.getState();
-      const owns = walk.scopePath === repoPath && walk.activePath === path;
+      const owns =
+        walk.scopePath === repoPath &&
+        walk.activePath === path &&
+        walkGeneration() === walkGen;
+      // A Resolve all reading for this tree replaces the walk at its arm (or the
+      // self-heal moves on once it lands); advancing here would drop that run.
+      const advances = owns && walk.prefiltering !== repoPath;
       if (clean) {
         toast.success(
-          owns && walk.queue.length > 0
+          advances && walk.queue.length > 0
             ? `Resolved ${baseName(path)} — next conflict`
             : `Resolved ${baseName(path)}`,
         );
@@ -354,10 +480,12 @@ export function ConflictResolveView({
           `Applied the proposal to ${baseName(path)} but left it unstaged — conflict markers remain. Fix the rest by hand, then mark it resolved.`,
         );
       }
+      handOff();
       // An empty queue ends the session, so a single-file resolve exits too.
-      if (owns) walk.advance();
+      if (advances) walk.advance();
     } catch (e) {
       toastError(e);
+      land();
     } finally {
       acceptingRef.current = false;
       setAccepting(false);
@@ -390,13 +518,22 @@ export function ConflictResolveView({
 
   return (
     <div
+      ref={rootRef}
       className="ph-no-capture flex h-full flex-col"
+      onPointerDownCapture={takeOverLanding}
+      onWheelCapture={takeOverLanding}
+      onTouchMoveCapture={takeOverLanding}
+      onKeyDownCapture={(e) => {
+        if (PANE_SCROLL_KEYS.has(e.key)) takeOverLanding();
+      }}
       onKeyDown={(e) => {
         if (e.key === "Escape" && !resolve.isPending && !accepting) {
           generating ? handleCancel() : stopSession();
         }
       }}
     >
+      {/* Where focus goes when the control holding it leaves. */}
+      <span ref={resolveSinkRef} tabIndex={-1} className="sr-only" />
       {/* Header — mirrors the diff pane's file bar */}
       <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
         <span className="flex min-w-0 items-center gap-1.5">
@@ -463,7 +600,9 @@ export function ConflictResolveView({
       <div ref={paneRef} className="min-h-0 flex-1 overflow-auto">
         {phase === "blocked" ? (
           <p className="p-4 text-xs text-muted-foreground">
-            {BLOCKED_COPY[blockedReason(sides)](baseName(path))}
+            {pathRefusal !== null
+              ? `${pathRefusal.summary} ${PATH_REFUSAL_GUIDANCE[pathRefusal.linkedLeaf ? "leaf" : "other"]}`
+              : BLOCKED_COPY[blockedReason(sides)](baseName(path))}
           </p>
         ) : phase === "loading" ? (
           <p className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
@@ -539,6 +678,9 @@ export function ConflictResolveView({
               className="ml-auto"
               disabled={resolve.isPending || accepting}
               onClick={() => void accept()}
+              // A refused accept hands focus back here; the Enter still held
+              // from that press must not accept again.
+              onKeyDown={ignoreHeldEnter}
             >
               {resolve.isPending || accepting ? (
                 <Spinner data-icon="inline-start" />
@@ -550,9 +692,10 @@ export function ConflictResolveView({
           </>
         ) : (
           <>
-            {/* Blocked files (AI-ignored, or not UTF-8 text) have no bypass:
-                honoring the ignore, and keeping the bytes exact, is the point.
-                Other idle states (cancelled / empty response) can retry. */}
+            {/* Blocked files (AI-ignored, not UTF-8 text, or refused by the
+                path gate) have no bypass: honoring the ignore, and keeping the
+                bytes exact, is the point, and a refused path can't heal on a
+                retry. Other idle states (cancelled / empty response) can retry. */}
             {phase !== "blocked" && (
               <Button
                 variant="outline"
@@ -567,7 +710,7 @@ export function ConflictResolveView({
             {/* Mid-run, let the user move past a skipped/blocked file without
                 ending the whole resolve-all walk. */}
             {queue.length > 0 && (
-              <Button variant="ghost" size="sm" onClick={advance}>
+              <Button variant="ghost" size="sm" onClick={() => advance()}>
                 Skip to next
               </Button>
             )}

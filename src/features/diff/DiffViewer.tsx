@@ -36,6 +36,7 @@ import {
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
 import { statusReadFailed } from "@/features/repository/StatusReadError";
+import { useWalkSelfHeal } from "@/features/repository/use-walk-self-heal";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { SelectedLine } from "@/lib/git/api";
 import {
@@ -145,6 +146,16 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   // A walk armed in a PR takeover's hidden worktree names files by ITS paths — a
   // same-named conflict here is a different file, so only this tree's walk counts.
   const resolveHere = resolveScope === repoPath ? resolveActive : null;
+  useWalkSelfHeal(
+    repoPath,
+    status.data && !status.isPlaceholderData
+      ? status.data.entries
+          .filter(
+            (e) => e.unstaged === "conflicted" || e.staged === "conflicted",
+          )
+          .map((e) => e.path)
+      : null,
+  );
   // Render off a deferred selection so rapidly arrowing the changes list only
   // mounts + loads the file landed on (each file is its own keyed slot). The
   // list highlight still uses the live selection.
@@ -184,9 +195,17 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
         }
         if (view.kind === "conflict") {
           return resolveHere === view.key ? (
-            <ConflictResolveView repoPath={repoPath} path={view.key} />
+            <ConflictResolveView
+              repoPath={repoPath}
+              path={view.key}
+              focusSink={slots.sinkRef}
+            />
           ) : (
-            <ConflictFileView repoPath={repoPath} path={view.key} />
+            <ConflictFileView
+              repoPath={repoPath}
+              path={view.key}
+              focusSink={slots.sinkRef}
+            />
           );
         }
         return (

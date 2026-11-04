@@ -36,6 +36,7 @@ export const FileRow = memo(function FileRow({
   active,
   disabled,
   checking,
+  tabStop,
   stat,
   treeDisplay,
   indentPx,
@@ -53,6 +54,9 @@ export const FileRow = memo(function FileRow({
   /** A conflicted stage's marker check is running (part of `disabled`): Space
    *  says so rather than failing silently. */
   checking: boolean;
+  /** This row is the list's single roving tab stop (its toggle button rides
+   *  along). A boolean, like `selected`, so a stop move re-renders two rows. */
+  tabStop: boolean;
   /** This row's OWN side of the diff (staged rows: index vs HEAD; unstaged:
    *  working tree vs index). Absent = a blank, still-reserved counts cell. */
   stat?: DiffStatEntry;
@@ -147,7 +151,7 @@ export const FileRow = memo(function FileRow({
       }}
       role="option"
       aria-selected={selected}
-      tabIndex={0}
+      tabIndex={tabStop ? 0 : -1}
     >
       <span
         aria-hidden
@@ -178,6 +182,7 @@ export const FileRow = memo(function FileRow({
           (active || selected) && "opacity-100",
         )}
         aria-label={staged ? `Unstage ${entry.path}` : `Stage ${entry.path}`}
+        tabIndex={tabStop ? 0 : -1}
         disabled={disabled || reservedName !== null}
         reason={reservedName && reservedStageReason(reservedName)}
         onClick={(e) => {

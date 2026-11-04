@@ -611,3 +611,76 @@ test("the header's whole-file actions explain their notConflicted and path-gate 
     "NOT_CONFLICTED_COPY must keep the reason copy",
   );
 });
+
+/** Accept all reads the file before its moved check: an outside `git add`
+ *  makes the status poll drop the view behind the confirm, and only the read
+ *  can tell that from the user leaving. The not-conflicted arm touches the
+ *  view (refresh, landing) only while it is still mounted. */
+function pinAcceptAllReadsFirst(source) {
+  const src = { source, masked: maskNonCode(source, true) };
+  assert.match(
+    src.masked,
+    /\bconst\s+mountedRef\s*=\s*useRef\s*\(\s*false\s*\)\s*;\s*useEffect\s*\(\s*\(\)\s*=>\s*\{\s*mountedRef\.current\s*=\s*true\s*;\s*return\s*\(\)\s*=>\s*\{\s*mountedRef\.current\s*=\s*false\s*;\s*\}\s*;\s*\}\s*,\s*\[\s*\]\s*\)/,
+    "ConflictFileView needs a mountedRef set on mount and cleared on unmount",
+  );
+  const { open, close } = functionBody(src, "acceptAll");
+  const body = src.masked.slice(open + 1, close);
+  const read = body.search(/(?<![\w$])await\s+conflictSides\s*\(/);
+  assert.notEqual(read, -1, "acceptAll must await a conflictSides(…) re-read");
+  const moved = [...body.matchAll(/(?<![\w$.])refuseIfMoved\s*\(/g)];
+  assert.equal(
+    moved.length,
+    1,
+    `acceptAll: expected one refuseIfMoved(…) check, found ${moved.length}`,
+  );
+  assert.ok(
+    moved[0].index > read,
+    "acceptAll must re-read before its moved check, or a poll-dropped view reads as the user leaving",
+  );
+  const arm =
+    /\bif\s*\(\s*fresh\s*!==\s*null\s*&&\s*noLongerConflicted\s*\(\s*fresh\s*\)\s*\)\s*\{/.exec(
+      body,
+    );
+  assert.ok(arm, "acceptAll's not-conflicted arm is gone");
+  assert.ok(
+    read < arm.index && arm.index < moved[0].index,
+    "acceptAll's not-conflicted arm must sit between the re-read and the moved check",
+  );
+  const armOpen = arm.index + arm[0].length - 1;
+  assert.match(
+    body.slice(armOpen + 1, matchBrace(body, armOpen)),
+    /^\s*toast\.info\s*\(\s*notConflictedToast\s*\)\s*;\s*if\s*\(\s*!mountedRef\.current\s*\)\s*return\s*;\s*await\s+refreshAfterError\s*\(\s*\)\s*;\s*armLanding\s*\([^;]*\)\s*;\s*return\s*;\s*$/,
+    "the not-conflicted arm must toast, then refresh and land only while mounted",
+  );
+}
+
+test("Accept all re-reads before its moved check", () => {
+  const source = readFileSync(join(REPO_ROOT, VIEW), "utf8");
+  pinAcceptAllReadsFirst(source);
+  const mutate = (text, from, to) => {
+    const out = text.replace(from, to);
+    assert.notEqual(out, text, `the fixture \`${from}\` moved`);
+    return out;
+  };
+  // Built outside assert.throws, so a moved fixture fails instead of passing.
+  const oldOrder = mutate(
+    mutate(
+      source,
+      /if \(refuseIfMoved\(acceptIn, "nothing was resolved"\)\) return;\r?\n/,
+      "",
+    ),
+    "if (!ok) return;",
+    'if (!ok || refuseIfMoved(acceptIn, "nothing was resolved")) return;',
+  );
+  const ungated = mutate(
+    source,
+    /if \(!mountedRef\.current\) return;\r?\n\s*/,
+    "",
+  );
+  for (const [mutant, reason] of [
+    [oldOrder, /re-read before its moved check/],
+    [ungated, /refresh and land only while mounted/],
+  ]) {
+    assert.throws(() => pinAcceptAllReadsFirst(mutant), reason);
+  }
+});

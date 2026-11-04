@@ -76,6 +76,16 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
+    label:
+      "Stage, unstage, discard or stash the shown files of a folder from its context menu in the directory tree view",
+  },
+  {
+    group: "Diffs & staging",
+    label:
+      "Collapse the Staged or Changes section to focus on the other, counts and Stage all / Unstage all still in reach",
+  },
+  {
+    group: "Diffs & staging",
     label: "Per-file added/deleted line counts on the changes list",
   },
   {
@@ -156,7 +166,7 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
-      "In-app conflict editor — current / incoming / both, or mark files resolved as they stand on disk",
+      "In-app conflict editor — current / incoming / both, a conflicts-left count with next / previous jumps, or mark files resolved as they stand on disk",
   },
   { group: "Rewrite & recovery", label: "Stash browser" },
   {

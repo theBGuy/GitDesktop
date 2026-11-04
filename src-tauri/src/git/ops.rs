@@ -2036,6 +2036,7 @@ const DISCARD_WIN_TRAILING: &str =
     "Windows reads a name ending in a dot or space as a different path";
 const DISCARD_WIN_SHELL_FOLDER: &str = "Windows treats a name ending in .{GUID} as a shell link";
 const DISCARD_UNDECODABLE: &str = "its name isn't valid UTF-8; rename it and try again";
+const DISCARD_UNMERGED: &str = "it's conflicted now, so resolve it in the conflict editor first";
 
 /// Shared lexical gate for caller-supplied repo-relative paths that writes join
 /// onto the working tree; returns git's spelling without resolving filesystem
@@ -2283,6 +2284,25 @@ pub(crate) async fn git_discard_paths_core(
         }
     }
 
+    // `git restore` refuses a batch holding an unmerged path only after the
+    // untracked entries went to the recycle bin, so refuse the batch up front.
+    for batch in tracked.chunks(100) {
+        let mut args = vec!["ls-files", "--unmerged", "-z", "--"];
+        args.extend(batch.iter().map(String::as_str));
+        let out = run_git(Some(&top), &args, DEFAULT_TIMEOUT).await?;
+        if let Some(record) = out.stdout.split(|&b| b == 0).find(|r| !r.is_empty()) {
+            // `<mode> <object> <stage>\t<path>`
+            let path = record
+                .iter()
+                .position(|&b| b == b'\t')
+                .map_or(record, |tab| &record[tab + 1..]);
+            return Err(discard_refusal(
+                &String::from_utf8_lossy(path),
+                DISCARD_UNMERGED,
+            ));
+        }
+    }
+
     if !trash.is_empty() {
         let top = top.clone();
         tauri::async_runtime::spawn_blocking(move || trash_entries(&top, &trash))
@@ -2347,6 +2367,22 @@ pub(crate) async fn git_stash_paths_core(
     // operation git is still holding state for.
     refuse_mid_op(&repo_path).await?;
 
+    // Reserved-name untracked files make git write the stash and then fail
+    // removing them (exit 1), so they stay behind the way stash-all leaves them.
+    // A selection naming one drops it: git's own subprocess also fails a
+    // positive pathspec its exclude cancels, after the stash exists (measured
+    // without system config, as the runner runs; git 2.51.1).
+    let excludes = reserved_stash_excludes(&repo_path).await?;
+    paths.retain(|p| {
+        !excludes.iter().any(|ex| {
+            let reserved = ex.trim_start_matches(":(exclude,literal)");
+            p == reserved || crate::git::pathspec::literal(reserved) == *p
+        })
+    });
+    if paths.is_empty() {
+        return Ok(false);
+    }
+
     // Enumerate EVERY path staged vs HEAD, NUL-safe. `--no-renames` decomposes a
     // staged rename into delete+add so the subtraction sees stable per-path names
     // (an unselected half is preserved via reset/restore like any other staged path).
@@ -2394,8 +2430,10 @@ pub(crate) async fn git_stash_paths_core(
         .map(|p| crate::git::pathspec::literal(p))
         .collect();
 
+    // The excludes still cover a directory or glob pathspec over such a file.
     let mut stash_args = vec!["stash", "push", "--include-untracked", "--"];
     stash_args.extend(paths.iter().map(String::as_str));
+    stash_args.extend(excludes.iter().map(String::as_str));
 
     // A pathspec matching nothing still exits 0, so this stdout line is the only
     // signal that no entry was created; `run_git` pins `LC_ALL=C` to keep it stable.
@@ -18038,6 +18076,51 @@ detached
         assert!(!dir.path().join("u.txt").exists());
     }
 
+    /// git refuses to restore an unmerged path, but only after the batch's
+    /// untracked files would already be in the recycle bin.
+    #[tokio::test]
+    async fn discard_paths_refuses_an_unmerged_path_before_trashing_anything() {
+        let (dir, repo) = setup_repo("discard-unmerged").await;
+        discard_pin_excludes(&repo, dir.path()).await;
+        let start = head_branch(&repo).await;
+        git(&repo, &["switch", "-c", "feature"]).await;
+        commit_file(&repo, dir.path(), "a.txt", "theirs\n", "feature edit").await;
+        git(&repo, &["switch", &start]).await;
+        commit_file(&repo, dir.path(), "a.txt", "mine\n", "base edit").await;
+        let _ = run_git_raw(
+            Some(&repo),
+            &["merge", "--no-edit", "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await;
+        assert!(
+            has_unmerged(&repo).await.unwrap(),
+            "fixture must leave a.txt unmerged"
+        );
+        std::fs::write(dir.path().join("u.txt"), "new\n").unwrap();
+
+        let error = git_discard_paths_core(
+            &AppState::default(),
+            repo.clone(),
+            vec![discard_arg("u.txt", true), discard_arg("a.txt", false)],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            discard_message(error),
+            format!("Can't discard a.txt — {DISCARD_UNMERGED}. Nothing was discarded.")
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("u.txt")).unwrap(),
+            "new\n",
+            "the untracked file never reached the recycle bin"
+        );
+        assert!(
+            has_unmerged(&repo).await.unwrap(),
+            "the conflict is untouched"
+        );
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     async fn discard_paths_trashes_confirmed_untracked_and_restores_tracked() {
@@ -19382,6 +19465,44 @@ detached
             std::fs::metadata(verbatim(dir.path(), "nul")).is_ok(),
             "the reserved-name file stays put"
         );
+    }
+
+    /// A path stash naming a reserved-name untracked file would write its entry
+    /// and then fail; excluded, the rest of the selection stashes once.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stash_paths_leaves_a_reserved_device_named_file_behind() {
+        let (dir, repo) = setup_repo("stash-paths-reserved").await;
+        std::fs::create_dir(dir.path().join("out")).unwrap();
+        std::fs::write(dir.path().join("out").join("ok.txt"), "y\n").unwrap();
+        std::fs::write(verbatim(&dir.path().join("out"), "nul"), b"x\n").expect("verbatim write");
+
+        let state = AppState::default();
+        let created = git_stash_paths_core(
+            &state,
+            repo.clone(),
+            vec![":(literal)out/nul".into(), ":(literal)out/ok.txt".into()],
+        )
+        .await
+        .unwrap();
+
+        assert!(created);
+        assert_eq!(stash_count(&repo).await, 1);
+        assert!(
+            !dir.path().join("out").join("ok.txt").exists(),
+            "ok.txt is stashed"
+        );
+        assert!(
+            std::fs::metadata(verbatim(&dir.path().join("out"), "nul")).is_ok(),
+            "the reserved-name file stays put"
+        );
+
+        // Selecting only the reserved file leaves git nothing to run on.
+        let created = git_stash_paths_core(&state, repo.clone(), vec![":(literal)out/nul".into()])
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(stash_count(&repo).await, 1);
     }
 
     /// Excluding every change would leave git nothing to stash, which it reports

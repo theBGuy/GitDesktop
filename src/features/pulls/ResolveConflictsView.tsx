@@ -6,11 +6,13 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
+import { useWalkSelfHeal } from "@/features/repository/use-walk-self-heal";
+import { PREFILTER_READ_REASON } from "@/lib/git/conflict-prefilter";
 import {
   LOCAL_PR_WRITES_KEY,
   pendingWriteMatching,
@@ -88,6 +90,10 @@ export function ResolveConflictsView({
   const startAll = useConflictResolve((s) => s.startAll);
   const activePath = useConflictResolve((s) => s.activePath);
   const scopePath = useConflictResolve((s) => s.scopePath);
+  const retireWalk = useConflictResolve((s) => s.retire);
+  const prefilterHold = useConflictResolve(
+    (s) => s.prefiltering === worktreePath,
+  );
   // Only this worktree's walk drives this surface.
   const walkActive = scopePath === worktreePath ? activePath : null;
 
@@ -112,6 +118,10 @@ export function ResolveConflictsView({
     (e) => e.unstaged === "conflicted" || e.staged === "conflicted",
   );
   const conflictedPaths = conflicted.map((e) => e.path);
+  useWalkSelfHeal(
+    worktreePath,
+    status.data && !status.isPlaceholderData ? conflictedPaths : null,
+  );
 
   // Keep a valid selection: default to the first conflict, and drop it once that
   // file is resolved (leaves the list). Following `walkActive` lets an AI
@@ -130,12 +140,18 @@ export function ResolveConflictsView({
     });
   }, [walkActive, status.data]);
 
-  if (!pending) return null;
-
   const remaining = conflictedPaths.length;
   // Gated on a SUCCESSFUL read: an errored status query (a worktree that vanished
   // underneath us) leaves no entries, which would otherwise read as "all resolved".
   const done = status.isSuccess && remaining === 0;
+
+  // The conflict pane's landing, outside it: each pane hands focus here as it
+  // unmounts, and focus on <body> lands here when the all-resolved line swaps in.
+  const paneSinkRef = useRef<HTMLSpanElement>(null);
+  useFocusOnControlsSwap(done, paneSinkRef);
+
+  if (!pending) return null;
+
   const canResolveWithAi = aiEnabled && reviewConfigured && remaining > 0;
   const busy = finishing || aborting;
 
@@ -149,6 +165,7 @@ export function ResolveConflictsView({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    retireWalk(pending.worktreePath);
     try {
       const outcome = await finish.mutateAsync({
         base: pr.base,
@@ -186,6 +203,7 @@ export function ResolveConflictsView({
   async function onAbort() {
     if (!pending) return;
     if (!(await useConfirm.getState().ask(DISCARD_MERGE_CONFIRM))) return;
+    retireWalk(pending.worktreePath);
     try {
       await abort.mutateAsync({
         worktreePath: pending.worktreePath,
@@ -225,14 +243,20 @@ export function ResolveConflictsView({
         </span>
         <div className="flex items-center gap-1.5">
           {canResolveWithAi && (
-            <Button
+            <DisabledReasonButton
               size="xs"
               variant="ghost"
+              disabled={prefilterHold}
+              reason={prefilterHold ? PREFILTER_READ_REASON : undefined}
               onClick={() => startAll(conflictedPaths, worktreePath)}
             >
-              <SparkleIcon data-icon="inline-start" />
+              {prefilterHold ? (
+                <Spinner aria-hidden data-icon="inline-start" />
+              ) : (
+                <SparkleIcon data-icon="inline-start" />
+              )}
               {remaining === 1 ? "Resolve with AI" : "Resolve all with AI"}
-            </Button>
+            </DisabledReasonButton>
           )}
           <DisabledReasonButton
             variant="outline"
@@ -308,6 +332,7 @@ export function ResolveConflictsView({
           )}
         </div>
         <div className="min-h-0 flex-1">
+          <span ref={paneSinkRef} tabIndex={-1} className="sr-only" />
           {done ? (
             <div className="flex h-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
               All conflicts resolved — Finish to complete the merge.
@@ -318,12 +343,14 @@ export function ResolveConflictsView({
                 key={selectedPath}
                 repoPath={worktreePath}
                 path={selectedPath}
+                focusSink={paneSinkRef}
               />
             ) : (
               <ConflictFileView
                 key={selectedPath}
                 repoPath={worktreePath}
                 path={selectedPath}
+                focusSink={paneSinkRef}
               />
             )
           ) : null}

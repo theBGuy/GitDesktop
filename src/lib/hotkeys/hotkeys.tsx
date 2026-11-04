@@ -90,7 +90,21 @@ export function useHotkeysListener() {
   }, [bindings]);
 
   const onKeyDown = useEffectEvent((e: KeyboardEvent) => {
-    if (e.defaultPrevented || e.repeat) return;
+    // Bare F7 would open WebView2's "Turn on caret browsing?" prompt (measured,
+    // WebView2 156): consume it app-wide, text fields and repeats included;
+    // dispatch below is unchanged and propagation never stops. The consumed
+    // flag is read first: after the guard it would be this guard's own mark.
+    const consumed = e.defaultPrevented;
+    if (
+      e.key === "F7" &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      !e.metaKey &&
+      !e.shiftKey
+    ) {
+      e.preventDefault();
+    }
+    if (consumed || e.repeat) return;
     const binding = eventToBinding(e);
     if (!binding) return;
     if (isEditableTarget(e.target) && !firesInEditable(binding)) return;
