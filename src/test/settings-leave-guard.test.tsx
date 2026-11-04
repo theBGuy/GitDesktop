@@ -33,10 +33,12 @@ let stored: AppSettings;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /** Mirrors the app's view switch, so leaving Settings unmounts the screen. */
@@ -91,8 +93,9 @@ async function makeDirty(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("Settings leave guard", () => {
-  // Scan header L7-9 (one requestLeave that Back and Esc call, which asks) and
-  // L12 (Keep editing cancels it); SettingsScreen L879 (prompt Esc keeps editing).
+  // Scan header L8 (one requestLeave that Back and Esc call, which asks) and L12
+  // (Keep editing cancels it); the prompt Dialog's onOpenChange (Esc keeps
+  // editing).
   it("F1: Esc and Back ask while dirty, and Keep editing stays", async () => {
     const user = await openSettings();
     await makeDirty(user);
@@ -114,7 +117,7 @@ describe("Settings leave guard", () => {
     expect(screen.getByText("You have unsaved changes")).toBeInTheDocument();
   });
 
-  // Scan header L8 (the route asks, or goes).
+  // Scan header L8-10 (the route asks, or goes).
   it("F2: Discard and close leaves without writing", async () => {
     const user = await openSettings();
     await makeDirty(user);
@@ -154,8 +157,11 @@ describe("Settings leave guard", () => {
     await waitFor(() => expect(view()).toBe("welcome"));
   });
 
-  // Scan header L8 (guard registered only while unsaved or writing);
-  // SettingsScreen L545-550.
+  // Scan header L6-7 (guard registered only while unsaved or writing);
+  // SettingsScreen's guardOn registration effect. The null guard, read after
+  // the seeded form renders and right before the move, is the evidence: jsdom
+  // runs no view transition, so the screen unmounts at once and an absent
+  // dialog alone can't tell "never asked" from "asked and gone".
   it("F4: a clean screen is never intercepted", async () => {
     const user = await openSettings();
     expect(leaveGuard()).toBeNull();
@@ -188,12 +194,12 @@ describe("Settings leave guard", () => {
     await waitFor(() => expect(view()).toBe("help"));
   });
 
-  // SettingsScreen L382-383 (a failed Save never leaves); scan header L10-11.
+  // SettingsScreen's onSubmit catch and finally (a failed Save never leaves);
+  // scan header L9-11. The write is held so the test sees it in flight, then
+  // fails it inside act, so the post-state is read after the failure settled.
   it("F6: a failed Save stays on Settings with the draft", async () => {
-    vi.mocked(saveSettingsMerged).mockRejectedValue({
-      kind: "io",
-      message: "disk full",
-    });
+    const write = deferred<AppSettings>();
+    vi.mocked(saveSettingsMerged).mockImplementation(() => write.promise);
     const user = await openSettings();
     await makeDirty(user);
 
@@ -202,10 +208,16 @@ describe("Settings leave guard", () => {
     await user.click(screen.getByRole("button", { name: "Save and close" }));
 
     await waitFor(() => expect(saveSettingsMerged).toHaveBeenCalledTimes(1));
+    // A regex: the in-flight Spinner's "Loading" label joins the button's name.
+    const saveChanges = () =>
+      screen.getByRole("button", { name: /Save changes/ });
     await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Save changes" }),
-      ).not.toHaveAttribute("aria-disabled", "true"),
+      expect(saveChanges()).toHaveAttribute("aria-disabled", "true"),
+    );
+
+    await act(async () => write.reject({ kind: "io", message: "disk full" }));
+    await waitFor(() =>
+      expect(saveChanges()).not.toHaveAttribute("aria-disabled", "true"),
     );
     expect(view()).toBe("settings");
     expect(screen.queryByRole("dialog")).toBeNull();

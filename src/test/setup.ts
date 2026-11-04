@@ -3,8 +3,14 @@ import { cleanup } from "@testing-library/react";
 import { afterEach } from "vitest";
 import { installTransport } from "@/lib/transport";
 
-// RTL registers its auto-cleanup only on a global afterEach, which
-// `globals: false` withholds.
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean | undefined;
+}
+
+// RTL registers its auto-cleanup and its act environment only through global
+// hooks, which `globals: false` withholds; without the flag React stays silent
+// about updates that land outside act().
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 afterEach(cleanup);
 
 // view-transition.ts reads matchMedia at module load, and jsdom has none.

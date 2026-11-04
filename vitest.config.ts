@@ -10,7 +10,8 @@ export default defineConfig(async (env) =>
       environment: "jsdom",
       setupFiles: ["./src/test/setup.ts"],
       globals: false,
-      restoreMocks: true,
+      // Calls reset per test; suites re-apply implementations in beforeEach.
+      clearMocks: true,
     },
   }),
 );

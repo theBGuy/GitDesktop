@@ -1374,7 +1374,7 @@ by the app, separately from OS code signing.
 
 ## Development
 
-Prereqs: Rust toolchain, Node 24+, pnpm.
+Prereqs: Rust toolchain, Node 24.15+ or 26+, pnpm.
 
 ```sh
 pnpm install

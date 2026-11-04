@@ -50,6 +50,7 @@ either in the tree.
 - `pnpm build` — typecheck plus frontend bundle. Plain `tsc --noEmit` is a no-op
   in this repo; only `tsc -b` (or `pnpm build`) typechecks.
 - `pnpm run checks` — the repo guard scripts CI runs.
+- `pnpm test` — Vitest component tests (jsdom).
 - `cargo test --manifest-path src-tauri/Cargo.toml`
 - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`
 - `cd site && pnpm build` — the marketing site.

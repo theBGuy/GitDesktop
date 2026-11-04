@@ -24,7 +24,7 @@ expected to respect its Design Principles.
 ## Prerequisites
 
 - **Rust** toolchain (stable) — <https://rustup.rs>
-- **Node 24+**
+- **Node 24.15+ or 26+** (Node 25 is not supported)
 - **pnpm** (`corepack enable` will use the version pinned in `package.json`)
 - Tauri's platform build dependencies — see the
   [Tauri prerequisites guide](https://v2.tauri.app/start/prerequisites/).
@@ -49,6 +49,7 @@ Other useful commands:
 ```sh
 pnpm build                                        # typecheck (tsc) + bundle the frontend
 pnpm lint                                         # Biome — formats and lints ./src and ./site (a --write rewrite)
+pnpm test                                         # Vitest component tests (jsdom)
 cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests
 ```
 
@@ -239,7 +240,7 @@ the utmost care.
 1. Branch off `master`.
 2. Keep PRs small and focused; one logical change per PR is easiest to review.
 3. Link the issue it addresses (`Closes #123`).
-4. Run `pnpm lint` and, if you touched Rust, `cargo test --manifest-path src-tauri/Cargo.toml`.
+4. Run `pnpm lint`, `pnpm test` and, if you touched Rust, `cargo test --manifest-path src-tauri/Cargo.toml`.
 5. Add a `changelog.d/` fragment if the change is user-facing — the required
    `fragment` check blocks merge on `src/` or `src-tauri/` changes without one
    (see the Changelog section for the escape hatches).
