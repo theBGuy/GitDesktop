@@ -526,15 +526,17 @@ the last list up, with a line above it saying it couldn't refresh.
   focus in the diff. A file whose change isn't UTF-8 text stages, unstages and discards
   only as a whole, keeping every byte exact; its diff says so.
 - Select multiple files ({{key:mod}}-click, or Shift-click for a range), then {{secondaryclick}}
-  to act on the selection; each menu action shows how many selected items it applies
-  to. **Stage** and **Discard** take the selected unstaged rows, and **Unstage** the
-  selected staged ones. **Stash**{{ai}}, **Exclude from AI**{{/ai}} and **Ignore** count
-  each selected file once, and a stash takes the whole file, staged and unstaged changes
-  alike, even when only one of its rows is selected. **Untrack** covers the selected
-  files Git can untrack, skipping new files and staged deletions. **Discard** leaves
-  selected conflicted files out and shows "N of M" when it does; **Stash** is
-  unavailable while any file in the repository is conflicted. The command palette
-  ({{kbd:command-palette}}) offers Stage / Unstage selected files too.
+  to act on the selection. Each menu action shows how many selected items it applies
+  to, and one that applies to none is left out of the menu; the exception is **Stage**,
+  which stays in view but unavailable when every selected unstaged file has a name
+  Windows reserves. **Stage** and **Discard** take the selected unstaged rows, and
+  **Unstage** the selected staged ones. **Stash**{{ai}}, **Exclude from AI**{{/ai}} and
+  **Ignore** count each selected file once, and a stash takes the whole file, staged and
+  unstaged changes alike, even when only one of its rows is selected. **Untrack** covers
+  the selected files Git can untrack, skipping new files and staged deletions.
+  **Discard** leaves selected conflicted files out and shows "N of M" when it does;
+  **Stash** is unavailable while any file in the repository is conflicted. The command
+  palette ({{kbd:command-palette}}) offers Stage / Unstage selected files too.
 - Filter the list by path, or by category (new / modified / deleted, included /
   excluded) with the funnel button.
 - Click the **Staged** or **Changes** heading to collapse that section, and again to
@@ -552,9 +554,11 @@ the last list up, with a line above it saying it couldn't refresh.
   multi-selection, and the diff you have open stays open. Selection, staging,
   and filtering behave the same in both views, and file rows keep their
   {{secondaryclick}} menu. A folder row's {{secondaryclick}} menu stages, discards
-  or stashes the files shown under it (in Staged: unstages or stashes them), each
-  item counting the files it applies to, and can copy the folder's path or
-  **Show in Explorer**. **Discard** leaves conflicted files for the conflict editor
+  or stashes the files shown under it (in Staged: unstages or stashes them), and can
+  copy the folder's path or **Show in Explorer**. Its stage, unstage, discard and
+  stash items count the files they apply to; **Discard** and **Stash** are left out
+  when they'd apply to none, and **Stage** stays unavailable when every file shown
+  has a name Windows reserves. **Discard** leaves conflicted files for the conflict editor
   and its confirm says how many it skipped. **Stash** stays unavailable, marked
   "resolve conflicts first", while any file is conflicted. When the filter hides
   some of the folder's files, the menu says how many it leaves alone. *Stage
@@ -653,9 +657,9 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
 > (\`nul\`, \`con\`, \`com3\`): the recycle bin can't take one, so those are removed
 > permanently. On Windows git can't stage such a file at all, so its **Stage**
 > control explains that rather than failing, and **Stage all** stages everything else.
-> **Stash all** works around them too: everything else is stashed and the reserved-named
-> file stays put; if they're the only changes, Stash all explains why nothing can be
-> stashed.`,
+> **Stash** works around them too, whether it's **Stash all** or a stash of selected
+> files or a folder: everything else is stashed and the reserved-named file stays put;
+> if they're the only changes, Stash all explains why nothing can be stashed.`,
   },
   {
     id: "history",

@@ -6,7 +6,11 @@ import {
   StackIcon,
   TreeViewIcon,
 } from "@phosphor-icons/react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  defaultRangeExtractor,
+  type Range,
+  useVirtualizer,
+} from "@tanstack/react-virtual";
 import {
   type FocusEvent,
   type KeyboardEvent,
@@ -63,7 +67,10 @@ import {
   useUntrack,
   useWorkingLineStats,
 } from "@/lib/git/queries";
-import { reservedDeviceName } from "@/lib/git/reserved-device-name";
+import {
+  pathHasReservedComponent,
+  reservedDeviceName,
+} from "@/lib/git/reserved-device-name";
 import type { ChangeKind, FileEntry, RepoStatus } from "@/lib/git/types";
 import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -80,10 +87,11 @@ import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useStashReapplyMarker } from "@/lib/stores/stash-reapply-marker";
-import { useUiStore } from "@/lib/stores/ui";
+import { type SelectedFile, useUiStore } from "@/lib/stores/ui";
 import { ignoreToast, toastError } from "@/lib/toast";
 import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
+import { mergePinnedIndexes } from "./BranchSwitcherRows";
 import {
   bulkRowTargets,
   excludeConflicted,
@@ -127,6 +135,7 @@ import {
   pruneCollapsedSectionKeys,
   rowKeySection,
 } from "./section-collapse";
+import { selectionFollowingShownFile } from "./shown-file-follow";
 import { STATUS_READ_FAILED_REASON } from "./sync-controls-state";
 
 /** The pathspecs that unstage one entry — a staged rename is "delete old path +
@@ -194,10 +203,12 @@ function isReservedName(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) !== null;
 }
 
-/** The backend leaves an untracked reserved device name out of a path stash
- *  (git can't remove it), so no Stash count includes one. */
+/** The backend leaves an untracked path with a reserved device name in ANY
+ *  component out of a path stash (git can't remove it), so no Stash count
+ *  includes one. Component-wise like the backend's exclude, not `isReservedName`,
+ *  which reads only the file name. */
 function staysOutOfStash(entry: FileEntry): boolean {
-  return entry.unstaged === "untracked" && isReservedName(entry);
+  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);
 }
 
 /** Appended to a multi-file discard confirm: the recycle bin refuses a reserved
@@ -584,6 +595,12 @@ export function ChangesPanel({
   // whose diff is shown; `anchorKey` is the pivot for shift-range selection.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [anchorKey, setAnchorKey] = useState<string | null>(null);
+  // The shown file as the panel itself last wrote it (the store keeps the very
+  // object): any other value came from a route outside the panel, and the
+  // multi-selection follows it there.
+  const ownShownWrite = useRef<SelectedFile | null>(null);
+  // The shown file the follow effect last saw, so it acts only on a change.
+  const shownSeen = useRef(selectedFile);
   // Tree mode's collapsed directories, keyed `"<section>:<dirPath>"`. Session-local
   // by design: the changes list is ephemeral, so a collapse outlives neither a
   // repo switch nor a restart.
@@ -598,6 +615,10 @@ export function ChangesPanel({
   // The nav cursor when it rests on a folder row (which has no diff to show, so
   // `selectedFile` stays where it was). Null = the cursor follows `selectedFile`.
   const [activeFolderKey, setActiveFolderKey] = useState<string | null>(null);
+  // Re-minted when focus landing on a file row moves the cursor off that row,
+  // onto the shown file: that commit's cursor change must not scroll the list,
+  // which would carry the row out from under a press still in progress.
+  const [focusCursorMove, setFocusCursorMove] = useState<object>(() => ({}));
   const [filterText, setFilterText] = useState("");
   const [activeKinds, setActiveKinds] = useState<Set<FilterKind>>(new Set());
   const [stashesOpen, setStashesOpen] = useState(false);
@@ -1322,6 +1343,7 @@ export function ChangesPanel({
               staged: nextSide.staged,
               untracked: nextEntry.unstaged === "untracked",
             });
+            noteOwnShownWrite();
             setSelectedKeys((keys) => selectionAfterAdvance(keys, key, next));
             setAnchorKey(next);
             const cursor = cursorAfterAdvance(
@@ -1546,6 +1568,28 @@ export function ChangesPanel({
       return next.size === prev.size ? prev : next;
     });
   }, [status.data]);
+  // A shown file the panel didn't write (the conflict walk's starts and moves)
+  // takes the multi-selection with it, so the highlight marks the file on
+  // screen. Keyed on the shown file alone: a selection-only change, a section
+  // collapse included, never runs it.
+  const followShownFile = useEffectEvent(
+    (prev: SelectedFile | null, next: SelectedFile | null) => {
+      const follow = selectionFollowingShownFile({
+        prevKey: prev ? keyOf(prev.path, prev.staged) : null,
+        nextKey: next ? keyOf(next.path, next.staged) : null,
+        panelWrote: next === ownShownWrite.current,
+        visibleKeys: navFileKeys,
+      });
+      if (follow === null) return;
+      setSelectedKeys(follow.keys);
+      setAnchorKey(follow.anchor);
+    },
+  );
+  useEffect(() => {
+    const prev = shownSeen.current;
+    shownSeen.current = selectedFile;
+    followShownFile(prev, selectedFile);
+  }, [selectedFile]);
   // Collapse state and the folder cursor name directories of the repo they were
   // made in. Guarded on the path actually changing: <Activity> replays effects
   // on every tab show, and an unguarded reset would drop the user's collapses.
@@ -1667,6 +1711,15 @@ export function ChangesPanel({
       staged,
       untracked: entry.unstaged === "untracked",
     });
+    noteOwnShownWrite();
+  }
+
+  /** Records the shown file the panel just wrote. The store's set is
+   *  synchronous, so the read is the panel's own object; every panel write of
+   *  a file calls this right after, or the follow effect would treat it as an
+   *  outside move. */
+  function noteOwnShownWrite() {
+    ownShownWrite.current = useUiStore.getState().selectedFile;
   }
 
   // Click selection with modifier support: plain = single, Ctrl/Cmd = toggle,
@@ -1726,6 +1779,16 @@ export function ChangesPanel({
     const row = navRows.find((r) => rowKeyOf(r) === key);
     if (!row) return;
     setActiveFolderKey(row.type === "folder" ? key : null);
+    // Clearing the folder cursor moves it to the shown file, which a pointer
+    // press can sit far from. An arrow move has already shown the row it
+    // focuses, so its cursor lands here and keeps its scroll.
+    const shown = useUiStore.getState().selectedFile;
+    if (
+      row.type === "file" &&
+      activeFolderKey !== null &&
+      (shown === null || keyOf(shown.path, shown.staged) !== key)
+    )
+      setFocusCursorMove({});
   }
 
   /** Every stage route's one `git add` (no await unless a target is conflicted);
@@ -2147,7 +2210,7 @@ export function ChangesPanel({
   // component, and each is an O(n) walk of lists sized for 20k rows that would
   // otherwise re-run on every render while their inputs hold.
   // primary = what the cursor's Stage/Unstage reaches; Discard leaves
-  // conflicted files out, Stash takes every shown file.
+  // conflicted files out, Stash leaves out what the backend won't stash.
   const folderCursorTargets = useMemo(() => {
     const cursor =
       treeMode && activeFolderKey !== null
@@ -2165,7 +2228,7 @@ export function ChangesPanel({
       discardable: staged
         ? 0
         : shown.filter((e) => !isConflictedEntry(e)).length,
-      stashable: shown.length,
+      stashable: shown.filter((e) => !staysOutOfStash(e)).length,
     };
   }, [treeMode, activeFolderKey, stagedEntries, unstagedEntries]);
 
@@ -2546,6 +2609,11 @@ export function ChangesPanel({
     const target = selectedFile;
     const cached = conflictedPaths;
     const firedAt = Date.now();
+    // The press is the request, so it bumps here, once: the start after the
+    // re-read lands on this claim without bumping again, and any interaction
+    // during the read retires it.
+    useUiStore.getState().noteUserInteraction();
+    const claimedEpoch = useUiStore.getState().interactionEpoch;
     resolveCheckInFlight.current = true;
     const result = await status.refetch();
     resolveCheckInFlight.current = false;
@@ -2557,6 +2625,7 @@ export function ChangesPanel({
       )
     )
       return;
+    if (useUiStore.getState().interactionEpoch !== claimedEpoch) return;
     // Fail toward unknown: a failed re-read never says "no conflicts", so it
     // proceeds on the last successful read. A refetch another fetch cancelled
     // resolves with the observer's PRE-refetch result, still a success, so only
@@ -2571,8 +2640,8 @@ export function ChangesPanel({
       return;
     }
     if (target && fresh.includes(target.path))
-      startResolveOne(target.path, firedOn);
-    else startResolveAll(fresh, firedOn);
+      startResolveOne(target.path, firedOn, { claimedEpoch });
+    else startResolveAll(fresh, firedOn, { claimedEpoch });
   }
   useHotkeyAction(
     "resolve-conflict-ai",
@@ -3023,6 +3092,8 @@ export function ChangesPanel({
                 collapsedFolders={collapsedFolders}
                 collapsedSections={collapsedSections}
                 activeRowKey={cursorKey}
+                focusCursorMove={focusCursorMove}
+                tabStopKey={tabStopKey}
                 nothingMatches={nothingMatches}
                 onClearFilter={() => {
                   setFilterText("");
@@ -3215,6 +3286,8 @@ function VirtualizedChangeList({
   collapsedFolders,
   collapsedSections,
   activeRowKey,
+  focusCursorMove,
+  tabStopKey,
   nothingMatches,
   onClearFilter,
   onListKeyDown,
@@ -3242,6 +3315,11 @@ function VirtualizedChangeList({
   collapsedSections: Set<ChangesSection>;
   /** The cursor row — a file or (tree mode) a folder — kept scrolled into view. */
   activeRowKey: string | null;
+  /** Re-minted with a cursor change that focus caused; that change skips the
+   *  cursor scroll, since the focused row is already mounted and in view. */
+  focusCursorMove: object;
+  /** The list's roving tab stop, kept mounted at any scroll position. */
+  tabStopKey: string | null;
   nothingMatches: boolean;
   onClearFilter: () => void;
   onListKeyDown: (e: KeyboardEvent) => void;
@@ -3298,8 +3376,20 @@ function VirtualizedChangeList({
     },
     [entries, text, activeKinds, viewMode, collapsedFolders, collapsedSections],
   );
+  // The rows' roving tab stop stays MOUNTED: scrolled past the overscan window
+  // it would unmount, leaving every mounted row at tabIndex -1, and Tab would
+  // skip every row. Mounted at its offset, Tab still enters at that row.
+  const tabStopIndex = tabStopKey
+    ? flatRows.findIndex((r) => rowKeyOf(r) === tabStopKey)
+    : -1;
+  const count = flatRows.length;
+  const rangeExtractor = useCallback(
+    (range: Range) =>
+      mergePinnedIndexes(defaultRangeExtractor(range), [tabStopIndex], count),
+    [tabStopIndex, count],
+  );
   const rowVirtualizer = useVirtualizer({
-    count: flatRows.length,
+    count,
     getScrollElement: () => scrollEl,
     estimateSize: (i) => {
       const r = flatRows[i];
@@ -3313,6 +3403,7 @@ function VirtualizedChangeList({
     // between indexes, and an index key hands a section header the height
     // measured for whatever row sat there before, so the next row overlaps it.
     getItemKey,
+    rangeExtractor,
     overscan: 16,
   });
   // Flat index of the cursor row, so we can keep it scrolled into view under
@@ -3331,13 +3422,19 @@ function VirtualizedChangeList({
   // same index in both layouts (a root-level file above the section that held
   // the folders), and that claim would then never be re-offered.
   const sectionsSeen = useRef(collapsedSections);
+  const focusMoveSeen = useRef(focusCursorMove);
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll on active change
   useEffect(() => {
     if (activeFlatIndex < 0) return;
     // A section toggle shifts the cursor's index (or reveals its row) without
     // moving the cursor; scrolling there would carry the clicked toggle out of
-    // the window and drop focus to <body>.
-    if (sectionsSeen.current === collapsedSections)
+    // the window and drop focus to <body>. A cursor move that focus caused
+    // skips too: the scroll would carry the pressed row out from under the
+    // pointer, so the click lands elsewhere.
+    if (
+      sectionsSeen.current === collapsedSections &&
+      focusMoveSeen.current === focusCursorMove
+    )
       rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });
     let frame = 0;
     let tries = 3;
@@ -3350,9 +3447,13 @@ function VirtualizedChangeList({
     return () => cancelAnimationFrame(frame);
   }, [activeFlatIndex, activeRowKey, viewMode]);
   // Every commit, after the effect above compared against the previous one, so
-  // a toggle's skip lasts its own commit even when that effect never ran.
+  // a toggle's (or a focus move's) skip lasts its own commit even when that
+  // effect never ran.
   useEffect(() => {
     sectionsSeen.current = collapsedSections;
+  });
+  useEffect(() => {
+    focusMoveSeen.current = focusCursorMove;
   });
   const focusTargetIndex = focusTargetKey
     ? flatRows.findIndex((r) => rowKeyOf(r) === focusTargetKey)

@@ -309,7 +309,108 @@ function resolveRecheckFailures(panel) {
     return ["the handler has no in-flight guard"];
   if (!(guard < set && set < refetch && refetch < reset && reset < refuse))
     return ["the in-flight guard doesn't span exactly the re-read"];
+  // The press bumps once, before the read, and claims that epoch; a newer
+  // interaction during the read drops the start, which lands on the claim.
+  const bump = masked.search(
+    loose("useUiStore.getState().noteUserInteraction();"),
+  );
+  const claim = masked.search(
+    loose("const claimedEpoch = useUiStore.getState().interactionEpoch;"),
+  );
+  if (bump === -1 || claim === -1 || !(bump < claim && claim < refetch))
+    return ["the press doesn't bump and claim its epoch before the re-read"];
+  const moved = masked.search(
+    loose(
+      "if (useUiStore.getState().interactionEpoch !== claimedEpoch) return;",
+    ),
+  );
+  if (moved === -1 || moved < refuse || starts.some((s) => s.index < moved))
+    return ["a start doesn't wait for the claimed epoch check"];
+  const claimed = [
+    ...masked.matchAll(
+      /\bstartResolve(?:One|All)\([^()]*,\s*firedOn,\s*\{\s*claimedEpoch\s*\}\)/g,
+    ),
+  ];
+  if (claimed.length !== starts.length)
+    return ["a start doesn't land on the claimed epoch"];
   return [];
+}
+
+/** Failures for the tab stop staying mounted (empty = pinned). */
+function tabStopMountFailures(panel) {
+  const failures = [];
+  if (codeSearch(panel, "tabStopKey={tabStopKey}") === -1)
+    failures.push("the list isn't handed the panel's tabStopKey");
+  if (
+    codeSearch(
+      panel,
+      "const tabStopIndex = tabStopKey ? flatRows.findIndex((r) => rowKeyOf(r) === tabStopKey) : -1;",
+    ) === -1
+  )
+    failures.push("the list doesn't find the tab stop's flat index");
+  if (
+    codeSearch(
+      panel,
+      "mergePinnedIndexes(defaultRangeExtractor(range), [tabStopIndex], count)",
+    ) === -1
+  )
+    failures.push("the range doesn't pin the tab stop's index");
+  const call = panel.masked.search(/\bconst rowVirtualizer = useVirtualizer\(/);
+  if (call === -1) return [...failures, "no rowVirtualizer"];
+  const open = panel.masked.indexOf("{", call);
+  const { keys } = topLevelKeys(panel.masked, open);
+  if (!keys.some((k) => k.name === "rangeExtractor"))
+    failures.push("the virtualizer doesn't take the pinning rangeExtractor");
+  return failures;
+}
+
+/** Failures for a focus-caused cursor move skipping the cursor scroll, so a
+ *  press on a file row is never carried out from under the pointer, while an
+ *  arrow move keeps its scroll (empty = pinned). */
+function focusMoveScrollFailures(panel) {
+  const failures = [];
+  if (codeSearch(panel, "focusCursorMove={focusCursorMove}") === -1)
+    failures.push("the list isn't handed the panel's focusCursorMove");
+  if (
+    codeSearch(panel, "const focusMoveSeen = useRef(focusCursorMove);") === -1
+  )
+    failures.push("the list keeps no focusMoveSeen ref");
+  if (
+    codeSearch(
+      panel,
+      'focusMoveSeen.current === focusCursorMove ) rowVirtualizer.scrollToIndex(activeFlatIndex, { align: "auto" });',
+    ) === -1
+  )
+    failures.push("the cursor scroll doesn't skip a focus move's commit");
+  if (
+    codeSearch(
+      panel,
+      "useEffect(() => { focusMoveSeen.current = focusCursorMove; });",
+    ) === -1
+  )
+    failures.push("focusMoveSeen isn't synced every commit");
+  if (panel.masked.match(/\bfocusMoveSeen\.current = /g)?.length !== 1)
+    failures.push("the per-commit sync isn't focusMoveSeen's only write");
+  if (panel.masked.match(/\bsetFocusCursorMove\(/g)?.length !== 1)
+    failures.push("focusCursorMove is re-minted outside handleRowFocus");
+  const body = functionBody(panel, "handleRowFocus");
+  if (!body) return [...failures, "no handleRowFocus function"];
+  const [open, close] = body;
+  const text = panel.masked.slice(open, close);
+  if (/\bselect(File)?\(/.test(text))
+    failures.push("handleRowFocus selects on focus");
+  if (
+    codeSearch(
+      panel,
+      'const shown = useUiStore.getState().selectedFile; if ( row.type === "file" && activeFolderKey !== null && (shown === null || keyOf(shown.path, shown.staged) !== key) ) setFocusCursorMove({});',
+      open,
+      close,
+    ) === -1
+  )
+    failures.push(
+      "handleRowFocus doesn't mark exactly a file focus that moves the folder cursor off its row",
+    );
+  return failures;
 }
 
 const panel = load(PANEL);
@@ -465,6 +566,106 @@ test("flip pin rejects an arm without the dialog test", () => {
 
 test("the palette AI resolve re-reads status before starting", () => {
   assert.deepEqual(resolveRecheckFailures(panel), []);
+});
+
+test("resolve pin rejects each broken epoch claim", () => {
+  for (const [find, replace] of [
+    ["useUiStore.getState().noteUserInteraction();", ""],
+    [
+      "if (useUiStore.getState().interactionEpoch !== claimedEpoch) return;",
+      "",
+    ],
+    [
+      "startResolveOne(target.path, firedOn, { claimedEpoch });",
+      "startResolveOne(target.path, firedOn);",
+    ],
+    [
+      "startResolveAll(fresh, firedOn, { claimedEpoch });",
+      "startResolveAll(fresh, firedOn);",
+    ],
+  ])
+    assert.notDeepEqual(
+      resolveRecheckFailures(mutatedPanel(find, replace)),
+      [],
+      `survived: ${find}`,
+    );
+});
+
+test("the roving tab stop stays mounted at any scroll position", () => {
+  assert.deepEqual(tabStopMountFailures(panel), []);
+});
+
+test("tab stop mount pin rejects each unpinned window", () => {
+  for (const [find, replace] of [
+    [/\n\s*rangeExtractor,\s*(overscan: 16,)/, "\n    $1"],
+    ["[tabStopIndex], count)", "[], count)"],
+    ["tabStopKey={tabStopKey}", "tabStopKey={null}"],
+    [
+      "(r) => rowKeyOf(r) === tabStopKey)",
+      "(r) => rowKeyOf(r) === activeRowKey)",
+    ],
+  ])
+    assert.notDeepEqual(
+      tabStopMountFailures(mutatedPanel(find, replace)),
+      [],
+      `survived: ${find}`,
+    );
+});
+
+test("a cursor move focus caused never scrolls the list", () => {
+  assert.deepEqual(focusMoveScrollFailures(panel), []);
+});
+
+test("focus-move pin rejects each broken skip", () => {
+  for (const [find, replace, message] of [
+    [
+      "sectionsSeen.current === collapsedSections && focusMoveSeen.current === focusCursorMove",
+      "sectionsSeen.current === collapsedSections",
+      "the cursor scroll doesn't skip a focus move's commit",
+    ],
+    [
+      "focusCursorMove={focusCursorMove}",
+      "focusCursorMove={{}}",
+      "the list isn't handed the panel's focusCursorMove",
+    ],
+    [
+      "focusMoveSeen.current = focusCursorMove; });",
+      "focusMoveSeen.current = focusCursorMove; }, [activeFlatIndex]);",
+      "focusMoveSeen isn't synced every commit",
+    ],
+    [
+      "if (activeFlatIndex < 0) return;",
+      "focusMoveSeen.current = focusCursorMove; if (activeFlatIndex < 0) return;",
+      "the per-commit sync isn't focusMoveSeen's only write",
+    ],
+    // Every file focus marked: an arrow move would lose its scroll.
+    [
+      "(shown === null || keyOf(shown.path, shown.staged) !== key)",
+      "true",
+      "handleRowFocus doesn't mark exactly a file focus that moves the folder cursor off its row",
+    ],
+    [
+      'row.type === "file" && activeFolderKey !== null &&',
+      'row.type === "file" &&',
+      "handleRowFocus doesn't mark exactly a file focus that moves the folder cursor off its row",
+    ],
+    [
+      'setActiveFolderKey(row.type === "folder" ? key : null);',
+      'setActiveFolderKey(row.type === "folder" ? key : null); if (row.type === "file") select(row.entry, row.staged);',
+      "handleRowFocus selects on focus",
+    ],
+    [
+      "function toggleKind(kind: FilterKind, on: boolean) {",
+      "function toggleKind(kind: FilterKind, on: boolean) { setFocusCursorMove({});",
+      "focusCursorMove is re-minted outside handleRowFocus",
+    ],
+  ]) {
+    const failures = focusMoveScrollFailures(mutatedPanel(find, replace));
+    assert.ok(
+      failures.includes(message),
+      `survived or misattributed: ${find} -> ${JSON.stringify(failures)}`,
+    );
+  }
 });
 
 test("resolve pin rejects a handler that starts from the cached read", () => {

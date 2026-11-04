@@ -103,10 +103,9 @@ export const BoardColumn = memo(function BoardColumn({
   );
   // The board's single tab stop has to stay MOUNTED or Tab can't get into the
   // board at all: scroll it past the overscan window by hand and the only
-  // tabbable card unmounts with it. Neither virtualized sibling hits this —
-  // ChangesPanel makes every row its own tab stop, MyWorkScreen keeps focus on
-  // a combobox input and never puts it on a row — so a roving tab stop over a
-  // virtualized list needs the window itself to carry the guarantee.
+  // tabbable card unmounts with it. A roving tab stop over a virtualized list
+  // needs the window itself to carry that guarantee, as the Changes list's
+  // does; MyWorkScreen sidesteps it by keeping focus on a combobox input.
   const rangeExtractor = useCallback(
     (range: Range) => {
       const window = defaultRangeExtractor(range);

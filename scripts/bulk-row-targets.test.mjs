@@ -428,8 +428,12 @@ function folderRouteProblems(text) {
     )
   )
     problems.push("the cursor's discardable count keeps conflicted files");
-  if (!/\bstashable: shown\.length,/.test(masked))
-    problems.push("the cursor's stashable count isn't every shown file");
+  if (
+    !/\bstashable: shown\.filter\(\(e\) => !staysOutOfStash\(e\)\)\.length,/.test(
+      masked,
+    )
+  )
+    problems.push("the cursor's stashable count keeps reserved names");
   // The mask blanks "unstaged": a staged cursor must never enable Discard.
   if (
     !text.includes(
@@ -747,6 +751,11 @@ test("folder route pin mutation controls go red", () => {
       text,
       "conflictedCount: shown.filter(isConflictedEntry).length,",
       "conflictedCount: entries.filter(isConflictedEntry).length,",
+    ),
+    mutate(
+      text,
+      "stashable: shown.filter((e) => !staysOutOfStash(e)).length,",
+      "stashable: shown.length,",
     ),
   ];
   for (const mutant of mutants)
@@ -1103,8 +1112,8 @@ const STASH_LABEL =
   'function stashLabel(stashable: number, total: number): string {\n  return stashable === total\n    ? `Stash ${total} change${total === 1 ? "" : "s"}…`\n    : `Stash ${stashable} of ${total} changes…`;\n}';
 const STASH_PANEL_PINS = [
   [
-    'function staysOutOfStash(entry: FileEntry): boolean {\n  return entry.unstaged === "untracked" && isReservedName(entry);\n}',
-    "staysOutOfStash is not the untracked reserved-name rule",
+    'function staysOutOfStash(entry: FileEntry): boolean {\n  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);\n}',
+    "staysOutOfStash is not the untracked any-component reserved-name rule",
   ],
   [
     "const stashablePathCount = bulk.pathEntries.filter(\n    (e) => !staysOutOfStash(e),\n  ).length;",
@@ -1187,8 +1196,14 @@ test("stash count pin mutation controls go red", () => {
     ),
     mutate(
       panel,
+      '  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);',
+      "  return pathHasReservedComponent(entry.path);",
+    ),
+    // The file name alone misses `con/x.txt`, which the backend leaves behind.
+    mutate(
+      panel,
+      '  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);',
       '  return entry.unstaged === "untracked" && isReservedName(entry);',
-      "  return isReservedName(entry);",
     ),
     mutate(
       panel,

@@ -198,7 +198,7 @@ function pinPanel(src) {
   );
   assert.ok(
     scroll.includes(
-      "if (sectionsSeen.current === collapsedSections)\n      rowVirtualizer.scrollToIndex(activeFlatIndex",
+      "    if (\n      sectionsSeen.current === collapsedSections &&\n      focusMoveSeen.current === focusCursorMove\n    )\n      rowVirtualizer.scrollToIndex(activeFlatIndex",
     ),
     "the cursor scroll skips a section toggle's commit",
   );
@@ -270,10 +270,7 @@ test("negative controls: the wiring pins catch their regressions", () => {
       "=> focusAdvanceTarget(key, cursorAfter, fallbackSection)",
       "=> focusAdvanceTarget(key, cursorAfter, null)",
     ],
-    [
-      "if (sectionsSeen.current === collapsedSections)\n      rowVirtualizer",
-      "rowVirtualizer",
-    ],
+    ["      sectionsSeen.current === collapsedSections &&\n", ""],
     [
       "    sectionsSeen.current = collapsedSections;\n  });\n",
       "    sectionsSeen.current = collapsedSections;\n  }, [activeFlatIndex]);\n",
@@ -295,6 +292,84 @@ test("negative controls: the wiring pins catch their regressions", () => {
     assert.ok(panelSrc.includes(from), `mutation anchor ${from}`);
     assert.throws(() => pinPanel(panelSrc.replace(from, () => to)), {
       code: "ERR_ASSERTION",
+    });
+  }
+});
+
+// Each of these breaks exactly one pin, so the control asserts that pin's own
+// message rather than any assertion failure.
+test("negative controls: the landing, toggle and backstop pins name their regression", () => {
+  const mutations = [
+    [
+      "        collapsedFolders,\n        collapsedSections,\n      ),",
+      "        collapsedFolders,\n      ),",
+      /collapsedSections is a buildChangeRows argument/,
+    ],
+    [
+      "const landing = advanceLanding(",
+      "const landing = pickLanding(",
+      /landing routes the helper/,
+    ],
+    [
+      '`[data-section-toggle="${landing.section}"]`',
+      '`[data-section-header="${landing.section}"]`',
+      /toggle landing/,
+    ],
+    [
+      "    markerLandingRef.current?.focus();\n    return false;",
+      "    return false;",
+      /silent landing/,
+    ],
+    [
+      "    markerLandingRef.current?.focus();\n    return false;",
+      "    markerLandingRef.current?.focus();\n    landingRef.current?.focus();\n    return false;",
+      /never landingRef/,
+    ],
+    [
+      "      if (onCursorScrolled() || tries === 0) return;",
+      "      if (tries === 0) return;",
+      /the claim loop still runs/,
+    ],
+    [
+      "    if (activeFolderKey !== null && rowKeySection(activeFolderKey) === section)\n      setActiveFolderKey(null);\n",
+      "",
+      /drops the cursor/,
+    ],
+    [
+      "if (claim !== null && rowKeySection(claim) === section) clearPendingFocus();",
+      "if (claim !== null && rowKeySection(claim) === section) return;",
+      /drops the claim/,
+    ],
+    [
+      "    if (collapsedSections.has(section)) {\n      setActiveFolderKey((cur) => (cur === staleKey ? null : cur));",
+      "    if (false) {\n      setActiveFolderKey((cur) => (cur === staleKey ? null : cur));",
+      /backstop never re-keys into a collapsed section/,
+    ],
+    [
+      "aria-expanded={!collapsedSections.has(row.section)}",
+      "aria-expanded={!collapsedSections.has(row.section)}\n                tabIndex={-1}",
+      /no roving or key wiring/,
+    ],
+    [
+      "    if (!collapsing) return;\n",
+      "    if (!collapsing) return;\n    const focusPlan = () => focusAdvanceTarget(null, null, null);\n",
+      /no plan reads the transition render's rows/,
+    ],
+    [
+      "    if (!collapsing) return;\n",
+      "    if (!collapsing) return;\n    sectionsSeen.current = collapsedSections;\n",
+      /the sync is the ref's only write/,
+    ],
+  ];
+  for (const [from, to, message] of mutations) {
+    assert.equal(
+      panelSrc.split(from).length,
+      2,
+      `mutation anchor appears exactly once: ${from}`,
+    );
+    assert.throws(() => pinPanel(panelSrc.replace(from, () => to)), {
+      code: "ERR_ASSERTION",
+      message,
     });
   }
 });

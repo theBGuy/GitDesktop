@@ -379,9 +379,12 @@ export function ConflictResolveView({
         : null;
     const land = () =>
       setLandRequest({ repoPath, path, kind: "header", pressed });
-    // A settled accept unmounts this view (the walk advances or the host drops
-    // the staged file) while the disabled button's focus sits on <body>, where
-    // the unmount hand-off can't see it: hand it to the host's sink first.
+    // A settled accept usually unmounts this view (the walk advances or the host
+    // drops the staged file) while the disabled button's focus sits on <body>,
+    // where the unmount hand-off can't see it: hand it to the host's sink first.
+    // An unclean accept whose walk still shows this file (held by a Resolve all
+    // reading for this tree, or re-armed onto it) keeps the view up, so it lands
+    // back on the pressed control instead.
     const handOff = () => {
       landPendingRef.current = false;
       const now = document.activeElement;
@@ -396,9 +399,10 @@ export function ConflictResolveView({
     const walkGen = walkGeneration();
     const acceptIn = repoPath;
     // A staged file with markers left would ride Continue's commit, so a
-    // marker-bearing proposal is written unstaged. It still leaves this view: the
-    // file stays listed as conflicted, and the hand fix (open in editor, Mark
-    // resolved) lives in the conflict editor, which this view has no counterpart to.
+    // marker-bearing proposal is written unstaged. The file stays conflicted and
+    // the walk moves on, since the hand fix (open in editor, Mark resolved) lives
+    // in the conflict editor; only a walk still on this file (a Resolve all
+    // reading for this tree, or one re-armed onto it) holds it.
     const clean = !hasConflictMarkers(proposed);
     try {
       // Phase "ready" implies `sides`. Its hash, never the re-read's below, is
@@ -480,7 +484,14 @@ export function ConflictResolveView({
           `Applied the proposal to ${baseName(path)} but left it unstaged — conflict markers remain. Fix the rest by hand, then mark it resolved.`,
         );
       }
-      handOff();
+      // Up only when the walk keeps this file and it stays conflicted.
+      const leaves =
+        advances ||
+        clean ||
+        walk.scopePath !== repoPath ||
+        walk.activePath !== path;
+      if (leaves) handOff();
+      else land();
       // An empty queue ends the session, so a single-file resolve exits too.
       if (advances) walk.advance();
     } catch (e) {

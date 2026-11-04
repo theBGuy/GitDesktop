@@ -579,11 +579,8 @@ function pinStore(store) {
     store,
     /const stale = \(\) => prefilterRun !== run \|\| !isLive\(run\);/,
   );
-  // A press bumps the ui epoch and claims it; a seeded start does neither.
-  assert.match(
-    store,
-    /if \(!seeded\) useUiStore\.getState\(\)\.noteUserInteraction\(\);\s*const run: PrefilterRun = \{[^}]*uiEpoch: seeded \? null : useUiStore\.getState\(\)\.interactionEpoch,/,
-  );
+  // A press bumps the ui epoch and claims it; a seeded start does neither (the
+  // bump's own pin sits with the claimed-start pins below).
   assert.match(
     store,
     /run\.epoch === walkEpoch &&\s*\(run\.uiEpoch === null \|\|\s*run\.uiEpoch === useUiStore\.getState\(\)\.interactionEpoch\)/,
@@ -616,6 +613,28 @@ function pinStore(store) {
     /advance: \(opts\) => \{[\s\S]*?selectConflicted\(next, scopePath, opts\?\.landing === true\);/,
   );
   assert.match(store, /if \(landing\) ui\.advanceSelectedFile\(file\);/);
+  // A start claimed at an earlier press drops once a newer interaction moved
+  // the epoch, and otherwise lands without a second bump.
+  assert.match(
+    store,
+    /claimed !== undefined &&\s*claimed !== useUiStore\.getState\(\)\.interactionEpoch/,
+  );
+  assert.match(
+    store,
+    /startOne: \(path, scope, opts\) => \{\s*const claimed = opts\?\.claimedEpoch;\s*if \(claimMoved\(claimed\)\) return;/,
+  );
+  assert.match(
+    store,
+    /selectConflicted\(path, scope, claimed !== undefined\);/,
+  );
+  assert.match(
+    store,
+    /const claimed = opts\?\.claimedEpoch;\s*if \(claimMoved\(claimed\)\) return;\s*\/\/ Ahead of the single-file arm/,
+  );
+  assert.match(
+    store,
+    /if \(!seeded && claimed === undefined\)\s*useUiStore\.getState\(\)\.noteUserInteraction\(\);\s*const run: PrefilterRun = \{[^}]*uiEpoch: seeded \? null : useUiStore\.getState\(\)\.interactionEpoch,/,
+  );
   // Retire acts only for its own tree.
   assert.match(
     store,
@@ -635,7 +654,24 @@ test("the store routes refusals, keeps or clears at the press, releases and reti
     [/(:\s*\{\s*prefiltering: scope,)\s*activePath: null,/, "$1"],
     [/ &&\s*isLive\(prefilterRun\)/, ""],
     ["prefilterRun !== run || !isLive(run)", "prefilterRun !== run"],
-    ["if (!seeded) useUiStore", "useUiStore"],
+    ["if (!seeded && claimed === undefined)", "if (!seeded)"],
+    ["if (!seeded && claimed === undefined)", "if (claimed === undefined)"],
+    [
+      /(startOne: \(path, scope, opts\) => \{\s*const claimed = opts\?\.claimedEpoch;)\s*if \(claimMoved\(claimed\)\) return;/,
+      "$1",
+    ],
+    [
+      /(const seeded = opts\?\.seeded === true;\s*const claimed = opts\?\.claimedEpoch;)\s*if \(claimMoved\(claimed\)\) return;/,
+      "$1",
+    ],
+    [
+      "selectConflicted(path, scope, claimed !== undefined);",
+      "selectConflicted(path, scope);",
+    ],
+    [
+      /claimed !== undefined &&\s*claimed !== useUiStore/,
+      "claimed !== useUiStore",
+    ],
     ["uiEpoch: seeded ? null : ", "uiEpoch: "],
     ["run.uiEpoch === null ||", "false ||"],
     [/(stop: \(\) => \{\s*walkEpoch\+\+;)\s*releaseDeadRun\(\);/, "$1"],

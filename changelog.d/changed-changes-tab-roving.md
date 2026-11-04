@@ -1,3 +1,3 @@
-- Tab now enters the changes list at the row you're on instead of walking
-  every file: the arrow keys move between files, and the current row's stage
-  button is the next Tab stop after it.
+- Tab no longer walks every file in the changes list: it stops on the row
+  you're on, the arrow keys move between files, and that row's stage button is
+  the next Tab stop after it.

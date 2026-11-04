@@ -309,8 +309,15 @@ function pinResolveArms(resolveSource) {
   const arms = [...body.matchAll(/(?<![\w$.])land\s*\(\s*\)/g)].length;
   assert.equal(
     arms,
-    4,
-    `accept: expected 4 land() refusal arms (re-read, undecodable, changed on disk, catch), found ${arms}`,
+    5,
+    `accept: expected 5 land() arms (re-read, undecodable, changed on disk, catch, kept view), found ${arms}`,
+  );
+  // A settled accept hands focus off only when the view leaves; an unclean
+  // accept the walk keeps on screen lands back on the pressed control.
+  assert.match(
+    body,
+    /\bconst\s+leaves\s*=\s*advances\s*\|\|\s*clean\s*\|\|\s*walk\.scopePath\s*!==\s*repoPath\s*\|\|\s*walk\.activePath\s*!==\s*path\s*;\s*if\s*\(\s*leaves\s*\)\s*handOff\(\);\s*else\s+land\(\);/,
+    "accept must hand off only when the view leaves, else land on the pressed control",
   );
   const effect = pinEffect(resolveSource, "acceptBusy");
   assert.doesNotMatch(
@@ -500,9 +507,34 @@ test("the pins fail on a mutated view", () => {
     [
       pinResolveArms.bind(
         null,
-        mutate(res, /handOff\(\);(\s*\/\/ An empty queue)/, "$1"),
+        mutate(res, /if \(leaves\) handOff\(\);\s*else land\(\);/, "land();"),
       ),
-      /hand focus off before walk\.advance/,
+      /hand off only when the view leaves/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          res,
+          /if \(leaves\) handOff\(\);\s*else land\(\);/,
+          "handOff();",
+        ),
+      ),
+      /expected 5 land\(\) arms/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(res, /(advances \|\|)\s*clean \|\|/, "$1"),
+      ),
+      /hand off only when the view leaves/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(res, /\|\|\s*walk\.activePath !== path;/, ";"),
+      ),
+      /hand off only when the view leaves/,
     ],
     [
       pinResolveArms.bind(

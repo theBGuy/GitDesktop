@@ -137,25 +137,24 @@ list flat or as a compacted directory tree: collapsible folders, single-child
 folder chains merged into one row, arrow keys that walk and fold it, and a
 folder context menu that stages, unstages, discards or stashes the files
 shown under it (Discard skips conflicted files, and Stash waits until no file
-is conflicted). The
-Staged and Changes sections collapse too, keeping their counts and their
-Stage all / Unstage all buttons. The
-working-tree diff is one whole-file view with hunk- and line-level staging
-and discarding (drag across the line numbers, spanning hunks freely — a drag
-picks up added and removed lines together in either view, Shift keeps it to
-one side, and Ctrl, or Cmd on macOS, adds to a selection), including
-committing or discarding only part of a brand-new (untracked) file. Partial
-staging is for UTF-8 text, where a long diff opens with up to 1,000 lines and
-Show full diff loads the rest; other encodings stage and discard as a whole file.
-Stage or unstage a drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`,
-without reaching for the button. Press `Space` on a focused file to stage or
-unstage it. Once the file you're viewing has nothing left to stage, whole or
-line by line, the next file in the list opens (the one above it, at the end of
-a section), and unstaging works the same way in Staged. Stage, unstage, or
-discard single files or a multi-selection from the context menu (staging and
-unstaging a selection sit in the command palette too); discarding a whole
-untracked file goes to the recycle bin. Commit with title + body, co-authors
-suggested from history, amend, undo, reset, and revert.
+is conflicted). The Staged and Changes sections collapse too, keeping their
+counts and their Stage all / Unstage all buttons. The working-tree diff is
+one whole-file view with hunk- and line-level staging and discarding (drag
+across the line numbers, spanning hunks freely — a drag picks up added and
+removed lines together in either view, Shift keeps it to one side, and Ctrl,
+or Cmd on macOS, adds to a selection), including committing or discarding
+only part of a brand-new (untracked) file. Partial staging is for UTF-8 text,
+where a long diff opens with up to 1,000 lines and Show full diff loads the
+rest; other encodings stage and discard as a whole file. Stage or unstage a
+drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`, without reaching for the
+button. Press `Space` on a focused file to stage or unstage it. Once the file
+you're viewing has nothing left to stage, whole or line by line, the next
+file in the list opens (the one above it, at the end of a section), and
+unstaging works the same way in Staged. Stage, unstage, or discard single
+files or a multi-selection from the context menu (staging and unstaging a
+selection sit in the command palette too); discarding a whole untracked file
+goes to the recycle bin. Commit with title + body, co-authors suggested from
+history, amend, undo, reset, and revert.
 
 <picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="site/src/assets/readme/lines-poster.webp">

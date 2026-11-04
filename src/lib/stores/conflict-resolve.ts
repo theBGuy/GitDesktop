@@ -39,10 +39,11 @@ import { useUiStore } from "./ui";
  * `startAll` clears the armed walk at the press and reads every file's sides
  * before arming, so the walk lands after those awaits. One prefilter at a time:
  * a new `startAll` supersedes a running one, except an exact repeat (same scope
- * and paths) of a live run, which is a no-op. Every continuation re-checks its
- * run token, `walkEpoch` (each walk change bumps it) and the ui store's
- * `interactionEpoch`, and drops silently once any moved. `prefiltering` is a
- * HOLD signal for the banner, not a liveness signal.
+ * and paths) of a live run, which is a no-op. A claimed start's press bump has
+ * already retired any pressed run, so it supersedes even an exact repeat. Every
+ * continuation re-checks its run token, `walkEpoch` (each walk change bumps it)
+ * and the ui store's `interactionEpoch`, and drops silently once any moved.
+ * `prefiltering` is a HOLD signal for the banner, not a liveness signal.
  */
 interface ConflictResolveState {
   /** The conflicted file with an active resolution session, or null. */
@@ -60,17 +61,25 @@ interface ConflictResolveState {
   prefiltering: string | null;
 
   /** Resolve one file (context-menu / diff-pane button) in `scope`'s tree. Selects
-   *  it so the diff pane shows its resolution view. */
-  startOne: (path: string, scope: string) => void;
+   *  it so the diff pane shows its resolution view. `claimedEpoch` is the ui
+   *  epoch a press bumped to before an await: the start no-ops once a newer
+   *  interaction moved it, else selects without bumping again. */
+  startOne: (
+    path: string,
+    scope: string,
+    opts?: { claimedEpoch?: number },
+  ) => void;
   /** Resolve a list of conflicted files in `scope`'s tree in sequence (the banner's
    *  "Resolve all"), leaving out, with one summary toast, files already resolved
    *  and files the walk would refuse to send. A single file skips only when it is
    *  already resolved. No-op on an empty list. `seeded` marks a start no user
-   *  pressed (a takeover's mount): it neither bumps nor watches the ui epoch. */
+   *  pressed (a takeover's mount): it neither bumps nor watches the ui epoch.
+   *  `claimedEpoch` is as for `startOne`: a stale claim no-ops, a live one is
+   *  the epoch the run watches, with no second bump. */
   startAll: (
     paths: string[],
     scope: string,
-    opts?: { seeded?: boolean },
+    opts?: { seeded?: boolean; claimedEpoch?: number },
   ) => void;
   /** This file is done (accepted) or skipped — move to the next queued file, or
    *  end the run when the queue is empty. `landing` marks a move no user made
@@ -92,9 +101,9 @@ function selectConflicted(path: string, scope: string | null, landing = false) {
   const ui = useUiStore.getState();
   if (scope !== ui.repoPath) return;
   const file = { path, staged: false, untracked: false };
-  // A landing (a prefilter's arm, the self-heal) never bumps: no user made it
-  // now, and a late bump would retire a claimant that snapshots the epoch
-  // without bumping (ActivityDock's navigate).
+  // A landing (a prefilter's arm, the self-heal, a claimed start) never bumps:
+  // no user made it now, and a late bump would retire a claimant that
+  // snapshots the epoch without bumping (ActivityDock's navigate).
   if (landing) ui.advanceSelectedFile(file);
   else ui.selectFile(file);
 }
@@ -129,6 +138,15 @@ function isLive(run: PrefilterRun): boolean {
     run.epoch === walkEpoch &&
     (run.uiEpoch === null ||
       run.uiEpoch === useUiStore.getState().interactionEpoch)
+  );
+}
+
+/** Whether a start's claimed ui epoch is stale: the user interacted after the
+ *  press that claimed it, so starting would override them. Unclaimed starts
+ *  are never stale. */
+function claimMoved(claimed: number | undefined): boolean {
+  return (
+    claimed !== undefined && claimed !== useUiStore.getState().interactionEpoch
   );
 }
 
@@ -215,17 +233,22 @@ export const useConflictResolve = create<ConflictResolveState>()(
     scopePath: null,
     prefiltering: null,
 
-    startOne: (path, scope) => {
+    startOne: (path, scope, opts) => {
+      const claimed = opts?.claimedEpoch;
+      if (claimMoved(claimed)) return;
       walkEpoch++;
       releaseDeadRun();
       set({ activePath: path, queue: [], scopePath: scope });
-      selectConflicted(path, scope);
+      selectConflicted(path, scope, claimed !== undefined);
     },
 
     startAll: (paths, scope, opts) => {
       if (paths.length === 0) return;
       const seeded = opts?.seeded === true;
-      // Ahead of the single-file arm, so a repeat of any size stays a no-op.
+      const claimed = opts?.claimedEpoch;
+      if (claimMoved(claimed)) return;
+      // Ahead of the single-file arm, so an unclaimed repeat of any size stays a
+      // no-op (a claimed start's press already retired the run it repeats).
       const key = JSON.stringify([...paths].sort());
       if (
         prefilterRun?.scope === scope &&
@@ -235,8 +258,10 @@ export const useConflictResolve = create<ConflictResolveState>()(
         return;
       }
       // A press is the request: bump here, since a selection landing after the
-      // reads would bump late and retire whatever the user did meanwhile.
-      if (!seeded) useUiStore.getState().noteUserInteraction();
+      // reads would bump late and retire whatever the user did meanwhile. A
+      // claimed start's press already bumped, and its claim is the live epoch.
+      if (!seeded && claimed === undefined)
+        useUiStore.getState().noteUserInteraction();
       const run: PrefilterRun = {
         scope,
         key,
