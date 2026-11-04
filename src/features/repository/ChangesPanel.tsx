@@ -592,6 +592,17 @@ export function ChangesPanel({
   // whose diff is shown; `anchorKey` is the pivot for shift-range selection.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [anchorKey, setAnchorKey] = useState<string | null>(null);
+  // Bumped by every writer that installs a NEW selection (a click, a range, an
+  // arrow move, a stage's advance, the shown-file follow), never by a prune: a
+  // prune only shrinks the selection the user made, so it is still theirs.
+  const selectionGen = useRef(0);
+  /** A clear after an await: only while no newer selection replaced the one
+   *  the action started from, and only in the repo it started in (the panel
+   *  outlives a repo switch, and keys are side + path alone). */
+  function clearSelectionIfUnchanged(gen: number, repo: string) {
+    if (selectionGen.current !== gen || !landedIn(repo).live) return;
+    setSelectedKeys(new Set());
+  }
   // The shown file as the panel itself last wrote it (the store keeps the very
   // object): any other value came from a route outside the panel, and the
   // multi-selection follows it there.
@@ -868,6 +879,7 @@ export function ChangesPanel({
       if (a !== -1) {
         const [lo, hi] = a <= to ? [a, to] : [to, a];
         // Folder rows contribute no keys: a range spans the files it covers.
+        selectionGen.current += 1;
         setSelectedKeys(
           new Set(
             navRows
@@ -879,6 +891,7 @@ export function ChangesPanel({
         return;
       }
     }
+    selectionGen.current += 1;
     setSelectedKeys(new Set([key]));
     setAnchorKey(key);
   }
@@ -1341,6 +1354,7 @@ export function ChangesPanel({
               untracked: nextEntry.unstaged === "untracked",
             });
             noteOwnShownWrite();
+            selectionGen.current += 1;
             setSelectedKeys((keys) => selectionAfterAdvance(keys, key, next));
             setAnchorKey(next);
             const cursor = cursorAfterAdvance(
@@ -1578,6 +1592,7 @@ export function ChangesPanel({
         visibleKeys: navFileKeys,
       });
       if (follow === null) return;
+      selectionGen.current += 1;
       setSelectedKeys(follow.keys);
       setAnchorKey(follow.anchor);
     },
@@ -1737,6 +1752,7 @@ export function ChangesPanel({
       if (a !== -1 && b !== -1) {
         const [lo, hi] = a <= b ? [a, b] : [b, a];
         // Folder rows contribute no keys: a range spans the files it covers.
+        selectionGen.current += 1;
         setSelectedKeys(
           new Set(
             navRows
@@ -1749,6 +1765,7 @@ export function ChangesPanel({
       }
     }
     if (mods.ctrlOrMeta) {
+      selectionGen.current += 1;
       setSelectedKeys((prev) => {
         const next = new Set(prev);
         if (next.has(key)) next.delete(key);
@@ -1758,6 +1775,7 @@ export function ChangesPanel({
       setAnchorKey(key);
       return;
     }
+    selectionGen.current += 1;
     setSelectedKeys(new Set([key]));
     setAnchorKey(key);
   }
@@ -2259,8 +2277,11 @@ export function ChangesPanel({
   // with staged and unstaged edits keeps the side the user didn't select.
   async function stageSelected() {
     if (stageableSelected.length === 0) return;
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
-      if (await stageGuarded(stageableSelected)) setSelectedKeys(new Set());
+      if (await stageGuarded(stageableSelected))
+        clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -2268,9 +2289,11 @@ export function ChangesPanel({
 
   async function unstageSelected() {
     if (bulk.stagedRows.length === 0) return;
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       await unstage.mutateAsync(bulk.stagedRows.flatMap(unstagePaths));
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -2362,10 +2385,12 @@ export function ChangesPanel({
   async function ignoreSelected() {
     if (bulk.pathEntries.length === 0) return;
     const patterns = bulk.pathEntries.map((e) => `/${globLiteralPath(e.path)}`);
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       const added = await appendIgnore.mutateAsync(patterns);
       toast.success(ignoreToast(added, patterns.length, ".gitignore"));
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -2385,12 +2410,14 @@ export function ChangesPanel({
         bulk.pathEntries.flatMap((e) => aiExcludePatternLinesForPath(e.path)),
       ),
     ];
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       const added = await appendAiIgnore.mutateAsync(patterns);
       toast.success(
         ignoreToast(added, patterns.length, ".gitdesktop/aiignore"),
       );
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -2401,6 +2428,8 @@ export function ChangesPanel({
   async function untrackSelected() {
     const tracked = bulk.trackedPathEntries;
     if (tracked.length === 0) return;
+    const gen = selectionGen.current;
+    const repo = repoPath;
     try {
       await untrack.mutateAsync({
         pathspecs: tracked.map((e) => literalPathspec(e.path)),
@@ -2409,7 +2438,7 @@ export function ChangesPanel({
       toast.success(
         `Untracked ${tracked.length} file${tracked.length === 1 ? "" : "s"} — kept on disk, added to .gitignore`,
       );
-      setSelectedKeys(new Set());
+      clearSelectionIfUnchanged(gen, repo);
     } catch (e) {
       onError(e);
     }
@@ -2423,14 +2452,14 @@ export function ChangesPanel({
     }
     // Cancel stays live while a write is pending, so a newer scope and a newer
     // selection may exist by the time this one settles: close only the scope
-    // being confirmed, and clear only the selection it was confirmed from.
+    // being confirmed, and clear only a selection nobody replaced since.
     const confirming = discardScope;
-    const selection = selectedKeys;
+    const gen = selectionGen.current;
     const finish = () => {
       setDiscardScope((cur) => (cur === confirming ? null : cur));
       // A folder action leaves an unrelated selection alone, like folder Stage.
       if (confirming.kind !== "files" || confirming.folder === undefined)
-        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));
+        clearSelectionIfUnchanged(gen, confirming.repo);
     };
     if (discardScope.kind === "all") {
       try {
@@ -2467,14 +2496,15 @@ export function ChangesPanel({
       setStashScope(null);
       return;
     }
-    // As in confirmDiscard: a newer scope or selection outlives this write.
+    // As in confirmDiscard: close only this scope, and clear only a selection
+    // nobody replaced since.
     const confirming = stashScope;
-    const selection = selectedKeys;
+    const gen = selectionGen.current;
     const finish = () => {
       setStashScope((cur) => (cur === confirming ? null : cur));
       // A folder action leaves an unrelated selection alone, like folder Stage.
       if (confirming.kind !== "files" || confirming.folder === undefined)
-        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));
+        clearSelectionIfUnchanged(gen, confirming.repo);
     };
     if (stashScope.kind === "all") {
       try {

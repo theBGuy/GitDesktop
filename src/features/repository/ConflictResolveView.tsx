@@ -375,7 +375,8 @@ export function ConflictResolveView({
   async function accept() {
     if (acceptingRef.current) return;
     // Captured before any await: the hold disables the button and Chromium
-    // blurs it to <body>. The refusal arms keep this view up and land focus.
+    // blurs it to <body>. Most refusal arms keep this view up and land focus;
+    // the not-conflicted one leaves, so it hands off.
     landPendingRef.current = true;
     const active = document.activeElement;
     const pressed =
@@ -440,13 +441,15 @@ export function ConflictResolveView({
         return;
       // A file resolved outside the app reads with no stages and no error, and
       // the backend accepts writes over unmerged paths by design: refuse here,
-      // or the proposal would land over the user's resolution.
+      // or the proposal would land over the user's resolution. The view is
+      // leaving (the next status read drops it), so focus goes to the host's
+      // sink before the await, as a settled accept's does.
       if (noLongerConflicted(fresh)) {
         toast.info(
           `${baseName(path)} is no longer conflicted — nothing was changed.`,
         );
+        handOff();
         await refreshConflictFile(queryClient, acceptIn);
-        land();
         return;
       }
       if (fresh.undecodable) {

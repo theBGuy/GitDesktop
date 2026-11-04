@@ -302,16 +302,88 @@ function pinViewArms(viewSource) {
   pinUnmountHandOff(viewSource, true);
 }
 
+/** accept()'s exits that owe a focus request, each with the one it owes. A
+ *  refused accept keeps the view up and lands on the pressed control; the
+ *  not-conflicted refusal leaves, so it hands off before its await. */
+const ACCEPT_FOCUS_ARMS = [
+  ["the re-read failure", /\bcatch\s*\{/, "land"],
+  [
+    "the not-conflicted arm",
+    /\bif\s*\(\s*noLongerConflicted\(\s*fresh\s*\)\s*\)\s*\{/,
+    "handOff",
+  ],
+  ["the undecodable arm", /\bif\s*\(\s*fresh\.undecodable\s*\)\s*\{/, "land"],
+  [
+    "the changed-on-disk arm",
+    /\bif\s*\(\s*outcome\.kind\s*===[^)]*\)\s*\{/,
+    "land",
+  ],
+  ["the write failure", /\bcatch\s*\(\s*e\s*\)\s*\{/, "land"],
+];
+/** Returns that owe none: the re-entry guard runs before anything is captured,
+ *  `!sides` can't happen in phase "ready", a moved generation belongs to the
+ *  restart that moved it, and refuseIfMoved's arms are unmounts and hides. */
+const ACCEPT_SILENT_RETURNS = [
+  /\bif\s*\(\s*acceptingRef\.current\s*\)\s*return\s*;/,
+  /\bif\s*\(\s*!sides\s*\)\s*return\s*;/,
+  /\bif\s*\(\s*gen\s*!==\s*genRef\.current\s*\)\s*return\s*;/,
+  /\bif\s*\(\s*refuseIfMoved\([^;]*\)\s*\)\s*return\s*;/,
+];
+const focusCall = (name) =>
+  new RegExp(String.raw`(?<![\w$.])${name}\s*\(\s*\)\s*;`, "g");
+
+/** Ties each of accept()'s focus requests to its arm. The set is bounded by
+ *  the returns: every `return` in accept() sits in a focus arm or is a
+ *  listed silent one, so a new exit fails until it is classified here. The
+ *  settle's leaves/land split is pinned beside this. */
+function pinAcceptArmFocus(body) {
+  const spans = [];
+  for (const [name, opener, call] of ACCEPT_FOCUS_ARMS) {
+    const hits = [...body.matchAll(new RegExp(opener.source, "g"))];
+    assert.equal(
+      hits.length,
+      1,
+      `accept: ${name} must appear once, found ${hits.length}`,
+    );
+    const open = hits[0].index + hits[0][0].length - 1;
+    const close = matchBrace(body, open);
+    const block = body.slice(open, close);
+    spans.push([open, close]);
+    const other = call === "land" ? "handOff" : "land";
+    const calls = [...block.matchAll(focusCall(call))];
+    assert.ok(
+      calls.length === 1 && block.search(focusCall(other)) === -1,
+      `accept: ${name} must call ${call}() and only that`,
+    );
+    const ret = block.search(/\breturn\s*;/);
+    assert.ok(
+      ret === -1 || calls[0].index < ret,
+      `accept: ${name} must call ${call}() before its return`,
+    );
+    const wait = block.search(/(?<![\w$])await(?![\w$])/);
+    assert.ok(
+      call !== "handOff" || wait === -1 || calls[0].index < wait,
+      `accept: ${name} must call handOff() before its await`,
+    );
+  }
+  for (const re of ACCEPT_SILENT_RETURNS) {
+    const m = re.exec(body);
+    assert.ok(m, `accept: the silent return ${re} moved`);
+    spans.push([m.index, m.index + m[0].length]);
+  }
+  for (const m of body.matchAll(/\breturn\b/g)) {
+    assert.ok(
+      spans.some(([a, b]) => m.index > a && m.index < b),
+      `accept: a return outside every classified arm, at offset ${m.index}`,
+    );
+  }
+}
+
 function pinResolveArms(resolveSource) {
   const src = load(resolveSource);
   const { open, close } = functionBody(src, "accept");
   const body = src.masked.slice(open, close);
-  const arms = [...body.matchAll(/(?<![\w$.])land\s*\(\s*\)/g)].length;
-  assert.equal(
-    arms,
-    6,
-    `accept: expected 6 land() arms (re-read, not conflicted, undecodable, changed on disk, catch, kept view), found ${arms}`,
-  );
+  pinAcceptArmFocus(body);
   // A settled accept hands focus off only when the view leaves; an unclean
   // accept the walk keeps on screen lands back on the pressed control.
   assert.match(
@@ -326,8 +398,14 @@ function pinResolveArms(resolveSource) {
     "a landing while the view stays mounted uses the view's own sink",
   );
   // A settled accept unmounts the view: hand focus to the host's sink first.
-  const handOff = body.search(/(?<![\w$.])handOff\s*\(\s*\)\s*;/);
-  const advance = body.search(/\bwalk\.advance\s*\(\s*\)/);
+  // Bound to the settle's own split, since the not-conflicted refusal arm
+  // hands off earlier in the body.
+  const handOff = body.search(
+    /\bif\s*\(\s*leaves\s*\)\s*handOff\s*\(\s*\)\s*;\s*else\s+land\s*\(\s*\)\s*;/,
+  );
+  const advance = body.search(
+    /\bif\s*\(\s*advances\s*\)\s*walk\.advance\s*\(\s*\)\s*;/,
+  );
   assert.ok(
     handOff !== -1 && advance !== -1 && handOff < advance,
     "accept must hand focus off before walk.advance() unmounts the view",
@@ -520,7 +598,75 @@ test("the pins fail on a mutated view", () => {
           "handOff();",
         ),
       ),
-      /expected 6 land\(\) arms/,
+      /hand off only when the view leaves/,
+    ],
+    // The settle's split moved after the advance that unmounts the view.
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          res,
+          /(\s*\/\/ Up only when[^\n]*\n\s*const leaves =[\s\S]*?else land\(\);)([\s\S]*?\n\s*if \(advances\) walk\.advance\(\);)/,
+          "$2$1",
+        ),
+      ),
+      /hand focus off before walk\.advance\(\) unmounts/,
+    ],
+    // The land() count stays the same, so only the per-arm pin sees the move.
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          mutate(
+            res,
+            /(keep the file's bytes exact\.`,\s*\);\s*)land\(\);/,
+            "$1",
+          ),
+          /(if \(outcome\.kind === "changedOnDisk"\) \{\s*toast\.info\(changedOnDiskCopy\(baseName\(path\)\)\);\s*)land\(\);/,
+          "$1land();\n        land();",
+        ),
+      ),
+      /the undecodable arm must call land\(\) and only that/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          res,
+          /handOff\(\);(\s*await refreshConflictFile\(queryClient, acceptIn\);)/,
+          "$1\n        land();",
+        ),
+      ),
+      /the not-conflicted arm must call handOff\(\) and only that/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          res,
+          /handOff\(\);(\s*await refreshConflictFile\(queryClient, acceptIn\);)/,
+          "$1\n        handOff();",
+        ),
+      ),
+      /the not-conflicted arm must call handOff\(\) before its await/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(res, /(toastError\(e\);)\s*land\(\);/, "$1"),
+      ),
+      /the write failure must call land\(\) and only that/,
+    ],
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          res,
+          /(const outcome = await resolve\.mutateAsync\()/,
+          'if (proposed === "") return;\n      $1',
+        ),
+      ),
+      /a return outside every classified arm/,
     ],
     [
       pinResolveArms.bind(

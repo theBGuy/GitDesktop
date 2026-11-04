@@ -349,7 +349,7 @@ test("the accept pin fails on a dropped, stale or late check", () => {
   );
   const noReturn = mutate(
     res,
-    /(await refreshConflictFile\(queryClient, acceptIn\);\s*land\(\);)\s*return;/,
+    /(handOff\(\);\s*await refreshConflictFile\(queryClient, acceptIn\);)\s*return;/,
     "$1",
   );
   const arm = /\s*if \(noLongerConflicted\(fresh\)\) \{[\s\S]*?\n {6}\}/.exec(

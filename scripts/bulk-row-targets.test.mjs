@@ -1001,20 +1001,20 @@ function confirmProblems(text) {
   // A folder action leaves an unrelated selection alone; the others clear it.
   // Cancel stays live while a write is pending, so a newer dialog and a newer
   // selection may exist when this one settles: finish closes only the scope it
-  // confirmed and clears only the selection captured at the confirm, through a
-  // pure updater. The mask blanks "files", so the kind check reads the unmasked
-  // body.
+  // confirmed and clears through clearSelectionIfUnchanged with the selection
+  // generation and repo captured at the confirm. The mask blanks "files", so
+  // the kind check reads the unmasked body.
   for (const [fn, scope, setter] of [
     ["confirmDiscard", "discardScope", "setDiscardScope"],
     ["confirmStash", "stashScope", "setStashScope"],
   ]) {
     const finish = new RegExp(
       String.raw`const confirming = ${scope};\s*` +
-        String.raw`const selection = selectedKeys;\s*` +
+        String.raw`const gen = selectionGen\.current;\s*` +
         String.raw`const finish = \(\) => \{\s*` +
         String.raw`${setter}\(\(cur\) => \(cur === confirming \? null : cur\)\);\s*` +
         String.raw`if \(confirming\.kind !== "files" \|\| confirming\.folder === undefined\)\s*` +
-        String.raw`setSelectedKeys\(\(cur\) => \(cur === selection \? new Set\(\) : cur\)\);\s*\};`,
+        String.raw`clearSelectionIfUnchanged\(gen, confirming\.repo\);\s*\};`,
     );
     const at = masked.search(new RegExp(String.raw`\basync function ${fn}\(`));
     const fnBody = functionBody(masked, fn);
@@ -1044,9 +1044,18 @@ test("confirm pin mutation controls go red", () => {
   const pathsTargets =
     "    const targets = stashScope.entries.map((e) => e.path);";
   const stashFinish =
-    "    const confirming = stashScope;\n    const selection = selectedKeys;\n    const finish = () => {";
-  const clearIfSame =
-    "        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));";
+    "    const confirming = stashScope;\n    const gen = selectionGen.current;\n    const finish = () => {";
+  const clearIfUnchanged =
+    "        clearSelectionIfUnchanged(gen, confirming.repo);";
+  const subsetClear = [
+    "        setSelectedKeys((cur) =>",
+    "          cur.size > 0 && [...cur].every((k) => selection.has(k))",
+    "            ? new Set()",
+    "            : cur,",
+    "        );",
+  ].join("\n");
+  const discardFinishHead =
+    '      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n';
   const withoutMatchedClear = mutate(text, inMatched, "      if (matched) {\n");
   const withoutAllClear = mutate(
     text,
@@ -1071,21 +1080,35 @@ test("confirm pin mutation controls go red", () => {
     withoutAllClear,
     mutate(
       text,
-      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}`,
+      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfUnchanged}`,
       "      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      setSelectedKeys(new Set());",
     ),
     // An older write's settle wipes a newer selection made after Cancel.
     mutate(
       text,
-      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}`,
+      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfUnchanged}`,
       `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n        setSelectedKeys(new Set());`,
     ),
     mutate(
       text,
-      `      setStashScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}`,
+      `      setStashScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfUnchanged}`,
       `      setStashScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n        setSelectedKeys(new Set());`,
     ),
-    // No snapshot: the compare has nothing captured at the confirm.
+    // The identity form: a status poll's prune mid-write leaves the pruned
+    // remainder of the confirmed selection selected.
+    mutate(
+      text,
+      `${discardFinishHead}${clearIfUnchanged}`,
+      `${discardFinishHead}        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));`,
+    ),
+    // The subset form: a deliberate re-click of a confirmed row, or a same-path
+    // key in another repo, reads as the confirmed selection and is wiped.
+    mutate(
+      text,
+      `${discardFinishHead}${clearIfUnchanged}`,
+      `${discardFinishHead}${subsetClear}`,
+    ),
+    // No snapshot: the clear has no generation captured at the confirm.
     mutate(
       text,
       stashFinish,
@@ -1116,12 +1139,159 @@ test("confirm pin mutation controls go red", () => {
     // Reading the live scope instead of the captured one.
     mutate(
       text,
-      `      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}\n    };\n    if (discardScope.kind`,
-      `      if (discardScope.kind !== "files" || discardScope.folder === undefined)\n${clearIfSame}\n    };\n    if (discardScope.kind`,
+      `      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfUnchanged}\n    };\n    if (discardScope.kind`,
+      `      if (discardScope.kind !== "files" || discardScope.folder === undefined)\n${clearIfUnchanged}\n    };\n    if (discardScope.kind`,
     ),
   ];
   for (const mutant of mutants)
     assert.notDeepEqual(confirmProblems(mutant), []);
+});
+
+/** Handlers that clear the selection after an await: each captures the
+ *  selection generation and repo before it and clears through the helper. */
+const POST_AWAIT_CLEARS = [
+  "stageSelected",
+  "unstageSelected",
+  "ignoreSelected",
+  "aiExcludeSelected",
+  "untrackSelected",
+  "confirmDiscard",
+  "confirmStash",
+];
+const GEN_BUMP = "selectionGen.current += 1;";
+
+/** Problems with ChangesPanel's selection generation: the helper checks both
+ *  the generation and the live repo, it is the only clear, every post-await
+ *  clearer captures first, and every writer that installs a new selection
+ *  bumps while a prune (shrinking what the user chose) never does. */
+function selectionGenProblems(text) {
+  const problems = [];
+  const masked = maskNonCode(text, true);
+  const helper =
+    /\bfunction clearSelectionIfUnchanged\(gen: number, repo: string\) \{/.exec(
+      masked,
+    );
+  if (!helper) return ["clearSelectionIfUnchanged is not declared"];
+  const hOpen = helper.index + helper[0].length - 1;
+  const hClose = matchBrace(masked, hOpen);
+  const hBody = text.slice(hOpen, hClose);
+  const guard = hBody.search(/\bif \(/);
+  const clear = hBody.indexOf("setSelectedKeys(new Set());");
+  if (!/selectionGen\.current !== gen\b/.test(hBody.slice(0, clear)))
+    problems.push("clearSelectionIfUnchanged must check the generation");
+  if (!/!landedIn\(repo\)\.live\b/.test(hBody.slice(0, clear)))
+    problems.push("clearSelectionIfUnchanged must check the live repo");
+  if (
+    guard === -1 ||
+    clear < guard ||
+    !/\)\s*return;/.test(hBody.slice(guard, clear))
+  )
+    problems.push("clearSelectionIfUnchanged must return before its clear");
+  for (const m of masked.matchAll(/\bsetSelectedKeys\(new Set\(\)\)/g)) {
+    if (m.index > hOpen && m.index < hClose) continue;
+    problems.push("a direct selection clear outside clearSelectionIfUnchanged");
+  }
+  for (const fn of POST_AWAIT_CLEARS) {
+    const body = functionBody(masked, fn);
+    if (body === null) {
+      problems.push(`${fn} is not found`);
+      continue;
+    }
+    const capture = body.indexOf("const gen = selectionGen.current;");
+    const firstAwait = body.search(/(?<![\w$])await(?![\w$])/);
+    if (
+      capture === -1 ||
+      firstAwait === -1 ||
+      capture > firstAwait ||
+      !/\bclearSelectionIfUnchanged\(gen, /.test(body)
+    )
+      problems.push(
+        `${fn} must capture the generation before its await and clear through the helper`,
+      );
+  }
+  for (const m of masked.matchAll(/\bsetSelectedKeys\(/g)) {
+    if (m.index > hOpen && m.index < hClose) continue;
+    const open = m.index + m[0].length - 1;
+    const arg = masked.slice(open, matchBrace(masked, open));
+    const prune =
+      /\b(pruneHiddenKeys|pruneCollapsedSectionKeys)\(|\blive\.has\(/.test(arg);
+    const bumped = masked.slice(0, m.index).trimEnd().endsWith(GEN_BUMP);
+    const line = text.slice(0, m.index).split("\n").length;
+    if (prune && bumped)
+      problems.push(
+        `a prune must not bump the selection generation (line ${line})`,
+      );
+    if (!prune && !bumped)
+      problems.push(
+        `a new-selection writer must bump the selection generation (line ${line})`,
+      );
+  }
+  return problems;
+}
+
+test("selection clears after an await go through the generation helper", () => {
+  assert.deepEqual(selectionGenProblems(source(PANEL)), []);
+});
+
+test("selection generation pin mutation controls go red", () => {
+  const text = source(PANEL);
+  const cases = [
+    [
+      mutate(
+        text,
+        "      await unstage.mutateAsync(bulk.stagedRows.flatMap(unstagePaths));\n      clearSelectionIfUnchanged(gen, repo);",
+        "      await unstage.mutateAsync(bulk.stagedRows.flatMap(unstagePaths));\n      setSelectedKeys(new Set());",
+      ),
+      /a direct selection clear outside clearSelectionIfUnchanged/,
+    ],
+    [
+      mutate(
+        text,
+        "    if (mods.ctrlOrMeta) {\n      selectionGen.current += 1;\n",
+        "    if (mods.ctrlOrMeta) {\n",
+      ),
+      /a new-selection writer must bump the selection generation/,
+    ],
+    [
+      mutate(
+        text,
+        "    setSelectedKeys((prev) => {\n      const next = new Set([...prev].filter((k) => live.has(k)));",
+        "    selectionGen.current += 1;\n    setSelectedKeys((prev) => {\n      const next = new Set([...prev].filter((k) => live.has(k)));",
+      ),
+      /a prune must not bump the selection generation/,
+    ],
+    [
+      mutate(
+        text,
+        "if (selectionGen.current !== gen || !landedIn(repo).live) return;",
+        "if (selectionGen.current !== gen) return;",
+      ),
+      /must check the live repo/,
+    ],
+    [
+      mutate(
+        text,
+        "if (selectionGen.current !== gen || !landedIn(repo).live) return;",
+        "if (!landedIn(repo).live) return;",
+      ),
+      /must check the generation/,
+    ],
+    [
+      mutate(
+        text,
+        "    ];\n    const gen = selectionGen.current;\n",
+        "    ];\n",
+      ),
+      /aiExcludeSelected must capture the generation before its await/,
+    ],
+  ];
+  for (const [mutant, message] of cases) {
+    const problems = selectionGenProblems(mutant);
+    assert.ok(
+      problems.some((p) => message.test(p)),
+      `expected ${message}, got ${JSON.stringify(problems)}`,
+    );
+  }
 });
 
 // Untracked Windows-reserved names stay out of a path stash (the backend drops
