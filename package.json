@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "biome check --write ./src/ ./site/",
     "checks": "node scripts/check-banned-patterns.mjs && node scripts/check-rust-invariants.mjs && node scripts/check-og-cards.mjs && node scripts/check-dead-surface.mjs && node scripts/check-skill-mirrors.mjs && node scripts/check-tauri-plugin-parity.mjs && node scripts/check-lockfile-dedupe.mjs && node scripts/check-appimage-env-twins.mjs && node scripts/check-enforced-node-suites.mjs && node scripts/check-reused-view-pending.mjs && node --test \"scripts/*.test.mjs\"",
+    "test": "vitest run",
     "preview": "vite preview",
     "changelog": "node scripts/changelog-draft.mjs",
     "changelog:preview": "node scripts/changelog-draft.mjs --preview",
@@ -80,6 +81,10 @@
     "@biomejs/biome": "2.6.3",
     "@rolldown/plugin-babel": "^0.2.4",
     "@tauri-apps/cli": "^2.12.4",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
     "@types/babel__core": "^7.20.5",
     "@types/node": "^24.13.6",
     "@types/react": "^19.3.0",
@@ -88,12 +93,14 @@
     "babel-plugin-react-compiler": "^1.0.0",
     "globals": "^17.13.0",
     "jscpd": "^5.4.2",
+    "jsdom": "^30.1.3",
     "knip": "^6.42.1",
     "typescript": "~6.0.3",
-    "vite": "^8.3.1"
+    "vite": "^8.3.1",
+    "vitest": "^5.0.5"
   },
   "engines": {
-    "node": ">=24"
+    "node": "^24.15.0 || >=26.0.0"
   },
   "packageManager": "pnpm@11.18.0+sha512.33d83c77da82f49fba836925c6f1b841181ec3132b670639bd012f7075f5c7cf634c5f870147c19aae7478fac01df09d8892e880454896edd23ee9b33757563c"
 }

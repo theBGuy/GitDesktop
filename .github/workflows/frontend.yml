@@ -23,6 +23,7 @@ on:
       - "scripts/**" # the Node-suites step reads these
       - "index.html"
       - "vite.config.ts"
+      - "vitest.config.ts"
       - "tsconfig*.json"
       - "biome.json"
       - ".gitignore" # live biome input (vcs.useIgnoreFile)
@@ -63,6 +64,9 @@ jobs:
       # Check-only (biome ci never writes); `pnpm lint` locally is --write.
       - name: Lint and format check
         run: pnpm exec biome ci ./src/
+
+      - name: Component tests (Vitest)
+        run: pnpm test
 
       # Suites whose dependencies live in node_modules and therefore SKIP in the
       # no-install guards job: the reference detector's render oracle needs

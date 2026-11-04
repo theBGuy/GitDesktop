@@ -159,6 +159,7 @@ change; new or edited guide sections follow it now.
 ```sh
 pnpm build      # typecheck (tsc) + bundle the frontend
 pnpm lint       # Biome (format + lint) — run before committing
+pnpm test       # Vitest component/interaction tests (jsdom)
 cargo test --manifest-path src-tauri/Cargo.toml   # Rust unit tests
 cd site && pnpm build   # build the marketing site
 pnpm changelog:preview  # preview pending changelog.d/ fragments

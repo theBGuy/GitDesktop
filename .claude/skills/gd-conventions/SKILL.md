@@ -44,10 +44,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cd site && pnpm build                  # when the marketing site changed
 pnpm run checks                        # guard scripts + self-tests — CI quality.yml guards job
+pnpm test                              # Vitest component tests (jsdom) — CI frontend.yml installed job
 ```
 
-Frontend changes run the first pair; Rust changes add the cargo pair. Not
-"done" until green.
+Frontend changes run the first pair plus `pnpm test` (CI runs it on every
+`src/**` change, and "which surfaces a suite exercises" is not decidable
+locally); Rust changes add the cargo pair. Not "done" until green.
 
 ⚠ **Formatting fixes stay in scope:** implementers format only their own files,
 via the targeted `pnpm exec biome check --write <files in scope>`, never the
@@ -62,6 +64,51 @@ gate is the CI form over LF-normalized copies: copy each edited file to a
 delete them after. `biome lint` is NOT a gate — it skips the formatter and
 assist layers `biome ci` enforces (a measured false clean, three CI reds).
 Never "fix" a red by converting line endings.
+
+## Frontend testing — two layers, routed by what the test asserts
+
+Two frontend test layers exist; pick by assertion kind, never by habit:
+
+- **Behaviour a user could observe** (render, interact, assert the outcome) →
+  a Vitest interaction test in `src/test/**/*.test.{ts,tsx}` (`pnpm test`; RTL +
+  user-event on jsdom; CI runs it in frontend.yml's installed job). Never add a
+  NEW source-scan pin for behaviour a jsdom test can exercise.
+- **"Every X does Y" class invariants** (roster/adopter scans over `src/`) and
+  **pure-logic `.ts` imports** → `scripts/*.test.mjs` as before (installless:
+  the `guards` job runs that glob with NO node_modules — a vitest-style test
+  there reds every PR).
+
+**Conversion is opportunistic, never a mass rewrite:** when a change touches
+behaviour an existing scan suite pins, convert those pins to interaction tests
+in the same change and delete only the pins the new tests replace; shape-guard
+scans stay scans. A conversion proves itself the way scan suites always have —
+a mutation of the pinned wiring goes red under the NEW tests before the old
+pin is deleted.
+
+Component-layer mechanics (set by the spike; extend, don't re-derive):
+- `src/test/setup.ts` installs a transport that REJECTS any unmocked `invoke()`
+  command (and records it in `unmockedCommands`) — mock at the api-module seam
+  (`vi.mock("@/lib/<area>/api")`), and never spell `invoke("literal")` in a
+  test: the dead-surface guard pairs those with registered Rust commands. A
+  module importing `@tauri-apps/api/core` or a Tauri plugin directly bypasses
+  that transport (four src files outside `src/lib/transport/` do today), so a
+  test reaching one mocks that module itself.
+- The React Compiler is ACTIVE under Vitest (vitest.config.ts merges
+  vite.config.ts) — tests exercise the shipped artifact, so no render-count or
+  referential-identity assertions.
+- jsdom shims live in setup.ts (`matchMedia`, `ResizeObserver`,
+  `Element.prototype.getAnimations` — Base UI's ScrollArea and Dialog need the
+  last one; without it every test still passes, but Vitest reports the thrown
+  errors as unhandled and exits non-zero). Add a shim only on an observed
+  failure, with the failing module cited beside it.
+- tsconfig.test.json puts the test project under `tsc -b`, so every app module
+  a test imports is also typechecked with `types: ["vite/client", "node"]`: a
+  `pnpm build` error naming an app file can come from the test project.
+- The src-wide guard scans read `src/test/` too — a guard red against a test
+  file is fixed in the test, never by widening the guard.
+- Under an agent session vitest picks its minimal reporter, which hides console
+  output from passing tests — act warnings and the unmocked-command warning only
+  show under `pnpm exec vitest run --silent=false`.
 
 ## Frontend conventions
 
