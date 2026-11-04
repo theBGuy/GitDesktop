@@ -442,7 +442,7 @@ export function ConflictBanner({
                 onClick={() => startAll(conflictedPaths, repoPath)}
               >
                 {prefilterHold ? (
-                  <Spinner data-icon="inline-start" />
+                  <Spinner aria-hidden data-icon="inline-start" />
                 ) : (
                   <SparkleIcon data-icon="inline-start" />
                 )}

@@ -33,6 +33,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
 import { statusReadFailed } from "@/features/repository/StatusReadError";
@@ -149,11 +150,7 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
   useWalkSelfHeal(
     repoPath,
     status.data && !status.isPlaceholderData
-      ? status.data.entries
-          .filter(
-            (e) => e.unstaged === "conflicted" || e.staged === "conflicted",
-          )
-          .map((e) => e.path)
+      ? status.data.entries.filter(isConflictedEntry).map((e) => e.path)
       : null,
   );
   // Render off a deferred selection so rapidly arrowing the changes list only

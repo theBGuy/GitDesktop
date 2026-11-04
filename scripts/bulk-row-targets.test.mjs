@@ -558,7 +558,8 @@ function stashItemProblems(text, masked) {
     }
     const [start, openEnd, end] = item;
     const open = masked.slice(start, openEnd);
-    if (!/\bdisabled=\{anyConflicted\}/.test(open))
+    // The file item also disables on its own reserved-name gate.
+    if (!/\bdisabled=\{anyConflicted(?: \|\| stashBlocked)?\}/.test(open))
       problems.push(`${name} doesn't disable while a file is conflicted`);
     if (!/\bclassName=\{MENU_HELD_ROW_CLASS\}/.test(open))
       problems.push(`${name} lacks MENU_HELD_ROW_CLASS`);
@@ -890,7 +891,7 @@ test("menu pin mutation controls go red", () => {
     );
     assert.ok(item.includes(label), opening);
     for (const [from, to] of [
-      ["disabled={anyConflicted}", ""],
+      [/disabled=\{anyConflicted(?: \|\| stashBlocked)?\}/, ""],
       ["className={MENU_HELD_ROW_CLASS}", ""],
       ['anyConflicted ? CONFLICT_HINT : ""', '""'],
     ])
@@ -998,19 +999,22 @@ function confirmProblems(text) {
   if (clears.some((at) => at < all))
     problems.push("confirmStash clears the offer before any stash exists");
   // A folder action leaves an unrelated selection alone; the others clear it.
-  // Cancel stays live while a write is pending, so a newer dialog may be open
-  // when this one settles: finish closes only the scope it confirmed. The
-  // mask blanks "files", so the kind check reads the unmasked body.
+  // Cancel stays live while a write is pending, so a newer dialog and a newer
+  // selection may exist when this one settles: finish closes only the scope it
+  // confirmed and clears only the selection captured at the confirm, through a
+  // pure updater. The mask blanks "files", so the kind check reads the unmasked
+  // body.
   for (const [fn, scope, setter] of [
     ["confirmDiscard", "discardScope", "setDiscardScope"],
     ["confirmStash", "stashScope", "setStashScope"],
   ]) {
     const finish = new RegExp(
       String.raw`const confirming = ${scope};\s*` +
+        String.raw`const selection = selectedKeys;\s*` +
         String.raw`const finish = \(\) => \{\s*` +
         String.raw`${setter}\(\(cur\) => \(cur === confirming \? null : cur\)\);\s*` +
         String.raw`if \(confirming\.kind !== "files" \|\| confirming\.folder === undefined\)\s*` +
-        String.raw`setSelectedKeys\(new Set\(\)\);\s*\};`,
+        String.raw`setSelectedKeys\(\(cur\) => \(cur === selection \? new Set\(\) : cur\)\);\s*\};`,
     );
     const at = masked.search(new RegExp(String.raw`\basync function ${fn}\(`));
     const fnBody = functionBody(masked, fn);
@@ -1040,7 +1044,9 @@ test("confirm pin mutation controls go red", () => {
   const pathsTargets =
     "    const targets = stashScope.entries.map((e) => e.path);";
   const stashFinish =
-    "    const confirming = stashScope;\n    const finish = () => {";
+    "    const confirming = stashScope;\n    const selection = selectedKeys;\n    const finish = () => {";
+  const clearIfSame =
+    "        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));";
   const withoutMatchedClear = mutate(text, inMatched, "      if (matched) {\n");
   const withoutAllClear = mutate(
     text,
@@ -1065,8 +1071,25 @@ test("confirm pin mutation controls go red", () => {
     withoutAllClear,
     mutate(
       text,
-      '      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n        setSelectedKeys(new Set());',
+      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}`,
       "      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      setSelectedKeys(new Set());",
+    ),
+    // An older write's settle wipes a newer selection made after Cancel.
+    mutate(
+      text,
+      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}`,
+      `      setDiscardScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n        setSelectedKeys(new Set());`,
+    ),
+    mutate(
+      text,
+      `      setStashScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}`,
+      `      setStashScope((cur) => (cur === confirming ? null : cur));\n      // A folder action leaves an unrelated selection alone, like folder Stage.\n      if (confirming.kind !== "files" || confirming.folder === undefined)\n        setSelectedKeys(new Set());`,
+    ),
+    // No snapshot: the compare has nothing captured at the confirm.
+    mutate(
+      text,
+      stashFinish,
+      "    const confirming = stashScope;\n    const finish = () => {",
     ),
     mutate(
       text,
@@ -1093,12 +1116,8 @@ test("confirm pin mutation controls go red", () => {
     // Reading the live scope instead of the captured one.
     mutate(
       text,
-      "    const confirming = discardScope;\n",
-      "    const confirming = discardScope;\n    void confirming;\n",
-    ).replace(
-      '      if (confirming.kind !== "files" || confirming.folder === undefined)\n        setSelectedKeys(new Set());\n    };\n    if (discardScope.kind',
-      () =>
-        '      if (discardScope.kind !== "files" || discardScope.folder === undefined)\n        setSelectedKeys(new Set());\n    };\n    if (discardScope.kind',
+      `      if (confirming.kind !== "files" || confirming.folder === undefined)\n${clearIfSame}\n    };\n    if (discardScope.kind`,
+      `      if (discardScope.kind !== "files" || discardScope.folder === undefined)\n${clearIfSame}\n    };\n    if (discardScope.kind`,
     ),
   ];
   for (const mutant of mutants)

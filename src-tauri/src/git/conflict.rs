@@ -536,13 +536,22 @@ pub(crate) async fn git_checkout_conflict_side_core(
         return Ok(());
     }
     // A stage-0 checkout restores the staged copy over unstaged edits. Refuse
-    // unless the path is known absent, when a repeat accept settles a removal.
+    // unless the path is known absent from both the disk and the index, when a
+    // repeat accept settles a removal; a stage-0 entry means it was resolved.
     if stages.is_empty() {
         if matches!(
             tokio::fs::try_exists(Path::new(&repo_path).join(&path)).await,
             Ok(false)
         ) {
-            return Ok(());
+            let staged = run_git(
+                Some(&repo_path),
+                &["ls-files", "-s", "--", &spec],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            if staged.stdout_lossy().trim().is_empty() {
+                return Ok(());
+            }
         }
         return Err(AppError::InvalidArgument(NOT_CONFLICTED_REFUSAL.into()));
     }
@@ -1232,6 +1241,45 @@ mod tests {
                 result,
                 Err(AppError::InvalidArgument(m)) if m == NOT_CONFLICTED_REFUSAL
             ));
+        }
+    }
+
+    /// No stages and no file is not enough to settle as a taken removal: a path
+    /// resolved at stage 0 and then deleted from disk must refuse, leaving the
+    /// index entry and the absent file as they were.
+    #[tokio::test]
+    async fn a_resolved_then_deleted_path_refuses_both_sides() {
+        let (_dir, repo) = conflicted_repo("resolved-deleted", "file.txt", &[]).await;
+        let file = Path::new(&repo).join("file.txt");
+        run_git(Some(&repo), &["add", "--", "file.txt"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        std::fs::remove_file(&file).unwrap();
+        let index_before = stdout_of(&repo, &["ls-files", "-s", "--", "file.txt"]).await;
+        assert!(!index_before.trim().is_empty());
+
+        let state = AppState::default();
+        for side in ["ours", "theirs"] {
+            let result = git_checkout_conflict_side_core(
+                &state,
+                repo.clone(),
+                "file.txt".into(),
+                side.into(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(AppError::InvalidArgument(ref m)) if m == NOT_CONFLICTED_REFUSAL
+                ),
+                "{side} must refuse a resolved path"
+            );
+            assert_eq!(
+                stdout_of(&repo, &["ls-files", "-s", "--", "file.txt"]).await,
+                index_before,
+                "{side} must preserve the index entry"
+            );
+            assert!(!file.exists(), "{side} must leave the file absent");
         }
     }
 

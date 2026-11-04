@@ -309,8 +309,8 @@ function pinResolveArms(resolveSource) {
   const arms = [...body.matchAll(/(?<![\w$.])land\s*\(\s*\)/g)].length;
   assert.equal(
     arms,
-    5,
-    `accept: expected 5 land() arms (re-read, undecodable, changed on disk, catch, kept view), found ${arms}`,
+    6,
+    `accept: expected 6 land() arms (re-read, not conflicted, undecodable, changed on disk, catch, kept view), found ${arms}`,
   );
   // A settled accept hands focus off only when the view leaves; an unclean
   // accept the walk keeps on screen lands back on the pressed control.
@@ -520,7 +520,7 @@ test("the pins fail on a mutated view", () => {
           "handOff();",
         ),
       ),
-      /expected 5 land\(\) arms/,
+      /expected 6 land\(\) arms/,
     ],
     [
       pinResolveArms.bind(

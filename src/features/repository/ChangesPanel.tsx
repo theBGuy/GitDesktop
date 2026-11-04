@@ -45,6 +45,7 @@ import { BlameDialog } from "@/features/history/BlameDialog";
 import { FileHistoryDialog } from "@/features/history/FileHistoryDialog";
 import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
 import { markNeedsConfirm } from "@/lib/git/conflict-parse";
+import { SIDES_READ_CHUNK } from "@/lib/git/conflict-prefilter";
 import {
   aiExcludePatternLinesForPath,
   globLiteralPath,
@@ -153,10 +154,6 @@ function unstagePaths(entry: FileEntry): string[] {
 function canStage(entry: FileEntry): boolean {
   return reservedDeviceName(entry.path) === null;
 }
-
-/** Sides reads in flight at once: each spawns several git processes, and a
- *  Stage all can cover hundreds of conflicts. */
-const SIDES_READ_CHUNK = 4;
 
 /** Whether a stage of `conflicted` may go ahead: true when no file still holds
  *  markers, else the user's answer to ONE prompt. Reads fresh from disk, since a
@@ -2424,14 +2421,16 @@ export function ChangesPanel({
       setDiscardScope(null);
       return;
     }
-    // Cancel stays live while a write is pending, so a newer scope may be open
-    // by the time this one settles: close only the scope being confirmed.
+    // Cancel stays live while a write is pending, so a newer scope and a newer
+    // selection may exist by the time this one settles: close only the scope
+    // being confirmed, and clear only the selection it was confirmed from.
     const confirming = discardScope;
+    const selection = selectedKeys;
     const finish = () => {
       setDiscardScope((cur) => (cur === confirming ? null : cur));
       // A folder action leaves an unrelated selection alone, like folder Stage.
       if (confirming.kind !== "files" || confirming.folder === undefined)
-        setSelectedKeys(new Set());
+        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));
     };
     if (discardScope.kind === "all") {
       try {
@@ -2468,12 +2467,14 @@ export function ChangesPanel({
       setStashScope(null);
       return;
     }
+    // As in confirmDiscard: a newer scope or selection outlives this write.
     const confirming = stashScope;
+    const selection = selectedKeys;
     const finish = () => {
       setStashScope((cur) => (cur === confirming ? null : cur));
       // A folder action leaves an unrelated selection alone, like folder Stage.
       if (confirming.kind !== "files" || confirming.folder === undefined)
-        setSelectedKeys(new Set());
+        setSelectedKeys((cur) => (cur === selection ? new Set() : cur));
     };
     if (stashScope.kind === "all") {
       try {
@@ -2791,6 +2792,9 @@ export function ChangesPanel({
     : "";
   const stashFolder =
     shownStashScope?.kind === "files" ? shownStashScope.folder : undefined;
+  // The file, folder and selection Stash items never offer a path stash with
+  // nothing stashable; `stashN === 0` stays as the fallback for any route that
+  // still opens one. (Stash all explains a reserved-only tree itself.)
   const stashBody =
     shownStashScope?.kind === "all"
       ? 'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.'

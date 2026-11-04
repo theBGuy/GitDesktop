@@ -36,13 +36,11 @@ import { useUiStore } from "./ui";
  * one when a takeover's worktree is finished or discarded), so a non-null
  * `activePath` means a walk EXISTS, not that one is running. Gate on scope.
  *
- * `startAll` clears the armed walk at the press and reads every file's sides
- * before arming, so the walk lands after those awaits. One prefilter at a time:
- * a new `startAll` supersedes a running one, except an exact repeat (same scope
- * and paths) of a live run, which is a no-op. A claimed start's press bump has
- * already retired any pressed run, so it supersedes even an exact repeat. Every
- * continuation re-checks its run token, `walkEpoch` (each walk change bumps it)
- * and the ui store's `interactionEpoch`, and drops silently once any moved.
+ * `startAll` reads every file's sides before arming, so its walk lands after
+ * those awaits. One prefilter at a time: a new `startAll` supersedes a running
+ * one, except an unclaimed exact repeat (same scope and paths) of a live run,
+ * which no-ops; a claimed start's press has already retired the pressed run it
+ * repeats, so it supersedes. Continuations drop silently once superseded.
  * `prefiltering` is a HOLD signal for the banner, not a liveness signal.
  */
 interface ConflictResolveState {

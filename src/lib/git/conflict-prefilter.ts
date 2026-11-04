@@ -4,9 +4,9 @@
 // would not be.
 import type { ConflictSides } from "./conflict";
 
-/** Sides reads in flight at once: each spawns several git processes, and a
- *  "Resolve all" can cover hundreds of conflicts. Same budget as ChangesPanel's
- *  stage-time marker reads. */
+/** Sides reads in flight at once, shared by the Resolve all prefilter and the
+ *  Changes stage-time marker reads: each read spawns several git processes, and
+ *  a Resolve all or a Stage all can cover hundreds of conflicts. */
 export const SIDES_READ_CHUNK = 4;
 
 /** Why a conflicted file never reaches the model. */

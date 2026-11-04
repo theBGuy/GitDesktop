@@ -5,6 +5,7 @@ import {
   WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,
@@ -40,12 +41,15 @@ import {
   conflictSides,
   diffContents,
 } from "@/lib/git/conflict";
-import { hasConflictMarkers } from "@/lib/git/conflict-parse";
+import {
+  hasConflictMarkers,
+  noLongerConflicted,
+} from "@/lib/git/conflict-parse";
 import {
   type ConflictBlockReason,
   conflictAiBlockReason,
 } from "@/lib/git/conflict-prefilter";
-import { useResolveConflict } from "@/lib/git/queries";
+import { refreshConflictFile, useResolveConflict } from "@/lib/git/queries";
 import { useReviewConfigured, useSettings } from "@/lib/settings/queries";
 import {
   useConflictResolve,
@@ -131,6 +135,7 @@ export function ConflictResolveView({
   const reviewConfigured = useReviewConfigured();
   const { run, cancel, reset, generating, text, status } = useAiTextStream();
   const resolve = useResolveConflict(repoPath);
+  const queryClient = useQueryClient();
   const queue = useConflictResolve((s) => s.queue);
   const advance = useConflictResolve((s) => s.advance);
   const stop = useConflictResolve((s) => s.stop);
@@ -433,6 +438,17 @@ export function ConflictResolveView({
         )
       )
         return;
+      // A file resolved outside the app reads with no stages and no error, and
+      // the backend accepts writes over unmerged paths by design: refuse here,
+      // or the proposal would land over the user's resolution.
+      if (noLongerConflicted(fresh)) {
+        toast.info(
+          `${baseName(path)} is no longer conflicted — nothing was changed.`,
+        );
+        await refreshConflictFile(queryClient, acceptIn);
+        land();
+        return;
+      }
       if (fresh.undecodable) {
         // A moved working file reads as changed on disk. An unmoved one was
         // decodable at the start read, so a stage version turned non-UTF-8.
