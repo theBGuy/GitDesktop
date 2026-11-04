@@ -47,9 +47,9 @@ pnpm run checks                        # guard scripts + self-tests — CI quali
 pnpm test                              # Vitest component tests (jsdom) — CI frontend.yml installed job
 ```
 
-Frontend changes run the first pair, plus `pnpm test` when they touch a surface
-a `src/test/` suite exercises; Rust changes add the cargo pair. Not "done"
-until green.
+Frontend changes run the first pair plus `pnpm test` (CI runs it on every
+`src/**` change, and "which surfaces a suite exercises" is not decidable
+locally); Rust changes add the cargo pair. Not "done" until green.
 
 ⚠ **Formatting fixes stay in scope:** implementers format only their own files,
 via the targeted `pnpm exec biome check --write <files in scope>`, never the
