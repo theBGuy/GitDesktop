@@ -100,13 +100,16 @@ const groups: Group[] = [
         label: "Apply a reviewer's suggestion locally",
         them: {
           state: "partial",
-          note: "GitKraken's own code suggestions, on GitHub PRs only",
+          note: "GitKraken's own code suggestions, on GitHub.com PRs only",
         },
         gd: { state: "yes", note: "straight to your working tree" },
       },
       {
         label: "Merge a PR in-app",
-        them: { state: "yes" },
+        them: {
+          state: "yes",
+          note: "merge-strategy choice on GitHub only",
+        },
         gd: {
           state: "yes",
           note: "merge & squash on all three; rebase (GitHub), fast-forward (Bitbucket)",
@@ -120,7 +123,7 @@ const groups: Group[] = [
         },
         gd: {
           state: "yes",
-          note: "create, extend & dissolve stacks, and merge one bottom-up (GitHub); MR chains detected (GitLab)",
+          note: "create, extend & dissolve stacks, and merge a stack bottom-up in one go (GitHub); MR chains detected (GitLab)",
         },
       },
       {
@@ -331,7 +334,7 @@ const faqs = [
   },
   {
     q: "Can GitKraken approve pull requests in the desktop app?",
-    a: "No. Since version 12.3, GitKraken Desktop links out to gitkraken.dev for code review: its pull request docs send reviews, approvals, and comments to GitKraken Code Review in the browser. GitDesktop runs the whole review in the app on GitHub, GitLab, and Bitbucket: line-anchored comments, suggestions applied to your working tree, approve or request changes, and the merge.",
+    a: "No. Since version 12.3, GitKraken Desktop links out to gitkraken.dev for code review: its pull request docs send reviews, approvals, and line comments to GitKraken Code Review in the browser. GitDesktop runs the whole review in the app on GitHub, GitLab, and Bitbucket: line-anchored comments, suggestions applied to your working tree, approve or request changes, and the merge.",
   },
 ];
 ---
