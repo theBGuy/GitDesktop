@@ -2,7 +2,7 @@
 // GitDesktop vs GitKraken — the strongest competitor in the set, and the
 // sharpest free-tier boundary: GitKraken Community covers public GitHub and
 // GitLab repos only, so every private-repo searcher for "gitkraken
-// alternative" is winnable. Re-grounded against GitKraken Desktop 12.5.0 on
+// alternative" is winnable. Re-grounded against GitKraken Desktop 12.6.2 on
 // the date in VERIFIED_ON (current then; release date in GK_RELEASED) via:
 // help.gitkraken.com release notes and integration pages plus the
 // gitkraken.com/pricing plan matrix. That page's dollar figures don't render
@@ -21,8 +21,8 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn.gitkraken;
-const GK_VERSION = "12.5.0";
-const GK_RELEASED = "September 15, 2026";
+const GK_VERSION = "12.6.2";
+const GK_RELEASED = "November 4, 2026";
 
 const groups: Group[] = [
   {
@@ -88,8 +88,8 @@ const groups: Group[] = [
       {
         label: "Line-anchored review comments",
         them: {
-          state: "partial",
-          note: "view & suggest only; its GitHub docs say full in-app review and commenting are not available",
+          state: "no",
+          note: "line comments happen on gitkraken.dev, in the browser",
         },
         gd: {
           state: "yes",
@@ -98,12 +98,18 @@ const groups: Group[] = [
       },
       {
         label: "Apply a reviewer's suggestion locally",
-        them: { state: "no" },
+        them: {
+          state: "partial",
+          note: "GitKraken's own code suggestions, on GitHub.com PRs only",
+        },
         gd: { state: "yes", note: "straight to your working tree" },
       },
       {
         label: "Merge a PR in-app",
-        them: { state: "yes" },
+        them: {
+          state: "yes",
+          note: "merge-strategy choice on GitHub only",
+        },
         gd: {
           state: "yes",
           note: "merge & squash on all three; rebase (GitHub), fast-forward (Bitbucket)",
@@ -111,10 +117,13 @@ const groups: Group[] = [
       },
       {
         label: "Stacked PRs",
-        them: { state: "no" },
+        them: {
+          state: "yes",
+          note: "GitHub.com only; stack a new PR as you create it",
+        },
         gd: {
           state: "yes",
-          note: "create, extend & dissolve stacks (GitHub); MR chains detected (GitLab)",
+          note: "create, extend & dissolve stacks, and merge a stack bottom-up in one go (GitHub); MR chains detected (GitLab)",
         },
       },
       {
@@ -325,14 +334,14 @@ const faqs = [
   },
   {
     q: "Can GitKraken approve pull requests in the desktop app?",
-    a: "No. Since version 12.3, GitKraken Desktop links out to gitkraken.dev for code review — its GitHub integration docs say full in-app code review and commenting are not available. GitDesktop runs the whole review in the app on GitHub, GitLab, and Bitbucket: line-anchored comments, suggestions applied to your working tree, approve or request changes, and the merge.",
+    a: "No. Since version 12.3, GitKraken Desktop links out to gitkraken.dev for code review: its pull request docs send reviews, approvals, and line comments to GitKraken Code Review in the browser. GitDesktop runs the whole review in the app on GitHub, GitLab, and Bitbucket: line-anchored comments, suggestions applied to your working tree, approve or request changes, and the merge.",
   },
 ];
 ---
 
 <SiteLayout
   title="GitDesktop vs GitKraken — a verified comparison"
-  description="GitDesktop vs GitKraken, verified September 2026: private repos on the free plan, the PR review loop in-app, unmetered AI on your own keys, sandboxed agents — plus what GitKraken still does better."
+  description="GitDesktop vs GitKraken, verified November 2026: private repos on the free plan, the PR review loop in-app, unmetered AI on your own keys, sandboxed agents — plus what GitKraken still does better."
   ogTitle="GitDesktop vs GitKraken"
   ogDescription="Free on private repos, review in-app, AI without a meter — a verified, dated comparison."
   breadcrumbs={[
