@@ -160,6 +160,7 @@ import {
 } from "./HistoryDialogs";
 import {
   ARM_FAILED_LINES,
+  armRead,
   loadedCheckedLine,
   loadedNoMatchLine,
   mergeSearchResults,
@@ -987,12 +988,27 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const searchShown = searchActive && commits.length > 0;
   // Search all's two arms answer apart. Negative copy and the coverage claim
   // render only from arms that answered; a dead arm swaps its claim for a
-  // failure line, and the error block shows only when nothing at all can.
-  const grepFailed = search.data === undefined && refreshFailed(search);
+  // failure line, and the error block shows only when nothing at all can. A
+  // stale arm keeps its rows under the list's refresh notice instead.
   const shaEligible = isShaPrefixQuery(debouncedQuery);
   const shortHex = isShortHexQuery(debouncedQuery);
-  // A failed refetch over cached matches degrades too; the stale rows stay.
-  const shaFailed = shaEligible && refreshFailed(shaLookup);
+  const grepSplit = splitInfiniteFailure(search);
+  const grepRead = armRead({
+    hasData: search.data !== undefined,
+    failed: grepSplit.failed,
+  });
+  const shaRead = armRead({
+    hasData: shaLookup.data !== undefined,
+    failed: shaEligible && refreshFailed(shaLookup),
+  });
+  const grepFailed = grepRead === "dead";
+  const shaFailed = shaRead === "dead";
+  // Every Retry on these arms refetches each one whose last read failed, dead
+  // or stale, and only those.
+  const retryFailedArms = () => {
+    if (grepRead !== "answering") void search.refetch();
+    if (shaRead !== "answering") void shaLookup.refetch();
+  };
   const coverage = searchCoverage({
     shaFailed,
     grepFailed,
@@ -1032,36 +1048,49 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     coverage === "sha-failed" &&
     (searchRows.length > 0 || (offBranchShown && !searchSettling));
   const grepRetryInFooter = searchShown && coverage === "grep-failed";
-  // Both arms dead over stale SHA rows or notices: they stay, the line claims
-  // none.
-  const bothRetryInFooter =
-    searchShown &&
-    coverage === "none" &&
-    (searchRows.length > 0 || offBranchShown);
-  const shownRead = searchShown ? search : log;
-  const notice =
-    shownRead.data === undefined
+  // One failure line at a time: a dead arm's line (footer, empty state or
+  // block) speaks for a stale arm too, so the refresh notice gives way to it.
+  // A failed Load more is pagination, not an arm, so its notice stays.
+  const armLineShown =
+    searchLoadFailed ||
+    shaRetryInEmpty ||
+    shaRetryInFooter ||
+    grepRetryInFooter;
+  const notice = searchShown
+    ? search.data === undefined && shaRead !== "stale"
       ? null
       : listNotice({
-          noun: searchShown ? "matches" : "commits",
-          ...splitInfiniteFailure(shownRead),
+          noun: "matches",
+          failed: !armLineShown && (grepSplit.failed || shaRead === "stale"),
+          loadMoreFailed: grepSplit.loadMoreFailed,
+          offline: false,
+          placeholder: false,
+          hasRows: searchRows.length + offBranchRows.length > 0,
+        })
+    : log.data === undefined
+      ? null
+      : listNotice({
+          noun: "commits",
+          ...splitInfiniteFailure(log),
           offline: false,
           placeholder: false,
           // Loaded rows, not filtered ones: a filter matching nothing still sits
           // over the last loaded results.
-          hasRows: (searchShown ? searchCommits : commits).length > 0,
+          hasRows: commits.length > 0,
         });
   // Each Retry's arm unmounts as its read refetches; focus lands on the shell.
   const { hostRef: logHostRef, retryRef: logRetryRef } =
     useRetryFocusRescue(logLoadFailed);
   const { hostRef: searchHostRef, retryRef: searchRetryRef } =
     useRetryFocusRescue(searchLoadFailed);
-  const { hostRef: shaArmHostRef, retryRef: shaArmRetryRef } =
-    useRetryFocusRescue(shaRetryInEmpty || shaRetryInFooter);
+  // One rescue per Retry position: the SHA line moving from the empty state to
+  // the footer unmounts the focused Retry while the line still shows.
+  const { hostRef: shaEmptyHostRef, retryRef: shaEmptyRetryRef } =
+    useRetryFocusRescue(shaRetryInEmpty);
+  const { hostRef: shaFooterHostRef, retryRef: shaFooterRetryRef } =
+    useRetryFocusRescue(shaRetryInFooter);
   const { hostRef: grepArmHostRef, retryRef: grepArmRetryRef } =
     useRetryFocusRescue(grepRetryInFooter);
-  const { hostRef: bothArmHostRef, retryRef: bothArmRetryRef } =
-    useRetryFocusRescue(bothRetryInFooter);
   // A Load more that fetches the last page unmounts under the user's focus;
   // the same edge rescue lands it on the shell. Each flag is true exactly
   // while its button is mounted (the list arm, in its mode, with a next page).
@@ -1082,9 +1111,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       ref={(node) => {
         logHostRef(node);
         searchHostRef(node);
-        shaArmHostRef(node);
+        shaEmptyHostRef(node);
+        shaFooterHostRef(node);
         grepArmHostRef(node);
-        bothArmHostRef(node);
         logMoreHostRef(node);
         searchMoreHostRef(node);
       }}
@@ -1101,9 +1130,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         message={notice?.message}
         retryLabel={notice?.retryLabel}
         onRetry={
-          notice?.cause === "refresh"
-            ? () => void shownRead.refetch()
-            : undefined
+          notice?.cause !== "refresh"
+            ? undefined
+            : searchShown
+              ? retryFailedArms
+              : () => void log.refetch()
         }
         className="shrink-0 border-b px-3 py-1.5"
       />
@@ -1783,10 +1814,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                   variant="outline"
                   size="sm"
                   className="cursor-pointer"
-                  onClick={() => {
-                    void search.refetch();
-                    if (shaFailed) void shaLookup.refetch();
-                  }}
+                  onClick={retryFailedArms}
                 >
                   Retry
                 </Button>
@@ -1822,11 +1850,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                   <div className="mt-1 flex items-center justify-center gap-2 text-[11px] text-destructive">
                     <span>{SHA_ARM_FAILED_LINE}</span>
                     <Button
-                      ref={shaArmRetryRef}
+                      ref={shaEmptyRetryRef}
                       variant="ghost"
                       size="xs"
                       className="text-muted-foreground"
-                      onClick={() => void shaLookup.refetch()}
+                      onClick={retryFailedArms}
                     >
                       Retry
                     </Button>
@@ -1860,24 +1888,17 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           )}
           {searchActive ? (
             <div className="space-y-0.5 px-3 py-2 text-center">
-              {(shaRetryInFooter || grepRetryInFooter || bothRetryInFooter) && (
+              {(shaRetryInFooter || grepRetryInFooter) && (
                 <div className="flex items-center justify-center gap-2 text-[11px] text-destructive">
                   <span>{ARM_FAILED_LINES[coverage]}</span>
                   <Button
                     ref={
-                      bothRetryInFooter
-                        ? bothArmRetryRef
-                        : grepRetryInFooter
-                          ? grepArmRetryRef
-                          : shaArmRetryRef
+                      grepRetryInFooter ? grepArmRetryRef : shaFooterRetryRef
                     }
                     variant="ghost"
                     size="xs"
                     className="text-muted-foreground"
-                    onClick={() => {
-                      if (grepFailed) void search.refetch();
-                      if (shaFailed) void shaLookup.refetch();
-                    }}
+                    onClick={retryFailedArms}
                   >
                     Retry
                   </Button>

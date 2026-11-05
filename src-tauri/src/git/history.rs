@@ -243,24 +243,80 @@ async fn commits_by_prefix(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let mut matches = Vec::new();
-    for commit in parse_commit_log(&log.stdout_lossy()).into_iter().take(cap) {
-        let oid = commit.hash.as_str();
-        let ancestry = run_git_raw(
+    let capped: Vec<CommitSummary> = parse_commit_log(&log.stdout_lossy())
+        .into_iter()
+        .take(cap)
+        .collect();
+    let ids: Vec<&str> = capped.iter().map(|c| c.hash.as_str()).collect();
+    let off = off_branch_commits(repo, &ids).await?;
+    let mut matches: Vec<CommitPrefixMatch> = capped
+        .into_iter()
+        .map(|commit| {
+            let on_branch = !off.contains(&commit.hash.to_ascii_lowercase());
+            CommitPrefixMatch { commit, on_branch }
+        })
+        .collect();
+    matches.sort_by_key(|m| !m.on_branch);
+    Ok(matches)
+}
+
+/// The lowercased ids of `commits` that are NOT ancestors of HEAD (HEAD itself
+/// counts as its own ancestor). One `rev-list <ids> --not HEAD` walk never misses
+/// an off-branch id, but under committer-date skew it stops early and can print
+/// an ancestor too, so each id it prints is re-checked with `merge-base
+/// --is-ancestor`. Every id must be a full commit id (anything else errs before a
+/// spawn); a failed walk is an error, never "on branch".
+async fn off_branch_commits(
+    repo: &str,
+    commits: &[&str],
+) -> AppResult<std::collections::HashSet<String>> {
+    if let Some(bad) = commits.iter().find(|id| !is_full_hex_id(id)) {
+        return Err(crate::error::AppError::InvalidArgument(format!(
+            "invalid commit id: {}",
+            crate::git::ops::discard_shown(bad)
+        )));
+    }
+    if commits.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    let mut args = vec!["rev-list"];
+    args.extend_from_slice(commits);
+    args.extend(["--not", "HEAD", "--"]);
+    let walked = run_git(Some(repo), &args, DEFAULT_TIMEOUT)
+        .await?
+        .stdout_lossy();
+    let wanted: std::collections::HashSet<String> =
+        commits.iter().map(|id| id.to_ascii_lowercase()).collect();
+    let printed: std::collections::HashSet<String> = walked
+        .lines()
+        .filter(|id| is_full_hex_id(id))
+        .map(str::to_ascii_lowercase)
+        .filter(|id| wanted.contains(id))
+        .collect();
+    let mut off = std::collections::HashSet::new();
+    for id in printed {
+        let out = run_git_raw(
             Some(repo),
-            &["merge-base", "--is-ancestor", oid, "HEAD"],
+            &["merge-base", "--is-ancestor", &id, "HEAD"],
             DEFAULT_TIMEOUT,
         )
         .await?;
-        let on_branch = match ancestry.code {
-            0 => true,
-            1 => false,
-            _ => ancestry.exit_verdict().map(|_| false)?,
-        };
-        matches.push(CommitPrefixMatch { commit, on_branch });
+        match out.code {
+            0 => {}
+            1 => {
+                off.insert(id);
+            }
+            _ => {
+                out.exit_verdict()?;
+            }
+        }
     }
-    matches.sort_by_key(|m| !m.on_branch);
-    Ok(matches)
+    Ok(off)
+}
+
+/// A full-width SHA-1 or SHA-256 object id in hex.
+fn is_full_hex_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The `%H%x00%s%x00%an%x00%ae%x00%cI%x00%D%x00%P` log format, one commit per line.
@@ -1830,6 +1886,235 @@ mod tests {
             matches!(&result, Err(crate::error::AppError::Git { stderr, .. }) if stderr.contains("not a git repository")),
             "{result:?}"
         );
+    }
+
+    fn sorted_ids(set: std::collections::HashSet<String>) -> Vec<String> {
+        let mut ids: Vec<String> = set.into_iter().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn sorted_of(ids: &[&str]) -> Vec<String> {
+        let mut ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[tokio::test]
+    async fn off_branch_commits_splits_ancestors_from_side_and_detached_heads() {
+        let (_dir, repo, first, second) = two_commit_repo("prefix-side").await;
+        pin_prefix_repo(&repo).await;
+        git(&repo, &["checkout", "-q", "-b", "side", &first]).await;
+        let side1 = commit_file(&repo, "side.txt", "a\n", "s1").await;
+        let side2 = commit_file(&repo, "side.txt", "a\nb\n", "s2").await;
+        git(&repo, &["checkout", "-q", "-"]).await;
+        assert_eq!(head_sha_of(&repo, "HEAD").await, second);
+
+        let upper = side1.to_ascii_uppercase();
+        let candidates = [
+            second.as_str(),
+            first.as_str(),
+            upper.as_str(),
+            side2.as_str(),
+        ];
+        let off = off_branch_commits(&repo, &candidates).await.unwrap();
+        assert_eq!(sorted_ids(off), sorted_of(&[&side1, &side2]));
+
+        git(&repo, &["checkout", "-q", "--detach", &side1]).await;
+        let off = off_branch_commits(&repo, &candidates).await.unwrap();
+        assert_eq!(sorted_ids(off), sorted_of(&[&second, &side2]));
+
+        let found = commits_by_prefix(&repo, &side1[..12], PREFIX_MATCH_CAP)
+            .await
+            .unwrap();
+        assert_eq!(prefix_hashes(&found), vec![(side1.as_str(), true)]);
+        let found = commits_by_prefix(&repo, &second[..12], PREFIX_MATCH_CAP)
+            .await
+            .unwrap();
+        assert_eq!(prefix_hashes(&found), vec![(second.as_str(), false)]);
+
+        assert!(off_branch_commits(&repo, &[]).await.unwrap().is_empty());
+        let err = off_branch_commits(&repo, &[BOGUS_COMMIT])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, crate::error::AppError::Git { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn off_branch_commits_reads_a_candidate_deep_in_a_long_side_history() {
+        let (_dir, repo) = temp_repo("prefix-long-side");
+        git(&repo, &["init", "-q"]).await;
+        pin_prefix_repo(&repo).await;
+        let mut stream = String::new();
+        for i in 1..=3u32 {
+            stream.push_str(&format!(
+                "commit refs/heads/main\nmark :{i}\ncommitter T <t@t> {} +0000\ndata 2\nm{i}\n",
+                1_700_000_000 + i
+            ));
+            if i > 1 {
+                stream.push_str(&format!("from :{}\n", i - 1));
+            }
+            stream.push('\n');
+        }
+        for i in 1..=500u32 {
+            stream.push_str(&format!(
+                "commit refs/heads/side\nmark :{}\ncommitter T <t@t> {} +0000\ndata 2\ns{}\n",
+                100 + i,
+                1_700_001_000 + i,
+                i % 10
+            ));
+            let parent = if i == 1 { 1 } else { 100 + i - 1 };
+            stream.push_str(&format!("from :{parent}\n\n"));
+        }
+        run_git_input(
+            Some(&repo),
+            &["fast-import", "--quiet"],
+            Some(&stream),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        let root = head_sha_of(&repo, "main~2").await;
+        let tip = head_sha_of(&repo, "main").await;
+        let deep = head_sha_of(&repo, "side~499").await;
+        let side_tip = head_sha_of(&repo, "side").await;
+
+        let candidates = [
+            deep.as_str(),
+            root.as_str(),
+            side_tip.as_str(),
+            tip.as_str(),
+        ];
+        let off = off_branch_commits(&repo, &candidates).await.unwrap();
+        assert_eq!(sorted_ids(off), sorted_of(&[&deep, &side_tip]));
+        let off = off_branch_commits(&repo, &[deep.as_str(), root.as_str()])
+            .await
+            .unwrap();
+        assert_eq!(sorted_ids(off), sorted_of(&[&deep]));
+    }
+
+    /// X sits under seven descendants backdated far below it, and HEAD merges X's
+    /// parent with that backdated tip: rev-list's date-ordered walk gives up before
+    /// it reaches X from HEAD, so only the re-check gets X right.
+    #[tokio::test]
+    async fn off_branch_commits_rechecks_an_ancestor_under_committer_date_skew() {
+        let (_dir, repo) = temp_repo("prefix-skew");
+        git(&repo, &["init", "-q"]).await;
+        pin_prefix_repo(&repo).await;
+        let commit = |head: &str, mark: u32, at: u64, from: Option<u32>| {
+            let mut entry = format!(
+                "{head}\nmark :{mark}\ncommitter T <t@t> {at} +0000\ndata 2\nc{}\n",
+                mark % 10
+            );
+            if let Some(parent) = from {
+                entry.push_str(&format!("from :{parent}\n"));
+            }
+            entry
+        };
+        let mut stream = String::new();
+        stream.push_str(&commit("commit refs/heads/main", 1, 1_577_836_800, None));
+        stream.push('\n');
+        stream.push_str(&commit("commit refs/heads/main", 2, 1_767_225_600, Some(1)));
+        stream.push('\n');
+        stream.push_str(&commit("commit refs/heads/x", 3, 1_769_904_000, Some(2)));
+        stream.push('\n');
+        for i in 1..=7u32 {
+            let parent = if i == 1 { 3 } else { 10 + i - 1 };
+            stream.push_str(&commit(
+                "commit refs/heads/x",
+                10 + i,
+                1_262_304_000 + u64::from(i),
+                Some(parent),
+            ));
+            stream.push('\n');
+        }
+        stream.push_str(&commit(
+            "commit refs/heads/main",
+            20,
+            1_772_323_200,
+            Some(2),
+        ));
+        stream.push_str("merge :17\n\n");
+        run_git_input(
+            Some(&repo),
+            &["fast-import", "--quiet"],
+            Some(&stream),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]).await;
+        let x = head_sha_of(&repo, "x~7").await;
+        assert_eq!(head_sha_of(&repo, "main^2~7").await, x);
+
+        let walked = run_git(
+            Some(&repo),
+            &["rev-list", &x, "--not", "HEAD", "--"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy();
+        assert!(
+            walked.lines().any(|id| id == x),
+            "the fixture must make rev-list misreport X: {walked:?}"
+        );
+        assert!(off_branch_commits(&repo, &[x.as_str()])
+            .await
+            .unwrap()
+            .is_empty());
+        let found = commits_by_prefix(&repo, &x[..12], PREFIX_MATCH_CAP)
+            .await
+            .unwrap();
+        assert_eq!(prefix_hashes(&found), vec![(x.as_str(), true)]);
+    }
+
+    #[tokio::test]
+    async fn off_branch_commits_counts_a_commit_reached_through_a_second_parent() {
+        let (_dir, repo, first, second) = two_commit_repo("prefix-second-parent").await;
+        pin_prefix_repo(&repo).await;
+        git(&repo, &["checkout", "-q", "-b", "side", &first]).await;
+        let side1 = commit_file(&repo, "side.txt", "a\n", "s1").await;
+        let side2 = commit_file(&repo, "side.txt", "a\nb\n", "s2").await;
+        git(&repo, &["checkout", "-q", "-"]).await;
+        let candidates = [side1.as_str(), side2.as_str(), second.as_str()];
+        assert_eq!(
+            sorted_ids(off_branch_commits(&repo, &candidates).await.unwrap()),
+            sorted_of(&[&side1, &side2])
+        );
+
+        git(
+            &repo,
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        )
+        .await;
+        assert_eq!(head_sha_of(&repo, "HEAD^2").await, side2);
+        assert!(off_branch_commits(&repo, &candidates)
+            .await
+            .unwrap()
+            .is_empty());
+        let found = commits_by_prefix(&repo, &side1[..12], PREFIX_MATCH_CAP)
+            .await
+            .unwrap();
+        assert_eq!(prefix_hashes(&found), vec![(side1.as_str(), true)]);
+    }
+
+    #[tokio::test]
+    async fn off_branch_commits_refuses_an_id_that_is_not_full_hex() {
+        let (_dir, repo, first, _second) = two_commit_repo("prefix-bad-id").await;
+        for bad in ["--all", "HEAD", &first[..12], "", &format!("{first}0")] {
+            let err = off_branch_commits(&repo, &[first.as_str(), bad])
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, crate::error::AppError::InvalidArgument(_)),
+                "{bad:?}: {err:?}"
+            );
+        }
     }
 
     #[test]

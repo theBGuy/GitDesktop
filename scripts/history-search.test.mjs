@@ -1,6 +1,7 @@
 // Pins search all's pure layer (src/features/history/history-search.ts): the
 // SHA arm's on-branch hits lead in wire order, grep rows follow minus any
-// commit already listed, off-branch hits split out; the coverage table; and
+// commit already listed, off-branch hits split out; the dead-vs-stale arm
+// read and the coverage table; and
 // the empty-state copy, including the singular count and the checked line's
 // three outcomes.
 //
@@ -14,6 +15,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ARM_FAILED_LINES,
+  armRead,
   GREP_ARM_FAILED_LINE,
   loadedCheckedLine,
   mergeSearchResults,
@@ -65,6 +67,13 @@ test("merge: off-branch hits split out in wire order, never as rows", () => {
   assert.deepEqual(hashes(out.offBranch), ["d3", "d2"]);
 });
 
+test("arm read: dead only without data; a failure over kept data is stale", () => {
+  assert.equal(armRead({ hasData: false, failed: false }), "answering");
+  assert.equal(armRead({ hasData: true, failed: false }), "answering");
+  assert.equal(armRead({ hasData: true, failed: true }), "stale");
+  assert.equal(armRead({ hasData: false, failed: true }), "dead");
+});
+
 test("coverage: the four cells", () => {
   const c = (shaFailed, grepFailed, hasShaMatches) =>
     searchCoverage({ shaFailed, grepFailed, hasShaMatches });
@@ -73,15 +82,24 @@ test("coverage: the four cells", () => {
   assert.equal(c(false, true, true), "grep-failed");
   assert.equal(c(false, true, false), "none");
   assert.equal(c(true, true, false), "none");
-  // SHA matches a failed refetch left cached answer nothing.
-  assert.equal(c(true, true, true), "none");
 });
 
-test("footer failure lines: one per degraded coverage, no new copy", () => {
+test("coverage: a stale SHA arm still answers for a dead grep", () => {
+  const dead = (hasData, failed) => armRead({ hasData, failed }) === "dead";
+  assert.equal(
+    searchCoverage({
+      shaFailed: dead(true, true),
+      grepFailed: dead(false, true),
+      hasShaMatches: true,
+    }),
+    "grep-failed",
+  );
+});
+
+test("footer failure lines: one per one-dead-arm coverage, no new copy", () => {
   assert.deepEqual(ARM_FAILED_LINES, {
     "sha-failed": SHA_ARM_FAILED_LINE,
     "grep-failed": GREP_ARM_FAILED_LINE,
-    none: SEARCH_ALL_FAILED_LINE,
   });
   assert.equal(SEARCH_ALL_FAILED_LINE, "Couldn't search all history.");
 });

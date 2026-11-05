@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -59,6 +60,12 @@ test("no-wip-push tests both ids width-free through one is_zero", () => {
   assert.doesNotMatch(body, /^z=/m);
   assert.ok(body.includes('  is_zero "$local_oid" && continue\n'));
   assert.ok(body.includes('  if is_zero "$remote_oid"; then\n'));
+});
+
+test("no-wip-push checks rev-list's own status, never through a pipe", () => {
+  const body = noWip.body;
+  assert.match(body, /^ {2}if ! found=\$\(git rev-list /m);
+  assert.doesNotMatch(body, /git rev-list[^\n]*\|/);
 });
 
 const root = mkdtempSync(join(tmpdir(), "gd-hook-tpl-"));
@@ -157,8 +164,103 @@ for (const [format, width] of [
     refused(push("topic"));
     ok(work, "reset", "-q", "--hard", "HEAD~1");
 
+    // Pushes over a remote tip this clone never fetched. The hook checks the
+    // commits on no remote-tracking ref and leaves the rest to git: a plain push
+    // is git's own "fetch first" rejection, and the hook prints nothing.
+    const WIP_LINE =
+      /Refusing to push: refs\/heads\/topic has WIP\/fixup\/squash commits\./;
+    const UNCHECKED_LINE =
+      /couldn't check \S+ for WIP\/fixup\/squash commits\./;
+    const quiet = (r) => {
+      assert.doesNotMatch(r.stderr, /Refusing to push/);
+      assert.doesNotMatch(r.stderr, /Invalid revision range/);
+    };
+    const other = join(dir, "other");
+    ok(dir, "clone", "-q", "-b", "topic", remote, other);
+    ok(other, "commit", "-q", "--allow-empty", "-m", "remote-only change");
+    ok(other, "push", "-q", "origin", "topic");
+    const remoteTip = ok(other, "rev-parse", "HEAD");
+    const remoteTopic = () => ok(remote, "rev-parse", "refs/heads/topic");
+    ok(work, "commit", "-q", "--allow-empty", "-m", "clean over unfetched tip");
+
+    // A plain push: git rejects it itself, and the hook stays quiet.
+    let r = push("topic");
+    assert.notEqual(r.status, 0, `push was allowed: ${r.stderr}`);
+    assert.match(r.stderr, /topic -> topic \(fetch first\)/);
+    quiet(r);
+    assert.equal(remoteTopic(), remoteTip);
+
+    // A multi-ref push: main lands, git rejects topic, the hook stays quiet.
+    ok(work, "switch", "-q", "main");
+    ok(work, "commit", "-q", "--allow-empty", "-m", "clean main change");
+    const mainTip = ok(work, "rev-parse", "HEAD");
+    ok(work, "switch", "-q", "topic");
+    r = push("main", "topic");
+    assert.notEqual(r.status, 0, `push was allowed: ${r.stderr}`);
+    assert.match(r.stderr, /topic -> topic \(fetch first\)/);
+    quiet(r);
+    assert.equal(ok(remote, "rev-parse", "refs/heads/main"), mainTip);
+    assert.equal(remoteTopic(), remoteTip);
+
+    // A force push carrying a WIP commit is refused as WIP, not as unchecked.
+    ok(work, "commit", "-q", "--allow-empty", "-m", "WIP over unfetched tip");
+    r = push("--force", "topic");
+    assert.notEqual(r.status, 0, `push was allowed: ${r.stderr}`);
+    assert.match(r.stderr, WIP_LINE);
+    assert.doesNotMatch(r.stderr, UNCHECKED_LINE);
+    assert.equal(remoteTopic(), remoteTip);
+
+    // The same force push of clean work goes through.
+    ok(work, "reset", "-q", "--hard", "HEAD~1");
+    r = push("--force", "topic");
+    allowed(r);
+    assert.doesNotMatch(r.stderr, /Refusing to push/);
+    assert.equal(remoteTopic(), ok(work, "rev-parse", "HEAD"));
+
+    // A force push over a fetched tip still walks the plain range.
+    ok(other, "fetch", "-q", "origin");
+    ok(other, "reset", "-q", "--hard", "origin/topic");
+    ok(other, "commit", "-q", "--allow-empty", "-m", "second remote change");
+    ok(other, "push", "-q", "origin", "topic");
+    ok(work, "fetch", "-q", "origin");
+    ok(work, "commit", "-q", "--allow-empty", "-m", "fixup! over fetched tip");
+    r = push("--force", "topic");
+    refused(r);
+    assert.match(r.stderr, WIP_LINE);
+    ok(work, "reset", "-q", "--hard", "HEAD~1");
+    ok(work, "commit", "-q", "--allow-empty", "-m", "clean over fetched tip");
+    allowed(push("--force", "topic"));
+    assert.equal(remoteTopic(), ok(work, "rev-parse", "HEAD"));
+
     // Deleting a branch carries an all-zero local id.
     allowed(push(":topic"));
     assert.ok(!remoteHas("topic"));
+
+    // A walk that fails outright refuses, on the new-branch path and on the
+    // unfetched-tip path: a pushed commit's parent object is missing locally.
+    ok(work, "switch", "-q", "-c", "broken", "main");
+    ok(work, "commit", "-q", "--allow-empty", "-m", "clean parent");
+    const parent = ok(work, "rev-parse", "HEAD");
+    allowed(push("broken"));
+    ok(work, "commit", "-q", "--allow-empty", "-m", "clean child");
+    const loose = join(
+      work,
+      ".git",
+      "objects",
+      parent.slice(0, 2),
+      parent.slice(2),
+    );
+    assert.ok(existsSync(loose), `${parent} is not a loose object`);
+    rmSync(loose);
+    for (const target of ["broken", "broken:refs/heads/broken-new"]) {
+      r = push(target);
+      assert.notEqual(r.status, 0, `push was allowed: ${r.stderr}`);
+      assert.match(
+        r.stderr,
+        /Refusing to push: couldn't check refs\/heads\/broken for WIP\/fixup\/squash commits\./,
+      );
+    }
+    assert.equal(ok(remote, "rev-parse", "refs/heads/broken"), parent);
+    assert.ok(!remoteHas("broken-new"));
   });
 }

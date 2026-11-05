@@ -24,7 +24,11 @@ import {
   gitOpState,
   gitStatus,
 } from "@/lib/git/api";
-import { isShaPrefixQuery, isShortHexQuery } from "@/lib/git/queries";
+import {
+  HISTORY_PAGE_SIZE,
+  isShaPrefixQuery,
+  isShortHexQuery,
+} from "@/lib/git/queries";
 import type { CommitPrefixMatch, CommitSummary } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -49,6 +53,10 @@ const FULL_LINE = "Checked the message and SHA of every commit.";
 const MESSAGES_LINE = "Checked the message of every commit.";
 const SHA_FAILED = "Couldn't check SHAs. Matches cover messages only.";
 const GREP_FAILED = "Couldn't search messages. Matches cover SHAs only.";
+// The list's refresh notice, which speaks for a stale arm.
+const REFRESH_FAILED = /^Couldn't refresh matches/;
+const SEARCH_KEY = (q: string) => ["repo", REPO, "log-search", q];
+const SHA_KEY = (q: string) => ["repo", REPO, "log-search", { sha: q }];
 
 /** 40 hex chars from non-zero filler, so the oid-width guard never reads a
  *  zero run. */
@@ -162,6 +170,14 @@ const rowOrder = () =>
 // The shell's pre-mounted announcement region (its first status node).
 const liveRegion = () =>
   document.querySelector('[role="status"].sr-only') as HTMLElement;
+// Every visible Retry: the arm lines' and the refresh notice's.
+const retryButtons = () => screen.queryAllByRole("button", { name: /^Retry/ });
+// react-query notifies observers on a later timer, after an awaited refetch
+// resolves; flush it so a negative assertion reads the settled render.
+const settle = () =>
+  act(async () => {
+    await new Promise((r) => setTimeout(r, 20));
+  });
 const filterInput = () => screen.getByPlaceholderText(PLACEHOLDER);
 const cta = () => screen.getByRole("button", { name: /^Search all history/ });
 
@@ -449,19 +465,85 @@ describe("partial failure", () => {
     expect(document.activeElement).not.toBe(document.body);
   });
 
-  it("a SHA refetch failing over cached rows keeps them under the line", async () => {
+  it("both arms stale over kept rows show one refresh notice, whose Retry reruns both", async () => {
     shaAnswer = async () => [hit(DEEP, true)];
+    grepAnswer = async () => [summary(GREP_ONLY)];
     const { client } = await renderPanel();
     await searchAll("62016e63");
-    await waitFor(() => expect(row(DEEP)).not.toBeNull());
-    shaAnswer = () => Promise.reject(new Error("sha boom"));
-    await act(() =>
-      client.refetchQueries({
-        queryKey: ["repo", REPO, "log-search", { sha: "62016e63" }],
-      }),
-    );
-    expect(await screen.findByText(SHA_FAILED)).toBeInTheDocument();
+    await waitFor(() => expect(row(GREP_ONLY)).not.toBeNull());
     expect(row(DEEP)).not.toBeNull();
+    shaAnswer = () => Promise.reject(new Error("sha boom"));
+    grepAnswer = () => Promise.reject(new Error("grep boom"));
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "log-search"] }),
+    );
+    await settle();
+    expect(screen.getByText(REFRESH_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText(SHA_FAILED)).toBeNull();
+    expect(screen.queryByText(GREP_FAILED)).toBeNull();
+    expect(screen.queryByText("Couldn't search all history.")).toBeNull();
+    expect(row(DEEP)).not.toBeNull();
+    expect(row(GREP_ONLY)).not.toBeNull();
+    expect(liveRegion().textContent).toBe("");
+    expect(retryButtons()).toHaveLength(1);
+    const grepBefore = grepCalls().length;
+    const shaBefore = shaCalls().length;
+    // Pending reruns unmount the line under focus.
+    grepAnswer = never;
+    shaAnswer = never;
+    await userEvent.setup().click(retryButtons()[0]);
+    await waitFor(() => expect(grepCalls()).toHaveLength(grepBefore + 1));
+    await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("a SHA refetch failing under fresh grep rows says so through the refresh notice, whose Retry reruns only the SHA arm", async () => {
+    shaAnswer = async () => [hit(DEEP, true)];
+    grepAnswer = async () => [summary(GREP_ONLY)];
+    const { client } = await renderPanel();
+    await searchAll("62016e63");
+    await waitFor(() => expect(row(GREP_ONLY)).not.toBeNull());
+    shaAnswer = () => Promise.reject(new Error("sha boom"));
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("62016e63") }));
+    await settle();
+    expect(screen.getByText(REFRESH_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText(SHA_FAILED)).toBeNull();
+    expect(row(DEEP)).not.toBeNull();
+    expect(retryButtons()).toHaveLength(1);
+    const grepBefore = grepCalls().length;
+    const shaBefore = shaCalls().length;
+    await userEvent.setup().click(retryButtons()[0]);
+    await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
+    expect(grepCalls()).toHaveLength(grepBefore);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("a dead SHA arm's line speaks for a stale grep too, whose Retry reruns both", async () => {
+    shaAnswer = () => Promise.reject(new Error("sha boom"));
+    grepAnswer = async () => [summary(GREP_ONLY)];
+    const { client } = await renderPanel();
+    await searchAll("62016e63");
+    expect(await screen.findByText(SHA_FAILED)).toBeInTheDocument();
+    grepAnswer = () => Promise.reject(new Error("grep boom"));
+    const grepRefetched = grepCalls().length + 1;
+    await act(() =>
+      client.refetchQueries({ queryKey: SEARCH_KEY("62016e63") }),
+    );
+    await settle();
+    expect(grepCalls()).toHaveLength(grepRefetched);
+    expect(screen.getByText(SHA_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
+    expect(row(GREP_ONLY)).not.toBeNull();
+    expect(liveRegion().textContent).toBe("");
+    expect(retryButtons()).toHaveLength(1);
+    const shaBefore = shaCalls().length;
+    // Pending reruns unmount the line under focus.
+    grepAnswer = never;
+    shaAnswer = never;
+    await userEvent.setup().click(retryButtons()[0]);
+    await waitFor(() => expect(grepCalls()).toHaveLength(grepRefetched + 1));
+    await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
+    expect(document.activeElement).not.toBe(document.body);
   });
 
   it("a dead grep keeps the SHA rows and never claims no match", async () => {
@@ -494,6 +576,8 @@ describe("partial failure", () => {
     ).toBeInTheDocument();
     expect(liveRegion().textContent).toContain("Couldn't search all history.");
     expect(screen.queryByText(FULL_LINE)).toBeNull();
+    expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
+    expect(retryButtons()).toHaveLength(1);
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Retry" }));
@@ -526,7 +610,33 @@ describe("partial failure", () => {
     expect(document.activeElement).not.toBe(document.body);
   });
 
-  it("both arms dead over cached off-branch hits keeps the notices over one line", async () => {
+  it("a dead SHA arm's empty-state line speaks for a stale grep too", async () => {
+    shaAnswer = () => Promise.reject(new Error("sha boom"));
+    const { client } = await renderPanel();
+    await searchAll("a1b2");
+    expect(await screen.findByText(SHA_FAILED)).toBeInTheDocument();
+    grepAnswer = () => Promise.reject(new Error("grep boom"));
+    const grepRefetched = grepCalls().length + 1;
+    await act(() => client.refetchQueries({ queryKey: SEARCH_KEY("a1b2") }));
+    await settle();
+    expect(grepCalls()).toHaveLength(grepRefetched);
+    expect(
+      screen.getByText('No commits on this branch match "a1b2"'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(SHA_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
+    expect(retryButtons()).toHaveLength(1);
+    const shaBefore = shaCalls().length;
+    // Pending reruns unmount the line under focus.
+    grepAnswer = never;
+    shaAnswer = never;
+    await userEvent.setup().click(retryButtons()[0]);
+    await waitFor(() => expect(grepCalls()).toHaveLength(grepRefetched + 1));
+    await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("a dead grep over stale off-branch hits keeps the notices over its own line", async () => {
     const OFF = hash("6201a");
     shaAnswer = async () => [hit(OFF, false)];
     grepAnswer = () => Promise.reject(new Error("grep boom"));
@@ -534,21 +644,18 @@ describe("partial failure", () => {
     await searchAll("6201a");
     expect(await screen.findByText(GREP_FAILED)).toBeInTheDocument();
     shaAnswer = () => Promise.reject(new Error("sha boom"));
-    await act(() =>
-      client.refetchQueries({
-        queryKey: ["repo", REPO, "log-search", { sha: "6201a" }],
-      }),
-    );
-    expect(
-      await screen.findByText("Couldn't search all history."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(GREP_FAILED)).toBeNull();
+    const shaRefetched = shaCalls().length + 1;
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201a") }));
+    await settle();
+    expect(shaCalls()).toHaveLength(shaRefetched);
+    expect(screen.getByText(GREP_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't search all history.")).toBeNull();
+    expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
     expect(
       screen.getByRole("button", { name: /^Open commit/ }),
     ).toBeInTheDocument();
-    // The notices still show, so the block's announcement stays quiet.
     expect(liveRegion().textContent).toBe("");
-    expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
+    expect(retryButtons()).toHaveLength(1);
   });
 
   it("a grep failing before the SHA arm answers waits for it", async () => {
@@ -576,33 +683,82 @@ describe("partial failure", () => {
     expect(liveRegion().textContent).toBe("");
   });
 
-  it("both arms dead over cached SHA rows claims neither arm", async () => {
+  it("a dead grep's line speaks for stale SHA rows too, whose Retry reruns both", async () => {
     shaAnswer = async () => [hit(DEEP, true)];
     grepAnswer = () => Promise.reject(new Error("grep boom"));
     const { client } = await renderPanel();
     await searchAll("62016e63");
     expect(await screen.findByText(GREP_FAILED)).toBeInTheDocument();
     shaAnswer = () => Promise.reject(new Error("sha boom"));
-    await act(() =>
-      client.refetchQueries({
-        queryKey: ["repo", REPO, "log-search", { sha: "62016e63" }],
-      }),
-    );
-    expect(
-      await screen.findByText("Couldn't search all history."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText(GREP_FAILED)).toBeNull();
+    const shaRefetched = shaCalls().length + 1;
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("62016e63") }));
+    await settle();
+    expect(shaCalls()).toHaveLength(shaRefetched);
+    expect(screen.getByText(GREP_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't search all history.")).toBeNull();
     expect(screen.queryByText(SHA_FAILED)).toBeNull();
+    expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
     expect(row(DEEP)).not.toBeNull();
-    // The rows still show, so the block's announcement stays quiet.
     expect(liveRegion().textContent).toBe("");
+    expect(retryButtons()).toHaveLength(1);
     const grepBefore = grepCalls().length;
     const shaBefore = shaCalls().length;
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Retry" }));
+    // Pending reruns unmount the line under focus.
+    grepAnswer = never;
+    shaAnswer = never;
+    await userEvent.setup().click(retryButtons()[0]);
     await waitFor(() => expect(grepCalls()).toHaveLength(grepBefore + 1));
     await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("a failed Load more keeps its own notice beside a dead SHA line, whose Retry leaves the grep pages alone", async () => {
+    shaAnswer = () => Promise.reject(new Error("sha boom"));
+    const page = Array.from({ length: HISTORY_PAGE_SIZE }, (_, i) =>
+      summary(hash(`d${i.toString(16).padStart(4, "0")}`)),
+    );
+    vi.mocked(gitLog).mockImplementation(async (_r, _limit, skip, q) => {
+      if (!q) return loaded;
+      if (skip) throw new Error("page boom");
+      return page;
+    });
+    await renderPanel();
+    await searchAll("a1b2");
+    expect(await screen.findByText(SHA_FAILED)).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Load more results" }));
+    expect(
+      await screen.findByText(/^Couldn't load more matches/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(SHA_FAILED)).toBeInTheDocument();
+    expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
+    expect(retryButtons()).toHaveLength(1);
+    const grepBefore = grepCalls().length;
+    const shaBefore = shaCalls().length;
+    shaAnswer = never;
+    await user.click(retryButtons()[0]);
+    await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
+    await settle();
+    expect(grepCalls()).toHaveLength(grepBefore);
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it("a dead SHA line moving from the empty state to the footer keeps focus off <body>", async () => {
+    shaAnswer = () => Promise.reject(new Error("sha boom"));
+    const { client } = await renderPanel();
+    await searchAll("a1b2");
+    expect(
+      await screen.findByText('No commits on this branch match "a1b2"'),
+    ).toBeInTheDocument();
+    const retry = screen.getByRole("button", { name: "Retry" });
+    act(() => retry.focus());
+    expect(document.activeElement).toBe(retry);
+    grepAnswer = async () => [summary(GREP_ONLY)];
+    await act(() => client.refetchQueries({ queryKey: SEARCH_KEY("a1b2") }));
+    await settle();
+    expect(row(GREP_ONLY)).not.toBeNull();
+    expect(screen.getByText(SHA_FAILED)).toBeInTheDocument();
+    expect(retry.isConnected).toBe(false);
     expect(document.activeElement).not.toBe(document.body);
   });
 });

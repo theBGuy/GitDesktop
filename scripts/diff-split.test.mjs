@@ -1321,6 +1321,13 @@ test("binarySizeSummary: exact bytes when the rounded sizes match", () => {
     delta: "3.0 KB larger (+0.2%)",
     sr: `Size changed from ${L(1882112)} bytes to ${L(1885184)} bytes, ${L(3072)} bytes larger.`,
   });
+  // 1048570 B rounds to 1024 KB, which carries to the 1.0 MB of 1048576 B.
+  assert.deepEqual(pair(1048570, 1048576), {
+    kind: "pair",
+    sizes: `${L(1048570)} → ${L(1048576)} bytes`,
+    delta: "6 B larger (<0.1%)",
+    sr: `Size changed from ${L(1048570)} bytes to ${L(1048576)} bytes, 6 bytes larger.`,
+  });
 });
 
 test("binarySizeSummary: rounded sizes when they differ", () => {

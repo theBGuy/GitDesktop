@@ -235,15 +235,23 @@ exit 0
     body: `#!/bin/sh
 # Block pushing work-in-progress commits (WIP / fixup! / squash!).
 # An all-zero id of any width (SHA-1 or SHA-256) marks a created or deleted ref.
+# Over a remote tip this clone never fetched, the commits on no remote-tracking ref are checked.
+# A push whose commits can't be listed is refused.
 is_zero() { case "$1" in *[!0]*) return 1 ;; esac; return 0; }
 while read -r local_ref local_oid remote_ref remote_oid; do
   is_zero "$local_oid" && continue
   if is_zero "$remote_oid"; then
-    range="$local_oid"
+    set -- "$local_oid"
+  elif git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+    set -- "$remote_oid..$local_oid"
   else
-    range="$remote_oid..$local_oid"
+    set -- "$local_oid" --not --remotes
   fi
-  if git rev-list -n 1 --grep 'WIP' --grep 'fixup!' --grep 'squash!' "$range" | grep -q .; then
+  if ! found=$(git rev-list -n 1 --grep 'WIP' --grep 'fixup!' --grep 'squash!' "$@"); then
+    echo "Refusing to push: couldn't check $local_ref for WIP/fixup/squash commits." >&2
+    exit 1
+  fi
+  if [ -n "$found" ]; then
     echo "Refusing to push: $local_ref has WIP/fixup/squash commits." >&2
     exit 1
   fi

@@ -30,20 +30,30 @@ export function mergeSearchResults(
   return { rows, offBranch };
 }
 
+/** One arm's read. DEAD only when it holds no data and its read failed; a
+ *  failed refetch over kept data is STALE: its rows stay, and the list's
+ *  refresh notice speaks for them. `failed` is a failed read of the loaded
+ *  data, never a failed Load more, whose button is its own retry. */
+export type ArmRead = "answering" | "stale" | "dead";
+
+export function armRead(i: { hasData: boolean; failed: boolean }): ArmRead {
+  if (!i.failed) return "answering";
+  return i.hasData ? "stale" : "dead";
+}
+
 export type SearchCoverage = "full" | "sha-failed" | "grep-failed" | "none";
 
-/** Which arms answered. `shaFailed` already implies the query was eligible
- *  for the SHA arm. `hasShaMatches` counts every match the SHA read returned,
- *  on this branch or off it. A dead grep is "none" unless those matches came
- *  from a SHA read that is still answering: a failed refetch's cache is stale. */
+/** Which arms answered. Both flags mean DEAD ({@link armRead}), and
+ *  `shaFailed` already implies the query was eligible for the SHA arm; a stale
+ *  arm still answers. `hasShaMatches` counts every match the SHA read holds,
+ *  on this branch or off it, so it rules out a dead SHA arm: a dead grep is
+ *  "grep-failed" over those matches and "none" without them. */
 export function searchCoverage(i: {
   shaFailed: boolean;
   grepFailed: boolean;
   hasShaMatches: boolean;
 }): SearchCoverage {
-  if (i.grepFailed) {
-    return i.hasShaMatches && !i.shaFailed ? "grep-failed" : "none";
-  }
+  if (i.grepFailed) return i.hasShaMatches ? "grep-failed" : "none";
   return i.shaFailed ? "sha-failed" : "full";
 }
 
@@ -85,12 +95,13 @@ export const GREP_ARM_FAILED_LINE =
   "Couldn't search messages. Matches cover SHAs only.";
 export const SEARCH_ALL_FAILED_LINE = "Couldn't search all history.";
 
-/** The failure line under rows still showing, per degraded coverage. */
+/** The failure line under rows still showing, per one-dead-arm coverage. Rows
+ *  and notices come from an arm holding data, which is never dead, so "none"
+ *  only ever renders as the error block. */
 export const ARM_FAILED_LINES: Record<
-  Exclude<SearchCoverage, "full">,
+  Exclude<SearchCoverage, "full" | "none">,
   string
 > = {
   "sha-failed": SHA_ARM_FAILED_LINE,
   "grep-failed": GREP_ARM_FAILED_LINE,
-  none: SEARCH_ALL_FAILED_LINE,
 };
