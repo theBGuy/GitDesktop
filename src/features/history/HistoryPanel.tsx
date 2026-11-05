@@ -61,11 +61,15 @@ import { useAppForm } from "@/lib/form";
 import { gitCommitDetails, headBranchPin } from "@/lib/git/api";
 import {
   headMoveAftermathKeys,
+  isShaPrefixQuery,
+  isShortHexQuery,
+  opStateOptions,
   repoKeys,
   useBranches,
   useCheckoutCommit,
   useCherryPick,
   useCommitAuthorAvatarIndex,
+  useCommitPrefixLookup,
   useCommitRecordsParent,
   useCommitSearch,
   useCreateBranch,
@@ -85,6 +89,7 @@ import { sanitizeRefName } from "@/lib/git/ref-name";
 import type {
   CommitDetails,
   CommitSummary,
+  RepoOpState,
   RewriteStep,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -100,6 +105,7 @@ import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError, toastErrorWithNote } from "@/lib/toast";
+import { useDebouncedValue } from "@/lib/use-debounced-value";
 import {
   ARIA_DISABLED_CLASS,
   heldButtonRender,
@@ -129,6 +135,8 @@ import {
   arrowCount,
   arrowUpstream,
   deriveEditRange,
+  type EditHistoryHold,
+  editHistoryHold,
   headAgrees,
   isNoUpstream,
   notAdjacentSquashHint,
@@ -150,6 +158,21 @@ import {
   type MergePickTarget,
   ResetCommitDialog,
 } from "./HistoryDialogs";
+import {
+  ARM_FAILED_LINES,
+  loadedCheckedLine,
+  loadedNoMatchLine,
+  mergeSearchResults,
+  OFF_BRANCH_NOTICE_CAP,
+  OFF_BRANCH_NOTICE_SUFFIX,
+  OPEN_COMMIT_LABEL,
+  offBranchOverflowLine,
+  SEARCH_ALL_FAILED_LINE,
+  SHA_ARM_FAILED_LINE,
+  searchAllCheckedLineFor,
+  searchAllNoMatchLine,
+  searchCoverage,
+} from "./history-search";
 import { type PickOntoHold, pickOntoHold } from "./pick-onto-hold";
 import { SquashDialog } from "./RewriteDialogs";
 import { useAmendWithConfirm } from "./useAmendCommit";
@@ -164,6 +187,14 @@ const UNDO_DETACHED_ROOT =
 /** The menu item's short form of {@link UNDO_DETACHED_ROOT}. */
 const UNDO_DETACHED_ROOT_HINT =
   " (detached at the first commit — nothing to undo onto)";
+/** The refusal for an undo while a merge is stopped. KEEP IN STEP: commit.rs's
+ *  `UNDO_MID_MERGE` is the backend's copy of this exact sentence. */
+const UNDO_MID_MERGE =
+  "A merge is in progress — finish or abort it first; nothing was undone.";
+/** The refusal for an undo while a cherry-pick or revert is stopped. KEEP IN
+ *  STEP: commit.rs's `UNDO_MID_PICK` is the backend's copy of this exact sentence. */
+const UNDO_MID_PICK =
+  "A cherry-pick or revert is in progress — finish or abort it first; nothing was undone.";
 
 /** Why undo is withheld at the oldest commit a depth-limited clone holds: its
  *  parent was never fetched, so there is nothing to soft-reset to. KEEP IN
@@ -183,7 +214,9 @@ type HeadRowHold =
   | "shallow-boundary"
   | "checking-parent"
   | "parent-unread"
-  | "already-at";
+  | "already-at"
+  | "mid-pick"
+  | "mid-merge";
 const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
   refreshing: HISTORY_REFRESHING_HINT,
   "not-latest": AMEND_HOLD_HINT["not-latest"],
@@ -195,6 +228,8 @@ const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
   "checking-parent": " (checking the latest commit…)",
   "parent-unread": " (couldn't check the latest commit's parent)",
   "already-at": " (already at this commit)",
+  "mid-pick": " (finish or abort the cherry-pick or revert first)",
+  "mid-merge": " (finish or abort the merge first)",
 };
 
 /** Cherry-pick to branch's menu-row reason per hold. Loading and unreadable
@@ -320,6 +355,16 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
   return null;
 }
 
+/** Mirrors git_undo_commit_core's refusal order: a stopped cherry-pick or
+ *  revert first, then a merge; rebasing is deliberately allowed (undo at an
+ *  edit stop). */
+function undoMidOpOf(
+  op: RepoOpState | undefined,
+): "mid-pick" | "mid-merge" | null {
+  if (op?.cherryPicking || op?.reverting) return "mid-pick";
+  return op?.merging ? "mid-merge" : null;
+}
+
 export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const queryClient = useQueryClient();
   const log = useLog(repoPath);
@@ -337,6 +382,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const hoverPrefetch = useHoverPrefetch();
   const setCommitDraft = useUiStore((s) => s.setCommitDraft);
   const setRepoTab = useUiStore((s) => s.setRepoTab);
+  const openCommit = useUiStore((s) => s.openCommit);
 
   const checkoutCommit = useCheckoutCommit(repoPath);
   const revertCommit = useRevertCommit(repoPath);
@@ -391,10 +437,27 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     (MergePickTarget & { repo: string }) | null
   >(null);
   const [filterText, setFilterText] = useState("");
-  // "Search all history" mode: server-side message grep across every commit,
-  // not just the loaded pages. Kept separate from the operational log so the
-  // rewrite/amend actions still see contiguous recent history.
+  // "Search all history" mode: a server-side message grep plus a SHA-prefix
+  // lookup across every commit, not just the loaded pages. Kept separate from
+  // the operational log so the rewrite/amend actions still see contiguous
+  // recent history.
   const [searchMode, setSearchMode] = useState(false);
+  // Search all reads a debounced query so typing spawns no git per keystroke.
+  // The CTA stamps the text it was pressed on, so a press runs at once on the
+  // live text. The stamp holds until the debounce settles on a newer value,
+  // since the value it last settled on can be older than the stamp, or until
+  // the live text returns to the settled value, which no new settle reports.
+  const debouncedText = useDebouncedValue(filterText, 300);
+  const [ctaStamp, setCtaStamp] = useState<{
+    text: string;
+    settled: string;
+  } | null>(null);
+  if (
+    ctaStamp &&
+    (debouncedText !== ctaStamp.settled || debouncedText === filterText)
+  )
+    setCtaStamp(null);
+  const debouncedQuery = (ctaStamp ? ctaStamp.text : debouncedText).trim();
   const filterRef = useRef<HTMLInputElement>(null);
   // The native scroll container that hosts the virtualized list. Kept in STATE
   // (not a ref) so attaching it re-renders and the child's virtualizer
@@ -444,9 +507,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }
 
   const searchActive = searchMode && filterText.trim().length > 0;
-  const search = useCommitSearch(
+  const search = useCommitSearch(repoPath, searchActive ? debouncedQuery : "");
+  const shaLookup = useCommitPrefixLookup(
     repoPath,
-    searchActive ? filterText.trim() : "",
+    searchActive ? debouncedQuery : "",
   );
 
   const onError = (e: unknown) => toastError(e);
@@ -547,9 +611,43 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // The root confirm promises to delete the branch's ref, which a detached HEAD
   // doesn't have: every route explains the backend's refusal instead.
   const detachedRoot = rootUndo && Boolean(head?.detached);
+  // A pending or failed opState read holds nothing, and the backend still
+  // refuses.
+  const undoMidOp = undoMidOpOf(opState.data);
 
   async function undoLast() {
     if (!lastCommit || !head) return;
+    // Ahead of every read and confirm: the backend would refuse anyway.
+    if (undoMidOp) {
+      // An abort run in a terminal moves no HEAD, so nothing re-reads the
+      // cached op state: a refusal re-reads it first and re-gates on the
+      // answer (a failed read keeps the cached one). Across the await only the
+      // repo is re-checked; lastCommit and head stay this render's, and the
+      // backend pins the HEAD it undoes.
+      const checkIn = repoPath;
+      let fresh: RepoOpState | undefined;
+      try {
+        fresh = await queryClient.fetchQuery({
+          ...opStateOptions(repoPath),
+          staleTime: 0,
+        });
+      } catch {
+        fresh = undefined;
+      }
+      if (
+        refuseIfSwitched(
+          checkIn,
+          "nothing was undone",
+          "before the undo started",
+        )
+      )
+        return;
+      const midOp = fresh ? undoMidOpOf(fresh) : undoMidOp;
+      if (midOp) {
+        toast.info(midOp === "mid-pick" ? UNDO_MID_PICK : UNDO_MID_MERGE);
+        return;
+      }
+    }
     // The menu holds these arms; the shortcut and palette stay enabled and
     // explain by toast instead.
     if (headIsRoot) {
@@ -776,9 +874,16 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         : commits,
     [commits, query],
   );
-  // In search mode the list is whole-history grep results; otherwise it's the
+  // In search mode the list is whole-history matches: the SHA arm's on-branch
+  // hits lead, grep rows follow minus duplicates, and off-branch hits never
+  // become rows (they're notices above the list). Otherwise it's the
   // (client-filtered) loaded pages.
-  const visibleCommits = searchActive ? searchCommits : filteredCommits;
+  const { rows: searchRows, offBranch: offBranchRows } = useMemo(
+    () => mergeSearchResults(shaLookup.data, searchCommits),
+    [shaLookup.data, searchCommits],
+  );
+  const offBranchShown = searchActive && offBranchRows.length > 0;
+  const visibleCommits = searchActive ? searchRows : filteredCommits;
   // Squash gating needs the selection's positions in REAL history (not the
   // filtered view), so index against `commits`.
   const selectedIndices = useMemo(
@@ -875,13 +980,64 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   );
 
   // A failed read never stands in for an answer: "No commits yet" and "No
-  // commits match" render only from reads that returned empty, and a failure
+  // commits … match" render only from reads that returned empty, and a failure
   // over loaded pages keeps them under the notice. The notice speaks for the
   // list on screen only, so a log failure is silent while search results show.
   const logLoadFailed = log.data === undefined && refreshFailed(log);
   const searchShown = searchActive && commits.length > 0;
+  // Search all's two arms answer apart. Negative copy and the coverage claim
+  // render only from arms that answered; a dead arm swaps its claim for a
+  // failure line, and the error block shows only when nothing at all can.
+  const grepFailed = search.data === undefined && refreshFailed(search);
+  const shaEligible = isShaPrefixQuery(debouncedQuery);
+  const shortHex = isShortHexQuery(debouncedQuery);
+  // A failed refetch over cached matches degrades too; the stale rows stay.
+  const shaFailed = shaEligible && refreshFailed(shaLookup);
+  const coverage = searchCoverage({
+    shaFailed,
+    grepFailed,
+    hasShaMatches: (shaLookup.data?.length ?? 0) > 0,
+  });
+  const shaPending = shaEligible && shaLookup.data === undefined && !shaFailed;
+  // Waits for a SHA arm still answering, and gives way to anything it found,
+  // off-branch notices included.
   const searchLoadFailed =
-    searchShown && search.data === undefined && refreshFailed(search);
+    searchShown &&
+    grepFailed &&
+    !shaPending &&
+    searchRows.length === 0 &&
+    !offBranchShown;
+  // Covers the debounce window and both arms' first answers, so the empty
+  // state never flashes "No commits…"; failed arms drop out so their own
+  // lines can render instead.
+  const searchSettling =
+    searchActive &&
+    (filterText.trim() !== debouncedQuery ||
+      search.isFetching ||
+      (search.data === undefined && !grepFailed) ||
+      (shaEligible && shaLookup.isFetching) ||
+      shaPending);
+  // The empty state gives way to the off-branch notice once settled.
+  const searchEmptyShown =
+    searchShown &&
+    !searchLoadFailed &&
+    searchRows.length === 0 &&
+    !(offBranchShown && !searchSettling);
+  // A dead SHA arm's line sits in the settled empty state when nothing
+  // matched, and in the footer whenever rows or notices are showing.
+  const shaRetryInEmpty =
+    coverage === "sha-failed" && searchEmptyShown && !searchSettling;
+  const shaRetryInFooter =
+    searchShown &&
+    coverage === "sha-failed" &&
+    (searchRows.length > 0 || (offBranchShown && !searchSettling));
+  const grepRetryInFooter = searchShown && coverage === "grep-failed";
+  // Both arms dead over stale SHA rows or notices: they stay, the line claims
+  // none.
+  const bothRetryInFooter =
+    searchShown &&
+    coverage === "none" &&
+    (searchRows.length > 0 || offBranchShown);
   const shownRead = searchShown ? search : log;
   const notice =
     shownRead.data === undefined
@@ -900,6 +1056,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     useRetryFocusRescue(logLoadFailed);
   const { hostRef: searchHostRef, retryRef: searchRetryRef } =
     useRetryFocusRescue(searchLoadFailed);
+  const { hostRef: shaArmHostRef, retryRef: shaArmRetryRef } =
+    useRetryFocusRescue(shaRetryInEmpty || shaRetryInFooter);
+  const { hostRef: grepArmHostRef, retryRef: grepArmRetryRef } =
+    useRetryFocusRescue(grepRetryInFooter);
+  const { hostRef: bothArmHostRef, retryRef: bothArmRetryRef } =
+    useRetryFocusRescue(bothRetryInFooter);
   // A Load more that fetches the last page unmounts under the user's focus;
   // the same edge rescue lands it on the shell. Each flag is true exactly
   // while its button is mounted (the list arm, in its mode, with a next page).
@@ -913,13 +1075,16 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const announcement = logLoadFailed
     ? `Couldn't load the history. ${presentError(log.error).summary}`
     : searchLoadFailed
-      ? `Couldn't search all history. ${presentError(search.error).summary}`
+      ? `${SEARCH_ALL_FAILED_LINE} ${presentError(search.error).summary}`
       : "";
   const shell = (body: ReactNode, header: ReactNode = null) => (
     <div
       ref={(node) => {
         logHostRef(node);
         searchHostRef(node);
+        shaArmHostRef(node);
+        grepArmHostRef(node);
+        bothArmHostRef(node);
         logMoreHostRef(node);
         searchMoreHostRef(node);
       }}
@@ -1164,6 +1329,17 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     view.count,
     view.hasNextPage,
   );
+  // Waits for agreement like squash: a mismatch may serve a set HEAD has
+  // already moved past.
+  const editHold = editHistoryHold({
+    editLen,
+    count: view.count,
+    headIsMerge: view.commits[0]?.isMerge === true,
+    shallowBoundary,
+    agreed,
+    opInProgress,
+  });
+  const canEditHistory = editHold === null;
 
   // CommitList is uncompiled, so a fresh element re-renders it. For the
   // compiler to cache this one: build it outside the list ternary, from stable
@@ -1190,19 +1366,40 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     />
   );
 
-  // Waits for agreement like squash: a mismatch may serve a set HEAD has
-  // already moved past.
-  const canEditHistory = editLen >= 1 && !opInProgress && agreed;
-  const editHistoryHint = (() => {
-    switch (true) {
-      case opInProgress:
-        return OP_IN_PROGRESS_HINT;
-      case !agreed:
-        return refreshingHint;
-      default:
-        return "";
-    }
-  })();
+  const nothingAheadOf =
+    view.basis === "default-branch" && view.defaultBranch !== null
+      ? view.defaultBranch
+      : null;
+  const editHistoryHints: Record<EditHistoryHold, string> = {
+    op: OP_IN_PROGRESS_HINT,
+    refreshing: refreshingHint,
+    "nothing-unpushed":
+      nothingAheadOf === null
+        ? " (no unpushed commits)"
+        : ` (no commits ahead of ${nothingAheadOf})`,
+    "merge-on-top": " (the latest commit is a merge)",
+    "shallow-boundary": HEAD_ROW_HOLD_HINT["shallow-boundary"],
+    "lone-commit": " (no older commit to rebase onto)",
+  };
+  const editHistoryHint = editHold ? editHistoryHints[editHold] : "";
+  // The empty Edit history dialog's footer line: the same hold in sentence
+  // form. Reads that agree on an empty set are final, so only a disagreement
+  // says it is catching up.
+  const editHistoryEmptyNotes: Record<EditHistoryHold, string> = {
+    op: "Finish the operation in Changes first.",
+    refreshing: countUnchecked
+      ? "Couldn't check which commits are pushed."
+      : "Catching up with the branch…",
+    "nothing-unpushed":
+      nothingAheadOf === null
+        ? "Nothing left to edit: every commit is pushed."
+        : `Nothing left to edit: no commits ahead of ${nothingAheadOf}.`,
+    "merge-on-top": "Nothing left to edit: the latest commit is a merge.",
+    "shallow-boundary":
+      "Nothing left to edit: the latest commit's parent isn't in this shallow clone.",
+    "lone-commit":
+      "Nothing left to edit: there's no older commit to rebase onto.",
+  };
   // Why cherry-picking onto a branch is unavailable, in precedence order: an
   // in-flight operation (the pick's own conflict path pauses one), a branch list
   // not read yet, then a repo whose every other branch is archived —
@@ -1249,6 +1446,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     }
     onRowContextMenu(visibleCommits[index].hash);
     setMenuTarget({ commit: visibleCommits[index] });
+    // The rows held mid-operation read a cache a terminal abort never moves,
+    // so each open re-reads it and a held row re-renders once it lands.
+    void queryClient.invalidateQueries({
+      queryKey: repoKeys.opState(repoPath),
+    });
   }
 
   // The items for whichever commit was right-clicked — three exclusive variants:
@@ -1351,9 +1553,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         menuIndex < 0
       )
         return "refreshing";
+      if (!isHead && menuIndex > 0) return "not-latest";
+      // Only a row that finishing the operation would enable says so.
+      if (undoMidOp) return undoMidOp;
       if (isHead && headIsRoot && !rootKnown && !recordsParent.isError)
         return "checking-parent";
-      if (!isHead && menuIndex > 0) return "not-latest";
       if (undoCommit.isPending) return "undoing";
       if (!canUndo) return "already-pushed";
       if (isHead && detachedRoot) return "detached-root";
@@ -1388,6 +1592,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}
           disabled={
+            undoMidOp !== null ||
             !isHead ||
             !canUndo ||
             undoCommit.isPending ||
@@ -1508,6 +1713,45 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   return shell(
     <>
+      {/* Outside the scroll container, so the virtualizer's range and
+          scroll-to-index math never count it. */}
+      {offBranchShown && (
+        <div className="shrink-0">
+          {offBranchRows.slice(0, OFF_BRANCH_NOTICE_CAP).map((c) => (
+            <div
+              key={c.hash}
+              className="flex items-center justify-between gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground"
+            >
+              <p className="min-w-0">
+                <span className="font-mono text-foreground">
+                  {c.hash.slice(0, 7)}
+                </span>
+                {OFF_BRANCH_NOTICE_SUFFIX}
+              </p>
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-foreground"
+                aria-label={`${OPEN_COMMIT_LABEL} ${c.hash.slice(0, 7)}`}
+                onClick={() => {
+                  openCommit(c.hash);
+                  setSelected(new Set());
+                  setAnchorHash(null);
+                }}
+              >
+                {OPEN_COMMIT_LABEL}
+              </Button>
+            </div>
+          ))}
+          {offBranchRows.length > OFF_BRANCH_NOTICE_CAP && (
+            <p className="border-b px-3 py-1.5 text-xs text-muted-foreground">
+              {offBranchOverflowLine(
+                offBranchRows.length - OFF_BRANCH_NOTICE_CAP,
+              )}
+            </p>
+          )}
+        </div>
+      )}
       {/* Keyed so a repo switch remounts it closed: clearing menuTarget under
           an open menu would leave Base UI's popup empty. */}
       <ContextMenu key={repoPath}>
@@ -1528,7 +1772,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           {searchLoadFailed ? (
             <div className="px-3 py-8 text-center text-xs">
               <p className="font-medium text-destructive">
-                Couldn't search all history.
+                {SEARCH_ALL_FAILED_LINE}
               </p>
               <p className="mt-1 text-muted-foreground">
                 {presentError(search.error).summary}
@@ -1539,7 +1783,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                   variant="outline"
                   size="sm"
                   className="cursor-pointer"
-                  onClick={() => void search.refetch()}
+                  onClick={() => {
+                    void search.refetch();
+                    if (shaFailed) void shaLookup.refetch();
+                  }}
                 >
                   Retry
                 </Button>
@@ -1558,34 +1805,84 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
               </div>
             </div>
           ) : visibleCommits.length === 0 ? (
-            <div className="px-3 py-8 text-center">
-              <p className="text-xs text-muted-foreground">
-                {searchActive
-                  ? search.isFetching || search.data === undefined
-                    ? "Searching all history…"
-                    : `No commits match "${filterText.trim()}"`
-                  : `No loaded commits match "${filterText.trim()}"`}
-              </p>
-              {!(searchActive && search.isFetching) && (
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  className="mt-2 text-muted-foreground"
-                  onClick={() => {
-                    setFilterText("");
-                    setSearchMode(false);
-                    filterRef.current?.focus();
-                  }}
-                >
-                  Clear filter
-                </Button>
-              )}
-            </div>
+            searchActive && !searchEmptyShown ? null : (
+              <div className="px-3 py-8 text-center">
+                <p className="text-xs text-muted-foreground">
+                  {searchActive
+                    ? searchSettling
+                      ? "Searching all history…"
+                      : searchAllNoMatchLine(debouncedQuery)
+                    : loadedNoMatchLine(filterText.trim())}
+                </p>
+                {!searchActive ? (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {loadedCheckedLine(commits.length)}
+                  </p>
+                ) : searchSettling ? null : shaRetryInEmpty ? (
+                  <div className="mt-1 flex items-center justify-center gap-2 text-[11px] text-destructive">
+                    <span>{SHA_ARM_FAILED_LINE}</span>
+                    <Button
+                      ref={shaArmRetryRef}
+                      variant="ghost"
+                      size="xs"
+                      className="text-muted-foreground"
+                      onClick={() => void shaLookup.refetch()}
+                    >
+                      Retry
+                    </Button>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {searchAllCheckedLineFor({
+                      shortHex,
+                      armFailed: coverage !== "full",
+                    })}
+                  </p>
+                )}
+                {!(searchActive && searchSettling) && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="mt-2 text-muted-foreground"
+                    onClick={() => {
+                      setFilterText("");
+                      setSearchMode(false);
+                      filterRef.current?.focus();
+                    }}
+                  >
+                    Clear filter
+                  </Button>
+                )}
+              </div>
+            )
           ) : (
             commitList
           )}
           {searchActive ? (
             <div className="space-y-0.5 px-3 py-2 text-center">
+              {(shaRetryInFooter || grepRetryInFooter || bothRetryInFooter) && (
+                <div className="flex items-center justify-center gap-2 text-[11px] text-destructive">
+                  <span>{ARM_FAILED_LINES[coverage]}</span>
+                  <Button
+                    ref={
+                      bothRetryInFooter
+                        ? bothArmRetryRef
+                        : grepRetryInFooter
+                          ? grepArmRetryRef
+                          : shaArmRetryRef
+                    }
+                    variant="ghost"
+                    size="xs"
+                    className="text-muted-foreground"
+                    onClick={() => {
+                      if (grepFailed) void search.refetch();
+                      if (shaFailed) void shaLookup.refetch();
+                    }}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              )}
               {search.hasNextPage && (
                 <Button
                   ref={searchMoreRetryRef}
@@ -1624,7 +1921,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                     variant="ghost"
                     size="xs"
                     className="text-primary"
-                    onClick={() => setSearchMode(true)}
+                    onClick={() => {
+                      setCtaStamp({ text: filterText, settled: debouncedText });
+                      setSearchMode(true);
+                    }}
                   >
                     <MagnifyingGlassIcon data-icon="inline-start" />
                     Search all history for "{filterText.trim()}"
@@ -1682,6 +1982,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           repoPath={repoPath}
           base={editBase}
           commits={editCommits}
+          emptyNote={editHold ? editHistoryEmptyNotes[editHold] : ""}
           open
           onOpenChange={(o) => {
             if (!o) {

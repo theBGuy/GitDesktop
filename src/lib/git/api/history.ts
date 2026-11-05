@@ -3,6 +3,7 @@ import type {
   BlameLine,
   CommitAuthor,
   CommitDetails,
+  CommitPrefixMatch,
   CommitSummary,
   DiffStatEntry,
   FileDiff,
@@ -40,6 +41,14 @@ export const gitLog = (
     limit,
     skip,
     search: search ?? null,
+  });
+
+/** Every commit whose id starts with a 4..=64-hex prefix: on-branch first, then
+ *  newest, at most 20 (the newest, kept before the on-branch ordering). */
+export const gitFindCommitsByPrefix = (repoPath: string, prefix: string) =>
+  invoke<CommitPrefixMatch[]>("git_find_commits_by_prefix", {
+    repoPath,
+    prefix,
   });
 
 export const gitCommitDetails = (repoPath: string, hash: string) =>

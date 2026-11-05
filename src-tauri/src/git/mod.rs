@@ -1,5 +1,6 @@
 pub mod ai_ignore;
 pub mod autostash;
+pub mod blob_sizes;
 pub mod branches;
 pub mod commit;
 pub mod compare;

@@ -180,6 +180,7 @@ export function EditHistoryDialog({
   repoPath,
   base,
   commits,
+  emptyNote,
   open,
   onOpenChange,
   onDone,
@@ -188,6 +189,9 @@ export function EditHistoryDialog({
   base: string;
   /** Editable unpushed commits, newest-first (matches the history list). */
   commits: CommitSummary[];
+  /** Why `commits` is empty, shown in the footer while it is; the caller
+   *  derives it from the same hold that disables the menu rows. */
+  emptyNote: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDone: () => void;
@@ -206,6 +210,9 @@ export function EditHistoryDialog({
   // Bumps on every reseed, so focus the reorder dropped can be put back.
   const [reseedNonce, setReseedNonce] = useState(0);
   const [menuHash, setMenuHash] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState({ text: "", seq: 0 });
+  const announce = (text: string) =>
+    setAnnouncement((prev) => ({ text, seq: prev.seq + 1 }));
 
   // Reseed when a different set of commits arrives (render-time adjustment).
   const key = commits.map((c) => c.hash).join();
@@ -216,6 +223,8 @@ export function EditHistoryDialog({
     setActions({});
     setOverrides({});
     setReseedNonce((n) => n + 1);
+    // The rows vanish under the user, so the footer's note is spoken too.
+    if (commits.length === 0 && emptyNote !== "") announce(emptyNote);
     // A menu whose row left would otherwise reopen by itself if the row came
     // back; one whose row survived stays open.
     if (menuHash !== null && !commits.some((c) => c.hash === menuHash)) {
@@ -277,9 +286,6 @@ export function EditHistoryDialog({
     hash: string;
     nonce: number;
   } | null>(null);
-  const [announcement, setAnnouncement] = useState({ text: "", seq: 0 });
-  const announce = (text: string) =>
-    setAnnouncement((prev) => ({ text, seq: prev.seq + 1 }));
 
   // A move re-orders keyed nodes, which can drop focus off the moved row (and a
   // button click parks it on a button), so every move lands focus back on it.
@@ -813,7 +819,11 @@ export function EditHistoryDialog({
 
         <DialogFooter className="sm:items-center sm:justify-between">
           <div className="mr-auto text-xs text-muted-foreground">
-            {messages.isError ? (
+            {/* First: an empty set has no messages worth retrying and no plan
+                to fault. */}
+            {commits.length === 0 && emptyNote !== "" ? (
+              emptyNote
+            ) : messages.isError ? (
               <span className="text-warning">
                 Couldn't load commit messages.{" "}
                 <button

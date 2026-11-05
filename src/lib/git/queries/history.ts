@@ -47,6 +47,33 @@ export function useCommitSearch(repo: string, query: string) {
   });
 }
 
+/** True when `q` can be a commit-id prefix: 4-64 hex after trim, any case —
+ *  the same gate as the Rust command's validation, so the query never sends
+ *  an input the backend would refuse. */
+export const isShaPrefixQuery = (q: string) =>
+  /^[0-9a-f]{4,64}$/.test(q.trim().toLowerCase());
+
+/** 1-3 hex chars after trim: too short for the SHA arm (git's minimum prefix
+ *  is 4), so search-all's checked line claims messages only. */
+export const isShortHexQuery = (q: string) =>
+  /^[0-9a-f]{1,3}$/.test(q.trim().toLowerCase());
+
+/** Search-all's SHA arm: every commit whose id starts with the prefix,
+ *  on-branch first. Idle until `query` is a hex prefix. */
+export function useCommitPrefixLookup(repo: string, query: string) {
+  const q = query.trim().toLowerCase();
+  return useQuery({
+    // Under the ["repo", repo, "log-search"] prefix so HEAD-move invalidation
+    // covers it; the {sha} leaf keeps the grep's string-q keys from prefixing
+    // this non-infinite shape. No placeholderData: a q-keyed lookup must never
+    // serve another query's answer.
+    queryKey: ["repo", repo, "log-search", { sha: q }] as const,
+    queryFn: () => api.gitFindCommitsByPrefix(repo, q),
+    enabled: isShaPrefixQuery(q),
+    networkMode: "always",
+  });
+}
+
 // Shared query definitions so the hook and the prefetch path can't drift.
 // Commits are immutable, so once fetched their data never goes stale.
 const commitDetailsOptions = (repo: string, hash: string) =>

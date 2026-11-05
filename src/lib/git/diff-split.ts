@@ -1,4 +1,5 @@
-import type { DiffStatEntry } from "./types";
+import { formatBytes } from "../format-bytes.ts";
+import type { BlobSizes, DiffStatEntry } from "./types";
 
 /** Only \n delimits lines; JS's \r/U+2028/U+2029 breaks would miskey sections. */
 export const DIFF_SECTION_BOUNDARY = /(?<![^\n])(?=diff --git )/;
@@ -350,6 +351,182 @@ export function headerOnlyMessage(diff: HeaderOnlyDiff): string {
  *  diffSectionStats' behavior is pinned on it. */
 export function sectionIsBinary(section: string): boolean {
   return section.includes("\nBinary files ");
+}
+
+/** A binary section's `index` ids. A null side is absent: git spells its id
+ *  as all zeros, at whatever width it abbreviates to. */
+export interface BinaryIndexOids {
+  old: string | null;
+  new: string | null;
+}
+
+/** QUIET_LINE's index arm with capture groups: the two must agree on what an
+ *  index line is. */
+const INDEX_LINE = /^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: [0-7]{6})?$/;
+const ABSENT_ID = /^0+$/;
+
+/** The first binary section's lines, one trailing CR dropped from each. A
+ *  typechange pairs a text section with a binary one in a single text. */
+function binarySectionLines(text: string): string[] | null {
+  const section = text.split(DIFF_SECTION_BOUNDARY).find(sectionIsBinary);
+  return section === undefined
+    ? null
+    : section.split("\n").map((line) => line.replace(/\r$/, ""));
+}
+
+/**
+ * The ids on a binary section's `index` line, or null when the text has no
+ * binary section or that section has no index line (forge-reconstructed
+ * patches carry none). A present id outside 4..64 hex is not git's (its
+ * shortest abbreviation is 4, its longest id 64), so the whole parse is null
+ * and no lookup is sent for it.
+ */
+export function binaryIndexOids(text: string): BinaryIndexOids | null {
+  const lines = binarySectionLines(text);
+  if (lines === null) return null;
+  for (const line of lines) {
+    const ids = INDEX_LINE.exec(line);
+    if (!ids) continue;
+    const [old, next] = [ids[1], ids[2]].map((id) =>
+      ABSENT_ID.test(id) ? null : id,
+    );
+    for (const id of [old, next])
+      if (id !== null && (id.length < 4 || id.length > 64)) return null;
+    return { old, new: next };
+  }
+  return null;
+}
+
+/** A binary section's mode change in words (the MODE_CHANGE sentence), or
+ *  null without both mode lines. classifyHeaderOnlyDiff can't supply it: it
+ *  rejects any section carrying the binary marker. */
+export function parseModeChange(text: string): string | null {
+  const lines = binarySectionLines(text);
+  if (lines === null) return null;
+  const modes: { old?: string; new?: string } = {};
+  for (const line of lines) {
+    const mode = MODE_LINE.exec(line);
+    if (mode) modes[mode[1] as "old" | "new"] ??= mode[2];
+  }
+  if (modes.old === undefined || modes.new === undefined) return null;
+  return MODE_CHANGE[modeTransition(modes.old, modes.new)](
+    modes.old,
+    modes.new,
+  );
+}
+
+/** The binary placeholder's size line. `blank` reserves the line while sizes
+ *  load, and whenever a read failed or couldn't size a present side. */
+export type BinarySizeLine =
+  | { kind: "blank" }
+  | { kind: "same"; text: string; sr: string }
+  | { kind: "size"; text: string; sr: string }
+  | { kind: "pair"; sizes: string; delta: string; sr: string }
+  | { kind: "end"; label: string; size: string; sr: string };
+
+const BLANK_SIZE_LINE: BinarySizeLine = { kind: "blank" };
+
+const END_LABEL: Record<"new" | "deleted", string> = {
+  new: "New file",
+  deleted: "Deleted file",
+};
+
+const DELTA_WORD: Record<"larger" | "smaller", string> = {
+  larger: "larger",
+  smaller: "smaller",
+};
+
+/** An exact byte count for the screen-reader sentences, singular at 1. */
+function byteCount(n: number): string {
+  return `${n.toLocaleString()} ${n === 1 ? "byte" : "bytes"}`;
+}
+
+/** A present side's line when the other is absent. A typechange's sections
+ *  delete and create one path that exists on both sides, so it shows the size
+ *  alone, never a new or deleted claim. */
+function endLine(
+  end: "new" | "deleted",
+  size: number,
+  typechange: boolean,
+): BinarySizeLine {
+  if (typechange)
+    return { kind: "size", text: formatBytes(size), sr: `${byteCount(size)}.` };
+  return {
+    kind: "end",
+    label: END_LABEL[end],
+    size: formatBytes(size),
+    sr: `${END_LABEL[end]}, ${byteCount(size)}.`,
+  };
+}
+
+/** True when a FileDiff's text holds more than one section: git splits a
+ *  file↔symlink typechange into a deletion and a creation of one path. */
+export function isTypechangeDiff(text: string): boolean {
+  return text.split(DIFF_SECTION_BOUNDARY).length > 1;
+}
+
+/** The delta's parenthetical. None over a 0-byte side, where a ratio is
+ *  undefined; growth from 10x reads as a multiplier; whole shrink percents
+ *  round toward zero, so a file that still exists never reads −100%. */
+function changeRatio(oldSize: number, newSize: number): string {
+  if (oldSize === 0 || newSize === 0) return "";
+  const ratio = newSize / oldSize;
+  if (ratio >= 10) return ` (${Math.round(ratio).toLocaleString()}×)`;
+  const pct = ((newSize - oldSize) / oldSize) * 100;
+  const magnitude = Math.abs(pct);
+  if (magnitude < 0.1) return " (<0.1%)";
+  const sign = pct > 0 ? "+" : "−";
+  // A magnitude rounding to 1.0 takes the whole-percent spelling, as 1 does.
+  const tenths = magnitude.toFixed(1);
+  if (magnitude < 1 && tenths !== "1.0") return ` (${sign}${tenths}%)`;
+  const whole =
+    pct > 0 ? Math.round(magnitude) : Math.max(1, Math.trunc(magnitude));
+  return ` (${sign}${whole}%)`;
+}
+
+/**
+ * The size line for a binary diff. Claims render only from an answer that
+ * sized every present side: a pending or failed read (`sizes` undefined), a
+ * side the lookup couldn't size, or two absent sides all stay blank. Exact
+ * byte counts show when both sizes round to the same label, and always in
+ * the screen-reader sentence. `typechange` (`isTypechangeDiff`) sizes a
+ * lone side without the new or deleted label.
+ */
+export function binarySizeSummary(
+  oids: BinaryIndexOids,
+  sizes: BlobSizes | undefined,
+  typechange = false,
+): BinarySizeLine {
+  if (sizes === undefined) return BLANK_SIZE_LINE;
+  const { oldSize, newSize } = sizes;
+  if (oids.old === null && oids.new === null) return BLANK_SIZE_LINE;
+  if (oids.new === null)
+    return oldSize === null
+      ? BLANK_SIZE_LINE
+      : endLine("deleted", oldSize, typechange);
+  if (oids.old === null)
+    return newSize === null
+      ? BLANK_SIZE_LINE
+      : endLine("new", newSize, typechange);
+  if (oldSize === null || newSize === null) return BLANK_SIZE_LINE;
+  if (oldSize === newSize)
+    return {
+      kind: "same",
+      text: `Same size (${formatBytes(newSize)}), different contents`,
+      sr: `Same size, ${byteCount(newSize)}, different contents.`,
+    };
+  const word = DELTA_WORD[newSize > oldSize ? "larger" : "smaller"];
+  const change = Math.abs(newSize - oldSize);
+  const sizesText =
+    formatBytes(oldSize) === formatBytes(newSize)
+      ? `${oldSize.toLocaleString()} → ${newSize.toLocaleString()} bytes`
+      : `${formatBytes(oldSize)} → ${formatBytes(newSize)}`;
+  return {
+    kind: "pair",
+    sizes: sizesText,
+    delta: `${formatBytes(change)} ${word}${changeRatio(oldSize, newSize)}`,
+    sr: `Size changed from ${byteCount(oldSize)} to ${byteCount(newSize)}, ${byteCount(change)} ${word}.`,
+  };
 }
 
 /** The paths of the rows the PR Files list may flag binary: forge counts 0/0

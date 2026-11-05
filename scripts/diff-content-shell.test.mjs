@@ -17,6 +17,7 @@ import { lineOf, maskNonCode, matchBrace } from "./lib/ts-mask.mjs";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SURFACE = "src/features/diff/DiffSurface.tsx";
 const IMAGE = "src/features/diff/ImageDiff.tsx";
+const PATH_ROW = "src/features/diff/DiffPathRow.tsx";
 // LF-normalized, so offsets and anchors read the same on any checkout.
 const read = (file) =>
   readFileSync(join(ROOT, file), "utf8").replace(/\r\n/g, "\n");
@@ -93,7 +94,7 @@ function codeOccurrences(raw, masked, needle, span) {
   );
 }
 
-export function diffShellViolations(surfaceRaw, imageRaw) {
+export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
   const problems = [];
   const need = (ok, what) => {
     if (!ok) problems.push(what);
@@ -212,16 +213,18 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
       );
   }
 
-  // (b) Regression-only (true pre-fix too). One path-row literal in
-  // DiffContent, naming the selected file: never a per-arm copy.
-  const rows = occurrences(surfaceRaw, ROW, body);
-  need(rows.length === 1, "DiffContent renders one path-row literal");
+  // (b) Regression-only (true pre-fix too). One path row in DiffContent, a
+  // DiffPathRow naming the selected file: never a per-arm copy, and the row's
+  // markup lives only in DiffPathRow, which the lazy fallback shares.
+  const rows = codeOccurrences(surfaceRaw, masked, "<DiffPathRow", body);
+  need(
+    rows.length === 1 && occurrences(surfaceRaw, ROW, body).length === 0,
+    "DiffContent renders one DiffPathRow",
+  );
   if (rows.length === 1) {
     need(
-      /^border-b px-3 py-1\.5">\s*<PathText\s+path=\{filePath\}/.test(
-        surfaceRaw.slice(rows[0]),
-      ),
-      "the path row renders PathText with the selected file's path",
+      /^<DiffPathRow\s+filePath=\{filePath\}/.test(surfaceRaw.slice(rows[0])),
+      "the path row renders with the selected file's path",
     );
     // Part of (a): the row sits inside the shell, outside every arm branch.
     need(
@@ -229,6 +232,16 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
       "the shell holds the path row",
     );
   }
+  const rowMasked = maskNonCode(rowRaw, true);
+  const pathRow = componentBody(rowMasked, "DiffPathRow");
+  const rowLiterals = pathRow === null ? [] : occurrences(rowRaw, ROW, pathRow);
+  need(
+    rowLiterals.length === 1 &&
+      /^border-b px-3 py-1\.5">\s*<PathText\s+path=\{filePath\}/.test(
+        rowRaw.slice(rowLiterals[0]),
+      ),
+    "DiffPathRow renders one path-row literal with PathText naming its file",
+  );
 
   // Part of (a), so it fails pre-fix too. The landing body (pending,
   // stale-path, error, binary, empty, header-only) carries the swap ref, the
@@ -243,11 +256,29 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
     codeOccurrences(surfaceRaw, masked, "ref={armRef}", body).length === 1,
     "one body carries the arm landing's ref",
   );
+  // The shell hands its row the controls landing, and the row puts it on the
+  // cluster.
+  const handed = codeOccurrences(
+    surfaceRaw,
+    masked,
+    "controlsRef={controlsRef}",
+    shell,
+  );
   need(
     shellClose > shellOpen &&
-      codeOccurrences(surfaceRaw, masked, "ref={controlsRef}", shell).length ===
-        1,
+      handed.length === 1 &&
+      rows.length === 1 &&
+      handed[0] > rows[0],
     "the controls cluster's focus landing renders in the shell",
+  );
+  need(
+    pathRow !== null &&
+      codeOccurrences(rowRaw, rowMasked, "ref={controlsRef}", pathRow)
+        .length === 1 &&
+      /<span\s+ref=\{controlsRef\}\s+tabIndex=\{-1\}/.test(
+        rowMasked.slice(pathRow.open, pathRow.close),
+      ),
+    "DiffPathRow's controls cluster carries the focus landing ref",
   );
 
   // The blank bodies (pending, stale path) are busy, so AT hears a load rather
@@ -448,16 +479,32 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
   );
 
   // The five nodes that can hold focus and leave on a watched flip: the text
-  // scroller, the Preview body, both toolbar clusters, and the notice.
+  // scroller, the Preview body, both toolbar clusters, and the notice. The
+  // scroller's capture rides its merged ref, shared with the line anchor.
   need(
     codeOccurrences(surfaceRaw, masked, "ref={captureHeldRef}", body).length ===
-      5,
-    "five capture nodes carry captureHeldRef",
+      4 &&
+      codeOccurrences(surfaceRaw, masked, "ref={scrollerCaptureRef}", body)
+        .length === 1,
+    "five capture nodes carry captureHeldRef, the scroller through its merged ref",
+  );
+  // Identity-stable, so a re-render never runs the capture's cleanup; its own
+  // cleanup runs the capture's before the scroller stops being readable.
+  const mergedDecl = "const scrollerCaptureRef = useCallback(";
+  const mergedAt = masked.indexOf(mergedDecl, body.open);
+  const mergedOpen = mergedAt + mergedDecl.length - 1;
+  const mergedClose =
+    mergedAt < 0 || mergedAt > body.close ? -1 : matchBrace(masked, mergedOpen);
+  need(
+    mergedClose > 0 &&
+      flat(masked.slice(mergedOpen, mergedClose + 1)) ===
+        "((node:HTMLDivElement|null)=>{scrollerRef.current=node;constcapture=captureHeldRef(node);return()=>{capture();scrollerRef.current=null;};},[captureHeldRef],)",
+    "the scroller's merged ref runs the capture's cleanup, identity-stable",
   );
   // Each capture node at its own placement, so a ref moved to another node
   // keeps the count and still trips. The ref and the node it wraps must both
   // be code, never a comment quoting them.
-  const captureAt = (source, child) => {
+  const captureAt = (source, child, ref = "ref={captureHeldRef}") => {
     const re = new RegExp(source, "dg");
     const hits = [...surfaceRaw.slice(body.open, body.close).matchAll(re)]
       .map((m) => ({
@@ -466,8 +513,7 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
       }))
       .filter(
         (h) =>
-          masked.startsWith("ref={captureHeldRef}", h.ref) &&
-          masked.startsWith(child, h.child),
+          masked.startsWith(ref, h.ref) && masked.startsWith(child, h.child),
       );
     return hits.length === 1 ? hits[0].ref : -1;
   };
@@ -475,8 +521,9 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
   const placements = [
     [
       captureAt(
-        String.raw`<div\s+(?<ref>ref=\{captureHeldRef\})\s+className="min-h-0 flex-1 overflow-auto">\s*(?<child>\{previewOn\b)`,
+        String.raw`<div\s+(?<ref>ref=\{scrollerCaptureRef\})\s+className="min-h-0 flex-1 overflow-auto">\s*(?<child>\{previewOn\b)`,
         "{previewOn",
+        "ref={scrollerCaptureRef}",
       ),
       "the text scroller is a capture node",
     ],
@@ -557,14 +604,18 @@ export function diffShellViolations(surfaceRaw, imageRaw) {
 }
 
 test("diff shell: every arm returns through the shell, each data arm with its notice", () => {
-  assert.deepEqual(diffShellViolations(read(SURFACE), read(IMAGE)), []);
+  assert.deepEqual(
+    diffShellViolations(read(SURFACE), read(IMAGE), read(PATH_ROW)),
+    [],
+  );
 });
 
 test("diff shell: negative controls trip the pin named beside them", () => {
   const surface = read(SURFACE);
   const image = read(IMAGE);
-  const caught = (s, i, pin) => {
-    const got = diffShellViolations(s, i);
+  const row = read(PATH_ROW);
+  const caught = (s, i, pin, r = row) => {
+    const got = diffShellViolations(s, i, r);
     assert.ok(
       got.some((p) => p.startsWith(pin)),
       `expected "${pin}", got ${JSON.stringify(got)}`,
@@ -598,9 +649,20 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   );
   // The row losing its box.
   caught(
-    swap(surface, 'gap-2 border-b px-3 py-1.5"', 'gap-2"'),
+    surface,
     image,
-    "DiffContent renders one path-row literal",
+    "DiffPathRow renders one path-row literal",
+    swap(row, 'gap-2 border-b px-3 py-1.5"', 'gap-2"'),
+  );
+  // The shell drawing its own row again instead of DiffPathRow.
+  caught(
+    swap(
+      surface,
+      "      <DiffPathRow\n        filePath={filePath}",
+      '      <div className="border-b px-3 py-1.5" />\n      <DiffPathRow\n        filePath={filePath}',
+    ),
+    image,
+    "DiffContent renders one DiffPathRow",
   );
   // No shell for the arms to share.
   caught(
@@ -616,7 +678,16 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<div key="arm-image" className="min-h-0 flex-1">\n<div className="border-b px-3 py-1.5"><PathText path={filePath} /></div>',
     ),
     image,
-    "DiffContent renders one path-row literal",
+    "DiffContent renders one DiffPathRow",
+  );
+  caught(
+    swap(
+      surface,
+      '<div key="arm-image" className="min-h-0 flex-1">',
+      '<div key="arm-image" className="min-h-0 flex-1">\n<DiffPathRow filePath={filePath} />',
+    ),
+    image,
+    "DiffContent renders one DiffPathRow",
   );
   // An arm returning ahead of the settle report.
   caught(
@@ -678,9 +749,19 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     "one body carries the arm landing's ref",
   );
   caught(
-    swap(surface, "ref={controlsRef}", "data-x={0} /* ref={controlsRef} */"),
+    swap(
+      surface,
+      "controlsRef={controlsRef}",
+      "data-x={0} /* controlsRef={controlsRef} */",
+    ),
     image,
     "the controls cluster's focus landing renders in the shell",
+  );
+  caught(
+    surface,
+    image,
+    "DiffPathRow's controls cluster carries the focus landing ref",
+    swap(row, "ref={controlsRef}", "data-x={0} /* ref={controlsRef} */"),
   );
   // The Preview rescue running first again.
   caught(
@@ -803,11 +884,26 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   caught(
     swap(
       surface,
-      '<div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">',
+      '<div ref={scrollerCaptureRef} className="min-h-0 flex-1 overflow-auto">',
       '<div className="min-h-0 flex-1 overflow-auto">',
     ),
     image,
     "five capture nodes carry captureHeldRef",
+  );
+  // The merged ref dropping the capture's cleanup, or its stable identity.
+  caught(
+    swap(surface, "        capture();\n", ""),
+    image,
+    "the scroller's merged ref runs the capture's cleanup",
+  );
+  caught(
+    swap(
+      surface,
+      "    [captureHeldRef],\n",
+      "    [captureHeldRef, filePath],\n",
+    ),
+    image,
+    "the scroller's merged ref runs the capture's cleanup",
   );
   caught(
     swap(
@@ -833,13 +929,22 @@ test("diff shell: negative controls trip the pin named beside them", () => {
   const unref = (raw, from) =>
     swap(raw, from, from.replace(" ref={captureHeldRef}", ""));
   caught(
+    unref(
+      surface,
+      '<span className="contents" ref={captureHeldRef}>\n            <MarkdownDocPreview',
+    ),
+    image,
+    "five capture nodes carry captureHeldRef",
+  );
+  caught(
     swap(
-      unref(
+      swap(
         surface,
-        '<div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">',
+        '<div ref={scrollerCaptureRef} className="min-h-0 flex-1 overflow-auto">',
+        '<div className="min-h-0 flex-1 overflow-auto">',
       ),
       '<InfoNote className="shrink-0">',
-      '<InfoNote ref={captureHeldRef} className="shrink-0">',
+      '<InfoNote ref={scrollerCaptureRef} className="shrink-0">',
     ),
     image,
     "the text scroller is a capture node",
@@ -860,7 +965,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     swap(
       unref(
         surface,
-        '<span className="contents" ref={captureHeldRef}>\n              <MarkdownViewToggle',
+        '<span className="contents" ref={captureHeldRef}>\n            <MarkdownViewToggle',
       ),
       '<span className="sr-only">(truncated',
       '<span className="sr-only" ref={captureHeldRef}>(truncated',
@@ -872,7 +977,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     swap(
       unref(
         surface,
-        '<span className="contents" ref={captureHeldRef}>\n              {/* The only variable-width',
+        '<span className="contents" ref={captureHeldRef}>\n            {/* The only variable-width',
       ),
       '<span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">',
       '<span aria-hidden ref={captureHeldRef} className="hidden shrink-0 @2xl/diff-pane:inline">',
@@ -982,4 +1087,117 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     image,
     "DiffContent's body is not found",
   );
+});
+
+test("diff shell: the shell and the lazy fallback root on one shared class", () => {
+  const USE = "className={DIFF_PANE_ROOT_CLASS}";
+  const check = (surface, row) => {
+    const problems = [];
+    if (
+      !/export const DIFF_PANE_ROOT_CLASS =\s*"[^"]*@container\/diff-pane\b[^"]*";/.test(
+        row,
+      )
+    )
+      problems.push("DiffPathRow exports the pane-root class");
+    if (row.split(USE).length !== 2)
+      problems.push("DiffPaneFallback roots on it");
+    if (surface.split(USE).length !== 2) problems.push("the shell roots on it");
+    if (/@container\/diff-pane flex/.test(surface))
+      problems.push("DiffSurface spells no pane-root literal of its own");
+    return problems;
+  };
+  const surface = read(SURFACE);
+  const row = read(PATH_ROW);
+  assert.deepEqual(check(surface, row), []);
+  // Negative controls: either side drifting onto its own literal is caught.
+  const literal =
+    'className="ph-no-capture @container/diff-pane flex h-full flex-col"';
+  assert.equal(surface.split(USE).length, 2);
+  assert.notDeepEqual(
+    check(
+      surface.replace(USE, () => literal),
+      row,
+    ),
+    [],
+  );
+  assert.equal(row.split(USE).length, 2);
+  assert.notDeepEqual(
+    check(
+      surface,
+      row.replace(USE, () => literal),
+    ),
+    [],
+  );
+});
+
+/** What the binary arm's `<BinaryFileSummary>` must be handed: the placeholder
+ *  flag as `held` (no lookup on another read's ids), the working-tree side
+ *  from the image revs, the surface's anchor commit, and a mount only with a
+ *  repo. */
+function binaryArmViolations(surfaceRaw) {
+  const masked = maskNonCode(surfaceRaw, true);
+  const at = masked.indexOf("if (data.isBinary) {");
+  if (at < 0) return ["the binary arm is not found"];
+  const open = masked.indexOf("{", at);
+  const close = matchBrace(masked, open);
+  const tags = [...masked.slice(open, close).matchAll(/<BinaryFileSummary\b/g)];
+  if (tags.length !== 1 || masked.split("<BinaryFileSummary").length !== 2)
+    return ["the binary arm renders the file's one BinaryFileSummary"];
+  const from = open + tags[0].index;
+  const end = masked.indexOf("/>", from);
+  const attrs = flat(surfaceRaw.slice(from, end));
+  const problems = [];
+  const need = (ok, what) => {
+    if (!ok) problems.push(what);
+  };
+  need(
+    attrs.includes("held={dataIsPlaceholder===true}"),
+    "held is the placeholder flag",
+  );
+  need(
+    attrs.includes("worktreeNewSide={imageRevs?.new===null}"),
+    "worktreeNewSide reads the image revs' new side",
+  );
+  need(
+    attrs.includes("anchorCommit={anchorCommit}"),
+    "anchorCommit passes through",
+  );
+  need(
+    flat(surfaceRaw.slice(open, from)).endsWith("repoPath!==undefined?(") &&
+      attrs.includes("repoPath={repoPath}"),
+    "the summary mounts only with a repo path",
+  );
+  return problems;
+}
+
+test("diff shell: the binary arm wires BinaryFileSummary's gates", () => {
+  const surface = read(SURFACE);
+  assert.deepEqual(binaryArmViolations(surface), []);
+  const swap = (from, to) => {
+    assert.ok(
+      surface.includes(from),
+      `negative-control anchor missing: ${from}`,
+    );
+    return surface.replace(from, () => to);
+  };
+  for (const [what, from, to] of [
+    ["held is the placeholder flag", "held={dataIsPlaceholder === true}", ""],
+    [
+      "worktreeNewSide reads the image revs' new side",
+      "worktreeNewSide={imageRevs?.new === null}",
+      "worktreeNewSide={imageRevs?.new !== null}",
+    ],
+    ["anchorCommit passes through", "anchorCommit={anchorCommit}", ""],
+    [
+      "the summary mounts only with a repo path",
+      "repoPath !== undefined ? (\n              <BinaryFileSummary",
+      "(\n              <BinaryFileSummary",
+    ],
+  ]) {
+    const got = binaryArmViolations(swap(from, to));
+    assert.ok(
+      got.includes(what),
+      `expected "${what}", got ${JSON.stringify(got)}`,
+    );
+  }
 });

@@ -465,6 +465,7 @@ function PrCommitFileDiffSlot({
       isError={false}
       repoPath={repoPath}
       previewRev={previewRev}
+      anchorCommit={sha}
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}
     />

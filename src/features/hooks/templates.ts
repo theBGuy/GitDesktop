@@ -234,10 +234,11 @@ exit 0
     hook: "pre-push",
     body: `#!/bin/sh
 # Block pushing work-in-progress commits (WIP / fixup! / squash!).
-z="0000000000000000000000000000000000000000"
+# An all-zero id of any width (SHA-1 or SHA-256) marks a created or deleted ref.
+is_zero() { case "$1" in *[!0]*) return 1 ;; esac; return 0; }
 while read -r local_ref local_oid remote_ref remote_oid; do
-  [ "$local_oid" = "$z" ] && continue
-  if [ "$remote_oid" = "$z" ]; then
+  is_zero "$local_oid" && continue
+  if is_zero "$remote_oid"; then
     range="$local_oid"
   else
     range="$remote_oid..$local_oid"

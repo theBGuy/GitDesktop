@@ -327,3 +327,18 @@ test("a fold that retargets to a same-subject leader still names it", () => {
     'Moved to 2 of 3, into "wip"',
   );
 });
+
+test("zero rows compile to no error and no change, never a drop-all", () => {
+  const plan = compilePlan([], []);
+  assert.equal(plan.error, null);
+  assert.equal(plan.changed, false);
+  assert.equal(plan.resultCount, 0);
+});
+
+test("every row dropped is held with the drop-all sentence", () => {
+  const plan = compile([row("a", "drop")]);
+  assert.equal(
+    plan.error,
+    "Keep at least one commit — you can't drop them all.",
+  );
+});

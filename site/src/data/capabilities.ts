@@ -62,6 +62,11 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
+      "Binary files show their size change — old and new size, and how much larger or smaller",
+  },
+  {
+    group: "Diffs & staging",
+    label:
       "Raw ⇄ Preview toggle on markdown & MDX diffs — read the change as rendered prose, repository images included",
     highlight: true,
   },
@@ -137,6 +142,11 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label: "Paged, filterable commit history with rich detail",
+  },
+  {
+    group: "Branches & history",
+    label:
+      "Search all history by message or SHA — paste a full or short hash to find its commit",
   },
   { group: "Branches & history", label: "File history & line blame" },
   { group: "Branches & history", label: "Commit-author avatars in history" },

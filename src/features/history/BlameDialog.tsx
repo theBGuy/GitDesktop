@@ -35,6 +35,7 @@ import {
 import { diffLang } from "@/features/diff/diff-lang";
 import { HighlightedLine } from "@/features/diff/HighlightedLine";
 import { presentError } from "@/lib/error-summary";
+import { FULL_OID_RE } from "@/lib/git/oid";
 import { useBlame } from "@/lib/git/queries";
 import type { BlameLine } from "@/lib/git/types";
 import { createCardLatch } from "@/lib/hover-card-latch";
@@ -86,12 +87,8 @@ export function BlameDialog({
   const lines = blame.data ?? [];
   const name = path.split("/").pop() ?? path;
   const lang = diffLang(path);
-  // Abbreviate a full 40-hex sha to 7 chars; show branch/tag names verbatim.
-  const shortRev = rev
-    ? /^[0-9a-f]{40}$/i.test(rev)
-      ? rev.slice(0, 7)
-      : rev
-    : null;
+  // Abbreviate a full commit id to 7 chars; show branch/tag names verbatim.
+  const shortRev = rev ? (FULL_OID_RE.test(rev) ? rev.slice(0, 7) : rev) : null;
   // Native scroll container held in STATE (not a ref) so attaching it
   // re-renders and the child's virtualizer re-initializes with the real node —
   // a plain ref stays null at the virtualizer's mount effect, so

@@ -1,6 +1,7 @@
 import { type ComponentProps, lazy, Suspense } from "react";
 
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
+import { DiffPaneFallback } from "./DiffPathRow";
 
 // @git-diff-view (and DiffSurface's render graph — Shiki wiring, the
 // multi-select workaround, DiffFile building) is heavy and only needed once a
@@ -10,7 +11,7 @@ import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
 // wrappers so the entry chunk no longer eagerly pulls the library in. Inside
 // it, only files already in DiffViewer's lazy chunk (DiffViewer,
 // MarkdownPreview) import ./DiffSurface directly; boot-path files here
-// (DiffRestingFallback, DiffPlaceholder) must not.
+// (DiffRestingFallback, DiffPlaceholder, DiffPathRow) must not.
 //
 // Prop types are derived from the real components via a type-only import of
 // the module below — types erase at build time, so this does NOT drag the
@@ -33,18 +34,20 @@ export type {
   SyntaxPrefs,
 } from "./DiffSurface";
 
-// The panes these render into paint their own placeholders and skeletons, so
-// the fallback stays blank (rows={[]}, ~300 ms on first use) while marking the
-// region busy and naming the wait for assistive tech.
+// GitDiffView's hosts draw their own headers, so its fallback stays blank
+// (rows={[]}, ~300 ms on first use) while marking the region busy and naming
+// the wait for assistive tech.
 const fallback = <LazyPanelFallback name="the diff" rows={[]} />;
 
 const DiffSurfaceLazyImpl = lazy(() =>
   import("./DiffSurface").then((m) => ({ default: m.DiffSurface })),
 );
 
+// DiffSurface and DiffContent draw the path row in every arm, so their
+// fallback draws the same row: the first diff's header is up before the chunk.
 export function DiffSurface(props: ComponentProps<typeof DiffSurfaceImpl>) {
   return (
-    <Suspense fallback={fallback}>
+    <Suspense fallback={<DiffPaneFallback filePath={props.filePath} />}>
       <DiffSurfaceLazyImpl {...props} />
     </Suspense>
   );
@@ -56,7 +59,7 @@ const DiffContentLazyImpl = lazy(() =>
 
 export function DiffContent(props: ComponentProps<typeof DiffContentImpl>) {
   return (
-    <Suspense fallback={fallback}>
+    <Suspense fallback={<DiffPaneFallback filePath={props.filePath} />}>
       <DiffContentLazyImpl {...props} />
     </Suspense>
   );

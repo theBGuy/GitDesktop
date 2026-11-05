@@ -159,7 +159,8 @@ export function compilePlan(
   }
 
   // Validation (first blocker wins; a fold-without-leader error takes priority).
-  if (!error && rows.every((r) => r.action === "drop")) {
+  // Zero rows is an empty set, not a drop-all: `every` is vacuously true there.
+  if (!error && rows.length > 0 && rows.every((r) => r.action === "drop")) {
     error = "Keep at least one commit — you can't drop them all.";
   }
   if (!error) {

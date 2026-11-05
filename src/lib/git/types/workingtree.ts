@@ -32,6 +32,12 @@ export interface FileDiff {
   oldPath?: string;
 }
 
+/** Byte sizes of a binary diff's sides; null = unknown. */
+export interface BlobSizes {
+  oldSize: number | null;
+  newSize: number | null;
+}
+
 export interface DiffStatEntry {
   path: string;
   added: number;
