@@ -5,9 +5,10 @@
 //
 // The import reaches straight into `src/` under Node's type stripping, so
 // `bulk-row-targets.ts` must keep to type-only imports, which stripping erases:
-// Node can't resolve the app's `@/` aliases. The ChangesPanel and
-// ChangesContextMenu wiring is pinned by mask-aware source scans, each with
-// in-memory mutation controls that must turn it red.
+// Node can't resolve the app's `@/` aliases. The ChangesPanel wiring and the
+// ChangesContextMenu's shared-predicate greps are pinned by mask-aware source
+// scans, each with in-memory mutation controls that must turn it red; the
+// menu's rendered labels and gates live in src/test/changes-context-menu.test.tsx.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
@@ -456,48 +457,12 @@ function folderRouteProblems(text) {
   return problems;
 }
 
-/** The raw text of the menu item whose onClick is `actions.<action>`. */
-function itemText(text, masked, action) {
-  const at = masked.search(new RegExp(`onClick=\\{actions\\.${action}\\}`));
-  if (at === -1) return null;
-  const end = masked.indexOf("</ContextMenuItem>", at);
-  // Labels sit in template literals, which the mask blanks: read them raw.
-  return end === -1 ? null : text.slice(at, end);
-}
-
-/** Problems with the bulk menu's gate and labels; empty when pinned. */
-function menuProblems(text) {
+/** Problems with the menu's shared-predicate and record-kind greps; empty
+ *  when pinned. Its rendered labels and gates are pinned by
+ *  src/test/changes-context-menu.test.tsx. */
+function menuClassGrepProblems(text) {
   const masked = maskNonCode(text, true);
   const problems = [];
-  // (p4) the bulk gate counts resolved rows.
-  if (!/\bif \(inSelection && rowCount > 1\)/.test(masked))
-    problems.push("the bulk gate does not compare rowCount");
-  // (p5) Discard counts the unstaged rows it sends, of all unstaged rows;
-  // Stash counts distinct paths.
-  if (
-    !/\{discardableCount > 0 && \(\s*<ContextMenuItem onClick=\{actions\.discardSelected\}>/.test(
-      masked,
-    )
-  )
-    problems.push("the bulk discard item doesn't hide at zero targets");
-  const discard = itemText(text, masked, "discardSelected");
-  if (discard === null) problems.push("the bulk discard item is not found");
-  else {
-    if (
-      !discard.includes(
-        '{discardableCount === unstagedRowCount\n              ? `Discard ${discardableCount} change${discardableCount === 1 ? "" : "s"}…`\n              : `Discard ${discardableCount} of ${unstagedRowCount} changes…`}',
-      )
-    )
-      problems.push("the discard label does not count discardableCount");
-    if (/\bpathCount\b|\browCount\b/.test(discard.replace(/\w+RowCount/g, "")))
-      problems.push("the discard label reads another count");
-  }
-  const stash = itemText(text, masked, "stashSelected");
-  if (stash === null) problems.push("the bulk stash item is not found");
-  else if (!stash.includes("${stashLabel(stashablePathCount, pathCount)}"))
-    problems.push(
-      "the stash label does not count stashablePathCount of pathCount",
-    );
   // The single-row Untrack shares the bulk rule instead of re-spelling it.
   if (!/\bconst untrackable = canUntrack\(entry\);/.test(masked))
     problems.push("the single-row menu does not gate Untrack on canUntrack");
@@ -506,68 +471,6 @@ function menuProblems(text) {
   // One conflict predicate, shared with the panel.
   if (/\bisConflicted\b/.test(masked) || text.includes('"conflicted"'))
     problems.push("the menu re-spells the conflict predicate");
-  if (
-    !/\{isConflictedEntry\(entry\) && aiEnabled && reviewConfigured &&/.test(
-      masked,
-    )
-  )
-    problems.push("Resolve with AI doesn't gate on isConflictedEntry");
-  // Like Discard, the bulk Stash hides when nothing it targets can be stashed.
-  if (
-    !/\{stashablePathCount > 0 && \(\s*<ContextMenuItem\s+className=\{MENU_HELD_ROW_CLASS\}\s+disabled=\{anyConflicted\}\s+onClick=\{actions\.stashSelected\}/.test(
-      masked,
-    )
-  )
-    problems.push("the bulk stash item doesn't hide at zero stashable files");
-  problems.push(...stashItemProblems(text, masked));
-  return problems;
-}
-
-/** The raw `<ContextMenuItem …>…</ContextMenuItem>` element holding the code
- *  `locator`, as [start, openEnd, end] offsets, or null. */
-function itemAround(masked, locator) {
-  const at = masked.search(locator);
-  if (at === -1) return null;
-  const start = masked.lastIndexOf("<ContextMenuItem", at);
-  // The tag closes after the locator's own brace (an arrow's `=>` doesn't).
-  const close = /\}\s*>/.exec(masked.slice(at));
-  const end = masked.indexOf("</ContextMenuItem>", at);
-  if (start === -1 || close === null || end === -1) return null;
-  const openEnd = at + close.index + close[0].length;
-  return openEnd > end ? null : [start, openEnd, end];
-}
-
-const STASH_ITEMS = {
-  "Stash all changes…": /onClick=\{actions\.stashAll\}/,
-  "the multi-select Stash": /onClick=\{actions\.stashSelected\}/,
-  "the folder Stash": /onClick=\{actions\.stashFolder\}/,
-  "Stash change…": /onClick=\{\(\) => actions\.stashFile\(entry, staged\)\}/,
-};
-
-/** Every Stash item disables while any file is conflicted, says why on its
- *  label, and stays hit-testable when a poll flips it under the pointer. */
-function stashItemProblems(text, masked) {
-  const problems = [];
-  if (!text.includes('const CONFLICT_HINT = " (resolve conflicts first)";'))
-    problems.push("CONFLICT_HINT is not the resolve-first reason");
-  for (const [name, locator] of Object.entries(STASH_ITEMS)) {
-    const item = itemAround(masked, locator);
-    if (item === null) {
-      problems.push(`${name} is not found`);
-      continue;
-    }
-    const [start, openEnd, end] = item;
-    const open = masked.slice(start, openEnd);
-    // The file item also disables on its own reserved-name gate.
-    if (!/\bdisabled=\{anyConflicted(?: \|\| stashBlocked)?\}/.test(open))
-      problems.push(`${name} doesn't disable while a file is conflicted`);
-    if (!/\bclassName=\{MENU_HELD_ROW_CLASS\}/.test(open))
-      problems.push(`${name} lacks MENU_HELD_ROW_CLASS`);
-    if (
-      !text.slice(openEnd, end).includes('anyConflicted ? CONFLICT_HINT : ""')
-    )
-      problems.push(`${name}'s label doesn't carry CONFLICT_HINT`);
-  }
   return problems;
 }
 
@@ -683,7 +586,7 @@ function mutate(text, from, to) {
 
 test("the panel and menu are wired to row-based targets", () => {
   assert.deepEqual(panelProblems(source(PANEL)), []);
-  assert.deepEqual(menuProblems(source(MENU)), []);
+  assert.deepEqual(menuClassGrepProblems(source(MENU)), []);
 });
 
 test("the folder Discard/Stash routes and palette enables are pinned", () => {
@@ -834,70 +737,34 @@ test("panel pin mutation controls go red", () => {
   for (const mutant of mutants) assert.notDeepEqual(panelProblems(mutant), []);
 });
 
-test("menu pin mutation controls go red", () => {
-  const text = source(MENU);
-  const mutants = [
-    mutate(
-      text,
-      "if (inSelection && rowCount > 1)",
-      "if (inSelection && pathCount > 1)",
+test("menu grep mutation controls go red", () => {
+  const mutant = mutate(
+    source(MENU),
+    "{isConflictedEntry(entry) && aiEnabled",
+    '{entry.unstaged === "conflicted" && aiEnabled',
+  );
+  assert.notDeepEqual(menuClassGrepProblems(mutant), []);
+  // Each ban alone: a record-kind compare, and the conflict identifier.
+  assert.deepEqual(
+    menuClassGrepProblems(
+      mutate(
+        source(MENU),
+        'const hasHistory = untrackable || entry.staged === "deleted";',
+        'const hasHistory = untrackable || !(entry.staged !== "deleted");',
+      ),
     ),
-    mutate(
-      text,
-      "`Discard ${discardableCount} of ${unstagedRowCount} changes…`",
-      "`Discard ${unstagedRowCount} changes…`",
+    ["the menu re-spells a record-kind rule inline"],
+  );
+  assert.deepEqual(
+    menuClassGrepProblems(
+      mutate(
+        source(MENU),
+        "{isConflictedEntry(entry) && aiEnabled",
+        "{isConflicted(entry) && aiEnabled",
+      ),
     ),
-    mutate(
-      text,
-      "{discardableCount > 0 && (\n          <ContextMenuItem onClick={actions.discardSelected}>",
-      "{unstagedRowCount > 0 && (\n          <ContextMenuItem onClick={actions.discardSelected}>",
-    ),
-    mutate(
-      text,
-      "stashLabel(stashablePathCount, pathCount)",
-      "stashLabel(pathCount, pathCount)",
-    ),
-    // Back to always rendering (pathCount > 1 whenever the bulk menu shows).
-    mutate(text, "{stashablePathCount > 0 && (", "{pathCount > 0 && ("),
-    mutate(
-      text,
-      "onClick={actions.discardSelected}",
-      "onClick={actions.ignoreSelected}",
-    ),
-    mutate(
-      text,
-      "{isConflictedEntry(entry) && aiEnabled",
-      '{entry.unstaged === "conflicted" && aiEnabled',
-    ),
-    mutate(
-      text,
-      'const CONFLICT_HINT = " (resolve conflicts first)";',
-      'const CONFLICT_HINT = " (conflicted)";',
-    ),
-  ];
-  // Each Stash item loses its disable, its reason, or its held class.
-  for (const [opening, label] of [
-    ["onClick={actions.stashAll}", "Stash all changes…"],
-    [
-      "onClick={actions.stashSelected}",
-      "{`${stashLabel(stashablePathCount, pathCount)}",
-    ],
-    ["onClick={actions.stashFolder}", "{`${stashLabel(stashable, files)}"],
-    ["onClick={() => actions.stashFile(entry, staged)}", "Stash change…"],
-  ]) {
-    const item = text.slice(
-      text.lastIndexOf("<ContextMenuItem", text.indexOf(opening)),
-      text.indexOf("</ContextMenuItem>", text.indexOf(opening)),
-    );
-    assert.ok(item.includes(label), opening);
-    for (const [from, to] of [
-      [/disabled=\{anyConflicted(?: \|\| stashBlocked)?\}/, ""],
-      ["className={MENU_HELD_ROW_CLASS}", ""],
-      ['anyConflicted ? CONFLICT_HINT : ""', '""'],
-    ])
-      mutants.push(mutate(text, item, mutate(item, from, to)));
-  }
-  for (const mutant of mutants) assert.notDeepEqual(menuProblems(mutant), []);
+    ["the menu re-spells the conflict predicate"],
+  );
 });
 
 test("the bulk handlers and hotkeys target row-based lists", () => {
@@ -966,7 +833,7 @@ test("the single-row Untrack rule mutation control goes red", () => {
     "const untrackable = canUntrack(entry);",
     'const untrackable = entry.unstaged !== "untracked" && entry.staged !== "added";',
   );
-  assert.notDeepEqual(menuProblems(mutant), []);
+  assert.notDeepEqual(menuClassGrepProblems(mutant), []);
 });
 
 const CLEAR_OFFER =
@@ -1295,15 +1162,11 @@ test("selection generation pin mutation controls go red", () => {
 });
 
 // Untracked Windows-reserved names stay out of a path stash (the backend drops
-// them), so every Stash count leaves them out: the menu's "N of M" labels, the
-// confirm's title and body, and the success toast.
-const STASH_LABEL =
-  'function stashLabel(stashable: number, total: number): string {\n  return stashable === total\n    ? `Stash ${total} change${total === 1 ? "" : "s"}…`\n    : `Stash ${stashable} of ${total} changes…`;\n}';
+// them), so every panel-side Stash count leaves them out: the menu's counts
+// and the success toast. The menu's labels are pinned by
+// src/test/changes-context-menu.test.tsx, the confirm's copy and the rule itself
+// by scripts/changes-confirm-copy.test.mjs.
 const STASH_PANEL_PINS = [
-  [
-    'function staysOutOfStash(entry: FileEntry): boolean {\n  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);\n}',
-    "staysOutOfStash is not the untracked any-component reserved-name rule",
-  ],
   [
     "const stashablePathCount = bulk.pathEntries.filter(\n    (e) => !staysOutOfStash(e),\n  ).length;",
     "stashablePathCount doesn't leave reserved names out",
@@ -1320,58 +1183,27 @@ const STASH_PANEL_PINS = [
     "const stashed = stashScope.entries.filter((e) => !staysOutOfStash(e));\n        toast.success(\n          stashed.length === 1\n            ? `Stashed ${stashed[0].path}`\n            : `Stashed ${stashed.length} files`,\n        );",
     "the stash toast doesn't count what was stashed",
   ],
-  [
-    "const stashN = stashFiles.filter((e) => !staysOutOfStash(e)).length;",
-    "the stash confirm's count keeps reserved names",
-  ],
-  [
-    ': `Stash ${stashN} change${stashN === 1 ? "" : "s"}?`;',
-    "the stash confirm's title doesn't read stashN",
-  ],
-  [
-    ": stashN === 0\n        ? `Nothing will be stashed.${stashReservedNote}`",
-    "a stash of only reserved names doesn't say nothing goes",
-  ],
-  [
-    '`${stashN} selected file${stashN === 1 ? " is" : "s are"} saved',
-    "the multi-select stash body doesn't read stashN",
-  ],
-  [
-    "const stashReservedNote = stashFiles.some(staysOutOfStash)",
-    "RESERVED_STASH_NOTE no longer rides the shared rule",
-  ],
 ];
 
 /** Problems with the Stash counts; empty when pinned. */
-function stashCountProblems(panel, menu) {
+function stashCountProblems(panel) {
   const problems = [];
   for (const [pin, why] of STASH_PANEL_PINS)
     if (!panel.includes(pin)) problems.push(why);
-  for (const raw of [
-    "Stash ${stashFiles.length}",
-    "${stashFiles.length} selected",
-  ])
-    if (panel.includes(raw))
-      problems.push(`a stash count reads every target: ${raw}`);
-  if (!menu.includes(STASH_LABEL))
-    problems.push("stashLabel lost its N of M form");
-  if (!menu.includes("const stashable = folderCounts?.stashableCount ?? 0;"))
-    problems.push("the folder Stash doesn't read stashableCount");
   return problems;
 }
 
-test("every Stash count leaves untracked reserved names out", () => {
-  assert.deepEqual(stashCountProblems(source(PANEL), source(MENU)), []);
+test("every panel-side Stash count leaves untracked reserved names out", () => {
+  assert.deepEqual(stashCountProblems(source(PANEL)), []);
 });
 
 test("stash count pin mutation controls go red", () => {
   const panel = source(PANEL);
-  const menu = source(MENU);
   const panelMutants = [
     mutate(
       panel,
-      "const stashN = stashFiles.filter((e) => !staysOutOfStash(e)).length;",
-      "const stashN = stashFiles.length;",
+      "const stashablePathCount = bulk.pathEntries.filter(\n    (e) => !staysOutOfStash(e),\n  ).length;",
+      "const stashablePathCount = bulk.pathEntries.length;",
     ),
     mutate(
       panel,
@@ -1385,40 +1217,10 @@ test("stash count pin mutation controls go red", () => {
     ),
     mutate(
       panel,
-      '  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);',
-      "  return pathHasReservedComponent(entry.path);",
-    ),
-    // The file name alone misses `con/x.txt`, which the backend leaves behind.
-    mutate(
-      panel,
-      '  return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);',
-      '  return entry.unstaged === "untracked" && isReservedName(entry);',
-    ),
-    mutate(
-      panel,
-      ': `Stash ${stashN} change${stashN === 1 ? "" : "s"}?`;',
-      ": `Stash ${stashFiles.length} changes?`;",
-    ),
-    mutate(
-      panel,
       "stashablePathCount={stashablePathCount}",
       "stashablePathCount={bulk.pathEntries.length}",
     ),
   ];
   for (const mutant of panelMutants)
-    assert.notDeepEqual(stashCountProblems(mutant, menu), []);
-  const menuMutants = [
-    mutate(
-      menu,
-      "    : `Stash ${stashable} of ${total} changes…`;",
-      "    : `Stash ${total} changes…`;",
-    ),
-    mutate(
-      menu,
-      "const stashable = folderCounts?.stashableCount ?? 0;",
-      "const stashable = files;",
-    ),
-  ];
-  for (const mutant of menuMutants)
-    assert.notDeepEqual(stashCountProblems(panel, mutant), []);
+    assert.notDeepEqual(stashCountProblems(mutant), []);
 });

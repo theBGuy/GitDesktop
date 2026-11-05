@@ -21,10 +21,7 @@ import {
   globLiteralPath,
   literalPathspec,
 } from "@/lib/git/glob";
-import {
-  pathHasReservedComponent,
-  reservedDeviceName,
-} from "@/lib/git/reserved-device-name";
+import { reservedDeviceName } from "@/lib/git/reserved-device-name";
 import type { FileEntry } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
 import {
@@ -34,6 +31,7 @@ import {
 } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { canUntrack, isConflictedEntry } from "./bulk-row-targets";
+import { staysOutOfStash } from "./changes-confirm-copy";
 
 /** What the one shared context menu acts on, set on right-click. */
 export type MenuTarget =
@@ -369,11 +367,9 @@ export function ChangesContextMenuItems({
   const hasHistory = untrackable || entry.staged === "deleted";
   // Only staging reads the working-tree file, so only it hits the device.
   const stageBlocked = !staged && reservedDeviceName(entry.path) !== null;
-  // ChangesPanel's `staysOutOfStash`, spelled twice on purpose (a congruence
-  // pin holds them equal): the path stash leaves this file in place, so stashing
-  // it alone would stash nothing. Component-wise, never `reservedDeviceName`.
-  const stashBlocked =
-    entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);
+  // The path stash leaves this file in place, so stashing it alone would stash
+  // nothing.
+  const stashBlocked = staysOutOfStash(entry);
   return (
     <>
       {isConflictedEntry(entry) && aiEnabled && reviewConfigured && (

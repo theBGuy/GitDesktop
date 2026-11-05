@@ -4,8 +4,9 @@
 // sentence (src-tauri/src/git/conflict.rs) and the conflict editor's own
 // declarations (ConflictFileView.tsx), and the walk routing a refusal to its
 // blocked screen instead of the retry arm. Also pins the not-conflicted
-// refusal the side checkout returns to the editor's not-conflicted line, and
-// accept()'s refusal of a file resolved outside the app before it writes.
+// refusal the side checkout returns to the editor's not-conflicted line.
+// accept()'s own not-conflicted refusal is pinned by
+// src/test/conflict-accept-arms.test.tsx.
 //
 // Not testable here: the rendered blocked screen and its focus rescue. Those
 // need the live app.
@@ -304,69 +305,4 @@ test("the pins fail on a reworded or rerouted side", () => {
     [() => pinRouting(noClear), /clear the last refusal/],
   ];
   for (const [run, message] of cases) assert.throws(run, message);
-});
-
-/** accept() refuses a file resolved outside the app: the live re-read
- *  (`fresh`) is checked with noLongerConflicted after the moved check and
- *  before the undecodable arm and the write, and that arm returns. */
-function pinAcceptNotConflicted(res) {
-  const masked = maskNonCode(res, true);
-  const fn = /\basync\s+function\s+accept\s*\(\s*\)\s*\{/.exec(masked);
-  assert.ok(fn, "ConflictResolveView must declare accept()");
-  const open = fn.index + fn[0].length - 1;
-  const body = masked.slice(open, matchBrace(masked, open));
-  const check = /\bif\s*\(\s*noLongerConflicted\(\s*fresh\s*\)\s*\)\s*\{/.exec(
-    body,
-  );
-  assert.ok(check, "accept() must check noLongerConflicted(fresh)");
-  const moved = body.search(/\brefuseIfMoved\(/);
-  const undecodable = body.search(/\bif\s*\(\s*fresh\.undecodable\b/);
-  const write = body.search(/\bresolve\.mutateAsync\(/);
-  assert.ok(
-    moved !== -1 && moved < check.index,
-    "the not-conflicted check runs after the moved check",
-  );
-  assert.ok(
-    undecodable > check.index && write > check.index,
-    "the not-conflicted check runs before the undecodable arm and the write",
-  );
-  const armOpen = check.index + check[0].length - 1;
-  const arm = body.slice(armOpen, matchBrace(body, armOpen));
-  assert.match(arm, /\breturn\s*;/, "the not-conflicted arm must return");
-}
-
-test("accept re-checks that the file is still conflicted before writing", () => {
-  pinAcceptNotConflicted(read(RESOLVE));
-});
-
-test("the accept pin fails on a dropped, stale or late check", () => {
-  const res = read(RESOLVE);
-  const noCheck = mutate(res, /noLongerConflicted\(fresh\)/, "false");
-  const staleRead = mutate(
-    res,
-    /noLongerConflicted\(fresh\)/,
-    "noLongerConflicted(sides)",
-  );
-  const noReturn = mutate(
-    res,
-    /(handOff\(\);\s*await refreshConflictFile\(queryClient, acceptIn\);)\s*return;/,
-    "$1",
-  );
-  const arm = /\s*if \(noLongerConflicted\(fresh\)\) \{[\s\S]*?\n {6}\}/.exec(
-    res,
-  );
-  assert.ok(arm, "the not-conflicted arm moved");
-  const late = mutate(
-    mutate(res, arm[0], ""),
-    /(\n\s*\/\/ The proposal and Regenerate stay;)/,
-    `${arm[0]}$1`,
-  );
-  const cases = [
-    [noCheck, /must check noLongerConflicted\(fresh\)/],
-    [staleRead, /must check noLongerConflicted\(fresh\)/],
-    [noReturn, /arm must return/],
-    [late, /before the undecodable arm and the write/],
-  ];
-  for (const [source, message] of cases)
-    assert.throws(() => pinAcceptNotConflicted(source), message);
 });
