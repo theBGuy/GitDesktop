@@ -1,4 +1,6 @@
-// Pins folder-key grammar, flat descendant counts and post-emptying focus order.
+// Pins folder-key grammar, flat descendant counts and post-emptying focus order,
+// plus the panel's folder-route wiring and the folder menu's PathText heading
+// (its rendered items are pinned by src/test/changes-context-menu.test.tsx).
 // Direct .ts imports use Node's type stripping; both modules stay import-free.
 // Negative controls run entirely in memory.
 import assert from "node:assert/strict";
@@ -448,105 +450,16 @@ function pinPanel(src) {
   );
 }
 
-function pinMenu(src) {
+// The folder heading truncates through PathText. jsdom lays nothing out, so
+// the menu interaction test can't tell it from a plain string.
+function pinMenuHeading(src) {
   const start = src.indexOf('if (target.kind === "folder")');
   assert.notEqual(start, -1, "folder branch not found");
   const end = src.indexOf('if (target.kind === "global")', start);
   assert.notEqual(end, -1, "global branch not found after the folder branch");
-  const branch = src.slice(start, end);
-  const group = branch.indexOf("<ContextMenuGroup>");
-  const label = branch.indexOf("<ContextMenuLabel");
-  const close = branch.indexOf("</ContextMenuGroup>");
   assert.ok(
-    group !== -1 && group < label && label < close,
-    "ContextMenuLabel sits inside ContextMenuGroup",
-  );
-  assert.ok(branch.includes("<PathText"), "heading renders through PathText");
-  assert.ok(
-    !branch.includes("discardAll"),
-    "no Discard all in the folder menu",
-  );
-  assert.ok(!branch.includes("stashAll"), "no Stash all in the folder menu");
-  // A folder whose files the filter hides all says so, never "nothing here".
-  assert.ok(
-    branch.includes(
-      "if (files === 0 && hidden > 0) label = `No visible files to ${verb}`;",
-    ),
-    "all-hidden folder names the filter",
-  );
-  assert.ok(
-    branch.includes('here is" : "s here are"} hidden by the filter.`'),
-    "all-hidden footnote drops 'more'",
-  );
-  // 5A order: the Stage/Unstage anchor, Discard, Stash, then the footnote.
-  const anchor = branch.indexOf(
-    "onClick={staged ? actions.unstageFolder : actions.stageFolder}",
-  );
-  const discardAt = branch.indexOf("onClick={actions.discardFolder}");
-  const stashAt = branch.indexOf("onClick={actions.stashFolder}");
-  const note = branch.indexOf("id={noteId}");
-  assert.ok(
-    anchor !== -1 &&
-      anchor < discardAt &&
-      discardAt < stashAt &&
-      stashAt < note,
-    "folder actions sit in 5A order",
-  );
-  const itemOf = (at) =>
-    branch.slice(
-      branch.lastIndexOf("<ContextMenuItem", at),
-      branch.indexOf("</ContextMenuItem>", at),
-    );
-  const discard = itemOf(discardAt);
-  const stash = itemOf(stashAt);
-  // Discard hides at zero (it never renders disabled) and counts what it sends.
-  assert.ok(
-    branch.includes(
-      "const discardable = staged\n      ? 0\n      : files - (folderCounts?.conflictedCount ?? 0);",
-    ),
-    "Discard counts the shown files minus conflicted ones, Changes only",
-  );
-  assert.ok(
-    branch.includes("{discardable > 0 && (\n            <ContextMenuItem\n"),
-    "Discard hides at zero",
-  );
-  assert.ok(!discard.includes("disabled="), "Discard never renders disabled");
-  assert.ok(
-    discard.includes(
-      '{discardable === files\n                ? `Discard ${discardable} change${discardable === 1 ? "" : "s"}…`\n                : `Discard ${discardable} of ${files} changes…`}',
-    ),
-    "Discard says N of M when conflicted files stay",
-  );
-  // Stash counts the shown files it takes, hides when it takes none (like
-  // Discard), and waits while anything is conflicted.
-  assert.ok(
-    branch.includes("{stashable > 0 && (\n"),
-    "Stash renders only while it takes a file",
-  );
-  assert.ok(stash.includes("disabled={anyConflicted}"), "Stash disables");
-  assert.ok(
-    stash.includes("className={MENU_HELD_ROW_CLASS}"),
-    "Stash stays hit-testable through a flip",
-  );
-  assert.ok(
-    stash.includes(
-      '{`${stashLabel(stashable, files)}${anyConflicted ? CONFLICT_HINT : ""}`}',
-    ),
-    "Stash counts the shown files it takes and names the reason",
-  );
-  for (const [name, item] of [
-    ["Discard", discard],
-    ["Stash", stash],
-  ])
-    assert.ok(
-      item.includes("aria-describedby={hidden > 0 ? noteId : undefined}"),
-      `${name} points at the filter footnote`,
-    );
-  assert.ok(
-    branch.includes(
-      '`${hidden} more ${hidden === 1 ? "is" : "are"} hidden by the filter and ${hidden === 1 ? "is" : "are"} left alone.`',
-    ),
-    "the footnote covers all three actions",
+    src.slice(start, end).includes("<PathText"),
+    "heading renders through PathText",
   );
 }
 
@@ -557,8 +470,8 @@ test("wiring: the panel mints folder targets and stages through the shared paths
   pinPanel(panelSrc);
 });
 
-test("wiring: the folder menu's heading is a group label", () => {
-  pinMenu(menuSrc);
+test("wiring: the folder menu's heading truncates through PathText", () => {
+  pinMenuHeading(menuSrc);
 });
 
 test("wiring: registry carries both palette actions; the guide drops the old claim", () => {
@@ -586,15 +499,11 @@ test("negative controls: the wiring pins catch their regressions", () => {
       "targets.map((e) => e.path)",
     ],
     [pinPanel, panelSrc, 'kind: "folder"', 'kind: "global"'],
-    [pinMenu, menuSrc, "<ContextMenuGroup>", "<>"],
-    [pinMenu, menuSrc, "Show in Explorer", "{actions.discardAll}"],
-    [pinMenu, menuSrc, "files === 0 && hidden > 0", "files === 0"],
-    [pinMenu, menuSrc, "No visible files to ${verb}", "Nothing to ${verb}"],
     [
-      pinMenu,
+      pinMenuHeading,
       menuSrc,
-      '" here is" : "s here are"}',
-      '" more is" : "s more are"}',
+      "<PathText path={target.path} />",
+      "{target.path}",
     ],
     [
       pinPanel,
@@ -619,63 +528,6 @@ test("negative controls: the wiring pins catch their regressions", () => {
       panelSrc,
       "excludeConflicted(rows.unstagedRows)",
       "({ targets: rows.unstagedRows, conflicted: [] })",
-    ],
-    // The Stash item must keep its disable while anything is conflicted.
-    [
-      pinMenu,
-      menuSrc,
-      "disabled={anyConflicted}\n              aria-describedby",
-      "aria-describedby",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      'stashLabel(stashable, files)}${anyConflicted ? CONFLICT_HINT : ""}',
-      "stashLabel(stashable, files)}",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      "stashLabel(stashable, files)",
-      "stashLabel(files, files)",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      "              className={MENU_HELD_ROW_CLASS}\n              disabled={anyConflicted}",
-      "              disabled={anyConflicted}",
-    ],
-    [pinMenu, menuSrc, "{discardable > 0 && (", "{files > 0 && ("],
-    [pinMenu, menuSrc, "{stashable > 0 && (", "{files > 0 && ("],
-    [
-      pinMenu,
-      menuSrc,
-      "`Discard ${discardable} of ${files} changes…`",
-      "`Discard ${files} changes…`",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      ": files - (folderCounts?.conflictedCount ?? 0);",
-      ": files;",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      "aria-describedby={hidden > 0 ? noteId : undefined}\n              onClick={actions.discardFolder}",
-      "onClick={actions.discardFolder}",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      "aria-describedby={hidden > 0 ? noteId : undefined}\n              onClick={actions.stashFolder}",
-      "onClick={actions.stashFolder}",
-    ],
-    [
-      pinMenu,
-      menuSrc,
-      '"is" : "are"} left alone.`',
-      '"stays" : "stay"} unstaged.`',
     ],
   ];
   for (const [pin, src, from, to] of mutations) {

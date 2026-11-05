@@ -4,9 +4,10 @@
 // focus-then-scroll rule, the landing effect's hold gate and never-steal
 // precondition, the handlers that arm it, and `landingOrdinal`'s table.
 //
-// Not testable here: whether focus actually lands where the pins say, mount
-// order, and the browser's blur of a button disabled under focus. Those need
-// the live app.
+// Where ConflictResolveView's Accept arms land focus, and the toast each one
+// shows, is pinned by src/test/conflict-accept-arms.test.tsx; what stays here
+// is the shape it can't see. Not testable either place: mount order and the
+// browser's own blur of a button disabled under focus. Those need the live app.
 //
 // The import reaches straight into `src/` under Node's type stripping, so
 // conflict-banner-state.ts must stay free of runtime imports. Every lookup
@@ -302,23 +303,19 @@ function pinViewArms(viewSource) {
   pinUnmountHandOff(viewSource, true);
 }
 
-/** accept()'s exits that owe a focus request, each with the one it owes. A
- *  refused accept keeps the view up and lands on the pressed control; the
- *  not-conflicted refusal leaves, so it hands off before its await. */
+/** accept()'s refusal exits, each owing one focus request; this pins their
+ *  shape. Which call each makes, and the settle's own exit (the leaves split),
+ *  are pinned by src/test/conflict-accept-arms.test.tsx, plus the
+ *  split-before-advance order check in pinResolveArms. */
 const ACCEPT_FOCUS_ARMS = [
-  ["the re-read failure", /\bcatch\s*\{/, "land"],
+  ["the re-read failure", /\bcatch\s*\{/],
   [
     "the not-conflicted arm",
     /\bif\s*\(\s*noLongerConflicted\(\s*fresh\s*\)\s*\)\s*\{/,
-    "handOff",
   ],
-  ["the undecodable arm", /\bif\s*\(\s*fresh\.undecodable\s*\)\s*\{/, "land"],
-  [
-    "the changed-on-disk arm",
-    /\bif\s*\(\s*outcome\.kind\s*===[^)]*\)\s*\{/,
-    "land",
-  ],
-  ["the write failure", /\bcatch\s*\(\s*e\s*\)\s*\{/, "land"],
+  ["the undecodable arm", /\bif\s*\(\s*fresh\.undecodable\s*\)\s*\{/],
+  ["the changed-on-disk arm", /\bif\s*\(\s*outcome\.kind\s*===[^)]*\)\s*\{/],
+  ["the write failure", /\bcatch\s*\(\s*e\s*\)\s*\{/],
 ];
 /** Returns that owe none: the re-entry guard runs before anything is captured,
  *  `!sides` can't happen in phase "ready", a moved generation belongs to the
@@ -329,16 +326,18 @@ const ACCEPT_SILENT_RETURNS = [
   /\bif\s*\(\s*gen\s*!==\s*genRef\.current\s*\)\s*return\s*;/,
   /\bif\s*\(\s*refuseIfMoved\([^;]*\)\s*\)\s*return\s*;/,
 ];
-const focusCall = (name) =>
-  new RegExp(String.raw`(?<![\w$.])${name}\s*\(\s*\)\s*;`, "g");
+const FOCUS_CALL = /(?<![\w$.])(?:land|handOff)\s*\(\s*\)\s*;/g;
 
-/** Ties each of accept()'s focus requests to its arm. The set is bounded by
- *  the returns: every `return` in accept() sits in a focus arm or is a
- *  listed silent one, so a new exit fails until it is classified here. The
- *  settle's leaves/land split is pinned beside this. */
-function pinAcceptArmFocus(body) {
+/** Bounds accept()'s early exits by their returns: every `return` sits in a
+ *  refusal arm or is a listed silent one, so a new exit fails until it is
+ *  classified here (the settle falls through to its split, with no return).
+ *  Each focus arm makes exactly one focus call, and a hand-off comes before
+ *  any await in its arm. Both stay invisible to jsdom: the hand-off clears
+ *  the pending landing, and the leaf render unmounts nothing during the await.
+ *  A land() needs no such order, since its landing waits out the hold. */
+function pinAcceptArmShape(body) {
   const spans = [];
-  for (const [name, opener, call] of ACCEPT_FOCUS_ARMS) {
+  for (const [name, opener] of ACCEPT_FOCUS_ARMS) {
     const hits = [...body.matchAll(new RegExp(opener.source, "g"))];
     assert.equal(
       hits.length,
@@ -349,21 +348,18 @@ function pinAcceptArmFocus(body) {
     const close = matchBrace(body, open);
     const block = body.slice(open, close);
     spans.push([open, close]);
-    const other = call === "land" ? "handOff" : "land";
-    const calls = [...block.matchAll(focusCall(call))];
-    assert.ok(
-      calls.length === 1 && block.search(focusCall(other)) === -1,
-      `accept: ${name} must call ${call}() and only that`,
-    );
-    const ret = block.search(/\breturn\s*;/);
-    assert.ok(
-      ret === -1 || calls[0].index < ret,
-      `accept: ${name} must call ${call}() before its return`,
+    const calls = [...block.matchAll(FOCUS_CALL)];
+    assert.equal(
+      calls.length,
+      1,
+      `accept: ${name} must make exactly one focus call`,
     );
     const wait = block.search(/(?<![\w$])await(?![\w$])/);
     assert.ok(
-      call !== "handOff" || wait === -1 || calls[0].index < wait,
-      `accept: ${name} must call handOff() before its await`,
+      !calls[0][0].startsWith("handOff") ||
+        wait === -1 ||
+        calls[0].index < wait,
+      `accept: ${name} must hand off before its await`,
     );
   }
   for (const re of ACCEPT_SILENT_RETURNS) {
@@ -383,37 +379,29 @@ function pinResolveArms(resolveSource) {
   const src = load(resolveSource);
   const { open, close } = functionBody(src, "accept");
   const body = src.masked.slice(open, close);
-  pinAcceptArmFocus(body);
-  // A settled accept hands focus off only when the view leaves; an unclean
-  // accept the walk keeps on screen lands back on the pressed control.
-  assert.match(
-    body,
-    /\bconst\s+leaves\s*=\s*advances\s*\|\|\s*clean\s*\|\|\s*walk\.scopePath\s*!==\s*repoPath\s*\|\|\s*walk\.activePath\s*!==\s*path\s*;\s*if\s*\(\s*leaves\s*\)\s*handOff\(\);\s*else\s+land\(\);/,
-    "accept must hand off only when the view leaves, else land on the pressed control",
-  );
+  pinAcceptArmShape(body);
   const effect = pinEffect(resolveSource, "acceptBusy");
   assert.doesNotMatch(
     effect,
     /\bfocusSink\b/,
     "a landing while the view stays mounted uses the view's own sink",
   );
-  // A settled accept unmounts the view: hand focus to the host's sink first.
-  // Bound to the settle's own split, since the not-conflicted refusal arm
-  // hands off earlier in the body.
-  const handOff = body.search(
-    /\bif\s*\(\s*leaves\s*\)\s*handOff\s*\(\s*\)\s*;\s*else\s+land\s*\(\s*\)\s*;/,
-  );
+  // A settled accept unmounts the view in the app, so the settle's focus split
+  // runs before the advance; the leaf render in the interaction tests unmounts
+  // nothing, so the order is invisible there.
+  const split = body.search(/\bif\s*\(\s*leaves\s*\)/);
   const advance = body.search(
     /\bif\s*\(\s*advances\s*\)\s*walk\.advance\s*\(\s*\)\s*;/,
   );
   assert.ok(
-    handOff !== -1 && advance !== -1 && handOff < advance,
+    split !== -1 && advance !== -1 && split < advance,
     "accept must hand focus off before walk.advance() unmounts the view",
   );
+  // Every rendered host passes a sink; the view's own is the fallback.
   assert.match(
     body,
-    /\bconst\s+handOff\s*=\s*\(\)\s*=>\s*\{[\s\S]*?now\s*===\s*null\s*\|\|\s*now\s*===\s*document\.body\s*\|\|\s*now\s*===\s*pressed\s*\)[\s\S]*?\(\s*focusSink\?\.current\s*\?\?\s*resolveSinkRef\.current\s*\)\?\.focus\(/,
-    "handOff must move only body/null/pressed focus, to the host's sink first",
+    /\bconst\s+handOff\s*=\s*\(\)\s*=>\s*\{[\s\S]*?\(\s*focusSink\?\.current\s*\?\?\s*resolveSinkRef\.current\s*\)\?\.focus\(/,
+    "handOff must focus the host's sink first, else the view's own",
   );
   pinTakeover(resolveSource, "accept");
   pinUnmountHandOff(resolveSource, false);
@@ -443,7 +431,7 @@ test("every conflict editor write handler arms a landing the effect gates", () =
   pinViewArms(read(VIEW));
 });
 
-test("the Resolve view's refused Accept lands back on the button", () => {
+test("the Resolve view's Accept exits are classified and its landing keeps its shape", () => {
   pinResolveArms(read(RESOLVE));
 });
 
@@ -582,24 +570,6 @@ test("the pins fail on a mutated view", () => {
       ),
       /hand off focus its hold left on <body>/,
     ],
-    [
-      pinResolveArms.bind(
-        null,
-        mutate(res, /if \(leaves\) handOff\(\);\s*else land\(\);/, "land();"),
-      ),
-      /hand off only when the view leaves/,
-    ],
-    [
-      pinResolveArms.bind(
-        null,
-        mutate(
-          res,
-          /if \(leaves\) handOff\(\);\s*else land\(\);/,
-          "handOff();",
-        ),
-      ),
-      /hand off only when the view leaves/,
-    ],
     // The settle's split moved after the advance that unmounts the view.
     [
       pinResolveArms.bind(
@@ -626,18 +596,18 @@ test("the pins fail on a mutated view", () => {
           "$1land();\n        land();",
         ),
       ),
-      /the undecodable arm must call land\(\) and only that/,
+      /the undecodable arm must make exactly one focus call/,
     ],
     [
       pinResolveArms.bind(
         null,
         mutate(
           res,
-          /handOff\(\);(\s*await refreshConflictFile\(queryClient, acceptIn\);)/,
-          "$1\n        land();",
+          /(handOff\(\);)(\s*await refreshConflictFile\(queryClient, acceptIn\);)/,
+          "$1 land();$2",
         ),
       ),
-      /the not-conflicted arm must call handOff\(\) and only that/,
+      /the not-conflicted arm must make exactly one focus call/,
     ],
     [
       pinResolveArms.bind(
@@ -648,14 +618,11 @@ test("the pins fail on a mutated view", () => {
           "$1\n        handOff();",
         ),
       ),
-      /the not-conflicted arm must call handOff\(\) before its await/,
+      /the not-conflicted arm must hand off before its await/,
     ],
     [
-      pinResolveArms.bind(
-        null,
-        mutate(res, /(toastError\(e\);)\s*land\(\);/, "$1"),
-      ),
-      /the write failure must call land\(\) and only that/,
+      pinResolveArms.bind(null, mutate(res, "focusSink?.current ?? ", "")),
+      /handOff must focus the host's sink first/,
     ],
     [
       pinResolveArms.bind(
@@ -667,20 +634,6 @@ test("the pins fail on a mutated view", () => {
         ),
       ),
       /a return outside every classified arm/,
-    ],
-    [
-      pinResolveArms.bind(
-        null,
-        mutate(res, /(advances \|\|)\s*clean \|\|/, "$1"),
-      ),
-      /hand off only when the view leaves/,
-    ],
-    [
-      pinResolveArms.bind(
-        null,
-        mutate(res, /\|\|\s*walk\.activePath !== path;/, ";"),
-      ),
-      /hand off only when the view leaves/,
     ],
     [
       pinResolveArms.bind(

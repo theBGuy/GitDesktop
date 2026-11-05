@@ -2,8 +2,9 @@
 // backend's `path_has_reserved_component` (src-tauri/src/fsops.rs): its rows
 // are the Rust test's own, so the Stash counts leave out exactly the paths the
 // path stash excludes. `reservedDeviceName` keeps reading the file name alone.
-// Also pins the context menu's single-file Stash gate to ChangesPanel's
-// `staysOutOfStash` (source congruence, two copies of one rule).
+// Also pins the context menu's `stashBlocked` spelling to the confirm-copy
+// module's `staysOutOfStash` (source congruence, two copies of one rule); the gate's
+// rendered effect is pinned by src/test/changes-context-menu.test.tsx.
 //
 // The module decides on `navigator.platform`, so the suite poses as Windows
 // before its first import. Imported through the shared src hooks (dynamic, so
@@ -96,11 +97,13 @@ test("a component check that ignores the stem rule goes red", async () => {
   assert.notDeepEqual(rowFailures(mutant), []);
 });
 
-// The single-file Stash item disables on the panel's stash-exclude rule, spelled
-// in both files: a drifted copy would offer a stash that stashes nothing, or hide
-// one that works.
-const PANEL_SRC = readFileSync(
-  new URL("../src/features/repository/ChangesPanel.tsx", import.meta.url),
+// The single-file Stash item's stash-exclude rule is spelled in both files: a
+// drifted copy would offer a stash that stashes nothing, or hide one that works.
+const RULE_SRC = readFileSync(
+  new URL(
+    "../src/features/repository/changes-confirm-copy.ts",
+    import.meta.url,
+  ),
   "utf8",
 );
 const MENU_SRC = readFileSync(
@@ -109,44 +112,33 @@ const MENU_SRC = readFileSync(
 );
 const squash = (s) => s.replace(/\s+/g, " ").trim();
 
-/** Failures (empty = congruent and wired) for a panel/menu source pair. */
-function stashGateFailures(panel, menu) {
+/** Failures (empty = congruent) for a confirm-copy module/menu source pair. */
+function stashGateFailures(ruleSrc, menu) {
   const failures = [];
-  const panelRule =
+  const ruleDecl =
     /function staysOutOfStash\(entry: FileEntry\): boolean \{\s*return ([^;]*);/.exec(
-      panel,
+      ruleSrc,
     );
   const menuRule = /const stashBlocked =([^;]*);/.exec(menu);
-  if (!panelRule) failures.push("ChangesPanel must declare staysOutOfStash");
+  if (!ruleDecl)
+    failures.push("changes-confirm-copy.ts must declare staysOutOfStash");
   if (!menuRule) failures.push("the menu must declare stashBlocked");
-  if (panelRule && menuRule) {
+  if (ruleDecl && menuRule) {
     const want =
       'entry.unstaged === "untracked" && pathHasReservedComponent(entry.path)';
-    if (squash(panelRule[1]) !== want)
+    if (squash(ruleDecl[1]) !== want)
       failures.push("staysOutOfStash moved off the component-wise rule");
-    if (squash(menuRule[1]) !== squash(panelRule[1]))
+    if (squash(menuRule[1]) !== squash(ruleDecl[1]))
       failures.push("stashBlocked differs from staysOutOfStash");
   }
-  if (
-    !/disabled=\{anyConflicted \|\| stashBlocked\}\s*onClick=\{\(\) => actions\.stashFile\(/.test(
-      menu,
-    )
-  )
-    failures.push("the file Stash item must disable on stashBlocked");
-  if (
-    !/\{stashBlocked \? RESERVED_HINT : anyConflicted \? CONFLICT_HINT : ""\}/.test(
-      menu,
-    )
-  )
-    failures.push("the file Stash item must name the reserved name first");
   return failures;
 }
 
-test("the file Stash item gates on the panel's stash-exclude rule", () => {
-  assert.deepEqual(stashGateFailures(PANEL_SRC, MENU_SRC), []);
+test("the menu's stashBlocked spells the confirm-copy module's stash-exclude rule", () => {
+  assert.deepEqual(stashGateFailures(RULE_SRC, MENU_SRC), []);
 });
 
-test("a drifted or unwired Stash gate goes red", () => {
+test("a drifted Stash rule goes red", () => {
   const swap = (src, from, to) => {
     const out = src.replace(from, to);
     assert.notEqual(out, src, `mutation did not apply: ${from}`);
@@ -154,7 +146,7 @@ test("a drifted or unwired Stash gate goes red", () => {
   };
   const cases = [
     [
-      PANEL_SRC,
+      RULE_SRC,
       swap(
         MENU_SRC,
         "pathHasReservedComponent(entry.path);",
@@ -164,34 +156,16 @@ test("a drifted or unwired Stash gate goes red", () => {
     ],
     [
       swap(
-        PANEL_SRC,
+        RULE_SRC,
         'return entry.unstaged === "untracked" && pathHasReservedComponent',
         "return pathHasReservedComponent",
       ),
       MENU_SRC,
       /moved off the component-wise rule/,
     ],
-    [
-      PANEL_SRC,
-      swap(
-        MENU_SRC,
-        "disabled={anyConflicted || stashBlocked}",
-        "disabled={anyConflicted}",
-      ),
-      /must disable on stashBlocked/,
-    ],
-    [
-      PANEL_SRC,
-      swap(
-        MENU_SRC,
-        "{stashBlocked ? RESERVED_HINT : anyConflicted ? CONFLICT_HINT",
-        "{anyConflicted ? CONFLICT_HINT : stashBlocked ? RESERVED_HINT",
-      ),
-      /reserved name first/,
-    ],
   ];
-  for (const [panel, menu, message] of cases) {
-    const failures = stashGateFailures(panel, menu);
+  for (const [ruleSrc, menu, message] of cases) {
+    const failures = stashGateFailures(ruleSrc, menu);
     assert.ok(
       failures.some((f) => message.test(f)),
       `expected ${message}, got ${JSON.stringify(failures)}`,

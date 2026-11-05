@@ -369,9 +369,9 @@ export function ChangesContextMenuItems({
   const hasHistory = untrackable || entry.staged === "deleted";
   // Only staging reads the working-tree file, so only it hits the device.
   const stageBlocked = !staged && reservedDeviceName(entry.path) !== null;
-  // ChangesPanel's `staysOutOfStash`, spelled twice on purpose (a congruence
-  // pin holds them equal): the path stash leaves this file in place, so stashing
-  // it alone would stash nothing. Component-wise, never `reservedDeviceName`.
+  // Matches changes-confirm-copy's `staysOutOfStash` (a congruence pin holds
+  // the two equal): the path stash leaves this file in place, so stashing it
+  // alone would stash nothing. Component-wise, never `reservedDeviceName`.
   const stashBlocked =
     entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);
   return (
