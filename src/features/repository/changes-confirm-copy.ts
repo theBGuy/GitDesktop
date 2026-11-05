@@ -39,8 +39,8 @@ export function isReservedName(entry: FileEntry): boolean {
 
 /** The backend leaves an untracked path with a reserved device name in ANY
  *  component out of a path stash (git can't remove it), so no Stash count
- *  includes one. Component-wise like the backend's exclude, not `isReservedName`,
- *  which reads only the file name. */
+ *  includes one, and the menu's file Stash disables on it. Component-wise,
+ *  like the backend's exclude, never `isReservedName` (the file name only). */
 export function staysOutOfStash(entry: FileEntry): boolean {
   return entry.unstaged === "untracked" && pathHasReservedComponent(entry.path);
 }

@@ -2,9 +2,6 @@
 // backend's `path_has_reserved_component` (src-tauri/src/fsops.rs): its rows
 // are the Rust test's own, so the Stash counts leave out exactly the paths the
 // path stash excludes. `reservedDeviceName` keeps reading the file name alone.
-// Also pins the context menu's `stashBlocked` spelling to the confirm-copy
-// module's `staysOutOfStash` (source congruence, two copies of one rule); the gate's
-// rendered effect is pinned by src/test/changes-context-menu.test.tsx.
 //
 // The module decides on `navigator.platform`, so the suite poses as Windows
 // before its first import. Imported through the shared src hooks (dynamic, so
@@ -95,80 +92,4 @@ test("a component check that ignores the stem rule goes red", async () => {
     "const stem = name;",
   );
   assert.notDeepEqual(rowFailures(mutant), []);
-});
-
-// The single-file Stash item's stash-exclude rule is spelled in both files: a
-// drifted copy would offer a stash that stashes nothing, or hide one that works.
-const RULE_SRC = readFileSync(
-  new URL(
-    "../src/features/repository/changes-confirm-copy.ts",
-    import.meta.url,
-  ),
-  "utf8",
-);
-const MENU_SRC = readFileSync(
-  new URL("../src/features/repository/ChangesContextMenu.tsx", import.meta.url),
-  "utf8",
-);
-const squash = (s) => s.replace(/\s+/g, " ").trim();
-
-/** Failures (empty = congruent) for a confirm-copy module/menu source pair. */
-function stashGateFailures(ruleSrc, menu) {
-  const failures = [];
-  const ruleDecl =
-    /function staysOutOfStash\(entry: FileEntry\): boolean \{\s*return ([^;]*);/.exec(
-      ruleSrc,
-    );
-  const menuRule = /const stashBlocked =([^;]*);/.exec(menu);
-  if (!ruleDecl)
-    failures.push("changes-confirm-copy.ts must declare staysOutOfStash");
-  if (!menuRule) failures.push("the menu must declare stashBlocked");
-  if (ruleDecl && menuRule) {
-    const want =
-      'entry.unstaged === "untracked" && pathHasReservedComponent(entry.path)';
-    if (squash(ruleDecl[1]) !== want)
-      failures.push("staysOutOfStash moved off the component-wise rule");
-    if (squash(menuRule[1]) !== squash(ruleDecl[1]))
-      failures.push("stashBlocked differs from staysOutOfStash");
-  }
-  return failures;
-}
-
-test("the menu's stashBlocked spells the confirm-copy module's stash-exclude rule", () => {
-  assert.deepEqual(stashGateFailures(RULE_SRC, MENU_SRC), []);
-});
-
-test("a drifted Stash rule goes red", () => {
-  const swap = (src, from, to) => {
-    const out = src.replace(from, to);
-    assert.notEqual(out, src, `mutation did not apply: ${from}`);
-    return out;
-  };
-  const cases = [
-    [
-      RULE_SRC,
-      swap(
-        MENU_SRC,
-        "pathHasReservedComponent(entry.path);",
-        "reservedDeviceName(entry.path) !== null;",
-      ),
-      /stashBlocked differs from staysOutOfStash/,
-    ],
-    [
-      swap(
-        RULE_SRC,
-        'return entry.unstaged === "untracked" && pathHasReservedComponent',
-        "return pathHasReservedComponent",
-      ),
-      MENU_SRC,
-      /moved off the component-wise rule/,
-    ],
-  ];
-  for (const [ruleSrc, menu, message] of cases) {
-    const failures = stashGateFailures(ruleSrc, menu);
-    assert.ok(
-      failures.some((f) => message.test(f)),
-      `expected ${message}, got ${JSON.stringify(failures)}`,
-    );
-  }
 });

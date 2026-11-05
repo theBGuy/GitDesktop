@@ -389,7 +389,9 @@ function pinResolveArms(resolveSource) {
   // A settled accept unmounts the view in the app, so the settle's focus split
   // runs before the advance; the leaf render in the interaction tests unmounts
   // nothing, so the order is invisible there.
-  const split = body.search(/\bif\s*\(\s*leaves\s*\)/);
+  const split = body.search(
+    /\bif\s*\(\s*leaves\s*\)\s*handOff\s*\(\s*\)\s*;\s*else\s+land\s*\(\s*\)\s*;/,
+  );
   const advance = body.search(
     /\bif\s*\(\s*advances\s*\)\s*walk\.advance\s*\(\s*\)\s*;/,
   );
@@ -578,6 +580,22 @@ test("the pins fail on a mutated view", () => {
           res,
           /(\s*\/\/ Up only when[^\n]*\n\s*const leaves =[\s\S]*?else land\(\);)([\s\S]*?\n\s*if \(advances\) walk\.advance\(\);)/,
           "$2$1",
+        ),
+      ),
+      /hand focus off before walk\.advance\(\) unmounts/,
+    ],
+    // An empty `if (leaves)` ahead of the advance, with the real split after it.
+    [
+      pinResolveArms.bind(
+        null,
+        mutate(
+          mutate(
+            res,
+            /if \(leaves\) handOff\(\);\s*else land\(\);/,
+            "if (leaves) {}",
+          ),
+          "if (advances) walk.advance();",
+          "if (advances) walk.advance();\n      if (leaves) handOff();\n      else land();",
         ),
       ),
       /hand focus off before walk\.advance\(\) unmounts/,

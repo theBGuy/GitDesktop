@@ -166,10 +166,24 @@ function expectDisabled(el: HTMLElement, disabled: boolean) {
   else expect(el).not.toHaveAttribute("aria-disabled", "true");
 }
 
+type User = ReturnType<typeof userEvent.setup>;
+
+/** Disabled for real: marked aria-disabled, and a click reaches no action. */
+async function expectBlocked(user: User, el: HTMLElement) {
+  expect(el).toHaveAttribute("aria-disabled", "true");
+  await user.click(el);
+  expectNoAction();
+}
+
 /** Exactly `key` fired, once; every other action stayed silent. */
 function expectOnly(key: keyof ChangesMenuActions) {
   for (const k of ACTION_KEYS)
     expect(vi.mocked(actions[k]), k).toHaveBeenCalledTimes(k === key ? 1 : 0);
+}
+
+/** Forgets every action call, for a case that clicks more than once. */
+function clearActions() {
+  for (const k of ACTION_KEYS) vi.mocked(actions[k]).mockClear();
 }
 
 /** No menu action fired. */
@@ -236,22 +250,48 @@ describe("single-file menu", () => {
       unstaged: "untracked",
     };
     for (const anyConflicted of [false, true]) {
-      const { menu } = await openMenu({ target: row(reserved), anyConflicted });
-      expectDisabled(item(menu, "Stage file (Windows-reserved name)"), true);
-      expectDisabled(item(menu, "Stash change… (Windows-reserved name)"), true);
+      const { user, menu } = await openMenu({
+        target: row(reserved),
+        anyConflicted,
+      });
+      await expectBlocked(
+        user,
+        item(menu, "Stage file (Windows-reserved name)"),
+      );
+      await expectBlocked(
+        user,
+        item(menu, "Stash change… (Windows-reserved name)"),
+      );
       cleanup();
     }
   });
 
   it("F4: a reserved directory blocks Stash but not Stage", async () => {
     for (const path of ["aux/readme.md", "con/x.txt"]) {
-      const { menu } = await openMenu({
+      const { user, menu } = await openMenu({
         target: row({ path, staged: null, unstaged: "untracked" }),
       });
       expectDisabled(item(menu, "Stage file"), false);
-      expectDisabled(item(menu, "Stash change… (Windows-reserved name)"), true);
+      await expectBlocked(
+        user,
+        item(menu, "Stash change… (Windows-reserved name)"),
+      );
       cleanup();
     }
+  });
+
+  it("F9: a tracked file under a reserved directory still stashes", async () => {
+    const tracked: FileEntry = {
+      path: "con/x.txt",
+      staged: null,
+      unstaged: "modified",
+    };
+    const { user, menu } = await openMenu({ target: row(tracked) });
+    const stash = item(menu, "Stash change…");
+    expectDisabled(stash, false);
+    await user.click(stash);
+    expectOnly("stashFile");
+    expect(actions.stashFile).toHaveBeenCalledWith(tracked, false);
   });
 
   it("F5: Resolve with AI follows either conflicted side and the AI gates", async () => {
@@ -268,9 +308,9 @@ describe("single-file menu", () => {
     for (const entry of [stagedSide, unstagedSide]) {
       const { user, menu } = await openMenu({ target: row(entry) });
       expect(labels(menu)[0]).toBe("Resolve with AI…");
-      vi.mocked(actions.resolveWithAi).mockClear();
+      clearActions();
       await user.click(item(menu, "Resolve with AI…"));
-      expect(actions.resolveWithAi).toHaveBeenCalledTimes(1);
+      expectOnly("resolveWithAi");
       expect(actions.resolveWithAi).toHaveBeenCalledWith("src/a.ts");
       cleanup();
     }
@@ -309,14 +349,14 @@ describe("single-file menu", () => {
   });
 
   it("F7: an ordinary file's Stash waits while anything is conflicted", async () => {
-    const { menu } = await openMenu({
+    const { user, menu } = await openMenu({
       target: row(modified),
       anyConflicted: true,
     });
     const stash = item(menu, "Stash change… (resolve conflicts first)");
-    expectDisabled(stash, true);
     expectHeld(stash);
     expectDisabled(item(menu, "Stage file"), false);
+    await expectBlocked(user, stash);
   });
 
   it("F8: Open in the configured editor appears only when one is set", async () => {
@@ -379,8 +419,8 @@ describe("multi-select menu", () => {
       target: row(modified),
     });
     const stage = item(none.menu, "Stage files (Windows-reserved names)");
-    expectDisabled(stage, true);
     expectHeld(stage);
+    await expectBlocked(none.user, stage);
   });
 
   it("B3: Discard counts what it sends and hides at zero", async () => {
@@ -442,8 +482,8 @@ describe("multi-select menu", () => {
       conflicted.menu,
       "Stash 8 changes… (resolve conflicts first)",
     );
-    expectDisabled(stash, true);
     expectHeld(stash);
+    await expectBlocked(conflicted.user, stash);
   });
 
   it("B5: Ignore counts every file, Untrack the tracked ones and hides at none", async () => {
@@ -498,14 +538,12 @@ describe("multi-select menu", () => {
   it("B8: an enabled item fires exactly its own action", async () => {
     const discard = await openMenu({ ...BULK, target: row(modified) });
     await discard.user.click(item(discard.menu, "Discard 2 of 6 changes…"));
-    expect(actions.discardSelected).toHaveBeenCalledTimes(1);
-    expect(actions.ignoreSelected).not.toHaveBeenCalled();
-    expect(actions.stashSelected).not.toHaveBeenCalled();
+    expectOnly("discardSelected");
     cleanup();
+    clearActions();
     const stash = await openMenu({ ...BULK, target: row(modified) });
     await stash.user.click(item(stash.menu, "Stash 1 of 8 changes…"));
-    expect(actions.stashSelected).toHaveBeenCalledTimes(1);
-    expect(actions.discardSelected).toHaveBeenCalledTimes(1);
+    expectOnly("stashSelected");
   });
 });
 
@@ -520,13 +558,13 @@ describe("whole-tree menu", () => {
   });
 
   it("S2: Stash all waits while anything is conflicted", async () => {
-    const { menu } = await openMenu({
+    const { user, menu } = await openMenu({
       target: { kind: "global" },
       anyConflicted: true,
     });
     const stash = item(menu, "Stash all changes… (resolve conflicts first)");
-    expectDisabled(stash, true);
     expectHeld(stash);
+    await expectBlocked(user, stash);
   });
 });
 
@@ -607,10 +645,14 @@ describe("folder menu", () => {
       ],
     ];
     for (const [target, over, label, disabled] of cases) {
-      const { menu } = await openMenu({ target, folderCounts: counts(over) });
+      const { user, menu } = await openMenu({
+        target,
+        folderCounts: counts(over),
+      });
       const stage = item(menu, label);
-      expectDisabled(stage, disabled);
       expectHeld(stage);
+      if (disabled) await expectBlocked(user, stage);
+      else expectDisabled(stage, false);
       cleanup();
     }
   });
@@ -646,8 +688,8 @@ describe("folder menu", () => {
         folderCounts: counts(over),
       });
       await user.click(item(menu, label));
-      expect(actions.discardFolder).toHaveBeenCalledTimes(1);
-      vi.mocked(actions.discardFolder).mockClear();
+      expectOnly("discardFolder");
+      clearActions();
       cleanup();
     }
   });
@@ -674,8 +716,8 @@ describe("folder menu", () => {
       conflicted.menu,
       "Stash 3 changes… (resolve conflicts first)",
     );
-    expectDisabled(stash, true);
     expectHeld(stash);
+    await expectBlocked(conflicted.user, stash);
   });
 
   it("FS1: Stage, Discard and Stash lead, the footnote follows them", async () => {
@@ -820,6 +862,20 @@ describe("bulk gate and callback routing", () => {
     expectOnly("stashFile");
     expect(actions.stashFile).toHaveBeenCalledWith(modified, false);
   });
+
+  it("C6: a staged row's file Stash stashes its staged side", async () => {
+    const staged: FileEntry = {
+      path: "app.ts",
+      staged: "modified",
+      unstaged: null,
+    };
+    const { user, menu } = await openMenu({ target: row(staged, true) });
+    const stash = item(menu, "Stash change…");
+    expectDisabled(stash, false);
+    await user.click(stash);
+    expectOnly("stashFile");
+    expect(actions.stashFile).toHaveBeenCalledWith(staged, true);
+  });
 });
 
 describe("folder menu: enabled states and helpers", () => {
@@ -831,7 +887,7 @@ describe("folder menu: enabled states and helpers", () => {
     await partial.user.click(item(partial.menu, "Stash 2 of 3 changes…"));
     expectOnly("stashFolder");
     cleanup();
-    vi.mocked(actions.stashFolder).mockClear();
+    clearActions();
     const filtered = await openMenu({
       target: folder(),
       folderCounts: counts({ hiddenCount: 2 }),
@@ -848,13 +904,13 @@ describe("folder menu: enabled states and helpers", () => {
       });
       await user.click(item(menu, "Discard 3 changes…"));
       expectOnly("discardFolder");
-      vi.mocked(actions.discardFolder).mockClear();
+      clearActions();
       cleanup();
     }
   });
 
   it("FL3: an all-hidden staged folder names the unstage verb", async () => {
-    const { menu } = await openMenu({
+    const { user, menu } = await openMenu({
       target: folder("staged"),
       folderCounts: counts({
         fileCount: 0,
@@ -863,7 +919,7 @@ describe("folder menu: enabled states and helpers", () => {
         hiddenCount: 2,
       }),
     });
-    expectDisabled(item(menu, "No visible files to unstage"), true);
+    await expectBlocked(user, item(menu, "No visible files to unstage"));
   });
 
   it("FS4: the folder copy and reveal items reach their helpers, no action", async () => {

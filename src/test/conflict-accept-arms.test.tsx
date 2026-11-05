@@ -346,6 +346,13 @@ describe("ConflictResolveView Accept arms", () => {
     await waitFor(() => expect(document.activeElement).toBe(sink));
     expect(toast.warning).toHaveBeenCalledTimes(1);
     expect(toast.warning).toHaveBeenCalledWith(COPY.markersLeft);
+    expect(resolveConflict).toHaveBeenCalledWith(
+      REPO,
+      PATH,
+      expect.any(String),
+      false,
+      "h1",
+    );
     expect(useConflictResolve.getState().activePath).toBe("dir/b.txt");
   });
 
@@ -395,6 +402,13 @@ describe("ConflictResolveView Accept arms", () => {
     await waitFor(() => expect(document.activeElement).toBe(accept));
     expect(toast.warning).toHaveBeenCalledTimes(1);
     expect(toast.warning).toHaveBeenCalledWith(COPY.markersLeft);
+    expect(resolveConflict).toHaveBeenCalledWith(
+      REPO,
+      PATH,
+      expect.any(String),
+      false,
+      "h1",
+    );
   });
 
   it("A7b: markers kept outside any walk hand off", async () => {
@@ -407,6 +421,13 @@ describe("ConflictResolveView Accept arms", () => {
     await waitFor(() => expect(document.activeElement).toBe(sink));
     expect(toast.warning).toHaveBeenCalledTimes(1);
     expect(toast.warning).toHaveBeenCalledWith(COPY.markersLeft);
+    expect(resolveConflict).toHaveBeenCalledWith(
+      REPO,
+      PATH,
+      expect.any(String),
+      false,
+      "h1",
+    );
   });
 
   it("A7c: markers kept while the walk is on another file hand off", async () => {
@@ -422,6 +443,13 @@ describe("ConflictResolveView Accept arms", () => {
     await waitFor(() => expect(document.activeElement).toBe(sink));
     expect(toast.warning).toHaveBeenCalledTimes(1);
     expect(toast.warning).toHaveBeenCalledWith(COPY.markersLeft);
+    expect(resolveConflict).toHaveBeenCalledWith(
+      REPO,
+      PATH,
+      expect.any(String),
+      false,
+      "h1",
+    );
   });
 
   it("A8: a failed write toasts the error and lands on Accept", async () => {
@@ -439,7 +467,7 @@ describe("ConflictResolveView Accept arms", () => {
     );
   });
 
-  it("A9: closing the repo during the re-read refuses silently", async () => {
+  it("A9: closing the repo during the re-read refuses without writing or moving focus", async () => {
     const arm = rereadArm(NOT_CONFLICTED);
     const { accept } = await renderReady(CLEAN, arm.reread);
     await press(accept, "pointer");
