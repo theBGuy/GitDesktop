@@ -3,8 +3,8 @@
 // ("github desktop alternative") against the slowest-moving competitor.
 //
 // Every row below is distilled from the local competitive audit, re-grounded
-// 2026-09-30 against GitHub Desktop stable 3.6.6 (released 2026-09-21 —
-// small fixes and hardening; its stable channel is feature-free since 3.6.0).
+// 2026-11-05 against GitHub Desktop stable 3.6.10 (released 2026-10-30;
+// nothing since 3.6.0 has moved a row).
 // The verified-on stamp is rendered on the page; when a row changes upstream,
 // update verifiedOn["github-desktop"] in src/lib/compare.ts (and the meta
 // description's month) in the same edit. A stale comparison is worse than
@@ -20,7 +20,7 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn["github-desktop"];
-const GHD_VERSION = "3.6.6";
+const GHD_VERSION = "3.6.10";
 
 // Distilled to the rows where the two clients genuinely diverge (plus a few
 // load-bearing parity rows). The full matrix behind this runs ~130 rows; both
@@ -310,14 +310,14 @@ const faqs = [
   },
   {
     q: "What about the GitHub Copilot app?",
-    a: "The GitHub Copilot app is GitHub's second desktop product, built around agents. It has its own pull-request and issue views and a merge drawer, but commits and pushes come from agent sessions, with no staging you drive yourself, and it signs in with a GitHub account (Azure DevOps and Jira arrive through integrations). GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
+    a: "The GitHub Copilot app is GitHub's second desktop product, built around agents. It has its own pull-request and issue views, a merge drawer, and a branch menu for committing and pushing a session's changes, but no staging you drive yourself, and it signs in with a GitHub account (Azure DevOps and Jira arrive through integrations). GitDesktop does both jobs in one window: a full manual Git client and agent delegation, on any of the three forges.",
   },
 ];
 ---
 
 <SiteLayout
   title="GitDesktop vs GitHub Desktop — a verified comparison"
-  description="GitDesktop vs GitHub Desktop, verified September 2026: forges, the PR loop, CI, issues, recovery, and optional AI — plus what GitHub Desktop still does better."
+  description="GitDesktop vs GitHub Desktop, verified November 2026: forges, the PR loop, CI, issues, recovery, and optional AI — plus what GitHub Desktop still does better."
   ogTitle="GitDesktop vs GitHub Desktop"
   ogDescription="Forges, the PR loop, CI, issues, recovery tooling, and optional AI — a verified, dated comparison."
   breadcrumbs={[

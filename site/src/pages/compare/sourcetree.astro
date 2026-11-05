@@ -3,8 +3,8 @@
 // and Sourcetree ships Windows+macOS only, so every Linux searcher is
 // winnable. Windows and Mac Sourcetree are SEPARATE apps on separate release
 // lines; rows say which platform a fact applies to when they differ.
-// Re-grounded 2026-09-30 against Windows 3.4.32 (2026-08-28) and Mac 4.2.19
-// (2026-07-30) via primary Atlassian sources (release notes, support KBs,
+// Re-grounded 2026-11-05 against Windows 3.4.33 (2026-10-31) and Mac 4.2.20
+// (2026-11-01) via primary Atlassian sources (release notes, support KBs,
 // jira.atlassian.com tickets). When a row changes upstream, update
 // verifiedOn.sourcetree in src/lib/compare.ts (plus the ST_* constants, the
 // meta description's month, and the maintenance FAQ's release months) in
@@ -20,8 +20,8 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn.sourcetree;
-const ST_WIN_VERSION = "3.4.32";
-const ST_MAC_VERSION = "4.2.19";
+const ST_WIN_VERSION = "3.4.33";
+const ST_MAC_VERSION = "4.2.20";
 
 const groups: Group[] = [
   {
@@ -275,14 +275,14 @@ const faqs = [
   },
   {
     q: "Is Sourcetree still maintained?",
-    a: `Yes, in a steady-patch sense: both apps shipped point releases through summer 2026 (Windows ${ST_WIN_VERSION} in August, Mac ${ST_MAC_VERSION} in July). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open.`,
+    a: `Yes, in a steady-patch sense: both apps kept shipping point releases through 2026 (Windows ${ST_WIN_VERSION} in October, Mac ${ST_MAC_VERSION} in November). But the two platforms run on separate codebases with a long-standing feature gap between them, community threads note it's absent from Atlassian's public product roadmap, and the big asks (worktree support requested since 2015, in-app pull requests since 2017) remain open.`,
   },
 ];
 ---
 
 <SiteLayout
   title="GitDesktop vs Sourcetree — a verified comparison"
-  description="GitDesktop vs Sourcetree, verified September 2026: Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — plus what Sourcetree still does better."
+  description="GitDesktop vs Sourcetree, verified November 2026: Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — plus what Sourcetree still does better."
   ogTitle="GitDesktop vs Sourcetree"
   ogDescription="Linux support, the in-app PR loop, CI, issues, optional AI, and no vendor account — a verified, dated comparison."
   breadcrumbs={[

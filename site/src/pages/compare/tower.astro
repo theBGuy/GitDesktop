@@ -20,10 +20,10 @@ const repo = "https://github.com/theBGuy/GitDesktop";
 const download = `${base}download/`;
 
 const VERIFIED_ON = verifiedOn.tower;
-const TOWER_MAC_VERSION = "17.3";
-const TOWER_MAC_RELEASED = "September 17, 2026";
-const TOWER_WIN_VERSION = "14.0";
-const TOWER_WIN_RELEASED = "September 15, 2026";
+const TOWER_MAC_VERSION = "18.0";
+const TOWER_MAC_RELEASED = "October 6, 2026";
+const TOWER_WIN_VERSION = "15.0";
+const TOWER_WIN_RELEASED = "November 2, 2026";
 const TOWER_MAC_MAJOR = TOWER_MAC_VERSION.split(".")[0];
 const TOWER_WIN_MAJOR = TOWER_WIN_VERSION.split(".")[0];
 
@@ -59,7 +59,7 @@ const groups: Group[] = [
         label: "Same features on every platform",
         them: {
           state: "no",
-          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; several features differ by platform, such as AI commit messages (Mac only) and Gitea (Windows only)`,
+          note: `separate apps on separate tracks — Mac sits at v${TOWER_MAC_MAJOR}, Windows at v${TOWER_WIN_MAJOR}; several features differ by platform, such as AI commit messages (Mac only) and Gitea, Forgejo & Codeberg (Windows only)`,
         },
         gd: {
           state: "yes",
@@ -70,7 +70,7 @@ const groups: Group[] = [
         label: "Hosting services",
         them: {
           state: "yes",
-          note: "GitHub, GitLab, Bitbucket, Azure DevOps, Beanstalk & Perforce GitSwarm, plus Gitea on Windows",
+          note: "GitHub, GitLab, Bitbucket, Azure DevOps, Beanstalk & Perforce GitSwarm, plus Gitea, Forgejo & Codeberg on Windows",
         },
         gd: {
           state: "yes",
@@ -285,7 +285,10 @@ const groups: Group[] = [
       },
       {
         label: "Use it from an AI assistant (MCP)",
-        them: { state: "no" },
+        them: {
+          state: "no",
+          note: "no MCP server; on Mac, Tower 18's agent skill opens Tower views",
+        },
         gd: {
           state: "yes",
           note: "GitDesktop doubles as an MCP server — read-only by default",
@@ -310,14 +313,14 @@ const faqs = [
   },
   {
     q: "Is Tower the same app on Windows and on a Mac?",
-    a: `They are separate products on separate release tracks: as of the date above, Tower for Mac is at version ${TOWER_MAC_VERSION} while Tower for Windows is at ${TOWER_WIN_VERSION}. AI commit messages (Tower 16) exist only in the Mac app, and Gitea support only in the Windows app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.`,
+    a: `They are separate products on separate release tracks: as of the date above, Tower for Mac is at version ${TOWER_MAC_VERSION} while Tower for Windows is at ${TOWER_WIN_VERSION}. AI commit messages (Tower 16) exist only in the Mac app, and Gitea, Forgejo, and Codeberg support only in the Windows app. GitDesktop ships from one codebase, so releases land on Windows, macOS, and Linux at once.`,
   },
 ];
 ---
 
 <SiteLayout
   title="GitDesktop vs Tower — a verified comparison"
-  description="GitDesktop vs Tower, verified September 2026: free vs subscription, Linux support, PR review with approval in-app, CI, issues, releases & unmetered AI — plus what Tower still does better."
+  description="GitDesktop vs Tower, verified November 2026: free vs subscription, Linux support, PR review with approval in-app, CI, issues, releases & unmetered AI — plus what Tower still does better."
   ogTitle="GitDesktop vs Tower"
   ogDescription="Free on three platforms, review in-app, no subscription — a verified, dated comparison."
   breadcrumbs={[
@@ -395,7 +398,8 @@ const faqs = [
           <span>
             <span class="text-ink">Hosting-service breadth.</span> Azure DevOps
             (its Server variant on Tower Pro), Beanstalk, Perforce GitSwarm,
-            and Gitea on Windows, alongside the big three. GitDesktop stops at
+            and Gitea, Forgejo, and Codeberg on Windows, alongside the big
+            three. GitDesktop stops at
             GitHub, GitLab, and Bitbucket Cloud, with Jira Cloud for issues.
           </span>
         </li>

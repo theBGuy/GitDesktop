@@ -38,10 +38,10 @@ export const stateClass: Record<State, string> = {
 // Each page's meta description also hand-carries a "verified <Month> <Year>"
 // phrase that is NOT derived from this map — update it in the same pass.
 export const verifiedOn = {
-  "github-desktop": "September 30, 2026",
-  sourcetree: "September 30, 2026",
-  gitkraken: "September 30, 2026",
-  tower: "September 30, 2026",
+  "github-desktop": "November 5, 2026",
+  sourcetree: "November 5, 2026",
+  gitkraken: "November 5, 2026",
+  tower: "November 5, 2026",
 } as const;
 
 export type CompareSlug = keyof typeof verifiedOn;
