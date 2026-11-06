@@ -992,6 +992,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
     return map;
   }, [prByBranch, defaultName]);
 
+  // Branch name → the PR it maps to that closed without merging, any base, for
+  // the cleanup dialog's Closed PR criterion. Remote PRs only, as above; a
+  // branch whose best-ranked PR merged elsewhere carries neither label.
+  const prClosedByBranch = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const [name, pr] of prByBranch)
+      if (pr.state === "closed" && pr.select.kind === "remote")
+        map.set(name, pr.label);
+    return map;
+  }, [prByBranch]);
+
   const prNoun = PR_NOUN[gh.data?.provider ?? "github"];
   /** A row's PR in words: its state, the forge's noun, and the PR's label. */
   const prChipLabel = (pr: BranchPr) =>
@@ -1032,6 +1043,23 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
       if (w.branch && normPath(w.path) !== activeNorm)
         map.set(w.branch, w.path);
     }
+    return map;
+  }, [userWorktrees.data, activeNorm]);
+  // The same branches with what the cleanup dialog needs to remove their
+  // worktree. Main-workspace entries stay in, so the dialog can tell "held by
+  // main" (never removable) from "not held".
+  const worktreeFacts = useMemo(() => {
+    const map = new Map<
+      string,
+      { path: string; isLocked: boolean; isMain: boolean }
+    >();
+    for (const w of userWorktrees.data ?? [])
+      if (w.branch && normPath(w.path) !== activeNorm)
+        map.set(w.branch, {
+          path: w.path,
+          isLocked: w.isLocked,
+          isMain: w.isMain,
+        });
     return map;
   }, [userWorktrees.data, activeNorm]);
   // Cross-worktree state (same fetch as the map above): the main workspace the
@@ -4844,15 +4872,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         open={cleanupOpen}
         onClose={() => setCleanupOpen(false)}
         branches={allBranches}
-        defaultBranch={defaultName}
+        // undefined only while the default-branch read is loading; null once
+        // it settled with none or with an error.
+        defaultBranch={defaultBranch.isPending ? undefined : defaultName}
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         // Until both rules scopes land, `isProtected` excludes nothing, so the
         // dialog holds its list rather than offering a branch a rule refuses.
         rulesSettling={rulesSettling}
-        isInWorktree={(name) => worktreeByBranch.has(name)}
-        // From the removal store, not the worktree read: `isInWorktree` still
-        // matches a worktree git lists until its removal finishes, and that
+        worktreeFacts={worktreeFacts}
+        // From the removal store, not the worktree read: `worktreeFacts` still
+        // lists a worktree git lists until its removal finishes, and that
         // read is gated on this menu or the dialog being open, so it can lag —
         // either way the exclusion holds a branch already on its way out. A
         // promote's removal (`promotePhase`) doesn't count: it frees the branch
@@ -4865,6 +4895,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         // exclusion that isn't answering yet.
         worktreeCheckState={worktreeCheckStateFrom(userWorktrees)}
         prMergedByBranch={mergedPrByBranch}
+        prClosedByBranch={prClosedByBranch}
         // Only the closed list carries merged PRs, and `canGh` is what says the
         // query runs at all — so the dialog is told which of the four it got,
         // never-ran included.

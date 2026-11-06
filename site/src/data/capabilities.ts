@@ -131,8 +131,18 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Clean up branches in bulk — archive or delete stale ones in one sweep, including branches merged through a pull request",
+      "Clean up branches in bulk — archive or delete stale ones in one sweep, filtered by merged, closed pull request, or idle",
     highlight: true,
+  },
+  {
+    group: "Branches & history",
+    label:
+      "See whether a stale branch still holds work its default branch lacks before you delete it",
+  },
+  {
+    group: "Branches & history",
+    label:
+      "Include worktree-held branches in a cleanup, removing each clean worktree first",
   },
   {
     group: "Branches & history",

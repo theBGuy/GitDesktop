@@ -1,3 +1,4 @@
+import type { QueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { create } from "zustand";
 import { presentError } from "@/lib/error-summary";
@@ -12,6 +13,9 @@ import {
 import { normPath } from "@/lib/git/path";
 import {
   invalidateRepoAfterWrite,
+  LOCAL_PR_WRITES_KEY,
+  type LocalPrWriteKind,
+  readPendingLocalPrWrite,
   repoKeys,
   worktreeKey,
 } from "@/lib/git/queries";
@@ -21,6 +25,7 @@ import {
   pruneWorktrees,
   removeWorktree,
   touchPromoteWindow,
+  type WorktreeRemoveOutcome,
 } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
 import { toastComposedError, toastError } from "@/lib/toast";
@@ -337,11 +342,20 @@ function toastArchiveRefused(branch: string, e: unknown) {
   });
 }
 
-/** Honours the delete dialog's "archive when done" checkbox, once the removal
- *  has settled. The removal itself has already succeeded here, so nothing in
- *  this step can turn it back into a failure — a refused archive reports itself
- *  and points at the branch menu, which can still do it. */
-async function archiveAfterRemoval(repoPath: string, branch: string) {
+/** What the archive step after a successful removal did. */
+type ArchiveStepOutcome =
+  | { kind: "archived" }
+  | { kind: "alreadyArchived" }
+  | { kind: "isDefault" }
+  | { kind: "failed"; error: unknown };
+
+/** Archives a removed worktree's branch and says what happened, reporting
+ *  nothing itself: the delete dialog's path toasts the outcome, Clean up
+ *  branches returns it as its row's result. */
+async function archiveBranchAfterRemoval(
+  repoPath: string,
+  branch: string,
+): Promise<ArchiveStepOutcome> {
   // Re-resolved at completion time rather than trusted from the dialog: the
   // intent can be minutes old, and archiving the default branch would hide it
   // from every branch surface. This write fails CLOSED — an unreadable default
@@ -351,27 +365,18 @@ async function archiveAfterRemoval(repoPath: string, branch: string) {
   let isDefault: boolean;
   try {
     isDefault = (await gitDefaultBranch(repoPath)) === branch;
-  } catch (e) {
-    toastArchiveRefused(branch, e);
-    return;
+  } catch (error) {
+    return { kind: "failed", error };
   }
-  if (isDefault) {
-    toast.success("Worktree removed");
-    toast.info(`Left ${branch} unarchived — it's the default branch.`);
-    return;
-  }
+  if (isDefault) return { kind: "isDefault" };
   // Already-archived is re-resolved here too, so a branch archived from the
-  // branch menu while the removal ran doesn't produce a success toast claiming
-  // this step changed something. Unlike the default-branch read this fails
-  // OPEN: the set is idempotent, so an unreadable list must not skip an archive
-  // that would have succeeded.
+  // branch menu while the removal ran isn't reported as this step changing
+  // something. Unlike the default-branch read this fails OPEN: the set is
+  // idempotent, so an unreadable list must not skip an archive that would have
+  // succeeded.
   try {
     const found = (await gitBranches(repoPath)).find((b) => b.name === branch);
-    if (found?.archived) {
-      toast.success("Worktree removed");
-      toast.info(`${branch} was already archived.`);
-      return;
-    }
+    if (found?.archived) return { kind: "alreadyArchived" };
   } catch {
     // Fall through to the archive.
   }
@@ -382,9 +387,33 @@ async function archiveAfterRemoval(repoPath: string, branch: string) {
     void queryClient.invalidateQueries({
       queryKey: repoKeys.branches(repoPath),
     });
-    toast.success(`Worktree removed and ${branch} archived`);
-  } catch (e) {
-    toastArchiveRefused(branch, e);
+    return { kind: "archived" };
+  } catch (error) {
+    return { kind: "failed", error };
+  }
+}
+
+/** Honours the delete dialog's "archive when done" checkbox, once the removal
+ *  has settled. The removal itself has already succeeded here, so nothing in
+ *  this step can turn it back into a failure — a refused archive reports itself
+ *  and points at the branch menu, which can still do it. */
+async function archiveAfterRemoval(repoPath: string, branch: string) {
+  const outcome = await archiveBranchAfterRemoval(repoPath, branch);
+  switch (outcome.kind) {
+    case "isDefault":
+      toast.success("Worktree removed");
+      toast.info(`Left ${branch} unarchived — it's the default branch.`);
+      return;
+    case "alreadyArchived":
+      toast.success("Worktree removed");
+      toast.info(`${branch} was already archived.`);
+      return;
+    case "archived":
+      toast.success(`Worktree removed and ${branch} archived`);
+      return;
+    case "failed":
+      toastArchiveRefused(branch, outcome.error);
+      return;
   }
 }
 
@@ -441,29 +470,34 @@ async function run({
   await archiveAfterRemoval(repoPath, branch);
 }
 
-/** Remove a worktree while keeping its branch, retrying once if the folder is
- *  momentarily still held. The app has just switched off this worktree, but its
- *  last in-flight git-status poll (or the OS) can keep the directory busy for a
- *  beat — and `openRepo` applies its switch in a View Transition callback that can
- *  run after the call returns, so the app may not have fully let go yet. The
- *  retry covers that window; a real, lasting hold (an editor/terminal in the
+/** A removal failure's text with the worktree's path stripped, so a folder
+ *  NAMED e.g. "docs-in-use" or "locked-tools" can't steer a classifier. */
+function removalErrorText(e: unknown, path: string): string {
+  return String((e as { message?: string })?.message ?? e).replaceAll(path, "");
+}
+
+/** Remove a worktree without forcing it (deleting `branch` too when given, if
+ *  its tip hasn't moved), retrying once if the folder is momentarily still held.
+ *  A promote has just switched the app off this worktree, and a cleanup's own
+ *  status read may still be running inside it: a last in-flight git process (or
+ *  the OS) can keep the directory busy for a beat, and `openRepo` applies its
+ *  switch in a View Transition callback that can run after the call returns.
+ *  The retry covers that window; a real, lasting hold (an editor/terminal in the
  *  folder) still surfaces the actionable error. */
-async function removeWorktreeFreeingBranch(repoPath: string, path: string) {
+async function removeWorktreeFreeingBranch(
+  repoPath: string,
+  path: string,
+  branch: string | null,
+): Promise<WorktreeRemoveOutcome> {
   try {
-    await removeWorktree(repoPath, path, null, false);
+    return await removeWorktree(repoPath, path, branch, false);
   } catch (e) {
-    // Path stripped before matching — a folder NAMED e.g. "docs-in-use" must
-    // not read as a transient hold.
-    const msg = String((e as { message?: string })?.message ?? e).replaceAll(
-      path,
-      "",
-    );
+    const msg = removalErrorText(e, path);
     if (/close any program|in use|being used|invalid argument/i.test(msg)) {
       await new Promise((resolve) => setTimeout(resolve, 300));
-      await removeWorktree(repoPath, path, null, false);
-    } else {
-      throw e;
+      return await removeWorktree(repoPath, path, branch, false);
     }
+    throw e;
   }
 }
 
@@ -529,7 +563,7 @@ async function runPromote(
     markedKey = activeKey;
     // Free the branch: remove the worktree but KEEP the branch (null) — we
     // check it out in main next. force=false: the clean-tree guard already ran.
-    await removeWorktreeFreeingBranch(mainPath, worktreePath);
+    await removeWorktreeFreeingBranch(mainPath, worktreePath, null);
     removed = true;
     // The removal can run for minutes; restart the window's expiry so the
     // stash and checkout legs still hold MCP branch changes off.
@@ -592,6 +626,204 @@ async function runPromote(
     promotingWorktrees.delete(normPath(worktreePath));
     // Best-effort: a close that fails leaves a marker its age gate expires.
     if (windowToken) await endPromoteWindow(windowToken).catch(() => undefined);
+  }
+}
+
+export type CleanupRemovalOutcome =
+  | {
+      ok: true;
+      branch: "archived" | "deleted" | "keptMoved" | "keptUnreadable";
+    }
+  | { ok: false; reason: string };
+
+// Clean up branches' row reasons read after "Couldn't archive: " / "Couldn't
+// delete: ", so each is a lowercase phrase with no period. "Already" stays the
+// starters' word for a duplicate attempt and never appears here.
+const CLEANUP_REMOVING_REASON = "the worktree is being removed";
+const CLEANUP_PROMOTING_REASON = "the worktree is being promoted";
+const CLEANUP_UPDATE_ON_BRANCH_REASON = "an update is running on this branch";
+const CLEANUP_UPDATE_IN_WORKTREE_REASON =
+  "an update is running in this worktree";
+const CLEANUP_MERGE_ON_BRANCH_REASON = "a merge is running into this branch";
+const CLEANUP_MERGE_IN_WORKTREE_REASON =
+  "a merge started from this worktree is running";
+const CLEANUP_LOCKED_REASON = "the worktree is locked";
+const CLEANUP_DIRTY_REASON = "the worktree has uncommitted changes";
+const CLEANUP_DEFAULT_BRANCH_REASON =
+  "the worktree was removed first (it is the default branch)";
+
+/** The local-PR writes that move a branch inside the worktree holding it:
+ *  "Update from…" merges into its head there, and a local-PR merge (or its
+ *  finish) fast-forwards its base there. */
+const HOLDER_WRITES: Partial<
+  Record<
+    LocalPrWriteKind,
+    { moves: "head" | "base"; onBranch: string; inWorktree: string }
+  >
+> = {
+  "update-from": {
+    moves: "head",
+    onBranch: CLEANUP_UPDATE_ON_BRANCH_REASON,
+    inWorktree: CLEANUP_UPDATE_IN_WORKTREE_REASON,
+  },
+  merge: {
+    moves: "base",
+    onBranch: CLEANUP_MERGE_ON_BRANCH_REASON,
+    inWorktree: CLEANUP_MERGE_IN_WORKTREE_REASON,
+  },
+  "finish-merge": {
+    moves: "base",
+    onBranch: CLEANUP_MERGE_ON_BRANCH_REASON,
+    inWorktree: CLEANUP_MERGE_IN_WORKTREE_REASON,
+  },
+};
+
+/** Why a pending local-PR write refuses removing the worktree at `path` that
+ *  holds `branch`, or null. The branch arm matches under ANY key repo: a write
+ *  started while the app views another worktree of the repo keys to that
+ *  viewer's path, yet moves the branch inside the holder; it wins over a holder
+ *  hit on any other write. The holder arm catches a write started from inside
+ *  this worktree, whichever branch it moves. A same-named branch in an
+ *  unrelated repo also refuses, the safe direction. */
+function pendingHolderWriteRefusal(
+  queryClient: QueryClient,
+  branch: string,
+  path: string,
+): string | null {
+  const target = normPath(path);
+  const pending = queryClient.getMutationCache().findAll({
+    mutationKey: LOCAL_PR_WRITES_KEY,
+    status: "pending",
+  });
+  let inWorktree: string | null = null;
+  for (const m of pending) {
+    // `localPrWriteKey` lays the key out as [prefix, kind, repo]: element 2 is
+    // the repo the write was started against.
+    const [, kind, keyRepo] = m.options.mutationKey ?? [];
+    if (typeof kind !== "string" || !Object.hasOwn(HOLDER_WRITES, kind))
+      continue;
+    const write = HOLDER_WRITES[kind as LocalPrWriteKind];
+    if (!write) continue;
+    if (
+      readPendingLocalPrWrite(kind, m.state.variables)[write.moves] === branch
+    )
+      return write.onBranch;
+    if (
+      inWorktree === null &&
+      typeof keyRepo === "string" &&
+      normPath(keyRepo) === target
+    )
+      inWorktree = write.inWorktree;
+  }
+  return inWorktree;
+}
+
+/** An error's summary as a row reason, which reads after "Couldn't …: ": one
+ *  trailing period dropped, the text otherwise as presentError gives it. */
+function reasonFromError(e: unknown): string {
+  return presentError(e).summary.replace(/\.$/, "");
+}
+
+/** A Clean up branches row's reason for a removal git refused or that failed.
+ *  Without force git refuses a locked or dirty worktree. Locked is matched on
+ *  git's own refusal ("cannot remove a locked working tree", git 2.51), and
+ *  first, since git echoes the lock's free-text reason after it. */
+function cleanupRemovalFailure(e: unknown, path: string): string {
+  const msg = removalErrorText(e, path);
+  if (/cannot remove a locked working tree/i.test(msg))
+    return CLEANUP_LOCKED_REASON;
+  if (/modified|untracked/i.test(msg)) return CLEANUP_DIRTY_REASON;
+  return reasonFromError(e);
+}
+
+/**
+ * Removes a linked worktree for Clean up branches (never forced), then archives
+ * or deletes its branch, resolving when this row is done. The removal store is
+ * marked for the duration, so every surface gating on a removal sees it.
+ * Refuses with `{ ok: false }`, starting nothing, when at call time the path is
+ * already being removed or promoted, or a local-PR write is moving the branch
+ * inside the worktree that holds it, or any such write was started from this
+ * worktree (both read from the mutation cache, as refuseWhilePushRuns reads
+ * it). Reports only through its result: no toast, and
+ * nothing to another removal listener.
+ */
+export async function removeWorktreeForCleanup(
+  queryClient: QueryClient,
+  args: {
+    repoPath: string;
+    path: string;
+    name: string;
+    branch: string;
+    then: "archive" | "delete";
+  },
+): Promise<CleanupRemovalOutcome> {
+  const { repoPath, path, name, branch, then } = args;
+  // The same two admission reads `startRemoval` refuses on.
+  if (
+    isRemovalInFlight(useWorktreeRemovalStore.getState().byRepo, repoPath, path)
+  )
+    return { ok: false, reason: CLEANUP_REMOVING_REASON };
+  if (promotingWorktrees.has(normPath(path)))
+    return { ok: false, reason: CLEANUP_PROMOTING_REASON };
+  const writeRefusal = pendingHolderWriteRefusal(queryClient, branch, path);
+  if (writeRefusal) return { ok: false, reason: writeRefusal };
+  markRemoval({
+    repoPath,
+    path,
+    name,
+    branch,
+    archiveWhenDone: then === "archive",
+  });
+
+  let removal: WorktreeRemoveOutcome;
+  try {
+    // The first await: every refusal read and the mark above ran before it, so
+    // a second call for this path in the same tick refuses off the mark.
+    // Archive keeps the branch through the removal (null) and archives it after.
+    removal = await removeWorktreeFreeingBranch(
+      repoPath,
+      path,
+      then === "delete" ? branch : null,
+    );
+    // Best-effort cleanup; a clean remove already drops its own admin entry.
+    await pruneWorktrees(repoPath).catch(() => undefined);
+  } catch (e) {
+    return { ok: false, reason: cleanupRemovalFailure(e, path) };
+  } finally {
+    // Settled before the branch step, so a failed archive can't strand the mark.
+    settleRemoval(repoPath, path);
+  }
+
+  if (then === "archive") {
+    const archived = await archiveBranchAfterRemoval(repoPath, branch);
+    switch (archived.kind) {
+      // Already archived is this row's end state too: the set is idempotent.
+      case "archived":
+      case "alreadyArchived":
+        return { ok: true, branch: "archived" };
+      case "isDefault":
+        return { ok: false, reason: CLEANUP_DEFAULT_BRANCH_REASON };
+      case "failed":
+        return {
+          ok: false,
+          reason: `the worktree was removed first (${reasonFromError(archived.error)})`,
+        };
+      default: {
+        const exhaustive: never = archived;
+        return exhaustive;
+      }
+    }
+  }
+  switch (removal.branchCleanup) {
+    // notRequested with a branch passed: the ref was already gone at the tip
+    // pin, which is this row's end state.
+    case "deleted":
+    case "notRequested":
+      return { ok: true, branch: "deleted" };
+    case "sparedMoved":
+      return { ok: true, branch: "keptMoved" };
+    case "sparedUnreadable":
+      return { ok: true, branch: "keptUnreadable" };
   }
 }
 

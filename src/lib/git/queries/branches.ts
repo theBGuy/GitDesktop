@@ -1,4 +1,10 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type UseQueryResult,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { reloadLocalPrs } from "@/lib/pulls/local";
 import {
   REPO_SHELL_GC_TIME,
@@ -406,4 +412,280 @@ export function useBranchResetToUpstream(repo: string) {
       networkMode: "always",
     },
   );
+}
+
+/** Content checks in flight app-wide: each spawns git twice, and one open
+ *  checks every listed branch (150+ in real repos). */
+const CONTENT_CHECK_SLOTS = 4;
+
+/** FIFO slot queue. A queued acquire rejects with the abort reason, so a
+ *  cancelled check never starts; an acquired slot ignores abort, because invoke
+ *  can't be cancelled and the slot frees only when it settles. */
+function slotQueue(size: number) {
+  let free = size;
+  const waiters: (() => void)[] = [];
+  return {
+    acquire(signal: AbortSignal): Promise<void> {
+      if (signal.aborted) return Promise.reject(signal.reason);
+      if (free > 0) {
+        free--;
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        const grant = () => {
+          signal.removeEventListener("abort", drop);
+          resolve();
+        };
+        const drop = () => {
+          const at = waiters.indexOf(grant);
+          if (at !== -1) waiters.splice(at, 1);
+          reject(signal.reason);
+        };
+        waiters.push(grant);
+        signal.addEventListener("abort", drop, { once: true });
+      });
+    },
+    release() {
+      const next = waiters.shift();
+      if (next) next();
+      else free++;
+    },
+  };
+}
+
+const contentCheckSlots = slotQueue(CONTENT_CHECK_SLOTS);
+
+/** Long enough that a row hidden and shown again within an open keeps its
+ *  landed verdict; the close or epoch change drops the open's entries itself. */
+const CONTENT_CHECK_GC_TIME = 5 * 60_000;
+
+// Minted only inside a setState updater: the React Compiler would cache a
+// call made directly in render, since it takes no reactive input.
+let contentCheckEpoch = 0;
+function nextContentCheckEpoch() {
+  contentCheckEpoch += 1;
+  return contentCheckEpoch;
+}
+
+interface ContentCheckOpen {
+  epoch: number;
+  repoPath: string;
+  /** The default branch this open checks against; undefined until its read
+   *  settles, then fixed for the open. */
+  latched: string | null | undefined;
+  /** The base this open's first settled read gave (null: none, or the read
+   *  failed); undefined until then. A later refetch never moves it. */
+  base: api.ContentCheckBase | null | undefined;
+}
+
+export interface BranchContentCheck {
+  /** "unsupported": git < 2.38 or no resolvable default branch. "pending": the
+   *  base or some requested verdict is still running. "settled": every
+   *  requested branch has a verdict (unknown included). */
+  status: "unsupported" | "pending" | "settled";
+  base: api.ContentCheckBase | null;
+  /** Landed verdicts by branch name; a requested branch missing here is still
+   *  pending. */
+  verdicts: ReadonlyMap<string, api.ContentVerdict>;
+  /** Requested branches whose verdict hasn't landed yet. */
+  pendingCount: number;
+}
+
+/**
+ * Whether each of `branches` still carries content its repo's default branch
+ * lacks, checked once per open (`enabled` false→true) against the newer of the
+ * default branch and its remote-tracking counterpart.
+ *
+ * `defaultBranch` is undefined ONLY while its read loads; pass null once it
+ * settled with none or failed ("unsupported", final for the open). Keys sit
+ * outside `["repo", repoPath]` and carry a per-open epoch, so no repo
+ * invalidation or refocus refetches a verdict mid-open and an earlier open's
+ * data never lands in this one. The open is decided during render, so the
+ * first commit after an enable edge or a repo switch already shows nothing
+ * landed. Closing cancels queued checks and drops the open's cache entries.
+ */
+export function useBranchContentCheck(
+  repoPath: string,
+  defaultBranch: string | null | undefined,
+  branches: readonly string[],
+  enabled: boolean,
+): BranchContentCheck {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState<ContentCheckOpen | null>(null);
+  // Render-time adjust: an effect would commit one render that still serves
+  // the previous open to consumers' effects.
+  if (enabled && (open === null || open.repoPath !== repoPath)) {
+    setOpen((prev) =>
+      prev !== null && prev.repoPath === repoPath
+        ? prev
+        : {
+            epoch: nextContentCheckEpoch(),
+            repoPath,
+            latched: defaultBranch,
+            base: undefined,
+          },
+    );
+  } else if (!enabled && open !== null) {
+    setOpen(null);
+  } else if (
+    open !== null &&
+    open.latched === undefined &&
+    defaultBranch !== undefined
+  ) {
+    setOpen({ ...open, latched: defaultBranch });
+  }
+  const live =
+    enabled && open !== null && open.repoPath === repoPath ? open : null;
+  const latched = live?.latched;
+
+  // Observers exist only while open, so a closed open's entries have none.
+  const baseInputs =
+    live !== null && typeof latched === "string"
+      ? [{ repo: live.repoPath, epoch: live.epoch, defaultName: latched }]
+      : [];
+  const baseQuery = useQueries({
+    queries: baseInputs.map(({ repo, epoch, defaultName }) => ({
+      queryKey: ["content-merged", repo, epoch, "base", defaultName] as const,
+      queryFn: () => api.gitContentCheckBase(repo, defaultName),
+      staleTime: Number.POSITIVE_INFINITY,
+      gcTime: CONTENT_CHECK_GC_TIME,
+      retry: false,
+      networkMode: "always" as const,
+    })),
+  })[0] as UseQueryResult<api.ContentCheckBase | null> | undefined;
+  // A filterless invalidation (an account switch) still refetches the base, so
+  // the open keeps its first settled answer: a failed or moved refetch must not
+  // turn the open unsupported or re-key its verdicts.
+  const settledBase = baseQuery?.isError ? null : baseQuery?.data;
+  const landedBase = live?.base !== undefined ? live.base : settledBase;
+  if (live !== null && live.base === undefined && settledBase !== undefined) {
+    const epochNow = live.epoch;
+    setOpen((prev) =>
+      prev !== null && prev.epoch === epochNow && prev.base === undefined
+        ? { ...prev, base: settledBase }
+        : prev,
+    );
+  }
+  const base = landedBase ?? null;
+
+  const verdictQueries = useQueries({
+    queries:
+      live !== null && base !== null
+        ? branches.map((branch) => ({
+            queryKey: [
+              "content-merged",
+              live.repoPath,
+              live.epoch,
+              "verdict",
+              base.sha,
+              branch,
+            ] as const,
+            queryFn: async ({ signal }: { signal: AbortSignal }) => {
+              await contentCheckSlots.acquire(signal);
+              try {
+                // A cancel can land between the grant and this continuation,
+                // after the waiter stopped listening for it.
+                if (signal.aborted) throw signal.reason;
+                return await api.gitBranchContentMerged(
+                  live.repoPath,
+                  base.sha,
+                  base.tree,
+                  branch,
+                );
+              } finally {
+                contentCheckSlots.release();
+              }
+            },
+            staleTime: Number.POSITIVE_INFINITY,
+            gcTime: CONTENT_CHECK_GC_TIME,
+            retry: false,
+            networkMode: "always" as const,
+          }))
+        : [],
+  });
+
+  // Ended in an effect BODY on the close or epoch-change commit, never in a
+  // cleanup: an <Activity> hide runs cleanups, and the open outlives a hide.
+  // An unmount leaves the entries to age out by gcTime.
+  const openRepo = live?.repoPath;
+  const epoch = live?.epoch;
+  const ended = useRef<{ repo: string; epoch: number } | null>(null);
+  useEffect(() => {
+    const prev = ended.current;
+    ended.current =
+      openRepo === undefined || epoch === undefined
+        ? null
+        : { repo: openRepo, epoch };
+    if (prev === null || (prev.repo === openRepo && prev.epoch === epoch))
+      return;
+    void queryClient.cancelQueries({
+      queryKey: ["content-merged", prev.repo, prev.epoch, "verdict"],
+      fetchStatus: "fetching",
+    });
+    queryClient.removeQueries({
+      queryKey: ["content-merged", prev.repo, prev.epoch],
+    });
+  }, [queryClient, openRepo, epoch]);
+
+  // A name that leaves `branches` mid-open has its queued check cancelled.
+  const requested = useRef<{
+    epoch: number;
+    baseSha: string;
+    names: readonly string[];
+  } | null>(null);
+  const baseSha = base?.sha;
+  useEffect(() => {
+    const prev = requested.current;
+    requested.current =
+      epoch === undefined || baseSha === undefined
+        ? null
+        : { epoch, baseSha, names: branches };
+    if (
+      openRepo === undefined ||
+      prev === null ||
+      prev.epoch !== epoch ||
+      prev.baseSha !== baseSha
+    )
+      return;
+    const kept = new Set(branches);
+    for (const name of prev.names) {
+      if (kept.has(name)) continue;
+      void queryClient.cancelQueries({
+        queryKey: ["content-merged", openRepo, epoch, "verdict", baseSha, name],
+        fetchStatus: "fetching",
+      });
+    }
+  }, [queryClient, openRepo, epoch, baseSha, branches]);
+
+  const verdicts = new Map<string, api.ContentVerdict>();
+  if (live === null || latched === undefined)
+    return {
+      status: "pending",
+      base: null,
+      verdicts,
+      pendingCount: branches.length,
+    };
+  if (latched === null || landedBase === null)
+    return { status: "unsupported", base: null, verdicts, pendingCount: 0 };
+  if (base === null)
+    return {
+      status: "pending",
+      base: null,
+      verdicts,
+      pendingCount: branches.length,
+    };
+  let pendingCount = 0;
+  branches.forEach((branch, i) => {
+    const query = verdictQueries[i];
+    if (query?.data) verdicts.set(branch, query.data.verdict);
+    // A failed check fails toward unknown, never toward merged.
+    else if (query?.isError) verdicts.set(branch, "unknown");
+    else pendingCount++;
+  });
+  return {
+    status: pendingCount > 0 ? "pending" : "settled",
+    base,
+    verdicts,
+    pendingCount,
+  };
 }

@@ -1,13 +1,17 @@
 /**
- * The Clean up dialog's selection policy. Import-free on purpose: the node
- * suites load it straight from `src/` under Node's type stripping.
+ * The Clean up dialog's selection policy. Import-free apart from a type-only
+ * import: the node suites load it straight from `src/` under Node's type
+ * stripping.
  *
- * The selection survives a close and reopen; it re-seeds to the pre-checked set
- * only when the repo or that set changes. After a batch that left the dialog
- * open, until the user changes the mode or window or closes it, a changed set
- * only prunes names that stopped being candidates, so a batch never re-checks
- * a row the user unchecked.
+ * The selection survives a close and reopen, minus the rows only a verdict
+ * checked, which the reopen's own verdicts decide again; it re-seeds to the
+ * pre-checked set only when the repo or that set changes. After a batch that
+ * left the dialog open, until the user changes the mode, window, criteria or
+ * worktree opt-in, or closes it, a changed set only prunes names that stopped
+ * being candidates, so a batch never re-checks a row the user unchecked.
  */
+
+import type { ContentVerdict } from "@/lib/git/api";
 
 /** A set of branch names as one comparable key: sorted, newline-joined (git ref
  *  names can't hold a newline), so a pure reorder isn't a new set. */
@@ -73,8 +77,19 @@ export function keepCandidates<S extends ReadonlySet<string>>(
   return kept.length === selected.size ? selected : new Set(kept);
 }
 
-/** The selection after a batch that stopped early or partly failed: the pre-run
- *  selection minus each name the batch processed without a failure. */
+/** The selection without each of `names` the user hasn't touched; the input
+ *  itself when nothing drops. */
+export function dropUntouched<S extends ReadonlySet<string>>(
+  selected: S,
+  names: ReadonlySet<string>,
+  touched: ReadonlySet<string>,
+): S | Set<string> {
+  const kept = [...selected].filter((n) => !names.has(n) || touched.has(n));
+  return kept.length === selected.size ? selected : new Set(kept);
+}
+
+/** The selection after a batch: the pre-run selection minus each name the batch
+ *  processed without a failure. */
 export function selectionAfterBatch(
   selected: ReadonlySet<string>,
   names: readonly string[],
@@ -83,4 +98,31 @@ export function selectionAfterBatch(
 ): Set<string> {
   const done = new Set(names.slice(0, processed).filter((n) => !failed.has(n)));
   return new Set([...selected].filter((n) => !done.has(n)));
+}
+
+/** Pre-check for a verdict-gated row once its verdict settled. `fallbackCheck`
+ *  is the row's policy without a verdict (idle → true, PR-name only → false),
+ *  which an unanswered check keeps; unique changes never pre-check. */
+export function settledPreCheck(
+  verdict: ContentVerdict,
+  fallbackCheck: boolean,
+): boolean {
+  const byVerdict: Record<ContentVerdict, boolean> = {
+    clean: true,
+    changes: false,
+    unknown: fallbackCheck,
+  };
+  return byVerdict[verdict];
+}
+
+/** The selection with every untouched `shouldCheck` name added. It never
+ *  removes a name, so a landing can't undo a user's check, and `touched` keeps
+ *  it off a row the user unchecked; the input itself when nothing is added. */
+export function applySettledChecks<S extends ReadonlySet<string>>(
+  selected: S,
+  touched: ReadonlySet<string>,
+  shouldCheck: readonly string[],
+): S | Set<string> {
+  const add = shouldCheck.filter((n) => !touched.has(n) && !selected.has(n));
+  return add.length === 0 ? selected : new Set([...selected, ...add]);
 }

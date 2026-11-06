@@ -1,15 +1,22 @@
 // Pins the Clean up dialog's selection policy: the user's choices survive a
 // close and reopen, an `<Activity>` re-show and a held-read flap; the selection
-// re-seeds only when the repo or the pre-checked set changes. After a stopped
-// or partly failed batch the selection is the pre-run one minus what the batch
-// finished, and the refetch that follows only prunes names that stopped being
-// candidates; the user's own controls (mode, window) still re-seed.
+// re-seeds only when the repo or the pre-checked set changes. After a batch the
+// selection is the pre-run one minus what the batch finished, and after a
+// stopped or partly failed one the refetch that follows only prunes names no
+// longer listed or held for good (a status read in flight holds a row only for
+// now); the user's own controls (mode, window, criteria, worktree opt-in) still
+// re-seed. Content verdicts never re-seed: once settled they only ADD rows the
+// user hasn't touched, so a landing never unchecks a row or checks one the user
+// unchecked, and worktree rows never pre-check. A reseed re-applies them, and a
+// reopen drops the rows only they checked.
 //
 // The policy is a pure module loaded straight from `src/` under Node's type
-// stripping, its truth table re-run over source mutants written to a temp dir;
+// stripping, its truth tables re-run over source mutants written to a temp dir;
 // the dialog's wiring is pinned over its source text with in-memory mutants.
 // Out of reach: a second selection writer added under another name (the pin
-// counts the writers it knows), and the rendered checkbox state.
+// counts the writers it knows), the rendered checkbox state, and the order in
+// which verdicts, the seed and user toggles land at runtime (the Vitest suite
+// drives those).
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,11 +24,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import {
+  applySettledChecks,
+  dropUntouched,
   keepCandidates,
   namesOfKey,
   selectionAfterBatch,
   selectionKey,
   selectionStep,
+  settledPreCheck,
 } from "../src/features/repository/cleanup-selection.ts";
 
 const POLICY = "src/features/repository/cleanup-selection.ts";
@@ -227,6 +237,109 @@ test("pruning drops only names that left the candidates", () => {
   assert.equal(keepCandidates(kept, selectionKey(["b"])).has("c"), false);
 });
 
+test("a reopen drops only the untouched rows a verdict checked", () => {
+  const sel = new Set(["anc", "auto", "mine"]);
+  const auto = new Set(["auto", "mine", "gone"]);
+  assert.deepEqual(
+    dropUntouched(sel, auto, new Set(["mine"])),
+    new Set(["anc", "mine"]),
+  );
+  assert.equal(dropUntouched(sel, new Set(["gone"]), new Set()), sel);
+  assert.equal(sel.size, 3);
+});
+
+/** The owner's pre-check table for a verdict-gated row: [verdict, fallback,
+ *  pre-checked]. A clean row pre-checks in both modes, unique changes never do,
+ *  and an unanswered check keeps the row's fallback. */
+const PRE_CHECK_TABLE = [
+  ["clean", true, true],
+  ["changes", true, false],
+  ["unknown", true, true],
+  ["clean", false, true],
+  ["changes", false, false],
+  ["unknown", false, false],
+];
+
+function preCheckProblems(fn) {
+  return PRE_CHECK_TABLE.filter(([v, fb, want]) => fn(v, fb) !== want).map(
+    ([v, fb]) => `${v}/${fb}`,
+  );
+}
+
+/** What applySettledChecks must answer: adds untouched names only, never
+ *  removes, never mutates, and hands back the input when nothing is added. */
+function settleProblems(apply) {
+  const problems = [];
+  const sel = new Set(["a"]);
+  const grown = apply(sel, new Set(), ["a", "b"]);
+  if (!(grown.has("a") && grown.has("b") && grown.size === 2))
+    problems.push("adds untouched");
+  if (apply(new Set(), new Set(["b"]), ["b"]).has("b"))
+    problems.push("checks a touched row");
+  const kept = apply(new Set(["x", "y"]), new Set(), ["b"]);
+  if (!(kept.has("x") && kept.has("y"))) problems.push("removes a check");
+  if (apply(sel, new Set(), ["a"]) !== sel)
+    problems.push("same set, new instance");
+  if (apply(sel, new Set(["b"]), ["b"]) !== sel)
+    problems.push("touched only, new instance");
+  if (apply(sel, new Set(), []) !== sel) problems.push("nothing, new instance");
+  if (sel.size !== 1) problems.push("mutates its input");
+  return problems;
+}
+
+test("a settled verdict pre-checks per the owner's table", () => {
+  assert.deepEqual(preCheckProblems(settledPreCheck), []);
+});
+
+test("settled checks only add rows the user hasn't touched", () => {
+  assert.deepEqual(settleProblems(applySettledChecks), []);
+});
+
+test("a verdict policy that checks touched rows, unchecks or flips a verdict fails", async () => {
+  const live = readFileSync(
+    new URL(`../${POLICY}`, import.meta.url),
+    "utf8",
+  ).replace(/\r\n/g, "\n");
+  const mutants = {
+    "touched ignored": [
+      live.replace("!touched.has(n) && ", ""),
+      (m) => settleProblems(m.applySettledChecks),
+    ],
+    "replaces the selection": [
+      live.replace("new Set([...selected, ...add])", "new Set(add)"),
+      (m) => settleProblems(m.applySettledChecks),
+    ],
+    "always a new instance": [
+      live.replace("add.length === 0 ? selected : ", ""),
+      (m) => settleProblems(m.applySettledChecks),
+    ],
+    "changes falls back": [
+      live.replace("changes: false,", "changes: fallbackCheck,"),
+      (m) => preCheckProblems(m.settledPreCheck),
+    ],
+    "unknown always checks": [
+      live.replace("unknown: fallbackCheck,", "unknown: true,"),
+      (m) => preCheckProblems(m.settledPreCheck),
+    ],
+    "clean only on fallback": [
+      live.replace("clean: true,", "clean: fallbackCheck,"),
+      (m) => preCheckProblems(m.settledPreCheck),
+    ],
+  };
+  const dir = mkdtempSync(join(tmpdir(), "cleanup-verdicts-"));
+  try {
+    for (const [name, [text, problems]] of Object.entries(mutants)) {
+      assert.notEqual(text, live, name);
+      const file = join(dir, `${name.replace(/\W+/g, "-")}.ts`);
+      writeFileSync(file, text);
+      const mod = await import(pathToFileURL(file).href);
+      assert.notDeepEqual(problems(mod), [], name);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const DIALOG = "src/features/repository/CleanupBranchesDialog.tsx";
 const source = () =>
   readFileSync(new URL(`../${DIALOG}`, import.meta.url), "utf8").replace(
@@ -234,47 +347,74 @@ const source = () =>
     "\n",
   );
 
+const CONTEXT =
+  "const selectionContext = `${mode}\\n${windowDays}\\n${criteria.merged ? 1 : 0}${criteria.closed ? 1 : 0}${criteria.idle ? 1 : 0}\\n${includeWorktrees ? 1 : 0}`;";
+const CRITERIA_TOKEN =
+  "\\n${criteria.merged ? 1 : 0}${criteria.closed ? 1 : 0}${criteria.idle ? 1 : 0}";
+const AUTO_FILTER = ".filter((c) => c.merged && !c.worktree)";
+const KEEPABLE = 'return hold === null || hold === "pending";';
+const SETTLE_CALL = "applySettledChecks(prev, touchedRef.current, want)";
+const RESEED_TOUCH = "touchedRef.current = new Set(keptRef.current);";
+const BATCH_PRUNE =
+  "setSelected((prev) =>\n      selectionAfterBatch(prev, names, processed, retryable),\n    );";
+const SETTLE_GUARD =
+  'if (running || holdingReads || shouldCheckKey === "") return;';
+const TOGGLE_TOUCH =
+  "touchedRef.current.add(name);\n    setSelected((prev) => {";
+const TOGGLE_ALL_TOUCH =
+  "for (const name of candidateNames) touchedRef.current.add(name);";
+const SETTLED_ONLY = "return v !== undefined && settledPreCheck(v, fallback);";
+const NO_WORKTREE_DESIRE = "if (c.worktree || c.merged) return false;";
+const UNSUPPORTED_FALLBACK =
+  'if (check.status === "unsupported") return fallback;';
+
 /** The dialog's wiring of the policy: one seed effect stepping it with the
- *  live inputs, the post-batch arm marking the batch and pruning through the
- *  helper, and no other selection writer than the user's toggles. */
+ *  live inputs, every batch pruning through the helper and the post-batch arm
+ *  marking a stopped or partly failed one, the settled-verdict effect adding
+ *  through its helper, and no other selection writer than the user's toggles
+ *  and the reopen's drop. */
 function wiringProblems(text) {
   const problems = [];
   const need = {
-    "context from the user's controls":
-      "const selectionContext = `${mode}\\n${windowDays}`;",
+    "context from the user's controls": CONTEXT,
     "keys through selectionKey":
       "const autoSelectKey = selectionKey(autoSelectNames);",
-    "candidate key": "const candidateKey = selectionKey(candidateNames);",
+    "pre-checks ancestry rows outside worktrees only": `const autoSelectNames = useMemo(\n    () =>\n      candidates\n        ${AUTO_FILTER}\n        .map((c) => c.branch.name),\n    [candidates],\n  );`,
+    "keepable key": "const keepableKey = selectionKey(",
+    "a pending hold stays keepable": KEEPABLE,
     "step with live inputs":
       "const step = selectionStep(selectionSeed.current, {\n      repo: repoPath,\n      open,\n      running,\n      holdingReads,\n      context: selectionContext,\n      autoKey: autoSelectKey,\n    });",
     "seed write keeps every field":
       "selectionSeed.current = {\n      repo: step.repo,\n      seededKey: step.seededKey,\n      afterBatch: step.afterBatch,\n    };",
-    "reseed arm":
-      'if (step.action === "reseed")\n      setSelected(new Set(namesOfKey(autoSelectKey)));',
+    "reseed arm resets touched to the kept rows": RESEED_TOUCH,
     "prune arm":
-      'else if (step.action === "prune")\n      setSelected((prev) => keepCandidates(prev, candidateKey));',
-    deps: "}, [\n    repoPath,\n    open,\n    autoSelectKey,\n    candidateKey,\n    selectionContext,\n    running,\n    holdingReads,\n  ]);",
+      '} else if (step.action === "prune")\n      setSelected((prev) => keepCandidates(prev, keepableKey));',
+    deps: "}, [\n    repoPath,\n    open,\n    autoSelectKey,\n    keepableKey,\n    selectionContext,\n    running,\n    holdingReads,\n  ]);",
+    "settled verdicts add through the helper": `useEffect(() => {\n    ${SETTLE_GUARD}\n    const want = namesOfKey(shouldCheckKey).filter(\n      (n) => !touchedRef.current.has(n),\n    );\n    for (const n of want) autoCheckedRef.current.add(n);\n    setSelected((prev) => ${SETTLE_CALL});\n  }, [shouldCheckKey, running, holdingReads]);`,
+    "toggle marks touched": TOGGLE_TOUCH,
+    "select all marks touched": TOGGLE_ALL_TOUCH,
+    "worktree and ancestry rows want no verdict check": NO_WORKTREE_DESIRE,
+    "fallback only once unsupported": UNSUPPORTED_FALLBACK,
+    "only a landed verdict checks": SETTLED_ONLY,
   };
   for (const [what, spelling] of Object.entries(need))
     if (!text.includes(spelling)) problems.push(`missing: ${what}`);
   const batch = text.indexOf("async function runBatch()");
-  const settle = text.indexOf("setProgress(null);", batch);
+  const prune = text.indexOf(BATCH_PRUNE, batch);
   const arm = text.indexOf(
     "if (processed < names.length || fails.size > 0) {",
-    batch,
+    prune,
   );
   const mark = text.indexOf("afterBatch: selectionContext,", arm);
-  const prune = text.indexOf(
-    "setSelected((prev) => selectionAfterBatch(prev, names, processed, fails));",
-    arm,
-  );
-  if (batch < 0 || arm < 0 || mark < 0 || prune < 0 || !(prune < settle))
+  const settle = text.indexOf("setProgress(null);", mark);
+  if (batch < 0 || prune < 0 || arm < 0 || mark < 0 || settle < 0)
     problems.push(
-      "post-batch arm doesn't mark the batch and prune before settling",
+      "the batch doesn't prune, then mark a stopped or failed batch, before settling",
     );
-  // The writers: the two seed arms, the post-batch arm, toggle and toggleAll.
+  // The writers: the two seed arms, the settled-verdict effect, the batch's
+  // prune, toggle, toggleAll and the reopen's drop of verdict-only checks.
   const writers = text.split("setSelected(").length - 1;
-  if (writers !== 5) problems.push(`selection writers: ${writers}`);
+  if (writers !== 7) problems.push(`selection writers: ${writers}`);
   return problems;
 }
 
@@ -287,22 +427,16 @@ test("a dialog that re-seeds after a batch, skips the prune or drops the repo is
   const mutants = [
     // The old shape: re-seed whenever the effect runs off a batch.
     live.replace(
-      'else if (step.action === "prune")\n      setSelected((prev) => keepCandidates(prev, candidateKey));',
-      'else if (step.action === "prune")\n      setSelected(new Set(namesOfKey(autoSelectKey)));',
+      '} else if (step.action === "prune")\n      setSelected((prev) => keepCandidates(prev, keepableKey));',
+      '} else if (step.action === "prune")\n      setSelected(new Set(namesOfKey(autoSelectKey)));',
     ),
-    live.replace(
-      "      setSelected((prev) => selectionAfterBatch(prev, names, processed, fails));\n",
-      "",
-    ),
+    live.replace(`    ${BATCH_PRUNE}\n`, ""),
     live.replace("        afterBatch: selectionContext,\n", ""),
     live.replace(
       "if (processed < names.length || fails.size > 0) {",
       "if (processed < names.length) {",
     ),
-    live.replace(
-      "const selectionContext = `${mode}\\n${windowDays}`;",
-      "const selectionContext = `${mode}\\n${windowDays}\\n${autoSelectKey}`;",
-    ),
+    live.replace(CONTEXT, CONTEXT.replace("}`;", "}\\n${autoSelectKey}`;")),
     live.replace(
       "      running,\n      holdingReads,\n      context:",
       "      running: false,\n      holdingReads,\n      context:",
@@ -314,6 +448,29 @@ test("a dialog that re-seeds after a batch, skips the prune or drops the repo is
     live.replace("      repo: repoPath,\n      open,", "      open,"),
     live.replace("      repo: step.repo,\n", ""),
     live.replace("  }, [\n    repoPath,\n    open,", "  }, [\n    open,"),
+    // The criteria toggles stop counting as the user's own controls.
+    live.replace(CRITERIA_TOKEN, ""),
+    // Idle rows seed before their verdict lands (I2).
+    live.replace(AUTO_FILTER, ".filter((c) => c.merged || c.old)"),
+    // Worktree rows seed, and the opt-in moves the seed key (F1).
+    live.replace(AUTO_FILTER, ".filter((c) => c.merged)"),
+    // A reseed keeps the previous context's touched rows.
+    live.replace(`      ${RESEED_TOUCH}\n`, ""),
+    // A landing writes past the touched guard, or replaces the selection.
+    live.replace(SETTLE_CALL, "new Set([...prev, ...want])"),
+    live.replace(SETTLE_CALL, "new Set(want)"),
+    live.replace(SETTLE_GUARD, 'if (running || shouldCheckKey === "") return;'),
+    live.replace(TOGGLE_TOUCH, "setSelected((prev) => {"),
+    live.replace(`${TOGGLE_ALL_TOUCH}\n`, ""),
+    // A pending row takes its fallback provisionally.
+    live.replace(
+      SETTLED_ONLY,
+      'return settledPreCheck(v ?? "unknown", fallback);',
+    ),
+    live.replace(NO_WORKTREE_DESIRE, "if (c.merged) return false;"),
+    live.replace(UNSUPPORTED_FALLBACK, ""),
+    // A status read in flight prunes a failed worktree row after a batch.
+    live.replace(KEEPABLE, "return hold === null;"),
   ];
   for (const mutant of mutants) {
     assert.notEqual(mutant, live);
