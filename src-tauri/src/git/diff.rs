@@ -56,8 +56,9 @@ fn preview_read_refusal(raw: &str, why: &str) -> AppError {
 pub(crate) const NO_VERBATIM_FORM: &str = "the path has no verbatim form";
 
 /// What a repo-relative working-tree path names, read through the verbatim,
-/// link-refusing chain the working-tree preview and blob-size reads share. It
-/// carries reasons only: each caller words its own refusal around them.
+/// link-refusing chain the working-tree preview and blob-size reads share. Its
+/// non-regular arms carry reasons only; each caller words its own refusal around
+/// them.
 pub(crate) enum WorktreeEntry {
     Absent,
     Linked,

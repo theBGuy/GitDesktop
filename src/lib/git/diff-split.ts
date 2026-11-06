@@ -365,10 +365,19 @@ export interface BinaryIndexOids {
 const INDEX_LINE = /^index ([0-9a-f]+)\.\.([0-9a-f]+)(?: [0-7]{6})?$/;
 const ABSENT_ID = /^0+$/;
 
-/** The first binary section's lines, one trailing CR dropped from each. A
- *  typechange pairs a text section with a binary one in a single text. */
-function binarySectionLines(text: string): string[] | null {
-  const section = text.split(DIFF_SECTION_BOUNDARY).find(sectionIsBinary);
+/** The sections of `text` keyed to `path` itself. A local per-file diff's
+ *  literal pathspec also matches files under a same-named directory, and
+ *  their sections must never size, label or mode the row. */
+function ownSections(text: string, path: string): string[] {
+  return text
+    .split(DIFF_SECTION_BOUNDARY)
+    .filter((section) => sectionFilePath(section) === path);
+}
+
+/** The row's first binary section's lines, one trailing CR dropped from each.
+ *  A typechange pairs a text section with a binary one in a single text. */
+function binarySectionLines(text: string, path: string): string[] | null {
+  const section = ownSections(text, path).find(sectionIsBinary);
   return section === undefined
     ? null
     : section.split("\n").map((line) => line.replace(/\r$/, ""));
@@ -381,8 +390,11 @@ function binarySectionLines(text: string): string[] | null {
  * shortest abbreviation is 4, its longest id 64), so the whole parse is null
  * and no lookup is sent for it.
  */
-export function binaryIndexOids(text: string): BinaryIndexOids | null {
-  const lines = binarySectionLines(text);
+export function binaryIndexOids(
+  text: string,
+  path: string,
+): BinaryIndexOids | null {
+  const lines = binarySectionLines(text, path);
   if (lines === null) return null;
   for (const line of lines) {
     const ids = INDEX_LINE.exec(line);
@@ -400,8 +412,8 @@ export function binaryIndexOids(text: string): BinaryIndexOids | null {
 /** A binary section's mode change in words (the MODE_CHANGE sentence), or
  *  null without both mode lines. classifyHeaderOnlyDiff can't supply it: it
  *  rejects any section carrying the binary marker. */
-export function parseModeChange(text: string): string | null {
-  const lines = binarySectionLines(text);
+export function parseModeChange(text: string, path: string): string | null {
+  const lines = binarySectionLines(text, path);
   if (lines === null) return null;
   const modes: { old?: string; new?: string } = {};
   for (const line of lines) {
@@ -459,29 +471,69 @@ function endLine(
   };
 }
 
-/** True when a FileDiff's text holds more than one section: git splits a
- *  file↔symlink typechange into a deletion and a creation of one path. */
-export function isTypechangeDiff(text: string): boolean {
-  return text.split(DIFF_SECTION_BOUNDARY).length > 1;
+/** True when a FileDiff's text holds two sections of the row's own path: git
+ *  splits a file↔symlink typechange into a deletion and a creation of it. */
+export function isTypechangeDiff(text: string, path: string): boolean {
+  return ownSections(text, path).length > 1;
 }
 
-/** The delta's parenthetical. None over a 0-byte side, where a ratio is
- *  undefined; growth from 10x reads as a multiplier; whole shrink percents
- *  round toward zero, so a file that still exists never reads −100%. */
-function changeRatio(oldSize: number, newSize: number): string {
-  if (oldSize === 0 || newSize === 0) return "";
+/** A size change's ratio, read once so the visible glyphs and the spoken
+ *  words can't disagree. `value` is already formatted. */
+type ChangeRatio =
+  | { kind: "multiplier"; value: string }
+  | { kind: "percent"; direction: "larger" | "smaller"; value: string }
+  | { kind: "tiny"; direction: "larger" | "smaller" };
+
+const RATIO_SIGN: Record<"larger" | "smaller", string> = {
+  larger: "+",
+  smaller: "−",
+};
+
+/** None over a 0-byte side, where a ratio is undefined; growth from 10x reads
+ *  as a multiplier; whole shrink percents round toward zero, so a file that
+ *  still exists never reads −100%. */
+function changeRatio(oldSize: number, newSize: number): ChangeRatio | null {
+  if (oldSize === 0 || newSize === 0) return null;
   const ratio = newSize / oldSize;
-  if (ratio >= 10) return ` (${Math.round(ratio).toLocaleString()}×)`;
+  if (ratio >= 10)
+    return { kind: "multiplier", value: Math.round(ratio).toLocaleString() };
   const pct = ((newSize - oldSize) / oldSize) * 100;
   const magnitude = Math.abs(pct);
-  if (magnitude < 0.1) return " (<0.1%)";
-  const sign = pct > 0 ? "+" : "−";
+  const direction = pct > 0 ? "larger" : "smaller";
+  if (magnitude < 0.1) return { kind: "tiny", direction };
   // A magnitude rounding to 1.0 takes the whole-percent spelling, as 1 does.
   const tenths = magnitude.toFixed(1);
-  if (magnitude < 1 && tenths !== "1.0") return ` (${sign}${tenths}%)`;
+  if (magnitude < 1 && tenths !== "1.0")
+    return { kind: "percent", direction, value: tenths };
   const whole =
     pct > 0 ? Math.round(magnitude) : Math.max(1, Math.trunc(magnitude));
-  return ` (${sign}${whole}%)`;
+  return { kind: "percent", direction, value: `${whole}` };
+}
+
+/** The delta's visible parenthetical. */
+function ratioGlyphs(ratio: ChangeRatio | null): string {
+  if (ratio === null) return "";
+  switch (ratio.kind) {
+    case "multiplier":
+      return ` (${ratio.value}×)`;
+    case "tiny":
+      return " (<0.1%)";
+    case "percent":
+      return ` (${RATIO_SIGN[ratio.direction]}${ratio.value}%)`;
+  }
+}
+
+/** The same ratio as a spoken clause, words in place of the sign and glyphs. */
+function ratioWords(ratio: ChangeRatio | null): string {
+  if (ratio === null) return "";
+  switch (ratio.kind) {
+    case "multiplier":
+      return `, ${ratio.value} times larger`;
+    case "tiny":
+      return `, less than 0.1 percent ${ratio.direction}`;
+    case "percent":
+      return `, ${ratio.value} percent ${ratio.direction}`;
+  }
 }
 
 /**
@@ -521,11 +573,12 @@ export function binarySizeSummary(
     formatBytes(oldSize) === formatBytes(newSize)
       ? `${oldSize.toLocaleString()} → ${newSize.toLocaleString()} bytes`
       : `${formatBytes(oldSize)} → ${formatBytes(newSize)}`;
+  const ratio = changeRatio(oldSize, newSize);
   return {
     kind: "pair",
     sizes: sizesText,
-    delta: `${formatBytes(change)} ${word}${changeRatio(oldSize, newSize)}`,
-    sr: `Size changed from ${byteCount(oldSize)} to ${byteCount(newSize)}, ${byteCount(change)} ${word}.`,
+    delta: `${formatBytes(change)} ${word}${ratioGlyphs(ratio)}`,
+    sr: `Size changed from ${byteCount(oldSize)} to ${byteCount(newSize)}, ${byteCount(change)} ${word}${ratioWords(ratio)}.`,
   };
 }
 
@@ -591,14 +644,20 @@ export function diffSectionStats(diff: string): DiffStatEntry[] {
  * keyed by the new-file path, so each can be fed to the file diff viewer.
  *
  * A section whose path can't be keyed is dropped rather than passed through:
- * an unkeyable section has no file row to attach to.
+ * an unkeyable section has no file row to attach to. A binary creation joins
+ * its path's earlier section, so the size line sees the typechange; otherwise
+ * the later section wins, since the text viewer parses one section per file
+ * (a binary→symlink keeps its symlink text).
  */
 export function splitUnifiedDiff(diff: string): Map<string, string> {
   const sections = new Map<string, string>();
   for (const part of diff.split(DIFF_SECTION_BOUNDARY)) {
     if (!part.trim()) continue;
     const path = sectionFilePath(part);
-    if (path) sections.set(path, part);
+    if (!path) continue;
+    const prev = sections.get(path);
+    const join = prev !== undefined && sectionIsBinary(part);
+    sections.set(path, join ? prev + part : part);
   }
   return sections;
 }

@@ -88,6 +88,21 @@ describe("Edit history over an empty commit set", () => {
     await waitFor(() => expect(status).toHaveTextContent(PUSHED));
   });
 
+  it("announces the empty set's note again when its reason moves on", async () => {
+    const rerender = renderDialog({
+      commits: [commitA],
+      base: HASH_BASE,
+      emptyNote: "",
+    });
+    await screen.findByRole("dialog");
+    const status = within(screen.getByRole("dialog")).getByRole("status");
+    rerender({ commits: [], base: "", emptyNote: CATCHING_UP });
+    await waitFor(() => expect(status).toHaveTextContent(CATCHING_UP));
+    rerender({ commits: [], base: "", emptyNote: PUSHED });
+    await waitFor(() => expect(status).toHaveTextContent(PUSHED));
+    expect(status).not.toHaveTextContent(CATCHING_UP);
+  });
+
   it("still holds a non-empty set whose every row is dropped", async () => {
     const user = userEvent.setup();
     renderDialog({ commits: [commitA], base: HASH_BASE, emptyNote: "" });

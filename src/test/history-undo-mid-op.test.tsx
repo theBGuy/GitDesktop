@@ -393,6 +393,16 @@ describe("Edit history with nothing to edit", () => {
   });
 
   describe("the open dialog's note once the set empties", () => {
+    /** The footer's note, outside the live region that speaks it too. */
+    const footerNote = (text: string) =>
+      waitFor(() =>
+        expect(
+          screen
+            .getAllByText(text)
+            .filter((el) => el.closest('[role="status"]') === null),
+        ).toHaveLength(1),
+      );
+
     async function openDialog() {
       setBranch(NO_UPSTREAM);
       vi.mocked(gitUnpushedCount).mockResolvedValue({
@@ -413,19 +423,13 @@ describe("Edit history with nothing to edit", () => {
         basis: "remotes",
         defaultBranch: null,
       }));
-      expect(
-        await screen.findByText(
-          "Nothing left to edit: every commit is pushed.",
-        ),
-      ).toBeInTheDocument();
+      await footerNote("Nothing left to edit: every commit is pushed.");
     }
 
     it("says the count couldn't be checked when its read fails", async () => {
       await openDialog();
       await recount(() => Promise.reject(new Error("count boom")));
-      expect(
-        await screen.findByText("Couldn't check which commits are pushed."),
-      ).toBeInTheDocument();
+      await footerNote("Couldn't check which commits are pushed.");
       expect(screen.queryByText("Catching up with the branch…")).toBeNull();
     });
 
@@ -437,9 +441,7 @@ describe("Edit history with nothing to edit", () => {
         basis: "default-branch",
         defaultBranch: "feature",
       }));
-      expect(
-        await screen.findByText("Catching up with the branch…"),
-      ).toBeInTheDocument();
+      await footerNote("Catching up with the branch…");
       expect(
         screen.queryByText("Couldn't check which commits are pushed."),
       ).toBeNull();

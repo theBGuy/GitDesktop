@@ -349,11 +349,12 @@ export function GitDiffView({
   /** Render unified whatever the preference says — the measuring pane sets this
    *  when it's too narrow for split. Omitted = follow the preference. */
   forceUnified?: boolean;
-  /** Where focus lands when Show full diff takes its own button away (the
-   *  host's path-row controls). Omitted = a sink rendered beside the diff. */
+  /** Where focus lands when Show full diff takes its own button away and the
+   *  diff's own group isn't mounted to take it (the host's path-row controls).
+   *  Omitted = a sink rendered beside the diff. */
   revealLanding?: { readonly current: HTMLElement | null };
-  /** The host's scroller, whose top visible line a split/unified switch
-   *  keeps. Omitted = no restore. */
+  /** The host's scroller, whose top visible line a split/unified switch or a
+   *  Show full diff expand keeps. Omitted = no restore. */
   scrollerRef?: { readonly current: HTMLElement | null };
 }) {
   const sinkRef = useRef<HTMLSpanElement>(null);
@@ -917,10 +918,11 @@ function placeLineAnchor(
 }
 
 /** Restores `anchor` in the layout `armedFor.mode` names: in this commit when
- *  its row is here, else once it lands, yielding to any input in the scroller
- *  since the request (a latch, never a scrollTop compare), to another mode or
- *  file than `armedFor` (read from `live`), and to RESTORE_BOUND_MS. Returns
- *  the wait's disarm. Once placed, the line is frozen (`freezeLineAnchor`). */
+ *  its row is here, else once it lands, yielding to a wheel, touch scroll,
+ *  press, focus move or scroll key in the scroller once armed (a latch, never a
+ *  scrollTop compare), to another mode or file than `armedFor` (read from
+ *  `live`), and to RESTORE_BOUND_MS. Returns the wait's disarm. Once placed,
+ *  the line is frozen (`freezeLineAnchor`). */
 function restoreLineAnchor(
   rt: LineAnchorRuntime,
   scroller: HTMLElement,
@@ -2078,8 +2080,6 @@ export function DiffContent({
   // the path row, then the arm's body. The row has one height in every arm,
   // so only a visible (degraded) notice coming or going moves the body on an
   // arm swap; its controls render only over a text diff (`showsToolbar`).
-  // ph-no-capture: blocks the whole pane (file path + diff body) from session
-  // replay — this is user code/paths. See src/components/Redacted.tsx.
   const shell = (body: ReactNode, notice: ReactNode = null) => (
     <div ref={paneRef} className={DIFF_PANE_ROOT_CLASS}>
       {notice !== null && (

@@ -6,7 +6,8 @@
 // and fall to nothing editable otherwise; plus the sync gates that refetch the
 // trailing side without looping, re-read the HEAD-move set only where a read
 // predates the move, and recheck an aged no-upstream count; and squash's gate
-// with its hold precedence.
+// with its hold precedence, and Edit history's hold codes in their precedence
+// order.
 //
 // Not testable here: the component's ref holding the last-seen oid (its update
 // rule is `observeHeadOid`, pinned below), the render-time setState loop,

@@ -11,8 +11,8 @@
 //   clearSelectedCommit, and both routes that write a commit's message into
 //   the commit box ask replacesMessageConfirm between the message read and the
 //   write;
-// - the frontend's UNDO_SHALLOW_BOUNDARY, UNDO_MID_PICK and UNDO_MID_MERGE are
-//   byte-for-byte the backend's.
+// - the frontend's UNDO_SHALLOW_BOUNDARY, UNDO_MID_PICK, UNDO_MID_MERGE and
+//   UNDO_DETACHED_ROOT are byte-for-byte the backend's.
 // Every check reads its source whole and fails closed on anything it can't
 // find; each also runs against an in-memory mutated copy, so a green suite
 // proves the pin bites. Runs in CI's installless guards job: Node built-ins only.
@@ -309,7 +309,12 @@ function constant(src, lead) {
 }
 
 /** The undo refusals the panel spells itself, each KEEP IN STEP with commit.rs. */
-const UNDO_TWINS = ["UNDO_SHALLOW_BOUNDARY", "UNDO_MID_PICK", "UNDO_MID_MERGE"];
+const UNDO_TWINS = [
+  "UNDO_SHALLOW_BOUNDARY",
+  "UNDO_MID_PICK",
+  "UNDO_MID_MERGE",
+  "UNDO_DETACHED_ROOT",
+];
 
 function checkUndoTwin(rust, panel, name) {
   const backend = constant(rust, `const ${name}: &str =`);

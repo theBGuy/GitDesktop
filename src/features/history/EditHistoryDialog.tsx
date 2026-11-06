@@ -217,19 +217,27 @@ export function EditHistoryDialog({
   // Reseed when a different set of commits arrives (render-time adjustment).
   const key = commits.map((c) => c.hash).join();
   const [lastKey, setLastKey] = useState(key);
+  const [lastNote, setLastNote] = useState(emptyNote);
   if (key !== lastKey) {
     setLastKey(key);
     setOrder(commits.map((c) => c.hash));
     setActions({});
     setOverrides({});
     setReseedNonce((n) => n + 1);
-    // The rows vanish under the user, so the footer's note is spoken too.
+    // The footer's note is spoken whenever it changes under an open dialog:
+    // when the rows vanish (here) or when an empty set's reason moves on (below),
+    // once per change and never on mount.
     if (commits.length === 0 && emptyNote !== "") announce(emptyNote);
     // A menu whose row left would otherwise reopen by itself if the row came
     // back; one whose row survived stays open.
     if (menuHash !== null && !commits.some((c) => c.hash === menuHash)) {
       setMenuHash(null);
     }
+  }
+  if (emptyNote !== lastNote) {
+    setLastNote(emptyNote);
+    if (key === lastKey && commits.length === 0 && emptyNote !== "")
+      announce(emptyNote);
   }
 
   const subjectOf = useMemo(

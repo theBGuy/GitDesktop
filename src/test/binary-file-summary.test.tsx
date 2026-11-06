@@ -1,19 +1,39 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { BinaryFileSummary } from "@/features/diff/BinaryFileSummary";
+import { DiffContent } from "@/features/diff/DiffSurface";
 import {
   DiffPaneHold,
   type DiffPaneHoldValue,
 } from "@/features/diff/diff-pane-hold";
 import { gitBlobSizes } from "@/lib/git/api";
-import { MODE_CHANGE } from "@/lib/git/diff-split";
+import {
+  MODE_CHANGE,
+  sectionIsBinary,
+  splitUnifiedDiff,
+} from "@/lib/git/diff-split";
 import type { BlobSizes } from "@/lib/git/types";
+import { loadSettings } from "@/lib/settings/api";
+import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitBlobSizes: vi.fn(),
+}));
+
+vi.mock("@/lib/settings/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/settings/api")>()),
+  loadSettings: vi.fn(),
 }));
 
 const blobSizes = vi.mocked(gitBlobSizes);
@@ -30,7 +50,7 @@ const ADDED = section("new file mode 100644", "index 0000000..abc1234");
 const DELETED = section("deleted file mode 100644", "index abc1234..0000000");
 const NO_INDEX = section();
 
-/** A binary file at x.png replaced by a symlink: two sections of one path. */
+/** A symlink at x.png replaced by a binary file: two sections of one path. */
 const TYPECHANGE =
   "diff --git a/x.png b/x.png\ndeleted file mode 120000\nindex 3333ccc..0000000\n--- a/x.png\n+++ /dev/null\n@@ -1 +0,0 @@\n-target\ndiff --git a/x.png b/x.png\nnew file mode 100644\nindex 0000000..4444ddd\nBinary files /dev/null and b/x.png differ\n";
 
@@ -124,7 +144,7 @@ describe("BinaryFileSummary states", () => {
     );
     expect(line?.parentElement).toBe(sizeBox(container));
     expect(container.querySelector(".sr-only")?.textContent).toBe(
-      `Size changed from ${L(48230)} bytes to ${L(51918)} bytes, ${L(3688)} bytes larger.`,
+      `Size changed from ${L(48230)} bytes to ${L(51918)} bytes, ${L(3688)} bytes larger, 8 percent larger.`,
     );
     expectNoFocusables(container);
   });
@@ -305,6 +325,29 @@ describe("BinaryFileSummary caching", () => {
     expect(blobSizes).toHaveBeenCalledTimes(2);
     expect(blobSizes.mock.calls[1][2]).toBe("fedcba9");
   });
+
+  it("the same ids under another anchor read again, never the first anchor's sizes", async () => {
+    const first = "1".repeat(40);
+    const second = "2".repeat(40);
+    blobSizes.mockResolvedValueOnce({ oldSize: 48230, newSize: 51918 });
+    const { container, client, rerender, all } = renderSummary({
+      anchorCommit: first,
+    });
+    await screen.findByText("47.1 KB → 50.7 KB");
+
+    // The second anchor's store doesn't hold these blobs.
+    blobSizes.mockResolvedValueOnce({ oldSize: null, newSize: null });
+    rerender(
+      <QueryClientProvider client={client}>
+        <BinaryFileSummary {...all} anchorCommit={second} />
+      </QueryClientProvider>,
+    );
+    await settled(client);
+    expect(blobSizes).toHaveBeenCalledTimes(2);
+    expect(blobSizes.mock.calls[1][4]).toBe(second);
+    expect(screen.queryByText("47.1 KB → 50.7 KB")).toBeNull();
+    expect(sizeBox(container).childElementCount).toBe(0);
+  });
 });
 
 describe("BinaryFileSummary layout", () => {
@@ -334,6 +377,94 @@ describe("BinaryFileSummary layout", () => {
     expect(container.querySelector(".sr-only")?.textContent).toBe(
       `${L(716800)} bytes.`,
     );
+  });
+
+  it("a PR patch's typechange, once split, still sizes without a new-file claim", async () => {
+    blobSizes.mockResolvedValue({ oldSize: null, newSize: 716800 });
+    const text = splitUnifiedDiff(
+      `${MODIFIED.replace(/x\.png/g, "y.png")}${TYPECHANGE}`,
+    ).get("x.png");
+    const { container } = renderSummary({ text, anchorCommit: hex(40) });
+    expect(await screen.findByText("700 KB")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/New file|Deleted file/);
+  });
+
+  it("DiffContent renders a split typechange through the binary arm", async () => {
+    blobSizes.mockResolvedValue({ oldSize: null, newSize: 716800 });
+    const text = splitUnifiedDiff(TYPECHANGE).get("x.png") ?? "";
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { container } = render(
+      <QueryClientProvider client={client}>
+        <DiffContent
+          filePath="x.png"
+          data={{
+            filePath: "x.png",
+            text,
+            isBinary: sectionIsBinary(text),
+            isTruncated: false,
+          }}
+          isPending={false}
+          isError={false}
+          repoPath="/repo"
+          anchorCommit={hex(40)}
+        />
+      </QueryClientProvider>,
+    );
+    expect(
+      await screen.findByText("Binary file — no text diff available"),
+    ).toBeTruthy();
+    expect(await screen.findByText("700 KB")).toBeTruthy();
+    expect(container.textContent).not.toMatch(/New file|Deleted file/);
+  });
+});
+
+describe("a split binary-to-symlink typechange", () => {
+  // @git-diff-view measures text on a 2D canvas, which jsdom leaves null.
+  beforeAll(() => {
+    const measure = {
+      font: "",
+      measureText: (t: string) => ({ width: t.length }),
+    };
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+      () => measure as unknown as CanvasRenderingContext2D,
+    );
+  });
+
+  it("DiffContent renders the symlink text, never the binary placeholder", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    const patch =
+      "diff --git a/x b/x\ndeleted file mode 100644\nindex 5555eee..0000000\n" +
+      "Binary files a/x and /dev/null differ\n" +
+      "diff --git a/x b/x\nnew file mode 120000\nindex 0000000..6666fff\n" +
+      "--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+target\n";
+    const text = splitUnifiedDiff(patch).get("x") ?? "";
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <DiffContent
+          filePath="x"
+          data={{
+            filePath: "x",
+            text,
+            isBinary: sectionIsBinary(text),
+            isTruncated: false,
+          }}
+          isPending={false}
+          isError={false}
+          repoPath="/repo"
+          anchorCommit={hex(40)}
+        />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("target")).toBeTruthy();
+    expect(
+      screen.queryByText("Binary file — no text diff available"),
+    ).toBeNull();
+    expect(blobSizes).not.toHaveBeenCalled();
   });
 });
 
@@ -377,7 +508,7 @@ describe("BinaryFileSummary placeholder hold", () => {
       );
 
     // The placeholder is the patch just shown, under the next anchor.
-    at({ held: true, anchorCommit: undefined, filePath: "y.png" });
+    at({ held: true, anchorCommit: undefined });
     await tick();
     expect(screen.getByText("47.1 KB → 50.7 KB")).toBeTruthy();
     expect(container.querySelector(".sr-only")?.textContent).toMatch(
@@ -391,7 +522,7 @@ describe("BinaryFileSummary placeholder hold", () => {
         resolve = r;
       }),
     );
-    at({ held: false, filePath: "y.png", text: ADDED });
+    at({ held: false, text: ADDED });
     expect(sizeBox(container).childElementCount).toBe(0);
     expect(container.querySelector(".sr-only")).toBeNull();
     await tick();

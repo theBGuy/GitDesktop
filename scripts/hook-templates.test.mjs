@@ -2,7 +2,10 @@
 // object ids: git hands a pre-push hook all-zero ids for a created or deleted ref,
 // 40 zeros in a SHA-1 repo and 64 in a SHA-256 one. The no-wip-push template is
 // executed through a real `git push` in both formats, so the test fails when the
-// hook lets a WIP commit through at either width or refuses a clean push.
+// hook lets a WIP commit through at either width or refuses a clean push it
+// could check. It also covers pushes over a remote tip this clone never
+// fetched, checks that it refuses when the commit walk itself fails, and pins
+// rev-list's status read without a pipe.
 //
 // The import below reaches straight into `src/` and relies on Node's default
 // type stripping (>= 23.6), which resolves no bundler aliases, so the module must
@@ -59,7 +62,7 @@ test("no-wip-push tests both ids width-free through one is_zero", () => {
   assert.equal(body.split("is_zero() {").length - 1, 1);
   assert.doesNotMatch(body, /^z=/m);
   assert.ok(body.includes('  is_zero "$local_oid" && continue\n'));
-  assert.ok(body.includes('  if is_zero "$remote_oid"; then\n'));
+  assert.ok(body.includes('  if ! is_zero "$remote_oid" && git cat-file '));
 });
 
 test("no-wip-push checks rev-list's own status, never through a pipe", () => {
@@ -123,6 +126,10 @@ for (const [format, width] of [
     assert.equal(ok(work, "rev-parse", "HEAD").length, width);
     ok(work, "remote", "add", "origin", remote);
     ok(work, "push", "-q", "origin", "main");
+    // A WIP-titled commit already published on main, pushed before the hook
+    // exists: branches cut from main carry it without pushing it.
+    ok(work, "commit", "-q", "--allow-empty", "-m", "Remove WIP banner");
+    ok(work, "push", "-q", "origin", "main");
 
     const hook = join(work, ".git", "hooks", "pre-push");
     writeFileSync(hook, noWip.body);
@@ -148,7 +155,8 @@ for (const [format, width] of [
     refused(push("wip"));
     assert.ok(!remoteHas("wip"), "the WIP branch reached the remote");
 
-    // Clean new branch, then a clean update: the hook must not refuse everything.
+    // Clean new branch off main, then a clean update: the published WIP-titled
+    // commit on main is never checked, and the hook must not refuse everything.
     ok(work, "switch", "-q", "-c", "topic", "main");
     ok(work, "commit", "-q", "--allow-empty", "-m", "clean change");
     allowed(push("topic"));
@@ -165,8 +173,8 @@ for (const [format, width] of [
     ok(work, "reset", "-q", "--hard", "HEAD~1");
 
     // Pushes over a remote tip this clone never fetched. The hook checks the
-    // commits on no remote-tracking ref and leaves the rest to git: a plain push
-    // is git's own "fetch first" rejection, and the hook prints nothing.
+    // commits not on origin's tracking refs and leaves the rest to git: a plain
+    // push is git's own "fetch first" rejection, and the hook prints nothing.
     const WIP_LINE =
       /Refusing to push: refs\/heads\/topic has WIP\/fixup\/squash commits\./;
     const UNCHECKED_LINE =
@@ -231,6 +239,30 @@ for (const [format, width] of [
     ok(work, "commit", "-q", "--allow-empty", "-m", "clean over fetched tip");
     allowed(push("--force", "topic"));
     assert.equal(remoteTopic(), ok(work, "rev-parse", "HEAD"));
+
+    // A WIP commit only another remote's tracking refs hold is still checked on
+    // a push to origin, as a new branch and over a tip this clone never fetched.
+    const fork = join(dir, "fork.git");
+    ok(dir, "init", "-q", "--bare", `--object-format=${format}`, fork);
+    ok(work, "remote", "add", "fork", fork);
+    ok(work, "switch", "-q", "-c", "forked", "main");
+    ok(work, "commit", "-q", "--allow-empty", "-m", "WIP from the fork");
+    ok(work, "push", "-q", "--no-verify", "fork", "forked");
+    ok(work, "rev-parse", "--verify", "refs/remotes/fork/forked");
+    const FORK_WIP_LINE =
+      /Refusing to push: refs\/heads\/forked has WIP\/fixup\/squash commits\./;
+    r = push("forked");
+    refused(r);
+    assert.match(r.stderr, FORK_WIP_LINE);
+    assert.ok(!remoteHas("forked"), "the fork's WIP commit reached origin");
+    ok(other, "switch", "-q", "-c", "unfetched");
+    ok(other, "commit", "-q", "--allow-empty", "-m", "unfetched remote change");
+    ok(other, "push", "-q", "origin", "unfetched");
+    const unfetchedTip = ok(other, "rev-parse", "HEAD");
+    r = push("--force", "forked:refs/heads/unfetched");
+    refused(r);
+    assert.match(r.stderr, FORK_WIP_LINE);
+    assert.equal(ok(remote, "rev-parse", "refs/heads/unfetched"), unfetchedTip);
 
     // Deleting a branch carries an all-zero local id.
     allowed(push(":topic"));

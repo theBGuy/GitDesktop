@@ -263,6 +263,7 @@ export function CommitComments({
   remoteLabel,
   diffSections,
   selectedPath,
+  selectedBinary = false,
   onSelectFile,
   lens,
   stale = false,
@@ -279,6 +280,9 @@ export function CommitComments({
   /** The file currently open in the diff pane — its resolvable anchored comments
    *  render inline there, so they're excluded from the labelled group below. */
   selectedPath?: string | null;
+  /** The selected file renders through the binary arm, which draws no line
+   *  anchors, so its anchored comments stay in the labelled group. */
+  selectedBinary?: boolean;
   /** Selects a file in the sidebar; makes each group's path label a button that
    *  jumps to that file's diff. Absent = the label is plain text. */
   onSelectFile?: (path: string) => void;
@@ -388,13 +392,15 @@ export function CommitComments({
   });
 
   // Anchored comments NOT visible inline: one renders inline only when it's on the
-  // selected file AND resolves to a new-side line. Everything else surfaces below
+  // selected file, resolves to a new-side line, and the file isn't drawn by the
+  // binary arm (which draws no lines). Everything else surfaces below
   // under its `path:line` label, with the resolved line when we have one. Until
   // `diffReady`, no patch-derived line counts as resolved — its inline anchor doesn't
   // exist yet, so excluding the comment here would hide it. A server-provided `line`
   // never depends on the patch and stays resolved throughout.
   // Selected-file entries lead the group: they're retained only when their line
-  // didn't resolve, and under a cross-file label they read as another file's comment.
+  // didn't resolve or the binary arm drew the file, and under a cross-file label
+  // they read as another file's comment.
   const orderedHidden = useMemo(() => {
     const retained = anchored
       .map((c) => {
@@ -406,12 +412,15 @@ export function CommitComments({
             : null);
         return { comment: c, path, line, startLine: c.startLine };
       })
-      .filter(({ path, line }) => !(path === selectedPath && line != null));
+      .filter(
+        ({ path, line }) =>
+          !(path === selectedPath && line != null && !selectedBinary),
+      );
     return [
       ...retained.filter(({ path }) => path === selectedPath),
       ...retained.filter(({ path }) => path !== selectedPath),
     ];
-  }, [anchored, diffSections, selectedPath, diffReady]);
+  }, [anchored, diffSections, selectedPath, selectedBinary, diffReady]);
 
   // Parents serve the previous commit's content (or on-remote verdict) as
   // placeholder while arrowing through history, so hold writes until the shown

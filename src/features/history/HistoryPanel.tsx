@@ -10,6 +10,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type MouseEvent,
   type ReactNode,
+  useCallback,
   useEffect,
   useEffectEvent,
   useMemo,
@@ -173,6 +174,7 @@ import {
   searchAllCheckedLineFor,
   searchAllNoMatchLine,
   searchCoverage,
+  searchMessagesNoMatchLine,
 } from "./history-search";
 import { type PickOntoHold, pickOntoHold } from "./pick-onto-hold";
 import { SquashDialog } from "./RewriteDialogs";
@@ -620,7 +622,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     if (!lastCommit || !head) return;
     // Ahead of every read and confirm: the backend would refuse anyway.
     if (undoMidOp) {
-      // An abort run in a terminal moves no HEAD, so nothing re-reads the
+      // An abort run in a terminal that leaves HEAD in place (a merge, or a
+      // pick or revert with nothing committed yet) triggers no re-read of the
       // cached op state: a refusal re-reads it first and re-gates on the
       // answer (a failed read keeps the cached one). Across the await only the
       // repo is re-checked; lastCommit and head stay this render's, and the
@@ -1023,9 +1026,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     !shaPending &&
     searchRows.length === 0 &&
     !offBranchShown;
-  // Covers the debounce window and both arms' first answers, so the empty
-  // state never flashes "No commits…"; failed arms drop out so their own
-  // lines can render instead.
+  // Covers the debounce window and every fetch either arm runs, refetches
+  // included, so the empty state never claims "No commits…" over a read
+  // still in flight; failed arms drop out so their own lines can render
+  // instead.
   const searchSettling =
     searchActive &&
     (filterText.trim() !== debouncedQuery ||
@@ -1040,13 +1044,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     searchRows.length === 0 &&
     !(offBranchShown && !searchSettling);
   // A dead SHA arm's line sits in the settled empty state when nothing
-  // matched, and in the footer whenever rows or notices are showing.
+  // matched, and in the footer whenever rows are showing.
   const shaRetryInEmpty =
     coverage === "sha-failed" && searchEmptyShown && !searchSettling;
   const shaRetryInFooter =
-    searchShown &&
-    coverage === "sha-failed" &&
-    (searchRows.length > 0 || (offBranchShown && !searchSettling));
+    searchShown && coverage === "sha-failed" && searchRows.length > 0;
   const grepRetryInFooter = searchShown && coverage === "grep-failed";
   // One failure line at a time: a dead arm's line (footer, empty state or
   // block) speaks for a stale arm too, so the refresh notice gives way to it.
@@ -1099,6 +1101,34 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     useRetryFocusRescue(listArm && !searchActive && log.hasNextPage);
   const { hostRef: searchMoreHostRef, retryRef: searchMoreRetryRef } =
     useRetryFocusRescue(listArm && searchActive && search.hasNextPage);
+  // A refreshed SHA answer can unmount a focused Open commit: focus goes to the
+  // next remaining row's button (earlier rows React already removed aren't
+  // counted), else the last remaining one, else the shell. A microtask decides
+  // once the commit's DOM is final, and only for a row really gone with focus
+  // on <body>: a hidden or re-attached row, or a newer focus move, keeps focus.
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const offBranchRowRef = useCallback((node: HTMLDivElement | null) => {
+    if (node === null) return;
+    return () => {
+      if (!node.contains(document.activeElement)) return;
+      const parent = node.parentElement;
+      let index = 0;
+      for (let s = node.previousElementSibling; s; s = s.previousElementSibling)
+        if (s.querySelector("button") !== null) index += 1;
+      queueMicrotask(() => {
+        if (node.isConnected || document.activeElement !== document.body)
+          return;
+        const buttons = parent?.isConnected
+          ? Array.from(parent.children).flatMap((row) => {
+              const button = row.querySelector("button");
+              return button === null ? [] : [button];
+            })
+          : [];
+        const next = buttons[Math.min(index, buttons.length - 1)];
+        (next ?? shellRef.current)?.focus({ preventScroll: true });
+      });
+    };
+  }, []);
   // Pre-mounted at one tree position, never under aria-busy: a live region
   // created together with its text announces unreliably.
   const announcement = logLoadFailed
@@ -1116,6 +1146,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         grepArmHostRef(node);
         logMoreHostRef(node);
         searchMoreHostRef(node);
+        shellRef.current = node;
       }}
       tabIndex={-1}
       className="flex min-h-0 flex-1 flex-col outline-none"
@@ -1477,8 +1508,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     }
     onRowContextMenu(visibleCommits[index].hash);
     setMenuTarget({ commit: visibleCommits[index] });
-    // The rows held mid-operation read a cache a terminal abort never moves,
-    // so each open re-reads it and a held row re-renders once it lands.
+    // The rows held mid-operation read a cache that a terminal abort leaving
+    // HEAD in place never moves, so each open re-reads it and a held row
+    // re-renders once it lands.
     void queryClient.invalidateQueries({
       queryKey: repoKeys.opState(repoPath),
     });
@@ -1585,7 +1617,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       )
         return "refreshing";
       if (!isHead && menuIndex > 0) return "not-latest";
-      // Only a row that finishing the operation would enable says so.
+      // Rows past HEAD keep their own reason; the HEAD row names a stopped
+      // cherry-pick, revert or merge ahead of its other holds, the order the
+      // backend refuses in.
       if (undoMidOp) return undoMidOp;
       if (isHead && headIsRoot && !rootKnown && !recordsParent.isError)
         return "checking-parent";
@@ -1751,6 +1785,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           {offBranchRows.slice(0, OFF_BRANCH_NOTICE_CAP).map((c) => (
             <div
               key={c.hash}
+              ref={offBranchRowRef}
               className="flex items-center justify-between gap-2 border-b px-3 py-1.5 text-xs text-muted-foreground"
             >
               <p className="min-w-0">
@@ -1839,7 +1874,9 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                   {searchActive
                     ? searchSettling
                       ? "Searching all history…"
-                      : searchAllNoMatchLine(debouncedQuery)
+                      : coverage === "sha-failed"
+                        ? searchMessagesNoMatchLine(debouncedQuery)
+                        : searchAllNoMatchLine(debouncedQuery)
                     : loadedNoMatchLine(filterText.trim())}
                 </p>
                 {!searchActive ? (

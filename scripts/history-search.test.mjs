@@ -1,9 +1,8 @@
 // Pins search all's pure layer (src/features/history/history-search.ts): the
 // SHA arm's on-branch hits lead in wire order, grep rows follow minus any
 // commit already listed, off-branch hits split out; the dead-vs-stale arm
-// read and the coverage table; and
-// the empty-state copy, including the singular count and the checked line's
-// three outcomes.
+// read and the coverage table; and the empty-state copy, including the
+// singular count and the checked line's three outcomes.
 //
 // Not testable here: the hex-shape predicates (they live in the react-query
 // module) and the panel's rendering; src/test/history-search.test.tsx covers

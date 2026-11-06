@@ -1,12 +1,13 @@
 // Guards src/ against SHA-1-only object-id reads: a full commit id is 40 hex in
 // a SHA-1 repo and 64 in a SHA-256 one, and git's "no ref" marker is all zeros at
 // either width. A line fails when it carries (a) a fixed-width-40 regex quantifier
-// with no {64} alternative on the same line, (b) a 40-zero literal, the regex text
-// 0{40} / 0{40,}, or "0".repeat(40), whatever else the line says, or (c) a length
-// compared against 40. Out of reach: slice/substring widths (`slice(0, 40)`; test
-// fixtures legitimately cut ids that way), a width held in a named constant, and
-// a shape split across lines. The walk fails closed on an empty corpus, an
-// unreadable file, or a missing anchor file.
+// on a line with no `{64}` anywhere (a comment counts), (b) a 40-zero literal, the
+// regex text 0{40} / 0{40,}, or "0".repeat(40), whatever else the line says, or
+// (c) a length compared with 40 by ==, !=, === or !==. Out of reach:
+// slice/substring widths (`slice(0, 40)`; test fixtures legitimately cut ids
+// that way), a width held in a named constant, and a shape split across lines.
+// The walk fails closed on an empty corpus, an unreadable file, or a missing
+// anchor file.
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";

@@ -597,8 +597,8 @@ the last list up, with a line above it saying it couldn't refresh.
   inside the stashes dialog open the same viewer.
 - **Other binary files** show their size change under the binary-file notice, such as
   *1.2 MB → 725 KB · 486 KB smaller (−40%)*, or *Deleted file · 900 KB* for a removed one.
-  When the two sizes round to the same figure, the line gives exact byte counts. A
-  screen reader always hears the exact counts. A changed file mode gets its own line.
+  When two different sizes round to the same figure, the line gives exact byte counts.
+  A screen reader always hears the exact counts. A changed file mode gets its own line.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
@@ -686,11 +686,15 @@ subject, author or SHA. To look past them, choose **Search all history for "…"
 the list: it searches the message of every commit on the branch, and a query of 4 to 64
 hex characters also finds the commit with that SHA, so a hash pasted from a terminal, a
 CI log or a review comment lands on its commit even when it isn't loaded yet. A short
-hash that fits several commits on this branch lists each of them. A match that isn't on
-this branch shows as a line with its short SHA and an **Open commit** button; past three
-such matches, a last line counts the rest. When nothing matches, the list says what it
-checked. If the message search or the SHA lookup fails, whatever the other one found
-stays on screen with a line saying which part failed and a **Retry**.
+hash that fits several commits lists them, up to the 20 newest; a longer hash narrows
+the list. A match that isn't on this branch shows as a line with its short SHA and an
+**Open commit** button; past three such matches, a last line counts the rest. When
+nothing matches, the list says what it checked. If the message search fails and the SHA
+lookup has nothing to show, the list says the search couldn't run, with a **Retry**.
+Otherwise, when either one fails before it finds anything, a line names the part that
+failed, with a **Retry**, and whatever the other one found stays on screen. A refresh
+that fails over results already on screen keeps them under a line saying so, or under
+the failed part's line when one shows.
 **Back to recent history** returns to the loaded list.
 
 ## Commit actions

@@ -66,6 +66,9 @@ export const loadedCheckedLine = (n: number) =>
   `Checked the subject, author and SHA of ${n} loaded commit${n === 1 ? "" : "s"}.`;
 export const searchAllNoMatchLine = (q: string) =>
   `No commits on this branch match "${q}"`;
+/** The headline when the SHA arm is dead: only commit messages were checked. */
+export const searchMessagesNoMatchLine = (q: string) =>
+  `No commit messages on this branch match "${q}"`;
 export const SEARCH_ALL_CHECKED_LINE =
   "Checked the message and SHA of every commit.";
 export const SEARCH_ALL_CHECKED_MESSAGES_LINE =
@@ -87,7 +90,7 @@ export function searchAllCheckedLineFor(i: {
 
 export const OFF_BRANCH_NOTICE_SUFFIX = " isn't on this branch";
 export const offBranchOverflowLine = (k: number) =>
-  `+${k} more matches aren't on this branch`;
+  `+${k} more ${k === 1 ? "match isn't" : "matches aren't"} on this branch`;
 export const OPEN_COMMIT_LABEL = "Open commit";
 export const SHA_ARM_FAILED_LINE =
   "Couldn't check SHAs. Matches cover messages only.";

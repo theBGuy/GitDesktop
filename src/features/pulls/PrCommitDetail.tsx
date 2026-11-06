@@ -373,6 +373,9 @@ export function PrCommitDetail({
                       // still resolves.
                       diffReady={diff.data !== undefined}
                       selectedPath={effectivePath}
+                      selectedBinary={sectionIsBinary(
+                        sections.get(effectivePath ?? "") ?? "",
+                      )}
                       onSelectFile={setSelectedPath}
                       lens={lens}
                     />

@@ -96,6 +96,20 @@ describe("RenderedDiff prebuilt rows", () => {
     expect(commits[0].unified).toBeGreaterThan(0);
   });
 
+  it("a fresh split mount commits split rows with the build, in both views", () => {
+    client.setQueryData(settingsKeys.settings, {
+      ...DEFAULT_SETTINGS,
+      diffViewMode: "split" as const,
+    });
+    for (const props of [{}, { lineWidget: widget }]) {
+      commits = [];
+      const { unmount } = render(view(props));
+      expect(commits[0].split).toBeGreaterThan(0);
+      expect(commits[0].unified).toBe(0);
+      unmount();
+    }
+  });
+
   it("a split/unified switch commits the other layout's rows at once", async () => {
     client.setQueryData(settingsKeys.settings, {
       ...DEFAULT_SETTINGS,

@@ -396,10 +396,11 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   region has no aria-busy and announces nothing to assistive tech. The
   carve-out: a boot-path boundary over a panel with a settled resting state
   renders that state as its fallback (`DiffRestingFallback`, sharing its
-  message with DiffViewer through `diff-resting-message.ts`; `DiffPaneFallback`
-  when a file is selected, painting its path row), with an aria-busy
+  message with DiffViewer through `diff-resting-message.ts`), with an aria-busy
   region and its sr-only status beside it rather than inside it, so the first
-  frame already shows the panel's own resting message; still never
+  frame already shows the panel's own resting message. The lazy DiffSurface and
+  DiffContent wrappers (`DiffSurfaceLazy.tsx`) fall back to `DiffPaneFallback`
+  in the same shape, which paints the file's path row. Still never
   `fallback={null}`.
 - Loading placeholders for a bordered row list are `ListRowSkeletons`
   (`src/components/list-row-skeleton.tsx`), with `lines` matching the real row's
@@ -537,6 +538,10 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   its scroller ref, the effective mode, the path and the built diff; an expand of
   the same diff (Show full diff) calls the hook's `keepLine` before it flips, so
   the line read before the press is restored after the browser re-lays the rows.
+  Two gaps remain: the staging viewer's Show full diff doesn't keep the line
+  (only a focused press moves focus to the first revealed hunk), and
+  `GitDiffView` hosts without a scroller (agent transcript inline diffs, the
+  conflict view) keep it on neither a switch nor an expand.
 - A file rail's header content (a count, a filter summary) rides `DetailRail`'s
   `header` prop (`src/components/detail-rail.tsx`), which places it in the h-7
   caret strip — never a first-child band inside `children`: the strip is already

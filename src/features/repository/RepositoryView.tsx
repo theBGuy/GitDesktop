@@ -16,7 +16,6 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  Activity,
   type KeyboardEvent,
   lazy,
   type ReactNode,
@@ -30,10 +29,6 @@ import {
   useTransition,
 } from "react";
 import { LazyPanelFallback } from "@/components/lazy-panel-fallback";
-import {
-  PanelActivityBoundary,
-  PanelPortalBoundary,
-} from "@/components/panel-portal";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -115,6 +110,7 @@ import { OpRecoveryBanner } from "./OpRecoveryBanner";
 import { PrCreateBanner } from "./PrCreateBanner";
 import { PublishPendingBanner } from "./PublishPendingBanner";
 import { RepoHeader } from "./RepoHeader";
+import { TabPanel } from "./TabPanel";
 import { usePrNotifications } from "./usePrNotifications";
 import { useRepoVisibilityProbe } from "./useRepoVisibilityProbe";
 import { WorktreeRemovalBanner } from "./WorktreeRemovalBanner";
@@ -195,31 +191,6 @@ const FINDING_KEY: {
 // correlation the map already encodes is asserted once, here.
 function findingKey(f: SelectedFinding): string {
   return (FINDING_KEY[f.type] as (finding: SelectedFinding) => string)(f);
-}
-
-// Every repo tab panel goes through this: the <Activity> + boundary pairing
-// is the invariant, and wrapping <Activity> alone re-mints the stranded-popup
-// bug. Module scope is required — declared inside RepositoryView it would be
-// a new component type each render, remounting every panel and losing the
-// state <Activity> exists to preserve (filters, selections, scroll). A hidden
-// <Activity> connects no effects, so hidden panels hold no live query
-// observers and fetch nothing while hidden; the real cost is the RE-SHOW
-// refetch of anything past its staleTime. Heavy tabs keep their
-// `active`-style query gates as a backstop.
-function TabPanel({
-  active,
-  children,
-}: {
-  active: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <Activity mode={active ? "visible" : "hidden"}>
-      <PanelActivityBoundary active={active}>
-        <PanelPortalBoundary>{children}</PanelPortalBoundary>
-      </PanelActivityBoundary>
-    </Activity>
-  );
 }
 
 // The collapsed sidebar's icon rail. Icons follow the surfaces' house pairings:

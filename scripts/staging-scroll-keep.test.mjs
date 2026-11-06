@@ -687,3 +687,37 @@ test("staging scroll keep: the prebuild stays out of the shared createDiffFile",
     [],
   );
 });
+
+const MODE_ANCHOR_PIN =
+  "DiffViewer calls useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile)";
+
+/** The staging viewer keeps its top line across a split/unified switch: one
+ *  code-level call of the shared hook with its scroller, mode, path and built
+ *  diff, in that order (a commented-out call doesn't count). */
+function modeLineAnchorViolations(raw) {
+  const code = squash(maskNonCode(raw, true));
+  return /\buseModeLineAnchor\( ?scrollPaneRef, viewMode, deferredPath, diffFile,? ?\);/.test(
+    code,
+  )
+    ? []
+    : [MODE_ANCHOR_PIN];
+}
+
+test("staging scroll keep: the viewer wires the layout-switch line anchor", () => {
+  const raw = read(VIEWER);
+  assert.deepEqual(modeLineAnchorViolations(raw), []);
+  const call =
+    "  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile);";
+  assert.equal(raw.split(call).length, 2, `one control anchor: ${call}`);
+  for (const to of [
+    "",
+    `  // ${call.trim()}`,
+    "  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, undefined);",
+    "  useModeLineAnchor(scrollPaneRef, viewMode, diffFile, deferredPath);",
+  ])
+    assert.deepEqual(
+      modeLineAnchorViolations(raw.replace(call, () => to)),
+      [MODE_ANCHOR_PIN],
+      `control not caught: ${JSON.stringify(to)}`,
+    );
+});

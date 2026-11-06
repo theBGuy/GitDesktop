@@ -5,6 +5,8 @@ import type { ReactNode } from "react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DiffContent, GitDiffView } from "@/features/diff/DiffSurface";
 import { DiffPaneHold } from "@/features/diff/diff-pane-hold";
+import { gitFileBase64 } from "@/lib/git/api";
+import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import type { FileDiff } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
@@ -13,6 +15,11 @@ import { settingsKeys } from "@/lib/settings/queries";
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
+}));
+
+vi.mock("@/lib/git/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/api")>()),
+  gitFileBase64: vi.fn(),
 }));
 
 const PATH = "docs/notes/deep/readme.txt";
@@ -177,7 +184,7 @@ describe("Show full diff focus landing", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
-  it("a bare GitDiffView lands on the diff's group too, its sink kept for a failed build", async () => {
+  it("a bare GitDiffView lands on the diff's group too, with its sink rendered beside the diff", async () => {
     const user = userEvent.setup();
     const { container } = render(
       wrap(<GitDiffView filePath={PATH} text={CAPPED} />),
@@ -186,24 +193,90 @@ describe("Show full diff focus landing", () => {
 
     const sink = container.querySelector('span.sr-only[tabindex="-1"]');
     expect(sink).not.toBeNull();
+    expect(diffGroup().contains(sink)).toBe(false);
     expect(document.activeElement).toBe(diffGroup());
   });
 
   it("the diff's group outranks the host's landing", async () => {
     const user = userEvent.setup();
-    render(
-      wrap(
-        <GitDiffView
-          filePath={PATH}
-          text={CAPPED}
-          revealLanding={{ current: null }}
-        />,
-      ),
-    );
-    await user.click(await showFull());
+    const host = document.createElement("button");
+    document.body.append(host);
+    const hostFocus = vi.spyOn(host, "focus");
+    try {
+      render(
+        wrap(
+          <GitDiffView
+            filePath={PATH}
+            text={CAPPED}
+            revealLanding={{ current: host }}
+          />,
+        ),
+      );
+      await user.click(await showFull());
 
-    expect(screen.queryByRole("button", { name: "Show full diff" })).toBeNull();
-    expect(document.activeElement).toBe(diffGroup());
+      expect(
+        screen.queryByRole("button", { name: "Show full diff" }),
+      ).toBeNull();
+      expect(document.activeElement).toBe(diffGroup());
+      expect(hostFocus).not.toHaveBeenCalled();
+    } finally {
+      host.remove();
+    }
+  });
+
+  it("a refresh that leaves no diff to show lands on the bare view's sink", async () => {
+    const { container, rerender } = render(
+      wrap(<GitDiffView filePath={PATH} text={CAPPED} />),
+    );
+    (await showFull()).focus();
+    await act(async () =>
+      rerender(wrap(<GitDiffView filePath={PATH} text="" />)),
+    );
+
+    expect(screen.getByText("No changes to show")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: `Diff of ${PATH}` })).toBeNull();
+    const sink = container.querySelector('span.sr-only[tabindex="-1"]');
+    expect(sink).not.toBeNull();
+    expect(document.activeElement).toBe(sink);
+  });
+
+  it("a refresh whose whole-file reads go pending lands on the host's path-row controls", async () => {
+    // Never settles: content mode holds the paint while its reads are out.
+    vi.mocked(gitFileBase64).mockReturnValue(new Promise(() => undefined));
+    const host = (text: string) =>
+      wrap(
+        <DiffContent
+          filePath={PATH}
+          data={fileDiff(PATH, text)}
+          isPending={false}
+          isError={false}
+          repoPath="/repo"
+          contentRevs={{ oldRev: "HEAD", newRev: null }}
+        />,
+      );
+    const { container, rerender } = render(host(CAPPED));
+    (await showFull()).focus();
+    await act(async () => rerender(host(SHORT)));
+
+    expect(gitFileBase64).toHaveBeenCalled();
+    expect(screen.queryByRole("group", { name: `Diff of ${PATH}` })).toBeNull();
+    const controls = container.querySelector('span.min-h-7[tabindex="-1"]');
+    expect(controls).not.toBeNull();
+    expect(document.activeElement).toBe(controls);
+  });
+});
+
+describe("a forge patch's text typechange", () => {
+  it("renders its creation section after the split, never an empty diff", async () => {
+    const patch =
+      "diff --git a/x b/x\ndeleted file mode 100644\nindex 1111aaa..0000000\n" +
+      "--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-hello\n" +
+      "diff --git a/x b/x\nnew file mode 120000\nindex 0000000..2222bbb\n" +
+      "--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+target\n";
+    render(content("x", splitUnifiedDiff(patch).get("x") ?? ""));
+
+    expect(await screen.findByText("target")).toBeTruthy();
+    expect(screen.queryByText("No changes to show")).toBeNull();
   });
 });
 

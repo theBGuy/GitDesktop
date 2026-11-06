@@ -290,8 +290,9 @@ export function restoreTop(
 }
 
 /** How long a restore waits for the new layout's rows (one landing later than
- *  this is no longer the switch's), and how long a placed line then holds
- *  against the layout settling under it before scrolls sample again. */
+ *  this is no longer the switch's or the expand's), and how long a placed
+ *  line then holds against the layout settling under it before scrolls sample
+ *  again. */
 export const RESTORE_BOUND_MS = 1000;
 
 export type RestoreStep =
@@ -302,10 +303,11 @@ export type RestoreStep =
   | "disarm-file"
   | "disarm-timeout";
 
-/** What a restore armed at a layout switch does now. Input in the scroller
- *  since the switch, another mode or file than the one it armed for, and the
- *  bound each disarm it, in that order; otherwise it fires once the anchored
- *  row exists. `tookOver` is a latch: the caller never sets it back. */
+/** What a restore armed at a layout switch or an expand does now. Input in
+ *  the scroller since it armed, another mode or file than the one it armed
+ *  for, and the bound each disarm it, in that order; otherwise it fires once
+ *  the anchored row exists. `tookOver` is a latch: the caller never sets it
+ *  back. */
 export function restoreDecision(s: {
   armedMode: string;
   armedFile: string;
@@ -350,7 +352,8 @@ export function anchorRows(scroller: HTMLElement): ArrayLike<Element> {
 
 /** The scroller's top visible line, read from the rows rendered in it. A
  *  caller sampling per scrolled frame passes its cached `anchorRows` list, so
- *  a frame costs the bisect's rect reads, never a subtree walk. */
+ *  a frame costs the bisect's and probe's row reads, never a walk of the
+ *  scroller's subtree. */
 export function captureLineAnchor(
   scroller: HTMLElement,
   rows: ArrayLike<Element> = anchorRows(scroller),

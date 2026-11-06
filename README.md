@@ -131,9 +131,9 @@ delete), and deep links to the settings GitHub keeps browser-only.
 ### Changes and commits
 
 A unified or split diff with syntax highlighting, collapsible surrounding
-context, image diffing, and a size change for other binary files
-(`1.2 MB → 725 KB · 486 KB smaller`). Filter the changes list by path or
-category, and read a file's `+added -deleted` line counts without opening it.
+context, image diffing, and a size change shown for other binary files
+(`1.2 MB → 725 KB · 486 KB smaller (−40%)`). Filter the changes list by path
+or category, and read a file's `+added -deleted` line counts without opening it.
 Show that list flat or as a compacted directory tree: collapsible folders,
 single-child folder chains merged into one row, arrow keys that walk and fold
 it, and a folder context menu that stages, unstages, discards or stashes the

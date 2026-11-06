@@ -163,8 +163,12 @@ pub struct CommitPrefixMatch {
 /// matches first and newest first within each group. At most 20, the newest by
 /// committer date, and nothing on the wire says the list was cut; the cap applies
 /// before the on-branch ordering, so past it an older on-branch match can drop
-/// while newer off-branch ones stay. Only a 4-hex prefix in a history of over a
-/// million commits reaches it.
+/// while newer off-branch ones stay. Any 21 commits sharing a prefix reach it; for
+/// random ids that is likely only with a 4-hex prefix in a repo of roughly half a
+/// million local commits or more (unreachable ones count too); a 4-hex prefix
+/// averages 20 commits at about 1.3 million. On an unborn HEAD (an orphan branch
+/// included) every match reads off-branch, an answer only the backend gives
+/// today: the History panel offers no search on an unborn HEAD.
 #[tauri::command]
 pub async fn git_find_commits_by_prefix(
     repo_path: String,
@@ -189,9 +193,8 @@ async fn commits_by_prefix(
             "invalid commit prefix: {shown}"
         )));
     }
-    if unborn_head(repo).await? {
-        return Ok(Vec::new());
-    }
+    // Nothing is on a branch with no commits, so the walk is skipped there.
+    let unborn = unborn_head(repo).await?;
     // Lists only local objects of every type, and never fetches a missing full id
     // in a partial clone; git truncates an overlong prefix to its hash width, so
     // only ids that extend `p` survive.
@@ -248,7 +251,11 @@ async fn commits_by_prefix(
         .take(cap)
         .collect();
     let ids: Vec<&str> = capped.iter().map(|c| c.hash.as_str()).collect();
-    let off = off_branch_commits(repo, &ids).await?;
+    let off = if unborn {
+        ids.iter().map(|id| id.to_ascii_lowercase()).collect()
+    } else {
+        off_branch_commits(repo, &ids).await?
+    };
     let mut matches: Vec<CommitPrefixMatch> = capped
         .into_iter()
         .map(|commit| {
@@ -264,8 +271,11 @@ async fn commits_by_prefix(
 /// counts as its own ancestor). One `rev-list <ids> --not HEAD` walk never misses
 /// an off-branch id, but under committer-date skew it stops early and can print
 /// an ancestor too, so each id it prints is re-checked with `merge-base
-/// --is-ancestor`. Every id must be a full commit id (anything else errs before a
-/// spawn); a failed walk is an error, never "on branch".
+/// --is-ancestor`. Every id must be a full-width hex id naming a commit. A
+/// malformed id errs before a spawn and a missing one fails the walk, but rev-list
+/// skips a blob or tree id and walks a tag's commit in place of the tag, so any
+/// non-commit id would read as on-branch. A failed walk is an error, never "on
+/// branch".
 async fn off_branch_commits(
     repo: &str,
     commits: &[&str],
@@ -1654,7 +1664,7 @@ mod tests {
         }
     }
 
-    /// F1: 1000 blobs and 1000 linear commits on main from one fast-import, so 4-hex
+    /// 1000 blobs and 1000 linear commits on main from one fast-import, so 4-hex
     /// prefixes collide within and across object types. `keep` holds the tip.
     async fn colliding_history() -> (tempfile::TempDir, String) {
         let (dir, repo) = temp_repo("prefix-collide");
@@ -1771,7 +1781,7 @@ mod tests {
 
         // Order inside one colliding pair: by age while both are on the branch, the
         // newer one alone under a cap of one, and on-branch first once main moves
-        // back between the two. The pair must sit above the root commit, which the
+        // back to the older one. The pair must sit above the root commit, which the
         // all-off-branch arm below keeps on the branch.
         let mut picked = None;
         for (prefix, commits) in &shared {
@@ -1818,6 +1828,20 @@ mod tests {
             ages
         };
         assert!(ages.windows(2).all(|w| w[0] > w[1]), "{ages:?}");
+    }
+
+    #[tokio::test]
+    async fn commits_by_prefix_on_an_orphan_branch_lists_matches_off_branch() {
+        let (_dir, repo, first, second) = two_commit_repo("prefix-orphan").await;
+        pin_prefix_repo(&repo).await;
+        git(&repo, &["switch", "-q", "--orphan", "lonely"]).await;
+        assert!(unborn_head(&repo).await.unwrap());
+        for (query, id) in [(second.clone(), &second), (first[..7].to_string(), &first)] {
+            let found = git_find_commits_by_prefix(repo.clone(), query.clone())
+                .await
+                .unwrap();
+            assert_eq!(prefix_hashes(&found), vec![(id.as_str(), false)], "{query}");
+        }
     }
 
     #[tokio::test]

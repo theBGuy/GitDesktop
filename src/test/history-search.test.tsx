@@ -7,6 +7,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { type ReactNode, StrictMode, useLayoutEffect, useState } from "react";
 import {
   afterAll,
   afterEach,
@@ -18,6 +19,7 @@ import {
   vi,
 } from "vitest";
 import { HistoryPanel } from "@/features/history/HistoryPanel";
+import { TabPanel } from "@/features/repository/TabPanel";
 import {
   gitFindCommitsByPrefix,
   gitLog,
@@ -85,6 +87,21 @@ const hit = (h: string, onBranch: boolean): CommitPrefixMatch => ({
 });
 // A read that never settles.
 const never = <T,>() => new Promise<T>(() => undefined);
+// Reruns that stay pending until the test fails them, so the pending render
+// unmounts a pressed Retry before any answer lands.
+function heldFailures() {
+  const fails: (() => void)[] = [];
+  return {
+    answer: <T,>() =>
+      new Promise<T>((_, reject) => {
+        fails.push(() => reject(new Error("still failing")));
+      }),
+    failAll: () =>
+      act(async () => {
+        for (const fail of fails.splice(0)) fail();
+      }),
+  };
+}
 
 let loaded: CommitSummary[];
 let grepAnswer: (q: string) => Promise<CommitSummary[]>;
@@ -179,16 +196,20 @@ const settle = () =>
     await new Promise((r) => setTimeout(r, 20));
   });
 const filterInput = () => screen.getByPlaceholderText(PLACEHOLDER);
+// The panel shell, where a rescued Retry hands focus.
+const panelShell = () => filterInput().closest('[tabindex="-1"]');
 const cta = () => screen.getByRole("button", { name: /^Search all history/ });
 
-async function renderPanel() {
+async function renderPanel(
+  wrap: (panel: ReactNode) => ReactNode = (panel) => panel,
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   client.setQueryData(settingsKeys.settings, structuredClone(DEFAULT_SETTINGS));
   const utils = render(
     <QueryClientProvider client={client}>
-      <HistoryPanel repoPath={REPO} />
+      {wrap(<HistoryPanel repoPath={REPO} />)}
     </QueryClientProvider>,
   );
   await waitFor(() => expect(row(HASH_HEAD)).not.toBeNull());
@@ -304,11 +325,228 @@ describe("off-branch notice", () => {
     await renderPanel();
     await searchAll("6201");
     expect(
-      await screen.findByText("+1 more matches aren't on this branch"),
+      await screen.findByText("+1 more match isn't on this branch"),
     ).toBeInTheDocument();
     expect(
       screen.getAllByRole("button", { name: /^Open commit/ }),
     ).toHaveLength(3);
+  });
+
+  it("counts two or more overflow matches in the plural", async () => {
+    shaAnswer = async () =>
+      ["1", "2", "3", "4", "5"].map((c) => hit(hash(`6201${c}`), false));
+    await renderPanel();
+    await searchAll("6201");
+    expect(
+      await screen.findByText("+2 more matches aren't on this branch"),
+    ).toBeInTheDocument();
+  });
+
+  it("a focused Open commit whose match turns on-branch hands focus to the panel", async () => {
+    shaAnswer = async () => [hit(OFF, false)];
+    const { client } = await renderPanel();
+    await searchAll("6201a");
+    const open = await screen.findByRole("button", { name: /^Open commit/ });
+    act(() => open.focus());
+    expect(document.activeElement).toBe(open);
+    shaAnswer = async () => [hit(OFF, true)];
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201a") }));
+    await settle();
+    expect(screen.queryByRole("button", { name: /^Open commit/ })).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement?.contains(filterInput())).toBe(true);
+  });
+
+  it("a focused Open commit whose row turns on-branch hands focus to the next row's button", async () => {
+    const OTHER = hash("6201b");
+    shaAnswer = async () => [hit(OFF, false), hit(OTHER, false)];
+    const { client } = await renderPanel();
+    await searchAll("6201");
+    const first = await screen.findByRole("button", {
+      name: `Open commit ${OFF.slice(0, 7)}`,
+    });
+    act(() => first.focus());
+    shaAnswer = async () => [hit(OFF, true), hit(OTHER, false)];
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201") }));
+    await settle();
+    expect(first.isConnected).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: `Open commit ${OTHER.slice(0, 7)}` }),
+    );
+  });
+
+  it("a focused last row turning on-branch hands focus to the row before it", async () => {
+    const OTHER = hash("6201b");
+    shaAnswer = async () => [hit(OFF, false), hit(OTHER, false)];
+    const { client } = await renderPanel();
+    await searchAll("6201");
+    const second = await screen.findByRole("button", {
+      name: `Open commit ${OTHER.slice(0, 7)}`,
+    });
+    act(() => second.focus());
+    shaAnswer = async () => [hit(OFF, false), hit(OTHER, true)];
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201") }));
+    await settle();
+    expect(second.isConnected).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: `Open commit ${OFF.slice(0, 7)}` }),
+    );
+  });
+
+  it("a focused third row turning on-branch hands focus to the row that slides in", async () => {
+    const ids = ["1", "2", "3", "4"].map((c) => hash(`6201${c}`));
+    shaAnswer = async () => ids.map((h) => hit(h, false));
+    const { client } = await renderPanel();
+    await searchAll("6201");
+    const third = await screen.findByRole("button", {
+      name: `Open commit ${ids[2].slice(0, 7)}`,
+    });
+    expect(
+      screen.queryByRole("button", {
+        name: `Open commit ${ids[3].slice(0, 7)}`,
+      }),
+    ).toBeNull();
+    act(() => third.focus());
+    shaAnswer = async () => ids.map((h, i) => hit(h, i === 2));
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201") }));
+    await settle();
+    expect(third.isConnected).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", {
+        name: `Open commit ${ids[3].slice(0, 7)}`,
+      }),
+    );
+  });
+
+  it("focus moved off Open commit stays put when the notice goes", async () => {
+    shaAnswer = async () => [hit(OFF, false)];
+    const { client } = await renderPanel();
+    await searchAll("6201a");
+    await screen.findByRole("button", { name: /^Open commit/ });
+    act(() => filterInput().focus());
+    shaAnswer = async () => [hit(OFF, true)];
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201a") }));
+    await settle();
+    expect(screen.queryByRole("button", { name: /^Open commit/ })).toBeNull();
+    expect(document.activeElement).toBe(filterInput());
+  });
+
+  it("two rows leaving at once hand focus to the next remaining row", async () => {
+    const ids = ["1", "2", "3", "4"].map((c) => hash(`6201${c}`));
+    shaAnswer = async () => ids.map((h) => hit(h, false));
+    const { client } = await renderPanel();
+    await searchAll("6201");
+    const second = await screen.findByRole("button", {
+      name: `Open commit ${ids[1].slice(0, 7)}`,
+    });
+    act(() => second.focus());
+    shaAnswer = async () => ids.map((h, i) => hit(h, i < 2));
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201") }));
+    await settle();
+    expect(second.isConnected).toBe(false);
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", {
+        name: `Open commit ${ids[2].slice(0, 7)}`,
+      }),
+    );
+  });
+
+  it("an unfocused row leaving leaves focus on <body>", async () => {
+    shaAnswer = async () => [hit(OFF, false)];
+    const { client } = await renderPanel();
+    await searchAll("6201a");
+    await screen.findByRole("button", { name: /^Open commit/ });
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+    expect(document.activeElement).toBe(document.body);
+    shaAnswer = async () => [hit(OFF, true)];
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201a") }));
+    await settle();
+    expect(screen.queryByRole("button", { name: /^Open commit/ })).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("a focus move made while the row leaves is never undone", async () => {
+    if (!customElements.get("gd-focus-on-disconnect")) {
+      customElements.define(
+        "gd-focus-on-disconnect",
+        class extends HTMLElement {
+          disconnectedCallback() {
+            filterInput().focus();
+          }
+        },
+      );
+    }
+    shaAnswer = async () => [hit(OFF, false)];
+    const { client } = await renderPanel();
+    await searchAll("6201a");
+    const open = await screen.findByRole("button", { name: /^Open commit/ });
+    open.parentElement?.append(
+      document.createElement("gd-focus-on-disconnect"),
+    );
+    act(() => open.focus());
+    shaAnswer = async () => [hit(OFF, true)];
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201a") }));
+    await settle();
+    expect(open.isConnected).toBe(false);
+    expect(document.activeElement).toBe(filterInput());
+  });
+
+  it("an Activity hide and re-show never moves focus", async () => {
+    const control: { set?: (mode: "visible" | "hidden") => void } = {};
+    // A browser drops focus from a display:none node; jsdom keeps it, so the
+    // host drops it to body in the hide commit, before any microtask runs (a
+    // removed focus owner falls to body; jsdom won't blur a hidden node). The
+    // rescue's isConnected guard stays unpinned: without it the target is the
+    // hidden row's own button, and focusing a display:none node is a no-op.
+    function Host({ children }: { children: ReactNode }) {
+      const [mode, setMode] = useState<"visible" | "hidden">("visible");
+      useLayoutEffect(() => {
+        control.set = setMode;
+        if (mode !== "hidden") return;
+        const away = document.createElement("button");
+        document.body.append(away);
+        away.focus();
+        away.remove();
+      });
+      return <TabPanel active={mode === "visible"}>{children}</TabPanel>;
+    }
+    shaAnswer = async () => [hit(OFF, false)];
+    await renderPanel((panel) => <Host>{panel}</Host>);
+    await searchAll("6201a");
+    const open = await screen.findByRole("button", { name: /^Open commit/ });
+    act(() => open.focus());
+    act(() => control.set?.("hidden"));
+    await settle();
+    expect(open.isConnected).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+    act(() => control.set?.("visible"));
+    await settle();
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("under StrictMode a later commit never re-runs a spent rescue", async () => {
+    const ids = ["1", "2", "3", "4"].map((c) => hash(`6201${c}`));
+    shaAnswer = async () => ids.map((h) => hit(h, false));
+    const { client } = await renderPanel((panel) => (
+      <StrictMode>{panel}</StrictMode>
+    ));
+    await searchAll("6201");
+    const third = await screen.findByRole("button", {
+      name: `Open commit ${ids[2].slice(0, 7)}`,
+    });
+    act(() => third.focus());
+    shaAnswer = async () => ids.map((h, i) => hit(h, i === 2));
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201") }));
+    await settle();
+    const slidIn = screen.getByRole("button", {
+      name: `Open commit ${ids[3].slice(0, 7)}`,
+    });
+    expect(document.activeElement).toBe(slidIn);
+    act(() => slidIn.blur());
+    expect(document.activeElement).toBe(document.body);
+    await act(() => client.refetchQueries({ queryKey: SHA_KEY("6201") }));
+    await settle();
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("Open commit selects the full hash and clears the list selection", async () => {
@@ -452,17 +690,26 @@ describe("partial failure", () => {
     shaAnswer = () => Promise.reject(new Error("sha boom"));
     await renderPanel();
     await searchAll("a1b2");
+    // Only messages were checked, so the headline claims no more than that.
     expect(
-      await screen.findByText('No commits on this branch match "a1b2"'),
+      await screen.findByText('No commit messages on this branch match "a1b2"'),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByText('No commits on this branch match "a1b2"'),
+    ).toBeNull();
     expect(screen.getByText(SHA_FAILED)).toBeInTheDocument();
     expect(screen.queryByText(FULL_LINE)).toBeNull();
     const retry = screen.getByRole("button", { name: "Retry" });
     const grepBefore = grepCalls().length;
+    const held = heldFailures();
+    shaAnswer = held.answer;
     await userEvent.setup().click(retry);
     await waitFor(() => expect(shaCalls()).toHaveLength(2));
     expect(grepCalls()).toHaveLength(grepBefore);
-    expect(document.activeElement).not.toBe(document.body);
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    expect(document.activeElement).toBe(panelShell());
+    await held.failAll();
+    expect(await screen.findByText(SHA_FAILED)).toBeInTheDocument();
   });
 
   it("both arms stale over kept rows show one refresh notice, whose Retry reruns both", async () => {
@@ -512,10 +759,18 @@ describe("partial failure", () => {
     expect(retryButtons()).toHaveLength(1);
     const grepBefore = grepCalls().length;
     const shaBefore = shaCalls().length;
-    await userEvent.setup().click(retryButtons()[0]);
+    const retry = retryButtons()[0];
+    // The notice's always-mounted host takes focus when its Retry unmounts.
+    const noticeHost = retry.closest('[tabindex="-1"]');
+    const held = heldFailures();
+    shaAnswer = held.answer;
+    await userEvent.setup().click(retry);
     await waitFor(() => expect(shaCalls()).toHaveLength(shaBefore + 1));
     expect(grepCalls()).toHaveLength(grepBefore);
-    expect(document.activeElement).not.toBe(document.body);
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    expect(document.activeElement).toBe(noticeHost);
+    await held.failAll();
+    expect(await screen.findByText(REFRESH_FAILED)).toBeInTheDocument();
   });
 
   it("a dead SHA arm's line speaks for a stale grep too, whose Retry reruns both", async () => {
@@ -557,12 +812,16 @@ describe("partial failure", () => {
     expect(screen.queryByText("Couldn't search all history.")).toBeNull();
     expect(liveRegion().textContent).toBe("");
     const shaBefore = shaCalls().length;
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Retry" }));
+    const retry = screen.getByRole("button", { name: "Retry" });
+    const held = heldFailures();
+    grepAnswer = held.answer;
+    await userEvent.setup().click(retry);
     await waitFor(() => expect(grepCalls()).toHaveLength(2));
     expect(shaCalls()).toHaveLength(shaBefore);
-    expect(document.activeElement).not.toBe(document.body);
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    expect(document.activeElement).toBe(panelShell());
+    await held.failAll();
+    expect(await screen.findByText(GREP_FAILED)).toBeInTheDocument();
   });
 
   it("both arms dead shows the error block, announced, whose Retry reruns both", async () => {
@@ -578,12 +837,19 @@ describe("partial failure", () => {
     expect(screen.queryByText(FULL_LINE)).toBeNull();
     expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
     expect(retryButtons()).toHaveLength(1);
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Retry" }));
+    const retry = screen.getByRole("button", { name: "Retry" });
+    const held = heldFailures();
+    shaAnswer = held.answer;
+    grepAnswer = held.answer;
+    await userEvent.setup().click(retry);
     await waitFor(() => expect(grepCalls()).toHaveLength(2));
     await waitFor(() => expect(shaCalls()).toHaveLength(2));
-    expect(document.activeElement).not.toBe(document.body);
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    expect(document.activeElement).toBe(panelShell());
+    await held.failAll();
+    expect(
+      await screen.findByText("Couldn't search all history."),
+    ).toBeInTheDocument();
     expect(row(OFF)).toBeNull();
   });
 
@@ -602,12 +868,16 @@ describe("partial failure", () => {
     expect(liveRegion().textContent).toBe("");
     expect(row(OFF)).toBeNull();
     const shaBefore = shaCalls().length;
-    await userEvent
-      .setup()
-      .click(screen.getByRole("button", { name: "Retry" }));
+    const retry = screen.getByRole("button", { name: "Retry" });
+    const held = heldFailures();
+    grepAnswer = held.answer;
+    await userEvent.setup().click(retry);
     await waitFor(() => expect(grepCalls()).toHaveLength(2));
     expect(shaCalls()).toHaveLength(shaBefore);
-    expect(document.activeElement).not.toBe(document.body);
+    await waitFor(() => expect(retry.isConnected).toBe(false));
+    expect(document.activeElement).toBe(panelShell());
+    await held.failAll();
+    expect(await screen.findByText(GREP_FAILED)).toBeInTheDocument();
   });
 
   it("a dead SHA arm's empty-state line speaks for a stale grep too", async () => {
@@ -621,7 +891,7 @@ describe("partial failure", () => {
     await settle();
     expect(grepCalls()).toHaveLength(grepRefetched);
     expect(
-      screen.getByText('No commits on this branch match "a1b2"'),
+      screen.getByText('No commit messages on this branch match "a1b2"'),
     ).toBeInTheDocument();
     expect(screen.getByText(SHA_FAILED)).toBeInTheDocument();
     expect(screen.queryByText(REFRESH_FAILED)).toBeNull();
@@ -748,7 +1018,7 @@ describe("partial failure", () => {
     const { client } = await renderPanel();
     await searchAll("a1b2");
     expect(
-      await screen.findByText('No commits on this branch match "a1b2"'),
+      await screen.findByText('No commit messages on this branch match "a1b2"'),
     ).toBeInTheDocument();
     const retry = screen.getByRole("button", { name: "Retry" });
     act(() => retry.focus());

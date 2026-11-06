@@ -54,10 +54,10 @@ export function BinaryFileSummary({
    *  the line last shown, which sized that same patch. */
   held?: boolean;
 }): ReactNode {
-  const oids = binaryIndexOids(text);
-  const mode = parseModeChange(text);
-  // A PR surface's ids are abbreviated against the forge's object store, so
-  // without a full anchor commit a local prefix match could size another blob.
+  const oids = binaryIndexOids(text, filePath);
+  const mode = parseModeChange(text, filePath);
+  // A PR surface's ids abbreviate against the forge's store: lookups need a full
+  // anchor commit, though a partial or shallow clone can still match another blob.
   const mount =
     oids !== null &&
     (anchorCommit === undefined || FULL_OID_RE.test(anchorCommit ?? ""));
@@ -77,7 +77,7 @@ export function BinaryFileSummary({
   // Before the null return: a slot holds the previous file until sizes land.
   useReportPaneSettled(!lookup || !query.isPending);
   const fresh = lookup
-    ? binarySizeSummary(oids, query.data, isTypechangeDiff(text))
+    ? binarySizeSummary(oids, query.data, isTypechangeDiff(text, filePath))
     : BLANK_LINE;
   // The placeholder body IS the patch last shown, so its line still holds;
   // an unheld render records what it shows, blank included.
