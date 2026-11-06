@@ -395,7 +395,8 @@ export function useGithubBlobSizes(
         args?.lens ?? "origin",
       ),
     enabled: args !== null,
-    // A forge read: the default network mode parks it offline.
+    // A forge read: the default network mode parks it offline. No placeholderData:
+    // the oids are the identity, so it would show another file's sizes.
     staleTime: Infinity,
     retry: shouldRetryQuery,
   });

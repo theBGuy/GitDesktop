@@ -20,11 +20,12 @@ import {
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import type { BlobSizes, FileDiff } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
-import { useRepoLens } from "@/lib/repo-lens/queries";
+import { useLensState } from "@/lib/repo-lens/queries";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
+import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
@@ -36,10 +37,58 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   openNearestFolder: vi.fn(),
 }));
 
-vi.mock("@/lib/repo-lens/queries", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/repo-lens/queries")>()),
-  useRepoLens: vi.fn(),
-}));
+/** The lens reads' state, as an external store: a change re-renders the
+ *  observing probe itself, as the real queries do. With `refetchOnMount`, each
+ *  mount reads unsettled (answered, refetching) until its own refetch lands a
+ *  macrotask later, as a new observer over warm cached reads does. */
+const lensStore = vi.hoisted(() => {
+  type State = {
+    lens: "origin" | "upstream";
+    settled: boolean;
+    answered: boolean;
+    refetchOnMount?: boolean;
+  };
+  let state: State = { lens: "origin", settled: true, answered: true };
+  const subs = new Set<() => void>();
+  return {
+    get: () => state,
+    set(next: State) {
+      state = next;
+      for (const notify of subs) notify();
+    },
+    subscribe(notify: () => void) {
+      subs.add(notify);
+      return () => subs.delete(notify);
+    },
+  };
+});
+
+vi.mock("@/lib/repo-lens/queries", async (importOriginal) => {
+  const { useEffect, useState, useSyncExternalStore } = await import("react");
+  return {
+    ...(await importOriginal<typeof import("@/lib/repo-lens/queries")>()),
+    useLensState: vi.fn(() => {
+      const { lens, settled, answered, refetchOnMount } = useSyncExternalStore(
+        lensStore.subscribe,
+        lensStore.get,
+      );
+      const [refetching, setRefetching] = useState(refetchOnMount === true);
+      useEffect(() => {
+        if (!refetching) return;
+        const landed = setTimeout(() => setRefetching(false), 0);
+        return () => clearTimeout(landed);
+      }, [refetching]);
+      return {
+        gate: true,
+        lens,
+        settled: settled && !refetching,
+        answered,
+        waiting: false,
+        storedLens: lens,
+      };
+    }),
+  };
+});
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
@@ -53,7 +102,7 @@ vi.mock("@/lib/toast", async (importOriginal) => ({
 
 const local = vi.mocked(gitBlobSizes);
 const github = vi.mocked(githubBlobSizes);
-const lens = vi.mocked(useRepoLens);
+const lens = vi.mocked(useLensState);
 
 /** Non-zero hex of any length, so the oid-width guard never reads a zero run. */
 const hex = (n: number) => "abcdef0123".repeat(7).slice(0, n);
@@ -99,7 +148,7 @@ const tick = () =>
 let client: QueryClient;
 beforeEach(() => {
   vi.clearAllMocks();
-  lens.mockReturnValue("origin");
+  lensStore.set({ lens: "origin", settled: true, answered: true });
   local.mockResolvedValue({ oldSize: 48230, newSize: 51918 });
   github.mockResolvedValue({ oldSize: null, newSize: null });
   vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
@@ -190,10 +239,11 @@ describe("the GitHub size fallback", () => {
 
   it("reads under the upstream lens, one cache entry per lens", async () => {
     local.mockResolvedValue({ oldSize: null, newSize: 51918 });
-    const view = renderSummary({ anchorCommit: ANCHOR });
+    renderSummary({ anchorCommit: ANCHOR });
     await waitFor(() => expect(github).toHaveBeenCalledTimes(1));
-    lens.mockReturnValue("upstream");
-    view.at({});
+    act(() =>
+      lensStore.set({ lens: "upstream", settled: true, answered: true }),
+    );
     await waitFor(() => expect(github).toHaveBeenCalledTimes(2));
     expect(github).toHaveBeenLastCalledWith(
       "/repo",
@@ -212,6 +262,83 @@ describe("the GitHub size fallback", () => {
     expect(await screen.findByText("47.1 KB → 50.7 KB")).toBeTruthy();
     await tick();
     expect(github).not.toHaveBeenCalled();
+  });
+
+  // Negative control: reading the lens unconditionally in AnchoredSizeFallback
+  // fails this test (each mount re-reads remotes).
+  it("never reads the lens when the local store sized every side", async () => {
+    renderSummary({ anchorCommit: ANCHOR });
+    expect(await screen.findByText("47.1 KB → 50.7 KB")).toBeTruthy();
+    await tick();
+    expect(lens).not.toHaveBeenCalled();
+  });
+
+  // Negative controls: mounting the lens read around the summary (its position
+  // following `missing`) remounts it when holding, blanking the line; stamping
+  // only a settled lens blanks it on release until the remount's refetch lands.
+  it("keeps the GitHub-filled line through a hold, which unmounts the lens read", async () => {
+    lensStore.set({
+      lens: "origin",
+      settled: true,
+      answered: true,
+      refetchOnMount: true,
+    });
+    local.mockResolvedValue({ oldSize: null, newSize: 51918 });
+    github.mockResolvedValue({ oldSize: 48230, newSize: null });
+    const view = renderSummary({ anchorCommit: ANCHOR });
+    expect(await screen.findByText("47.1 KB → 50.7 KB")).toBeTruthy();
+    view.at({ held: true });
+    await tick();
+    expect(screen.getByText("47.1 KB → 50.7 KB")).toBeTruthy();
+    // Released, the remounted lens read finds GitHub's answer cached, and the
+    // line never blanks while that mount's own refetch is in flight.
+    view.at({ held: false });
+    expect(screen.getByText("47.1 KB → 50.7 KB")).toBeTruthy();
+    await tick();
+    expect(screen.getByText("47.1 KB → 50.7 KB")).toBeTruthy();
+    expect(github).toHaveBeenCalledTimes(1);
+  });
+
+  // Negative control: sending the lookup under any stamped lens, whatever ids
+  // it was read for, fails this test (OTHER's sides go out under origin first).
+  it("never pairs new sides with the lens read for the previous ones", async () => {
+    local.mockResolvedValue({ oldSize: null, newSize: 51918 });
+    const OTHER = bin("x.bin", "index 4567abc..cdef012 100644");
+    // OTHER's local answer is cached, as for a pull request already visited;
+    // the key mirrors useBinarySizes'.
+    client.setQueryData(
+      ["repo", "/repo", "blob-sizes", "4567abc", "cdef012", null, ANCHOR],
+      { oldSize: null, newSize: 51918 },
+    );
+    const view = renderSummary({ anchorCommit: ANCHOR });
+    await waitFor(() => expect(github).toHaveBeenCalledTimes(1));
+    act(() => {
+      lensStore.set({ lens: "upstream", settled: true, answered: true });
+      view.at({ text: OTHER });
+    });
+    await waitFor(() => expect(github).toHaveBeenCalledTimes(2));
+    await tick();
+    expect(github.mock.calls).toEqual([
+      ["/repo", "0123abc", null, "origin"],
+      ["/repo", "4567abc", null, "upstream"],
+    ]);
+  });
+
+  // Negative control: stamping the lens before its reads answer fails this
+  // test (one lookup goes out under the provisional origin).
+  it("waits for the lens reads to answer before asking GitHub", async () => {
+    local.mockResolvedValue({ oldSize: null, newSize: 51918 });
+    lensStore.set({ lens: "origin", settled: false, answered: false });
+    renderSummary({ anchorCommit: ANCHOR });
+    await waitFor(() => expect(local).toHaveBeenCalledTimes(1));
+    await tick();
+    expect(github).not.toHaveBeenCalled();
+    act(() =>
+      lensStore.set({ lens: "upstream", settled: true, answered: true }),
+    );
+    await waitFor(() => expect(github).toHaveBeenCalledTimes(1));
+    await tick();
+    expect(github.mock.calls).toEqual([["/repo", "0123abc", null, "upstream"]]);
   });
 
   it("keeps a side GitHub couldn't size blank", async () => {
@@ -445,16 +572,7 @@ describe("the binary pane's actions", () => {
 });
 
 describe("the stacked typechange arm", () => {
-  // @git-diff-view measures text on a 2D canvas, which jsdom leaves null.
-  beforeAll(() => {
-    const measure = {
-      font: "",
-      measureText: (t: string) => ({ width: t.length }),
-    };
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-      () => measure as unknown as CanvasRenderingContext2D,
-    );
-  });
+  beforeAll(stubCanvas);
 
   function renderPane(
     filePath: string,

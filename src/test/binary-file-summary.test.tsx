@@ -25,6 +25,7 @@ import {
 import type { BlobSizes } from "@/lib/git/types";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
+import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
@@ -32,11 +33,18 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   githubBlobSizes: vi.fn(),
 }));
 
-// Anchored panes mount the lens read; its forge and remote reads aren't the
-// subject here.
+// An anchored pane mounts the lens read only while a side is missing; its forge
+// and remote reads aren't the subject here.
 vi.mock("@/lib/repo-lens/queries", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/repo-lens/queries")>()),
-  useRepoLens: vi.fn(() => "origin"),
+  useLensState: vi.fn(() => ({
+    gate: false,
+    lens: "origin",
+    settled: true,
+    answered: true,
+    waiting: false,
+    storedLens: "origin",
+  })),
 }));
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
@@ -451,17 +459,6 @@ describe("BinaryFileSummary layout", () => {
   });
 });
 
-/** @git-diff-view measures text on a 2D canvas, which jsdom leaves null. */
-function stubCanvas() {
-  const measure = {
-    font: "",
-    measureText: (t: string) => ({ width: t.length }),
-  };
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    () => measure as unknown as CanvasRenderingContext2D,
-  );
-}
-
 describe("a split symlink-to-binary typechange", () => {
   beforeAll(stubCanvas);
 
@@ -521,7 +518,6 @@ describe("a split symlink-to-binary typechange", () => {
 });
 
 describe("a split binary-to-symlink typechange", () => {
-  // @git-diff-view measures text on a 2D canvas, which jsdom leaves null.
   beforeAll(stubCanvas);
 
   it("DiffContent renders the symlink text, never the binary placeholder", async () => {

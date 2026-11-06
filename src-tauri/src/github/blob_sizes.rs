@@ -15,13 +15,7 @@ async fn sizes_repo_slug(repo: &str, lens: Option<&str>) -> AppResult<Option<Str
     let remote = lens_remote(lens)?;
     let url = match crate::git::remote::git_remote_url(repo.to_string(), remote.to_string()).await {
         Ok(url) => url,
-        Err(AppError::Git { stderr, .. })
-            if stderr
-                .lines()
-                .any(|line| line == format!("error: No such remote '{remote}'")) =>
-        {
-            return Ok(None);
-        }
+        Err(AppError::Git { stderr, .. }) if no_such_remote(&stderr) => return Ok(None),
         Err(error) => return Err(error),
     };
     // The query pins github.com (run_gh would aim it at origin's login host), so the
@@ -34,6 +28,12 @@ async fn sizes_repo_slug(repo: &str, lens: Option<&str>) -> AppResult<Option<Str
         Err(AppError::Gh(_)) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+// Matches the repo's other missing-remote checks: git before 2.30 died with
+// `fatal: No such remote`, current git prints `error: No such remote`.
+fn no_such_remote(stderr: &str) -> bool {
+    stderr.contains("No such remote")
 }
 
 fn sizes_query(old: Option<&str>, new: Option<&str>) -> String {
@@ -289,6 +289,19 @@ mod tests {
         }
         assert!(!sizes_query(None, Some("1234")).contains("o:object"));
         assert!(!sizes_query(Some("abcd"), None).contains("n:object"));
+    }
+
+    #[test]
+    fn a_missing_remote_reads_as_unknown_in_either_git_wording() {
+        for stderr in [
+            "error: No such remote 'upstream'",
+            "fatal: No such remote 'upstream'\n",
+        ] {
+            assert!(no_such_remote(stderr), "{stderr:?}");
+        }
+        for stderr in ["fatal: not a git repository", ""] {
+            assert!(!no_such_remote(stderr), "{stderr:?}");
+        }
     }
 
     #[test]

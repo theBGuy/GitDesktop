@@ -22,9 +22,9 @@ import {
 } from "@/lib/git/diff-split";
 import { FULL_OID_RE } from "@/lib/git/oid";
 import { useBinarySizes, useGithubBlobSizes } from "@/lib/git/queries";
-import type { BlobSizes } from "@/lib/git/types";
+import type { BlobSizes, RemoteLens } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
-import { useRepoLens } from "@/lib/repo-lens/queries";
+import { useLensState } from "@/lib/repo-lens/queries";
 import { toastError } from "@/lib/toast";
 import { useReportPaneSettled } from "./diff-pane-hold";
 import { useFocusOnControlsSwap } from "./use-hidden-trigger-focus";
@@ -141,8 +141,9 @@ export function BinaryFileSummary({
       actions={actions}
     />
   );
-  // Only a PR surface mounts the lens and GitHub reads, so a local pane sends
-  // neither; no surface flips between the two.
+  // Only a PR surface mounts the lens and GitHub reads (the lens only while a
+  // side is missing), so a local pane sends neither; no surface flips between
+  // the two.
   if (anchorCommit === undefined) return summary();
   return (
     <AnchoredSizeFallback
@@ -179,7 +180,8 @@ function mergeSizes(
 }
 
 /** A PR surface's GitHub lookup for its missing sides, under the lens the PR
- *  surfaces read. A pending, failed or parked read leaves those sides null. */
+ *  surfaces read. A pending, failed or parked read, or a lens not yet answered
+ *  for these sides, leaves those sides null. */
 function AnchoredSizeFallback({
   repoPath,
   missing,
@@ -189,12 +191,59 @@ function AnchoredSizeFallback({
   missing: SideOids | null;
   children: (github: BlobSizes | undefined) => ReactNode;
 }): ReactNode {
-  const lens = useRepoLens(repoPath);
+  // The lens read mounts only while a side is missing (each new observer
+  // re-reads remotes), as a sibling slot: the summary keeps its position, and
+  // its held line, while `missing` flips.
+  const [stamp, setStamp] = useState<LensStamp | null>(null);
+  const key = missing === null ? null : sidesKey(missing);
+  // Only a lens stamped for these very ids: a navigation can move the lens and
+  // the ids together, so the previous ids' stamp may name the wrong repo for
+  // these.
   const github = useGithubBlobSizes(
     repoPath,
-    missing === null ? null : { ...missing, lens },
+    missing === null || stamp === null || stamp.key !== key
+      ? null
+      : { ...missing, lens: stamp.lens },
   );
-  return children(github.data);
+  return (
+    <>
+      {key !== null && (
+        <LensProbe repoPath={repoPath} sidesKey={key} onStamp={setStamp} />
+      )}
+      {children(github.data)}
+    </>
+  );
+}
+
+/** An answered lens and the missing sides it was read for. */
+interface LensStamp {
+  lens: RemoteLens;
+  key: string;
+}
+
+const sidesKey = (sides: SideOids) =>
+  `${sides.oldOid ?? ""}:${sides.newOid ?? ""}`;
+
+/** Reports the lens stamped with its ids once every lens input has answered,
+ *  never the provisional "origin" a cold read serves. A background refetch
+ *  doesn't hold it back (cached answers stamp on mount); unmounting clears it. */
+function LensProbe({
+  repoPath,
+  sidesKey: key,
+  onStamp,
+}: {
+  repoPath: string;
+  sidesKey: string;
+  onStamp: (stamp: LensStamp | null) => void;
+}): null {
+  const { lens, answered } = useLensState(repoPath);
+  // A layout effect, so a remount's stamp lands before paint: a passive one
+  // would let the release commit paint the local-only line for a frame.
+  useLayoutEffect(() => {
+    if (answered) onStamp({ lens, key });
+  }, [lens, answered, key, onStamp]);
+  useLayoutEffect(() => () => onStamp(null), [onStamp]);
+  return null;
 }
 
 function SizeSummary({

@@ -44,28 +44,27 @@ export function useRepoLensRaw(repo: string) {
 const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
   !q.isPending && !q.isFetching;
 
-/** Every async read the lens resolves from, in ONE body: the gate, the value, and
- *  whether all of them have settled are derived side by side, so an input added to the
- *  value necessarily joins the settled test — the two can't cover different sets. Each
- *  hook is called unconditionally (a short-circuited `&&` would skip one and break hook
- *  order). `settled` is owned here rather than re-derived by consumers — the reads behind
- *  the lens are this module's implementation detail, and a consumer re-deriving them
- *  drifts the moment the lens gains an input. The single-value exports below are
- *  projections of this and nothing else; consumers needing more than one take this.
- *  `waiting` is the window before the forge's FIRST answer on a repo with an
- *  upstream remote, when the gate can't be known yet; never `!settled`, which
- *  flips on every background refetch. `storedLens` is the cached lens choice,
- *  ungated: what a supported fork settles on. */
+/** Every async read the lens resolves from, each hook called unconditionally in ONE
+ *  body and listed once in `inputs`, so `settled` and `answered` can't cover different
+ *  sets (a new read must still be added to it); consumers take these, never re-derive them.
+ *  `answered` (no input pending) holds through a refetch of an input that already has
+ *  data, so a consumer that can take a cached lens the refetch may still move doesn't
+ *  wait on each new observer's refetch. `waiting` is the window before the forge's FIRST
+ *  answer on a repo with an upstream remote; never `!settled`, which flips on every
+ *  background refetch. `storedLens` is the cached choice, ungated: what a supported fork
+ *  settles on. */
 export function useLensState(repo: string): {
   gate: boolean;
   lens: RemoteLens;
   settled: boolean;
+  answered: boolean;
   waiting: boolean;
   storedLens: RemoteLens;
 } {
   const forge = useForgeStatus(repo);
   const remotes = useRemotes(repo);
   const raw = useRepoLensRaw(repo);
+  const inputs = [forge, remotes, raw];
   // Signed out, the status still names a github.com repo, but resolving the
   // parent needs `gh repo view`, so the upstream lens can't be offered.
   const gate =
@@ -75,10 +74,8 @@ export function useLensState(repo: string): {
   return {
     gate,
     lens: gate && raw.data === "upstream" ? "upstream" : "origin",
-    settled:
-      lensReadSettled(forge) &&
-      lensReadSettled(remotes) &&
-      lensReadSettled(raw),
+    settled: inputs.every(lensReadSettled),
+    answered: inputs.every((q) => !q.isPending),
     waiting:
       !gate &&
       forgeAwaitingFirstAnswer(forge) &&

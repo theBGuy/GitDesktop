@@ -63,7 +63,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Binary files show their size change — old and new size, and how much larger or smaller, on GitHub pull requests too",
+      "Binary files show their size change — old and new size, and how much larger or smaller, on GitHub and Bitbucket pull requests too",
   },
   {
     group: "Diffs & staging",

@@ -6,6 +6,7 @@ import { GitDiffView, type LineWidget } from "@/features/diff/DiffSurface";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
+import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
@@ -33,16 +34,7 @@ const TEXT = `${[
   " keep 24",
 ].join("\n")}\n`;
 
-// @git-diff-view measures text on a 2D canvas, which jsdom leaves null.
-beforeAll(() => {
-  const measure = {
-    font: "",
-    measureText: (t: string) => ({ width: t.length }),
-  };
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    () => measure as unknown as CanvasRenderingContext2D,
-  );
-});
+beforeAll(stubCanvas);
 
 // Number spans seen in each commit's layout phase, before passive effects
 // (where the library builds rows it wasn't handed) run. Line-number spans,

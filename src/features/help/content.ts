@@ -602,12 +602,13 @@ the last list up, with a line above it saying it couldn't refresh.
   *1.2 MB → 725 KB · 486 KB smaller (−40%)*, or *Deleted file · 900 KB* for a removed one.
   When two different sizes round to the same figure, the line gives exact byte counts.
   A screen reader always hears the exact counts. A changed file mode gets its own line.
-  GitHub pull requests show sizes too; on GitHub.com that includes files your clone
-  doesn't have. A non-image binary file with unstaged changes (in your working tree or
-  an agent session's) also offers **Open with default program** and **Show in
-  Explorer**; for a deleted one, **Show in Explorer** opens the nearest folder that
-  still exists. When a non-image binary file and a symbolic link trade places, local
-  diffs show both: the binary side's size line and the link's text.
+  GitHub and Bitbucket pull requests show sizes too; on GitHub.com that includes files
+  your clone doesn't have. A non-image binary file with unstaged changes (in your
+  working tree or an agent session's) also offers **Open with default program** and
+  **Show in Explorer**; for a deleted one, **Show in Explorer** opens the nearest
+  folder that still exists. When a non-image binary file and a symbolic link trade
+  places, local diffs show both the binary side's size line and the link's text, as
+  do pull requests where a link became a binary file.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will

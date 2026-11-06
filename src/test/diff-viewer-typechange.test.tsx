@@ -8,6 +8,7 @@ import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
+import { stubCanvas } from "./canvas-stub";
 
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
@@ -21,16 +22,7 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
   loadSettings: vi.fn(),
 }));
 
-// @git-diff-view measures text on a 2D canvas, which jsdom leaves null.
-beforeAll(() => {
-  const measure = {
-    font: "",
-    measureText: (t: string) => ({ width: t.length }),
-  };
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    () => measure as unknown as CanvasRenderingContext2D,
-  );
-});
+beforeAll(stubCanvas);
 
 /** A symlink at x replaced by a binary file, unstaged: one FileDiff whose text
  *  holds a text half and a binary half. */
