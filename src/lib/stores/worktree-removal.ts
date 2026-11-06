@@ -815,8 +815,8 @@ export async function removeWorktreeForCleanup(
     }
   }
   switch (removal.branchCleanup) {
-    // notRequested with a branch passed: the ref was already gone at the tip
-    // pin, which is this row's end state.
+    // notRequested with a branch passed: the ref was already gone, at the tip
+    // pin or when the delete re-read it, which is this row's end state.
     case "deleted":
     case "notRequested":
       return { ok: true, branch: "deleted" };

@@ -7,8 +7,9 @@
  * checked, which the reopen's own verdicts decide again; it re-seeds to the
  * pre-checked set only when the repo or that set changes. After a batch that
  * left the dialog open, until the user changes the mode, window, criteria or
- * worktree opt-in, or closes it, a changed set only prunes names that stopped
- * being candidates, so a batch never re-checks a row the user unchecked.
+ * worktree opt-in, or closes it, a changed set only prunes names no longer
+ * listed, or held for good (dirty, locked, unreadable); a pending read holds
+ * only for now. So a batch never re-checks a row the user unchecked.
  */
 
 import type { ContentVerdict } from "@/lib/git/api";
@@ -28,7 +29,8 @@ export interface SelectionSeed {
   repo: string | null;
   /** The pre-checked key the selection was last seeded from (or adopted). */
   seededKey: string | null;
-  /** The mode/window context of the last batch that left the dialog open. */
+  /** The control context (mode, window, the three criteria and the worktree
+   *  opt-in) of the last batch that left the dialog open. */
   afterBatch: string | null;
 }
 
@@ -98,6 +100,17 @@ export function selectionAfterBatch(
 ): Set<string> {
   const done = new Set(names.slice(0, processed).filter((n) => !failed.has(n)));
   return new Set([...selected].filter((n) => !done.has(n)));
+}
+
+/** Select all: every actionable name, plus each checked name a pending read
+ *  holds right now, so the press never drops a row the user chose. */
+export function selectAllOver(
+  selected: ReadonlySet<string>,
+  pendingHeld: readonly string[],
+  actionable: readonly string[],
+): Set<string> {
+  const held = new Set(pendingHeld);
+  return new Set([...[...selected].filter((n) => held.has(n)), ...actionable]);
 }
 
 /** Pre-check for a verdict-gated row once its verdict settled. `fallbackCheck`

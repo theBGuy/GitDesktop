@@ -798,21 +798,23 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Closed PR** (a pull request closed without merging), and **Idle** for 30, 60, or 90 days.
   Each row names every reason that applies, such as **merged #123**, **closed #45**, or
   **worktree**, and the dialog names pull requests only where it read them. On Git 2.38 or
-  later, a branch your history doesn't already call merged also shows whether everything
-  on it is in the default branch or whether it still carries changes the default branch
-  lacks, compared against the newer of your local default branch and its remote copy.
-  Branches your own history calls merged start **pre-checked**. Idle branches do too,
-  unless that check finds changes still to merge, and a pull-request match starts checked
-  only once the check shows nothing would be lost. Turn on **Include branches checked out
-  in a worktree** to list branches held by another linked folder: acting on one removes
-  that worktree first, never by force, and a locked worktree or one with uncommitted
-  changes is listed but can't be selected. Review the list, then **archive** the checked
-  branches (reversible) or **delete** them. Deleting asks first, and so does archiving when
-  it removes a worktree; the confirmation names how many worktrees and branches it
-  removes. The current branch, the default branch, branches checked out in the main
-  workspace, and agent session branches are never included, and deleting skips protected
-  branches. A branch that couldn't be archived or deleted stays in the list with the reason
-  under its name, ready to retry.
+  later, unless your Git configuration sets a merge driver, a branch your history doesn't
+  already call merged is also checked against the newer of your local default branch and
+  its remote copy: the row shows whether everything on it is in the default branch or it
+  still carries changes the default branch lacks, and a check that can't decide shows
+  nothing. Branches your own history calls merged start **pre-checked**. While **Idle** is
+  on, idle branches do too unless that check finds changes still to merge; any other listed
+  branch starts checked only once the check shows nothing would be lost. Turn on **Include
+  branches checked out in a worktree** to list branches held by another linked folder.
+  Acting on one removes that worktree first, never by force; a worktree row never starts
+  checked; and a worktree that is locked, has uncommitted changes, or couldn't be checked
+  is listed but can't be selected. Review the list, then **archive** the checked branches
+  (reversible) or **delete** them. Deleting asks first, and so does archiving when it
+  removes a worktree; the confirmation names how many worktrees it removes and how many
+  branches it archives or deletes. The current branch, the default branch, branches checked
+  out in the main workspace, and agent session branches are never included, and deleting
+  skips protected branches. A branch that couldn't be archived or deleted stays in the list
+  with the reason under its name, ready to retry.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that

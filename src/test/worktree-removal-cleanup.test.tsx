@@ -416,6 +416,28 @@ describe("removeWorktreeForCleanup git refusals", () => {
     expectSilent();
   });
 
+  it("never lets a path that says untracked steer another failure", async () => {
+    const path = "C:/repos/wt/fix-untracked-files";
+    const denied = new Error(
+      `error: failed to delete '${path}': Permission denied.`,
+    );
+    vi.mocked(removeWorktree).mockRejectedValueOnce(denied);
+    expect(
+      await removeWorktreeForCleanup(qc, {
+        repoPath: REPO,
+        path,
+        name: BRANCH,
+        branch: BRANCH,
+        then: "delete",
+      }),
+    ).toEqual({
+      ok: false,
+      reason: `failed to delete '${path}': Permission denied`,
+    });
+    expect(removeWorktree).toHaveBeenCalledTimes(1);
+    expectSilent();
+  });
+
   it("retries a folder held for a beat, and reports a lasting hold as-is", async () => {
     const busy = new Error(
       "The folder is in use. Close any program using that folder and try again.",

@@ -271,14 +271,16 @@ own, may take it.
 
 ## Or don't do any of this
 
-[GitDesktop](/features/)'s **Clean up branches** keeps two answers to
-the merged question side by side and lets neither stand in for the
-other. A branch the default branch has reached and moved past (the
-ancestry test `-d` makes) starts out checked. One that a recent pull
-request merged, which is how squash and rebase merges show up when the
-app is connected to your forge, gets a badge naming that pull request
-("merged #41"). In the guide's words, the match "goes by branch name, so
-it never pre-checks a row on its own — it badges one for you to confirm."
+[GitDesktop](/features/)'s **Clean up branches** keeps its answers to
+the merged question side by side and lets none stand in for another. A
+branch the default branch has reached and moved past (the ancestry test
+`-d` makes) starts out checked, unless a linked worktree holds it. One
+that a recent pull request merged, which is how squash and rebase merges
+show up when the app is connected to your forge, gets a badge naming that
+pull request ("merged #41"). The match goes by branch name, so the badge
+alone never checks the row. On Git 2.38 or later the dialog can also ask
+`git merge-tree` whether merging the branch would still change anything,
+and a branch with nothing left to add can start checked.
 
 Archive is the dialog's default, with Delete beside it. Archiving folds
 branches into a collapsed "Archived" section of the switcher and leaves

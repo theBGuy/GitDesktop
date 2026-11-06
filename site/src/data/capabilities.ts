@@ -137,7 +137,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "See whether a stale branch still holds work its default branch lacks before you delete it",
+      "See whether a stale branch still holds work the default branch lacks before you delete it (Git 2.38+)",
   },
   {
     group: "Branches & history",

@@ -414,8 +414,10 @@ export function useBranchResetToUpstream(repo: string) {
   );
 }
 
-/** Content checks in flight app-wide: each spawns git twice, and one open
- *  checks every listed branch (150+ in real repos). */
+/** Content checks in flight app-wide: each runs git one to five times (a tip
+ *  that no longer resolves stops after one rev-parse; a clean verdict adds a
+ *  merge-base read, and a content merge two more), and one open checks every
+ *  listed branch (150+ in real repos). */
 const CONTENT_CHECK_SLOTS = 4;
 
 /** FIFO slot queue. A queued acquire rejects with the abort reason, so a
@@ -455,8 +457,10 @@ function slotQueue(size: number) {
 
 const contentCheckSlots = slotQueue(CONTENT_CHECK_SLOTS);
 
-/** Long enough that a row hidden and shown again within an open keeps its
- *  landed verdict; the close or epoch change drops the open's entries itself. */
+/** An in-flight check is cancelled and reverted when its last observer leaves
+ *  (the queryFn reads the abort signal), and a latched answer returns without
+ *  git, so this only keeps a landed answer across a brief observer gap. The
+ *  close or epoch change drops the open's entries itself. */
 const CONTENT_CHECK_GC_TIME = 5 * 60_000;
 
 // Minted only inside a setState updater: the React Compiler would cache a
@@ -476,12 +480,20 @@ interface ContentCheckOpen {
   /** The base this open's first settled read gave (null: none, or the read
    *  failed); undefined until then. A later refetch never moves it. */
   base: api.ContentCheckBase | null | undefined;
+  /** Each branch's first settled check this open (null: it failed). A later
+   *  refetch never moves one. */
+  answers: ReadonlyMap<string, api.BranchContentMerged | null>;
 }
 
+const NO_ANSWERS: ReadonlyMap<string, api.BranchContentMerged | null> =
+  new Map();
+
 export interface BranchContentCheck {
-  /** "unsupported": git < 2.38 or no resolvable default branch. "pending": the
-   *  base or some requested verdict is still running. "settled": every
-   *  requested branch has a verdict (unknown included). */
+  /** "unsupported": git < 2.38 (or a version that can't be read), no resolvable
+   *  default branch, a failed base read (final for the open), or a configured
+   *  merge driver or merge.default (or an unreadable config).
+   *  "pending": the base or some requested verdict is still running.
+   *  "settled": every requested branch has a verdict (unknown included). */
   status: "unsupported" | "pending" | "settled";
   base: api.ContentCheckBase | null;
   /** Landed verdicts by branch name; a requested branch missing here is still
@@ -523,6 +535,7 @@ export function useBranchContentCheck(
             repoPath,
             latched: defaultBranch,
             base: undefined,
+            answers: NO_ANSWERS,
           },
     );
   } else if (!enabled && open !== null) {
@@ -581,6 +594,10 @@ export function useBranchContentCheck(
               branch,
             ] as const,
             queryFn: async ({ signal }: { signal: AbortSignal }) => {
+              const landed = live.answers.get(branch);
+              if (landed === null)
+                throw new Error("This branch's check already failed");
+              if (landed !== undefined) return landed;
               await contentCheckSlots.acquire(signal);
               try {
                 // A cancel can land between the grant and this continuation,
@@ -603,6 +620,32 @@ export function useBranchContentCheck(
           }))
         : [],
   });
+  // Latched like the base (`settledBase`/`landedBase`): a branch's first settled
+  // answer is final for the open, and its queryFn hands it back without git, so
+  // a filterless refetch never moves a verdict.
+  let freshAnswers: Map<string, api.BranchContentMerged | null> | null = null;
+  if (live !== null && base !== null) {
+    for (let i = 0; i < branches.length; i++) {
+      const branch = branches[i];
+      const query = verdictQueries[i];
+      if (query === undefined || live.answers.has(branch)) continue;
+      const answer = query.data ?? (query.isError ? null : undefined);
+      if (answer === undefined) continue;
+      freshAnswers ??= new Map();
+      freshAnswers.set(branch, answer);
+    }
+  }
+  if (live !== null && freshAnswers !== null) {
+    const epochNow = live.epoch;
+    const landing = freshAnswers;
+    setOpen((prev) => {
+      if (prev === null || prev.epoch !== epochNow) return prev;
+      const answers = new Map(prev.answers);
+      for (const [branch, answer] of landing)
+        if (!answers.has(branch)) answers.set(branch, answer);
+      return { ...prev, answers };
+    });
+  }
 
   // Ended in an effect BODY on the close or epoch-change commit, never in a
   // cleanup: an <Activity> hide runs cleanups, and the open outlives a hide.
@@ -675,13 +718,14 @@ export function useBranchContentCheck(
       pendingCount: branches.length,
     };
   let pendingCount = 0;
-  branches.forEach((branch, i) => {
-    const query = verdictQueries[i];
-    if (query?.data) verdicts.set(branch, query.data.verdict);
+  for (const branch of branches) {
+    const answer = live.answers.has(branch)
+      ? live.answers.get(branch)
+      : freshAnswers?.get(branch);
+    if (answer === undefined) pendingCount++;
     // A failed check fails toward unknown, never toward merged.
-    else if (query?.isError) verdicts.set(branch, "unknown");
-    else pendingCount++;
-  });
+    else verdicts.set(branch, answer?.verdict ?? "unknown");
+  }
   return {
     status: pendingCount > 0 ? "pending" : "settled",
     base,

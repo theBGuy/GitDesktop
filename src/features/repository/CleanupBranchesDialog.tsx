@@ -14,15 +14,16 @@ import {
   useEffect,
   useEffectEvent,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { LabeledGroup } from "@/components/form/labeled-group";
 import { RelativeTime, useRelativeNow } from "@/components/relative-time";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -61,6 +62,7 @@ import {
   keepCandidates,
   namesOfKey,
   type SelectionSeed,
+  selectAllOver,
   selectionAfterBatch,
   selectionKey,
   selectionStep,
@@ -236,13 +238,76 @@ const MERGED_PR_ASIDE: Record<PrCheckState, string> = {
   unavailable: "",
 };
 
+/** The empty state's closed clause claims a pull-request read found nothing, so
+ *  it rides the same per-state rule as {@link MERGED_PR_ASIDE}. */
+const CLOSED_PR_CLAIM: Record<PrCheckState, boolean> = {
+  checked: true,
+  pending: true,
+  failed: false,
+  unavailable: false,
+};
+
+/** What follows "No stale branches." when Closed PR is the only criterion on
+ *  and its clause is withheld; a failed read's own caveat follows it instead. */
+const CLOSED_ONLY_NOTE: Record<PrCheckState, string> = {
+  checked: "",
+  pending: "",
+  failed: "",
+  unavailable:
+    " Pull requests aren't being read, so Closed PR can't match a branch.",
+};
+
+/** Which of the pull-request criteria a pull-request read serves. */
+type PrScope = "merged" | "closed" | "both";
+
+function prScope(criteria: Criteria): PrScope {
+  if (criteria.merged && criteria.closed) return "both";
+  return criteria.merged ? "merged" : "closed";
+}
+
 /** What the candidate list is waiting on, per outstanding read. They settle
  *  independently, so the line names the one actually running rather than
- *  whichever came first. */
-const CHECKING_COPY: Record<"merged" | "worktrees" | "rules", string> = {
+ *  whichever came first. The pull-request lines name only the criteria on;
+ *  `contained` is the ancestry read while Merged is off, which still decides
+ *  which listed rows start checked (Closed PR alone included). */
+const CHECKING_COPY: Record<
+  PrScope | "contained" | "default" | "worktrees" | "rules",
+  string
+> = {
   merged: "Checking which branches are merged…",
+  closed: "Checking which branches had a pull request closed…",
+  both: "Checking which branches are merged or closed through a pull request…",
+  contained: "Checking which branches the default branch already contains…",
+  default: "Checking which branch is the default…",
   worktrees: "Checking which branches are checked out in another worktree…",
   rules: "Checking branch protection rules…",
+};
+type CheckingWhat = keyof typeof CHECKING_COPY;
+
+/** A parked pull-request read's line, naming the criteria it serves. */
+const WAITING_COPY: Record<PrScope, string> = {
+  merged:
+    "Waiting for a connection to check which branches were merged through a pull request…",
+  closed:
+    "Waiting for a connection to check which branches had a pull request closed without merging…",
+  both: "Waiting for a connection to check which branches were merged or closed through a pull request…",
+};
+
+/** A failed pull-request read's caveats (the status line, then the empty
+ *  state's), naming the criteria it serves. */
+const PR_FAILED_LINE: Record<PrScope, string> = {
+  merged:
+    "Pull requests couldn't be checked — a branch merged through one may be missing.",
+  closed:
+    "Pull requests couldn't be checked — a branch whose pull request was closed may be missing.",
+  both: "Pull requests couldn't be checked — a branch merged or closed through one may be missing.",
+};
+const PR_FAILED_EMPTY_NOTE: Record<PrScope, string> = {
+  merged:
+    " Pull requests couldn't be checked, so a branch merged through one may be missing here.",
+  closed:
+    " Pull requests couldn't be checked, so a branch whose pull request was closed may be missing here.",
+  both: " Pull requests couldn't be checked, so a branch merged or closed through one may be missing here.",
 };
 
 /** Why a worktree row can't be acted on: a locked or dirty worktree refuses
@@ -250,11 +315,33 @@ const CHECKING_COPY: Record<"merged" | "worktrees" | "rules", string> = {
  *  answer to act on. */
 type WorktreeHold = "locked" | "dirty" | "pending" | "unreadable";
 
-const WORKTREE_ROW_REASON: Record<Exclude<WorktreeHold, "pending">, string> = {
+/** Each hold's reason; the pending one reaches AT only, beside its visible
+ *  skeleton. */
+const WORKTREE_ROW_REASON: Record<WorktreeHold, string> = {
   locked: "Worktree is locked, so it can't be removed.",
   dirty: "Worktree has uncommitted changes, so it can't be removed.",
+  pending: "Checking this worktree for uncommitted changes…",
   unreadable: "Couldn't check the worktree for uncommitted changes.",
 };
+
+/** The primary's hold reasons, so a held primary stays focusable and says why:
+ *  the confirm returns focus to it while a batch runs. Cancel holds with the
+ *  running one. */
+const PRIMARY_RUNNING_REASON = "Wait for the current batch to finish.";
+const PRIMARY_HOLDING_REASON =
+  "Wait for the list to finish checking which branches it can act on.";
+const PRIMARY_EMPTY_REASON: Record<Mode, string> = {
+  archive: "Select a branch to archive.",
+  delete: "Select a branch to delete.",
+};
+
+const NO_FAILURES: ReadonlyMap<string, string> = new Map();
+
+/** Title-only badge explanations, also handed to AT through the row checkbox's
+ *  description. */
+const PR_CLOSED_DETAIL = "Closed without merging — matched by branch name";
+const prMergedDetail = (label: string) =>
+  `Merged via pull request ${label} — matched by branch name`;
 
 /** A removal that succeeded but left the branch in place; each reads after the
  *  row's "Couldn't delete: " lead and states both outcomes. */
@@ -283,6 +370,9 @@ const VERDICT_BADGE: Record<
   },
 };
 
+const verdictDetail = (verdict: "clean" | "changes", baseRef: string) =>
+  `${VERDICT_BADGE[verdict].title} ${baseRef}`;
+
 const WORKTREE_BADGE: Record<
   "locked" | "free",
   { word: string; Icon: typeof CheckIcon }
@@ -303,6 +393,8 @@ interface ConfirmBatch {
    *  exactly these; a name missing here is acted on as a plain branch. */
   worktreePaths: ReadonlyMap<string, string>;
   changes: number;
+  /** The ref `changes` was measured against. */
+  baseRef: string;
 }
 
 const CONFIRM_TITLE: Record<ConfirmKind, (batch: ConfirmBatch) => string> = {
@@ -358,16 +450,24 @@ const CONTROL_ROW =
  *  can park, since the other reads work on local data. */
 function CheckingLine({
   what,
-  paused,
+  waitingOn,
+  srOnly,
 }: {
-  what: "merged" | "worktrees" | "rules";
-  paused: boolean;
+  what: CheckingWhat;
+  /** The parked pull-request read's scope when no local read the list waits
+   *  on (default branch, worktrees, branch rules, ancestry) is running, else
+   *  null. */
+  waitingOn: PrScope | null;
+  /** AT-only while the skeleton paints, whatever un-hides the region. */
+  srOnly: boolean;
 }) {
   return (
-    <p className="px-1 py-1 text-[11px] text-muted-foreground">
-      {paused
-        ? "Waiting for a connection to check which branches were merged through a pull request…"
-        : CHECKING_COPY[what]}
+    <p
+      className={
+        srOnly ? "sr-only" : "px-1 py-1 text-[11px] text-muted-foreground"
+      }
+    >
+      {waitingOn === null ? CHECKING_COPY[what] : WAITING_COPY[waitingOn]}
     </p>
   );
 }
@@ -407,13 +507,12 @@ function RowBadges({
   candidate: c,
   error,
   verdict,
-  defaultShort,
   baseRef,
 }: {
   candidate: Candidate;
   error: string | undefined;
   verdict: RowVerdict;
-  defaultShort: string;
+  /** The ref the verdicts were measured against, as git names it. */
   baseRef: string;
 }) {
   const words: { key: string; node: ReactNode }[] = [];
@@ -441,10 +540,7 @@ function RowBadges({
     words.push({
       key: "pr-merged",
       node: (
-        <span
-          className="text-merged"
-          title={`Merged via pull request ${c.prMerged} — matched by branch name`}
-        >
+        <span className="text-merged" title={prMergedDetail(c.prMerged)}>
           merged {c.prMerged}
         </span>
       ),
@@ -453,10 +549,7 @@ function RowBadges({
     words.push({
       key: "pr-closed",
       node: (
-        <span
-          className="text-muted-foreground"
-          title="Closed without merging — matched by branch name"
-        >
+        <span className="text-muted-foreground" title={PR_CLOSED_DETAIL}>
           closed {c.prClosed}
         </span>
       ),
@@ -490,11 +583,11 @@ function RowBadges({
       node: (
         <span
           className={cn("flex items-center gap-0.5", v.tone)}
-          title={`${v.title} ${baseRef}`}
+          title={verdictDetail(verdict, baseRef)}
         >
           <v.Icon weight="bold" aria-hidden className="size-3" />
           <span>
-            {v.lead} <span className="font-mono">{defaultShort}</span>
+            {v.lead} <span className="font-mono">{baseRef}</span>
           </span>
         </span>
       ),
@@ -550,7 +643,7 @@ function NoMatchCopy({
         </>
       ),
     });
-  if (criteria.closed)
+  if (criteria.closed && CLOSED_PR_CLAIM[prCheckState])
     clauses.push({
       key: "closed",
       aside: false,
@@ -562,6 +655,9 @@ function NoMatchCopy({
       aside: false,
       node: `idle for ${windowDays} days`,
     });
+  // Only a withheld closed clause leaves none: this renders with a criterion on.
+  if (clauses.length === 0)
+    return <>{`No stale branches.${CLOSED_ONLY_NOTE[prCheckState]}`}</>;
   const last = clauses.length - 1;
   return (
     <>
@@ -574,19 +670,15 @@ function NoMatchCopy({
         </Fragment>
       ))}
       {"."}
-      {criteria.idle ? " Try a shorter window." : null}
+      {criteria.idle && windowDays > AGE_WINDOWS[0]
+        ? " Try a shorter window."
+        : null}
     </>
   );
 }
 
 /** A confirm's body, from the snapshot it opened with. */
-function ConfirmBody({
-  batch,
-  defaultShort,
-}: {
-  batch: ConfirmBatch;
-  defaultShort: string;
-}) {
+function ConfirmBody({ batch }: { batch: ConfirmBatch }) {
   const branches = pluralBranches(batch.names.length);
   const worktrees = batch.worktreePaths.size;
   if (batch.kind === "archiveWorktrees")
@@ -612,7 +704,7 @@ function ConfirmBody({
       {batch.changes > 0 ? (
         <>
           {` ${changesLead} changes not in `}
-          <span className="font-mono">{defaultShort}</span>.
+          <span className="font-mono">{batch.baseRef}</span>.
         </>
       ) : null}
       {" This can't be undone."}
@@ -629,8 +721,10 @@ function ConfirmBody({
  * (`git branch -D`) the selected set in one pass. The current branch, the
  * default branch and `gd/session/*` branches are never candidates. A branch
  * checked out in a linked worktree is listed only under the worktree opt-in,
- * which removes that worktree first (never forced); Archive also skips
- * already-archived branches, and Delete skips rule-protected ones.
+ * which removes that worktree first (never forced), except one whose worktree
+ * is already being removed: Archive lists it as a plain row whatever the opt-in
+ * says. Archive also skips already-archived branches, and Delete skips
+ * rule-protected ones.
  *
  * Pre-checks stay safety-first: ancestry-merged rows seed checked; idle and
  * pull-request rows wait for their content verdict; worktree rows never seed.
@@ -733,6 +827,9 @@ export function CleanupBranchesDialog({
     total: number;
   } | null>(null);
   const [failed, setFailed] = useState<Map<string, string>>(new Map());
+  // The repo `failed` was written in: the dialog outlives a repo switch and a
+  // batch can settle after one, so its lines render only in that repo.
+  const [failedIn, setFailedIn] = useState<string | null>(null);
   // The rows a running batch renders, their verdict slots and its actionable
   // names, frozen at its start: its own removal marks would otherwise reclassify
   // rows under it, drop a row's verdict and move the counts. Rows leave on the
@@ -742,6 +839,9 @@ export function CleanupBranchesDialog({
     rows: Candidate[];
     verdicts: ReadonlyMap<string, RowVerdict>;
     actionable: readonly string[];
+    /** The ref those verdicts were measured against: a switch or the close's
+     *  reset moves the live one. */
+    baseRef: string;
   } | null>(null);
   const running = progress !== null;
   // The snapshot paints only while it applies: under its run, and through the
@@ -761,6 +861,9 @@ export function CleanupBranchesDialog({
   // The same names for render, which never reads the ref: a kept row shows no
   // verdict and a confirm counts it as having changes.
   const [keptNames, setKeptNames] = useState<ReadonlySet<string>>(new Set());
+  // Kept rows touched by the batch rather than the user: the next open releases
+  // them, so its own verdict decides; a user toggle since makes the touch theirs.
+  const keptTouchRef = useRef<Set<string>>(new Set());
 
   useSeedOnOpen(open, () => {
     setMode("archive");
@@ -772,6 +875,8 @@ export function CleanupBranchesDialog({
     setFrozen(null);
     keptRef.current.clear();
     setKeptNames(new Set());
+    for (const n of keptTouchRef.current) touchedRef.current.delete(n);
+    keptTouchRef.current.clear();
     const carried = autoCheckedRef.current;
     autoCheckedRef.current = new Set();
     setSelected((prev) => dropUntouched(prev, carried, touchedRef.current));
@@ -783,8 +888,10 @@ export function CleanupBranchesDialog({
     setConfirmBatch((c) => (c !== null && c.repoPath !== repoPath ? null : c));
   }, [repoPath]);
 
-  // The widened prop stops here: only the content check tells a loading
-  // default branch from a settled none.
+  // A loading default branch excludes nothing and gates no divergence, so the
+  // list holds on it like the worktree and rules reads; a failed read arrives
+  // settled as null, so the hold can't stick.
+  const defaultLoading = defaultBranch === undefined;
   const defaultOrNull = defaultBranch ?? null;
   const defaultShort = defaultOrNull ?? "the default branch";
 
@@ -933,7 +1040,7 @@ export function CleanupBranchesDialog({
   // excludes nothing until they land. Held in BOTH modes: rules settle within
   // moments of opening the repo while this dialog opens later, and the mode can
   // flip while it is open, so a delete-only hold buys nothing and can miss.
-  const holdingReads = checkingWorktrees || rulesSettling;
+  const holdingReads = checkingWorktrees || rulesSettling || defaultLoading;
 
   // Every ACTIONABLE row: held worktree rows render but stay out of the count,
   // Select all and the batch.
@@ -960,8 +1067,9 @@ export function CleanupBranchesDialog({
         .map((c) => c.branch.name),
     [candidates],
   );
-  // Content verdicts for every row ancestry doesn't already prove merged; a
-  // per-open snapshot that lands once, never re-fetched under the dialog.
+  // Content verdicts for every row ancestry doesn't already prove merged; the
+  // hook latches each branch's first settled verdict for the open, so a landed
+  // verdict never changes within it.
   const checkNames = useMemo(
     () => candidates.filter((c) => !c.merged).map((c) => c.branch.name),
     [candidates],
@@ -976,15 +1084,17 @@ export function CleanupBranchesDialog({
   // (sorted keys, so a new-but-equal array or a reorder on the 30s clock isn't
   // one); a close and reopen, an `<Activity>` re-show or a held-read flap keeps
   // the user's choices. After a batch that leaves the dialog open, until the
-  // user changes a control or closes it, a changed set only prunes rows that
-  // stopped being candidates (cleanup-selection.ts).
+  // user changes a control or closes it, a changed set only prunes names no
+  // longer listed, or held for good (dirty, locked, unreadable); a pending
+  // read holds only for now (cleanup-selection.ts).
   const autoSelectKey = selectionKey(autoSelectNames);
   // The user's own controls; a batch's refetch changes none of them.
   const selectionContext = `${mode}\n${windowDays}\n${criteria.merged ? 1 : 0}${criteria.closed ? 1 : 0}${criteria.idle ? 1 : 0}\n${includeWorktrees ? 1 : 0}`;
   // Rows a settled verdict pre-checks: idle and pull-request rows, never a
-  // worktree row. The fallback stands in only once the check is unsupported
-  // for this open, never while it is still pending, and idleness counts only
-  // while Idle is on: a row listed through a pull request alone starts unchecked.
+  // worktree row. The fallback stands in when the check is unsupported or a
+  // verdict comes back unknown, never while one is pending, and idleness counts
+  // only while Idle is on: a row listed through a pull request alone starts
+  // unchecked.
   const shouldCheckKey = selectionKey(
     candidates
       .filter((c) => {
@@ -1029,8 +1139,10 @@ export function CleanupBranchesDialog({
       if (step.repo !== prevRepo) {
         keptRef.current.clear();
         setKeptNames(new Set());
+        setFailed(new Map());
       }
       touchedRef.current = new Set(keptRef.current);
+      keptTouchRef.current = new Set(keptRef.current);
       const want = settledCheckNames().filter(
         (n) => !touchedRef.current.has(n),
       );
@@ -1065,6 +1177,17 @@ export function CleanupBranchesDialog({
     for (const n of want) autoCheckedRef.current.add(n);
     setSelected((prev) => applySettledChecks(prev, touchedRef.current, want));
   }, [shouldCheckKey, running, holdingReads]);
+  // A worktree row stays checked only by the user's hand: a row checked
+  // automatically while it was plain loses that check when a worktree read
+  // shows a checkout holding it, since removing its folder was never chosen.
+  const worktreeRowKey = selectionKey(
+    candidates.filter((c) => c.worktree !== null).map((c) => c.branch.name),
+  );
+  useEffect(() => {
+    if (running || worktreeRowKey === "") return;
+    const rows = new Set(namesOfKey(worktreeRowKey));
+    setSelected((prev) => dropUntouched(prev, rows, touchedRef.current));
+  }, [worktreeRowKey, running]);
 
   const noCriteria = !criteria.merged && !criteria.closed && !criteria.idle;
   // Pull requests feed only the Merged and Closed PR criteria, so their read
@@ -1073,20 +1196,28 @@ export function CleanupBranchesDialog({
   // First load: a merged signal still in flight and nothing has surfaced yet.
   // Age-based candidates already show instantly (branch data is cached), so this
   // only gates the truly-empty first paint.
-  const checkingMerged =
-    (Boolean(defaultOrNull) && divergence.isLoading) ||
-    (prMatters && prCheckState === "pending");
-  // Parked matters only while the merged check is still outstanding: a parked
-  // FIRST fetch keeps `checkingMerged` true (prCheckState "pending"), while a
-  // parked background refetch over settled data has nothing to wait for — and
-  // its connection copy would answer for the local reads still running.
-  const pausedMergedCheck = checkingMerged && prMatters && prCheckPaused;
-  // Which of the status region's lines are DRAWN — it announces more than it
-  // shows: the check line stays sr-only on the empty first paint (the skeleton
-  // is the visual signal there).
+  const prPending = prMatters && prCheckState === "pending";
+  const ancestryLoading = Boolean(defaultOrNull) && divergence.isLoading;
+  const checkingMerged = ancestryLoading || prPending;
+  // Local reads run offline too, so one still running outranks a parked
+  // pull-request read: its line and skeleton show instead of the wait.
+  const localRunning = holdingReads || ancestryLoading;
+  // Parked counts only for a pull-request read still pending, the list's actual
+  // wait: a parked background refetch over settled data has nothing to wait
+  // for, and its connection copy would answer for the local reads still running.
+  const pausedMergedCheck = prPending && prCheckPaused;
+  // The running merged-or-closed check's line: a pull-request read names the
+  // criteria it serves; the ancestry read alone serves Merged, or while Merged
+  // is off still decides which listed rows start checked (Closed PR alone
+  // included), so it claims no merged check.
+  function mergedCheckLine(): CheckingWhat {
+    if (prPending) return prScope(criteria);
+    return ancestryCheckLine();
+  }
+  function ancestryCheckLine(): CheckingWhat {
+    return criteria.merged ? "merged" : "contained";
+  }
   const stillChecking = !noCriteria && (checkingMerged || holdingReads);
-  const showCheckLine =
-    stillChecking && (pausedMergedCheck || candidates.length > 0);
   const showPrFailedLine =
     prCheckState === "failed" && prMatters && candidates.length > 0;
   // Unlike the pull-request caveat, this one shows on an empty list too: a
@@ -1098,17 +1229,33 @@ export function CleanupBranchesDialog({
   const showSkeleton =
     !noCriteria &&
     (holdingReads || (checkingMerged && candidates.length === 0));
+  // Which of the status region's lines are DRAWN — it announces more than it
+  // shows: the check line stays sr-only wherever the skeleton paints (it is the
+  // visual signal there), provisional rows under a held read included.
+  const skeletonPaints =
+    showSkeleton &&
+    shownFrozen === null &&
+    !(pausedMergedCheck && !localRunning);
+  const showCheckLine = stillChecking && !skeletonPaints;
   // Verdicts still landing. The visible count ticks OUTSIDE the live region,
   // which carries one stable sentence instead, so a screen reader hears the
   // check start, not every landing.
   const verdictsPending = check.status === "pending" && checkNames.length > 0;
+  // Neither speaks over frozen rows: the live check may be another repo's.
   const tickingBase =
-    verdictsPending && !showSkeleton && rows.length > 0 ? check.base : null;
+    verdictsPending && !showSkeleton && rows.length > 0 && shownFrozen === null
+      ? check.base
+      : null;
   const comparedWith =
-    check.status === "settled" && check.base !== null && checkNames.length > 0
+    shownFrozen === null &&
+    check.status === "settled" &&
+    check.base !== null &&
+    checkNames.length > 0
       ? ` Contents compared with ${check.base.refName}.`
       : "";
   const baseRef = check.base?.refName ?? defaultShort;
+  // Frozen rows name the ref their frozen verdicts were measured against.
+  const rowsBaseRef = shownFrozen?.baseRef ?? baseRef;
   // A kept row's verdict measured a tip the batch found moved or couldn't read,
   // so it shows none for the rest of the open.
   function rowVerdict(c: Candidate): RowVerdict {
@@ -1129,6 +1276,7 @@ export function CleanupBranchesDialog({
 
   function toggle(name: string) {
     if (running) return;
+    keptTouchRef.current.delete(name);
     touchedRef.current.add(name);
     setSelected((prev) => {
       const next = new Set(prev);
@@ -1138,10 +1286,18 @@ export function CleanupBranchesDialog({
     });
   }
 
+  // Select all adds to the checked rows a pending status read holds, so it never
+  // drops one the user chose; Deselect all clears everything.
   function toggleAll() {
     if (running) return;
     for (const name of candidateNames) touchedRef.current.add(name);
-    setSelected(allChecked ? new Set() : new Set(candidateNames));
+    for (const name of candidateNames) keptTouchRef.current.delete(name);
+    const pendingHeld = candidates
+      .filter((c) => worktreeHold(c) === "pending")
+      .map((c) => c.branch.name);
+    setSelected((prev) =>
+      allChecked ? new Set() : selectAllOver(prev, pendingHeld, candidateNames),
+    );
   }
 
   // Changing a control opens a fresh context, so drop any per-branch failures
@@ -1179,6 +1335,14 @@ export function CleanupBranchesDialog({
       void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
   }
 
+  // The latest committed protection read, so a running batch sees rules that
+  // land after it started; the repo it answers for keeps a switched repo's
+  // rules away from the batch.
+  const protectionRef = useRef({ repoPath, isProtected });
+  useLayoutEffect(() => {
+    protectionRef.current = { repoPath, isProtected };
+  });
+
   async function runBatch() {
     // A confirm hands over the set and worktree rows it showed; an unconfirmed
     // Archive acts on the live selection and removes no worktree, since it
@@ -1200,11 +1364,19 @@ export function CleanupBranchesDialog({
     const fails = new Map<string, string>();
     // Removed worktrees whose branch stayed: failures that leave the selection.
     const kept = new Set<string>();
+    // Live for the batch's own repo; after a switch, the rules it started with.
+    const protectedNow = (name: string) => {
+      const live = protectionRef.current;
+      return live.repoPath === repoPath
+        ? live.isProtected(name)
+        : isProtected(name);
+    };
     setFailed(new Map());
     setFrozen({
       rows: candidates,
       verdicts: new Map(candidates.map((c) => [c.branch.name, rowVerdict(c)])),
       actionable: candidateNames,
+      baseRef,
     });
     setProgress({ done: 0, total: names.length });
     let processed = names.length;
@@ -1218,10 +1390,10 @@ export function CleanupBranchesDialog({
       const name = names[i];
       const wtPath = worktreePaths.get(name);
       try {
-        if (mode === "delete" && isProtected(name)) {
-          // Defensive: delete-mode candidates already exclude protected names,
-          // so this stays unreachable unless that filter changes. It runs
-          // first, so a protected branch never loses its worktree either.
+        if (mode === "delete" && protectedNow(name)) {
+          // Delete-mode candidates already exclude protected names; this
+          // covers rules that land after the confirm captured its names, or
+          // during the batch. First, so a protected branch keeps its worktree.
           fails.set(name, "protected by a branch rule");
         } else if (wtPath !== undefined) {
           // Called per row as it starts: the removal re-checks updates and
@@ -1266,8 +1438,16 @@ export function CleanupBranchesDialog({
     for (const n of kept) {
       keptRef.current.add(n);
       touchedRef.current.add(n);
+      keptTouchRef.current.add(n);
     }
     if (kept.size > 0) setKeptNames(new Set(keptRef.current));
+    // A finished branch is touched too: a stale list can still show it, and a
+    // settled verdict must not check it again for a retry.
+    for (const n of names.slice(0, processed))
+      if (!fails.has(n)) {
+        touchedRef.current.add(n);
+        keptTouchRef.current.add(n);
+      }
     const retryable = { has: (n: string) => fails.has(n) && !kept.has(n) };
     setSelected((prev) =>
       selectionAfterBatch(prev, names, processed, retryable),
@@ -1289,6 +1469,7 @@ export function CleanupBranchesDialog({
     if (processed < names.length) {
       if (fails.size > 0) {
         setFailed(fails);
+        setFailedIn(repoPath);
         toast.error(`${verb} ${ok}, ${fails.size} failed`);
       } else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);
       return;
@@ -1299,6 +1480,7 @@ export function CleanupBranchesDialog({
       return;
     }
     setFailed(fails);
+    setFailedIn(repoPath);
     // The successful ones drop out of the candidate list on refetch, leaving the
     // failures on screen with their reason; the user can retry them.
     toast.error(`${verb} ${ok}, ${fails.size} failed`);
@@ -1329,6 +1511,7 @@ export function CleanupBranchesDialog({
       changes: names.filter(
         (n) => keptNames.has(n) || check.verdicts.get(n) === "changes",
       ).length,
+      baseRef,
     };
     if (mode === "delete") openConfirm({ kind: "delete", ...snapshot });
     else if (worktreePaths.size > 0)
@@ -1358,6 +1541,19 @@ export function CleanupBranchesDialog({
   const primaryLabel = running
     ? `${gerund}… ${progress?.done ?? 0}/${progress?.total ?? 0}`
     : `${verb} ${pluralBranches(selectedCount)}`;
+  const primaryHeldReason = ((): string | null => {
+    switch (true) {
+      case running:
+        return PRIMARY_RUNNING_REASON;
+      case holdingReads:
+        return PRIMARY_HOLDING_REASON;
+      case selectedCount === 0:
+        return PRIMARY_EMPTY_REASON[mode];
+      default:
+        return null;
+    }
+  })();
+  const failedHere = failedIn === repoPath ? failed : NO_FAILURES;
   // The mode's own exclusions can empty the list while stale branches remain, so
   // both empty states name the exclusion instead of reporting none. One string
   // for the prose and the live region — a reader and a listener get the same
@@ -1390,7 +1586,12 @@ export function CleanupBranchesDialog({
             </DialogDescription>
           </DialogHeader>
 
-          {/* Action / Show captions beside their controls, then the opt-in. */}
+          {/* Action / Show captions beside their controls, then the opt-in.
+              A running batch natively disables every control here and in the
+              list as one run-wide lock, explained by the held primary's
+              progress label and reason. onOpenChange refuses every dismissal
+              meanwhile (Escape, the header close, a backdrop press); that close
+              stays enabled on purpose, since the vendored one takes no reason. */}
           <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
             <LabeledGroup label="Action" className={CONTROL_ROW}>
               <div className="inline-flex w-fit rounded-none ring-1 ring-border">
@@ -1478,9 +1679,11 @@ export function CleanupBranchesDialog({
                           windowDays === d &&
                             criteria.idle &&
                             "bg-primary text-primary-foreground",
+                          // Idle off keeps the pick visible without a fill: an
+                          // inset primary ring clears 3:1 on the popover.
                           windowDays === d &&
                             !criteria.idle &&
-                            "bg-muted text-muted-foreground",
+                            "text-foreground ring-1 ring-primary ring-inset",
                           windowDays !== d &&
                             "text-muted-foreground hover:text-foreground",
                         )}
@@ -1570,29 +1773,35 @@ export function CleanupBranchesDialog({
                   honestly repeat on every control change. */}
               {stillChecking ? (
                 (() => {
-                  // A RUNNING local read outranks the parked merged fetch — the
-                  // line names the one actually running, and the waiting copy
-                  // shows only when the parked check is the sole outstanding one.
-                  const what = ((): "merged" | "worktrees" | "rules" => {
+                  // A RUNNING local read the list waits on (default branch,
+                  // worktrees, branch rules, ancestry) outranks the parked
+                  // pull-request fetch: the line names the one running, and the
+                  // waiting copy shows only while none of them is.
+                  const what = ((): CheckingWhat => {
                     switch (true) {
                       case checkingMerged && !pausedMergedCheck:
-                        return "merged";
+                        return mergedCheckLine();
+                      case ancestryLoading:
+                        return ancestryCheckLine();
+                      case defaultLoading:
+                        return "default";
                       case checkingWorktrees:
                         return "worktrees";
                       case rulesSettling:
                         return "rules";
                       default:
-                        return "merged";
+                        return mergedCheckLine();
                     }
                   })();
                   return (
                     <CheckingLine
                       what={what}
-                      paused={
-                        pausedMergedCheck &&
-                        !checkingWorktrees &&
-                        !rulesSettling
+                      waitingOn={
+                        pausedMergedCheck && !localRunning
+                          ? prScope(criteria)
+                          : null
                       }
+                      srOnly={skeletonPaints}
                     />
                   );
                 })()
@@ -1618,8 +1827,7 @@ export function CleanupBranchesDialog({
                       : "sr-only"
                   }
                 >
-                  Pull requests couldn't be checked — a branch merged or closed
-                  through one may be missing.
+                  {PR_FAILED_LINE[prScope(criteria)]}
                 </p>
               ) : null}
               {worktreeCheckFailed ? (
@@ -1635,8 +1843,8 @@ export function CleanupBranchesDialog({
                 className="px-1 py-1 text-[11px] text-muted-foreground"
               >
                 Checked {checkNames.length - check.pendingCount} of{" "}
-                {checkNames.length} branches for changes not in{" "}
-                <span className="font-mono">{tickingBase.refName}</span>…
+                {checkNames.length} {branchNoun(checkNames.length)} for changes
+                not in <span className="font-mono">{tickingBase.refName}</span>…
               </p>
             ) : null}
 
@@ -1650,12 +1858,12 @@ export function CleanupBranchesDialog({
                     </p>
                   );
                 case showSkeleton && shownFrozen === null:
-                  // A running local read (worktrees, branch rules) is real
-                  // activity, so it earns the skeleton even while the
-                  // pull-request fetch sits parked.
+                  // A running local read (default branch, worktrees, branch
+                  // rules, ancestry) is real activity, so it earns the skeleton
+                  // even while the pull-request fetch sits parked.
                   return (
                     <CheckingPlaceholder
-                      paused={pausedMergedCheck && !holdingReads}
+                      paused={pausedMergedCheck && !localRunning}
                     />
                   );
                 case rows.length === 0:
@@ -1674,7 +1882,7 @@ export function CleanupBranchesDialog({
                       {/* Carried by BOTH arms: an excluded-only list is just as
                           incomplete when the pull-request read failed. */}
                       {prCheckState === "failed" && prMatters
-                        ? " Pull requests couldn't be checked, so a branch merged or closed through one may be missing here."
+                        ? PR_FAILED_EMPTY_NOTE[prScope(criteria)]
                         : null}
                     </p>
                   );
@@ -1691,15 +1899,31 @@ export function CleanupBranchesDialog({
                       {rows.map((c, index) => {
                         const name = c.branch.name;
                         const hold = worktreeHold(c);
-                        const err = failed.get(name);
+                        const err = failedHere.get(name);
                         const errId = `${baseId}-${index}`;
                         const holdId = `${baseId}-${index}-hold`;
+                        const detailId = `${baseId}-${index}-detail`;
                         const holdReason =
-                          hold !== null && hold !== "pending"
-                            ? WORKTREE_ROW_REASON[hold]
-                            : null;
+                          hold === null ? null : WORKTREE_ROW_REASON[hold];
+                        const verdict =
+                          shownFrozen === null
+                            ? rowVerdict(c)
+                            : (shownFrozen.verdicts.get(name) ?? null);
+                        // The badges' title-only explanations, for AT; inside
+                        // the label they would join the checkbox's name.
+                        const details = [
+                          c.prMerged ? prMergedDetail(c.prMerged) : null,
+                          c.prClosed ? PR_CLOSED_DETAIL : null,
+                          verdict === "clean" || verdict === "changes"
+                            ? verdictDetail(verdict, rowsBaseRef)
+                            : null,
+                        ].filter((d) => d !== null);
                         const describedBy =
-                          [err ? errId : null, holdReason ? holdId : null]
+                          [
+                            err ? errId : null,
+                            holdReason ? holdId : null,
+                            details.length > 0 ? detailId : null,
+                          ]
                             .filter(Boolean)
                             .join(" ") || undefined;
                         return (
@@ -1758,22 +1982,27 @@ export function CleanupBranchesDialog({
                               <RowBadges
                                 candidate={c}
                                 error={err}
-                                verdict={
-                                  shownFrozen === null
-                                    ? rowVerdict(c)
-                                    : (shownFrozen.verdicts.get(name) ?? null)
-                                }
-                                defaultShort={defaultShort}
-                                baseRef={baseRef}
+                                verdict={verdict}
+                                baseRef={rowsBaseRef}
                               />
                             </label>
-                            {hold === "pending" ? (
-                              <div
-                                aria-hidden
-                                className="mt-1 ml-6 h-2.5 w-40 animate-pulse bg-muted"
-                              />
+                            {details.length > 0 ? (
+                              <span id={detailId} className="sr-only">
+                                {details.join(". ")}
+                              </span>
                             ) : null}
-                            {holdReason ? (
+                            {hold === "pending" ? (
+                              <>
+                                <div
+                                  aria-hidden
+                                  className="mt-1 ml-6 h-2.5 w-40 animate-pulse bg-muted"
+                                />
+                                <span id={holdId} className="sr-only">
+                                  {holdReason}
+                                </span>
+                              </>
+                            ) : null}
+                            {holdReason && hold !== "pending" ? (
                               <div
                                 id={holdId}
                                 className="truncate pl-6 text-[11px] text-muted-foreground"
@@ -1801,22 +2030,24 @@ export function CleanupBranchesDialog({
           </div>
 
           <DialogFooter>
-            <Button
+            <DisabledReasonButton
               type="button"
               variant="outline"
               disabled={running}
+              reason={running ? PRIMARY_RUNNING_REASON : null}
               onClick={onClose}
             >
               Cancel
-            </Button>
-            <Button
+            </DisabledReasonButton>
+            <DisabledReasonButton
               type="button"
               variant={mode === "delete" ? "destructive" : "default"}
-              disabled={selectedCount === 0 || running || holdingReads}
+              disabled={primaryHeldReason !== null}
+              reason={primaryHeldReason}
               onClick={onPrimary}
             >
               {primaryLabel}
-            </Button>
+            </DisabledReasonButton>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1826,9 +2057,7 @@ export function CleanupBranchesDialog({
           open={open && confirmBatch !== null}
           onCancel={() => setConfirmBatch(null)}
           title={CONFIRM_TITLE[shownConfirm.kind](shownConfirm)}
-          body={
-            <ConfirmBody batch={shownConfirm} defaultShort={defaultShort} />
-          }
+          body={<ConfirmBody batch={shownConfirm} />}
           confirmLabel={`${CONFIRM_VERB[shownConfirm.kind]} ${pluralBranches(shownConfirm.names.length)}`}
           confirmVariant={CONFIRM_VARIANT[shownConfirm.kind]}
           onConfirm={onConfirmBatch}

@@ -184,10 +184,11 @@ default's name), and a PR badge.
   branch (directly, or by a recent pull request where the forge connection
   supplies one, so squash and rebase merges count), branches whose pull
   request was closed without merging, branches with no commits in a chosen
-  window, or any mix. On Git 2.38+ a content check shows whether a stale
-  branch still holds work the default branch lacks, and pre-checking leaves
-  those branches out. Branches checked out in another linked worktree can join
-  the list; acting on one removes its clean worktree first.
+  window, or any mix. On Git 2.38+, unless your Git configuration sets a
+  merge driver, a content check shows whether a stale branch still holds
+  work the default branch lacks, and pre-checking leaves those branches out.
+  Branches checked out in another linked worktree can join the list; acting
+  on one removes its clean worktree first.
 - **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
   memory before you commit (fast-forward, already up to date, clean, or
   exactly which files will conflict), with `--no-ff` and a clearly cautioned

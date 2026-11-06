@@ -198,7 +198,9 @@ export interface BranchContentMerged {
 }
 
 /** The newer of the default branch and its remote-tracking counterpart; null on
- *  git older than 2.38 or when neither side resolves. */
+ *  git older than 2.38 (or a git version that can't be read), when neither side
+ *  resolves, or when a merge driver or merge.default is configured or the config
+ *  can't be read. */
 export const gitContentCheckBase = (repoPath: string, defaultBranch: string) =>
   invoke<ContentCheckBase | null>("git_content_check_base", {
     repoPath,

@@ -186,6 +186,46 @@ describe("useBranchContentCheck", () => {
     expect(view.latest().pendingCount).toBe(0);
   });
 
+  it("two hook instances share the four-check limit", async () => {
+    const repoA = "C:/repos/cc-shared-a";
+    const repoB = "C:/repos/cc-shared-b";
+    const branchesA = names("shared-a", 6);
+    const branchesB = names("shared-b", 6);
+    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("b"));
+    const a = mount({
+      repoPath: repoA,
+      defaultBranch: "main",
+      branches: branchesA,
+      enabled: true,
+    });
+    const b = mount({
+      repoPath: repoB,
+      defaultBranch: "main",
+      branches: branchesB,
+      enabled: true,
+    });
+    await waitFor(() => expect(gitContentCheckBase).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(calls).toHaveLength(4));
+    await flush();
+    expect(calls).toHaveLength(4);
+    expect(maxInFlight).toBe(4);
+
+    while (calls.some((c) => !c.settled)) {
+      calls.find((c) => !c.settled)?.settle();
+      await flush();
+      expect(inFlight).toBeLessThanOrEqual(4);
+    }
+    expect(maxInFlight).toBe(4);
+    expect(calls.filter((c) => c.repo === repoA).map((c) => c.branch)).toEqual(
+      branchesA,
+    );
+    expect(calls.filter((c) => c.repo === repoB).map((c) => c.branch)).toEqual(
+      branchesB,
+    );
+    a.unmount();
+    b.unmount();
+  });
+
   it("closing stops queued checks and drops the open's cache entries", async () => {
     const repo = "C:/repos/cc-close";
     const branches = names("close", 6);
@@ -455,29 +495,80 @@ describe("useBranchContentCheck", () => {
     for (const call of calls) call.settle();
     await waitFor(() => expect(view.latest().status).toBe("settled"));
 
-    // An account switch invalidates every query, this open's included.
+    // An account switch invalidates every query, this open's included. The
+    // landed verdicts answer from the latch, so the refetch settles on its own.
     vi.mocked(gitContentCheckBase).mockRejectedValueOnce(new Error("spawn"));
-    // Not awaited: it waits on the verdict refetches, which settle by hand.
-    act(() => {
-      void view.client.invalidateQueries();
+    await act(async () => {
+      await view.client.invalidateQueries();
     });
     await flush();
     expect(gitContentCheckBase).toHaveBeenCalledTimes(2);
-    expect(view.latest().status).not.toBe("unsupported");
+    expect(view.latest().status).toBe("settled");
     expect(view.latest().base).toEqual(baseFor("5"));
 
     vi.mocked(gitContentCheckBase).mockResolvedValueOnce(baseFor("6"));
-    // Not awaited: it waits on the verdict refetches, which settle by hand.
-    act(() => {
-      void view.client.invalidateQueries();
+    await act(async () => {
+      await view.client.invalidateQueries();
     });
     await flush();
     expect(gitContentCheckBase).toHaveBeenCalledTimes(3);
     expect(view.latest().base).toEqual(baseFor("5"));
+    expect(calls).toHaveLength(2);
     expect(calls.every((c) => c.baseSha === "5".repeat(40))).toBe(true);
-    for (const call of calls) if (!call.settled) call.settle();
+    expect(view.latest().status).toBe("settled");
+    expect(view.latest().verdicts).toEqual(
+      new Map(branches.map((b) => [b, "clean"])),
+    );
+  });
+
+  it("keeps each first verdict through a filterless refetch, without re-running git", async () => {
+    const repo = "C:/repos/cc-latch-verdicts";
+    const branches = ["vlatch-changes", "vlatch-clean", "vlatch-failed"];
+    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("a"));
+    const view = mount({
+      repoPath: repo,
+      defaultBranch: "main",
+      branches,
+      enabled: true,
+    });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    calls[0].settle("changes");
+    calls[1].settle("clean");
+    calls[2].fail();
+    const landed = new Map<string, ContentVerdict>([
+      ["vlatch-changes", "changes"],
+      ["vlatch-clean", "clean"],
+      ["vlatch-failed", "unknown"],
+    ]);
     await waitFor(() => expect(view.latest().status).toBe("settled"));
-    expect(view.latest().verdicts.size).toBe(2);
+    expect(view.latest().verdicts).toEqual(landed);
+
+    // The backend would now answer every branch differently.
+    const later: Record<string, ContentVerdict> = {
+      "vlatch-changes": "unknown",
+      "vlatch-clean": "changes",
+      "vlatch-failed": "clean",
+    };
+    vi.mocked(gitBranchContentMerged).mockImplementation(
+      async (_repo, _sha, _tree, branch) => ({
+        branch,
+        verdict: later[branch],
+        headSha: "f".repeat(40),
+      }),
+    );
+    const mark = commits.length;
+    await act(async () => {
+      await view.client.invalidateQueries();
+    });
+    await flush();
+
+    expect(gitContentCheckBase).toHaveBeenCalledTimes(2);
+    expect(gitBranchContentMerged).toHaveBeenCalledTimes(3);
+    expect(commits.length).toBeGreaterThan(mark);
+    for (const commit of commits.slice(mark)) {
+      expect(commit.status).toBe("settled");
+      expect(commit.verdicts).toEqual(landed);
+    }
   });
 
   it("keeps a verdict whose row leaves and returns within the open", async () => {
