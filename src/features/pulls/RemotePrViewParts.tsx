@@ -287,6 +287,7 @@ export function PrFilesPane({
                 lens={lens}
                 number={number}
                 previewRev={previewRev}
+                anchorCommit={blameRev ?? null}
                 lineWidget={lineWidget}
                 onQuote={onQuote}
                 onReply={onReply}
@@ -327,6 +328,7 @@ function PrFileDiffSlot({
   lens,
   number,
   previewRev,
+  anchorCommit,
   lineWidget,
   onQuote,
   onReply,
@@ -355,6 +357,8 @@ function PrFileDiffSlot({
   lens?: RemoteLens;
   number?: number;
   previewRev?: string;
+  /** The pull request's head, gating the binary-size lookups. */
+  anchorCommit?: string | null;
   /** The parent's composer, for its selected file: only a shown slot opens it. */
   lineWidget?: LineWidget;
   reportRead: (read: SlotRead) => void;
@@ -487,6 +491,7 @@ function PrFileDiffSlot({
       dataIsPlaceholder={dataIsPlaceholder}
       repoPath={repoPath}
       previewRev={previewRev}
+      anchorCommit={anchorCommit}
       lineAnchors={lineAnchors}
       lineWidget={widget}
     />

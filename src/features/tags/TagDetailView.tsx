@@ -38,9 +38,9 @@ import {
   checkoutTagSuccessToast,
 } from "@/features/history/commit-confirms";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
-import { formatBytes } from "@/features/repository/insights/primitives";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { presentError } from "@/lib/error-summary";
+import { formatBytes } from "@/lib/format-bytes";
 import { UPDATER_MANIFEST_NAME } from "@/lib/git/api";
 import {
   forgeFeatureReady,

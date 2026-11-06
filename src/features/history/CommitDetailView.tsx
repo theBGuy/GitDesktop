@@ -163,6 +163,14 @@ export function CommitDetailView({
     ? keyedPaneView(repoPath, hash, deferredPath, deferredPath)
     : placeholderPaneView(hash);
   const diffSlots = useFileSlots(diffTarget);
+  // The shown file's own diff read (the slot's query): a binary one renders no
+  // line anchors, so its comments stay in the pane's labelled group.
+  const shownDiff = useCommitFileDiff(
+    repoPath,
+    hash,
+    deferredPath,
+    deferredPath !== null && diffEnabledFor(deferredPath),
+  );
   // The commit the header shows: while the selected one's details are still a
   // placeholder, the last one whose details settled (the placeholder's source).
   const [settledHash, setSettledHash] = useState(hash);
@@ -746,6 +754,10 @@ export function CommitDetailView({
           // Inline anchors are off while the diff isn't the rendered commit's, so
           // the list keeps that file's comments too.
           selectedPath={anchorsMatchDiff ? deferredPath : null}
+          // A placeholder is the previous file's diff, not the selected one's.
+          selectedBinary={
+            !shownDiff.isPlaceholderData && shownDiff.data?.isBinary === true
+          }
           onSelectFile={selectFileFromComments}
           lens="origin"
           stale={stale}

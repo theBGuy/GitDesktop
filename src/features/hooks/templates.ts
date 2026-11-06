@@ -234,15 +234,24 @@ exit 0
     hook: "pre-push",
     body: `#!/bin/sh
 # Block pushing work-in-progress commits (WIP / fixup! / squash!).
-z="0000000000000000000000000000000000000000"
+# An all-zero id of any width (SHA-1 or SHA-256) marks a created or deleted ref.
+# A new branch, or a push over a remote tip this clone never fetched,
+# checks only the commits not on the destination remote's tracking refs.
+# A push whose commits can't be listed is refused.
+is_zero() { case "$1" in *[!0]*) return 1 ;; esac; return 0; }
+remote="$1"
 while read -r local_ref local_oid remote_ref remote_oid; do
-  [ "$local_oid" = "$z" ] && continue
-  if [ "$remote_oid" = "$z" ]; then
-    range="$local_oid"
+  is_zero "$local_oid" && continue
+  if ! is_zero "$remote_oid" && git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+    set -- "$remote_oid..$local_oid"
   else
-    range="$remote_oid..$local_oid"
+    set -- "$local_oid" --not --remotes="$remote"
   fi
-  if git rev-list -n 1 --grep 'WIP' --grep 'fixup!' --grep 'squash!' "$range" | grep -q .; then
+  if ! found=$(git rev-list -n 1 --grep 'WIP' --grep 'fixup!' --grep 'squash!' "$@"); then
+    echo "Refusing to push: couldn't check $local_ref for WIP/fixup/squash commits." >&2
+    exit 1
+  fi
+  if [ -n "$found" ]; then
     echo "Refusing to push: $local_ref has WIP/fixup/squash commits." >&2
     exit 1
   fi

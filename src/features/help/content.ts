@@ -595,6 +595,10 @@ the last list up, with a line above it saying it couldn't refresh.
   between the old and new sides; at **100%** the arrow keys pan the zoomed image, and
   Esc closes either way. The **SVG** preview above a text diff and the image diffs
   inside the stashes dialog open the same viewer.
+- **Other binary files** show their size change under the binary-file notice, such as
+  *1.2 MB → 725 KB · 486 KB smaller (−40%)*, or *Deleted file · 900 KB* for a removed one.
+  When two different sizes round to the same figure, the line gives exact byte counts.
+  A screen reader always hears the exact counts. A changed file mode gets its own line.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will
@@ -644,9 +648,10 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   nothing. Undoing a branch's *first* commit also asks — it has no parent to fall
   back to, so the branch ref goes with it. If another Git
   process commits or switches branches after History last showed it, or while the
-  undo runs, Undo stops without undoing anything and says so. Undo also asks you
-  to finish or abort a merge, cherry-pick or revert in progress, and to resolve
-  any conflicts, first. On a detached first commit, or when the latest commit's
+  undo runs, Undo stops without undoing anything and says so. While a merge,
+  cherry-pick or revert is in progress, Undo is held: its menu item says to finish
+  or abort that first, and the shortcut says the same. Undo also asks you to
+  resolve any conflicts first. On a detached first commit, or when the latest commit's
   parent was never fetched (the oldest commit of a shallow clone), there is nothing
   to undo onto, and Undo says so instead. Fetching more history from a terminal
   (\`git fetch --deepen=1\`) gives that commit a parent, and Undo works again once
@@ -673,6 +678,24 @@ selection to compare a range.
 
 If the history can't be read, the tab says why and offers **Retry**. A failed refresh or
 **Load more** keeps the commits already loaded under a line saying so.
+
+## Searching history
+
+The box above the list ({{kbd:focus-filter}}) filters the commits already loaded by
+subject, author or SHA. To look past them, choose **Search all history for "…"** below
+the list: it searches the message of every commit on the branch, and a query of 4 to 64
+hex characters also finds the commit with that SHA, so a hash pasted from a terminal, a
+CI log or a review comment lands on its commit even when it isn't loaded yet. A short
+hash that fits several commits lists them, up to the 20 newest; a longer hash narrows
+the list. A match that isn't on this branch shows as a line with its short SHA and an
+**Open commit** button; past three such matches, a last line counts the rest. When
+nothing matches, the list says what it checked. If the message search fails and the SHA
+lookup has nothing to show, the list says the search couldn't run, with a **Retry**.
+Otherwise, when either one fails before it finds anything, a line names the part that
+failed, with a **Retry**, and whatever the other one found stays on screen. A refresh
+that fails over results already on screen keeps them under a line saying so, or under
+the failed part's line when one shows.
+**Back to recent history** returns to the loaded list.
 
 ## Commit actions
 
@@ -722,7 +745,12 @@ If the history can't be read, the tab says why and offers **Retry**. A failed re
   **Changes** tab (stage and commit/amend as usual), then **Continue** from the banner
   there. A quick **Squash N commits…** is also on the context menu when you select adjacent
   commits; both it and **Edit history** wait while a merge, rebase, cherry-pick or revert
-  is in progress, and the menu says to finish the operation in **Changes** first.
+  is in progress, and the menu says to finish the operation in **Changes** first. When
+  there's nothing to edit (every commit is pushed, or with no upstream there are no
+  commits ahead of the default branch; the latest commit is a merge; its parent isn't
+  in a shallow clone; or there's no older commit to rebase onto), **Edit history** is
+  held and the menu says which. If the editor is open when that happens, its footer
+  says so.
 - **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
   first and explains the detached HEAD you land in), or copy
   its SHA.

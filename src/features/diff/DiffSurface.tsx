@@ -55,6 +55,7 @@ import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useRetained } from "@/lib/use-retained";
+import { BinaryFileSummary } from "./BinaryFileSummary";
 import {
   capDiffText,
   DIFF_LINE_CAP,
@@ -68,6 +69,7 @@ import {
 } from "./cap-diff";
 import { DiffErrorBoundary } from "./DiffErrorBoundary";
 import { DiffLanguagePicker } from "./DiffLanguagePicker";
+import { DIFF_PANE_ROOT_CLASS, DiffPathRow } from "./DiffPathRow";
 import { DiffPlaceholder } from "./DiffPlaceholder";
 import { diffLang, fileExt } from "./diff-lang";
 import {
@@ -77,7 +79,18 @@ import {
 } from "./diff-pane-hold";
 import { HOLD_BOUND_MS } from "./diff-pane-slots";
 import "./code-highlight.css";
-import { diffRendersRows } from "./diff-rows";
+import {
+  anchorRow,
+  anchorRows,
+  anchorScrollTop,
+  captureLineAnchor,
+  diffRendersRows,
+  type LineAnchor,
+  landHunkFocus,
+  PANE_SCROLL_KEYS,
+  RESTORE_BOUND_MS,
+  restoreDecision,
+} from "./diff-rows";
 import {
   changesSince,
   contentBuildGate,
@@ -318,6 +331,8 @@ export function GitDiffView({
   lineAnchors,
   lineWidget,
   forceUnified,
+  revealLanding,
+  scrollerRef,
 }: {
   filePath: string;
   /** The path the old side's whole-file read uses (a rename's source).
@@ -334,20 +349,36 @@ export function GitDiffView({
   /** Render unified whatever the preference says — the measuring pane sets this
    *  when it's too narrow for split. Omitted = follow the preference. */
   forceUnified?: boolean;
+  /** Where focus lands when Show full diff takes its own button away and the
+   *  diff's own group isn't mounted to take it (the host's path-row controls).
+   *  Omitted = a sink rendered beside the diff. */
+  revealLanding?: { readonly current: HTMLElement | null };
+  /** The host's scroller, whose top visible line a split/unified switch or a
+   *  Show full diff expand keeps. Omitted = no restore. */
+  scrollerRef?: { readonly current: HTMLElement | null };
 }) {
+  const sinkRef = useRef<HTMLSpanElement>(null);
   return (
-    <DiffErrorBoundary resetKey={`${filePath} ${text.length}`}>
-      <RenderedDiff
-        filePath={filePath}
-        oldPath={oldPath}
-        text={text}
-        repoPath={repoPath}
-        contentRevs={contentRevs}
-        lineAnchors={lineAnchors}
-        lineWidget={lineWidget}
-        forceUnified={forceUnified}
-      />
-    </DiffErrorBoundary>
+    <>
+      {/* Outside the error boundary, so the landing survives a failed build. */}
+      {revealLanding === undefined && (
+        <span ref={sinkRef} tabIndex={-1} className="sr-only" />
+      )}
+      <DiffErrorBoundary resetKey={`${filePath} ${text.length}`}>
+        <RenderedDiff
+          filePath={filePath}
+          oldPath={oldPath}
+          text={text}
+          repoPath={repoPath}
+          contentRevs={contentRevs}
+          lineAnchors={lineAnchors}
+          lineWidget={lineWidget}
+          forceUnified={forceUnified}
+          revealLanding={revealLanding ?? sinkRef}
+          scrollerRef={scrollerRef}
+        />
+      </DiffErrorBoundary>
+    </>
   );
 }
 
@@ -799,6 +830,283 @@ export function useShikiRouting({
   };
 }
 
+/** What one mounted line anchor carries between commits. */
+interface LineAnchorRuntime {
+  /** The reading position a switch or an expand restores. */
+  anchor: LineAnchor | null;
+  /** The rows sampling bisects, walked once per build: a new build or any
+   *  child mutation under the scroller drops the list. */
+  rows: ArrayLike<Element> | null;
+  /** Set while a restore waits for rows: sampling pauses, so the rowless
+   *  commit's own clamp can't overwrite the anchor the restore reads. */
+  armed: { tookOver: boolean; disarm: () => void } | null;
+  /** Set by a restore until the next input anywhere or RESTORE_BOUND_MS: the
+   *  snapshot it placed stays the anchor, so the restore's own scrolls (a clamp
+   *  at the scroll end included) never re-sample it, and `place` puts back a
+   *  line a scroll or a re-laid layout moved off its offset. */
+  frozen: { place: () => void; release: () => void } | null;
+  /** The anchor `keepLine` read ahead of an expand, and the build it read. */
+  kept: { anchor: LineAnchor | null; content: unknown } | null;
+}
+
+// Inputs that hand the reading position back to scrolling. Document-wide, and
+// they reach the capture listener before the toggle or press they start acts.
+const ANCHOR_RELEASE_INPUTS = [
+  "wheel",
+  "touchmove",
+  "keydown",
+  "pointerdown",
+] as const;
+
+function releaseLineAnchor(rt: LineAnchorRuntime) {
+  rt.frozen?.release();
+}
+
+function freezeLineAnchor(
+  rt: LineAnchorRuntime,
+  scroller: HTMLElement,
+  anchor: LineAnchor,
+  split: boolean,
+) {
+  releaseLineAnchor(rt);
+  const place = () => {
+    placeLineAnchor(scroller, anchor, split);
+  };
+  // A layout can re-lay its rows after the restore (wrapped rows settling to
+  // their height) with no scroll event, so a content resize re-places too. The
+  // children are re-observed when the scroller's content root is replaced.
+  const resized = new ResizeObserver(place);
+  const watch = () => {
+    resized.disconnect();
+    for (const child of scroller.children) resized.observe(child);
+  };
+  const swapped = new MutationObserver(watch);
+  const timer = setTimeout(release, RESTORE_BOUND_MS);
+  function release() {
+    clearTimeout(timer);
+    resized.disconnect();
+    swapped.disconnect();
+    for (const type of ANCHOR_RELEASE_INPUTS)
+      document.removeEventListener(type, release, true);
+    if (rt.frozen?.release === release) rt.frozen = null;
+  }
+  watch();
+  swapped.observe(scroller, { childList: true });
+  for (const type of ANCHOR_RELEASE_INPUTS)
+    document.addEventListener(type, release, { capture: true, passive: true });
+  rt.anchor = anchor;
+  rt.frozen = { place, release };
+}
+
+/** Puts the anchored line back at its offset when its row is rendered;
+ *  returns whether it was. A write within a pixel of the target is skipped,
+ *  so a re-placement never feeds its own scroll event. */
+function placeLineAnchor(
+  scroller: HTMLElement,
+  anchor: LineAnchor,
+  split: boolean,
+): boolean {
+  if (anchor.atTop) {
+    if (scroller.scrollTop !== 0) scroller.scrollTop = 0;
+    return true;
+  }
+  const row = anchorRow(scroller, anchor, split);
+  if (row === null) return false;
+  const top = anchorScrollTop(scroller, row, anchor);
+  if (Math.abs(top - scroller.scrollTop) > 1) scroller.scrollTop = top;
+  return true;
+}
+
+/** Restores `anchor` in the layout `armedFor.mode` names: in this commit when
+ *  its row is here, else once it lands, yielding to a wheel, touch scroll,
+ *  press, focus move or scroll key in the scroller once armed (a latch, never a
+ *  scrollTop compare), to another mode or file than `armedFor` (read from
+ *  `live`), and to RESTORE_BOUND_MS. Returns the wait's disarm. Once placed,
+ *  the line is frozen (`freezeLineAnchor`). */
+function restoreLineAnchor(
+  rt: LineAnchorRuntime,
+  scroller: HTMLElement,
+  anchor: LineAnchor,
+  armedFor: { mode: string; file: string },
+  live: () => { mode: string; file: string },
+): (() => void) | undefined {
+  const split = armedFor.mode === "split";
+  if (placeLineAnchor(scroller, anchor, split)) {
+    freezeLineAnchor(rt, scroller, anchor, split);
+    return undefined;
+  }
+  const start = performance.now();
+  const armed = { tookOver: false, disarm };
+  rt.armed = armed;
+  function disarm() {
+    mo.disconnect();
+    clearTimeout(timer);
+    document.removeEventListener("wheel", latch, true);
+    document.removeEventListener("touchmove", latch, true);
+    document.removeEventListener("keydown", latchKey, true);
+    document.removeEventListener("pointerdown", latch, true);
+    document.removeEventListener("focusin", latch, true);
+    if (rt.armed === armed) rt.armed = null;
+  }
+  const step = () => {
+    const now = live();
+    const next = restoreDecision({
+      armedMode: armedFor.mode,
+      armedFile: armedFor.file,
+      mode: now.mode,
+      file: now.file,
+      tookOver: armed.tookOver,
+      elapsedMs: performance.now() - start,
+      rowReady: anchorRow(scroller, anchor, split) !== null,
+    });
+    if (next === "wait") return;
+    disarm();
+    if (next === "fire" && placeLineAnchor(scroller, anchor, split))
+      freezeLineAnchor(rt, scroller, anchor, split);
+  };
+  const latch = (e: Event) => {
+    if (!(e.target instanceof Node) || !scroller.contains(e.target)) return;
+    armed.tookOver = true;
+    step();
+  };
+  const latchKey = (e: KeyboardEvent) => {
+    if (PANE_SCROLL_KEYS.has(e.key)) latch(e);
+  };
+  const mo = new MutationObserver(step);
+  const timer = setTimeout(disarm, RESTORE_BOUND_MS);
+  const passive = { capture: true, passive: true };
+  document.addEventListener("wheel", latch, passive);
+  document.addEventListener("touchmove", latch, passive);
+  document.addEventListener("keydown", latchKey, passive);
+  document.addEventListener("pointerdown", latch, true);
+  document.addEventListener("focusin", latch, true);
+  mo.observe(scroller, { childList: true, subtree: true });
+  return disarm;
+}
+
+/** Keeps the top visible line in place across a split/unified switch, whatever
+ *  flipped the effective mode (the toggle, the setting, the narrow-pane
+ *  override), and across an expand of the same diff: the layouts lay out at
+ *  different heights and an expand replaces every row, so a kept scrollTop
+ *  shows another line. Scrolling samples the anchor; a switch snapshots it, as
+ *  does the returned `keepLine` called just before an expand, and the next
+ *  layout or build restores it with an absolute scrollTop. No scroller, no
+ *  restore. `content` is the built diff on screen: any other new build under
+ *  the same path and mode re-reads the anchor from its rows. */
+export function useModeLineAnchor(
+  scrollerRef: { readonly current: HTMLElement | null } | undefined,
+  mode: string,
+  file: string,
+  content: unknown,
+): () => void {
+  const runtime = useRef<LineAnchorRuntime>({
+    anchor: null,
+    rows: null,
+    armed: null,
+    frozen: null,
+    kept: null,
+  });
+  // The last mode and file applied, so an <Activity> re-show restores only
+  // when the mode changed while hidden; a new file drops the anchor.
+  const appliedRef = useRef({ mode, file });
+  const contentRef = useRef({ content, mode, file });
+  useEffect(() => {
+    const scroller = scrollerRef?.current;
+    if (!scroller) return;
+    const rt = runtime.current;
+    let frame = 0;
+    const sample = () => {
+      frame = 0;
+      if (rt.armed !== null || rt.frozen !== null) return;
+      rt.rows ??= anchorRows(scroller);
+      rt.anchor = captureLineAnchor(scroller, rt.rows);
+    };
+    const onScroll = () => {
+      if (rt.frozen !== null) {
+        rt.frozen.place();
+        return;
+      }
+      if (frame === 0 && rt.armed === null)
+        frame = requestAnimationFrame(sample);
+    };
+    const drop = new MutationObserver(() => {
+      rt.rows = null;
+    });
+    drop.observe(scroller, { childList: true, subtree: true });
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scroller.removeEventListener("scroll", onScroll);
+      cancelAnimationFrame(frame);
+      drop.disconnect();
+      rt.rows = null;
+      releaseLineAnchor(rt);
+    };
+  }, [scrollerRef]);
+  // Its cleanup is the disarm, so the next mode or file edge, a hide and an
+  // unmount each end a wait.
+  useLayoutEffect(() => {
+    const rt = runtime.current;
+    const applied = appliedRef.current;
+    appliedRef.current = { mode, file };
+    if (applied.file !== file) {
+      rt.anchor = null;
+      rt.kept = null;
+      releaseLineAnchor(rt);
+      return;
+    }
+    const anchor = rt.anchor;
+    const scroller = scrollerRef?.current;
+    if (applied.mode === mode || anchor === null || !scroller) return;
+    return restoreLineAnchor(
+      rt,
+      scroller,
+      anchor,
+      { mode, file },
+      () => appliedRef.current,
+    );
+  }, [mode, file, scrollerRef]);
+  // A new build under a kept scrollTop (another commit of the same path, a
+  // stage or unstage) moves the lines without a scroll event, so the anchor is
+  // re-read from its committed rows; an expand `keepLine` read restores that
+  // read instead. Either way a wait armed for the build it replaces ends: its
+  // snapshot never lands in another build. Not in the commit a mode or file
+  // edge ran in: that edge owns the anchor.
+  useLayoutEffect(() => {
+    const rt = runtime.current;
+    const prev = contentRef.current;
+    contentRef.current = { content, mode, file };
+    if (prev.content === content) return;
+    const kept = rt.kept;
+    rt.kept = null;
+    rt.rows = null;
+    const scroller = scrollerRef?.current;
+    if (!scroller || prev.mode !== mode || prev.file !== file) return;
+    rt.armed?.disarm();
+    if (kept?.anchor && kept.content === prev.content)
+      return restoreLineAnchor(
+        rt,
+        scroller,
+        kept.anchor,
+        { mode, file },
+        () => appliedRef.current,
+      );
+    releaseLineAnchor(rt);
+    rt.rows = anchorRows(scroller);
+    rt.anchor = captureLineAnchor(scroller, rt.rows);
+  }, [content, mode, file, scrollerRef]);
+  // Called just before an expand of the diff on screen: reads the line the
+  // pane shows now, which the expanded build restores.
+  return useCallback(() => {
+    const rt = runtime.current;
+    const scroller = scrollerRef?.current;
+    if (!scroller) return;
+    rt.kept = {
+      anchor: rt.armed !== null ? rt.anchor : captureLineAnchor(scroller),
+      content: contentRef.current.content,
+    };
+  }, [scrollerRef]);
+}
+
 /** The per-side line -> render() maps the vendored DiffView consumes. */
 type AnchorExtendData = Record<string, { data: { render: () => ReactNode } }>;
 
@@ -811,6 +1119,8 @@ function RenderedDiff({
   lineAnchors,
   lineWidget,
   forceUnified,
+  revealLanding,
+  scrollerRef,
 }: {
   filePath: string;
   oldPath?: string;
@@ -820,6 +1130,8 @@ function RenderedDiff({
   lineAnchors?: DiffLineAnchor[];
   lineWidget?: LineWidget;
   forceUnified?: boolean;
+  revealLanding?: { readonly current: HTMLElement | null };
+  scrollerRef?: { readonly current: HTMLElement | null };
 }) {
   const settings = useSettings();
   const isDark = useIsDark();
@@ -935,29 +1247,34 @@ function RenderedDiff({
 
   // grammarState: inert once compiled; see useShikiRouting's contract.
   // biome-ignore lint/correctness/useExhaustiveDependencies: grammarState stays listed for the uncompiled path; the rebuild rides holdForGrammar
-  const builtDiffFile = useMemo(
-    () =>
-      blocked || contentPending || holdForGrammar || contentHold
-        ? null
-        : createDiffFile(
-            deferredPath,
-            shown,
-            { syntaxMap, customLanguages },
-            content ?? undefined,
-          ),
-    [
-      shown,
+  const builtDiffFile = useMemo(() => {
+    if (blocked || contentPending || holdForGrammar || contentHold) return null;
+    const file = createDiffFile(
       deferredPath,
-      syntaxMap,
-      customLanguages,
-      content,
-      blocked,
-      contentPending,
-      holdForGrammar,
-      contentHold,
-      grammarState,
-    ],
-  );
+      shown,
+      { syntaxMap, customLanguages },
+      content ?? undefined,
+    );
+    // Rows prebuilt for both layouts, as the library's own mount effect builds
+    // them: its view remounts on every rebuild (Show full diff among them), and
+    // rows built only in that effect would leave the scroller rowless for a
+    // commit, which clamps it to the top. The layout stays out of the deps,
+    // since a new build would drop the user's expanded context.
+    file?.buildSplitDiffLines();
+    file?.buildUnifiedDiffLines();
+    return file;
+  }, [
+    shown,
+    deferredPath,
+    syntaxMap,
+    customLanguages,
+    content,
+    blocked,
+    contentPending,
+    holdForGrammar,
+    contentHold,
+    grammarState,
+  ]);
   // Through a refresh's hold, the build already on screen, with the worker
   // highlighting painted on it (the worker answers nothing while held).
   const diffFile = useRetained(builtDiffFile, !contentHold);
@@ -1263,6 +1580,55 @@ function RenderedDiff({
           rowsFor === diffFile)),
   );
 
+  // Show full diff takes its own button away, as does a same-file refresh that
+  // uncaps the diff: only focus the button held as it left, in that same file,
+  // lands, without scrolling, on the diff's own named group (so focus stays in
+  // the diff and announces it), else on `revealLanding`. The cleanup reads the
+  // last committed path, so a file switch's unmount never lands.
+  const diffLandingRef = useRef<HTMLDivElement>(null);
+  const footerFocus = useRef<{
+    button: HTMLElement;
+    hadFocus: boolean;
+    forPath: string;
+  } | null>(null);
+  const committedPath = useRef(deferredPath);
+  const captureFooter = useCallback(
+    (node: HTMLButtonElement | null) => () => {
+      if (node !== null)
+        footerFocus.current = {
+          button: node,
+          hadFocus: node.contains(document.activeElement),
+          forPath: committedPath.current,
+        };
+    },
+    [],
+  );
+  // False only inside a held or preparing diff-pane slot, whose inert subtree
+  // must not take focus.
+  const { interactive } = useDiffPaneHold();
+  // No dependency array: it consumes the capture every commit, after that
+  // commit's ref cleanups wrote it. A button still mounted (a re-render that
+  // kept it focused) never counts as taken away; defence in depth, as the
+  // identity-stable capture callback only fires on a detach.
+  useLayoutEffect(() => {
+    const held = footerFocus.current;
+    footerFocus.current = null;
+    if (
+      held !== null &&
+      held.forPath === deferredPath &&
+      !held.button.isConnected &&
+      interactive
+    )
+      landHunkFocus(held, diffLandingRef.current ?? revealLanding?.current);
+    committedPath.current = deferredPath;
+  });
+  const keepLine = useModeLineAnchor(
+    scrollerRef,
+    viewMode,
+    deferredPath,
+    diffFile,
+  );
+
   // A generated/minified file (one enormous line) would freeze the renderer:
   // placeholder + one-click opt-in. FIRST, so a blocked mega file never flashes
   // null while an irrelevant grammar loads.
@@ -1290,7 +1656,15 @@ function RenderedDiff({
   if (contentPending || holdForGrammar || holdBlank) return null;
   if (!diffFile) return <DiffPlaceholder message="No changes to show" />;
   return (
-    <>
+    // The Show full landing: a named group, so focus that lands here stays in
+    // the diff (scroll keys keep reading it) and announces which diff it is.
+    <div
+      ref={diffLandingRef}
+      role="group"
+      aria-label={`Diff of ${deferredPath}`}
+      tabIndex={-1}
+      className="outline-none"
+    >
       {inSlot && <span ref={rowsProbeRef} hidden />}
       {lineWidget?.enabled ? (
         // Line-comment mode: the multi-select variant adds clickable line numbers
@@ -1340,9 +1714,13 @@ function RenderedDiff({
       <DiffCapFooter
         hidden={hidden}
         shortened={shortened}
-        onShowFull={() => setShowFull(true)}
+        onShowFull={() => {
+          keepLine();
+          setShowFull(true);
+        }}
+        buttonRef={captureFooter}
       />
-    </>
+    </div>
   );
 }
 
@@ -1483,6 +1861,7 @@ export function DiffContent({
   lineAnchors,
   lineWidget,
   stagingSide,
+  anchorCommit,
 }: {
   filePath: string;
   /** Absent only when the source query has nothing to show; never an empty
@@ -1521,6 +1900,9 @@ export function DiffContent({
   /** Set only by the working-tree staging host; enables the non-UTF-8 note.
    *  Absent = read-only host, no note. */
   stagingSide?: StagingSide;
+  /** PR surfaces only: the commit oid gating the binary-size lookups (PR head on Files,
+   *  the commit on Commits). undefined = local surface. See BinaryFileSummary. */
+  anchorCommit?: string | null;
 }) {
   // The pane measures itself: this surface mounts at widths from a full window
   // down to a rail-flanked column, and both the split gate and the toolbar's
@@ -1588,6 +1970,21 @@ export function DiffContent({
         paneHeldFocus.current = true;
     },
     [],
+  );
+  // The text scroller is a capture node and the line anchor's scroller. One
+  // identity-stable ref serves both, so a re-render never runs the capture's
+  // cleanup, and a detached scroller is never readable.
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const scrollerCaptureRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      scrollerRef.current = node;
+      const capture = captureHeldRef(node);
+      return () => {
+        capture();
+        scrollerRef.current = null;
+      };
+    },
+    [captureHeldRef],
   );
   // A load or a refetch can take the toolbar away (a new selection, the file
   // emptied, a mode-only change left): only focus the pane held as that subtree
@@ -1667,85 +2064,68 @@ export function DiffContent({
       !(data !== undefined && data.filePath !== filePath),
   );
 
+  // ~200px of unshrinkable text, so it shows only where the pane has the room;
+  // the sr-only twin carries it at every width, and `aria-hidden` on the
+  // visible copy keeps the two from announcing twice. Hidden in Preview, which
+  // reads the full file rather than the truncated diff.
+  const truncatedMeta = showsToolbar && data?.isTruncated && !previewOn && (
+    <>
+      <span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">
+        (truncated — diff too large)
+      </span>
+      <span className="sr-only">(truncated — diff too large)</span>
+    </>
+  );
   // Every arm renders this shell: the notice where retained data shows, then
   // the path row, then the arm's body. The row has one height in every arm,
   // so only a visible (degraded) notice coming or going moves the body on an
   // arm swap; its controls render only over a text diff (`showsToolbar`).
-  // ph-no-capture: blocks the whole pane (file path + diff body) from session
-  // replay — this is user code/paths. See src/components/Redacted.tsx.
   const shell = (body: ReactNode, notice: ReactNode = null) => (
-    <div
-      ref={paneRef}
-      className="ph-no-capture @container/diff-pane flex h-full flex-col"
-    >
+    <div ref={paneRef} className={DIFF_PANE_ROOT_CLASS}>
       {notice !== null && (
         <span className="contents" ref={captureHeldRef}>
           {notice}
         </span>
       )}
-      <div className="flex items-center justify-between gap-2 border-b px-3 py-1.5">
-        <PathText
-          path={filePath}
-          className="flex-1 font-mono text-xs text-muted-foreground"
-        />
-        {/* ~200px of unshrinkable text, so it shows only where the pane has the
-            room; the sr-only twin carries it at every width, and `aria-hidden`
-            on the visible copy keeps the two from announcing twice. Hidden in
-            Preview, which reads the full file rather than the truncated diff. */}
-        {showsToolbar && data?.isTruncated && !previewOn && (
-          <>
-            <span aria-hidden className="hidden shrink-0 @2xl/diff-pane:inline">
-              (truncated — diff too large)
-            </span>
-            <span className="sr-only">(truncated — diff too large)</span>
-          </>
+      <DiffPathRow
+        filePath={filePath}
+        meta={truncatedMeta}
+        controlsRef={controlsRef}
+      >
+        {canPreview && (
+          <span className="contents" ref={captureHeldRef}>
+            <MarkdownViewToggle view={mdView} onChange={setMdView} />
+          </span>
         )}
-        {/* min-h-7 pins the cluster to the language picker's h-7 trigger, so
-            the row keeps one height in every arm: an extensionless file keeps
-            only the xs (h-6) mode toggle, and the arms without controls keep
-            none. tabIndex/outline-none make it a silent landing spot for focus
-            when the picker closes with its trigger already hidden, or when the
-            toolbar comes back. */}
-        <span
-          ref={controlsRef}
-          tabIndex={-1}
-          className="flex min-h-7 shrink-0 items-center gap-1.5 outline-none"
-        >
-          {canPreview && (
-            <span className="contents" ref={captureHeldRef}>
-              <MarkdownViewToggle view={mdView} onChange={setMdView} />
+        {/* The picker and Unified/Split configure the raw diff, so they
+            leave the cluster while Preview is up (the same swap this row
+            already does for the working-tree selection actions). */}
+        {showsToolbar && !previewOn && (
+          <span className="contents" ref={captureHeldRef}>
+            {/* The only variable-width control here (its label follows the
+                language name), so it's the one that goes under @md — leaving
+                the row a fixed floor. It must stay laid out while its popup
+                is open, though: Base UI anchors to the trigger, and a
+                display:none trigger positions the popup at 0,0.
+                `empty:hidden` keeps the row's gap off an extensionless file,
+                where the picker renders nothing. */}
+            <span
+              ref={langWrapRef}
+              className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex"
+            >
+              <DiffLanguagePicker
+                filePath={filePath}
+                open={langOpen}
+                onOpenChange={(open) => {
+                  setLangOpen(open);
+                  if (!open) returnFocusIfTriggerHidden();
+                }}
+              />
             </span>
-          )}
-          {/* The picker and Unified/Split configure the raw diff, so they
-              leave the cluster while Preview is up (the same swap this row
-              already does for the working-tree selection actions). */}
-          {showsToolbar && !previewOn && (
-            <span className="contents" ref={captureHeldRef}>
-              {/* The only variable-width control here (its label follows the
-                  language name), so it's the one that goes under @md — leaving
-                  the row a fixed floor. It must stay laid out while its popup
-                  is open, though: Base UI anchors to the trigger, and a
-                  display:none trigger positions the popup at 0,0.
-                  `empty:hidden` keeps the row's gap off an extensionless file,
-                  where the picker renders nothing. */}
-              <span
-                ref={langWrapRef}
-                className="hidden @md/diff-pane:flex empty:hidden has-[[data-popup-open]]:flex"
-              >
-                <DiffLanguagePicker
-                  filePath={filePath}
-                  open={langOpen}
-                  onOpenChange={(open) => {
-                    setLangOpen(open);
-                    if (!open) returnFocusIfTriggerHidden();
-                  }}
-                />
-              </span>
-              <DiffModeToggle splitDisabled={narrowPane} />
-            </span>
-          )}
-        </span>
-      </div>
+            <DiffModeToggle splitDisabled={narrowPane} />
+          </span>
+        )}
+      </DiffPathRow>
       {body}
     </div>
   );
@@ -1831,7 +2211,21 @@ export function DiffContent({
     }
     return shell(
       landing(
-        <DiffPlaceholder message="Binary file — no text diff available" />,
+        <DiffPlaceholder
+          message="Binary file — no text diff available"
+          action={
+            repoPath !== undefined ? (
+              <BinaryFileSummary
+                repoPath={repoPath}
+                filePath={filePath}
+                text={data.text}
+                worktreeNewSide={imageRevs?.new === null}
+                anchorCommit={anchorCommit}
+                held={dataIsPlaceholder === true}
+              />
+            ) : undefined
+          }
+        />,
       ),
       notice,
     );
@@ -1880,7 +2274,7 @@ export function DiffContent({
           {UNDECODABLE_NOTE_COPY[stagingSide]}
         </InfoNote>
       )}
-      <div ref={captureHeldRef} className="min-h-0 flex-1 overflow-auto">
+      <div ref={scrollerCaptureRef} className="min-h-0 flex-1 overflow-auto">
         {previewOn && repoPath && previewRevs ? (
           // Passed the raw revs, not the truncation-stripped pair below:
           // preview reads the file, not the diff, so it works on exactly the
@@ -1921,6 +2315,8 @@ export function DiffContent({
               lineAnchors={lineAnchors}
               lineWidget={lineWidget}
               forceUnified={narrowPane}
+              revealLanding={controlsRef}
+              scrollerRef={scrollerRef}
             />
           </>
         )}

@@ -946,6 +946,8 @@ const UNDO_BRANCH_SWITCHED: &str = "The checked-out branch changed — nothing w
 
 /// The refusal for an undo while a merge is stopped (MERGE_HEAD): `reset --soft` refuses
 /// there, and the undo's `update-ref` would not. KEEP IN STEP with the family above.
+// KEEP IN STEP: HistoryPanel.tsx's `UNDO_MID_MERGE` toasts this exact sentence on the
+// hotkey and palette routes, and its menu row shows a short form.
 const UNDO_MID_MERGE: &str =
     "A merge is in progress — finish or abort it first; nothing was undone.";
 
@@ -956,6 +958,8 @@ const UNDO_UNRESOLVED: &str = "Resolve the conflicts first; nothing was undone."
 
 /// The refusal for an undo while a cherry-pick or revert is stopped: `reset --soft` would
 /// cancel it, clearing its sequencer only on the last pick. KEEP IN STEP with the family above.
+// KEEP IN STEP: HistoryPanel.tsx's `UNDO_MID_PICK` toasts this exact sentence on the
+// hotkey and palette routes, and its menu row shows a short form.
 const UNDO_MID_PICK: &str =
     "A cherry-pick or revert is in progress — finish or abort it first; nothing was undone.";
 

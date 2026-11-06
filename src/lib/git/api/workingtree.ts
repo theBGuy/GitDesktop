@@ -1,6 +1,7 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
   ApplyLinesResult,
+  BlobSizes,
   CommitResult,
   FileDiff,
   IgnoredFile,
@@ -90,6 +91,25 @@ export const gitFileBase64 = (
     rev,
     filePath,
     probeSize,
+  });
+
+/** Sizes of a binary diff's sides by their `index` ids (null id = side absent).
+ *  `worktreeFile` reads the new side from disk instead of `newOid`. `anchorCommit`
+ *  is the full 40|64-hex commit a PR surface shows (the PR head on Files, the
+ *  commit itself on Commits); lookups answer only when it is a local commit. */
+export const gitBlobSizes = (
+  repoPath: string,
+  oldOid: string | null,
+  newOid: string | null,
+  worktreeFile: string | null,
+  anchorCommit: string | null,
+) =>
+  invoke<BlobSizes>("git_blob_sizes", {
+    repoPath,
+    oldOid,
+    newOid,
+    worktreeFile,
+    anchorCommit,
   });
 
 /** Decode base64 file bytes (from git_file_base64) to a UTF-8 string. */

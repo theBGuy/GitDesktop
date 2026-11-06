@@ -445,6 +445,17 @@ pub(crate) async fn run_git_raw_env(
     run_git_spawn(repo_path, args, None, envs, timeout).await
 }
 
+/// [`run_git_raw_input`] with extra environment pairs, set after the runner's own.
+pub(crate) async fn run_git_raw_input_env(
+    repo_path: Option<&str>,
+    args: &[&str],
+    input: Option<&str>,
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> AppResult<GitOutput> {
+    run_git_spawn(repo_path, args, input.map(str::as_bytes), envs, timeout).await
+}
+
 /// The one spawn path under every raw runner. An abandoned run (a timeout, a failed
 /// wait) kills git's whole process tree on both platforms (`GitJob`, `GitGroup`).
 async fn run_git_spawn(

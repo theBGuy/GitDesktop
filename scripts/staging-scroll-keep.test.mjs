@@ -19,6 +19,8 @@ import { escapeRe, maskNonCode, matchBrace, tagEnd } from "./lib/ts-mask.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const VIEWER = "src/features/diff/DiffViewer.tsx";
+// landHunkFocus and PANE_SCROLL_KEYS live here, shared with DiffSurface.
+const ROWS = "src/features/diff/diff-rows.ts";
 const read = (file) => readFileSync(join(ROOT, file), "utf8");
 const squash = (s) => s.replace(/\s+/g, " ").trim();
 
@@ -71,16 +73,17 @@ function arrowBody(src, name, span) {
   return close < 0 ? null : squash(src.masked.slice(open, close + 1));
 }
 
-export function scrollKeepViolations(raw) {
+export function scrollKeepViolations(raw, rowsRaw) {
   const src = { raw, masked: maskNonCode(raw, true) };
   const { masked } = src;
+  const rows = { raw: rowsRaw, masked: maskNonCode(rowsRaw, false) };
   const problems = [];
   const need = (ok, what) => {
     if (!ok) problems.push(what);
   };
   const view = functionSpan(masked, "StagingDiffView");
   const pane = functionSpan(masked, "WorkingTreeDiff");
-  const landFocus = functionSpan(masked, "landHunkFocus");
+  const landFocus = functionSpan(rows.masked, "landHunkFocus");
   if (view === null || pane === null || landFocus === null)
     return ["StagingDiffView, WorkingTreeDiff or landHunkFocus not found"];
   const viewCode = squash(masked.slice(view.start, view.end));
@@ -123,16 +126,32 @@ export function scrollKeepViolations(raw) {
   }
   need(pressShapes >= 3, "HunkFocus and its two press literals not found");
 
-  // The landing's own focus never scrolls.
-  const focusCalls = calls(src, "target.focus", landFocus.start, landFocus.end);
+  // The landing's own focus never scrolls. DiffViewer lands through the shared
+  // copy in diff-rows.ts and keeps no local one.
+  const focusCalls = calls(
+    rows,
+    "target.focus",
+    landFocus.start,
+    landFocus.end,
+  );
   need(
     focusCalls.length === 1 &&
       focusCalls[0].text === "target.focus({ preventScroll: true })",
     "landHunkFocus focuses with preventScroll",
   );
   need(
-    !masked.slice(landFocus.start, landFocus.end).includes("scrollIntoView"),
+    !rows.masked
+      .slice(landFocus.start, landFocus.end)
+      .includes("scrollIntoView"),
     "landHunkFocus never scrolls",
+  );
+  need(
+    /import \{[^}]*\blandHunkFocus,[^}]*\bPANE_SCROLL_KEYS,[^}]*\} from "\.\/diff-rows";/.test(
+      squash(raw),
+    ) &&
+      !/\bfunction landHunkFocus\(/.test(masked) &&
+      !/\bPANE_SCROLL_KEYS\s*=/.test(masked),
+    "DiffViewer imports landHunkFocus and PANE_SCROLL_KEYS from diff-rows, with no local copy",
   );
 
   // The prebuild, in the staging memo only, off the layout.
@@ -492,11 +511,11 @@ export function scrollKeepViolations(raw) {
       ),
     "focusin latches pending, in-pane moves other than to the pressed button",
   );
-  const keys = /const PANE_SCROLL_KEYS = new Set\(\[/.exec(masked);
+  const keys = /const PANE_SCROLL_KEYS = new Set\(\[/.exec(rows.masked);
   if (keys === null) problems.push("PANE_SCROLL_KEYS not found");
   else {
     const open = keys.index + keys[0].length - 1;
-    const list = raw.slice(open, matchBrace(masked, open) + 1);
+    const list = rowsRaw.slice(open, matchBrace(rows.masked, open) + 1);
     need(
       [...list.matchAll(/"([^"]*)"/g)].map((m) => m[1]).join() ===
         "PageUp,PageDown,Home,End,ArrowUp,ArrowDown",
@@ -514,12 +533,52 @@ export function scrollKeepViolations(raw) {
 
 test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing scroll", () => {
   const raw = read(VIEWER);
-  assert.deepEqual(scrollKeepViolations(raw), []);
+  const rowsRaw = read(ROWS);
+  assert.deepEqual(scrollKeepViolations(raw, rowsRaw), []);
   // Negative controls: each regression the pin exists for is caught.
   const mutate = (from, to) => {
     assert.equal(raw.split(from).length, 2, `one control anchor: ${from}`);
-    return scrollKeepViolations(raw.replace(from, () => to));
+    return scrollKeepViolations(
+      raw.replace(from, () => to),
+      rowsRaw,
+    );
   };
+  // The same, for the helpers DiffViewer imports from diff-rows.ts.
+  const mutateRows = (from, to) => {
+    assert.equal(rowsRaw.split(from).length, 2, `one control anchor: ${from}`);
+    return scrollKeepViolations(
+      raw,
+      rowsRaw.replace(from, () => to),
+    );
+  };
+  for (const [from, to] of [
+    ['"ArrowDown",', ""],
+    [
+      "if (kept) target.focus({ preventScroll: true });",
+      "if (kept) target.focus();",
+    ],
+    ["  return kept;", "  target.scrollIntoView();\n  return kept;"],
+  ])
+    assert.notDeepEqual(
+      mutateRows(from, to),
+      [],
+      `control not caught: ${from}`,
+    );
+  // The import pin's own arms: a local landHunkFocus, or the name dropped from
+  // the import.
+  const IMPORT_PIN =
+    "DiffViewer imports landHunkFocus and PANE_SCROLL_KEYS from diff-rows, with no local copy";
+  for (const [from, to] of [
+    [
+      "function swallowRepeatedActivation(",
+      "function landHunkFocus() {}\nfunction swallowRepeatedActivation(",
+    ],
+    ["  landHunkFocus,", ""],
+  ])
+    assert.ok(
+      mutate(from, to).includes(IMPORT_PIN),
+      `import pin control not caught: ${from}`,
+    );
   const controls = [
     ["file?.buildUnifiedDiffLines();", ""],
     ["file?.buildSplitDiffLines();", ""],
@@ -530,7 +589,11 @@ test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing 
       "if (landed.cycle !== undefined)",
     ],
     ["scrollPaneRef.current?.contains(target) === true", "true"],
-    ['"ArrowDown",', ""],
+    // A local copy shadowing the shared helpers.
+    [
+      "function swallowRepeatedActivation(",
+      "const PANE_SCROLL_KEYS = new Set([]);\nfunction swallowRepeatedActivation(",
+    ],
     [
       'armReland(index, target, "primary", pending)',
       'armReland(index, target, "primary")',
@@ -577,10 +640,6 @@ test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing 
       "const passive = { capture: true, passive: true };",
       "const passive = { capture: true, passive: false };",
     ],
-    [
-      "if (kept) target.focus({ preventScroll: true });",
-      "if (kept) target.focus();",
-    ],
     ["!anchors.some((a) => a.top >= 0);", "!anchors.some((a) => a.top > 0);"],
     [
       'viaConfirm: kind === "discard",',
@@ -593,11 +652,72 @@ test("staging scroll keep: prebuilt rows, a rowless hold, and a latched landing 
     assert.notDeepEqual(mutate(from, to), [], `control not caught: ${from}`);
 });
 
+/** Row builds inside the shared createDiffFile itself: each memo that calls
+ *  it prebuilds for its own view, never the builder every host shares. */
+function sharedBuilderPrebuilds(raw) {
+  const masked = maskNonCode(raw, true);
+  const span = functionSpan(masked, "createDiffFile");
+  if (span === null) return ["createDiffFile not found"];
+  return /\bbuild(Split|Unified)DiffLines\(/.test(
+    masked.slice(span.start, span.end),
+  )
+    ? ["createDiffFile builds rows"]
+    : [];
+}
+
 test("staging scroll keep: the prebuild stays out of the shared createDiffFile", () => {
-  const masked = maskNonCode(read("src/features/diff/DiffSurface.tsx"), true);
-  assert.ok(
-    masked.includes("function createDiffFile("),
-    "createDiffFile found",
+  const raw = read("src/features/diff/DiffSurface.tsx").replace(/\r\n/g, "\n");
+  assert.deepEqual(sharedBuilderPrebuilds(raw), []);
+  // A build call inside the builder trips the pin.
+  const inside = "    return file;\n  } catch {";
+  assert.ok(raw.includes(inside), `negative-control anchor missing: ${inside}`);
+  assert.notDeepEqual(
+    sharedBuilderPrebuilds(
+      raw.replace(inside, () => `    file.buildSplitDiffLines();\n${inside}`),
+    ),
+    [],
   );
-  assert.doesNotMatch(masked, /\bbuild(Split|Unified)DiffLines\(/);
+  // Builds outside it leave the pin green: RenderedDiff's memo prebuild, and
+  // any later top-level function.
+  assert.match(maskNonCode(raw, true), /\bfile\?\.buildSplitDiffLines\(\)/);
+  assert.deepEqual(
+    sharedBuilderPrebuilds(
+      `${raw}\nfunction later(file) {\n  file.buildUnifiedDiffLines();\n}\n`,
+    ),
+    [],
+  );
+});
+
+const MODE_ANCHOR_PIN =
+  "DiffViewer calls useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile)";
+
+/** The staging viewer keeps its top line across a split/unified switch: one
+ *  code-level call of the shared hook with its scroller, mode, path and built
+ *  diff, in that order (a commented-out call doesn't count). */
+function modeLineAnchorViolations(raw) {
+  const code = squash(maskNonCode(raw, true));
+  return /\buseModeLineAnchor\( ?scrollPaneRef, viewMode, deferredPath, diffFile,? ?\);/.test(
+    code,
+  )
+    ? []
+    : [MODE_ANCHOR_PIN];
+}
+
+test("staging scroll keep: the viewer wires the layout-switch line anchor", () => {
+  const raw = read(VIEWER);
+  assert.deepEqual(modeLineAnchorViolations(raw), []);
+  const call =
+    "  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile);";
+  assert.equal(raw.split(call).length, 2, `one control anchor: ${call}`);
+  for (const to of [
+    "",
+    `  // ${call.trim()}`,
+    "  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, undefined);",
+    "  useModeLineAnchor(scrollPaneRef, viewMode, diffFile, deferredPath);",
+  ])
+    assert.deepEqual(
+      modeLineAnchorViolations(raw.replace(call, () => to)),
+      [MODE_ANCHOR_PIN],
+      `control not caught: ${JSON.stringify(to)}`,
+    );
 });

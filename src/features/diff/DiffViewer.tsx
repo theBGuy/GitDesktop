@@ -89,6 +89,7 @@ import {
   DiffModeToggle,
   DiffSurface,
   useFileContent,
+  useModeLineAnchor,
   useShikiRouting,
 } from "./DiffSurface";
 import { fileExt } from "./diff-lang";
@@ -116,6 +117,10 @@ import {
   hunkRange,
   hunkRangeText,
   hunkStart,
+  landHunkFocus,
+  numSpanForLine,
+  PANE_SCROLL_KEYS,
+  rowForLine,
 } from "./diff-rows";
 import { FileSlots, useFileSlots } from "./file-slot";
 import { ImagePanes } from "./ImageDiff";
@@ -304,17 +309,6 @@ type SelectionPress = HunkFocus & {
  *  write), when the bar's unmount may hand focus to the sink. Never scrolls. */
 type SelectionFocus = SelectionPress & { settled: boolean };
 
-/** Keys that scroll the pane from a focused hunk button without activating it.
- *  Space activates every focusable control in the pane, so it is not one. */
-const PANE_SCROLL_KEYS = new Set([
-  "PageUp",
-  "PageDown",
-  "Home",
-  "End",
-  "ArrowUp",
-  "ArrowDown",
-]);
-
 /** keydown for the hunk buttons and their Discard confirm: an auto-repeat of a
  *  held Enter or Space activates nothing, so one physical press acts once even
  *  when a landing hands focus to the next hunk's button mid-hold. Ctrl, Alt
@@ -374,24 +368,6 @@ function hunkControlOf(
       return { index, control, button: el };
   }
   return null;
-}
-
-/** Moves focus to `target` only while it is where the hunk action left it: the
- *  pressed button had focus at the press and still does, or lost it to <body>
- *  because the button unmounted. Anywhere else, the user moved it. Returns
- *  whether it moved. */
-function landHunkFocus(
-  pending: HunkFocus,
-  target: HTMLElement | null | undefined,
-): boolean {
-  if (!target || !pending.hadFocus || !target.isConnected) return false;
-  const active = document.activeElement;
-  const kept =
-    active === pending.button ||
-    ((active === null || active === document.body) &&
-      !pending.button.isConnected);
-  if (kept) target.focus({ preventScroll: true });
-  return kept;
 }
 
 /** Runs a hunk write: `onSuccess` after it resolves, `onError` on a throw from
@@ -1394,38 +1370,6 @@ interface DragAnchors {
   startRow: HTMLTableRowElement;
   endRow: HTMLTableRowElement;
   side: "old" | "new" | null;
-}
-
-/** The number span for a line. Unified mode tags it `data-line-{new,old}-num`;
- *  split mode uses a generic `data-line-num` inside a cell marked `data-side`.
- *  Try both so either view works; a caller that knows it is in split passes
- *  `split` to skip the unified probe, which can never match there. A placeholder
- *  (a split row's empty side) carries no such span, so it can never resolve.
- *  PRECONDITION: only the wrap-mode split renderer puts `data-side` on the
- *  CELLS (the normal one puts it on the row and splits the sides across two
- *  tables), so the split arm here and in `splitRowSpans` requires the view's
- *  `diffViewWrap`. */
-function numSpanForLine(
-  container: HTMLElement,
-  side: "old" | "new",
-  line: number,
-  split = false,
-) {
-  const unifiedAttr =
-    side === "new" ? "data-line-new-num" : "data-line-old-num";
-  return (
-    (split
-      ? null
-      : container.querySelector(`span[${unifiedAttr}="${line}"]`)) ??
-    container.querySelector(
-      `td[data-side="${side}"] span[data-line-num="${line}"]`,
-    )
-  );
-}
-
-/** The diff row for a line, in either view. */
-function rowForLine(container: HTMLElement, side: "old" | "new", line: number) {
-  return numSpanForLine(container, side, line)?.closest("tr") ?? null;
 }
 
 /** A hunk's first row, by line number: what its buttons are hosted from, and
@@ -2541,6 +2485,8 @@ function StagingDiffView({
       !displayHunks.some((h) => hunkFirstRow(container, h) !== null);
     container.style.minHeight = hold ? `${heightRef.current}px` : "";
   }, [rowsPending, displayHunks]);
+  // After the hold, so the restore measures the rows at their final height.
+  useModeLineAnchor(scrollPaneRef, viewMode, deferredPath, diffFile);
   // Once the hold releases and the refreshed hunks have hosts, focus moves to
   // the Stage/Unstage of the hunk now at the press's index (or the last hunk);
   // `landHunkFocus` decides whether it moves at all. Past a capped diff's

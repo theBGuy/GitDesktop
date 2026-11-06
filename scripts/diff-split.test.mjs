@@ -1,18 +1,22 @@
 // Pins the section keys the AI-ignore filter and PR file views share.
 // The import reaches straight into src/ under Node's type stripping in the
-// installless guards job, so diff-split.ts must stay free of runtime and
-// aliased imports — and this dep-free suite never joins frontend.yml's
-// node_modules-required roster.
+// installless guards job, so diff-split.ts must stay free of aliased imports
+// (relative runtime imports carry their .ts suffix) — and this dep-free suite
+// never joins frontend.yml's node_modules-required roster.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  binaryIndexOids,
   binaryRowPaths,
+  binarySizeSummary,
   classifyHeaderOnlyDiff,
   diffSectionStats,
   HEADER_ONLY_MESSAGE,
   headerOnlyMessage,
+  isTypechangeDiff,
   MODE_CHANGE,
+  parseModeChange,
   sectionFilePath,
   sectionIsBinary,
   splitUnifiedDiff,
@@ -1012,4 +1016,631 @@ test("header-only copy: total Records, sentence case, no trailing period", () =>
     assert.match(message, /^[A-Z]/, message);
     assert.doesNotMatch(message, /\.$/, message);
   }
+});
+
+// ------------------------------------------------------------ binaryIndexOids
+
+const MARKER = "Binary files a/x.png and b/x.png differ\n";
+const binSection = (...lines) =>
+  "diff --git a/x.png b/x.png\n" + lines.map((l) => `${l}\n`).join("") + MARKER;
+// A symlink at x replaced by a binary file: git splits the typechange into a
+// deletion section and a creation section of the one path.
+const TYPECHANGE =
+  "diff --git a/x b/x\n" +
+  "deleted file mode 120000\n" +
+  "index 3333ccc..0000000\n" +
+  "--- a/x\n" +
+  "+++ /dev/null\n" +
+  "@@ -1 +0,0 @@\n" +
+  "-target\n" +
+  "diff --git a/x b/x\n" +
+  "new file mode 100644\n" +
+  "index 0000000..4444ddd\n" +
+  "Binary files /dev/null and b/x differ\n";
+// The reverse: a binary file at x replaced by a symlink, binary section first.
+const TYPECHANGE_TO_LINK =
+  "diff --git a/x b/x\n" +
+  "deleted file mode 100644\n" +
+  "index 5555eee..0000000\n" +
+  "Binary files a/x and /dev/null differ\n" +
+  "diff --git a/x b/x\n" +
+  "new file mode 120000\n" +
+  "index 0000000..6666fff\n" +
+  "--- /dev/null\n" +
+  "+++ b/x\n" +
+  "@@ -0,0 +1 @@\n" +
+  "+target\n";
+const HEX40A = "a".repeat(40);
+const HEX40B = "b".repeat(40);
+const HEX64A = "c".repeat(64);
+const HEX64B = "d".repeat(64);
+
+const oidShapes = [
+  {
+    name: "a modified binary, mode suffix accepted",
+    text: binSection("index 0123abc..89defab 100644"),
+    want: { old: "0123abc", new: "89defab" },
+  },
+  {
+    name: "an added binary",
+    text: binSection("new file mode 100644", "index 0000000..abc1234"),
+    want: { old: null, new: "abc1234" },
+  },
+  {
+    name: "a deleted binary",
+    text: binSection("deleted file mode 100644", "index abc1234..0000000"),
+    want: { old: "abc1234", new: null },
+  },
+  {
+    name: "a rename with similarity lines before the index line",
+    text:
+      "diff --git a/old.png b/new.png\n" +
+      "similarity index 80%\n" +
+      "rename from old.png\n" +
+      "rename to new.png\n" +
+      "index 1111aaa..2222bbb 100644\n" +
+      "Binary files a/old.png and b/new.png differ\n",
+    path: "new.png",
+    want: { old: "1111aaa", new: "2222bbb" },
+  },
+  {
+    name: "a typechange: the binary section's ids, not the text section's",
+    text: TYPECHANGE,
+    path: "x",
+    want: { old: null, new: "4444ddd" },
+  },
+  {
+    name: "a typechange with the binary section first: its old id",
+    text: TYPECHANGE_TO_LINK,
+    path: "x",
+    want: { old: "5555eee", new: null },
+  },
+  {
+    name: "full 40-hex ids",
+    text: binSection(`index ${HEX40A}..${HEX40B} 100644`),
+    want: { old: HEX40A, new: HEX40B },
+  },
+  {
+    name: "full 64-hex ids (sha256)",
+    text: binSection(`index ${HEX64A}..${HEX64B}`),
+    want: { old: HEX64A, new: HEX64B },
+  },
+  {
+    name: "CRLF line endings",
+    text:
+      "diff --git a/x.png b/x.png\r\n" +
+      "index 0123abc..89defab 100644\r\n" +
+      "Binary files a/x.png and b/x.png differ\r\n",
+    want: { old: "0123abc", new: "89defab" },
+  },
+  {
+    name: "all-zero sides at 40 chars",
+    text: binSection(`index ${"0".repeat(40)}..${"0".repeat(40)}`),
+    want: { old: null, new: null },
+  },
+  {
+    name: "all-zero sides at 7 chars",
+    text: binSection("index 0000000..0000000"),
+    want: { old: null, new: null },
+  },
+];
+
+for (const { name, text, want, path = "x.png" } of oidShapes) {
+  test(`binaryIndexOids: ${name}`, () => {
+    assert.deepEqual(binaryIndexOids(text, path), want);
+  });
+}
+
+const oidRejects = [
+  {
+    name: "a reconstructed section with no index line",
+    text: binSection(),
+  },
+  {
+    name: "a non-binary section",
+    text:
+      "diff --git a/x.txt b/x.txt\n" +
+      "index 0123abc..89defab 100644\n" +
+      "--- a/x.txt\n" +
+      "+++ b/x.txt\n" +
+      "@@ -1 +1 @@\n" +
+      "-a\n" +
+      "+b\n",
+    path: "x.txt",
+  },
+  { name: "uppercase hex", text: binSection("index 0123ABC..89defab 100644") },
+  { name: "a 3-hex id", text: binSection("index abc..89defab") },
+  { name: "a 1-hex id", text: binSection("index 0123abc..f") },
+  { name: "a 65-hex id", text: binSection(`index ${"e".repeat(65)}..89defab`) },
+];
+
+for (const { name, text, path = "x.png" } of oidRejects) {
+  test(`binaryIndexOids: null for ${name}`, () => {
+    assert.equal(binaryIndexOids(text, path), null);
+  });
+}
+
+test("binaryIndexOids: both-absent is a parse, distinct from no parse", () => {
+  const oids = binaryIndexOids(binSection("index 0000000..0000000"), "x.png");
+  assert.notEqual(oids, null);
+  assert.deepEqual(binarySizeSummary(oids, { oldSize: 1, newSize: 1 }), {
+    kind: "blank",
+  });
+});
+
+// ------------------------------------------------------ index-line congruence
+
+// binaryIndexOids' line shape must match QUIET_LINE's index arm; a mode-only
+// section built around a line classifies exactly when that line is quiet.
+const quiet = (line) =>
+  classifyHeaderOnlyDiff(
+    `diff --git a/x b/x\nold mode 100644\nnew mode 100755\n${line}\n`,
+  ) !== null;
+
+const indexLinesAccepted = [
+  "index 0123abc..89defab",
+  "index 0123abc..89defab 100644",
+  "index 0000000..abc1234",
+  "index abc1234..0000000 100755",
+  `index ${HEX40A}..${HEX40B}`,
+  `index ${HEX64A}..${HEX64B} 100644`,
+];
+const indexLinesRejected = [
+  "index 0123ABC..89defab",
+  "index 0123abc...89defab",
+  "index 0123abc 89defab",
+  "index ..abc1234",
+  "index 0123abc..89defab 10064",
+  "index 0123abc..89defab 100644 ",
+  "index 0123abc..89defab 100648",
+  " index 0123abc..89defab",
+];
+
+test("index-line congruence: accepted lines are quiet", () => {
+  for (const line of indexLinesAccepted) {
+    assert.notEqual(binaryIndexOids(binSection(line), "x.png"), null, line);
+    assert.equal(quiet(line), true, line);
+  }
+});
+
+test("index-line congruence: rejected lines are not quiet", () => {
+  for (const line of indexLinesRejected) {
+    assert.equal(binaryIndexOids(binSection(line), "x.png"), null, line);
+    assert.equal(quiet(line), false, line);
+  }
+});
+
+// ------------------------------------------------------------ parseModeChange
+
+test("parseModeChange: the MODE_CHANGE sentences", () => {
+  assert.equal(
+    parseModeChange(
+      binSection(
+        "old mode 100644",
+        "new mode 100755",
+        "index 0123abc..89defab",
+      ),
+      "x.png",
+    ),
+    MODE_CHANGE["to-exec"]("100644", "100755"),
+  );
+  assert.equal(
+    parseModeChange(
+      binSection(
+        "old mode 100755",
+        "new mode 100644",
+        "index 0123abc..89defab",
+      ),
+      "x.png",
+    ),
+    MODE_CHANGE["from-exec"]("100755", "100644"),
+  );
+  assert.equal(
+    parseModeChange(
+      binSection(
+        "old mode 100644",
+        "new mode 100664",
+        "index 0123abc..89defab",
+      ),
+      "x.png",
+    ),
+    MODE_CHANGE.other("100644", "100664"),
+  );
+  assert.equal(
+    MODE_CHANGE.other("100644", "100664"),
+    "File mode changed from 100644 to 100664",
+  );
+});
+
+test("parseModeChange: null without both mode lines or a binary section", () => {
+  assert.equal(
+    parseModeChange(
+      binSection("old mode 100644", "index 0123abc..89defab"),
+      "x.png",
+    ),
+    null,
+  );
+  assert.equal(
+    parseModeChange(
+      binSection("new mode 100755", "index 0123abc..89defab"),
+      "x.png",
+    ),
+    null,
+  );
+  assert.equal(
+    parseModeChange(binSection("index 0123abc..89defab"), "x.png"),
+    null,
+  );
+  assert.equal(
+    parseModeChange(
+      "diff --git a/x b/x\nold mode 100644\nnew mode 100755\n",
+      "x",
+    ),
+    null,
+  );
+});
+
+// ---------------------------------------------------------- binarySizeSummary
+
+const L = (n) => n.toLocaleString();
+const BOTH = { old: "0123abc", new: "89defab" };
+const pair = (oldSize, newSize) =>
+  binarySizeSummary(BOTH, { oldSize, newSize });
+
+test("binarySizeSummary: blank while the read has no answer", () => {
+  assert.deepEqual(binarySizeSummary(BOTH, undefined), { kind: "blank" });
+});
+
+test("binarySizeSummary: deleted and new files", () => {
+  assert.deepEqual(
+    binarySizeSummary(
+      { old: "abc1234", new: null },
+      { oldSize: 921600, newSize: null },
+    ),
+    {
+      kind: "end",
+      label: "Deleted file",
+      size: "900 KB",
+      sr: `Deleted file, ${L(921600)} bytes.`,
+    },
+  );
+  assert.deepEqual(
+    binarySizeSummary(
+      { old: null, new: "abc1234" },
+      { oldSize: null, newSize: 700 },
+    ),
+    {
+      kind: "end",
+      label: "New file",
+      size: "700 B",
+      sr: `New file, ${L(700)} bytes.`,
+    },
+  );
+});
+
+test("binarySizeSummary: an unsized present side is never a partial claim", () => {
+  const blank = { kind: "blank" };
+  assert.deepEqual(
+    binarySizeSummary(
+      { old: "abc1234", new: null },
+      { oldSize: null, newSize: null },
+    ),
+    blank,
+  );
+  assert.deepEqual(
+    binarySizeSummary(
+      { old: null, new: "abc1234" },
+      { oldSize: null, newSize: null },
+    ),
+    blank,
+  );
+  assert.deepEqual(pair(null, 700), blank);
+  assert.deepEqual(pair(700, null), blank);
+  assert.deepEqual(pair(null, null), blank);
+  assert.deepEqual(
+    binarySizeSummary({ old: null, new: null }, { oldSize: 5, newSize: 5 }),
+    blank,
+  );
+});
+
+test("binarySizeSummary: same size, different contents", () => {
+  assert.deepEqual(pair(5021, 5021), {
+    kind: "same",
+    text: "Same size (4.9 KB), different contents",
+    sr: `Same size, ${L(5021)} bytes, different contents.`,
+  });
+});
+
+test("binarySizeSummary: exact bytes when the rounded sizes match", () => {
+  assert.deepEqual(pair(1882112, 1885184), {
+    kind: "pair",
+    sizes: `${L(1882112)} → ${L(1885184)} bytes`,
+    delta: "3.0 KB larger (+0.2%)",
+    sr: `Size changed from ${L(1882112)} bytes to ${L(1885184)} bytes, ${L(3072)} bytes larger, 0.2 percent larger.`,
+  });
+  // 1048570 B rounds to 1024 KB, which carries to the 1.0 MB of 1048576 B.
+  assert.deepEqual(pair(1048570, 1048576), {
+    kind: "pair",
+    sizes: `${L(1048570)} → ${L(1048576)} bytes`,
+    delta: "6 B larger (<0.1%)",
+    sr: `Size changed from ${L(1048570)} bytes to ${L(1048576)} bytes, 6 bytes larger, less than 0.1 percent larger.`,
+  });
+});
+
+test("binarySizeSummary: rounded sizes when they differ", () => {
+  assert.deepEqual(pair(48230, 51918), {
+    kind: "pair",
+    sizes: "47.1 KB → 50.7 KB",
+    delta: "3.6 KB larger (+8%)",
+    sr: `Size changed from ${L(48230)} bytes to ${L(51918)} bytes, ${L(3688)} bytes larger, 8 percent larger.`,
+  });
+});
+
+test("binarySizeSummary: a shrink carries a true minus", () => {
+  const line = pair(1240064, 742400);
+  assert.equal(line.sizes, "1.2 MB → 725 KB");
+  assert.equal(line.delta, "486 KB smaller (−40%)");
+  const minus = line.delta.slice(line.delta.indexOf("(") + 1)[0];
+  assert.equal(minus.codePointAt(0), 0x2212);
+  assert.match(line.sr, /bytes smaller, 40 percent smaller\.$/);
+});
+
+test("binarySizeSummary: growth from 10x is a multiplier", () => {
+  const line = pair(2048, 10485760);
+  assert.equal(line.sizes, "2.0 KB → 10.0 MB");
+  assert.equal(line.delta, `10.0 MB larger (${L(5120)}×)`);
+  assert.equal(pair(1000, 10000).delta, `8.8 KB larger (${L(10)}×)`);
+  assert.equal(pair(1000, 9990).delta, "8.8 KB larger (+899%)");
+});
+
+test("binarySizeSummary: the sentence speaks the ratio the delta shows", () => {
+  assert.equal(
+    pair(1000, 12000).sr,
+    `Size changed from ${L(1000)} bytes to ${L(12000)} bytes, ${L(11000)} bytes larger, 12 times larger.`,
+  );
+  assert.equal(pair(1000, 12000).delta, "10.7 KB larger (12×)");
+  assert.equal(
+    pair(100000, 99950).sr,
+    `Size changed from ${L(100000)} bytes to ${L(99950)} bytes, 50 bytes smaller, less than 0.1 percent smaller.`,
+  );
+  assert.match(
+    pair(10000, 9980).sr,
+    /20 bytes smaller, 0\.2 percent smaller\.$/,
+  );
+  assert.match(pair(1240064, 742400).sr, /, 40 percent smaller\.$/);
+  for (const [o, n] of [
+    [2048, 10485760],
+    [1240064, 742400],
+    [100000, 100050],
+    [10000, 10095],
+  ])
+    assert.doesNotMatch(pair(o, n).sr, /[−%×+]/);
+  // No clause where the delta has no parenthetical.
+  assert.match(pair(0, 700).sr, /, 700 bytes larger\.$/);
+  assert.match(pair(5021, 0).sr, /bytes smaller\.$/);
+});
+
+test("binarySizeSummary: shrinks stay percents, truncated, never -100%", () => {
+  assert.equal(pair(10485760, 524288).delta, "9.5 MB smaller (−95%)");
+  assert.equal(pair(10485760, 524288).sizes, "10.0 MB → 512 KB");
+  // A raw -95.7% truncates toward zero.
+  assert.equal(pair(10000, 430).delta, "9.3 KB smaller (−95%)");
+  assert.equal(pair(10485760, 2048).delta, "10.0 MB smaller (−99%)");
+  const floor = pair(1000000, 400).delta;
+  assert.match(floor, /\(−99%\)$/);
+  assert.doesNotMatch(floor, /−100%/);
+  assert.doesNotMatch(floor, /×/);
+});
+
+test("binarySizeSummary: sub-1% and sub-0.1% spellings", () => {
+  // 0.95% renders through toFixed(1), whose float reading of 0.95 is 0.9.
+  assert.equal(pair(10000, 10095).delta, "95 B larger (+0.9%)");
+  assert.equal(pair(10000, 9980).delta, "20 B smaller (−0.2%)");
+  assert.equal(pair(100000, 100050).delta, "50 B larger (<0.1%)");
+  assert.equal(pair(100000, 99950).delta, "50 B smaller (<0.1%)");
+});
+
+test("binarySizeSummary: a magnitude rounding to 1.0 takes the whole-percent spelling", () => {
+  assert.equal(pair(10000, 10097).delta, "97 B larger (+1%)");
+  assert.equal(pair(10000, 10100).delta, "100 B larger (+1%)");
+  // A shrink still truncates, but never to a 0%.
+  assert.equal(pair(10000, 9903).delta, "97 B smaller (−1%)");
+  for (const line of [pair(10000, 10097), pair(10000, 9903)])
+    assert.doesNotMatch(line.delta, /1\.0%|[+−]0%/);
+});
+
+test("binarySizeSummary: a 1-byte count is singular in every sentence", () => {
+  const added = binarySizeSummary(
+    { old: null, new: "abc1" },
+    { oldSize: null, newSize: 1 },
+  );
+  assert.equal(added.sr, "New file, 1 byte.");
+  assert.equal(
+    pair(2048, 2049).sr,
+    `Size changed from ${L(2048)} bytes to ${L(2049)} bytes, 1 byte larger, less than 0.1 percent larger.`,
+  );
+  assert.equal(
+    pair(1, 2).sr,
+    "Size changed from 1 byte to 2 bytes, 1 byte larger, 100 percent larger.",
+  );
+  assert.equal(pair(1, 1).sr, "Same size, 1 byte, different contents.");
+  for (const line of [added, pair(2048, 2049), pair(1, 2), pair(1, 1)])
+    assert.doesNotMatch(line.sr, /\b1 bytes/);
+});
+
+test("binarySizeSummary: a typechange sizes its lone side with no new or deleted claim", () => {
+  assert.equal(isTypechangeDiff(TYPECHANGE, "x"), true);
+  assert.equal(
+    isTypechangeDiff(binSection("index 0123abc..89defab"), "x.png"),
+    false,
+  );
+  const oids = binaryIndexOids(TYPECHANGE, "x");
+  const line = binarySizeSummary(
+    oids,
+    { oldSize: null, newSize: 716800 },
+    isTypechangeDiff(TYPECHANGE, "x"),
+  );
+  assert.deepEqual(line, {
+    kind: "size",
+    text: "700 KB",
+    sr: `${L(716800)} bytes.`,
+  });
+  const deleted = binarySizeSummary(
+    { old: "abc1234", new: null },
+    { oldSize: 921600, newSize: null },
+    true,
+  );
+  assert.equal(deleted.kind, "size");
+  for (const l of [line, deleted])
+    assert.doesNotMatch(JSON.stringify(l), /New file|Deleted file/);
+  // Without the flag the same answer still names the end.
+  assert.equal(
+    binarySizeSummary(oids, { oldSize: null, newSize: 716800 }).label,
+    "New file",
+  );
+});
+
+const OTHER_SECTION =
+  "diff --git a/y.txt b/y.txt\n--- a/y.txt\n+++ b/y.txt\n@@ -1 +1 @@\n-a\n+b\n";
+
+test("splitUnifiedDiff: a binary creation joins its typechange's deletion, in order", () => {
+  const split = splitUnifiedDiff(
+    OTHER_SECTION + TYPECHANGE + OTHER_SECTION.replace(/y/g, "z"),
+  );
+  assert.deepEqual([...split.keys()], ["y.txt", "x", "z.txt"]);
+  const text = split.get("x");
+  assert.equal(text, TYPECHANGE);
+  assert.equal(isTypechangeDiff(text, "x"), true);
+  const line = binarySizeSummary(
+    binaryIndexOids(text, "x"),
+    { oldSize: null, newSize: 716800 },
+    isTypechangeDiff(text, "x"),
+  );
+  assert.equal(line.kind, "size");
+  assert.doesNotMatch(JSON.stringify(line), /New file|Deleted file/);
+});
+
+test("splitUnifiedDiff: a binary deletion yields to its symlink creation", () => {
+  const split = splitUnifiedDiff(
+    OTHER_SECTION + TYPECHANGE_TO_LINK + OTHER_SECTION.replace(/y/g, "z"),
+  );
+  assert.deepEqual([...split.keys()], ["y.txt", "x", "z.txt"]);
+  const text = split.get("x");
+  assert.equal(
+    text,
+    TYPECHANGE_TO_LINK.slice(TYPECHANGE_TO_LINK.indexOf("diff --git", 1)),
+  );
+  assert.match(text, /^new file mode 120000$/m);
+  assert.equal(isTypechangeDiff(text, "x"), false);
+  assert.equal(sectionIsBinary(text), false);
+});
+
+// A local per-file diff's literal pathspec also matches files under a
+// same-named directory, so one FileDiff can carry another path's sections.
+const textSection = (path, kind) =>
+  kind === "deleted"
+    ? `diff --git a/${path} b/${path}\ndeleted file mode 100644\n` +
+      `index 1111aaa..0000000\n--- a/${path}\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n`
+    : `diff --git a/${path} b/${path}\nnew file mode 100644\n` +
+      `index 0000000..2222bbb\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1 @@\n+a\n`;
+const binaryEnd = (path, kind) =>
+  kind === "deleted"
+    ? `diff --git a/${path} b/${path}\ndeleted file mode 100644\n` +
+      `index 7777aaa..0000000\nBinary files a/${path} and /dev/null differ\n`
+    : `diff --git a/${path} b/${path}\nnew file mode 100755\n` +
+      `index 0000000..8888bbb\nBinary files /dev/null and b/${path} differ\n`;
+
+const dirShapes = [
+  {
+    name: "a text file replaced by a directory holding a binary",
+    text:
+      textSection("assets", "deleted") + binaryEnd("assets/logo.png", "new"),
+    row: "assets",
+    oids: null,
+    typechange: false,
+  },
+  {
+    name: "a directory's binary replaced by a binary file",
+    text: binaryEnd("x/a.png", "deleted") + binaryEnd("x", "new"),
+    row: "x",
+    oids: { old: null, new: "8888bbb" },
+    typechange: false,
+  },
+  {
+    name: "a binary file replaced by a directory",
+    text: binaryEnd("x", "deleted") + textSection("x/a.txt", "new"),
+    row: "x",
+    oids: { old: "7777aaa", new: null },
+    typechange: false,
+  },
+  {
+    name: "a binary deleted beside a new directory's binary",
+    text: binaryEnd("x", "deleted") + binaryEnd("x/b.png", "new"),
+    row: "x",
+    oids: { old: "7777aaa", new: null },
+    typechange: false,
+  },
+];
+
+for (const { name, text, row, oids, typechange } of dirShapes) {
+  test(`row-path scope: ${name}`, () => {
+    assert.deepEqual(binaryIndexOids(text, row), oids);
+    assert.equal(isTypechangeDiff(text, row), typechange);
+    assert.equal(parseModeChange(text, row), null);
+    if (oids === null) return;
+    const line = binarySizeSummary(
+      oids,
+      { oldSize: oids.old && 900, newSize: oids.new && 700 },
+      typechange,
+    );
+    assert.equal(line.kind, "end");
+    assert.equal(line.label, oids.new ? "New file" : "Deleted file");
+  });
+}
+
+test("row-path scope: a nested binary's mode never reads as the row's", () => {
+  const text =
+    textSection("x", "deleted") +
+    "diff --git a/x/run b/x/run\nold mode 100644\nnew mode 100755\n" +
+    "index 1234abc..5678def\nBinary files a/x/run and b/x/run differ\n";
+  assert.equal(parseModeChange(text, "x"), null);
+  assert.equal(parseModeChange(text, "x/run"), MODE_CHANGE["to-exec"]());
+});
+
+test("splitUnifiedDiff: a text typechange keeps only its creation section", () => {
+  const deletion = (mode, line) =>
+    `diff --git a/x b/x\ndeleted file mode ${mode}\nindex 1111aaa..0000000\n` +
+    `--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-${line}\n`;
+  const creation = (mode, line) =>
+    `diff --git a/x b/x\nnew file mode ${mode}\nindex 0000000..2222bbb\n` +
+    `--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+${line}\n`;
+  for (const [name, gone, made] of [
+    [
+      "text to symlink",
+      deletion("100644", "hello"),
+      creation("120000", "target"),
+    ],
+    [
+      "symlink to text",
+      deletion("120000", "target"),
+      creation("100644", "hello"),
+    ],
+  ]) {
+    const split = splitUnifiedDiff(
+      OTHER_SECTION + gone + made + OTHER_SECTION.replace(/y/g, "z"),
+    );
+    assert.deepEqual([...split.keys()], ["y.txt", "x", "z.txt"], name);
+    assert.equal(split.get("x"), made, name);
+    assert.equal(isTypechangeDiff(split.get("x"), "x"), false, name);
+  }
+});
+
+test("binarySizeSummary: a 0-byte side takes no parenthetical", () => {
+  assert.deepEqual(pair(0, 700), {
+    kind: "pair",
+    sizes: "0 B → 700 B",
+    delta: "700 B larger",
+    sr: `Size changed from ${L(0)} bytes to ${L(700)} bytes, ${L(700)} bytes larger.`,
+  });
+  assert.equal(pair(5021, 0).delta, "4.9 KB smaller");
 });
