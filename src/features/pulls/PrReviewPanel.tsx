@@ -10,7 +10,7 @@ import {
 } from "@phosphor-icons/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, m } from "motion/react";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ElapsedTime } from "@/components/elapsed-time";
@@ -123,6 +123,7 @@ export function PrReviewPanel({
   onPost,
   posting,
   stale = false,
+  conversationHoldReason = null,
 }: {
   context: ReviewContext;
   /** Whether this PR is a GitHub PR or a local-only one. */
@@ -137,6 +138,10 @@ export function PrReviewPanel({
   /** The caller is still rendering a previously selected PR, so `context` describes
    *  that one while the run would persist under this `prRef` — holds the run. */
   stale?: boolean;
+  /** Why the conversation won't take a comment (locked or archived): holds both
+   *  Posts (live and history) with it. A post in flight outranks it; it outranks
+   *  `stale`. Local PRs pass none. */
+  conversationHoldReason?: string | null;
 }) {
   const settings = useSettings();
   const repoName = useUiStore((s) => s.repoName) ?? "";
@@ -404,6 +409,17 @@ export function PrReviewPanel({
   // arm for another target is dropped (a render-time adjustment).
   const scopeKey = `${prKind}:${context.repoPath}#${context.lens}#${prRef}`;
   const scopeKeyRef = useLatestRef(scopeKey);
+  const holdRef = useLatestRef(conversationHoldReason);
+  const staleRef = useLatestRef(stale);
+  // The confirm host is app-level, so a dialog can outlive this panel, whose
+  // refs then freeze at the scope it left.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [focusArmedFor, setFocusArmedFor] = useState<string | null>(null);
   if (focusArmedFor !== null && focusArmedFor !== scopeKey)
     setFocusArmedFor(null);
@@ -424,7 +440,14 @@ export function PrReviewPanel({
     prKind === "local" ? ACT_PENDING_REASON : COMMENT_POST_PENDING_REASON;
 
   async function post() {
-    if (!onPost || !text.trim() || posting || stale) return;
+    if (
+      !onPost ||
+      !text.trim() ||
+      posting ||
+      conversationHoldReason !== null ||
+      stale
+    )
+      return;
     // The stamp target and the posted run, pinned before any await: a run starting
     // mid-post takes the entry (and clears its recordId), and a PR switch moves
     // context. The stamp and the reset stay with this one.
@@ -461,7 +484,18 @@ export function PrReviewPanel({
       already: livePosted,
       suspectRefs,
     });
-    if (confirm && !(await useConfirm.getState().ask(confirm))) return;
+    if (confirm) {
+      if (!(await useConfirm.getState().ask(confirm))) return;
+      // Read fresh: the dialog's answer counts only for the PR still selected
+      // and shown here (mounted, no hold, not stale, same scope).
+      if (
+        !mountedRef.current ||
+        holdRef.current !== null ||
+        staleRef.current ||
+        scopeKeyRef.current !== postedScope
+      )
+        return;
+    }
     const label = mode === "security" ? "security audit" : "review";
     const body = buildAiCommentBody({
       kind: label,
@@ -730,8 +764,12 @@ export function PrReviewPanel({
             <DisabledReasonButton
               variant="ghost"
               size="sm"
-              disabled={posting || stale}
-              reason={posting ? postPendingReason : PR_SWITCH_LOADING_REASON}
+              disabled={posting || conversationHoldReason !== null || stale}
+              reason={
+                posting
+                  ? postPendingReason
+                  : (conversationHoldReason ?? PR_SWITCH_LOADING_REASON)
+              }
               onClick={post}
             >
               {posting && <Spinner data-icon="inline-start" />}
@@ -917,6 +955,7 @@ export function PrReviewPanel({
           onPost={onPost}
           posting={posting}
           stale={stale}
+          conversationHoldReason={conversationHoldReason}
         />
       </div>
 

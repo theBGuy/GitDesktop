@@ -54,7 +54,7 @@ function Footers({
     try {
       await started;
     } catch {
-      footerFocus.disarm();
+      footerFocus.disarm(entityKey);
     }
   }
   return (
@@ -185,6 +185,25 @@ describe("useFooterFocusSwap", () => {
     expect(document.activeElement).toBe(document.body);
   });
 
+  it("a late failure on the PR left behind keeps the next PR's arm", async () => {
+    const onA = deferred();
+    const onB = deferred();
+    let attempt = 0;
+    const { show } = setup("OPEN", () => {
+      attempt += 1;
+      return attempt === 1 ? onA.promise : onB.promise;
+    });
+    await userEvent.click(button("Close"));
+    // The user moves to B (dropping A's arm) and closes it from its footer.
+    show("OPEN", B);
+    await userEvent.click(button("Close"));
+    // A's close fails now; its disarm names A, so B's arm stands.
+    await act(async () => onA.reject(new Error("boom")));
+    show("CLOSED", B);
+    expect(document.activeElement).toBe(button("Reopen"));
+    await act(async () => onB.resolve());
+  });
+
   it("a refetch swapping the footer with nothing armed moves nothing", () => {
     const { show } = setup("OPEN", () => "cancelled");
     show("CLOSED");
@@ -234,6 +253,41 @@ describe("useFooterFocusSwap", () => {
     expect(document.activeElement).toBe(document.body);
     rerender(<Probe closeShown={false} reopenShown={false} />);
     rerender(<Probe closeShown={false} reopenShown />);
+    expect(document.activeElement).toBe(button("Reopen"));
+  });
+
+  // doClose/doReopen arm only after awaiting the riding comment, so an arm can
+  // arrive for a PR the user already left.
+  it("a late arm for the PR left behind keeps the shown PR's arm", () => {
+    let arm: ((target: "close" | "reopen", key: string) => void) | undefined;
+    function Probe(props: { entityKey: string; closed: boolean }) {
+      const closeRef = useRef<HTMLButtonElement>(null);
+      const reopenRef = useRef<HTMLButtonElement>(null);
+      const footerFocus = useFooterFocusSwap({
+        entityKey: props.entityKey,
+        closeShown: !props.closed,
+        reopenShown: props.closed,
+        closeRef,
+        reopenRef,
+      });
+      arm = footerFocus.arm;
+      return props.closed ? (
+        <button ref={reopenRef} type="button">
+          Reopen
+        </button>
+      ) : (
+        <button ref={closeRef} type="button">
+          Close
+        </button>
+      );
+    }
+    const { rerender } = render(<Probe entityKey={A} closed />);
+    // The user moves to B and closes it from its footer.
+    rerender(<Probe entityKey={B} closed={false} />);
+    act(() => arm?.("reopen", B));
+    // A's riding comment lands now, and its reopen arms for A.
+    act(() => arm?.("close", A));
+    rerender(<Probe entityKey={B} closed />);
     expect(document.activeElement).toBe(button("Reopen"));
   });
 

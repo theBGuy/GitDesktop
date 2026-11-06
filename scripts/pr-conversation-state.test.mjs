@@ -4,9 +4,9 @@
 // serializes them (an `AppError::Gh` is `{kind: "gh", message}` with no Display
 // lead, so the message must equal the pinned copy byte for byte).
 //
-// The module imports the `@/` error-summary lead mirror, which Node's type
-// stripping can't resolve, so the shared src hooks go in first and the import
-// is dynamic.
+// `isPrArchivedRefusal` lives in error-summary.ts, whose `@/` imports Node's
+// type stripping can't resolve, so the shared src hooks go in first and the
+// imports are dynamic.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { installSrcHooks } from "./lib/src-import-hooks.mjs";
@@ -14,11 +14,10 @@ import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 const hooks = installSrcHooks();
 after(() => hooks.deregister());
 
-const {
-  PR_ARCHIVED_READONLY_MESSAGE,
-  isPrArchivedRefusal,
-  prConversationHold,
-} = await import("@/lib/git/types/prs");
+const { PR_ARCHIVED_READONLY_MESSAGE, prConversationHold } = await import(
+  "@/lib/git/types/prs"
+);
+const { isPrArchivedRefusal } = await import("@/lib/error-summary");
 
 const ARCHIVED =
   "This pull request is archived, so its conversation is read-only.";

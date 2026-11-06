@@ -138,6 +138,20 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   return run;
 }
 
+// Session receipts: posted stamps by record id, set when {@link markReviewPosted} is
+// called and kept whatever its write's outcome. Every read overlays them, so a read
+// holding a store copy from before the write persisted (any path's query, a sibling
+// worktree's included) can't serve the record unposted and re-offer a plain Post.
+const pendingStamps = new Map<string, number>();
+
+function withPendingStamps(records: PersistedReview[]): PersistedReview[] {
+  if (pendingStamps.size === 0) return records;
+  return records.map((r) => {
+    const postedAt = pendingStamps.get(r.id);
+    return postedAt === undefined ? r : { ...r, postedAt };
+  });
+}
+
 async function reloadRaw(): Promise<void> {
   await reloadToleratingEmptyStore(await getStore());
 }
@@ -219,10 +233,10 @@ async function read(
   repo: string,
   opts?: { fresh?: boolean },
 ): Promise<PersistedReview[]> {
-  if (!opts?.fresh) return readMerged(repo);
+  if (!opts?.fresh) return withPendingStamps(await readMerged(repo));
   return serialize(async () => {
     await reloadRaw();
-    return readMerged(repo);
+    return withPendingStamps(await readMerged(repo));
   });
 }
 
@@ -403,13 +417,16 @@ export async function updateReviewText(
 /** Stamps a stored record as posted to the PR conversation. Rides the same queue as
  *  {@link saveReview}, so a stamp enqueued after a save targets the saved record; an
  *  id the prune or a delete already removed is a no-op. Never reorders: rows sort by
- *  `finishedAt`, which this leaves alone. Callers invalidate. */
+ *  `finishedAt`, which this leaves alone. Callers invalidate. Reads return the
+ *  record as posted from this call on, for the rest of the session, whatever the
+ *  write's outcome (see `pendingStamps`). */
 export async function markReviewPosted(
   repo: string,
   id: string,
   postedAt: number,
 ): Promise<void> {
-  return serialize(async () => {
+  pendingStamps.set(id, postedAt);
+  await serialize(async () => {
     const identity = await repoIdentity(repo);
     await withAppStoreLock(STORE_FILE, async () => {
       await reloadRaw();

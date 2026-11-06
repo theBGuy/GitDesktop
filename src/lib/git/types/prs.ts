@@ -1,4 +1,3 @@
-import { appErrorDetail } from "@/lib/error-summary";
 import type { ForgeProvider, ForgeUserRef, RepoLabel } from "./forge";
 import type { CompletedReviewerWithState, PrThreadOut } from "./pr-reviews";
 
@@ -466,14 +465,6 @@ export interface PrDetails {
  *  `AppError::Gh` whose message carries no Display lead. */
 export const PR_ARCHIVED_READONLY_MESSAGE =
   "This pull request is archived, so its conversation is read-only.";
-
-/** Whether a failed PR comment was GitHub refusing an archived pull request. */
-export function isPrArchivedRefusal(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) return false;
-  const { kind, message } = error as { kind?: unknown; message?: unknown };
-  if (kind !== "gh" || typeof message !== "string") return false;
-  return appErrorDetail(kind, message) === PR_ARCHIVED_READONLY_MESSAGE;
-}
 
 const PR_LOCKED_COMMENT_REASONS: Partial<Record<ForgeProvider, string>> = {
   github: "This conversation is locked, so only collaborators can comment.",

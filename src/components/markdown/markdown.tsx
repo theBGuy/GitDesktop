@@ -24,7 +24,7 @@ import {
 import { diffLang } from "@/features/diff/diff-lang";
 import { type FileBytes, forgeRepoUrl } from "@/lib/git/api";
 import { fileAtRevOptions, issueDetailsOptions } from "@/lib/git/queries";
-import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
+import type { ForgeProvider } from "@/lib/git/types";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { createCardLatch } from "@/lib/hover-card-latch";
 import {
@@ -33,7 +33,7 @@ import {
   cancelFrame,
   cancelTimer,
 } from "@/lib/hover-card-timing";
-import { lensKey } from "@/lib/repo-lens/queries";
+import { cachedRepoLens } from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -784,6 +784,14 @@ export function Markdown({
   // cursor plus aria-busy is the whole affordance: a spinner or a toast would be
   // louder than this warrants.
   const [resolving, setResolving] = useState(false);
+  // An <Activity> hide runs the cleanup too, which counts as leaving the body.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   // Subscribe to the highlight.js upgrade: when a fence's exotic language pulls
   // in the full build, this snapshot changes, re-parsing so the previously-plain
   // fence highlights. (Module state read during render is invisible to the React
@@ -1268,10 +1276,8 @@ export function Markdown({
     // selectPr/selectIssue hand over a bare number that the destination view
     // resolves under the repo's ACTIVE lens, so a body rendered under the other
     // one (a local view, or any surface pinned to origin) can only reach the
-    // right item by leaving the app. A cold cache reads as "origin", matching
-    // useRepoLens' own fallback.
-    const activeLens =
-      queryClient.getQueryData<RemoteLens>(lensKey(repoPath)) ?? "origin";
+    // right item by leaving the app. Read through the same gate as useRepoLens.
+    const activeLens = cachedRepoLens(queryClient, repoPath);
     if (activeLens !== lens) {
       setResolving(true);
       try {
@@ -1297,11 +1303,25 @@ export function Markdown({
       openIssue();
       return;
     }
+    // The lookup outlives the click, which claims its own epoch so a newer click
+    // or navigation strands it; it navigates only while the body is still
+    // mounted, on that epoch, repo and lens. (The browser-only arms need none.)
+    useUiStore.getState().noteUserInteraction();
+    const clickEpoch = useUiStore.getState().interactionEpoch;
     setResolving(true);
     try {
       const issue = await queryClient.fetchQuery(
         issueDetailsOptions(repoPath, number, lens),
       );
+      const live = useUiStore.getState();
+      const liveLens = cachedRepoLens(queryClient, repoPath);
+      if (
+        !mountedRef.current ||
+        live.interactionEpoch !== clickEpoch ||
+        live.repoPath !== repoPath ||
+        liveLens !== lens
+      )
+        return;
       if (isPullRefUrl(issue.url)) openPr();
       else openIssue();
     } catch (e) {

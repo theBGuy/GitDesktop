@@ -41,12 +41,14 @@ struct PrListArgs {
     /// Bitbucket a full page.
     /// With `limit`, GitHub returns up to 1000 and Bitbucket up to 50. GitLab
     /// reads up to 500 per state, newest-created first: open, merged and unmerged
-    /// read one state each, and closed reads both closed and merged. When a
-    /// GitLab state needs a sixth page to cover `limit`, the call returns at most
-    /// the newest min(limit, 500) rows overall and usually stops short of that,
-    /// because rows sharing the cutoff's creation time are left out. The response
-    /// does not mark a shortened list. Otherwise a GitLab closed call can return
-    /// up to `limit` rows across both states.
+    /// read one state each, and closed reads both closed and merged. GitLab open
+    /// past that horizon returns up to the newest min(limit, 500); MRs opened or
+    /// closed during the walk can leave it a few rows short. When a closed,
+    /// merged or unmerged state needs a sixth page to cover `limit`, the call
+    /// returns at most the newest min(limit, 500) rows overall and usually stops
+    /// short of that, because rows sharing the cutoff's creation time are left
+    /// out. Neither response marks a capped list. Otherwise a GitLab closed call
+    /// can return up to `limit` rows across both states.
     #[serde(default)]
     limit: Option<u32>,
 }
@@ -152,12 +154,15 @@ impl GitDesktopMcp {
                        GitLab open 500 (newest-created first); closed, merged and unmerged up \
                        to 500 per state (closed walks both closed and merged; merged and \
                        unmerged one state each; newest-created first); Bitbucket 50. A larger \
-                       `limit` returns the ceiling. When a GitLab state needs a sixth page to \
-                       cover `limit`, the call returns at most the newest min(`limit`, 500) \
-                       rows overall and usually stops short of that, because rows sharing the \
-                       cutoff's creation time are left out. The response does not mark a \
-                       shortened list. Otherwise a closed call can return up to `limit` rows \
-                       across both states. Open rows carry a `stack` object \
+                       `limit` returns the ceiling. GitLab open past its horizon returns up \
+                       to the newest min(`limit`, 500); MRs opened or closed during the walk \
+                       can leave it a few rows short. When a GitLab closed, merged or \
+                       unmerged state needs a sixth page to cover `limit`, the call returns \
+                       at most the newest min(`limit`, 500) rows overall and usually stops \
+                       short of that, because rows sharing the cutoff's creation time are \
+                       left out. Neither response marks a capped list. Otherwise a closed \
+                       call can return up to `limit` rows across both states. Open rows carry \
+                       a `stack` object \
                        ({id, position, size}, position 1 = bottom and merges first) when the \
                        PR belongs to a stack — GitHub stacks, or a chain of GitLab MRs each \
                        targeting the next one's source branch; null otherwise. On GitHub, \

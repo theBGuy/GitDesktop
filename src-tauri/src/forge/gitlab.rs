@@ -1716,12 +1716,16 @@ where
 }
 
 /// Offset pages retain server order; only explicit limits above one page deepen.
-/// A full horizon reports capped only when the requested limit needs more pages.
+/// Rows dedupe on `key` (first sighting wins) as they arrive, and the walk counts
+/// unique rows: a row that shifts between offset pages repeats, so a raw count
+/// would stop one page short. It ends at `limit` unique rows, a short page, or the
+/// horizon, and reports capped only for a full horizon still short of `limit`.
 async fn unfiltered_pages_with<R, F, Fut>(
     endpoint: &str,
     limit: u32,
     what: &str,
     parse_failure: &str,
+    key: impl Fn(&R) -> u64,
     fetch: F,
 ) -> AppResult<(Vec<R>, bool)>
 where
@@ -1729,20 +1733,21 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<String>>,
 {
-    let needed = limit.div_ceil(FILTER_PAGE_SIZE);
+    let mut seen = std::collections::HashSet::new();
     let mut rows = Vec::new();
     let mut short_page = false;
-    for page in 1..=needed.min(MAX_LEG_PAGES) {
+    for page in 1..=MAX_LEG_PAGES {
         let body = fetch(format!("{endpoint}&page={page}")).await?;
         let page_rows: Vec<R> = serde_json::from_str(&body)
             .map_err(|e| gl_unreadable(what, format!("{parse_failure}: {e}")))?;
         short_page = page_rows.len() < FILTER_PAGE_SIZE as usize;
-        rows.extend(page_rows);
-        if short_page {
+        rows.extend(page_rows.into_iter().filter(|r| seen.insert(key(r))));
+        if short_page || rows.len() >= limit as usize {
             break;
         }
     }
-    Ok((rows, needed > MAX_LEG_PAGES && !short_page))
+    let capped = !short_page && rows.len() < limit as usize;
+    Ok((rows, capped))
 }
 
 /// Inference sees every row read, including the full first page for small limits.
@@ -1764,6 +1769,7 @@ where
             n,
             "merge requests",
             "could not parse GitLab merge requests",
+            |mr: &GlabMr| mr.iid,
             fetch,
         )
         .await?
@@ -1779,10 +1785,6 @@ where
         (mrs, false)
     };
     let mut prs: Vec<PrInfo> = mrs.into_iter().map(from_glab_mr).collect();
-    if limit.is_some_and(|n| n > FILTER_PAGE_SIZE) {
-        let mut seen = std::collections::HashSet::new();
-        prs.retain(|p| seen.insert(p.number));
-    }
     // Truncation must follow inference so an omitted child still decorates its parent.
     apply_mr_stacks(&mut prs);
     if let Some(n) = limit {
@@ -4960,15 +4962,11 @@ where
             n,
             "issues",
             "could not parse GitLab issues",
+            |issue: &GlabIssue| issue.iid,
             fetch,
         )
         .await?;
-        let mut seen = std::collections::HashSet::new();
-        let mut rows: Vec<IssueInfo> = issues
-            .into_iter()
-            .map(from_glab_issue)
-            .filter(|i| seen.insert(i.number))
-            .collect();
+        let mut rows: Vec<IssueInfo> = issues.into_iter().map(from_glab_issue).collect();
         rows.truncate(n as usize);
         return Ok(rows);
     }
@@ -12672,20 +12670,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_mr_pages_dedupe_a_repeated_iid() {
-        let mut pages = closed_state_pages("opened", 1, 200, 5000);
+    async fn open_mr_pages_dedupe_a_repeated_iid_and_read_on() {
+        let mut pages = closed_state_pages("opened", 1, 300, 5000);
         let mut second: serde_json::Value = serde_json::from_str(&pages[1]).unwrap();
         second[0]["iid"] = serde_json::json!(5);
         second[0]["title"] = serde_json::json!("later duplicate");
         pages[1] = second.to_string();
-        let (rows, urls, capped) =
-            read_open_pages(Some(200), page_responses(OPEN_WALK_ENDPOINT, pages)).await;
-        assert_eq!(urls.len(), 2);
-        assert_eq!(rows.len(), 199);
+        let responses = page_responses(OPEN_WALK_ENDPOINT, pages);
+        let expected_urls: Vec<_> = responses.iter().map(|(url, _)| url.clone()).collect();
+        let (rows, urls, capped) = read_open_pages(Some(200), responses).await;
+        assert_eq!(urls, expected_urls);
+        assert_eq!(rows.len(), 200);
         assert_eq!(rows.iter().filter(|p| p.number == 5).count(), 1);
         assert_eq!(rows[4].number, 5);
         assert!(rows[4].title.is_empty());
+        assert!(!rows.iter().any(|p| p.number == 101));
+        assert_eq!(rows[199].number, 201);
         assert!(!capped);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_issue_pages_count_unique_rows() {
+        let mut pages = closed_state_pages("closed", 1, 300, 5000);
+        let mut second: serde_json::Value = serde_json::from_str(&pages[1]).unwrap();
+        second[0]["iid"] = serde_json::json!(7);
+        pages[1] = second.to_string();
+        let responses = page_responses(ISSUE_WALK_ENDPOINT, pages);
+        let requested = std::sync::Mutex::new(Vec::new());
+        let rows = unfiltered_issues_with(
+            "group%2Frepo",
+            "closed",
+            Some(200),
+            list_page_fetch(&responses, &requested),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 200);
+        assert_eq!(rows.iter().filter(|i| i.number == 7).count(), 1);
+        assert_eq!(requested.into_inner().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_with_repeats_cap_at_the_horizon() {
+        let mut pages = closed_state_pages("opened", 1, 800, 5000);
+        let mut second: serde_json::Value = serde_json::from_str(&pages[1]).unwrap();
+        second[0]["iid"] = serde_json::json!(5);
+        pages[1] = second.to_string();
+        let (rows, urls, capped) =
+            read_open_pages(Some(500), page_responses(OPEN_WALK_ENDPOINT, pages)).await;
+        assert_eq!(urls.len(), 5);
+        assert_eq!(rows.len(), 499);
+        assert!(capped);
     }
 
     #[tokio::test]

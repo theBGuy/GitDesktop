@@ -37,14 +37,20 @@ function withPosted(data: unknown, id: string, postedAt: number): unknown {
   return data;
 }
 
+/** Both cached families, every path/lens/kind/ref: a sibling worktree reads the same
+ *  identity-keyed store through its own path's keys. The partial prefix also covers
+ *  the partials list. */
+const FAMILIES = [["review-history"], ["review-partial"]] as const;
+
 /**
  * Stamps a posted review, shared by the live Post and a history row's Post so both
- * surfaces read "posted" the moment the comment lands. Fire-and-forget: patches
- * the cached copies (only caches holding the record; it never creates an entry),
- * then writes the store and re-reads both keys. A failed write re-reads too, which
- * rolls the patch back to store truth; nothing is surfaced, since the comment
- * itself landed. It cancels in-flight reads of both keys first: one started before
- * the stamp would land the pre-stamp store copy over the patch.
+ * surfaces read "posted" the moment the comment lands. Fire-and-forget: patches the
+ * record by id (a UUID) in every cached copy of both families (only caches holding
+ * it; never creating an entry), then writes the store and re-reads this scope's
+ * keys. Reads return the record as posted from the write's request on, for the rest
+ * of the session, whatever the write's outcome (a failure surfaces nothing: the
+ * comment itself landed). It cancels this scope's in-flight reads first, so none
+ * lands a pre-stamp copy over the patch; other paths' reads get the receipt.
  */
 export function stampReviewPosted(
   queryClient: QueryClient,
@@ -62,7 +68,7 @@ export function stampReviewPosted(
     await Promise.all(
       keys.map((queryKey) => queryClient.cancelQueries({ queryKey })),
     );
-    for (const queryKey of keys) {
+    for (const queryKey of FAMILIES) {
       for (const [key, data] of queryClient.getQueriesData({ queryKey })) {
         const next = withPosted(data, id, postedAt);
         if (next !== data) queryClient.setQueryData(key, next);

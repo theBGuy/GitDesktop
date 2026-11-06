@@ -108,7 +108,7 @@ import {
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
-import { presentError } from "@/lib/error-summary";
+import { isPrArchivedRefusal, presentError } from "@/lib/error-summary";
 import {
   gitFetch,
   type MergeStrategy,
@@ -207,7 +207,6 @@ import {
   type ApprovalState,
   type ForgeProvider,
   type ForgeUserRef,
-  isPrArchivedRefusal,
   listPageRows,
   OPEN_IN_BROWSER,
   type PrDetails,
@@ -589,6 +588,7 @@ export function useFooterFocusSwap({
     null,
   );
   const prevRef = useRef({ closeShown, reopenShown });
+  const liveKeyRef = useLatestRef(entityKey);
   useLayoutEffect(() => {
     const prev = prevRef.current;
     prevRef.current = { closeShown, reopenShown };
@@ -607,15 +607,61 @@ export function useFooterFocusSwap({
     (toClose ? closeRef : reopenRef).current?.focus();
   }, [closeShown, reopenShown, entityKey, closeRef, reopenRef]);
   return {
-    /** Call right before the write starts, for the PR it addresses. */
+    /** Call right before the write starts, for the PR it addresses. A key that
+     *  isn't the PR on screen is refused, so a late arm never replaces its arm. */
     arm(target: FooterFocusTarget, key: string) {
+      if (key !== liveKeyRef.current) return;
       pendingRef.current = { target, key };
     },
-    /** A failed write leaves the footer, and focus on its button, standing. */
-    disarm() {
-      pendingRef.current = null;
+    /** A failed write leaves the footer, and focus on its button, standing.
+     *  Compare-and-clear on the key it armed with: a later PR's arm survives. */
+    disarm(key: string) {
+      if (pendingRef.current?.key === key) pendingRef.current = null;
     },
   };
+}
+
+/**
+ * The archived-PR latch. An archived pull request has no read signal, so a refused
+ * write latches the conversation read-only for the PR it was sent on, but only
+ * while that PR is still on screen at the refusal: a late one from a PR the user
+ * left would replace the shown PR's latch, which the reset then clears. Any other
+ * PR on screen clears it (render-time reset), so it never outlives that PR.
+ */
+export function useArchivedLatch(entityKey: string) {
+  const [archivedFor, setArchivedFor] = useState<string | null>(null);
+  if (archivedFor !== null && archivedFor !== entityKey) setArchivedFor(null);
+  const entityKeyRef = useLatestRef(entityKey);
+  return {
+    archived: archivedFor === entityKey,
+    /** Call from a write's catch with the entity key pinned when it started. */
+    latchIfArchived(sentOn: string, error: unknown) {
+      if (isPrArchivedRefusal(error) && entityKeyRef.current === sentOn)
+        setArchivedFor(sentOn);
+    },
+  };
+}
+
+/** The palette's route to the comment box, offered only where there is a box to
+ *  focus and it would take a comment: a resolve takes the whole view over, the
+ *  other sub-tabs have no composer, and a held composer is read-only. */
+export function useFocusCommentAction(
+  focus: () => void,
+  {
+    threadActive,
+    canComment,
+    composerHold,
+  }: {
+    threadActive: boolean;
+    canComment: boolean;
+    composerHold: string | null;
+  },
+) {
+  useHotkeyAction(
+    "focus-comment",
+    focus,
+    threadActive && canComment && composerHold === null,
+  );
 }
 
 export function RemotePrView({
@@ -704,6 +750,13 @@ export function RemotePrView({
     canSubmitReview,
   } = usePrCapabilities(forge.data, provider, writeAccess.data);
   const [section, setSection] = useState<PrSection>("conversation");
+  // A section pick is a user action whose state lives here, so it claims the
+  // epoch first and a pending continuation yields to it. The automatic
+  // corrections below (the pending landing, the fallback) set it silently.
+  const pickSection = (next: PrSection) => {
+    useUiStore.getState().noteUserInteraction();
+    setSection(next);
+  };
   // The <Activity> gate every polling read below carries.
   const repoTab = useUiStore((s) => s.repoTab);
   const selectedPr = useUiStore((s) => s.selectedPr);
@@ -1093,6 +1146,12 @@ export function RemotePrView({
   const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // A user file pick, noted first so a pending continuation (a markdown
+  // `#N` lookup) strands; the automatic selections stay silent.
+  const pickPath = (path: string) => {
+    useUiStore.getState().noteUserInteraction();
+    setSelectedPath(path);
+  };
   // Commits-tab drill-in: the selected commit's oid, or null for the list. Reset
   // when the PR number changes (below, alongside the file-selection reset).
   const [selectedCommitOid, setSelectedCommitOid] = useState<string | null>(
@@ -1931,16 +1990,12 @@ export function RemotePrView({
 
   // Keyed on the PR on screen, so a hold keeps showing the held PR's draft.
   const compose = useKeyedEntityState(hold.shownKey, "");
-  // An archived pull request has no read signal, so a refused comment latches
-  // the conversation read-only for the PR it was sent on; any other PR on screen
-  // clears the latch (render-time reset), so it never outlives that PR.
-  const [archivedFor, setArchivedFor] = useState<string | null>(null);
-  if (archivedFor !== null && archivedFor !== entityKey) setArchivedFor(null);
+  const { archived, latchIfArchived } = useArchivedLatch(entityKey);
   // Read off the rendered PR's own details only: a placeholder is another PR's.
   // The provider only picks the hold's copy, so it names the shown one.
   const conversationHold = prConversationHold(
     detailsPlaceholder ? undefined : details.data,
-    archivedFor === entityKey,
+    archived,
     shown,
   );
   // Quote entry points withhold over a placeholder (the quote would be another
@@ -2189,7 +2244,7 @@ export function RemotePrView({
       toast.success("Comment added");
     } catch (e) {
       compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
-      if (isPrArchivedRefusal(e)) setArchivedFor(submittedFor);
+      latchIfArchived(submittedFor, e);
       onError(e);
     }
   }
@@ -2217,7 +2272,7 @@ export function RemotePrView({
       compose.clearFor(submittedFor);
       return true;
     } catch (e) {
-      if (isPrArchivedRefusal(e)) setArchivedFor(submittedFor);
+      latchIfArchived(submittedFor, e);
       onError(e);
       return false;
     }
@@ -2281,7 +2336,7 @@ export function RemotePrView({
           : `Closed #${number}`,
       );
     } catch (e) {
-      footerFocus.disarm();
+      footerFocus.disarm(entityKey);
       if (withComment)
         toastErrorWithNote(
           e,
@@ -2318,7 +2373,7 @@ export function RemotePrView({
           : `Reopened #${number}`,
       );
     } catch (e) {
-      footerFocus.disarm();
+      footerFocus.disarm(entityKey);
       if (withComment)
         toastErrorWithNote(
           e,
@@ -2727,15 +2782,12 @@ export function RemotePrView({
     !detailsStale &&
     feedReady;
   const jumpRef = useThreadJumpHotkeys(threadActive);
-  // The palette's route to the comment box. Every term the composer itself is
-  // gated on rides here too, so the action is offered only where there is a box
-  // to focus: a resolve takes the whole view over, and the other sub-tabs have
-  // no composer.
-  useHotkeyAction(
-    "focus-comment",
-    () => composerRef.current?.focus(),
-    threadActive && canComment,
-  );
+  // Every term the composer itself is gated on rides here too.
+  useFocusCommentAction(() => composerRef.current?.focus(), {
+    threadActive,
+    canComment,
+    composerHold: conversationHold.composer,
+  });
 
   const detailPane = resolveDetailPane({
     pending: details.isPending,
@@ -3842,7 +3894,7 @@ export function RemotePrView({
             repoPath={repoPath}
             number={shownNumber}
             onView={() => {
-              setSection("conversation");
+              pickSection("conversation");
               setTasksScrollFor(hold.shownKey);
             }}
           />
@@ -3928,7 +3980,7 @@ export function RemotePrView({
               variant={section === s ? "secondary" : "ghost"}
               size="xs"
               aria-pressed={section === s}
-              onClick={() => setSection(s)}
+              onClick={() => pickSection(s)}
             >
               {SECTION_LABEL[s](pr)}
             </Button>
@@ -4051,14 +4103,17 @@ export function RemotePrView({
           }}
           posting={commentPending}
           // The context above is seeded from the rendered PR, so through a switch
+          // (the selection hold included, which still paints the PR it left)
           // `stale` holds both the run and the post — without the spinner that
           // `posting` shows for a real one.
-          stale={detailsPlaceholder}
+          stale={detailsStale}
+          conversationHoldReason={conversationHold.composer}
           // The panel posts its AI review as a comment and passes `asBot: true`,
           // forwarded to the mutation so GitLab attributes it to the review-bot
           // identity (other providers ignore the flag).
-          onPost={(body, opts) =>
-            comment
+          onPost={(body, opts) => {
+            const postedFor = entityKey;
+            return comment
               .mutateAsync({
                 number,
                 body,
@@ -4066,10 +4121,11 @@ export function RemotePrView({
                 asBot: opts?.asBot,
               })
               .catch((e) => {
+                latchIfArchived(postedFor, e);
                 onError(e);
                 throw e; // let the panel skip its success toast / text clear
-              })
-          }
+              });
+          }}
         />
       )}
 
@@ -4200,12 +4256,12 @@ export function RemotePrView({
                     setRevealThreadId={setRevealThreadId}
                     revealReviewId={revealReviewId}
                     onReviewRevealed={() => setRevealReviewId(null)}
-                    setSection={setSection}
+                    setSection={pickSection}
                     // Drill into the commit via the Commits-tab machinery
                     // (selectedCommitOid → PrCommitDetail).
                     onSelectCommit={(oid) => {
                       setSelectedCommitOid(oid);
-                      setSection("commits");
+                      pickSection("commits");
                     }}
                     canWrite={canWrite}
                     canThreadReply={canThreadReply}
@@ -4370,6 +4426,7 @@ export function RemotePrView({
               // previously rendered PR.
               reason={composerReason}
               readOnlyReason={conversationHold.composer}
+              holdKey={entityKey}
               actions={
                 <>
                   {/* The Review control opens the batch submit dialog for every
@@ -4605,7 +4662,7 @@ export function RemotePrView({
               files={pr.files}
               binaryPaths={binaryPaths}
               effectivePath={effectivePath}
-              onSelectPath={setSelectedPath}
+              onSelectPath={pickPath}
               fileDiff={fileDiff}
               isPending={prDiff.isPending}
               isError={prDiff.isError}

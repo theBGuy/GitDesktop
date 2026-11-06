@@ -58,6 +58,7 @@ export function CommentComposer({
   mentions,
   toastClearance,
   readOnlyReason,
+  holdKey,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). Both methods expand a collapsed box first. */
@@ -94,6 +95,9 @@ export function CommentComposer({
    *  editor and submit hold with this reason, busy or not. Clear stays live, as
    *  discarding a draft is local. */
   readOnlyReason?: string | null;
+  /** The entity `readOnlyReason` is read for. The hold hands focus from the
+   *  editor to the held submit only when it engages on the same entity. */
+  holdKey?: string;
 }) {
   const hasDraft = value.trim().length > 0;
   // Only the `busy` and read-only holds get words: an empty draft explains
@@ -107,6 +111,13 @@ export function CommentComposer({
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const editorWrapRef = useRef<HTMLDivElement>(null);
   const peekRef = useRef<HTMLButtonElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
+  // The editor holds focus as far as React has seen. Chromium blurs a focused
+  // textarea as `disabled` lands, inside React's commit, where its event system
+  // is off, so that blur never reaches onBlur and ownership stays true; any
+  // processed blur (a click-away included) clears it.
+  const editorOwnsFocusRef = useRef(false);
+  const prevHoldRef = useRef({ readOnly, holdKey });
   useToastClearance(rootRef, toastClearance === true);
   // The scroll region measured before the box grows (an expand, or the rollback
   // of a refused collapse), when the reader was sitting at its bottom; null
@@ -250,6 +261,27 @@ export function CommentComposer({
     });
   }, [collapsed]);
 
+  // The hold engaging under the typing user (an archived latch, a lock answer)
+  // disables the editor, so focus moves to the held submit, which carries the
+  // reason. Only on the engage edge for the same entity, and only while focus is
+  // still in that editor.
+  useLayoutEffect(() => {
+    const prev = prevHoldRef.current;
+    prevHoldRef.current = { readOnly, holdKey };
+    if (prev.holdKey !== holdKey) {
+      editorOwnsFocusRef.current = false;
+      return;
+    }
+    if (!readOnly || prev.readOnly) return;
+    const owned = editorOwnsFocusRef.current;
+    editorOwnsFocusRef.current = false;
+    const active = document.activeElement;
+    const inEditor =
+      !!editorWrapRef.current?.contains(active) ||
+      ((active === null || active === document.body) && owned);
+    if (inEditor) submitRef.current?.focus();
+  }, [readOnly, holdKey]);
+
   return (
     <div ref={rootRef} className="border-t p-3">
       {/* Hidden, not unmounted: the editor keeps its textarea mounted so a
@@ -260,6 +292,12 @@ export function CommentComposer({
         id={editorId}
         hidden={collapsed}
         className="mb-2"
+        onFocus={() => {
+          editorOwnsFocusRef.current = true;
+        }}
+        onBlur={() => {
+          editorOwnsFocusRef.current = false;
+        }}
       >
         <MarkdownEditor
           ref={editorRef}
@@ -328,6 +366,7 @@ export function CommentComposer({
         {leadingActions}
         {!collapsed && (
           <DisabledReasonButton
+            ref={submitRef}
             variant="outline"
             size="sm"
             disabled={!hasDraft || busy || readOnly}

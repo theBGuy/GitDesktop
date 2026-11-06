@@ -8,7 +8,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   InlineConfirm,
@@ -79,6 +79,7 @@ export function ReviewHistory({
   onPost,
   posting,
   stale = false,
+  conversationHoldReason = null,
 }: {
   repoPath: string;
   /** The origin|upstream lens the PR was opened under — a fork's two lenses keep
@@ -92,6 +93,9 @@ export function ReviewHistory({
   posting?: boolean;
   /** The PR view still renders a previously selected PR — holds Post. */
   stale?: boolean;
+  /** Why the conversation won't take a comment (locked or archived): holds Post
+   *  with it. A post in flight outranks it; it outranks `stale`. */
+  conversationHoldReason?: string | null;
 }) {
   const queryClient = useQueryClient();
   // Stored review text cites `#N` the same way a live run does, so it linkifies
@@ -126,6 +130,17 @@ export function ReviewHistory({
   // scope's confirm alone.
   const scopeKey = `${repoPath}#${lens}#${prKind}#${prRef}`;
   const scopeKeyRef = useLatestRef(scopeKey);
+  const holdRef = useLatestRef(conversationHoldReason);
+  const staleRef = useLatestRef(stale);
+  // The confirm host is app-level, so a dialog can outlive this disclosure,
+  // whose refs then freeze at the scope it left.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [lastScopeKey, setLastScopeKey] = useState(scopeKey);
   if (scopeKey !== lastScopeKey) {
     setLastScopeKey(scopeKey);
@@ -206,7 +221,14 @@ export function ReviewHistory({
   // continuation writes with is pinned here, before the confirm's await.
   async function postRecord(r: PersistedReview) {
     const text = reviewText(r);
-    if (!onPost || postingFor !== null || posting || stale || !text.trim())
+    if (
+      !onPost ||
+      postingFor !== null ||
+      posting ||
+      conversationHoldReason !== null ||
+      stale ||
+      !text.trim()
+    )
       return;
     const record = r;
     const repo = repoPath;
@@ -214,6 +236,7 @@ export function ReviewHistory({
     const ref = prRef;
     const scopeLens = lens;
     const post = onPost;
+    const startedFor = scopeKey;
     // Same wiring as the live post: a local PR posts into app data, where no forge
     // cross-reference exists; GitLab alone honors the `\#N` escape (measured).
     const suspectRefs =
@@ -229,7 +252,18 @@ export function ReviewHistory({
       already: reviewPostedAt(record) !== undefined,
       suspectRefs,
     });
-    if (confirm && !(await useConfirm.getState().ask(confirm))) return;
+    if (confirm) {
+      if (!(await useConfirm.getState().ask(confirm))) return;
+      // Read fresh: the dialog's answer counts only for the PR still selected
+      // and shown here (mounted, no hold, not stale, same scope).
+      if (
+        !mountedRef.current ||
+        holdRef.current !== null ||
+        staleRef.current ||
+        scopeKeyRef.current !== startedFor
+      )
+        return;
+    }
     const token = { id: record.id };
     setPostingFor(token);
     // The RECORD's mode and model, never the live run's.
@@ -473,11 +507,17 @@ export function ReviewHistory({
                                   ? undefined
                                   : "text-muted-foreground"
                               }
-                              disabled={postingFor !== null || posting || stale}
+                              disabled={
+                                postingFor !== null ||
+                                posting ||
+                                conversationHoldReason !== null ||
+                                stale
+                              }
                               reason={
                                 postingFor !== null || posting
                                   ? postPendingReason
-                                  : PR_SWITCH_LOADING_REASON
+                                  : (conversationHoldReason ??
+                                    PR_SWITCH_LOADING_REASON)
                               }
                               onClick={() => void postRecord(r)}
                             >

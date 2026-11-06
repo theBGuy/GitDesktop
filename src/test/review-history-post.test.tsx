@@ -29,6 +29,7 @@ import {
   markReviewPosted,
   type PersistedReview,
   reviewHistoryKey,
+  reviewPartialsKey,
 } from "@/lib/pulls/reviews-history";
 import { useConfirm } from "@/lib/stores/confirm";
 import { resetReview } from "@/lib/stores/reviews";
@@ -100,6 +101,7 @@ vi.mock("sonner", async (importOriginal) => ({
 vi.mock("@/lib/stores/reviews", () => ({ resetReview: vi.fn() }));
 
 const REPO = "C:/repos/demo";
+const HOLD = "This conversation is locked, so only collaborators can comment.";
 const SCOPE_7 = {
   repo: REPO,
   lens: "origin",
@@ -160,6 +162,7 @@ type Props = {
   posting?: boolean;
   stale?: boolean;
   withPost?: boolean;
+  conversationHoldReason?: string | null;
 };
 
 function tree(client: QueryClient, p: Props) {
@@ -173,6 +176,7 @@ function tree(client: QueryClient, p: Props) {
         onPost={p.withPost === false ? undefined : onPost}
         posting={p.posting}
         stale={p.stale}
+        conversationHoldReason={p.conversationHoldReason}
       />
     </QueryClientProvider>
   );
@@ -365,8 +369,8 @@ describe("history row Post", () => {
     expect(useConfirm.getState().request).toBeNull();
   });
 
-  it("offers no Post on an empty-text record or without a post route", async () => {
-    state.done = [rec("e", { text: "" }), rec("f")];
+  it("offers no Post on an empty-text record", async () => {
+    state.done = [rec("e", { text: "" })];
     await renderOpen("e");
     expect(
       screen.queryByRole("button", { name: /^(Post as comment|Post again)$/ }),
@@ -604,7 +608,7 @@ describe("optimistic stamp", () => {
     expect(onPost).not.toHaveBeenCalled();
   });
 
-  it("patches only the named record in the pinned scope and creates no entry", async () => {
+  it("patches only the named record and creates no entry", async () => {
     state.done = [
       rec("a", { finishedAt: 1_700_000_300_000 }),
       rec("b", { finishedAt: 1_700_000_200_000 }),
@@ -614,16 +618,17 @@ describe("optimistic stamp", () => {
     vi.mocked(markReviewPosted).mockImplementation(
       () => new Promise<void>(() => undefined),
     );
-    // Another PR's history, holding a record with the same id.
+    // Another PR's history, holding none of the stamped ids.
     const otherKey = reviewHistoryKey(REPO, "origin", "remote", "99");
-    client.setQueryData(otherKey, [rec("a", { ref: "99" })]);
+    const otherData = [rec("c", { ref: "99" })];
+    client.setQueryData(otherKey, otherData);
     const here = reviewHistoryKey(REPO, "origin", "remote", "7");
     const before = client.getQueryCache().getAll().length;
     await act(async () => {
       stampReviewPosted(client, { ...SCOPE_7, id: "b" });
       stampReviewPosted(client, { ...SCOPE_7, id: "zzz" });
       // A scope nothing has read: the stamp must not create its entry.
-      stampReviewPosted(client, { ...SCOPE_7, ref: "55", id: "a" });
+      stampReviewPosted(client, { ...SCOPE_7, ref: "55", id: "b" });
     });
     await waitFor(() =>
       expect(
@@ -637,29 +642,106 @@ describe("optimistic stamp", () => {
         ?.filter((r) => r.postedAt !== undefined)
         .map((r) => r.id);
     expect(posted(here)).toEqual(["b"]);
-    expect(posted(otherKey)).toEqual([]);
+    expect(client.getQueryData(otherKey)).toBe(otherData);
     expect(client.getQueryCache().getAll().length).toBe(before);
     expect(postButton()).toHaveTextContent("Post as comment");
   });
 
-  it("rolls back to store truth when the stamp rejects", async () => {
+  it("patches the record in a sibling checkout's caches too", async () => {
+    vi.mocked(markReviewPosted).mockImplementation(
+      () => new Promise<void>(() => undefined),
+    );
+    const client = new QueryClient();
+    // A sibling worktree reads the same identity-keyed store under its own path.
+    const SIB = "C:/repos/demo-wt";
+    const sibHistory = reviewHistoryKey(SIB, "origin", "remote", "7");
+    const sibPartials = reviewPartialsKey(SIB, "origin", "remote", "7");
+    const unrelatedKey = reviewHistoryKey(SIB, "origin", "remote", "8");
+    const unrelated = [rec("other", { ref: "8" })];
+    client.setQueryData(sibHistory, [rec("a")]);
+    client.setQueryData(sibPartials, [rec("a", { phase: "error" })]);
+    client.setQueryData(unrelatedKey, unrelated);
+    await act(async () => {
+      stampReviewPosted(client, { ...SCOPE_7, id: "a" });
+    });
+    await waitFor(() =>
+      expect(
+        client.getQueryData<PersistedReview[]>(sibHistory)?.[0].postedAt,
+      ).toEqual(expect.any(Number)),
+    );
+    expect(
+      client.getQueryData<PersistedReview[]>(sibPartials)?.[0].postedAt,
+    ).toEqual(expect.any(Number));
+    expect(client.getQueryData(unrelatedKey)).toBe(unrelated);
+  });
+
+  it("stays posted and asks before re-posting when the stamp rejects", async () => {
     state.done = [rec("a")];
     const fail = { reject: (_e: Error) => undefined as void };
+    // The store's reads keep a rejected stamp as a session receipt (pinned in
+    // reviews-history-posted.test.ts), so the re-read after the rejection says
+    // posted while the write itself fails.
     vi.mocked(markReviewPosted).mockImplementation(
-      () =>
+      (_repo, id, at) =>
         new Promise<void>((_resolve, reject) => {
+          stampStored(id, at);
           fail.reject = reject;
         }),
     );
-    const { user } = await renderOpen("a");
+    const { user, client } = await renderOpen("a");
     await user.click(postButton());
     await waitFor(() => expect(postButton()).toHaveTextContent("Post again"));
     await act(async () => fail.reject(new Error("store down")));
-    await waitFor(() =>
-      expect(postButton()).toHaveTextContent("Post as comment"),
-    );
-    expect(screen.queryByText(/Posted to the conversation/)).toBeNull();
+    await waitFor(() => expect(client.isFetching()).toBe(0));
+    expect(postButton()).toHaveTextContent("Post again");
+    expect(screen.getByText(/Posted to the conversation/)).toBeInTheDocument();
     expect(toast.success).toHaveBeenCalledTimes(1);
+    await user.click(postButton());
+    const request = await confirmRequest();
+    expect(request.title).toBe("Post this review again?");
+    act(() => useConfirm.getState().answer(false));
+    expect(onPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts nothing when a hold lands while the confirm is open", async () => {
+    state.done = [rec("a", { postedAt: 1_700_000_500_000 })];
+    const { user, rerenderWith } = await renderOpen("a");
+    await user.click(postButton());
+    const request = await confirmRequest();
+    expect(request.title).toBe("Post this review again?");
+    rerenderWith({ conversationHoldReason: HOLD });
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing when the disclosure unmounted while the confirm was open", async () => {
+    state.done = [rec("a", { postedAt: 1_700_000_500_000 })];
+    const { user, view } = await renderOpen("a");
+    await user.click(postButton());
+    await confirmRequest();
+    // The app-level confirm host outlives the history (a swap to an uncached PR).
+    view.unmount();
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("holds Post with the conversation's hold reason", async () => {
+    state.done = [rec("a")];
+    const { user, rerenderWith } = await renderOpen("a", {
+      conversationHoldReason: HOLD,
+    });
+    expectHeld(postButton(), HOLD);
+    await user.click(postButton());
+    expect(onPost).not.toHaveBeenCalled();
+    // Precedence: a post in flight outranks the hold, the hold outranks stale.
+    rerenderWith({ conversationHoldReason: HOLD, stale: true });
+    expectHeld(postButton(), HOLD);
+    rerenderWith({ conversationHoldReason: HOLD, stale: true, posting: true });
+    expectHeld(postButton(), COMMENT_POST_PENDING_REASON);
+    rerenderWith({ conversationHoldReason: null });
+    expectLive(postButton());
   });
 
   it("releases postingFor once onPost resolves, without waiting on the store", async () => {
@@ -682,5 +764,48 @@ describe("optimistic stamp", () => {
     state.done = [rec("l", { kind: "local" })];
     await renderOpen("l", { prKind: "local", posting: true });
     expectHeld(postButton(), ACT_PENDING_REASON);
+  });
+});
+
+// One predicate after the confirm: mounted, no live hold, not live-stale, same
+// scope. The hold and unmount cells live in the optimistic-stamp block above.
+describe("history Post confirm continuation", () => {
+  async function openAgainConfirm(p: Props = {}) {
+    state.done = [
+      rec("a", { postedAt: 1_700_000_500_000, kind: p.prKind ?? "remote" }),
+    ];
+    const opened = await renderOpen("a", p);
+    await opened.user.click(postButton());
+    expect((await confirmRequest()).title).toBe("Post this review again?");
+    return opened;
+  }
+
+  async function accept() {
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+  }
+
+  it("posts nothing when the selection moved while the PR stayed painted", async () => {
+    const { rerenderWith } = await openAgainConfirm();
+    rerenderWith({ stale: true });
+    await accept();
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing when the rendered PR changed", async () => {
+    const { rerenderWith } = await openAgainConfirm();
+    rerenderWith({ prRef: "8" });
+    await accept();
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("posts on accept when nothing moved, a local PR included", async () => {
+    for (const prKind of ["remote", "local"] as const) {
+      onPost.mockClear();
+      const { view } = await openAgainConfirm({ prKind });
+      await accept();
+      await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
+      view.unmount();
+    }
   });
 });

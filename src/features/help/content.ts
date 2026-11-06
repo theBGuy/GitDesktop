@@ -1393,9 +1393,11 @@ commits since**), so an out-of-date verdict never reads as current. The feed wor
 events each one reports.
 A locked conversation shows a **locked** badge in the header, with GitHub's lock reason
 when it gives one. When GitHub or GitLab won't take a comment from you, the comment box
-and reactions turn read-only and the disabled button says why. On an archived GitHub pull
-request, the first refused comment explains the archive, and the box and reactions stay
-read-only until you leave that pull request.
+and reactions turn read-only and the disabled button says why.
+{{ai}}Posting an AI review is held the same way.{{/ai}} On an archived GitHub pull
+request, the first refused comment{{ai}} or AI review post{{/ai}} explains the archive,
+and the box and reactions{{ai}}, and AI review posting,{{/ai}} stay read-only until you
+leave that pull request.
 
 CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
 ⊖ J skipped**, each count with its own icon and word so status never rides on color
@@ -1903,8 +1905,7 @@ On a GitHub or GitLab repo the description and comment box complete **@** mentio
 them as links you can click through. Rename a branch in GitDesktop (in the app or through
 its MCP server) and open local PRs whose head or base used the old name follow it.
 The create dialog counts the commits the merge would bring in. When the head branch is
-already in the base it says **Nothing to merge**, and **Create** stays disabled until
-there is something to merge.
+already in the base it says **Nothing to merge** and holds **Create**.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA

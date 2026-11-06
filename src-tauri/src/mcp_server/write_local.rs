@@ -115,7 +115,9 @@ impl GitDesktopMcp {
     #[tool(
         description = "Create a local PR — GitDesktop's own app-data review artifact for the bound \
                        repository (NOT a GitHub/remote PR; nothing is pushed). Verifies both `base` \
-                       and `head` exist as branches first. Returns the created record as JSON.",
+                       and `head` exist as branches first, and refuses a `head` whose commits \
+                       are all already in `base`; when that count can't be read, it creates \
+                       anyway. Returns the created record as JSON.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn create_local_pr(

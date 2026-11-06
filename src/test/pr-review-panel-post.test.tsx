@@ -19,8 +19,14 @@ import {
 import { create } from "zustand";
 import { PR_SWITCH_LOADING_REASON } from "@/features/pulls/PrMergeabilityBanner";
 import { PrReviewPanel } from "@/features/pulls/PrReviewPanel";
+import { useArchivedLatch } from "@/features/pulls/RemotePrView";
 import type { ReviewMode } from "@/lib/ai/types";
-import type { RemoteLens } from "@/lib/git/types";
+import {
+  PR_ARCHIVED_READONLY_MESSAGE,
+  type PrDetails,
+  prConversationHold,
+  type RemoteLens,
+} from "@/lib/git/types";
 import {
   ACT_PENDING_REASON,
   COMMENT_POST_PENDING_REASON,
@@ -249,6 +255,7 @@ function renderPanel(p: PanelProps = {}) {
   return Object.assign(userEvent.setup(), {
     client,
     rerenderWith: (q: PanelProps) => view.rerender(tree(q)),
+    unmount: () => view.unmount(),
   });
 }
 
@@ -637,5 +644,254 @@ describe("a history read in flight when the post resolves", () => {
     const request = await confirmRequest();
     expect(request.title).toBe("Post this review again?");
     expect(onPost).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** RemotePrView's hold wiring around the panel: the archived latch, the hold read
+ *  off the details, and the onPost catch that latches for the PR it started on. */
+function HeldPanel({
+  entityKey,
+  details,
+  post,
+}: {
+  entityKey: string;
+  details?: Pick<PrDetails, "locked" | "viewerCanComment" | "viewerCanReact">;
+  post: PostFn;
+}) {
+  const { archived, latchIfArchived } = useArchivedLatch(entityKey);
+  const hold = prConversationHold(details, archived, "github");
+  return (
+    <>
+      <output data-testid="composer-hold">{hold.composer ?? ""}</output>
+      <PrReviewPanel
+        context={context}
+        prKind="remote"
+        prRef="7"
+        conversationHoldReason={hold.composer}
+        onPost={(body, opts) => {
+          const postedFor = entityKey;
+          return post(body, opts).catch((e) => {
+            latchIfArchived(postedFor, e);
+            throw e;
+          });
+        }}
+      />
+    </>
+  );
+}
+
+const ARCHIVED_ERROR = { kind: "gh", message: PR_ARCHIVED_READONLY_MESSAGE };
+const LOCKED =
+  "This conversation is locked, so only collaborators can comment.";
+
+function renderHeld(props: Omit<Parameters<typeof HeldPanel>[0], "post">) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const tree = (p: typeof props) => (
+    <QueryClientProvider client={client}>
+      <HeldPanel {...p} post={onPost} />
+    </QueryClientProvider>
+  );
+  const view = render(tree(props));
+  return Object.assign(userEvent.setup(), {
+    rerenderWith: (p: typeof props) => view.rerender(tree(p)),
+  });
+}
+
+/** Opens the history row and returns its Post: the one that isn't `live`. */
+async function historyPost(
+  user: ReturnType<typeof userEvent.setup>,
+  live: HTMLElement,
+) {
+  await user.click(screen.getByRole("button", { name: /Previous reviews/ }));
+  const toggle = document.querySelector<HTMLElement>('[data-row="old"]');
+  if (!toggle) throw new Error("no history row");
+  await user.click(toggle);
+  const others = screen
+    .getAllByRole("button", { name: /^(Post as comment|Post again)$/ })
+    .filter((b) => b !== live);
+  expect(others).toHaveLength(1);
+  return others[0];
+}
+
+describe("conversation hold on the AI review Posts", () => {
+  it("an archived refusal from the live Post latches read-only and holds both Posts", async () => {
+    stored.done = [rec("old", { text: "Older findings." })];
+    onPost.mockImplementation(async () => {
+      throw ARCHIVED_ERROR;
+    });
+    const user = renderHeld({ entityKey: "A" });
+    await user.click(postButton());
+    await waitFor(() =>
+      expect(screen.getByTestId("composer-hold")).toHaveTextContent(
+        PR_ARCHIVED_READONLY_MESSAGE,
+      ),
+    );
+    const live = postButton();
+    expectHeld(live, PR_ARCHIVED_READONLY_MESSAGE);
+    await user.click(live);
+    expect(onPost).toHaveBeenCalledTimes(1);
+    expectHeld(await historyPost(user, live), PR_ARCHIVED_READONLY_MESSAGE);
+  });
+
+  it("holds both Posts with the lock reason when the viewer can't comment", async () => {
+    stored.done = [rec("old", { text: "Older findings." })];
+    // The lock answer arrives after mount; unknown keeps the Post live.
+    const user = renderHeld({ entityKey: "A" });
+    expect(postButton()).not.toHaveAttribute("aria-disabled");
+    user.rerenderWith({
+      entityKey: "A",
+      details: { locked: true, viewerCanComment: false },
+    });
+    const live = postButton();
+    expectHeld(live, LOCKED);
+    expectHeld(await historyPost(user, live), LOCKED);
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("latches nothing on the new PR when the refusal settles after a switch", async () => {
+    const fail = { reject: (_e: unknown) => undefined as void };
+    onPost.mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          fail.reject = reject;
+        }),
+    );
+    const user = renderHeld({ entityKey: "A" });
+    await user.click(postButton());
+    await waitFor(() => expect(onPost).toHaveBeenCalled());
+    user.rerenderWith({ entityKey: "B" });
+    await act(async () => fail.reject(ARCHIVED_ERROR));
+    expect(screen.getByTestId("composer-hold")).toHaveTextContent("");
+    expect(postButton()).not.toHaveAttribute("aria-disabled");
+  });
+
+  it("posts nothing when a hold lands while the confirm is open", async () => {
+    stored.done = [rec("rec-1", { postedAt: 1_700_000_500_000 })];
+    const user = renderHeld({ entityKey: "A" });
+    await user.click(postButton());
+    const request = await confirmRequest();
+    expect(request.title).toBe("Post this review again?");
+    user.rerenderWith({
+      entityKey: "A",
+      details: { locked: true, viewerCanComment: false },
+    });
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing when the panel unmounted while the confirm was open", async () => {
+    stored.done = [rec("rec-1", { postedAt: 1_700_000_500_000 })];
+    const user = renderPanel();
+    await user.click(postButton());
+    await confirmRequest();
+    // The app-level confirm host outlives the panel (a swap to an uncached PR).
+    user.unmount();
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("leaves a local PR's Post live: local PRs pass no hold", async () => {
+    const user = renderPanel({ kind: "local" });
+    expect(postButton()).not.toHaveAttribute("aria-disabled");
+    await user.click(postButton());
+    await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe("useArchivedLatch", () => {
+  function Latch({
+    entityKey,
+    onLatch,
+  }: {
+    entityKey: string;
+    onLatch: (latch: (sentOn: string, e: unknown) => void) => void;
+  }) {
+    const { archived, latchIfArchived } = useArchivedLatch(entityKey);
+    onLatch(latchIfArchived);
+    return <output data-testid="archived">{String(archived)}</output>;
+  }
+
+  it("a late refusal from the PR left behind keeps the shown PR's latch", () => {
+    let latch: (sentOn: string, e: unknown) => void = () => undefined;
+    const tree = (key: string) => (
+      <Latch
+        entityKey={key}
+        onLatch={(l) => {
+          latch = l;
+        }}
+      />
+    );
+    const view = render(tree("A"));
+    view.rerender(tree("B"));
+    act(() => latch("B", ARCHIVED_ERROR));
+    expect(screen.getByTestId("archived")).toHaveTextContent("true");
+    act(() => latch("A", ARCHIVED_ERROR));
+    expect(screen.getByTestId("archived")).toHaveTextContent("true");
+    view.rerender(tree("A"));
+    expect(screen.getByTestId("archived")).toHaveTextContent("false");
+  });
+
+  it("latches only on an archived refusal", () => {
+    let latch: (sentOn: string, e: unknown) => void = () => undefined;
+    render(
+      <Latch
+        entityKey="A"
+        onLatch={(l) => {
+          latch = l;
+        }}
+      />,
+    );
+    act(() => latch("A", { kind: "gh", message: "rate limited" }));
+    expect(screen.getByTestId("archived")).toHaveTextContent("false");
+    act(() => latch("A", ARCHIVED_ERROR));
+    expect(screen.getByTestId("archived")).toHaveTextContent("true");
+  });
+});
+
+// One predicate after the confirm: mounted, no live hold, not live-stale, same
+// scope. The hold and unmount cells live in the conversation-hold block above.
+describe("live Post confirm continuation", () => {
+  async function openAgainConfirm(p: PanelProps = {}) {
+    stored.done = [rec("rec-1", { postedAt: 1_700_000_500_000 })];
+    const user = renderPanel(p);
+    await user.click(postButton());
+    expect((await confirmRequest()).title).toBe("Post this review again?");
+    return user;
+  }
+
+  async function accept() {
+    await act(async () => useConfirm.getState().answer(true));
+    await waitFor(() => expect(useConfirm.getState().request).toBeNull());
+  }
+
+  it("posts nothing when the selection moved while the PR stayed painted", async () => {
+    const user = await openAgainConfirm();
+    // RemotePrView's selection hold: the rendered PR is unchanged, stale is on.
+    user.rerenderWith({ stale: true });
+    await accept();
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing when the rendered PR changed", async () => {
+    const user = await openAgainConfirm();
+    user.rerenderWith({ prRef: "8" });
+    await accept();
+    expect(onPost).not.toHaveBeenCalled();
+  });
+
+  it("posts on accept when nothing moved, a local PR included", async () => {
+    for (const kind of ["remote", "local"] as const) {
+      onPost.mockClear();
+      // The first round's post reset the run; each round starts from its output.
+      live.setState({ text: TEXT, seq: 1 });
+      const user = await openAgainConfirm({ kind });
+      await accept();
+      await waitFor(() => expect(onPost).toHaveBeenCalledTimes(1));
+      user.unmount();
+    }
   });
 });

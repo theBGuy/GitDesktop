@@ -6,11 +6,12 @@ import {
 import { useCallback } from "react";
 import {
   forgeAwaitingFirstAnswer,
+  remotesOptions,
   useForgeStatus,
   useRemotes,
   useRemoteUrl,
 } from "@/lib/git/queries";
-import type { RemoteLens } from "@/lib/git/types";
+import type { ForgeStatus, RemoteLens } from "@/lib/git/types";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastErrorWithNote } from "@/lib/toast";
@@ -44,6 +45,36 @@ export function useRepoLensRaw(repo: string) {
 const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
   !q.isPending && !q.isFetching;
 
+/** The gate and lens from the three reads' data, shared by {@link useLensState} and
+ *  {@link cachedRepoLens} so the two can't drift. A read with no data counts as
+ *  failing its gate input, so a cold cache yields "origin". */
+export function lensFromReads(
+  forge: ForgeStatus | undefined,
+  remotes: readonly string[] | undefined,
+  raw: RemoteLens | undefined,
+): { gate: boolean; lens: RemoteLens } {
+  // Signed out, the status still names a github.com repo, but resolving the
+  // parent needs `gh repo view`, so the upstream lens can't be offered.
+  const gate =
+    forge?.provider === "github" &&
+    Boolean(forge.authenticated) &&
+    Boolean(remotes?.includes("upstream"));
+  return { gate, lens: gate && raw === "upstream" ? "upstream" : "origin" };
+}
+
+/** The imperative twin of {@link useRepoLens} for click-time and post-await reads:
+ *  the same gate over the same three caches, read without subscribing. */
+export function cachedRepoLens(
+  queryClient: QueryClient,
+  repo: string,
+): RemoteLens {
+  return lensFromReads(
+    queryClient.getQueryData<ForgeStatus>(["repo", repo, "forge-status"]),
+    queryClient.getQueryData<string[]>(remotesOptions(repo).queryKey),
+    queryClient.getQueryData<RemoteLens>(lensKey(repo)),
+  ).lens;
+}
+
 /** Every async read the lens resolves from, in ONE body: the gate, the value, and
  *  whether all of them have settled are derived side by side, so an input added to the
  *  value necessarily joins the settled test — the two can't cover different sets. Each
@@ -66,15 +97,10 @@ export function useLensState(repo: string): {
   const forge = useForgeStatus(repo);
   const remotes = useRemotes(repo);
   const raw = useRepoLensRaw(repo);
-  // Signed out, the status still names a github.com repo, but resolving the
-  // parent needs `gh repo view`, so the upstream lens can't be offered.
-  const gate =
-    forge.data?.provider === "github" &&
-    Boolean(forge.data.authenticated) &&
-    Boolean(remotes.data?.includes("upstream"));
+  const { gate, lens } = lensFromReads(forge.data, remotes.data, raw.data);
   return {
     gate,
-    lens: gate && raw.data === "upstream" ? "upstream" : "origin",
+    lens,
     settled:
       lensReadSettled(forge) &&
       lensReadSettled(remotes) &&
