@@ -68,11 +68,26 @@ export function cachedRepoLens(
   queryClient: QueryClient,
   repo: string,
 ): RemoteLens {
-  return lensFromReads(
+  return lensFromReads(...cachedLensInputs(queryClient, repo)).lens;
+}
+
+/** Whether every cache {@link cachedRepoLens} reads has answered. Until then its
+ *  "origin" is a default, not a verdict, so an in-app select could later resolve
+ *  under the other lens. */
+export function cachedLensInputsComplete(
+  queryClient: QueryClient,
+  repo: string,
+): boolean {
+  return cachedLensInputs(queryClient, repo).every((v) => v !== undefined);
+}
+
+/** The three caches both imperative reads take, so they can't drift apart. */
+function cachedLensInputs(queryClient: QueryClient, repo: string) {
+  return [
     queryClient.getQueryData<ForgeStatus>(["repo", repo, "forge-status"]),
     queryClient.getQueryData<string[]>(remotesOptions(repo).queryKey),
     queryClient.getQueryData<RemoteLens>(lensKey(repo)),
-  ).lens;
+  ] as const;
 }
 
 /** Every async read the lens resolves from, in ONE body: the gate, the value, and

@@ -113,6 +113,11 @@ import {
   type RepoOverride,
 } from "./types";
 
+/** The failed outcome's detail when the local PR a review was for was deleted
+ *  before it could be posted. */
+export const VANISHED_LOCAL_PR_DETAIL =
+  "The local pull request was deleted before the review could be posted.";
+
 export type AutomationEvent =
   | {
       kind: "commit";
@@ -281,6 +286,18 @@ type RunActionOutcome = {
    *  history store, which this id family doesn't address. */
   resultId?: string;
 };
+
+/** The outcome a finished delivery settles to: `delivered` false means the local
+ *  PR was deleted mid-run and nothing was posted, so the run failed. */
+export function deliveryOutcome(
+  action: ActionId,
+  delivered: boolean,
+  resultId: string | undefined,
+): RunActionOutcome {
+  if (!delivered)
+    return { action, code: "failed", detail: VANISHED_LOCAL_PR_DETAIL };
+  return { action, code: "delivered", ...(resultId ? { resultId } : {}) };
+}
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
@@ -906,13 +923,12 @@ async function runOneAction({
         delivered,
       ).catch(() => undefined);
     }
-    // Success: remove the dock row — a delivered review lands in Notifications.
+    // The local PR was deleted mid-run (deliver toasted it), so nothing was
+    // posted: the run records as failed and gives its claim back.
+    if (!delivered) releaseClaim();
+    // Remove the dock row — a delivered review lands in Notifications.
     handle.settle();
-    settled.push({
-      action,
-      code: "delivered",
-      ...(resultId ? { resultId } : {}),
-    });
+    settled.push(deliveryOutcome(action, delivered, resultId));
     await recordProgress();
   } catch (e) {
     // Release the claim on every failure/cancel path so a transient error doesn't

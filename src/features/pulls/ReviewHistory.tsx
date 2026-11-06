@@ -26,6 +26,7 @@ import {
   findSuspectRefs,
   REF_TRIGGERS,
 } from "@/lib/ai/comment-branding";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { useForgeStatus, usePendingRepoWrites } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
@@ -409,7 +410,10 @@ export function ReviewHistory({
                           : "Stopped early"}
                       </Badge>
                     )}
-                    <span className="min-w-0 truncate font-mono text-muted-foreground">
+                    <span
+                      className="min-w-0 truncate font-mono text-muted-foreground"
+                      onMouseEnter={clipTitleFromText}
+                    >
                       {r.model || "model"}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1 text-muted-foreground">

@@ -1,11 +1,24 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { type ComponentProps, type ReactElement, useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationListPanel } from "@/features/conversations/ConversationListPanel";
 import { PullRequestsPanel } from "@/features/pulls/PullRequestsPanel";
-import type { PrStateFilter } from "@/lib/git/api";
+import {
+  forgePrListPage,
+  forgeStatus,
+  type PrStateFilter,
+} from "@/lib/git/api";
+import type { ForgeImplemented, ForgeStatus } from "@/lib/git/types";
+import { type LocalPr, listLocalPrs } from "@/lib/pulls/local";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 
@@ -17,6 +30,11 @@ vi.mock("@/lib/settings/api", async (importOriginal) => ({
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeStatus: vi.fn(() => new Promise(() => undefined)),
+  forgePrListPage: vi.fn(),
+}));
+vi.mock("@/lib/pulls/local", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/pulls/local")>()),
+  listLocalPrs: vi.fn(),
 }));
 
 type Local = { id: string; title: string };
@@ -244,8 +262,98 @@ describe("issue list state tabs (no stateOptions)", () => {
   });
 });
 
-describe("PR panel noun while the forge probe is pending", () => {
-  it("says merge requests for a repo saved as GitLab", async () => {
+const READY_GITHUB: ForgeStatus = {
+  provider: "github",
+  installed: true,
+  authenticated: true,
+  repo: "owner/repo",
+  host: "github.com",
+  login: "me",
+  capabilities: {
+    pullRequests: true,
+    draftPrs: true,
+    issues: true,
+    labels: true,
+    milestones: true,
+    reactions: true,
+    discussions: true,
+    stars: true,
+    ci: true,
+    webhooks: true,
+    approvals: true,
+    securityFindings: true,
+  },
+  // Only the list read is built: every side read (CI, mergeability, review
+  // state, scope filters) stays gated off, so the list call is the one to watch.
+  implemented: { pullRequests: true } as ForgeImplemented,
+};
+
+function localPr(id: string, title: string, status: LocalPr["status"]) {
+  return {
+    id,
+    title,
+    body: "",
+    base: "main",
+    head: id,
+    status,
+    approved: false,
+    labels: [],
+    comments: [],
+    createdAt: "2026-01-01T00:00:00Z",
+  } satisfies LocalPr;
+}
+
+function renderPanel() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <PullRequestsPanel repoPath="C:/repo" />
+    </QueryClientProvider>,
+  );
+}
+
+describe("PullRequestsPanel (real panel)", () => {
+  afterEach(() => {
+    vi.mocked(forgeStatus).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+  });
+
+  it("files local rows per tab and sends unmerged for Closed", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(READY_GITHUB);
+    vi.mocked(forgePrListPage).mockResolvedValue({ rows: [], capped: false });
+    vi.mocked(listLocalPrs).mockResolvedValue([
+      localPr("l1", "Local open one", "open"),
+      localPr("l2", "Local merged one", "merged"),
+      localPr("l3", "Local closed one", "closed"),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    const states = () => vi.mocked(forgePrListPage).mock.calls.map((c) => c[1]);
+    const shown = () =>
+      ["Local open one", "Local merged one", "Local closed one"].filter(
+        (t) => screen.queryByText(t) !== null,
+      );
+
+    await waitFor(() => expect(states()).toContain("open"));
+    await waitFor(() => expect(shown()).toEqual(["Local open one"]));
+    const group = screen.getByRole("group", { name: "Pull request state" });
+
+    await user.click(within(group).getByRole("button", { name: "Merged" }));
+    await waitFor(() => expect(states()).toContain("merged"));
+    await waitFor(() => expect(shown()).toEqual(["Local merged one"]));
+
+    await user.click(within(group).getByRole("button", { name: "Closed" }));
+    await waitFor(() => expect(states()).toContain("unmerged"));
+    await waitFor(() => expect(shown()).toEqual(["Local closed one"]));
+    expect(states()).not.toContain("closed");
+    expect([...new Set(states())]).toEqual(["open", "merged", "unmerged"]);
+  });
+
+  it("says merge requests for a repo saved as GitLab while the probe is pending", async () => {
     vi.mocked(loadSettings).mockResolvedValue({
       ...DEFAULT_SETTINGS,
       recentRepos: [

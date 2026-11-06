@@ -51,6 +51,7 @@ type PrKind = "remote" | "local";
 
 const run = vi.hoisted(() => ({
   recordId: "rec-1" as string | undefined,
+  timedOut: false,
   generating: false,
   phase: undefined as ReviewPhase | undefined,
   mode: "general" as ReviewMode,
@@ -185,6 +186,7 @@ function rec(id: string, extra: Partial<PersistedReview> = {}) {
 
 beforeEach(() => {
   run.recordId = "rec-1";
+  run.timedOut = false;
   run.generating = false;
   run.phase = undefined;
   run.mode = "general";
@@ -221,6 +223,7 @@ beforeEach(() => {
     startedAt: 1_700_000_000_000,
     endedAt: 1_700_000_060_000,
     recordId: run.recordId,
+    timedOut: run.timedOut,
   }));
 });
 
@@ -483,6 +486,17 @@ describe("optimistic stamp and post holds", () => {
     await user.click(postButton());
     const request = await confirmRequest();
     expect(request.body).toMatch(/^This run failed before completing/);
+  });
+
+  it("names a timeout from the live run before its record loads", async () => {
+    run.phase = "error";
+    run.timedOut = true;
+    const user = renderPanel();
+    await user.click(postButton());
+    const request = await confirmRequest();
+    expect(request.body).toBe(
+      "This run timed out before it finished, so the text may be incomplete. Post it as a comment anyway?",
+    );
   });
 
   it("names any write in flight on a local PR", () => {

@@ -177,6 +177,7 @@ export function PrReviewPanel({
     startedAt,
     endedAt,
     recordId,
+    timedOut,
   } = useReviewRun(target);
   const queryClient = useQueryClient();
 
@@ -475,12 +476,13 @@ export function PrReviewPanel({
           )
         : [];
     // The text is never rewritten here — the user decides.
+    // The run's stored record tells a timeout from a failure, which the phase
+    // can't; until it loads the live entry's flag does. A cancelled run saves none.
+    let incomplete = LIVE_INCOMPLETE[phase] ?? null;
+    if (liveRecord) incomplete = recordIncomplete(liveRecord);
+    else if (phase === "error" && timedOut) incomplete = "timed-out";
     const confirm = reviewPostConfirm({
-      // The run's stored record tells a timeout from a failure, which the phase
-      // can't; a cancelled run saves none.
-      incomplete: liveRecord
-        ? recordIncomplete(liveRecord)
-        : (LIVE_INCOMPLETE[phase] ?? null),
+      incomplete,
       already: livePosted,
       suspectRefs,
     });

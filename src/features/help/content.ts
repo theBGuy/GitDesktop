@@ -1398,8 +1398,10 @@ review, including commits, comments, and labels. The grouping covers the list as
 stands; a list grown past a few hundred rows can outrun the review check, and then it
 says so and leaves the list flat. The command palette carries every scope:
 **Show all pull requests**, **Filter pull requests: mine**, **Filter pull requests: needs
-my review**, and **Toggle grouping by my review**. The assignee, reviewer, author, and
-label axes work on **GitHub** and **GitLab**; **My teams** and the review grouping are
+my review**, and **Toggle grouping by my review**. It carries the state tabs too, as
+**Filter pull requests: open**, **Filter pull requests: merged**, and **Filter pull
+requests: closed**. The assignee, reviewer, author, and label axes work on **GitHub**
+and **GitLab**; **My teams** and the review grouping are
 GitHub-only, and on GitLab those two rows say so. On **Bitbucket** the switch doesn't
 appear, the funnel's **Mine** and **Author** rows name what it can't filter by
 (assignees, review requests, and authors), and a label pick narrows the pull requests

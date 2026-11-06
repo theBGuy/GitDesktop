@@ -144,11 +144,20 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 // worktree's included) can't serve the record unposted and re-offer a plain Post.
 const pendingStamps = new Map<string, number>();
 
+/** `r` stamped `stamp`, unless its valid stored stamp is at least as late: a
+ *  stamp covers a stale or failed write, but never rolls a newer post back. */
+function withLaterStamp(r: PersistedReview, stamp: number): PersistedReview {
+  const stored = reviewPostedAt(r);
+  return stored !== undefined && stored >= stamp
+    ? r
+    : { ...r, postedAt: stamp };
+}
+
 function withPendingStamps(records: PersistedReview[]): PersistedReview[] {
   if (pendingStamps.size === 0) return records;
   return records.map((r) => {
-    const postedAt = pendingStamps.get(r.id);
-    return postedAt === undefined ? r : { ...r, postedAt };
+    const receipt = pendingStamps.get(r.id);
+    return receipt === undefined ? r : withLaterStamp(r, receipt);
   });
 }
 
@@ -419,7 +428,7 @@ export async function updateReviewText(
  *  id the prune or a delete already removed is a no-op. Never reorders: rows sort by
  *  `finishedAt`, which this leaves alone. Callers invalidate. Reads return the
  *  record as posted from this call on, for the rest of the session, whatever the
- *  write's outcome (see `pendingStamps`). */
+ *  write's outcome (see `pendingStamps`). A later stored stamp is kept. */
 export async function markReviewPosted(
   repo: string,
   id: string,
@@ -436,7 +445,7 @@ export async function markReviewPosted(
         const all = await readByKey(key);
         await writeAll(
           key,
-          all.map((r) => (r.id === id ? { ...r, postedAt } : r)),
+          all.map((r) => (r.id === id ? withLaterStamp(r, postedAt) : r)),
         );
       });
     });

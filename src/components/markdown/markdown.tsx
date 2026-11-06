@@ -33,7 +33,10 @@ import {
   cancelFrame,
   cancelTimer,
 } from "@/lib/hover-card-timing";
-import { cachedRepoLens } from "@/lib/repo-lens/queries";
+import {
+  cachedLensInputsComplete,
+  cachedRepoLens,
+} from "@/lib/repo-lens/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastError } from "@/lib/toast";
@@ -1276,9 +1279,14 @@ export function Markdown({
     // selectPr/selectIssue hand over a bare number that the destination view
     // resolves under the repo's ACTIVE lens, so a body rendered under the other
     // one (a local view, or any surface pinned to origin) can only reach the
-    // right item by leaving the app. Read through the same gate as useRepoLens.
+    // right item by leaving the app. Read through the same gate as useRepoLens;
+    // until all of its inputs have answered its lens is a default, so the
+    // browser takes the click then too.
     const activeLens = cachedRepoLens(queryClient, repoPath);
-    if (activeLens !== lens) {
+    if (
+      activeLens !== lens ||
+      !cachedLensInputsComplete(queryClient, repoPath)
+    ) {
       setResolving(true);
       try {
         const details = await queryClient.fetchQuery(
@@ -1322,6 +1330,10 @@ export function Markdown({
         liveLens !== lens
       )
         return;
+      if (!cachedLensInputsComplete(queryClient, repoPath)) {
+        await openUrl(issue.url);
+        return;
+      }
       if (isPullRefUrl(issue.url)) openPr();
       else openIssue();
     } catch (e) {

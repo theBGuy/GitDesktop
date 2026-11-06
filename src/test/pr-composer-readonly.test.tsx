@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 // Aliased: scripts/toast-clearance-adopters.test.mjs rosters every product
@@ -17,6 +17,8 @@ import { unmockedCommands } from "./setup";
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/settings/api")>()),
   loadSettings: vi.fn(),
+  // An expand persists the preference; the write's echo is all the hook reads.
+  saveSettingsMerged: vi.fn(async (s: unknown) => s),
 }));
 
 // The real editor's `disabled` takes keys away from the textarea, so the
@@ -167,6 +169,22 @@ describe("CommentComposer readOnlyReason", () => {
     expect(
       screen.queryByRole("button", { name: "Comment" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("expanding a held, collapsed box by keyboard lands on the held submit", async () => {
+    const user = userEvent.setup();
+    renderComposer({
+      value: "a draft",
+      readOnlyReason: REASON,
+      collapsed: true,
+    });
+    const peek = await screen.findByRole("button", { expanded: false });
+    peek.focus();
+    await user.keyboard("{Enter}");
+    // Named explicitly: jsdom can leave focus on a disabled element, so "not
+    // body" would pass with focus stuck in the editor.
+    await waitFor(() => expect(document.activeElement).toBe(submit()));
+    expect(submit()).toHaveAccessibleDescription(REASON);
   });
 
   it("without the prop, the composer stays live (negative control)", async () => {

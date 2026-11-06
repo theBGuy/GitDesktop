@@ -158,6 +158,10 @@ export interface ReviewEntry {
    *  Post can stamp that record as posted. Cleared by every fresh run, so a post can
    *  never stamp a previous run's record. */
   recordId?: string;
+  /** The failed run hit its deadline: set beside {@link recordId} so a live Post can
+   *  name the timeout before the saved record loads (or when its save fails).
+   *  Cleared by every fresh run, with `recordId`. */
+  timedOut?: boolean;
   /** Re-fires this run through the automation pipeline — set ONLY on automation rows
    *  (by {@link registerAutomationRun}). Its presence is the discriminator that a
    *  stopped row belongs in the dock's Stopped group: a manual run also reaches
@@ -536,6 +540,7 @@ export async function startReview(
     startedAt: undefined,
     endedAt: undefined,
     recordId: undefined,
+    timedOut: undefined,
   });
 
   // Wait for a slot in this run's lane (immediate when under the cap). A cancel
@@ -912,7 +917,7 @@ export async function startReview(
       const partial = useReviewStore.getState().texts[key] ?? "";
       if (partial.trim() && startedAtMs !== undefined) {
         const recordId = crypto.randomUUID();
-        patch({ recordId });
+        patch({ recordId, timedOut });
         void saveReview(target.repoPath, {
           schemaVersion: 1,
           id: recordId,
@@ -1226,5 +1231,7 @@ export function useReviewRun(target: ReviewTarget) {
     /** Id of the history record this run saved — what a live Post stamps as
      *  posted. Absent until the run saves one, and cleared by every fresh run. */
     recordId: entry.recordId,
+    /** The failed run hit its deadline; known before its saved record loads. */
+    timedOut: entry.timedOut === true,
   };
 }

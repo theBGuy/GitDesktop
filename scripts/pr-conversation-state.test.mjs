@@ -69,7 +69,7 @@ test("locked + viewer can't comment holds the composer and reactions", () => {
     ),
     { composer: LOCKED, reactions: LOCKED },
   );
-  // GitLab mirrors the two flags.
+  // A viewer who also can't react gets the reactions copy on top of the lock.
   assert.deepEqual(
     prConversationHold(
       { locked: true, viewerCanComment: false, viewerCanReact: false },

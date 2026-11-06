@@ -7,6 +7,7 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { useComposerCollapsed } from "./useComposerCollapsed";
 import type { MentionSource } from "./useMentionCandidates";
@@ -118,6 +119,8 @@ export function CommentComposer({
   // processed blur (a click-away included) clears it.
   const editorOwnsFocusRef = useRef(false);
   const prevHoldRef = useRef({ readOnly, holdKey });
+  // Read when a hand-off lands, which can be a frame after the render that armed it.
+  const readOnlyRef = useLatestRef(readOnly);
   useToastClearance(rootRef, toastClearance === true);
   // The scroll region measured before the box grows (an expand, or the rollback
   // of a refused collapse), when the reader was sitting at its bottom; null
@@ -142,6 +145,15 @@ export function CommentComposer({
     collapse,
     rollback,
   );
+
+  /** A hand-off that means "type here". A held editor is disabled, so its
+   *  focus() is a no-op that strands focus on <body>; the held submit, which
+   *  carries the reason, takes it instead (the expand commit inlines the same
+   *  choice, so its effect reads only refs). */
+  function focusEditor() {
+    if (readOnlyRef.current) submitRef.current?.focus();
+    else editorRef.current?.focus();
+  }
 
   /** The scroll region an about-to-grow box owes a re-pin, or null when the
    *  reader isn't sitting at its bottom. Call BEFORE the flip: growing the box
@@ -207,7 +219,7 @@ export function CommentComposer({
   useImperativeHandle(ref, () => ({
     focus() {
       if (collapsed) expand("focus");
-      else editorRef.current?.focus();
+      else focusEditor();
     },
     showPreview() {
       if (collapsed) expand("preview");
@@ -257,6 +269,7 @@ export function CommentComposer({
     requestAnimationFrame(() => {
       handoffRef.current = false;
       if (pending === "preview") editorRef.current?.showPreview();
+      else if (readOnlyRef.current) submitRef.current?.focus();
       else editorRef.current?.focus();
     });
   }, [collapsed]);

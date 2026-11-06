@@ -482,6 +482,19 @@ export function PullRequestsPanel({ repoPath }: { repoPath: string }) {
     () => listFilter.setPreset("needs-review"),
     onPullsTab && canFilterMine && canGroupByReview && listFilter.prefsReady,
   );
+  // The state tabs render on every forge, so only the tab gates them; each goes
+  // through the tab click's own door, which counts the pick as the user's.
+  useHotkeyAction("pr-state-open", () => onUserStateFilter("open"), onPullsTab);
+  useHotkeyAction(
+    "pr-state-merged",
+    () => onUserStateFilter("merged"),
+    onPullsTab,
+  );
+  useHotkeyAction(
+    "pr-state-closed",
+    () => onUserStateFilter("unmerged"),
+    onPullsTab,
+  );
   useHotkeyAction(
     "pr-group-review",
     () => listFilter.setGroupByReview(!listFilter.groupByReview),

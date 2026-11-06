@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { act, fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Markdown } from "@/components/markdown/markdown";
@@ -13,6 +14,11 @@ import { useUiStore } from "@/lib/stores/ui";
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   forgeIssueView: vi.fn(),
+}));
+// The browser arm's seam: the plugin bypasses the test transport.
+vi.mock("@tauri-apps/plugin-opener", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/plugin-opener")>()),
+  openUrl: vi.fn(async () => undefined),
 }));
 
 const REPO = "C:/repos/demo";
@@ -47,6 +53,12 @@ async function clickRef(
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  // Every lens input answered, so the click may resolve in the app.
+  client.setQueryData(["repo", REPO, "forge-status"], {
+    provider: "github",
+    authenticated: true,
+  });
+  client.setQueryData(remotesOptions(REPO).queryKey, ["origin"]);
   client.setQueryData(lensKey(REPO), "origin");
   seed?.(client);
   // A merged list page holds the number, so `#N` resolves to a PR from cache.
@@ -89,6 +101,25 @@ describe("a PR link in a markdown body", () => {
       "Fixed by !42.",
     );
     expectAlignedPr("42");
+  });
+});
+
+describe("a #N clicked before the lens inputs answered", () => {
+  it("opens the browser and selects nothing while the remotes read is cold", async () => {
+    vi.mocked(openUrl).mockClear();
+    vi.mocked(forgeIssueView).mockResolvedValue({
+      url: "https://github.com/o/r/pull/618",
+    } as Awaited<ReturnType<typeof forgeIssueView>>);
+    await clickRef(
+      { provider: "github", repoPath: REPO, lens: "origin" },
+      "Fixed by #618.",
+      (c) => c.removeQueries({ queryKey: remotesOptions(REPO).queryKey }),
+    );
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/o/r/pull/618");
+    const s = useUiStore.getState();
+    expect(s.selectedPr).toBeNull();
+    expect(s.selectedIssue).toBeNull();
+    expect(s.repoTab).toBe("issues");
   });
 });
 

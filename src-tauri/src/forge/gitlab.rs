@@ -858,8 +858,8 @@ fn infer_mr_stacks(open: &[(u64, &str, &str)]) -> HashMap<u64, (String, u32, u32
 }
 
 /// Fill each row's `stack` from the chains inferred over the SAME list. Membership
-/// is only as complete as the list in hand: callers pass every open page read before
-/// truncating, so unread pages and merged layers remain outside inference.
+/// is only as complete as the list in hand: callers pass the first open page before
+/// truncating, so later pages and merged layers remain outside inference.
 /// Cross-repository rows sit out the inference entirely: their source branch lives
 /// in another project, so its name says nothing about a chain in this one.
 fn apply_mr_stacks(prs: &mut [PrInfo]) {
@@ -1182,8 +1182,8 @@ fn sort_filtered_rows<T>(rows: &mut [T], key: impl Fn(&T) -> (&str, u64)) {
 /// axes, dedupe by iid (the mine legs overlap whenever the viewer is both assignee
 /// and reviewer), order newest-first, and truncate to `limit`.
 ///
-/// Every surviving row is marked `stack_unknown`: chain inference reads the WHOLE
-/// open list (see [`apply_mr_stacks`]) and would mis-position rows over a filtered
+/// Every surviving row is marked `stack_unknown`: chain inference reads an unfiltered
+/// open page (see [`apply_mr_stacks`]) and would mis-position rows over a filtered
 /// subset, so the decoration is unfetched rather than absent. Pure.
 fn merge_filtered_mrs(rows: Vec<PrInfo>, plan: &GlFilterPlan, limit: Option<u32>) -> Vec<PrInfo> {
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -1750,7 +1750,9 @@ where
     Ok((rows, capped))
 }
 
-/// Inference sees every row read, including the full first page for small limits.
+/// Inference reads the first page in full at every limit, the rows the MR view's
+/// single-page read infers from, so a chain never differs between list and detail.
+/// Rows past it are marked `stack_unknown`.
 async fn open_mrs_with<F, Fut>(
     enc: &str,
     limit: Option<u32>,
@@ -1786,7 +1788,13 @@ where
     };
     let mut prs: Vec<PrInfo> = mrs.into_iter().map(from_glab_mr).collect();
     // Truncation must follow inference so an omitted child still decorates its parent.
-    apply_mr_stacks(&mut prs);
+    let first_page = prs.len().min(FILTER_PAGE_SIZE as usize);
+    let (inferred, beyond) = prs.split_at_mut(first_page);
+    apply_mr_stacks(inferred);
+    for pr in beyond {
+        pr.stack = None;
+        pr.stack_unknown = true;
+    }
     if let Some(n) = limit {
         prs.truncate(n as usize);
     }
@@ -12639,34 +12647,85 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn open_mr_pages_infer_stacks_over_every_page_read() {
-        let pages = closed_state_pages("opened", 1, 200, 5000)
+    /// Open pages where each row heads `b{iid}`, retargeted per `targets` (iid, base).
+    fn open_stack_pages(count: u32, targets: &[(u64, &str)]) -> Vec<String> {
+        closed_state_pages("opened", 1, count, 5000)
             .into_iter()
             .map(|body| {
                 let mut rows: serde_json::Value = serde_json::from_str(&body).unwrap();
                 for row in rows.as_array_mut().unwrap() {
                     let iid = row["iid"].as_u64().unwrap();
                     row["source_branch"] = serde_json::json!(format!("b{iid}"));
-                    if iid == 150 {
-                        row["target_branch"] = serde_json::json!("b5");
+                    if let Some((_, base)) = targets.iter().find(|(t, _)| *t == iid) {
+                        row["target_branch"] = serde_json::json!(base);
                     }
                 }
                 rows.to_string()
             })
-            .collect();
+            .collect()
+    }
+
+    /// A row's number, inferred `(id, position, size)`, and `stack_unknown` flag.
+    type StackCell = (u64, Option<(String, u32, u32)>, bool);
+
+    fn stack_cells(rows: &[PrInfo]) -> Vec<StackCell> {
+        rows.iter()
+            .map(|p| {
+                let stack = p.stack.as_ref();
+                let cell = stack.map(|s| (s.id.clone(), s.position, s.size));
+                (p.number, cell, p.stack_unknown)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_infer_stacks_over_the_first_page_only() {
+        let pages = open_stack_pages(250, &[(7, "b3"), (150, "b5")]);
+        let single_page = vec![(OPEN_PAGE_ENDPOINT.to_string(), pages[0].clone())];
         let (rows, urls, capped) =
-            read_open_pages(Some(120), page_responses(OPEN_WALK_ENDPOINT, pages)).await;
-        assert_eq!(urls.len(), 2);
-        assert_eq!(rows.len(), 120);
-        assert!(!rows.iter().any(|p| p.number == 150));
-        let parent = rows.iter().find(|p| p.number == 5).unwrap();
-        let stack = parent.stack.as_ref().unwrap();
+            read_open_pages(Some(500), page_responses(OPEN_WALK_ENDPOINT, pages)).await;
+        assert_eq!(urls.len(), 3);
+        assert_eq!(rows.len(), 250);
+        assert!(!capped);
+        // The first page decorates exactly as the MR view's single-page read does.
+        let (detail_rows, _, _) = read_open_pages(None, single_page).await;
+        assert_eq!(stack_cells(&rows[..100]), stack_cells(&detail_rows));
+        let row = |n: u64| rows.iter().find(|p| p.number == n).unwrap();
+        let stack = row(7).stack.as_ref().unwrap();
+        assert_eq!(
+            (stack.id.as_str(), stack.position, stack.size),
+            ("mr-3", 2, 2)
+        );
+        // A child past row 100 infers no chain at either end of the boundary.
+        assert!(row(5).stack.is_none() && !row(5).stack_unknown);
+        assert!(row(150).stack.is_none() && row(150).stack_unknown);
+        assert!(rows[100..]
+            .iter()
+            .all(|p| p.stack.is_none() && p.stack_unknown));
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_keep_a_first_page_stack_past_the_limit() {
+        let pages = open_stack_pages(100, &[(50, "b5")]);
+        let (rows, _, _) = read_open_pages(
+            Some(20),
+            vec![(OPEN_PAGE_ENDPOINT.into(), pages[0].clone())],
+        )
+        .await;
+        assert_eq!(rows.len(), 20);
+        assert!(!rows.iter().any(|p| p.number == 50));
+        let stack = rows
+            .iter()
+            .find(|p| p.number == 5)
+            .unwrap()
+            .stack
+            .as_ref()
+            .unwrap();
         assert_eq!(
             (stack.id.as_str(), stack.position, stack.size),
             ("mr-5", 1, 2)
         );
-        assert!(!capped);
+        assert!(rows.iter().all(|p| !p.stack_unknown));
     }
 
     #[tokio::test]

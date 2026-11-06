@@ -189,10 +189,11 @@ export interface PrInfo {
   headSha: string;
   /** Stack membership, driving the row's position badge. Null/absent = unstacked. */
   stack?: PrStackInfo | null;
-  /** Whether the list's stack join FAILED, making every row's `stack` unreliable.
-   *  Tri-state: absent or false = the join answered (zero stacks is a real answer);
-   *  true = it failed, so a row showing no stack may still be stacked. The join is
-   *  fail-open per list, so this flag is uniform across the page. */
+  /** Whether this row's stack membership went unread, making its `stack`
+   *  unreliable: true = a row showing no stack may still be stacked; absent or
+   *  false = it was read (no stack is a real answer). GitHub sets it on every row
+   *  when the list's stack probe fails; GitLab also on rows its chain inference
+   *  doesn't read (past the first open page, or a filtered page's rows). */
   stackUnknown?: boolean;
   /** True when the head branch lives in ANOTHER repository — a fork PR, which can
    *  never be a stack member. Absent/false = same-repo. */

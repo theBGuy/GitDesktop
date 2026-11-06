@@ -183,6 +183,37 @@ describe("markReviewPosted", () => {
     expect(list[0].postedAt).toBe(9_900);
   });
 
+  it("never rolls a newer stored stamp back to the receipt", async () => {
+    await saveReview(REPO, record("newer"));
+    await markReviewPosted(REPO, "newer", 5_000);
+    // A later post (another window, say) stamped the store after this receipt.
+    data.set(REPO, [record("newer", { postedAt: 7_000 })]);
+    const list = await listReviews(REPO, "origin", "remote", "7");
+    expect(list[0].postedAt).toBe(7_000);
+  });
+
+  it("never writes an older stamp over a newer stored one", async () => {
+    // Another instance persisted a later post before this stamp took the lock.
+    await saveReview(REPO, record("writer", { postedAt: 7_000 }));
+    await markReviewPosted(REPO, "writer", 5_000);
+    expect(stored()[0].postedAt).toBe(7_000);
+  });
+
+  it("overlays the receipt on an older or unreadable stored stamp", async () => {
+    await saveReview(REPO, record("older"));
+    await markReviewPosted(REPO, "older", 6_000);
+    data.set(REPO, [record("older", { postedAt: 4_000 })]);
+    expect((await listReviews(REPO, "origin", "remote", "7"))[0].postedAt).toBe(
+      6_000,
+    );
+    data.set(REPO, [
+      record("older", { postedAt: "soon" as unknown as number }),
+    ]);
+    expect((await listReviews(REPO, "origin", "remote", "7"))[0].postedAt).toBe(
+      6_000,
+    );
+  });
+
   it("keeps a record posted for the session after its stamp's write rejects", async () => {
     await saveReview(REPO, record("receipt"));
     writeGate.next = Promise.reject(new Error("store down"));

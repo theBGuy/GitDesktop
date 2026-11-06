@@ -127,10 +127,12 @@ impl GitDesktopMcp {
         self.ensure_write()?;
         // Pre-mutation guards FIRST: both refs must resolve as branches, else error
         // naming the missing one — before any app-data write.
-        verify_branch(&self.repo, &args.base).await?;
-        verify_branch(&self.repo, &args.head).await?;
+        let base_ref = verify_branch(&self.repo, &args.base).await?;
+        let head_ref = verify_branch(&self.repo, &args.head).await?;
+        // The count reads the refs verify_branch proved: a bare `refs/`-spelled branch
+        // name would pass branch-first resolution untouched and read a same-named tag.
         refuse_nothing_to_merge(
-            crate::git::compare::branch_ahead_count_core(&self.repo, &args.base, &args.head).await,
+            crate::git::compare::branch_ahead_count_core(&self.repo, &base_ref, &head_ref).await,
             &args.base,
             &args.head,
         )?;
@@ -366,35 +368,37 @@ fn filter_by_status(
 }
 
 /// Verifies that `branch` resolves to an existing LOCAL branch (`refs/heads/<branch>`)
-/// in the repo, erroring clearly by name if not. Used as a pre-mutation guard for
-/// `create_local_pr` so a typo'd base/head is rejected before any app-data write.
+/// in the repo, erroring clearly by name if not, and returns that full ref. Used as a
+/// pre-mutation guard for `create_local_pr` so a typo'd base/head is rejected before
+/// any app-data write.
 ///
 /// Local branches ONLY — a remote-tracking ref (`origin/main`) is deliberately
 /// rejected: the GUI's local-PR paths assume local branches (the create dialog only
 /// offers local names, and `git_merge_local_pr` does `git switch <base>` + cherry-pick,
 /// which errors or DWIM-creates a branch for a remote-tracking ref), so a record with
 /// a remote-tracking ref would be a latent trap at merge time.
-async fn verify_branch(repo: &str, branch: &str) -> Result<(), McpError> {
+async fn verify_branch(repo: &str, branch: &str) -> Result<String, McpError> {
     ensure_not_flag(branch, "branch")?;
     // The branch-name gate, not the shared ref gate: it rejects refspec
     // metacharacters AND the rev-expression syntax the probe below would
     // otherwise RESOLVE (`feature~1` verifies as the branch's parent commit,
     // persisting a record that names a commit no branch points at).
     crate::git::branches::validate_branch_name(branch).map_err(app_err)?;
+    let full = format!("refs/heads/{branch}");
     let out = run_git_raw(
         Some(repo),
         &[
             "rev-parse",
             "--verify",
             "--quiet",
-            &format!("refs/heads/{branch}^{{commit}}"),
+            &format!("{full}^{{commit}}"),
         ],
         DEFAULT_TIMEOUT,
     )
     .await
     .map_err(app_err)?;
     if !out.stdout_lossy().trim().is_empty() {
-        return Ok(());
+        return Ok(full);
     }
     Err(McpError::invalid_params(
         format!("branch not found in this repository: {branch}"),
@@ -672,5 +676,38 @@ mod tests {
         commit(&repo, "feature work").await;
         create(&repo).await.expect("ahead head creates");
         assert_eq!(stored_count(&repo).await, 1);
+    }
+
+    /// git accepts `refs/tags/x` as a BRANCH name (stored as `refs/heads/refs/tags/x`);
+    /// beside a tag `x`, the bare spelling resolves to the tag.
+    // Holds the local-PR store's serializing guard across awaits: the store resolves
+    // through a process-wide override (each `#[tokio::test]` owns a current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn create_local_pr_counts_the_verified_branch_not_a_same_named_tag() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_dir, repo) = repo_with_feat().await;
+        git(&repo, &["branch", "refs/tags/x"]).await;
+        git(&repo, &["checkout", "-q", "feat"]).await;
+        commit(&repo, "only the tag reaches this").await;
+        git(&repo, &["tag", "x"]).await;
+        let h = GitDesktopMcp::with_options(repo.clone(), true, false, false, false);
+        let err = h
+            .create_local_pr(Parameters(CreateLocalPrArgs {
+                title: "t".into(),
+                body: None,
+                base: "main".into(),
+                head: "refs/tags/x".into(),
+            }))
+            .await
+            .expect_err("the branch is level with main");
+        assert!(
+            err.to_string()
+                .contains("Nothing to merge: refs/tags/x is already in main."),
+            "got: {err}"
+        );
+        assert_eq!(stored_count(&repo).await, 0, "no record may be written");
     }
 }

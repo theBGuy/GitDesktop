@@ -4,7 +4,12 @@ import { createElement, type ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { remotesOptions } from "@/lib/git/queries";
 import type { ForgeStatus, RemoteLens } from "@/lib/git/types";
-import { cachedRepoLens, lensKey, useLensState } from "@/lib/repo-lens/queries";
+import {
+  cachedLensInputsComplete,
+  cachedRepoLens,
+  lensKey,
+  useLensState,
+} from "@/lib/repo-lens/queries";
 
 // The hook's three reads refetch past their staleTime; a fetch that never
 // settles keeps each seeded value in place, so the hook reads only the seeds.
@@ -60,6 +65,21 @@ function seeded(seed: Seed) {
   if (seed.raw) client.setQueryData(lensKey(REPO), seed.raw);
   return client;
 }
+
+describe("cachedLensInputsComplete", () => {
+  it("is complete once all three inputs have answered", () => {
+    expect(cachedLensInputsComplete(seeded(FORK), REPO)).toBe(true);
+  });
+
+  it.each([
+    ["the forge status", { ...FORK, forge: undefined }],
+    ["the remotes", { ...FORK, remotes: undefined }],
+    ["the stored lens", { ...FORK, raw: undefined }],
+    ["every input", {}],
+  ] as [string, Seed][])("is incomplete without %s", (_name, seed) => {
+    expect(cachedLensInputsComplete(seeded(seed), REPO)).toBe(false);
+  });
+});
 
 describe("cachedRepoLens", () => {
   it.each(CASES)("reads %s", (_name, seed, lens) => {

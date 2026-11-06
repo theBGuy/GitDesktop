@@ -901,10 +901,12 @@ pub struct PrInfo {
     /// joined in from a supplementary call — hence the serde default.
     #[serde(default)]
     pub stack: Option<PrStackInfo>,
-    /// The list's stack probe FAILED, so `stack` being `None` proves nothing — these
-    /// rows may be stacked without showing it. `false` (the default) means the join
-    /// answered, empty or not. Callers that act on membership must treat `true` as
-    /// "don't know", never as "not stacked".
+    /// This row's stack membership wasn't read, so `None` in `stack` proves
+    /// nothing. GitHub sets it on every row when the list's stack probe fails;
+    /// GitLab also on rows its chain inference doesn't read (past the first open
+    /// page, or a filtered page's rows). `false` (the default) means it was read,
+    /// empty or not. Callers that act on membership must treat `true` as "don't
+    /// know", never as "not stacked".
     #[serde(default)]
     pub stack_unknown: bool,
     /// The head branch lives in a FORK, so this PR can never be a stack member
