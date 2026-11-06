@@ -36,7 +36,12 @@ import {
   openWithProgram,
 } from "@/lib/git/api";
 import { useRepoOwners } from "@/lib/git/queries";
-import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import {
+  type ForgeProvider,
+  knownProvider,
+  OPEN_IN_BROWSER,
+  providerLabel,
+} from "@/lib/git/types";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
@@ -91,6 +96,14 @@ function resolveHost(
   hostByPath: Map<string, string | null>,
 ): string | undefined {
   return repo.host || hostByPath.get(repo.path) || undefined;
+}
+
+/** The row menu's view-on-host label. A stored id this build doesn't know
+ *  names no host rather than defaulting to GitHub. */
+function viewOnLabel(provider: string | null): string {
+  if (provider === null) return `View on ${providerLabel(null)}`;
+  const known = knownProvider(provider);
+  return known ? `View on ${providerLabel(known)}` : OPEN_IN_BROWSER;
 }
 
 function resolveProvider(
@@ -690,7 +703,7 @@ function RepoMenuItems({
           {/* Name the repo's actual provider (incl. self-managed GitLab and
               Bitbucket); unrecognized hosts route through gh (Enterprise etc.),
               so GitHub is the honest default label. */}
-          View on {providerLabel(provider as ForgeProvider | null)}
+          {viewOnLabel(provider)}
         </ContextMenuItem>
       )}
       <ContextMenuItem

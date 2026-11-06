@@ -102,8 +102,12 @@ import {
 } from "@/lib/git/queries";
 import {
   type IssueInfo,
-  providerLabel,
+  OPEN_IN_BROWSER,
   type RemoteLens,
+  savedProvider,
+  shownProvider,
+  shownProviderLabel,
+  UNKNOWN_HOST,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import {
@@ -118,6 +122,7 @@ import {
   useOfflineHold,
 } from "@/lib/offline-writes";
 import { lensKey, useRepoLens } from "@/lib/repo-lens/queries";
+import { useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched, repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -199,7 +204,14 @@ export function RemoteIssueView({
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
   const canWrite = provider !== "gitlab" && provider !== "bitbucket";
-  const remoteLabel = providerLabel(provider);
+  // Copy names the saved provider until the probe answers; gates keep the raw probe.
+  const settings = useSettings();
+  const shown = shownProvider(
+    forge.data,
+    savedProvider(settings.data?.recentRepos, repoPath),
+  );
+  const hostName = shownProviderLabel(shown);
+  const remoteLabel = hostName ?? UNKNOWN_HOST;
   // The single lens-resolution point for this surface (package B2): every issue
   // read/write below targets the fork (origin) or its parent (upstream).
   const lens = useRepoLens(repoPath);
@@ -675,7 +687,7 @@ export function RemoteIssueView({
               reason={ISSUE_SWITCH_LOADING_REASON}
             >
               <ArrowSquareOutIcon data-icon="inline-start" />
-              {remoteLabel}
+              {hostName ?? OPEN_IN_BROWSER}
             </DisabledReasonButton>
             {(canLock || canDuplicate || canTransfer || canDelete) && (
               <DisabledReasonButton
@@ -701,9 +713,9 @@ export function RemoteIssueView({
   if (arm === "error" || !issue) {
     // The failure class isn't knowable here, so the headline claims only which
     // host the read was aimed at and the summary beneath carries the reason. The
-    // host goes unnamed while its own probe hasn't answered, rather than guessed.
-    const loadFailed = provider
-      ? `Couldn't load this issue from ${remoteLabel}.`
+    // host goes unnamed while neither its probe nor a saved provider names it.
+    const loadFailed = shown
+      ? `Couldn't load this issue from ${hostName}.`
       : "Couldn't load this issue from the remote.";
     const errorSummary = details.error
       ? presentError(details.error).summary
@@ -1405,11 +1417,15 @@ export function RemoteIssueView({
             disabled={detailsPlaceholder}
             reason={staleReason}
             onClick={() => openUrl(issue.url)}
-            title={`Open this issue on ${remoteLabel}`}
+            title={
+              hostName
+                ? `Open this issue on ${hostName}`
+                : "Open this issue in your browser"
+            }
             className="cursor-pointer"
           >
             <ArrowSquareOutIcon data-icon="inline-start" />
-            {remoteLabel}
+            {hostName ?? OPEN_IN_BROWSER}
           </DisabledReasonButton>
           {(canLock || canDuplicate || canTransfer || canDelete) && (
             <DropdownMenu

@@ -1311,7 +1311,8 @@ request** dialog offers an **Add upstream remote** button that wires it up for y
 
 ## GitHub PRs
 
-Browse open/closed PRs and open one in a full in-app view: description, commits, changed
+Browse PRs on three tabs (**Open**, **Merged**, and **Closed**, which holds the ones closed
+without merging) and open one in a full in-app view: description, commits, changed
 files with diffs, and CI checks. From there you can **comment** (with quote-reply),
 **review** (approve / comment / request changes), **edit** the title and body (and
 **retarget** the base branch, unless the PR is stacked), manage **labels**,
@@ -1390,6 +1391,11 @@ milestone added/removed, cross-referenced, issue linked/unlinked, and locked/unl
 commits since**), so an out-of-date verdict never reads as current. The feed works for
 **GitLab MRs**, **Bitbucket PRs**, and **local PRs** too — see their sections below for the
 events each one reports.
+A locked conversation shows a **locked** badge in the header, with GitHub's lock reason
+when it gives one. When GitHub or GitLab won't take a comment from you, the comment box
+and reactions turn read-only and the disabled button says why. On an archived GitHub pull
+request, the first refused comment explains the archive, and the box and reactions stay
+read-only until you leave that pull request.
 
 CI checks appear as a **rollup summary** — **✓ N passed · ✕ M failed · ● K pending ·
 ⊖ J skipped**, each count with its own icon and word so status never rides on color
@@ -1774,10 +1780,11 @@ release notes, squash message, script, publish, or repo settings),
 
 ## GitLab merge requests
 
-Point the app at a **GitLab** repo and the same tab lists its **merge requests** (open and
-closed/merged) next to any local PRs. Its **Closed** tab holds merged and closed merge
-requests together, newest first. Open one for the description, comments, commits, and a
-highlighted **diff** (with an **Open on GitLab** link) — and the GitLab MR writes:
+Point the app at a **GitLab** repo and the same tab lists its **merge requests** next to
+any local PRs, newest first, with merged and closed ones on their own **Merged** and
+**Closed** tabs. **Load 100 more** keeps adding merge requests up to 500. Open one for
+the description, comments, commits, and a highlighted **diff** (with a **GitLab** button
+that opens it in your browser) — and the GitLab MR writes:
 **comment** on it (and **edit** or **delete** your own comments), **close / reopen** it
 (closing asks first; either way your drafted comment posts alongside, as
 **request changes** does),
@@ -1895,6 +1902,9 @@ On a GitHub or GitLab repo the description and comment box complete **@** mentio
 **#** references (**!** merge requests too on GitLab) like the hosted ones, and render
 them as links you can click through. Rename a branch in GitDesktop (in the app or through
 its MCP server) and open local PRs whose head or base used the old name follow it.
+The create dialog counts the commits the merge would bring in. When the head branch is
+already in the base it says **Nothing to merge**, and **Create** stays disabled until
+there is something to merge.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA
@@ -1966,9 +1976,10 @@ pin a fixed limit that applies to every agent-CLI review. Whatever the reviewer 
 wrote is kept when the limit hits, for an automated pull-request review as much as one
 you started yourself: it stays on screen and is saved with the pull request, labelled
 **Timed out — partial output kept**, so it's still there after a restart. It also gets
-its own row under **Previous reviews**, where you can read, copy, or delete it like any
-other record. Kept output is never treated as a finished review — it doesn't feed the
-next run's context and doesn't count as coverage for an automated review, so run it
+its own row under **Previous reviews**, where you can read, copy, post, or delete it like
+any other record (posting kept output asks first, since the text may be incomplete).
+Kept output is never treated as a finished review — it doesn't feed the next run's
+context and doesn't count as coverage for an automated review, so run it
 again for a full one.
 
 **Critical** is the top severity an audit finding can carry — remote code execution,
@@ -1979,8 +1990,14 @@ breach.
 but you don't have to pick between a code review and a security audit: start one
 while the other is running and it **queues**, then starts automatically when the
 first finishes (whose result moves to **Previous reviews**, kept partial output
-included). A chip shows what's up next; **Dismiss** drops it, and cancelling the running
-review still lets the queued one proceed.
+included, where you can still post it). A chip shows what's up next; **Dismiss** drops
+it, and cancelling the running review still lets the queued one proceed.
+
+**Post a past review.** Every row under **Previous reviews** with text carries **Post as
+comment**, which posts that review to the pull request's conversation as written, even
+while another review streams. Once a review is posted, by you or by an automation that
+delivered it, its row says **Posted to the conversation** with the time, and the button
+becomes **Post again**, which asks before adding a second comment.
 
 **Agentic review.** The panel's **Agentic review** toggle gives the reviewer read-only
 tools so that, instead of relying on the prompt's truncated summary, it pulls the **full PR
@@ -3842,8 +3859,8 @@ Sections:
   pull-request entry opens that PR on the tab its event happened on, under the
   fork/upstream view it belongs to, so a new comment or approval lands on
   **Conversation** — and a review entry scrolls to the review itself. The
-  pull-request list itself switches to **Open** or **Closed** to match the PR's
-  current state, so one merged since the event still arrives selected. A failed
+  pull-request list itself switches to **Open**, **Merged**, or **Closed** to match the
+  PR's current state, so one merged since the event still arrives selected. A failed
   create's entry opens that repository's pull-request list. When the
   checkout an entry points to has been removed, GitDesktop opens another copy of
   that repository when it knows one; with none left it says so and changes

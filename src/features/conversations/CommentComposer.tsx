@@ -57,6 +57,7 @@ export function CommentComposer({
   leadingActions,
   mentions,
   toastClearance,
+  readOnlyReason,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). Both methods expand a collapsed box first. */
@@ -89,11 +90,17 @@ export function CommentComposer({
   /** This mount is its pane's bottom bar (or docks on one): toasts lift above
    *  its top edge. */
   toastClearance?: boolean;
+  /** The conversation won't take a comment (a locked or archived one): the
+   *  editor and submit hold with this reason, busy or not. Clear stays live, as
+   *  discarding a draft is local. */
+  readOnlyReason?: string | null;
 }) {
   const hasDraft = value.trim().length > 0;
-  // Only the `busy` hold gets words: an empty draft explains itself, and a reason
-  // there would add a tab stop for every viewer who simply hasn't typed yet.
-  const blockedReason = busy ? (reason ?? null) : null;
+  // Only the `busy` and read-only holds get words: an empty draft explains
+  // itself, and a reason there would add a tab stop for every viewer who simply
+  // hasn't typed yet.
+  const readOnly = readOnlyReason != null;
+  const blockedReason = readOnlyReason ?? (busy ? (reason ?? null) : null);
   const showClear = !!onClear && hasDraft;
   const editorId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -266,11 +273,11 @@ export function CommentComposer({
               // fires inside editable targets, so a chord this handler declines to
               // submit would otherwise reach the global action.
               e.preventDefault();
-              if (hasDraft && !busy) onSubmit();
+              if (hasDraft && !busy && !readOnly) onSubmit();
             }
           }}
           rows={2}
-          disabled={disabled}
+          disabled={disabled || readOnly}
           mentions={mentions}
           textareaClassName="max-h-32 min-h-12 resize-y"
         />
@@ -323,7 +330,7 @@ export function CommentComposer({
           <DisabledReasonButton
             variant="outline"
             size="sm"
-            disabled={!hasDraft || busy}
+            disabled={!hasDraft || busy || readOnly}
             reason={blockedReason}
             onClick={onSubmit}
             title={SUBMIT_HINT}
@@ -338,7 +345,7 @@ export function CommentComposer({
             size="sm"
             wrapperClassName="ml-auto"
             disabled={busy}
-            reason={blockedReason}
+            reason={busy ? (reason ?? null) : null}
             onClick={onClear}
             title="Discard this draft (e.g. a quote reply)"
           >

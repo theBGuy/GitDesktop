@@ -19,6 +19,7 @@ use rmcp::model::CallToolResult;
 use rmcp::{schemars, tool, tool_router, ErrorData as McpError};
 
 use super::{app_err, ensure_not_flag, json_result, GitDesktopMcp};
+use crate::error::AppResult;
 use crate::git::runner::{run_git_raw, DEFAULT_TIMEOUT};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -126,6 +127,11 @@ impl GitDesktopMcp {
         // naming the missing one — before any app-data write.
         verify_branch(&self.repo, &args.base).await?;
         verify_branch(&self.repo, &args.head).await?;
+        refuse_nothing_to_merge(
+            crate::git::compare::branch_ahead_count_core(&self.repo, &args.base, &args.head).await,
+            &args.base,
+            &args.head,
+        )?;
         let repo = self.local_pr_key().await?;
         let record = crate::local_prs::create(
             &repo,
@@ -394,6 +400,19 @@ async fn verify_branch(repo: &str, branch: &str) -> Result<(), McpError> {
     ))
 }
 
+/// Refuses a local PR whose head is already in its base: the reconcile reads one as
+/// merged the moment it exists. Only a MEASURED zero refuses; a failed count proceeds,
+/// matching the GUI dialog, which leaves Create enabled when it can't count.
+fn refuse_nothing_to_merge(count: AppResult<u32>, base: &str, head: &str) -> Result<(), McpError> {
+    if let Ok(0) = count {
+        return Err(McpError::invalid_params(
+            format!("Nothing to merge: {head} is already in {base}."),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 impl GitDesktopMcp {
     /// The worktree-stable store key for this server's local ISSUES, after folding any
     /// records still stored under the raw `--repo` checkout path onto it — the direct
@@ -498,8 +517,14 @@ mod tests {
     /// they must NOT return the write-gate error. They resolve the repo identity and hit
     /// the store, so against a throwaway `/tmp/x` repo they simply return an empty/`Ok`
     /// or a "no local … with id" error — never the `--allow-write` gate message.
+    // Holds the local-PR store's serializing guard across awaits: the store resolves
+    // through a process-wide override (each `#[tokio::test]` owns a current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn local_read_tools_are_ungated() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
         let h = GitDesktopMcp::with_options("/tmp/x".to_string(), false, false, false, false);
 
         macro_rules! assert_not_gated {
@@ -538,5 +563,112 @@ mod tests {
         assert_eq!(filter_by_status(records.clone(), Some("closed")).len(), 1);
         // Unknown status → nothing (records with no status can't match).
         assert!(filter_by_status(records, Some("merged")).is_empty());
+    }
+
+    #[test]
+    fn nothing_to_merge_refuses_only_a_measured_zero() {
+        let err = refuse_nothing_to_merge(Ok(0), "main", "feat").expect_err("zero refuses");
+        assert!(
+            err.to_string()
+                .contains("Nothing to merge: feat is already in main."),
+            "got: {err}"
+        );
+        assert!(refuse_nothing_to_merge(Ok(3), "main", "feat").is_ok());
+        // A failed count proceeds: it never blocks a create.
+        assert!(refuse_nothing_to_merge(
+            Err(crate::error::AppError::Command("boom".into())),
+            "main",
+            "feat"
+        )
+        .is_ok());
+    }
+
+    async fn git(repo: &str, args: &[&str]) {
+        run_git_raw(Some(repo), args, DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+    }
+
+    async fn commit(repo: &str, msg: &str) {
+        git(repo, &["commit", "-q", "--allow-empty", "-m", msg]).await;
+    }
+
+    /// A temp repo with `main` holding one commit and `feat` branched at its tip.
+    async fn repo_with_feat() -> (tempfile::TempDir, String) {
+        let dir = tempfile::Builder::new()
+            .prefix("gd-mcp-local-pr-")
+            .tempdir()
+            .expect("create temp dir");
+        let repo = dir.path().to_string_lossy().into_owned();
+        git(&repo, &["init", "-q", "-b", "main"]).await;
+        git(&repo, &["config", "user.email", "t@t.local"]).await;
+        git(&repo, &["config", "user.name", "T"]).await;
+        commit(&repo, "base").await;
+        git(&repo, &["branch", "feat"]).await;
+        (dir, repo)
+    }
+
+    async fn create(repo: &str) -> Result<CallToolResult, McpError> {
+        let h = GitDesktopMcp::with_options(repo.to_string(), true, false, false, false);
+        h.create_local_pr(Parameters(CreateLocalPrArgs {
+            title: "t".into(),
+            body: None,
+            base: "main".into(),
+            head: "feat".into(),
+        }))
+        .await
+    }
+
+    async fn stored_count(repo: &str) -> usize {
+        let key = crate::git::repo::repo_identity(repo).await.unwrap();
+        crate::local_prs::list(&key).unwrap().len()
+    }
+
+    // Holds the local-PR store's serializing guard across awaits: the store resolves
+    // through a process-wide override (each `#[tokio::test]` owns a current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn create_local_pr_refuses_a_head_equal_to_its_base() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_dir, repo) = repo_with_feat().await;
+        let err = create(&repo).await.expect_err("equal head refuses");
+        assert!(
+            err.to_string()
+                .contains("Nothing to merge: feat is already in main."),
+            "got: {err}"
+        );
+        assert_eq!(stored_count(&repo).await, 0, "no record may be written");
+    }
+
+    // Holds the local-PR store's serializing guard across awaits: the store resolves
+    // through a process-wide override (each `#[tokio::test]` owns a current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn create_local_pr_refuses_a_head_behind_its_base() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_dir, repo) = repo_with_feat().await;
+        commit(&repo, "main moves on").await;
+        let err = create(&repo).await.expect_err("behind head refuses");
+        assert!(err.to_string().contains("Nothing to merge: "), "got: {err}");
+        assert_eq!(stored_count(&repo).await, 0, "no record may be written");
+    }
+
+    // Holds the local-PR store's serializing guard across awaits: the store resolves
+    // through a process-wide override (each `#[tokio::test]` owns a current-thread runtime).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn create_local_pr_creates_when_the_head_is_ahead() {
+        let _serialized = crate::local_prs::tests::store_dir_lock();
+        let store_dir = tempfile::tempdir().unwrap();
+        let _override = crate::local_prs::tests::StoreDirOverride::set(store_dir.path());
+        let (_dir, repo) = repo_with_feat().await;
+        git(&repo, &["checkout", "-q", "feat"]).await;
+        commit(&repo, "feature work").await;
+        create(&repo).await.expect("ahead head creates");
+        assert_eq!(stored_count(&repo).await, 1);
     }
 }

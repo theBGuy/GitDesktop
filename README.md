@@ -481,7 +481,9 @@ in one click.
   start. The grouping is GitHub-only, and GitHub is also where your
   **teams**' review requests can join the filter. Your scope choice is
   remembered per repository, and a provider that can't express an axis says
-  so in the funnel rather than offering a dead control.
+  so in the funnel rather than offering a dead control. **Open**, **Merged**,
+  and **Closed** tabs keep merged work apart from pull requests closed
+  without merging, on all three forges and for local PRs.
 - **Refresh on demand**: a refresh button beside the list's search box (or
   **Refresh pull requests** in the command palette) re-reads the list you're
   looking at along with its checks, conflict chips, review-state grouping,
@@ -525,7 +527,9 @@ in one click.
 
 Run an **AI review** or **security audit** on any PR, with an activity
 indicator, a cancel, and a concurrency-capped queue; while one mode streams
-you can **queue the other to run next** instead of waiting. Reviews keep
+you can **queue the other to run next** instead of waiting. The finished
+review moves to **Previous reviews**, where any past review can still be
+**posted** as a comment (posting one twice asks first). Reviews keep
 running while you move between PRs, and finish in the tray even after you
 close the window.
 

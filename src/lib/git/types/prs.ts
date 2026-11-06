@@ -1,4 +1,5 @@
-import type { ForgeUserRef, RepoLabel } from "./forge";
+import { appErrorDetail } from "@/lib/error-summary";
+import type { ForgeProvider, ForgeUserRef, RepoLabel } from "./forge";
 import type { CompletedReviewerWithState, PrThreadOut } from "./pr-reviews";
 
 export interface PrPollInfo {
@@ -200,8 +201,9 @@ export interface PrInfo {
 }
 
 /** One `forge_pr_list_page` read: the rows plus whether the read stopped at its
- *  horizon. Only GitLab's unfiltered closed walk can report `capped`; every
- *  other provider and read says false. */
+ *  horizon. `capped` is true when a GitLab list walk (the closed, merged,
+ *  unmerged and open walks) hit its row horizon; every other provider and read
+ *  says false. */
 export interface PrListPage {
   rows: PrInfo[];
   capped: boolean;
@@ -436,6 +438,82 @@ export interface PrDetails {
    *  by maintainers"). GitHub only; absent/null = unknown, which must not be read
    *  as a denial. */
   maintainerCanModify?: boolean | null;
+  /** The conversation is locked: GitHub's `locked`, GitLab's
+   *  `discussion_locked`; always false on Bitbucket, which has no lock. Optional
+   *  for the same cache reason; only `=== true` renders the badge. */
+  locked?: boolean;
+  /** GitHub only: the lock read failed or answered without a readable `locked`,
+   *  so `locked` reads false without being an answer. Always false on GitLab and
+   *  Bitbucket. */
+  lockUnknown?: boolean;
+  /** GitHub's lock reason (off_topic/resolved/spam/too_heated) or null; always
+   *  null on GitLab and Bitbucket. */
+  activeLockReason?: string | null;
+  /** Whether the viewer may add to the conversation. False only on an
+   *  affirmative forge answer: GitHub derives it from a locked PR plus READ
+   *  permission, GitLab from a locked MR's `createNote` permission. Absent/null =
+   *  unknown, which keeps the composer live; always null on Bitbucket. */
+  viewerCanComment?: boolean | null;
+  /** Whether the viewer may react. GitHub's `viewerCanReact` verbatim (a lock
+   *  turns reactions off for everyone); GitLab mirrors `viewerCanComment`;
+   *  always null on Bitbucket. Absent/null = unknown. */
+  viewerCanReact?: boolean | null;
+}
+
+/** Copy of GitHub's refusal to comment on an ARCHIVED pull request (a per-PR
+ *  archive with no read signal). Byte-identical to `GH_PR_ARCHIVED_READONLY` in
+ *  src-tauri/src/github/pr.rs, which `gh_pr_comment` returns as an
+ *  `AppError::Gh` whose message carries no Display lead. */
+export const PR_ARCHIVED_READONLY_MESSAGE =
+  "This pull request is archived, so its conversation is read-only.";
+
+/** Whether a failed PR comment was GitHub refusing an archived pull request. */
+export function isPrArchivedRefusal(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { kind, message } = error as { kind?: unknown; message?: unknown };
+  if (kind !== "gh" || typeof message !== "string") return false;
+  return appErrorDetail(kind, message) === PR_ARCHIVED_READONLY_MESSAGE;
+}
+
+const PR_LOCKED_COMMENT_REASONS: Partial<Record<ForgeProvider, string>> = {
+  github: "This conversation is locked, so only collaborators can comment.",
+  gitlab: "This conversation is locked, so only project members can comment.",
+};
+const PR_LOCKED_COMMENT_FALLBACK =
+  "This conversation is locked, so you can't comment on it.";
+const PR_REACTIONS_OFF_REASONS: Partial<Record<ForgeProvider, string>> = {
+  github: "Reactions are turned off for this pull request.",
+  gitlab: "Reactions are turned off for this merge request.",
+};
+const PR_REACTIONS_OFF_FALLBACK =
+  "Reactions are turned off for this conversation.";
+
+/** Why the PR conversation's composer and reactions are read-only, each null
+ *  while live. Only an affirmative forge answer or a latched archived refusal
+ *  holds; an unknown or unreadable lock keeps both live. */
+export function prConversationHold(
+  pr:
+    | Pick<PrDetails, "locked" | "viewerCanComment" | "viewerCanReact">
+    | undefined,
+  archivedLatched: boolean,
+  provider: ForgeProvider | null | undefined,
+): { composer: string | null; reactions: string | null } {
+  if (archivedLatched)
+    return {
+      composer: PR_ARCHIVED_READONLY_MESSAGE,
+      reactions: PR_ARCHIVED_READONLY_MESSAGE,
+    };
+  const composer =
+    pr?.locked === true && pr.viewerCanComment === false
+      ? ((provider && PR_LOCKED_COMMENT_REASONS[provider]) ??
+        PR_LOCKED_COMMENT_FALLBACK)
+      : null;
+  const reactions =
+    pr?.viewerCanReact === false
+      ? ((provider && PR_REACTIONS_OFF_REASONS[provider]) ??
+        PR_REACTIONS_OFF_FALLBACK)
+      : composer;
+  return { composer, reactions };
 }
 
 /** The PR's head commit: the forge-reported `headSha`, falling back to the

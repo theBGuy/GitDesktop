@@ -219,6 +219,28 @@ export function DegradedListNotice(props: {
   );
 }
 
+/** The state segments a panel offers: values in order, a label per value, and
+ *  the segment group's accessible name. */
+export interface StateOptions<S extends string> {
+  values: readonly S[];
+  labels: Record<S, string>;
+  groupLabel: string;
+}
+
+/** The issue panels' Open | Closed pair. Read through a cast to the caller's S,
+ *  which is sound only while every caller omitting `stateOptions` has an S of
+ *  exactly "open" | "closed" (today IssuesPanel alone). */
+const OPEN_CLOSED_OPTIONS: StateOptions<"open" | "closed"> = {
+  values: ["open", "closed"],
+  labels: { open: "Open", closed: "Closed" },
+  groupLabel: "Issue state",
+};
+
+/** Hides the New button's label below the header's 277px content width (the
+ *  288px sidebar floor), where three state segments plus New and the filter
+ *  button overflow one line. CSS-only, so the button and its focus persist. */
+const NEW_ICON_ONLY = "@max-[277px]/gd-prhead:*:data-[slot=new-label]:hidden";
+
 /**
  * The master-detail list scaffold shared by the PR and issue panels: a state
  * tab toolbar + New menu + filter slot, a search input, and a Local / GitHub
@@ -226,13 +248,22 @@ export function DegradedListNotice(props: {
  * (and thus the `data-row` keys arrow-key nav depends on) is baked in here; each
  * panel supplies only the inner row content via render props.
  */
-export function ConversationListPanel<L, R, J = never, P = never>(props: {
+export function ConversationListPanel<
+  L,
+  R,
+  S extends string,
+  J = never,
+  P = never,
+>(props: {
   repoPath: string;
   /** ForgeNotReady's `feature` (e.g. "pull requests"). */
   feature: string;
   // toolbar
-  stateFilter: "open" | "closed";
-  onStateFilter: (s: "open" | "closed") => void;
+  stateFilter: S;
+  onStateFilter: (s: S) => void;
+  /** Opt-in state segments. Omitted, the issue panels' Open | Closed pair
+   *  renders. More than two compacts the New button on a narrow sidebar. */
+  stateOptions?: StateOptions<S>;
   newMenu: NewMenuConfig;
   filterSlot: ReactNode;
   /** Extra list controls, rendered at the right of the SEARCH row rather than
@@ -425,6 +456,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   const {
     stateFilter,
     onStateFilter,
+    stateOptions = OPEN_CLOSED_OPTIONS as unknown as StateOptions<S>,
     newMenu,
     filterSlot,
     toolbarActions,
@@ -549,10 +581,14 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
   // section saying it has no open pull requests directly under a strip that is
   // creating one is a flat contradiction. The FILTERED variant is unaffected —
   // "none match the filter" stays true beside a status strip.
+  // The empty copy names the tab's LABEL, never its wire value ("unmerged" is
+  // labelled Closed).
+  const stateWord = stateOptions.labels[stateFilter].toLowerCase();
+  const compactNew = stateOptions.values.length > 2;
   const remoteEmptyCopy = (() => {
     if (stateRemote.length > 0) return `No ${remoteNoun} match the filter.`;
     if (pinnedBody != null && pinnedBody.length > 0) return null;
-    return `No ${stateFilter} ${remoteNoun}.`;
+    return `No ${stateWord} ${remoteNoun}.`;
   })();
 
   // Keyed on the DRAWN rows, the same set the caller's arrow-key registry walks.
@@ -723,32 +759,55 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b p-2">
+      {/* The named container sits on this box because a container can't query
+          itself, so the row below can't be its own. */}
+      <div className={cn("border-b p-2", compactNew && "@container/gd-prhead")}>
         <div className="flex flex-wrap items-center gap-1">
           {/* Toolbar SEGMENTS run px-1.5 rather than the xs default px-2 — the
               scope row's five segments (the three scopes plus the fork lens pair)
               overflow the sidebar's default width by a pixel otherwise. The two
-              switchers match this. */}
-          {(["open", "closed"] as const).map((s) => (
-            <Button
-              key={s}
-              variant={stateFilter === s ? "secondary" : "ghost"}
-              size="xs"
-              className="px-1.5"
-              aria-pressed={stateFilter === s}
-              onClick={() => onStateFilter(s)}
-            >
-              {s === "open" ? "Open" : "Closed"}
-            </Button>
-          ))}
+              switchers match this. display:contents keeps each segment an item
+              of the row's flex, so they wrap one by one as before. */}
+          <span
+            role="group"
+            aria-label={stateOptions.groupLabel}
+            className="contents"
+          >
+            {stateOptions.values.map((s) => (
+              <Button
+                key={s}
+                variant={stateFilter === s ? "secondary" : "ghost"}
+                size="xs"
+                className="px-1.5"
+                aria-pressed={stateFilter === s}
+                onClick={() => onStateFilter(s)}
+              >
+                {stateOptions.labels[s]}
+              </Button>
+            ))}
+          </span>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
-                <Button variant="ghost" size="xs" className="ml-auto">
-                  <PlusIcon data-icon="inline-start" />
-                  New
-                  <CaretDownIcon data-icon="inline-end" />
-                </Button>
+                compactNew ? (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    aria-label="New"
+                    title="New"
+                    className={cn("ml-auto", NEW_ICON_ONLY)}
+                  >
+                    <PlusIcon data-icon="inline-start" />
+                    <span data-slot="new-label">New</span>
+                    <CaretDownIcon data-icon="inline-end" />
+                  </Button>
+                ) : (
+                  <Button variant="ghost" size="xs" className="ml-auto">
+                    <PlusIcon data-icon="inline-start" />
+                    New
+                    <CaretDownIcon data-icon="inline-end" />
+                  </Button>
+                )
               }
             />
             <DropdownMenuContent align="end" className="min-w-56">
@@ -819,7 +878,7 @@ export function ConversationListPanel<L, R, J = never, P = never>(props: {
                 <p className="px-3 py-2 text-xs text-muted-foreground">
                   {stateLocal.length > 0
                     ? `No local ${localNoun} match the filter.`
-                    : `No ${stateFilter} local ${localNoun}.`}
+                    : `No ${stateWord} local ${localNoun}.`}
                 </p>
               ) : (
                 visibleLocal.map((item) => {

@@ -94,11 +94,15 @@ fn validate_team(team: &str) -> AppResult<()> {
 }
 
 /// The `is:` qualifier for a list state, mirroring the legacy lists' semantics:
-/// closed includes merged, matching GitHub's own Closed tab.
+/// closed includes merged, matching GitHub's own Closed tab. "merged" and "unmerged"
+/// are PR-only (issues have no `is:merged`); `is:unmerged` alone also matches open
+/// PRs, so it always rides with `is:closed`.
 fn state_qualifier(is_pr: bool, state: &str) -> AppResult<&'static str> {
     match state {
         "open" => Ok("is:open"),
         "closed" => Ok("is:closed"),
+        "merged" if is_pr => Ok("is:merged"),
+        "unmerged" if is_pr => Ok("is:closed is:unmerged"),
         _ if is_pr => Err(AppError::InvalidArgument(format!(
             "unknown PR state filter: {state}"
         ))),
@@ -935,10 +939,11 @@ async fn review_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        advance, map_advanced_search_unsupported, require_viewer_login, review_map_truncated,
-        search_args, search_query, target_rows, viewer_login_get, viewer_login_put,
-        viewer_login_with, LoginMemo, ReviewStateEntry, ReviewStatePage, Step, ISSUE_SEARCH_QUERY,
-        MERGEABILITY_SEARCH_QUERY, PR_SEARCH_QUERY, REVIEW_STATE_QUERY, VIEWER_LOGIN_TTL,
+        advance, base_query, map_advanced_search_unsupported, require_viewer_login,
+        review_map_truncated, search_args, search_query, state_qualifier, target_rows,
+        viewer_login_get, viewer_login_put, viewer_login_with, LoginMemo, ReviewStateEntry,
+        ReviewStatePage, Step, ISSUE_SEARCH_QUERY, MERGEABILITY_SEARCH_QUERY, PR_SEARCH_QUERY,
+        REVIEW_STATE_QUERY, VIEWER_LOGIN_TTL,
     };
     use crate::error::AppError;
     use crate::forge::model::RemoteListFilter;
@@ -1210,7 +1215,10 @@ mod tests {
     #[test]
     fn the_builder_never_emits_a_negation() {
         for is_pr in [true, false] {
-            for state in ["open", "closed"] {
+            for state in ["open", "closed", "merged", "unmerged"] {
+                if !is_pr && matches!(state, "merged" | "unmerged") {
+                    continue;
+                }
                 let f = filter_of(
                     true,
                     true,
@@ -1238,13 +1246,51 @@ mod tests {
     fn an_unknown_state_is_rejected_like_the_legacy_lists() {
         let f = filter_of(true, false, &[], &[], &[]);
         assert!(matches!(
-            search_query("octo/hello", true, "merged", Some(&f)),
+            search_query("octo/hello", true, "all", Some(&f)),
             Err(AppError::InvalidArgument(_))
         ));
         assert!(matches!(
             search_query("octo/hello", false, "all", Some(&f)),
             Err(AppError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn the_pr_surface_scopes_each_of_the_four_states() {
+        let f = filter_of(true, false, &[], &[], &[]);
+        for (state, qualifier) in [
+            ("open", "is:open"),
+            ("closed", "is:closed"),
+            ("merged", "is:merged"),
+            ("unmerged", "is:closed is:unmerged"),
+        ] {
+            assert_eq!(state_qualifier(true, state).unwrap(), qualifier);
+            assert_eq!(
+                q(&f, true, state),
+                format!("repo:octo/hello type:pr {qualifier} sort:created-desc (assignee:@me)")
+            );
+        }
+        assert_eq!(
+            base_query("octo/hello", true, "merged").unwrap(),
+            "repo:octo/hello type:pr is:merged sort:created-desc"
+        );
+        assert_eq!(
+            base_query("octo/hello", true, "unmerged").unwrap(),
+            "repo:octo/hello type:pr is:closed is:unmerged sort:created-desc"
+        );
+    }
+
+    #[test]
+    fn the_issue_surface_refuses_the_pr_only_states() {
+        let f = filter_of(true, false, &[], &[], &[]);
+        for state in ["merged", "unmerged"] {
+            let err = state_qualifier(false, state).unwrap_err().to_string();
+            assert!(err.contains("unknown issue state filter"), "{state}: {err}");
+            assert!(matches!(
+                search_query("octo/hello", false, state, Some(&f)),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
     }
 
     #[test]

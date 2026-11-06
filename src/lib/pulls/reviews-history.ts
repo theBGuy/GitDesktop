@@ -11,6 +11,7 @@ import {
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
 import { writeWithRollback } from "@/lib/plugin-store-rollback";
+import { validEpochMs } from "@/lib/time";
 
 /**
  * A finished AI review, persisted so the NEXT run of the same PR + mode can feed
@@ -54,6 +55,12 @@ export interface PersistedReview {
   /** The partial run was killed at its timeout (rather than failing outright) — the
    *  distinction the kept output is labeled with. Partial records only. */
   timedOut?: boolean;
+  /** Epoch ms the record's text was posted to the PR conversation — set by the
+   *  automation writer when it persists a DELIVERED review, and by every successful
+   *  manual Post (live panel and history row). Absent reads as unposted, legacy
+   *  records included. Additive optional field; schemaVersion stays 1. Read it
+   *  through {@link reviewPostedAt}, never raw. */
+  postedAt?: number;
 }
 
 /** Whether a stored record is a kept PARTIAL run rather than a completed review.
@@ -78,6 +85,17 @@ export function partialReviewReason(
     timedOut: r.timedOut === true,
     error: typeof r.error === "string" ? r.error : "",
   };
+}
+
+/** A record's posted stamp, type-checked out of untrusted store JSON: anything but a
+ *  valid epoch number reads as unposted, so a hand-edited stamp never throws in
+ *  `toISOString` or claims a post that can't be dated. */
+export function reviewPostedAt(
+  r: Pick<PersistedReview, "postedAt">,
+): number | undefined {
+  return typeof r.postedAt === "number" && validEpochMs(r.postedAt)
+    ? r.postedAt
+    : undefined;
 }
 
 /** Reviews kept per `(lens, kind, ref, mode)` — enough to show iteration, bounded
@@ -376,6 +394,32 @@ export async function updateReviewText(
         await writeAll(
           key,
           all.map((r) => (r.id === id ? { ...r, text } : r)),
+        );
+      });
+    });
+  });
+}
+
+/** Stamps a stored record as posted to the PR conversation. Rides the same queue as
+ *  {@link saveReview}, so a stamp enqueued after a save targets the saved record; an
+ *  id the prune or a delete already removed is a no-op. Never reorders: rows sort by
+ *  `finishedAt`, which this leaves alone. Callers invalidate. */
+export async function markReviewPosted(
+  repo: string,
+  id: string,
+  postedAt: number,
+): Promise<void> {
+  return serialize(async () => {
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        await writeAll(
+          key,
+          all.map((r) => (r.id === id ? { ...r, postedAt } : r)),
         );
       });
     });

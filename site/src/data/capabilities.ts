@@ -292,6 +292,11 @@ export const capabilities: Capability[] = [
   {
     group: "Pull requests & review",
     label:
+      "Open, Merged & Closed PR tabs — merged work kept apart from PRs closed without merging",
+  },
+  {
+    group: "Pull requests & review",
+    label:
       "Refresh the PR list on demand — one press re-reads the list, its checks, conflict chips & review grouping",
   },
 
@@ -742,6 +747,12 @@ export const capabilities: Capability[] = [
     group: "AI · generate & review",
     ai: true,
     label: "Queue the other review mode while one streams — runs it next",
+  },
+  {
+    group: "AI · generate & review",
+    ai: true,
+    label:
+      "Post any past review from its history row — posted ones are marked, and posting twice asks first",
   },
   {
     group: "AI · generate & review",

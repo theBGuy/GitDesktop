@@ -1,15 +1,70 @@
 /** The hosting platform backing a repo's hosted features. */
 export type ForgeProvider = "github" | "gitlab" | "bitbucket";
 
+/** A provider's human label, as {@link providerLabel} spells it. */
+export type ProviderName = "GitHub" | "GitLab" | "Bitbucket";
+
 /** The human label for a provider. Null/undefined (an unrecognized host that
- *  routes through gh) reads as "GitHub" — gh stays the authoritative default. */
+ *  routes through gh) reads as "GitHub" — gh stays the authoritative default.
+ *  Copy that can render while the forge probe is pending goes through
+ *  {@link shownProviderLabel} instead. */
 export function providerLabel(
   provider: ForgeProvider | null | undefined,
-): "GitHub" | "GitLab" | "Bitbucket" {
+): ProviderName {
   if (provider === "gitlab") return "GitLab";
   if (provider === "bitbucket") return "Bitbucket";
   return "GitHub";
 }
+
+const FORGE_PROVIDER_IDS: Record<ForgeProvider, true> = {
+  github: true,
+  gitlab: true,
+  bitbucket: true,
+};
+
+/** A stored provider string narrowed to an id this build knows; anything else
+ *  (absent, null, an id from another build) is unknown. Never read through
+ *  providerLabel raw: that would name an unrecognized id "GitHub". */
+export function knownProvider(
+  value: string | null | undefined,
+): ForgeProvider | undefined {
+  return value != null && Object.hasOwn(FORGE_PROVIDER_IDS, value)
+    ? (value as ForgeProvider)
+    : undefined;
+}
+
+/** The provider saved in this repo's recents entry (strict path match, the
+ *  same lookup RepositoryMenu uses). */
+export function savedProvider(
+  recents: readonly { path: string; provider?: string | null }[] | undefined,
+  repoPath: string,
+): ForgeProvider | undefined {
+  return knownProvider(recents?.find((r) => r.path === repoPath)?.provider);
+}
+
+/** The provider copy may name: the probe's answer once it has one (null =
+ *  settled, no recognized host), else the saved provider, else undefined
+ *  (unknown). */
+export function shownProvider(
+  status: { provider: ForgeProvider | null } | undefined,
+  saved: ForgeProvider | undefined,
+): ForgeProvider | null | undefined {
+  return status !== undefined ? status.provider : saved;
+}
+
+/** providerLabel for a shown provider: unknown (undefined) reads null so the
+ *  caller picks neutral copy; settled null keeps providerLabel's gh-routed
+ *  "GitHub". */
+export function shownProviderLabel(
+  p: ForgeProvider | null | undefined,
+): ProviderName | null {
+  return p === undefined ? null : providerLabel(p);
+}
+
+/** Prose stand-in for a host nothing names yet ("on the host"). */
+export const UNKNOWN_HOST = "the host";
+/** An open-on-host button's label when nothing names the host. */
+export const OPEN_IN_BROWSER = "Open in browser";
 
 /** What a provider (and this repo on it) supports, so panels show only controls that
  *  work instead of erroring. GitHub is all-true; GitLab/Bitbucket follow the parity

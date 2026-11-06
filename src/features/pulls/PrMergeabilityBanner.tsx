@@ -20,7 +20,11 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
-import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import {
+  type ForgeProvider,
+  shownProviderLabel,
+  UNKNOWN_HOST,
+} from "@/lib/git/types";
 import { PR_NOUN } from "@/lib/pulls/pr-state";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { cn } from "@/lib/utils";
@@ -172,6 +176,9 @@ export const PROMOTION_REASON: Record<Exclude<PromotionKind, null>, string> = {
   configured: " is a promotion branch for this repository",
 };
 
+/** The host at a sentence's start when nothing names it yet. */
+const UNKNOWN_HOST_LEAD = "The host";
+
 /** An unresolved provider reads as GitHub, the app's default forge. */
 function prNounFor(provider: ForgeProvider | null | undefined): string {
   return provider ? PR_NOUN[provider] : PR_NOUN.github;
@@ -249,7 +256,7 @@ const ARM_MESSAGE: Record<
   predicted: ({ base, provider, forgeUnreachable }) => (
     <>
       {forgeUnreachable
-        ? `Couldn't reach ${providerLabel(provider)} to check mergeability. Merging into `
+        ? `Couldn't reach ${shownProviderLabel(provider) ?? UNKNOWN_HOST} to check mergeability. Merging into `
         : "Merging into "}
       <span className="font-mono">{base}</span>
       {/* Names the staleness: the prediction runs on remote-tracking refs
@@ -262,7 +269,7 @@ const ARM_MESSAGE: Record<
   // the forge unreachable — and the only one this arm can stand behind.
   unreachable: ({ base, provider, predictedClean }) => (
     <>
-      {`Couldn't reach ${providerLabel(provider)} to check mergeability.`}
+      {`Couldn't reach ${shownProviderLabel(provider) ?? UNKNOWN_HOST} to check mergeability.`}
       {predictedClean ? (
         <>
           {" No conflicts with "}
@@ -274,7 +281,7 @@ const ARM_MESSAGE: Record<
   ),
   updating: ({ base, provider }) => (
     <>
-      {`${providerLabel(provider)} is updating this branch from `}
+      {`${shownProviderLabel(provider) ?? UNKNOWN_HOST_LEAD} is updating this branch from `}
       <span className="font-mono">{base}</span>
       {"…"}
     </>
@@ -388,6 +395,8 @@ export function PrMergeabilityBanner({
    *  the flow — so the behind arm keeps its true count and drops the action. The
    *  two kinds only differ in the words that name the reason. */
   promotionKind: PromotionKind;
+  /** The provider copy may name (`shownProvider`): undefined while nothing
+   *  names the host yet, which reads as neutral copy. */
   provider: ForgeProvider | null | undefined;
   /** The head branch lives in another repository, so there's nowhere to push. */
   forkBlocked: boolean;
@@ -490,7 +499,7 @@ export function PrMergeabilityBanner({
   const updateBusyReason = (() => {
     switch (true) {
       case arm === "updating":
-        return `${providerLabel(provider)} is still updating this branch.`;
+        return `${shownProviderLabel(provider) ?? UNKNOWN_HOST_LEAD} is still updating this branch.`;
       case updateSubmitting:
         return "Submitting the update…";
       case updateAwaitingDefault:

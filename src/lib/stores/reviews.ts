@@ -154,6 +154,10 @@ export interface ReviewEntry {
    *  "runs next" chip. Set only while this entry is running/queued; cleared when the
    *  queued run starts or is dismissed. */
   queuedMode?: ReviewMode;
+  /** Id of the history record this run saved (completed or kept partial), so a live
+   *  Post can stamp that record as posted. Cleared by every fresh run, so a post can
+   *  never stamp a previous run's record. */
+  recordId?: string;
   /** Re-fires this run through the automation pipeline — set ONLY on automation rows
    *  (by {@link registerAutomationRun}). Its presence is the discriminator that a
    *  stopped row belongs in the dock's Stopped group: a manual run also reaches
@@ -531,6 +535,7 @@ export async function startReview(
     // persisted duration start fresh (stamped at the running transition below).
     startedAt: undefined,
     endedAt: undefined,
+    recordId: undefined,
   });
 
   // Wait for a slot in this run's lane (immediate when under the cap). A cancel
@@ -831,11 +836,13 @@ export async function startReview(
     if (!finalText.trim()) throw new Error("The review run produced no text.");
     // A run WITH tools closes its own coverage gap, so only a non-agentic run that
     // saw a truncated diff drives the panel's upgrade nudge.
+    const recordId = crypto.randomUUID();
     patch({
       phase: "done",
       status: "",
       truncatedCoverage: coverage.diffTruncated && !agenticRun,
       endedAt: Date.now(),
+      recordId,
     });
     notifyReviewDone(title, mode, true, target);
     // Persist the finished review so the NEXT run can use it as soft context.
@@ -846,7 +853,7 @@ export async function startReview(
     if (finalText.trim()) {
       void saveReview(target.repoPath, {
         schemaVersion: 1,
-        id: crypto.randomUUID(),
+        id: recordId,
         kind: target.kind,
         ref: target.ref,
         lens: context.lens,
@@ -904,9 +911,11 @@ export async function startReview(
       // output, never a review the next run may build on.
       const partial = useReviewStore.getState().texts[key] ?? "";
       if (partial.trim() && startedAtMs !== undefined) {
+        const recordId = crypto.randomUUID();
+        patch({ recordId });
         void saveReview(target.repoPath, {
           schemaVersion: 1,
-          id: crypto.randomUUID(),
+          id: recordId,
           kind: target.kind,
           ref: target.ref,
           lens: context.lens,
@@ -998,6 +1007,13 @@ export function cancelReview(key: string): void {
 /** Clears a finished review's text — used after posting it as a comment. */
 export function resetReview(key: string): void {
   useReviewStore.getState().remove(key);
+}
+
+/** The run on `target`'s entry, by its start order (`seq`), read fresh: a caller
+ *  that awaited compares it with the one it pinned to tell whether a newer run
+ *  took the key since. Undefined when the key holds no entry. */
+export function reviewRunSeq(target: ReviewTarget): number | undefined {
+  return useReviewStore.getState().entries[reviewKey(target)]?.seq;
 }
 
 /**
@@ -1207,5 +1223,8 @@ export function useReviewRun(target: ReviewTarget) {
     /** Epoch ms when the run reached a terminal state — with `startedAt` yields
      *  the run's total duration. Absent while still running. */
     endedAt: entry.endedAt,
+    /** Id of the history record this run saved — what a live Post stamps as
+     *  posted. Absent until the run saves one, and cleared by every fresh run. */
+    recordId: entry.recordId,
   };
 }
