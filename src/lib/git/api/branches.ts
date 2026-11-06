@@ -178,8 +178,9 @@ export const gitUpdateBranchFrom = (
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
 
-/** "clean": merging the branch into the base writes exactly the base's tree, so
- *  nothing on it would be lost. "changes" covers a conflict too, never merged. */
+/** "clean": merging the branch into the base writes exactly the base's tree.
+ *  "changes": it writes another tree or conflicts, which doesn't prove the branch
+ *  was never merged. "unknown": the check couldn't decide; never read as clean. */
 export type ContentVerdict = "clean" | "changes" | "unknown";
 
 /** The commit content verdicts compare against. `refName` is the short display

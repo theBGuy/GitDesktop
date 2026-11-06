@@ -808,13 +808,16 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   branches checked out in a worktree** to list branches held by another linked folder.
   Acting on one removes that worktree first, never by force; a worktree row never starts
   checked; and a worktree that is locked, has uncommitted changes, or couldn't be checked
-  is listed but can't be selected. Review the list, then **archive** the checked branches
-  (reversible) or **delete** them. Deleting asks first, and so does archiving when it
-  removes a worktree; the confirmation names how many worktrees it removes and how many
-  branches it archives or deletes. The current branch, the default branch, branches checked
-  out in the main workspace, and agent session branches are never included, and deleting
-  skips protected branches. A branch that couldn't be archived or deleted stays in the list
-  with the reason under its name, ready to retry.
+  is listed but can't be selected. If, when its turn comes, the worktree has switched to
+  another branch or is in the middle of a merge, rebase, cherry-pick, or revert, it's left
+  in place. Review the list, then **archive** the checked branches (reversible) or
+  **delete** them. Deleting asks first, and so does archiving when it removes a worktree;
+  the confirmation names how many worktrees it removes and how many branches it archives
+  or deletes. The current branch, the default branch, branches checked out in the main
+  workspace, and agent session branches are never included (when the default branch can't
+  be read, the list stays empty and says why), and deleting skips protected branches. A
+  branch that couldn't be archived or deleted stays in the list with the reason under its
+  name, ready to retry.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -1018,7 +1021,8 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
   **archive that branch after the worktree is removed**, so a branch you're finished with
   drops into the "Archived" section on its own (offered whenever the worktree is on a
   branch other than the default one that isn't already archived — the dialog says so when
-  it is). A worktree with uncommitted changes, or a locked one, asks before
+  it is). If you check the branch out again before the removal finishes, it stays
+  unarchived. A worktree with uncommitted changes, or a locked one, asks before
   force-removing. Removing a worktree can take a few minutes, and you can
   close the dialog and carry on: the removal keeps a line at the top of the repository view
   until it finishes, its row here reads **Removing…**, and the actions held while it runs

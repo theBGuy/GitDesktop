@@ -223,6 +223,7 @@ import {
 } from "./branch-sync-state";
 import {
   CleanupBranchesDialog,
+  defaultBranchReadFailed,
   prCheckStateFrom,
   worktreeCheckStateFrom,
 } from "./CleanupBranchesDialog";
@@ -4873,8 +4874,10 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         onClose={() => setCleanupOpen(false)}
         branches={allBranches}
         // undefined only while the default-branch read is loading; null once
-        // it settled with none or with an error.
+        // it settled with none or with an error, which only the query can
+        // tell apart: a failed read lists nothing, a null answer still lists.
         defaultBranch={defaultBranch.isPending ? undefined : defaultName}
+        defaultBranchFailed={defaultBranchReadFailed(defaultBranch)}
         currentBranch={currentName}
         isProtected={(name) => isDeletionBlocked(rulesConfig, name)}
         // Until both rules scopes land, `isProtected` excludes nothing, so the

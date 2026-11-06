@@ -4,9 +4,11 @@
  * stripping.
  *
  * The selection survives a close and reopen, minus the rows only a verdict
- * checked, which the reopen's own verdicts decide again; it re-seeds to the
- * pre-checked set only when the repo or that set changes. After a batch that
- * left the dialog open, until the user changes the mode, window, criteria or
+ * checked, which the reopen's own verdicts decide again. It re-seeds to the
+ * pre-checked set when the repo changes, or when that set changes across a
+ * control change or a reopen; new data that moves the set within one open
+ * merges only the change, so the user's touches stand. After a batch that left
+ * the dialog open, until the user changes the mode, window, criteria or
  * worktree opt-in, or closes it, a changed set only prunes names no longer
  * listed, or held for good (dirty, locked, unreadable); a pending read holds
  * only for now. So a batch never re-checks a row the user unchecked.
@@ -32,9 +34,14 @@ export interface SelectionSeed {
   /** The control context (mode, window, the three criteria and the worktree
    *  opt-in) of the last batch that left the dialog open. */
   afterBatch: string | null;
+  /** The control context the last unheld step of this open saw, recorded on
+   *  every such step; null after a close, so a reopen's first step counts as a
+   *  control change. A held step keeps it, so a control changed under a hold
+   *  still counts once the hold lifts. */
+  context: string | null;
 }
 
-export type SelectionAction = "none" | "prune" | "reseed";
+export type SelectionAction = "none" | "prune" | "merge" | "reseed";
 
 /** What the selection does on a render of the dialog's inputs. */
 export function selectionStep(
@@ -49,23 +56,33 @@ export function selectionStep(
   },
 ): SelectionSeed & { action: SelectionAction } {
   // A close keeps the seed, so a reopen over the same set keeps the user's
-  // choices; it only ends the post-batch window.
-  if (!input.open) return { ...seed, afterBatch: null, action: "none" };
+  // choices; it ends the post-batch window and forgets the context.
+  if (!input.open)
+    return { ...seed, afterBatch: null, context: null, action: "none" };
   // Never under a running batch, nor off reads still standing in.
   if (input.running || input.holdingReads) return { ...seed, action: "none" };
-  const { repo, autoKey } = input;
+  const { repo, autoKey, context } = input;
   if (seed.repo !== repo)
-    return { repo, seededKey: autoKey, afterBatch: null, action: "reseed" };
-  if (seed.afterBatch !== null && seed.afterBatch === input.context)
+    return {
+      repo,
+      seededKey: autoKey,
+      afterBatch: null,
+      context,
+      action: "reseed",
+    };
+  if (seed.afterBatch !== null && seed.afterBatch === context)
     return {
       repo,
       seededKey: autoKey,
       afterBatch: seed.afterBatch,
+      context,
       action: "prune",
     };
-  if (seed.seededKey === autoKey)
-    return { repo, seededKey: autoKey, afterBatch: null, action: "none" };
-  return { repo, seededKey: autoKey, afterBatch: null, action: "reseed" };
+  const next = { repo, seededKey: autoKey, afterBatch: null, context };
+  if (seed.seededKey === autoKey) return { ...next, action: "none" };
+  // Same open, same controls: only new data moved the set.
+  if (seed.context === context) return { ...next, action: "merge" };
+  return { ...next, action: "reseed" };
 }
 
 /** The selection with every non-candidate dropped; the input itself when

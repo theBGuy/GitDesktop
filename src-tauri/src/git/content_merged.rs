@@ -7,7 +7,8 @@
 //! `changes`; a clean run missing one, or any failed git step, `unknown`; a driver,
 //! `merge.default` or an unreadable config at the open yields no verdict. `unknown`
 //! pre-checks a row only via its idle fallback, never on a pull-request match alone. Out
-//! of reach: bare repositories and `attr.tree`/`--attr-source` setups.
+//! of reach: bare repositories, `attr.tree`/`--attr-source` setups, and attribute or
+//! config edits that land while a check runs (each git step reads them live).
 
 use serde::Serialize;
 
@@ -259,7 +260,7 @@ fn merge_attr_has_union(stdout: &str) -> Option<bool> {
         return None;
     }
     let mut union = false;
-    for triple in tokens.chunks_exact(3) {
+    for triple in tokens.as_chunks::<3>().0 {
         if triple[1] != "merge" {
             return None;
         }

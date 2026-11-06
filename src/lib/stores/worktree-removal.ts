@@ -6,6 +6,7 @@ import {
   gitBranches,
   gitCheckoutBranch,
   gitDefaultBranch,
+  gitOpState,
   gitSetBranchArchived,
   gitStashAll,
   validateRepo,
@@ -19,12 +20,16 @@ import {
   repoKeys,
   worktreeKey,
 } from "@/lib/git/queries";
+import type { RepoOp, RepoOpState } from "@/lib/git/types";
 import {
   beginPromoteWindow,
   endPromoteWindow,
+  listUserWorktrees,
+  listWorktrees,
   pruneWorktrees,
   removeWorktree,
   touchPromoteWindow,
+  type UserWorktree,
   type WorktreeRemoveOutcome,
 } from "@/lib/git/worktree";
 import { queryClient } from "@/lib/query-client";
@@ -137,19 +142,17 @@ export function registerRemovalListener(
 
 const NO_REMOVALS: WorktreeRemoval[] = [];
 
-/** True while this worktree is being removed, whichever spelling either path
- *  arrived in — the promote path holds git's, the delete path the ui store's. */
+/** True while this worktree is being removed, whichever spelling the path
+ *  arrived in and under ANY repo key: a worktree folder belongs to one repo, so
+ *  a removal marked while viewing another of its checkouts still counts (the
+ *  reasoning that makes {@link promotingWorktrees} global). */
 function isRemovalInFlight(
   byRepo: Record<string, Record<string, WorktreeRemoval>>,
-  repoPath: string,
   path: string,
 ): boolean {
-  const repo = normPath(repoPath);
   const target = normPath(path);
-  return Object.entries(byRepo).some(
-    ([r, entries]) =>
-      normPath(r) === repo &&
-      Object.keys(entries).some((p) => normPath(p) === target),
+  return Object.values(byRepo).some((entries) =>
+    Object.keys(entries).some((p) => normPath(p) === target),
   );
 }
 
@@ -213,9 +216,9 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
       archiveWhenDone,
       force,
     }) => {
-      // Matched on the directory, not the string: today's callers all spell it
-      // the ui store's way, but the admission rule shouldn't depend on that.
-      if (isRemovalInFlight(get().byRepo, repoPath, path))
+      // Matched on the directory, not the string or the viewer: the same folder
+      // can arrive in either spelling, from any checkout of the repo.
+      if (isRemovalInFlight(get().byRepo, path))
         return WORKTREE_REMOVING_MESSAGE;
       if (promotingWorktrees.has(normPath(path)))
         return WORKTREE_PROMOTING_MESSAGE;
@@ -225,9 +228,9 @@ export const useWorktreeRemovalStore = create<WorktreeRemovalState>()(
     },
 
     startPromote: ({ mainPath, worktreePath, branch, willStash }) => {
-      // `mainPath` is git's spelling; the entry this would collide with was
-      // written under the ui store's. Match on the directory, not the string.
-      if (isRemovalInFlight(get().byRepo, mainPath, worktreePath))
+      // The entry this would collide with may be keyed under any viewer and
+      // spelled the ui store's way; match on the directory, not the string.
+      if (isRemovalInFlight(get().byRepo, worktreePath))
         return WORKTREE_REMOVING_MESSAGE;
       if (promotingWorktrees.has(normPath(worktreePath)))
         return WORKTREE_PROMOTING_MESSAGE;
@@ -347,6 +350,7 @@ type ArchiveStepOutcome =
   | { kind: "archived" }
   | { kind: "alreadyArchived" }
   | { kind: "isDefault" }
+  | { kind: "inUse" }
   | { kind: "failed"; error: unknown };
 
 /** Archives a removed worktree's branch and says what happened, reporting
@@ -377,6 +381,20 @@ async function archiveBranchAfterRemoval(
   try {
     const found = (await gitBranches(repoPath)).find((b) => b.name === branch);
     if (found?.archived) return { kind: "alreadyArchived" };
+    if (found?.isCurrent) return { kind: "inUse" };
+  } catch {
+    // Fall through to the next read.
+  }
+  // Archiving a checked-out branch would hide the branch someone is on (the
+  // branch menu refuses it), and the freed branch can be checked out again
+  // while the removal runs. The branch list's `isCurrent` covers only this
+  // checkout, so a fresh worktree list covers the others: the UNFILTERED one,
+  // since the user list drops agent-session folders whatever they hold. Its
+  // branches arrive short (the backend strips `refs/heads/`). Fails OPEN for
+  // the same reason as the already-archived read.
+  try {
+    const worktrees = await listWorktrees(repoPath);
+    if (worktrees.some((w) => w.branch === branch)) return { kind: "inUse" };
   } catch {
     // Fall through to the archive.
   }
@@ -403,6 +421,10 @@ async function archiveAfterRemoval(repoPath: string, branch: string) {
     case "isDefault":
       toast.success("Worktree removed");
       toast.info(`Left ${branch} unarchived — it's the default branch.`);
+      return;
+    case "inUse":
+      toast.success("Worktree removed");
+      toast.info(`Left ${branch} unarchived — it's checked out again.`);
       return;
     case "alreadyArchived":
       toast.success("Worktree removed");
@@ -632,7 +654,14 @@ async function runPromote(
 export type CleanupRemovalOutcome =
   | {
       ok: true;
-      branch: "archived" | "deleted" | "keptMoved" | "keptUnreadable";
+      /** `keptInUse`: the removal succeeded, and the branch stayed unarchived
+       *  because it was checked out again by the archive step. */
+      branch:
+        | "archived"
+        | "deleted"
+        | "keptMoved"
+        | "keptUnreadable"
+        | "keptInUse";
     }
   | { ok: false; reason: string };
 
@@ -651,6 +680,65 @@ const CLEANUP_LOCKED_REASON = "the worktree is locked";
 const CLEANUP_DIRTY_REASON = "the worktree has uncommitted changes";
 const CLEANUP_DEFAULT_BRANCH_REASON =
   "the worktree was removed first (it is the default branch)";
+const CLEANUP_WORKTREE_GONE_REASON = "the worktree was moved or removed";
+const CLEANUP_BRANCH_CHANGED_REASON =
+  "the worktree no longer has this branch checked out";
+const CLEANUP_LIST_UNREADABLE_REASON =
+  "couldn't check which branch the worktree has checked out";
+const CLEANUP_OP_IN_PROGRESS_REASON: Record<RepoOp, string> = {
+  merge: "the worktree is in the middle of a merge",
+  rebase: "the worktree is in the middle of a rebase",
+  "cherry-pick": "the worktree is in the middle of a cherry-pick",
+  revert: "the worktree is in the middle of a revert",
+};
+/** Which in-progress flag names the refusal when several are set: outermost
+ *  first, since a rebase can stop inside a merge or cherry-pick of its own. */
+const OP_IN_PROGRESS_ORDER: [
+  "rebasing" | "merging" | "cherryPicking" | "reverting",
+  RepoOp,
+][] = [
+  ["rebasing", "rebase"],
+  ["merging", "merge"],
+  ["cherryPicking", "cherry-pick"],
+  ["reverting", "revert"],
+];
+
+/** Why the worktree at `path` no longer matches the `branch` row the user
+ *  confirmed, or null: re-read at fire time, since a batch reaches its later
+ *  rows minutes after the list they were drawn from. Refuses when the path is
+ *  gone from a fresh worktree list, holds another branch or a detached HEAD,
+ *  or the list can't be read (fail SAFE: git's unforced remove takes ignored
+ *  files, and a detached HEAD's commits, with it), and when a merge, rebase,
+ *  cherry-pick or revert is in progress there (an unreadable op state refuses
+ *  too). Direct IPC reads, not `fetchQuery`: that joins a fetch already in
+ *  flight, whose answer can predate this call. Out of reach: a bisect (op_state
+ *  doesn't report it), op_state's quiet answer for an unresolvable git dir, and
+ *  anything that changes between these reads and the removal. */
+async function fireTimeWorktreeRefusal(
+  repoPath: string,
+  path: string,
+  branch: string,
+): Promise<string | null> {
+  let worktrees: UserWorktree[];
+  try {
+    worktrees = await listUserWorktrees(repoPath);
+  } catch {
+    return CLEANUP_LIST_UNREADABLE_REASON;
+  }
+  const target = normPath(path);
+  const entry = worktrees.find((w) => normPath(w.path) === target);
+  if (!entry) return CLEANUP_WORKTREE_GONE_REASON;
+  if (entry.isDetached || entry.branch !== branch)
+    return CLEANUP_BRANCH_CHANGED_REASON;
+  let op: RepoOpState;
+  try {
+    op = await gitOpState(path);
+  } catch (e) {
+    return reasonFromError(e);
+  }
+  const busy = OP_IN_PROGRESS_ORDER.find(([flag]) => op[flag]);
+  return busy ? CLEANUP_OP_IN_PROGRESS_REASON[busy[1]] : null;
+}
 
 /** The local-PR writes that move a branch inside the worktree holding it:
  *  "Update from…" merges into its head there, and a local-PR merge (or its
@@ -744,8 +832,11 @@ function cleanupRemovalFailure(e: unknown, path: string): string {
  * already being removed or promoted, or a local-PR write is moving the branch
  * inside the worktree that holds it, or any such write was started from this
  * worktree (both read from the mutation cache, as refuseWhilePushRuns reads
- * it). Reports only through its result: no toast, and
- * nothing to another removal listener.
+ * it). Once marked, it also refuses, removing nothing, when the worktree no
+ * longer matches the confirmed row ({@link fireTimeWorktreeRefusal}) or such a
+ * write started during that re-read. The archive step leaves a branch checked
+ * out again by then unarchived (`keptInUse`). Reports only through its result:
+ * no toast, and nothing to another removal listener.
  */
 export async function removeWorktreeForCleanup(
   queryClient: QueryClient,
@@ -759,9 +850,7 @@ export async function removeWorktreeForCleanup(
 ): Promise<CleanupRemovalOutcome> {
   const { repoPath, path, name, branch, then } = args;
   // The same two admission reads `startRemoval` refuses on.
-  if (
-    isRemovalInFlight(useWorktreeRemovalStore.getState().byRepo, repoPath, path)
-  )
+  if (isRemovalInFlight(useWorktreeRemovalStore.getState().byRepo, path))
     return { ok: false, reason: CLEANUP_REMOVING_REASON };
   if (promotingWorktrees.has(normPath(path)))
     return { ok: false, reason: CLEANUP_PROMOTING_REASON };
@@ -777,8 +866,13 @@ export async function removeWorktreeForCleanup(
 
   let removal: WorktreeRemoveOutcome;
   try {
-    // The first await: every refusal read and the mark above ran before it, so
-    // a second call for this path in the same tick refuses off the mark.
+    // The first await: every admission read and the mark above ran before it,
+    // so a second call for this path in the same tick refuses off the mark.
+    const changed = await fireTimeWorktreeRefusal(repoPath, path, branch);
+    if (changed) return { ok: false, reason: changed };
+    // Again after the awaits: a write started during them moves the branch too.
+    const lateWrite = pendingHolderWriteRefusal(queryClient, branch, path);
+    if (lateWrite) return { ok: false, reason: lateWrite };
     // Archive keeps the branch through the removal (null) and archives it after.
     removal = await removeWorktreeFreeingBranch(
       repoPath,
@@ -803,6 +897,8 @@ export async function removeWorktreeForCleanup(
         return { ok: true, branch: "archived" };
       case "isDefault":
         return { ok: false, reason: CLEANUP_DEFAULT_BRANCH_REASON };
+      case "inUse":
+        return { ok: true, branch: "keptInUse" };
       case "failed":
         return {
           ok: false,

@@ -19,7 +19,10 @@ import {
   it,
   vi,
 } from "vitest";
-import { CleanupBranchesDialog } from "@/features/repository/CleanupBranchesDialog";
+import {
+  CleanupBranchesDialog,
+  defaultBranchReadFailed,
+} from "@/features/repository/CleanupBranchesDialog";
 import {
   type BranchContentMerged,
   type ContentCheckBase,
@@ -32,6 +35,7 @@ import {
   gitStatus,
 } from "@/lib/git/api";
 import type { Branch, FileEntry, RepoStatus } from "@/lib/git/types";
+import { listWorktrees } from "@/lib/git/worktree";
 import { useUiStore } from "@/lib/stores/ui";
 import {
   type CleanupRemovalOutcome,
@@ -54,6 +58,11 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 vi.mock("@/lib/stores/worktree-removal", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/stores/worktree-removal")>()),
   removeWorktreeForCleanup: vi.fn(),
+}));
+// The batch's fire-time checkout read before a plain Archive.
+vi.mock("@/lib/git/worktree", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
+  listWorktrees: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: {
@@ -179,6 +188,7 @@ beforeEach(() => {
   });
   vi.mocked(gitSetBranchArchived).mockImplementation(async () => undefined);
   vi.mocked(gitDeleteBranch).mockImplementation(async () => undefined);
+  vi.mocked(listWorktrees).mockResolvedValue([]);
   vi.mocked(removeWorktreeForCleanup).mockImplementation((_client, args) => {
     const d = deferred<CleanupRemovalOutcome>();
     removalCalls.push({ args, resolve: d.resolve });
@@ -221,6 +231,7 @@ interface Setup {
   >;
   removing?: string[];
   defaultBranch?: string | null;
+  defaultBranchFailed?: boolean;
   prCheckState?: DialogProps["prCheckState"];
   prCheckPaused?: boolean;
   /** The repo the app shows; defaults to `repoPath`. */
@@ -236,6 +247,7 @@ function propsFor(s: Setup): DialogProps {
     branches: s.branches,
     // An explicit undefined is the loading default-branch read.
     defaultBranch: "defaultBranch" in s ? s.defaultBranch : "main",
+    defaultBranchFailed: s.defaultBranchFailed ?? false,
     currentBranch: null,
     isProtected: () => false,
     worktreeFacts: new Map(
@@ -1062,6 +1074,12 @@ describe("confirms", () => {
     expect(confirm).toHaveTextContent(
       "Removes 1 worktree, then archives 2 branches. Removing a worktree deletes its folder, including ignored files such as build output. Archived branches can be unarchived anytime.",
     );
+    // The button says what the title asks.
+    expect(
+      within(confirm).getByRole("button", {
+        name: "Remove and archive 2 branches",
+      }),
+    ).toBeInTheDocument();
     await user.click(within(confirm).getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
       expect(
@@ -1408,6 +1426,64 @@ describe("across reseeds, reopens and batches", () => {
     expect(listed()).toEqual(["kp-w"]);
     expect(isChecked("kp-w")).toBe(false);
     expect(gitDeleteBranch).toHaveBeenCalledTimes(1);
+  });
+
+  it("takes a branch an Archive left unarchived out of the selection", async () => {
+    statusByPath.set("C:/wt/ku-w", "clean");
+    const view = renderDialog({
+      repoPath: "C:/repos/kept-in-use",
+      branches: [branch("ku-w", OLD)],
+      worktrees: { "ku-w": { path: "C:/wt/ku-w" } },
+    });
+    const { user } = view;
+    await user.click(optIn());
+    await landVerdicts({ "ku-w": "clean" });
+    await waitFor(() =>
+      expect(boxOf("ku-w")).not.toHaveAttribute("aria-disabled"),
+    );
+    await user.click(boxOf("ku-w"));
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Remove worktree?",
+    });
+    await user.click(
+      within(confirm).getByRole("button", {
+        name: "Remove and archive 1 branch",
+      }),
+    );
+    await waitFor(() => expect(removalCalls).toHaveLength(1));
+    expect(removalCalls[0].args.then).toBe("archive");
+    // The worktree is gone, so the row turns plain under its earlier "clean".
+    view.rerender({ worktreeFacts: new Map() });
+    await act(async () => {
+      removalCalls[0].resolve({ ok: true, branch: "keptInUse" });
+    });
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("Archived 0, 1 failed"),
+    );
+    expect(
+      screen.getByText(
+        "Couldn't archive: the worktree was removed, but the branch was checked out again, so it was left unarchived",
+      ),
+    ).toBeInTheDocument();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(isChecked("ku-w")).toBe(false);
+    expect(view.props().onClose).not.toHaveBeenCalled();
+    expect(removeWorktreeForCleanup).toHaveBeenCalledTimes(1);
+    expect(gitSetBranchArchived).not.toHaveBeenCalled();
+    // Its tip never moved, so the verdict still stands, and a Delete the user
+    // chooses on it counts no changes.
+    expect(within(rowOf("ku-w")).queryByText(/^in$/)).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await user.click(boxOf("ku-w"));
+    await user.click(primary());
+    const del = await screen.findByRole("dialog", { name: "Delete branch?" });
+    expect(del).toHaveTextContent(
+      "Permanently deletes 1 branch, including commits that exist only on it. This can't be undone.",
+    );
+    expect(del).not.toHaveTextContent(/changes not in/);
   });
 
   it("never carries an acted-on branch into the next open", async () => {
@@ -1837,6 +1913,448 @@ describe("reads the dialog gates on", () => {
     expect(primary()).toHaveAttribute("aria-disabled", "true");
     view.rerender({ defaultBranch: "main" });
     await waitFor(() => expect(listed()).toEqual(["dl-old"]));
+  });
+});
+
+const DEFAULT_FAILED =
+  "Couldn't read the default branch, so no branches are listed.";
+
+describe("a default-branch read that failed", () => {
+  /** The failure's empty state, its live-region line and the held primary. */
+  function expectFailedState() {
+    expect(listed()).toEqual([]);
+    const lines = screen.getAllByText(
+      (_, el) => el?.tagName === "P" && el.textContent === DEFAULT_FAILED,
+    );
+    const inStatus = (p: HTMLElement) => p.closest('[role="status"]') !== null;
+    expect(lines.filter(inStatus)).toHaveLength(1);
+    expect(lines.filter((p) => !inStatus(p))).toHaveLength(1);
+    expect(document.querySelector("[aria-busy]")).toBeNull();
+    expect(screen.queryByText(/^Checking which/)).toBeNull();
+    expect(primary()).toHaveAttribute("aria-disabled", "true");
+    expect(primary()).toHaveAccessibleDescription(
+      /Couldn't read the default branch, so no branches are listed\./,
+    );
+  }
+
+  it("lists nothing and says why, stays failed through a refetch, and recovers in the open", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/default-failed",
+      branches: [branch("main", OLD), branch("df-old", OLD)],
+      defaultBranch: null,
+      defaultBranchFailed: true,
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expectFailedState();
+    expect(gitContentCheckBase).not.toHaveBeenCalled();
+    // A refetch of the never-loaded read hands the dialog undefined again.
+    view.rerender({ defaultBranch: undefined });
+    expectFailedState();
+    // Another read still running doesn't bring a skeleton back.
+    view.rerender({ prCheckState: "pending" });
+    expectFailedState();
+    expect(gitContentCheckBase).not.toHaveBeenCalled();
+    view.rerender({
+      defaultBranch: "main",
+      defaultBranchFailed: false,
+      prCheckState: "checked",
+    });
+    await waitFor(() => expect(listed()).toEqual(["df-old"]));
+    // Throws "never requested" if the open latched the failure as null.
+    await landVerdicts({ "df-old": "clean" });
+    await waitFor(() => expect(isChecked("df-old")).toBe(true));
+  });
+
+  it("still lists a repo whose read answered with no default", async () => {
+    baseAnswer = null;
+    renderDialog({
+      repoPath: "C:/repos/default-none",
+      branches: [branch("main", OLD), branch("dn-old", OLD)],
+      defaultBranch: null,
+    });
+    await waitFor(() =>
+      expect(new Set(listed())).toEqual(new Set(["main", "dn-old"])),
+    );
+    expect(screen.queryByText(DEFAULT_FAILED)).toBeNull();
+    await waitFor(() => expect(isChecked("dn-old")).toBe(true));
+  });
+
+  it("counts only a read that errored with nothing loaded as failed", () => {
+    const refetching = {
+      data: undefined,
+      errorUpdateCount: 1,
+      fetchStatus: "fetching" as const,
+    };
+    expect(
+      [
+        { data: undefined, errorUpdateCount: 0 },
+        { data: undefined, errorUpdateCount: 1 },
+        refetching,
+        { data: null, errorUpdateCount: 0 },
+        { data: "main", errorUpdateCount: 1 },
+      ].map((q) => defaultBranchReadFailed(q)),
+    ).toEqual([false, true, true, false, false]);
+  });
+
+  it("drops the caveats about what the list holds while nothing lists", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/default-failed-caveats",
+      branches: [branch("dfc-old", OLD)],
+      defaultBranch: null,
+      defaultBranchFailed: true,
+      prCheckState: "failed",
+    });
+    view.rerender({ worktreeCheckState: "failed" });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(
+      screen.queryByText(/^Worktree checkouts couldn't be read/),
+    ).toBeNull();
+    expect(screen.queryByText(/^Pull requests couldn't be checked/)).toBeNull();
+    const status = screen.getByRole("status");
+    expect(status).toHaveClass("sr-only");
+    expect(status).toHaveTextContent(DEFAULT_FAILED);
+  });
+});
+
+describe("new ancestry data within one open", () => {
+  it("keeps the user's touches while divergence lands a newly merged branch", async () => {
+    const divergence =
+      deferred<Awaited<ReturnType<typeof gitBranchDivergence>>>();
+    vi.mocked(gitBranchDivergence).mockImplementationOnce(
+      () => divergence.promise,
+    );
+    const { user } = renderDialog({
+      repoPath: "C:/repos/merge-touch",
+      branches: [
+        branch("mt-clean", OLD),
+        branch("mt-changes", OLD),
+        branch("mt-new", FRESH),
+      ],
+    });
+    await landVerdicts({ "mt-clean": "clean", "mt-changes": "changes" });
+    await waitFor(() => expect(isChecked("mt-clean")).toBe(true));
+    await user.click(boxOf("mt-clean"));
+    await user.click(boxOf("mt-changes"));
+    expect(isChecked("mt-clean")).toBe(false);
+    expect(isChecked("mt-changes")).toBe(true);
+    await act(async () =>
+      divergence.resolve([{ name: "mt-new", ahead: 0, behind: 3 }]),
+    );
+    await waitFor(() => expect(listed()).toContain("mt-new"));
+    await waitFor(() => expect(isChecked("mt-new")).toBe(true));
+    expect(isChecked("mt-clean")).toBe(false);
+    expect(isChecked("mt-changes")).toBe(true);
+  });
+
+  it("keeps an unchecked row unchecked when a refetch moves the merged set, without a content check", async () => {
+    baseAnswer = null;
+    const view = renderDialog({
+      repoPath: "C:/repos/merge-refetch",
+      branches: [
+        branch("mr-anc", FRESH),
+        branch("mr-idle", OLD),
+        branch("mr-new", FRESH),
+      ],
+      merged: ["mr-anc"],
+    });
+    await waitFor(() => expect(isChecked("mr-anc")).toBe(true));
+    await waitFor(() => expect(isChecked("mr-idle")).toBe(true));
+    await view.user.click(boxOf("mr-anc"));
+    await view.user.click(boxOf("mr-idle"));
+    mergedByRepo.set("C:/repos/merge-refetch", ["mr-anc", "mr-new"]);
+    await act(async () => {
+      await view.client.invalidateQueries({
+        queryKey: ["repo", "C:/repos/merge-refetch", "divergence"],
+      });
+    });
+    await waitFor(() => expect(isChecked("mr-new")).toBe(true));
+    expect(isChecked("mr-anc")).toBe(false);
+    expect(isChecked("mr-idle")).toBe(false);
+  });
+
+  it("keeps a verdict-checked branch through a reopen once ancestry calls it merged", async () => {
+    const divergence =
+      deferred<Awaited<ReturnType<typeof gitBranchDivergence>>>();
+    vi.mocked(gitBranchDivergence).mockImplementationOnce(
+      () => divergence.promise,
+    );
+    const view = renderDialog({
+      repoPath: "C:/repos/merge-reopen",
+      branches: [branch("mo-idle", OLD)],
+    });
+    await landVerdicts({ "mo-idle": "clean" });
+    await waitFor(() => expect(isChecked("mo-idle")).toBe(true));
+    // Every later read answers the same.
+    mergedByRepo.set("C:/repos/merge-reopen", ["mo-idle"]);
+    await act(async () =>
+      divergence.resolve([{ name: "mo-idle", ahead: 0, behind: 3 }]),
+    );
+    await waitFor(() =>
+      expect(within(rowOf("mo-idle")).queryByText("merged")).not.toBeNull(),
+    );
+    expect(isChecked("mo-idle")).toBe(true);
+    view.rerender({ open: false });
+    view.rerender({ open: true });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(within(rowOf("mo-idle")).queryByText("merged")).not.toBeNull();
+    expect(isChecked("mo-idle")).toBe(true);
+  });
+
+  it("keeps a verdict-checked branch through a reopen once a post-batch refetch calls it merged", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/prune-reopen",
+      branches: [branch("pb-idle", OLD)],
+    });
+    await landVerdicts({ "pb-idle": "clean" });
+    await waitFor(() => expect(isChecked("pb-idle")).toBe(true));
+    vi.mocked(gitSetBranchArchived).mockRejectedValue(
+      new Error("branch is busy"),
+    );
+    // The batch's own refetch, and every read after it, calls it merged.
+    mergedByRepo.set("C:/repos/prune-reopen", ["pb-idle"]);
+    await view.user.click(primary());
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("Archived 0, 1 failed"),
+    );
+    await waitFor(() =>
+      expect(within(rowOf("pb-idle")).queryByText("merged")).not.toBeNull(),
+    );
+    expect(isChecked("pb-idle")).toBe(true);
+    view.rerender({ open: false });
+    view.rerender({ open: true });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(within(rowOf("pb-idle")).queryByText("merged")).not.toBeNull();
+    expect(isChecked("pb-idle")).toBe(true);
+  });
+});
+
+describe("a confirmed name the list no longer offers", () => {
+  it("skips one that became the default branch under a Delete confirm", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-default",
+      branches: [branch("sd-a", OLD + 10), branch("sd-b", OLD)],
+    });
+    const { user } = view;
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await landRest(["sd-a", "sd-b"], "clean");
+    await waitFor(() => expect(isChecked("sd-b")).toBe(true));
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    view.rerender({ defaultBranch: "sd-b" });
+    await user.click(
+      within(confirm).getByRole("button", { name: "Delete 2 branches" }),
+    );
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      ["C:/repos/skip-default", "sd-a"],
+    ]);
+    expect(toast.info).toHaveBeenCalledWith(
+      "Skipped sd-b — it's now the default branch.",
+    );
+    expect(toast.success).toHaveBeenCalledWith("Deleted 1 branch");
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("skips one checked out while an Archive batch runs, and still closes", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-current",
+      branches: [branch("sc-a", OLD + 10), branch("sc-b", OLD)],
+    });
+    await landRest(["sc-a", "sc-b"], "clean");
+    await waitFor(() => expect(isChecked("sc-b")).toBe(true));
+    const first = deferred<undefined>();
+    vi.mocked(gitSetBranchArchived).mockImplementationOnce(() => first.promise);
+    await view.user.click(primary());
+    await waitFor(() => expect(gitSetBranchArchived).toHaveBeenCalledTimes(1));
+    view.rerender({ currentBranch: "sc-b" });
+    await act(async () => first.resolve(undefined));
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+      ["C:/repos/skip-current", "sc-a", true],
+    ]);
+    expect(toast.info).toHaveBeenCalledWith(
+      "Skipped sc-b — it's now checked out.",
+    );
+    expect(toast.success).toHaveBeenCalledWith("Archived 1 branch");
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("skips a worktree row that became the default before its turn, keeping its worktree", async () => {
+    statusByPath.set("C:/wt/dw-w", "clean");
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-default-wt",
+      branches: [branch("dw-w", OLD + 10), branch("dw-p", OLD)],
+      worktrees: { "dw-w": { path: "C:/wt/dw-w" } },
+    });
+    const { user } = view;
+    await user.click(optIn());
+    await landRest(["dw-w", "dw-p"], "clean");
+    await waitFor(() =>
+      expect(boxOf("dw-w")).not.toHaveAttribute("aria-disabled"),
+    );
+    await waitFor(() => expect(isChecked("dw-p")).toBe(true));
+    await user.click(boxOf("dw-w"));
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Remove worktree?",
+    });
+    view.rerender({ defaultBranch: "dw-w" });
+    await user.click(
+      within(confirm).getByRole("button", {
+        name: "Remove and archive 2 branches",
+      }),
+    );
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    expect(removeWorktreeForCleanup).not.toHaveBeenCalled();
+    expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+      ["C:/repos/skip-default-wt", "dw-p", true],
+    ]);
+    expect(toast.info).toHaveBeenCalledWith(
+      "Skipped dw-w — it's now the default branch.",
+    );
+  });
+
+  it("skips a protected name that became the default rather than failing it", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-protected-default",
+      branches: [branch("pd-a", OLD + 10), branch("pd-b", OLD)],
+    });
+    const { user } = view;
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await landRest(["pd-a", "pd-b"], "clean");
+    await waitFor(() => expect(isChecked("pd-b")).toBe(true));
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    view.rerender({ defaultBranch: "pd-b", isProtected: (n) => n === "pd-b" });
+    await user.click(
+      within(confirm).getByRole("button", { name: "Delete 2 branches" }),
+    );
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    expect(vi.mocked(gitDeleteBranch).mock.calls).toEqual([
+      ["C:/repos/skip-protected-default", "pd-a"],
+    ]);
+    expect(toast.info).toHaveBeenCalledWith(
+      "Skipped pd-b — it's now the default branch.",
+    );
+    expect(toast.error).not.toHaveBeenCalled();
+    // Git refuses to delete a checked-out branch, so Delete reads no list.
+    expect(listWorktrees).not.toHaveBeenCalled();
+  });
+
+  it("skips a plain row checked out in another worktree at its Archive", async () => {
+    // A session folder holds it, which the user worktree list behind the
+    // dialog's exclusion leaves out.
+    vi.mocked(listWorktrees).mockResolvedValue([
+      { id: "s1", path: "C:/wt/s1", branch: "ow-b", base: "" },
+    ]);
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-elsewhere",
+      branches: [branch("ow-a", OLD + 10), branch("ow-b", OLD)],
+    });
+    await landRest(["ow-a", "ow-b"], "clean");
+    await waitFor(() => expect(isChecked("ow-b")).toBe(true));
+    await view.user.click(primary());
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+      ["C:/repos/skip-elsewhere", "ow-a", true],
+    ]);
+    expect(toast.info).toHaveBeenCalledWith(
+      "Skipped ow-b — it's now checked out.",
+    );
+    expect(toast.success).toHaveBeenCalledWith("Archived 1 branch");
+    // Read per row, at its turn.
+    expect(vi.mocked(listWorktrees).mock.calls).toEqual([
+      ["C:/repos/skip-elsewhere"],
+      ["C:/repos/skip-elsewhere"],
+    ]);
+  });
+
+  it("archives as before when the worktree list can't be read", async () => {
+    vi.mocked(listWorktrees).mockRejectedValue(new Error("list failed"));
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-elsewhere-open",
+      branches: [branch("oo-a", OLD)],
+    });
+    await landRest(["oo-a"], "clean");
+    await waitFor(() => expect(isChecked("oo-a")).toBe(true));
+    await view.user.click(primary());
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+      ["C:/repos/skip-elsewhere-open", "oo-a", true],
+    ]);
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("never skips a name for the default or current branch of a repo switched to mid-batch", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-switch-a",
+      branches: [branch("ss-a", OLD + 10), branch("ss-b", OLD)],
+    });
+    await landRest(["ss-a", "ss-b"], "clean");
+    await waitFor(() => expect(isChecked("ss-b")).toBe(true));
+    const first = deferred<undefined>();
+    vi.mocked(gitSetBranchArchived).mockImplementationOnce(() => first.promise);
+    await view.user.click(primary());
+    await waitFor(() => expect(gitSetBranchArchived).toHaveBeenCalledTimes(1));
+    act(() => useUiStore.setState({ repoPath: "C:/repos/skip-switch-b" }));
+    view.rerender({
+      repoPath: "C:/repos/skip-switch-b",
+      branches: [],
+      defaultBranch: "ss-b",
+      currentBranch: "ss-b",
+    });
+    await act(async () => first.resolve(undefined));
+    await waitFor(() => expect(gitSetBranchArchived).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+      ["C:/repos/skip-switch-a", "ss-a", true],
+      ["C:/repos/skip-switch-a", "ss-b", true],
+    ]);
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("leaves a skipped name unchecked after a partly failed batch, keeping only the failure", async () => {
+    // A session folder holds pf-b, so its Archive skips at its turn.
+    vi.mocked(listWorktrees).mockResolvedValue([
+      { id: "s2", path: "C:/wt/s2", branch: "pf-b", base: "" },
+    ]);
+    vi.mocked(gitSetBranchArchived).mockImplementation(async (_repo, name) => {
+      if (name === "pf-a") throw new Error("branch is busy");
+    });
+    const view = renderDialog({
+      repoPath: "C:/repos/skip-partial",
+      branches: [
+        branch("pf-a", OLD + 20),
+        branch("pf-b", OLD + 10),
+        branch("pf-c", OLD),
+      ],
+    });
+    await landRest(["pf-a", "pf-b", "pf-c"], "clean");
+    await waitFor(() => expect(isChecked("pf-c")).toBe(true));
+    await view.user.click(primary());
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith("Archived 1, 1 failed"),
+    );
+    expect(toast.info).toHaveBeenCalledWith(
+      "Skipped pf-b — it's now checked out.",
+    );
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(isChecked("pf-a")).toBe(true);
+    expect(isChecked("pf-b")).toBe(false);
+    expect(isChecked("pf-c")).toBe(false);
   });
 });
 

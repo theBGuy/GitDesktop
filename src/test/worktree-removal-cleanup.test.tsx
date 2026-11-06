@@ -11,6 +11,7 @@ import {
   gitDefaultBranch,
   gitFinishLocalPrMerge,
   gitMergeLocalPr,
+  gitOpState,
   gitSetBranchArchived,
   gitUpdateBranchFrom,
   validateRepo,
@@ -21,10 +22,14 @@ import {
   useMergeLocalPr,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
+import type { RepoOpState } from "@/lib/git/types";
 import {
   beginPromoteWindow,
+  listUserWorktrees,
+  listWorktrees,
   pruneWorktrees,
   removeWorktree,
+  type UserWorktree,
   type WorktreeRemoveOutcome,
 } from "@/lib/git/worktree";
 import {
@@ -45,6 +50,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitDefaultBranch: vi.fn(),
   gitFinishLocalPrMerge: vi.fn(),
   gitMergeLocalPr: vi.fn(),
+  gitOpState: vi.fn(),
   gitSetBranchArchived: vi.fn(),
   gitUpdateBranchFrom: vi.fn(),
   validateRepo: vi.fn(),
@@ -52,6 +58,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
   beginPromoteWindow: vi.fn(),
+  listUserWorktrees: vi.fn(),
+  listWorktrees: vi.fn(),
   removeWorktree: vi.fn(),
   pruneWorktrees: vi.fn(),
 }));
@@ -131,11 +139,44 @@ function expectSilent() {
 
 const removals = () => useWorktreeRemovalStore.getState().byRepo;
 
+const worktree = (path: string, branch: string): UserWorktree => ({
+  path,
+  branch,
+  head: "0".repeat(64),
+  isMain: false,
+  isDetached: branch === "",
+  isLocked: false,
+  lockReason: "",
+  lastActivityMs: null,
+});
+
+/** The default worktree list: every worktree still marked for removal, holding
+ *  the branch it was marked with, so each call's fire-time re-read finds its own
+ *  row unchanged and the archive step (after the mark settles) finds it gone. */
+async function listMarkedWorktrees(): Promise<UserWorktree[]> {
+  return Object.values(removals()).flatMap((entries) =>
+    Object.values(entries).map((r) => worktree(r.path, r.branch ?? "")),
+  );
+}
+
+const QUIET_OP_STATE: RepoOpState = {
+  merging: false,
+  rebasing: false,
+  cherryPicking: false,
+  reverting: false,
+  editPaused: false,
+  rebaseStop: null,
+};
+
 beforeEach(() => {
   qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   unmockedCommands.length = 0;
   vi.mocked(removeWorktree).mockResolvedValue(outcome("deleted"));
   vi.mocked(pruneWorktrees).mockResolvedValue(undefined);
+  vi.mocked(listUserWorktrees).mockImplementation(listMarkedWorktrees);
+  // The archive step's unfiltered list: by then the removed worktree is gone.
+  vi.mocked(listWorktrees).mockResolvedValue([]);
+  vi.mocked(gitOpState).mockResolvedValue(QUIET_OP_STATE);
   vi.mocked(gitDefaultBranch).mockResolvedValue("main");
   vi.mocked(gitBranches).mockResolvedValue([]);
   vi.mocked(gitSetBranchArchived).mockResolvedValue(undefined);
@@ -165,7 +206,8 @@ describe("removeWorktreeForCleanup refusals", () => {
       ok: false,
       reason: "the worktree is being removed",
     });
-    expect(removeWorktree).toHaveBeenCalledTimes(1);
+    // The first call reaches the removal only after its fire-time re-read.
+    await waitFor(() => expect(removeWorktree).toHaveBeenCalledTimes(1));
     held.resolve(outcome("deleted"));
     expect(await first).toEqual({ ok: true, branch: "deleted" });
   });
@@ -794,5 +836,312 @@ describe("removeWorktreeForCleanup mark and reporting", () => {
     expect(Object.keys(removals()[REPO])).toEqual([pathA]);
     heldA.resolve(outcome("deleted"));
     expect(await a).toEqual({ ok: true, branch: "deleted" });
+  });
+});
+
+describe("removeWorktreeForCleanup fire-time re-check", () => {
+  const cleanup = (path: string, then: "archive" | "delete" = "delete") =>
+    removeWorktreeForCleanup(qc, {
+      repoPath: REPO,
+      path,
+      name: BRANCH,
+      branch: BRANCH,
+      then,
+    });
+
+  it.each([
+    ["holds another branch", "other-branch"],
+    ["is detached", ""],
+  ])("refuses when the worktree now %s", async (_state, holds) => {
+    const path = "C:/repos/wt/switched";
+    vi.mocked(listUserWorktrees).mockResolvedValueOnce([worktree(path, holds)]);
+    expect(await cleanup(path)).toEqual({
+      ok: false,
+      reason: "the worktree no longer has this branch checked out",
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+    expectSilent();
+  });
+
+  it("refuses when the path left the list", async () => {
+    vi.mocked(listUserWorktrees).mockResolvedValueOnce([
+      worktree("C:/repos/wt/elsewhere", BRANCH),
+    ]);
+    expect(await cleanup("C:/repos/wt/gone")).toEqual({
+      ok: false,
+      reason: "the worktree was moved or removed",
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+  });
+
+  it("fails safe when the list can't be read", async () => {
+    vi.mocked(listUserWorktrees).mockRejectedValueOnce(
+      new Error("git worktree list failed"),
+    );
+    expect(await cleanup("C:/repos/wt/unlisted", "archive")).toEqual({
+      ok: false,
+      reason: "couldn't check which branch the worktree has checked out",
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+    expect(gitOpState).not.toHaveBeenCalled();
+    expect(gitSetBranchArchived).not.toHaveBeenCalled();
+  });
+
+  it("matches a backslash path against the list's forward slashes", async () => {
+    const path = "C:\\Repos\\WT\\back-slashed";
+    vi.mocked(listUserWorktrees).mockResolvedValueOnce([
+      worktree("C:/repos/wt/back-slashed", BRANCH),
+    ]);
+    expect(await cleanup(path)).toEqual({ ok: true, branch: "deleted" });
+    expect(listUserWorktrees).toHaveBeenCalledWith(REPO);
+    expect(gitOpState).toHaveBeenCalledWith(path);
+    expect(removeWorktree).toHaveBeenCalledWith(REPO, path, BRANCH, false);
+  });
+
+  it.each([
+    ["merging", "merge"],
+    ["rebasing", "rebase"],
+    ["cherryPicking", "cherry-pick"],
+    ["reverting", "revert"],
+  ] as const)("refuses while %s", async (flag, op) => {
+    vi.mocked(gitOpState).mockResolvedValueOnce({
+      ...QUIET_OP_STATE,
+      [flag]: true,
+    });
+    expect(await cleanup(`C:/repos/wt/op-${op}`)).toEqual({
+      ok: false,
+      reason: `the worktree is in the middle of a ${op}`,
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+  });
+
+  it("names the rebase when a rebase stopped inside a merge", async () => {
+    vi.mocked(gitOpState).mockResolvedValueOnce({
+      ...QUIET_OP_STATE,
+      merging: true,
+      rebasing: true,
+    });
+    expect(await cleanup("C:/repos/wt/op-both")).toEqual({
+      ok: false,
+      reason: "the worktree is in the middle of a rebase",
+    });
+  });
+
+  it("refuses with the read's error when the op state can't be read", async () => {
+    vi.mocked(gitOpState).mockRejectedValueOnce(
+      new Error("Not a git repository."),
+    );
+    expect(await cleanup("C:/repos/wt/op-unreadable")).toEqual({
+      ok: false,
+      reason: "Not a git repository",
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+  });
+
+  it("refuses a local-PR write that started during the re-read", async () => {
+    const path = "C:/repos/wt/late-write";
+    const list = deferred<UserWorktree[]>();
+    vi.mocked(listUserWorktrees).mockReturnValueOnce(list.promise);
+    const pending = cleanup(path);
+    stageUpdate(REPO, BRANCH);
+    list.resolve([worktree(path, BRANCH)]);
+    expect(await pending).toEqual({
+      ok: false,
+      reason: "an update is running on this branch",
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+  });
+
+  it("refuses a local-PR write that started during the op-state read", async () => {
+    const path = "C:/repos/wt/late-write-op";
+    const op = deferred<RepoOpState>();
+    vi.mocked(gitOpState).mockReturnValueOnce(op.promise);
+    const pending = cleanup(path);
+    await waitFor(() => expect(gitOpState).toHaveBeenCalledWith(path));
+    stageUpdate(REPO, BRANCH);
+    op.resolve(QUIET_OP_STATE);
+    expect(await pending).toEqual({
+      ok: false,
+      reason: "an update is running on this branch",
+    });
+    expect(removeWorktree).not.toHaveBeenCalled();
+  });
+
+  it("settles the mark on a refusal, so the next call isn't refused as removing", async () => {
+    const path = "C:/repos/wt/retry-after-refusal";
+    vi.mocked(listUserWorktrees).mockResolvedValueOnce([]);
+    expect(await cleanup(path)).toEqual({
+      ok: false,
+      reason: "the worktree was moved or removed",
+    });
+    expect(removals()).toEqual({});
+    expect(await cleanup(path)).toEqual({ ok: true, branch: "deleted" });
+    expect(removeWorktree).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a removal marked under another viewer's repo key", () => {
+  it("refuses both starters for the same folder in another spelling", async () => {
+    const marked = "C:/repos/wt/cross-viewer";
+    const respelled = "C:\\Repos\\WT\\cross-viewer";
+    const held = deferred<WorktreeRemoveOutcome>();
+    vi.mocked(removeWorktree).mockReturnValueOnce(held.promise);
+    const first = removeWorktreeForCleanup(qc, {
+      repoPath: "C:/repos/viewer-a",
+      path: marked,
+      name: BRANCH,
+      branch: BRANCH,
+      then: "delete",
+    });
+    expect(
+      await removeWorktreeForCleanup(qc, {
+        repoPath: REPO,
+        path: respelled,
+        name: BRANCH,
+        branch: BRANCH,
+        then: "delete",
+      }),
+    ).toEqual({ ok: false, reason: "the worktree is being removed" });
+    expect(
+      useWorktreeRemovalStore.getState().startRemoval({
+        repoPath: "C:/repos/viewer-b",
+        path: respelled,
+        name: BRANCH,
+        branch: BRANCH,
+        archiveWhenDone: false,
+        force: false,
+      }),
+    ).toBe("This worktree is already being removed.");
+    expect(Object.keys(removals())).toEqual(["C:/repos/viewer-a"]);
+    held.resolve(outcome("deleted"));
+    expect(await first).toEqual({ ok: true, branch: "deleted" });
+    expect(removeWorktree).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a promote of the same folder in another spelling", async () => {
+    const held = deferred<WorktreeRemoveOutcome>();
+    vi.mocked(removeWorktree).mockReturnValueOnce(held.promise);
+    const first = removeWorktreeForCleanup(qc, {
+      repoPath: "C:/repos/viewer-a",
+      path: "C:/repos/wt/cross-promote",
+      name: BRANCH,
+      branch: BRANCH,
+      then: "delete",
+    });
+    const respelled = "C:\\Repos\\WT\\cross-promote";
+    expect(
+      useWorktreeRemovalStore.getState().startPromote({
+        mainPath: "C:/repos/main-cross",
+        worktreePath: respelled,
+        branch: BRANCH,
+        willStash: false,
+      }),
+    ).toBe("This worktree is already being removed.");
+    expect(isWorktreePromoting(respelled)).toBe(false);
+    expect(validateRepo).not.toHaveBeenCalled();
+    held.resolve(outcome("deleted"));
+    expect(await first).toEqual({ ok: true, branch: "deleted" });
+  });
+});
+
+describe("the archive step leaves a branch checked out again unarchived", () => {
+  const OTHER_HOLDER = "C:/repos/wt/other-holder";
+  const SESSION_HOLDER = "C:/appdata/worktrees/sess1";
+  const IN_USE_ARMS: [name: string, arrange: () => void][] = [
+    [
+      "current in this checkout",
+      () => {
+        vi.mocked(gitBranches).mockResolvedValueOnce([
+          { name: BRANCH, archived: false, isCurrent: true },
+        ] as Branches);
+      },
+    ],
+    [
+      "held by a linked worktree",
+      () => {
+        vi.mocked(listUserWorktrees).mockImplementation(async () => [
+          ...(await listMarkedWorktrees()),
+          worktree(OTHER_HOLDER, BRANCH),
+        ]);
+        vi.mocked(listWorktrees).mockResolvedValue([
+          { id: "other-holder", path: OTHER_HOLDER, branch: BRANCH, base: "" },
+        ]);
+      },
+    ],
+    [
+      // The user list leaves agent-session folders out whatever they hold.
+      "held by a session-owned worktree",
+      () => {
+        vi.mocked(listWorktrees).mockResolvedValue([
+          { id: "main", path: REPO, branch: "main", base: "" },
+          { id: "sess1", path: SESSION_HOLDER, branch: BRANCH, base: "" },
+        ]);
+      },
+    ],
+  ];
+
+  it.each(IN_USE_ARMS)("cleanup keeps it when %s", async (_arm, arrange) => {
+    arrange();
+    expect(
+      await removeWorktreeForCleanup(qc, {
+        repoPath: REPO,
+        path: "C:/repos/wt/in-use",
+        name: BRANCH,
+        branch: BRANCH,
+        then: "archive",
+      }),
+    ).toEqual({ ok: true, branch: "keptInUse" });
+    expect(removeWorktree).toHaveBeenCalledTimes(1);
+    expect(gitSetBranchArchived).not.toHaveBeenCalled();
+    expectSilent();
+  });
+
+  it.each(IN_USE_ARMS)(
+    "the delete dialog toasts it when %s",
+    async (_arm, arrange) => {
+      arrange();
+      useWorktreeRemovalStore.getState().startRemoval({
+        repoPath: REPO,
+        path: "C:/repos/wt/dialog-in-use",
+        name: BRANCH,
+        branch: BRANCH,
+        archiveWhenDone: true,
+        force: false,
+      });
+      await waitFor(() =>
+        expect(toast.info).toHaveBeenCalledWith(
+          `Left ${BRANCH} unarchived — it's checked out again.`,
+        ),
+      );
+      expect(toast.success).toHaveBeenCalledWith("Worktree removed");
+      expect(gitSetBranchArchived).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      "the branch list",
+      () => {
+        vi.mocked(gitBranches).mockRejectedValueOnce(new Error("no list"));
+      },
+    ],
+    [
+      "the worktree list",
+      () => {
+        vi.mocked(listWorktrees).mockRejectedValueOnce(new Error("no list"));
+      },
+    ],
+  ])("archives anyway when %s can't be read", async (_read, arrange) => {
+    arrange();
+    expect(
+      await removeWorktreeForCleanup(qc, {
+        repoPath: REPO,
+        path: "C:/repos/wt/in-use-unreadable",
+        name: BRANCH,
+        branch: BRANCH,
+        then: "archive",
+      }),
+    ).toEqual({ ok: true, branch: "archived" });
+    expect(gitSetBranchArchived).toHaveBeenCalledWith(REPO, BRANCH, true);
   });
 });

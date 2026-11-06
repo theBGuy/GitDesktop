@@ -44,6 +44,7 @@ const baseFor = (n: string): ContentCheckBase => ({
 interface CheckCall {
   repo: string;
   baseSha: string;
+  baseTree: string;
   branch: string;
   settled: boolean;
   settle: (verdict?: ContentVerdict) => void;
@@ -121,13 +122,14 @@ beforeEach(() => {
   vi.mocked(gitContentCheckBase).mockReset();
   vi.mocked(gitBranchContentMerged)
     .mockReset()
-    .mockImplementation((repo, baseSha, _baseTree, branch) => {
+    .mockImplementation((repo, baseSha, baseTree, branch) => {
       const d = deferred<BranchContentMerged>();
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
       const call: CheckCall = {
         repo,
         baseSha,
+        baseTree,
         branch,
         settled: false,
         settle: (verdict = "clean") => {
@@ -179,7 +181,12 @@ describe("useBranchContentCheck", () => {
     expect(calls.map((c) => c.branch)).toEqual(branches);
     expect(maxInFlight).toBe(4);
     expect(
-      calls.every((c) => c.repo === repo && c.baseSha === "a".repeat(40)),
+      calls.every(
+        (c) =>
+          c.repo === repo &&
+          c.baseSha === "a".repeat(40) &&
+          c.baseTree === "e".repeat(40),
+      ),
     ).toBe(true);
     await waitFor(() => expect(view.latest().status).toBe("settled"));
     expect(view.latest().verdicts.size).toBe(10);

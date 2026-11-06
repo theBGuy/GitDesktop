@@ -45,10 +45,12 @@ import {
   worktreeKey,
 } from "@/lib/git/queries";
 import type { Branch } from "@/lib/git/types";
+import { listWorktrees } from "@/lib/git/worktree";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import {
+  type CleanupRemovalOutcome,
   promotionBlocksCheckout,
   removeWorktreeForCleanup,
 } from "@/lib/stores/worktree-removal";
@@ -190,6 +192,16 @@ export function worktreeCheckStateFrom(q: {
   return "pending";
 }
 
+/** Whether the default-branch read FAILED with nothing loaded. Sticky across a
+ *  refetch of a read that never loaded; a null answer (no default) and an error
+ *  over landed data are not failures. */
+export function defaultBranchReadFailed(q: {
+  data: unknown;
+  errorUpdateCount: number;
+}): boolean {
+  return q.data === undefined && q.errorUpdateCount > 0;
+}
+
 /** Why a stale branch can still be off the list, per mode and worktree opt-in —
  *  the empty state names it rather than claiming nothing is stale, which the
  *  branches sitting on disk would contradict. */
@@ -210,6 +222,11 @@ const CRITERION_LABEL: Record<"merged" | "closed", string> = {
 };
 
 const NO_CRITERIA_COPY = "Turn on Merged, Closed PR or Idle to list branches.";
+
+/** One string for the empty state, the live region and the held primary while
+ *  the default-branch read has failed. */
+const DEFAULT_READ_FAILED_COPY =
+  "Couldn't read the default branch, so no branches are listed.";
 
 /** The description's pull-request clause. It names pull requests only while
  *  their check counts or is underway: a FAILED check's note says the opposite,
@@ -343,13 +360,33 @@ const PR_CLOSED_DETAIL = "Closed without merging — matched by branch name";
 const prMergedDetail = (label: string) =>
   `Merged via pull request ${label} — matched by branch name`;
 
-/** A removal that succeeded but left the branch in place; each reads after the
- *  row's "Couldn't delete: " lead and states both outcomes. */
-const KEPT_BRANCH_REASON: Record<"keptMoved" | "keptUnreadable", string> = {
+/** Each successful removal's branch outcome: null when the branch went the way
+ *  the batch asked, else why it stayed, read after the row's "Couldn't <mode>: "
+ *  lead and stating both outcomes. Total, so a new outcome is a type error. */
+const KEPT_BRANCH_REASON: Record<
+  Extract<CleanupRemovalOutcome, { ok: true }>["branch"],
+  string | null
+> = {
+  archived: null,
+  deleted: null,
   keptMoved:
     "the worktree was removed, but the branch gained new commits and was kept",
   keptUnreadable:
     "the worktree was removed, but git couldn't delete the branch, so it was kept",
+  keptInUse:
+    "the worktree was removed, but the branch was checked out again, so it was left unarchived",
+};
+/** The kept outcomes whose tip the batch saw move or couldn't read, so the
+ *  row's verdict no longer describes it. */
+const KEPT_TIP_UNVERIFIED: Record<
+  Extract<CleanupRemovalOutcome, { ok: true }>["branch"],
+  boolean
+> = {
+  archived: false,
+  deleted: false,
+  keptMoved: true,
+  keptUnreadable: true,
+  keptInUse: false,
 };
 
 const VERDICT_BADGE: Record<
@@ -404,9 +441,11 @@ const CONFIRM_TITLE: Record<ConfirmKind, (batch: ConfirmBatch) => string> = {
 
 const WORKTREE_FOLDER_NOTE =
   "Removing a worktree deletes its folder, including ignored files such as build output.";
-const CONFIRM_VERB: Record<ConfirmKind, string> = {
-  delete: "Delete",
-  archiveWorktrees: "Archive",
+/** The confirm button says what the title asks. */
+const CONFIRM_LABEL: Record<ConfirmKind, (batch: ConfirmBatch) => string> = {
+  delete: (b) => `Delete ${pluralBranches(b.names.length)}`,
+  archiveWorktrees: (b) =>
+    `Remove and archive ${pluralBranches(b.names.length)}`,
 };
 const CONFIRM_VARIANT: Record<ConfirmKind, "default" | "destructive"> = {
   delete: "destructive",
@@ -415,6 +454,14 @@ const CONFIRM_VARIANT: Record<ConfirmKind, "default" | "destructive"> = {
 const CONFIRM_REFUSED: Record<ConfirmKind, string> = {
   delete: "nothing was deleted",
   archiveWorktrees: "nothing was archived",
+};
+
+/** Why a confirmed name was skipped at its turn: it became the branch the
+ *  list never offers after the confirm captured it. */
+type SkipReason = "default" | "current";
+const SKIPPED_TOAST: Record<SkipReason, (name: string) => string> = {
+  default: (name) => `Skipped ${name} — it's now the default branch.`,
+  current: (name) => `Skipped ${name} — it's now checked out.`,
 };
 
 /** Left/Right step and Home/End jump across a control group's buttons; plain
@@ -735,6 +782,7 @@ export function CleanupBranchesDialog({
   onClose,
   branches,
   defaultBranch,
+  defaultBranchFailed,
   currentBranch,
   isProtected,
   worktreeFacts,
@@ -753,6 +801,11 @@ export function CleanupBranchesDialog({
   /** undefined only while the default-branch read is loading; null once it
    *  settled with none or with an error. */
   defaultBranch: string | null | undefined;
+  /** True while that read has failed with nothing loaded
+   *  ({@link defaultBranchReadFailed}), sticky across its refetch. The list
+   *  then shows nothing and says why, since it can't keep a default it can't
+   *  name off the list; a settled null with this false still lists. */
+  defaultBranchFailed: boolean;
   currentBranch: string | null;
   /** True when a branch is blocked from deletion by an effective branch rule. */
   isProtected: (name: string) => boolean;
@@ -854,13 +907,16 @@ export function CleanupBranchesDialog({
   // Untouched rows the settled-verdict pass checked. A reopen drops them, so a
   // previous open's verdict never checks a row this open hasn't measured.
   const autoCheckedRef = useRef<Set<string>>(new Set());
-  // Rows whose worktree a batch removed but whose branch it kept (moved, or
-  // undeletable): their verdict predates that, so nothing re-checks them for
-  // the rest of the open, a reseed included.
+  // Rows whose worktree a batch removed but whose branch it kept (moved,
+  // undeletable, or checked out again): the user's choice on them was spent,
+  // so nothing re-checks them for the rest of the open, a reseed included.
   const keptRef = useRef<Set<string>>(new Set());
-  // The same names for render, which never reads the ref: a kept row shows no
-  // verdict and a confirm counts it as having changes.
-  const [keptNames, setKeptNames] = useState<ReadonlySet<string>>(new Set());
+  // The kept rows whose tip the batch saw move or couldn't read, for render:
+  // their verdict no longer describes them, so they show none and a confirm
+  // counts them as having changes. A row kept in use keeps its verdict.
+  const [tipUnverified, setTipUnverified] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   // Kept rows touched by the batch rather than the user: the next open releases
   // them, so its own verdict decides; a user toggle since makes the touch theirs.
   const keptTouchRef = useRef<Set<string>>(new Set());
@@ -874,7 +930,7 @@ export function CleanupBranchesDialog({
     setConfirmBatch(null);
     setFrozen(null);
     keptRef.current.clear();
-    setKeptNames(new Set());
+    setTipUnverified(new Set());
     for (const n of keptTouchRef.current) touchedRef.current.delete(n);
     keptTouchRef.current.clear();
     const carried = autoCheckedRef.current;
@@ -889,9 +945,12 @@ export function CleanupBranchesDialog({
   }, [repoPath]);
 
   // A loading default branch excludes nothing and gates no divergence, so the
-  // list holds on it like the worktree and rules reads; a failed read arrives
-  // settled as null, so the hold can't stick.
-  const defaultLoading = defaultBranch === undefined;
+  // list holds on it like the worktree and rules reads. A failed one lists
+  // nothing and says why instead, never a hold: no answer is coming until a
+  // refetch succeeds. A settled null (no default) still lists.
+  const defaultFailed =
+    defaultBranchFailed && typeof defaultBranch !== "string";
+  const defaultLoading = defaultBranch === undefined && !defaultFailed;
   const defaultOrNull = defaultBranch ?? null;
   const defaultShort = defaultOrNull ?? "the default branch";
 
@@ -917,6 +976,7 @@ export function CleanupBranchesDialog({
   // branches.
   const stale = useMemo(() => {
     const out: Candidate[] = [];
+    if (defaultFailed) return out;
     for (const b of branches) {
       if (
         b.isCurrent ||
@@ -951,6 +1011,7 @@ export function CleanupBranchesDialog({
     branches,
     criteria,
     currentBranch,
+    defaultFailed,
     defaultOrNull,
     mergedSet,
     now,
@@ -1074,19 +1135,23 @@ export function CleanupBranchesDialog({
     () => candidates.filter((c) => !c.merged).map((c) => c.branch.name),
     [candidates],
   );
+  // A failed read passes as still loading, so the open latches the name a
+  // recovery brings rather than null, which would end the check for the open.
   const check = useBranchContentCheck(
     repoPath,
-    defaultBranch,
+    defaultFailed ? undefined : defaultBranch,
     checkNames,
     open,
   );
-  // The selection re-seeds only when the repo or the pre-checked SET changes
+  // The selection re-seeds when the repo changes, or when the pre-checked SET
   // (sorted keys, so a new-but-equal array or a reorder on the 30s clock isn't
-  // one); a close and reopen, an `<Activity>` re-show or a held-read flap keeps
-  // the user's choices. After a batch that leaves the dialog open, until the
-  // user changes a control or closes it, a changed set only prunes names no
-  // longer listed, or held for good (dirty, locked, unreadable); a pending
-  // read holds only for now (cleanup-selection.ts).
+  // one) changes across a control change or a reopen; new data that moves the
+  // set within one open merges only the change, keeping the user's touches. A
+  // close and reopen over the same set, an `<Activity>` re-show or a held-read
+  // flap keeps the user's choices. After a batch that leaves the dialog open,
+  // until the user changes a control or closes it, a changed set only prunes
+  // names no longer listed, or held for good (dirty, locked, unreadable); a
+  // pending read holds only for now (cleanup-selection.ts).
   const autoSelectKey = selectionKey(autoSelectNames);
   // The user's own controls; a batch's refetch changes none of them.
   const selectionContext = `${mode}\n${windowDays}\n${criteria.merged ? 1 : 0}${criteria.closed ? 1 : 0}${criteria.idle ? 1 : 0}\n${includeWorktrees ? 1 : 0}`;
@@ -1111,13 +1176,16 @@ export function CleanupBranchesDialog({
     repo: null,
     seededKey: null,
     afterBatch: null,
+    context: null,
   });
-  // Read at a reseed only: the seed step must not re-run on every landing.
+  // Read at a reseed or merge only: the seed step must not re-run on every
+  // landing.
   const settledCheckNames = useEffectEvent(() => namesOfKey(shouldCheckKey));
   useEffect(() => {
     // Never under a running batch, nor off a stand-in exclusion: the seed
     // re-runs once those reads land and the excluded rows are really gone.
     const prevRepo = selectionSeed.current.repo;
+    const prevKey = selectionSeed.current.seededKey;
     const step = selectionStep(selectionSeed.current, {
       repo: repoPath,
       open,
@@ -1130,7 +1198,14 @@ export function CleanupBranchesDialog({
       repo: step.repo,
       seededKey: step.seededKey,
       afterBatch: step.afterBatch,
+      context: step.context,
     };
+    // Every unheld step, whatever its action: an ancestry name is never a
+    // verdict-only check, so a reopen never drops a check the ancestry key
+    // proves, which no verdict would restore (ancestry rows get none).
+    if (open && !running && !holdingReads)
+      for (const n of namesOfKey(autoSelectKey))
+        autoCheckedRef.current.delete(n);
     if (step.action === "reseed") {
       // A reseed forgets the user's touches, except on rows a batch kept in
       // this repo, and re-applies the settled verdicts in the same write: the
@@ -1138,7 +1213,7 @@ export function CleanupBranchesDialog({
       // of the ancestry seed too: its worktree's removal can make it one.
       if (step.repo !== prevRepo) {
         keptRef.current.clear();
-        setKeptNames(new Set());
+        setTipUnverified(new Set());
         setFailed(new Map());
       }
       touchedRef.current = new Set(keptRef.current);
@@ -1154,6 +1229,27 @@ export function CleanupBranchesDialog({
           ),
           touchedRef.current,
           want,
+        ),
+      );
+    } else if (step.action === "merge") {
+      // Only new data moved the set: the user's touches stand. A name leaving
+      // it drops only if untouched; one entering is added unless touched or
+      // kept; the settled verdicts are re-applied on the same terms.
+      const before = new Set(namesOfKey(prevKey ?? ""));
+      const after = new Set(namesOfKey(autoSelectKey));
+      const left = new Set([...before].filter((n) => !after.has(n)));
+      const entered = [...after].filter(
+        (n) => !before.has(n) && !keptRef.current.has(n),
+      );
+      const want = settledCheckNames().filter(
+        (n) => !touchedRef.current.has(n),
+      );
+      for (const n of want) autoCheckedRef.current.add(n);
+      setSelected((prev) =>
+        applySettledChecks(
+          dropUntouched(prev, left, touchedRef.current),
+          touchedRef.current,
+          [...entered, ...want],
         ),
       );
     } else if (step.action === "prune")
@@ -1217,17 +1313,24 @@ export function CleanupBranchesDialog({
   function ancestryCheckLine(): CheckingWhat {
     return criteria.merged ? "merged" : "contained";
   }
-  const stillChecking = !noCriteria && (checkingMerged || holdingReads);
+  // A failed default read outranks every other wait: nothing lists until it
+  // recovers, whatever else lands.
+  const stillChecking =
+    !noCriteria && !defaultFailed && (checkingMerged || holdingReads);
   const showPrFailedLine =
     prCheckState === "failed" && prMatters && candidates.length > 0;
+  // While a failed default read lists nothing, the caveats about what the list
+  // may hold have nothing to qualify; a frozen batch's rows keep them.
+  const caveatsApply = rows.length > 0 || !defaultFailed;
   // Unlike the pull-request caveat, this one shows on an empty list too: a
   // failed read leaves the exclusion vacuous, which the empty state's own copy
   // would otherwise assert as real.
-  const worktreeCheckFailed = worktreeCheckState === "failed";
+  const worktreeCheckFailed = worktreeCheckState === "failed" && caveatsApply;
   // A provisional list is no list: the skeleton covers the whole exclusion wait,
   // not just the empty first paint the merged check gates.
   const showSkeleton =
     !noCriteria &&
+    !defaultFailed &&
     (holdingReads || (checkingMerged && candidates.length === 0));
   // Which of the status region's lines are DRAWN — it announces more than it
   // shows: the check line stays sr-only wherever the skeleton paints (it is the
@@ -1256,11 +1359,11 @@ export function CleanupBranchesDialog({
   const baseRef = check.base?.refName ?? defaultShort;
   // Frozen rows name the ref their frozen verdicts were measured against.
   const rowsBaseRef = shownFrozen?.baseRef ?? baseRef;
-  // A kept row's verdict measured a tip the batch found moved or couldn't read,
-  // so it shows none for the rest of the open.
+  // A kept row whose tip the batch saw move or couldn't read shows no verdict
+  // for the rest of the open: the verdict measured another tip.
   function rowVerdict(c: Candidate): RowVerdict {
     if (c.merged || check.status === "unsupported") return null;
-    if (keptNames.has(c.branch.name)) return null;
+    if (tipUnverified.has(c.branch.name)) return null;
     return check.verdicts.get(c.branch.name) ?? "pending";
   }
 
@@ -1335,12 +1438,22 @@ export function CleanupBranchesDialog({
       void queryClient.invalidateQueries({ queryKey: worktreeKey(repoPath) });
   }
 
-  // The latest committed protection read, so a running batch sees rules that
-  // land after it started; the repo it answers for keeps a switched repo's
-  // rules away from the batch.
-  const protectionRef = useRef({ repoPath, isProtected });
+  // The latest committed protection read, default and current branch, so a
+  // running batch sees what lands after it started; the repo they answer for
+  // keeps a switched repo's values away from the batch.
+  const protectionRef = useRef({
+    repoPath,
+    isProtected,
+    defaultBranch: defaultOrNull,
+    currentBranch,
+  });
   useLayoutEffect(() => {
-    protectionRef.current = { repoPath, isProtected };
+    protectionRef.current = {
+      repoPath,
+      isProtected,
+      defaultBranch: defaultOrNull,
+      currentBranch,
+    };
   });
 
   async function runBatch() {
@@ -1364,12 +1477,38 @@ export function CleanupBranchesDialog({
     const fails = new Map<string, string>();
     // Removed worktrees whose branch stayed: failures that leave the selection.
     const kept = new Set<string>();
+    // The kept rows whose tip the batch saw move or couldn't read.
+    const unverified = new Set<string>();
+    // A plain row's archive would hide a branch checked out after the confirm
+    // in any worktree, session folders included (git refuses only a delete of
+    // one). Read per row, since an earlier read goes stale, and fail OPEN like
+    // the removal's archive step: the flag is reversible. A checkout landing
+    // between this read and the write is out of reach.
+    const checkedOutNow = async (name: string) => {
+      try {
+        return (await listWorktrees(repoPath)).some((w) => w.branch === name);
+      } catch {
+        return false;
+      }
+    };
     // Live for the batch's own repo; after a switch, the rules it started with.
     const protectedNow = (name: string) => {
       const live = protectionRef.current;
       return live.repoPath === repoPath
         ? live.isProtected(name)
         : isProtected(name);
+    };
+    // Names that became the default or current branch after the confirm
+    // captured them: never acted on, and neither a success nor a failure.
+    const skipped = new Set<string>();
+    const skipNow = (name: string): SkipReason | null => {
+      const live =
+        protectionRef.current.repoPath === repoPath
+          ? protectionRef.current
+          : { defaultBranch: defaultOrNull, currentBranch };
+      if (name === live.defaultBranch) return "default";
+      if (name === live.currentBranch) return "current";
+      return null;
     };
     setFailed(new Map());
     setFrozen({
@@ -1389,8 +1528,13 @@ export function CleanupBranchesDialog({
       }
       const name = names[i];
       const wtPath = worktreePaths.get(name);
+      const skip = skipNow(name);
       try {
-        if (mode === "delete" && protectedNow(name)) {
+        if (skip !== null) {
+          // Both modes, ahead of the rule check, so its worktree stays too.
+          skipped.add(name);
+          toast.info(SKIPPED_TOAST[skip](name));
+        } else if (mode === "delete" && protectedNow(name)) {
           // Delete-mode candidates already exclude protected names; this
           // covers rules that land after the confirm captured its names, or
           // during the batch. First, so a protected branch keeps its worktree.
@@ -1406,15 +1550,21 @@ export function CleanupBranchesDialog({
             then: mode,
           });
           if (!out.ok) fails.set(name, out.reason);
-          else if (
-            out.branch === "keptMoved" ||
-            out.branch === "keptUnreadable"
-          ) {
-            fails.set(name, KEPT_BRANCH_REASON[out.branch]);
-            kept.add(name);
+          else {
+            const keptReason = KEPT_BRANCH_REASON[out.branch];
+            if (keptReason !== null) {
+              fails.set(name, keptReason);
+              kept.add(name);
+              if (KEPT_TIP_UNVERIFIED[out.branch]) unverified.add(name);
+            }
           }
         } else if (mode === "archive") {
-          await api.gitSetBranchArchived(repoPath, name, true);
+          if (await checkedOutNow(name)) {
+            skipped.add(name);
+            toast.info(SKIPPED_TOAST.current(name));
+          } else {
+            await api.gitSetBranchArchived(repoPath, name, true);
+          }
         } else {
           await api.gitDeleteBranch(repoPath, name);
         }
@@ -1440,9 +1590,10 @@ export function CleanupBranchesDialog({
       touchedRef.current.add(n);
       keptTouchRef.current.add(n);
     }
-    if (kept.size > 0) setKeptNames(new Set(keptRef.current));
-    // A finished branch is touched too: a stale list can still show it, and a
-    // settled verdict must not check it again for a retry.
+    if (unverified.size > 0)
+      setTipUnverified((prev) => new Set([...prev, ...unverified]));
+    // A finished or skipped branch is touched too: a stale list can still show
+    // it, and a settled verdict must not check it again for a retry.
     for (const n of names.slice(0, processed))
       if (!fails.has(n)) {
         touchedRef.current.add(n);
@@ -1464,7 +1615,7 @@ export function CleanupBranchesDialog({
     }
     setProgress(null);
 
-    const ok = processed - fails.size;
+    const ok = processed - fails.size - skipped.size;
     const verb = mode === "archive" ? "Archived" : "Deleted";
     if (processed < names.length) {
       if (fails.size > 0) {
@@ -1474,8 +1625,10 @@ export function CleanupBranchesDialog({
       } else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);
       return;
     }
+    // A run whose only misses are skips closes like a success; its skip
+    // toasts already said what didn't happen.
     if (fails.size === 0) {
-      toast.success(`${verb} ${pluralBranches(ok)}`);
+      if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);
       onClose();
       return;
     }
@@ -1506,10 +1659,10 @@ export function CleanupBranchesDialog({
       repoPath,
       names,
       worktreePaths,
-      // A kept row's tip moved past what its verdict measured, or couldn't be
-      // read: counted as having changes, the cautious reading.
+      // A kept row whose tip moved past what its verdict measured, or
+      // couldn't be read: counted as having changes, the cautious reading.
       changes: names.filter(
-        (n) => keptNames.has(n) || check.verdicts.get(n) === "changes",
+        (n) => tipUnverified.has(n) || check.verdicts.get(n) === "changes",
       ).length,
       baseRef,
     };
@@ -1545,6 +1698,8 @@ export function CleanupBranchesDialog({
     switch (true) {
       case running:
         return PRIMARY_RUNNING_REASON;
+      case defaultFailed:
+        return DEFAULT_READ_FAILED_COPY;
       case holdingReads:
         return PRIMARY_HOLDING_REASON;
       case selectedCount === 0:
@@ -1561,6 +1716,7 @@ export function CleanupBranchesDialog({
   const allStaleExcluded = candidates.length === 0 && stale.length > 0;
   function emptyStatusLine(): string {
     if (noCriteria) return NO_CRITERIA_COPY;
+    if (defaultFailed) return DEFAULT_READ_FAILED_COPY;
     if (allStaleExcluded)
       return `${pluralBranches(stale.length)} ${stale.length === 1 ? "is" : "are"} stale but excluded from ${verb}: ${EMPTY_EXCLUDED_REASON[mode][includeWorktrees ? "on" : "off"]}.`;
     return "No stale branches.";
@@ -1819,7 +1975,7 @@ export function CleanupBranchesDialog({
               ) : null}
               {/* Announced even where the empty state carries it in prose: only
                   the region's copy reaches a screen reader as it happens. */}
-              {prCheckState === "failed" && prMatters ? (
+              {prCheckState === "failed" && prMatters && caveatsApply ? (
                 <p
                   className={
                     showPrFailedLine
@@ -1869,7 +2025,7 @@ export function CleanupBranchesDialog({
                 case rows.length === 0:
                   return (
                     <p className="py-6 text-center text-xs text-muted-foreground">
-                      {allStaleExcluded ? (
+                      {allStaleExcluded || defaultFailed ? (
                         emptyStatus
                       ) : (
                         <NoMatchCopy
@@ -1880,8 +2036,9 @@ export function CleanupBranchesDialog({
                         />
                       )}
                       {/* Carried by BOTH arms: an excluded-only list is just as
-                          incomplete when the pull-request read failed. */}
-                      {prCheckState === "failed" && prMatters
+                          incomplete when the pull-request read failed. A failed
+                          default read lists nothing either way. */}
+                      {prCheckState === "failed" && prMatters && !defaultFailed
                         ? PR_FAILED_EMPTY_NOTE[prScope(criteria)]
                         : null}
                     </p>
@@ -2058,7 +2215,7 @@ export function CleanupBranchesDialog({
           onCancel={() => setConfirmBatch(null)}
           title={CONFIRM_TITLE[shownConfirm.kind](shownConfirm)}
           body={<ConfirmBody batch={shownConfirm} />}
-          confirmLabel={`${CONFIRM_VERB[shownConfirm.kind]} ${pluralBranches(shownConfirm.names.length)}`}
+          confirmLabel={CONFIRM_LABEL[shownConfirm.kind](shownConfirm)}
           confirmVariant={CONFIRM_VARIANT[shownConfirm.kind]}
           onConfirm={onConfirmBatch}
         />
