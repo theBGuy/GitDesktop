@@ -20,6 +20,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Fragment,
   type ReactNode,
+  type RefObject,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -107,7 +108,7 @@ import {
 } from "@/lib/branch-rules/queries";
 import { copyText } from "@/lib/clipboard";
 import { entityKeyNumber, entityKeyScope } from "@/lib/entity-hold";
-import { presentError } from "@/lib/error-summary";
+import { isPrArchivedRefusal, presentError } from "@/lib/error-summary";
 import {
   gitFetch,
   type MergeStrategy,
@@ -207,13 +208,18 @@ import {
   type ForgeProvider,
   type ForgeUserRef,
   listPageRows,
+  OPEN_IN_BROWSER,
   type PrDetails,
   type PrInfo,
   type PrListPage,
   type PrThreadOut,
+  prConversationHold,
   prHeadSha,
-  providerLabel,
   type RemoteLens,
+  savedProvider,
+  shownProvider,
+  shownProviderLabel,
+  UNKNOWN_HOST,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
@@ -237,7 +243,7 @@ import {
 } from "@/lib/pulls/review-drafts";
 import { remoteStateMatches } from "@/lib/remote-state-filter";
 import { useRepoLens } from "@/lib/repo-lens/queries";
-import { useAiEnabled } from "@/lib/settings/queries";
+import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
@@ -552,6 +558,112 @@ const TAB_NAME: Record<PrSection, string> = {
   review: "Review",
 };
 
+export type FooterFocusTarget = "close" | "reopen";
+
+/**
+ * Hands focus across the docked footer swap a close or reopen causes: the
+ * outgoing footer unmounts with the focused button, dropping focus to <body>.
+ * Armed by the action (only when focus was inside the outgoing footer) for the
+ * PR it was fired on; it lands on the counterpart button when that footer
+ * mounts, only while that PR is on screen and focus still sits on <body>.
+ * Change-only, so a footer swapped by a refetch with nothing armed moves
+ * nothing; a PR change drops the arm unconsumed.
+ */
+export function useFooterFocusSwap({
+  entityKey,
+  closeShown,
+  reopenShown,
+  closeRef,
+  reopenRef,
+}: {
+  entityKey: string;
+  /** The open footer (and its Close button) is painted. */
+  closeShown: boolean;
+  /** The closed footer (and its Reopen button) is painted. */
+  reopenShown: boolean;
+  closeRef: RefObject<HTMLButtonElement | null>;
+  reopenRef: RefObject<HTMLButtonElement | null>;
+}) {
+  const pendingRef = useRef<{ target: FooterFocusTarget; key: string } | null>(
+    null,
+  );
+  const prevRef = useRef({ closeShown, reopenShown });
+  const liveKeyRef = useLatestRef(entityKey);
+  useLayoutEffect(() => {
+    const prev = prevRef.current;
+    prevRef.current = { closeShown, reopenShown };
+    const pending = pendingRef.current;
+    if (pending === null) return;
+    if (pending.key !== entityKey) {
+      pendingRef.current = null;
+      return;
+    }
+    const toClose = pending.target === "close";
+    const wasShown = toClose ? prev.closeShown : prev.reopenShown;
+    const shown = toClose ? closeShown : reopenShown;
+    if (wasShown || !shown) return;
+    pendingRef.current = null;
+    if (document.activeElement !== document.body) return;
+    (toClose ? closeRef : reopenRef).current?.focus();
+  }, [closeShown, reopenShown, entityKey, closeRef, reopenRef]);
+  return {
+    /** Call right before the write starts, for the PR it addresses. A key that
+     *  isn't the PR on screen is refused, so a late arm never replaces its arm. */
+    arm(target: FooterFocusTarget, key: string) {
+      if (key !== liveKeyRef.current) return;
+      pendingRef.current = { target, key };
+    },
+    /** A failed write leaves the footer, and focus on its button, standing.
+     *  Compare-and-clear on the key it armed with: a later PR's arm survives. */
+    disarm(key: string) {
+      if (pendingRef.current?.key === key) pendingRef.current = null;
+    },
+  };
+}
+
+/**
+ * The archived-PR latch. An archived pull request has no read signal, so a refused
+ * write latches the conversation read-only for the PR it was sent on, but only
+ * while that PR is still on screen at the refusal: a late one from a PR the user
+ * left would replace the shown PR's latch, which the reset then clears. Any other
+ * PR on screen clears it (render-time reset), so it never outlives that PR.
+ */
+export function useArchivedLatch(entityKey: string) {
+  const [archivedFor, setArchivedFor] = useState<string | null>(null);
+  if (archivedFor !== null && archivedFor !== entityKey) setArchivedFor(null);
+  const entityKeyRef = useLatestRef(entityKey);
+  return {
+    archived: archivedFor === entityKey,
+    /** Call from a write's catch with the entity key pinned when it started. */
+    latchIfArchived(sentOn: string, error: unknown) {
+      if (isPrArchivedRefusal(error) && entityKeyRef.current === sentOn)
+        setArchivedFor(sentOn);
+    },
+  };
+}
+
+/** The palette's route to the comment box, offered only where there is a box to
+ *  focus and it would take a comment: a resolve takes the whole view over, the
+ *  other sub-tabs have no composer, and a held composer is read-only. */
+export function useFocusCommentAction(
+  focus: () => void,
+  {
+    threadActive,
+    canComment,
+    composerHold,
+  }: {
+    threadActive: boolean;
+    canComment: boolean;
+    composerHold: string | null;
+  },
+) {
+  useHotkeyAction(
+    "focus-comment",
+    focus,
+    threadActive && canComment && composerHold === null,
+  );
+}
+
 export function RemotePrView({
   repoPath,
   number,
@@ -566,8 +678,15 @@ export function RemotePrView({
   // or failed forge-status probe never strips a GitHub PR's write controls.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
-  const remoteLabel = providerLabel(provider);
-  const prNoun = PR_NOUN[provider ?? "github"];
+  // Copy names the saved provider until the probe answers; gates keep the raw probe.
+  const settings = useSettings();
+  const shown = shownProvider(
+    forge.data,
+    savedProvider(settings.data?.recentRepos, repoPath),
+  );
+  const hostName = shownProviderLabel(shown);
+  const remoteLabel = hostName ?? UNKNOWN_HOST;
+  const prNoun = PR_NOUN[shown ?? "github"];
   // The single lens-resolution point for this surface: every PR read/write below
   // targets the fork (origin) or its parent (upstream) — "origin" everywhere but a
   // GitHub fork whose lens is set upstream.
@@ -631,6 +750,13 @@ export function RemotePrView({
     canSubmitReview,
   } = usePrCapabilities(forge.data, provider, writeAccess.data);
   const [section, setSection] = useState<PrSection>("conversation");
+  // A section pick is a user action whose state lives here, so it claims the
+  // epoch first and a pending continuation yields to it. The automatic
+  // corrections below (the pending landing, the fallback) set it silently.
+  const pickSection = (next: PrSection) => {
+    useUiStore.getState().noteUserInteraction();
+    setSection(next);
+  };
   // The <Activity> gate every polling read below carries.
   const repoTab = useUiStore((s) => s.repoTab);
   const selectedPr = useUiStore((s) => s.selectedPr);
@@ -1020,6 +1146,12 @@ export function RemotePrView({
   const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const defaultBranch = useDefaultBranch(repoPath);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // A user file pick, noted first so a pending continuation (a markdown
+  // `#N` lookup) strands; the automatic selections stay silent.
+  const pickPath = (path: string) => {
+    useUiStore.getState().noteUserInteraction();
+    setSelectedPath(path);
+  };
   // Commits-tab drill-in: the selected commit's oid, or null for the list. Reset
   // when the PR number changes (below, alongside the file-selection reset).
   const [selectedCommitOid, setSelectedCommitOid] = useState<string | null>(
@@ -1858,6 +1990,17 @@ export function RemotePrView({
 
   // Keyed on the PR on screen, so a hold keeps showing the held PR's draft.
   const compose = useKeyedEntityState(hold.shownKey, "");
+  const { archived, latchIfArchived } = useArchivedLatch(entityKey);
+  // Read off the rendered PR's own details only: a placeholder is another PR's.
+  // The provider only picks the hold's copy, so it names the shown one.
+  const conversationHold = prConversationHold(
+    detailsPlaceholder ? undefined : details.data,
+    archived,
+    shown,
+  );
+  // Quote entry points withhold over a placeholder (the quote would be another
+  // PR's) and while the composer is read-only (the draft could never post).
+  const quoteHeld = detailsPlaceholder || conversationHold.composer !== null;
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(
     null,
   );
@@ -2086,7 +2229,7 @@ export function RemotePrView({
 
   async function submitComment() {
     const body = compose.value.trim();
-    if (!body || detailsStale) return;
+    if (!body || detailsStale || conversationHold.composer !== null) return;
     // Clear the draft immediately (the perceived-speed win) and append the
     // synthetic comment optimistically; on error restore the draft, but only if
     // that PR's composer is still empty so we never clobber newly-typed text.
@@ -2101,14 +2244,16 @@ export function RemotePrView({
       toast.success("Comment added");
     } catch (e) {
       compose.setFor(submittedFor, (prev) => (prev.trim() ? prev : body));
+      latchIfArchived(submittedFor, e);
       onError(e);
     }
   }
 
   // A typed draft rides Close/Reopen rather than being discarded by them. Gated
-  // on `canComment` so the labels below never promise a comment the provider
-  // won't take.
-  const draftRidesStateChange = canComment && !!compose.value.trim();
+  // on `canComment` and a live composer so the labels below never promise a
+  // comment the provider or a read-only conversation won't take.
+  const draftRidesStateChange =
+    canComment && conversationHold.composer === null && !!compose.value.trim();
 
   /** Posts the riding draft ahead of a state change. False means the comment
    *  failed and the state change is abandoned: the draft stays put for a retry,
@@ -2127,6 +2272,7 @@ export function RemotePrView({
       compose.clearFor(submittedFor);
       return true;
     } catch (e) {
+      latchIfArchived(submittedFor, e);
       onError(e);
       return false;
     }
@@ -2136,6 +2282,9 @@ export function RemotePrView({
     // Re-checked in the handler: the footer disables on the same hold, but a
     // click can land across a selection switch before the disable repaints.
     if (busy || detailsStale || triageBlocked) return;
+    // Read at entry, before the confirm dialog takes focus: only a close fired
+    // from inside the footer may move focus when the footer swaps.
+    const ownsFocus = !!openFooterRef.current?.contains(document.activeElement);
     // `closePr` follows the live repo once the awaits below have run.
     const closeIn = repoPath;
     // Captured before the await: posting clears the draft, and the error arm
@@ -2176,6 +2325,7 @@ export function RemotePrView({
       )
     )
       return;
+    if (ownsFocus) footerFocus.arm("reopen", entityKey);
     try {
       await closePr.mutateAsync({ number, lens });
       // The riding comment posts without the "Comment added" toast the ordinary
@@ -2186,6 +2336,7 @@ export function RemotePrView({
           : `Closed #${number}`,
       );
     } catch (e) {
+      footerFocus.disarm(entityKey);
       if (withComment)
         toastErrorWithNote(
           e,
@@ -2197,6 +2348,9 @@ export function RemotePrView({
 
   async function doReopen() {
     if (busy || detailsStale || triageBlocked) return;
+    const ownsFocus = !!reopenFooterRef.current?.contains(
+      document.activeElement,
+    );
     // `reopenPr` follows the live repo once the riding post has run.
     const reopenIn = repoPath;
     const withComment = draftRidesStateChange;
@@ -2210,6 +2364,7 @@ export function RemotePrView({
       )
     )
       return;
+    if (ownsFocus) footerFocus.arm("close", entityKey);
     try {
       await reopenPr.mutateAsync({ number, lens });
       toast.success(
@@ -2218,6 +2373,7 @@ export function RemotePrView({
           : `Reopened #${number}`,
       );
     } catch (e) {
+      footerFocus.disarm(entityKey);
       if (withComment)
         toastErrorWithNote(
           e,
@@ -2626,15 +2782,12 @@ export function RemotePrView({
     !detailsStale &&
     feedReady;
   const jumpRef = useThreadJumpHotkeys(threadActive);
-  // The palette's route to the comment box. Every term the composer itself is
-  // gated on rides here too, so the action is offered only where there is a box
-  // to focus: a resolve takes the whole view over, and the other sub-tabs have
-  // no composer.
-  useHotkeyAction(
-    "focus-comment",
-    () => composerRef.current?.focus(),
-    threadActive && canComment,
-  );
+  // Every term the composer itself is gated on rides here too.
+  useFocusCommentAction(() => composerRef.current?.focus(), {
+    threadActive,
+    canComment,
+    composerHold: conversationHold.composer,
+  });
 
   const detailPane = resolveDetailPane({
     pending: details.isPending,
@@ -2752,6 +2905,15 @@ export function RemotePrView({
   const reopenFooterRef = useRef<HTMLDivElement>(null);
   useToastClearance(openFooterRef, loadedViewPainted && openFooterShown);
   useToastClearance(reopenFooterRef, loadedViewPainted && reopenFooterShown);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const reopenButtonRef = useRef<HTMLButtonElement>(null);
+  const footerFocus = useFooterFocusSwap({
+    entityKey,
+    closeShown: loadedViewPainted && openFooterShown,
+    reopenShown: loadedViewPainted && reopenFooterShown,
+    closeRef: closeButtonRef,
+    reopenRef: reopenButtonRef,
+  });
   if (showsLoadingFrame) {
     // The loaded header's controls, held where they will stand and gated on the
     // list row's state as the loaded ones are on the PR's. With no cached row an
@@ -2803,7 +2965,7 @@ export function RemotePrView({
               reason={PR_SWITCH_LOADING_REASON}
             >
               <ArrowSquareOutIcon data-icon="inline-start" />
-              {remoteLabel}
+              {hostName ?? OPEN_IN_BROWSER}
             </DisabledReasonButton>
           </>
         }
@@ -2883,10 +3045,10 @@ export function RemotePrView({
   if (detailPane === "error" || !pr) {
     // Offline, deleted, access lost — the class isn't knowable here, so the headline
     // claims only what is: which host the read was aimed at. Naming one class would
-    // demote the true reason to the summary beneath. The host goes unnamed when its
-    // own probe hasn't answered, rather than guessed.
-    const loadFailed = provider
-      ? `Couldn't load this ${prNoun} from ${remoteLabel}.`
+    // demote the true reason to the summary beneath. The host goes unnamed when
+    // neither its probe nor a saved provider names it.
+    const loadFailed = shown
+      ? `Couldn't load this ${prNoun} from ${hostName}.`
       : `Couldn't load this ${prNoun} from the remote.`;
     const errorSummary = details.error
       ? presentError(details.error).summary
@@ -3142,8 +3304,9 @@ export function RemotePrView({
     // The subject is the rendered PR's body or one of its comments, while the
     // write and its optimistic patch address `number` — GitLab routes by both, so
     // a mismatched pair awards the wrong note or 404s. The bars disable on the
-    // same flag; this arm is the belt-and-braces behind them.
-    if (detailsStale) return;
+    // same flag; this arm is the belt-and-braces behind them, as it is for a
+    // read-only conversation's hold.
+    if (detailsStale || conversationHold.reactions !== null) return;
     try {
       await toggleReactionMutation.mutateAsync({
         reactionsKey: repoKeys.reactions(repoPath, ["pr", lens, number]),
@@ -3636,11 +3799,15 @@ export function RemotePrView({
             variant="outline"
             size="xs"
             onClick={() => openUrl(pr.url)}
-            title={`Open this ${prNoun} on ${remoteLabel}`}
+            title={
+              hostName
+                ? `Open this ${prNoun} on ${hostName}`
+                : `Open this ${prNoun} in your browser`
+            }
             className="cursor-pointer"
           >
             <ArrowSquareOutIcon data-icon="inline-start" />
-            {remoteLabel}
+            {hostName ?? OPEN_IN_BROWSER}
           </Button>
         </div>
         <JiraRefRow
@@ -3655,6 +3822,14 @@ export function RemotePrView({
           <Badge variant={pr.state === "OPEN" ? "default" : "secondary"}>
             {pr.isDraft ? "Draft" : pr.state.toLowerCase()}
           </Badge>
+          {pr.locked === true && (
+            <Badge variant="secondary">
+              locked
+              {pr.activeLockReason
+                ? ` · ${pr.activeLockReason.replace(/_/g, "-")}`
+                : ""}
+            </Badge>
+          )}
           <AuthorAvatar login={pr.author} avatarUrl={pr.authorAvatarUrl} />
           <span>{displayLogin(pr.author)}</span>
           <span>•</span>
@@ -3719,7 +3894,7 @@ export function RemotePrView({
             repoPath={repoPath}
             number={shownNumber}
             onView={() => {
-              setSection("conversation");
+              pickSection("conversation");
               setTasksScrollFor(hold.shownKey);
             }}
           />
@@ -3805,7 +3980,7 @@ export function RemotePrView({
               variant={section === s ? "secondary" : "ghost"}
               size="xs"
               aria-pressed={section === s}
-              onClick={() => setSection(s)}
+              onClick={() => pickSection(s)}
             >
               {SECTION_LABEL[s](pr)}
             </Button>
@@ -3818,7 +3993,7 @@ export function RemotePrView({
         base={pr.baseRefName}
         head={pr.headRefName}
         promotionKind={promotionKind}
-        provider={provider}
+        provider={shown}
         forkBlocked={!!pr.crossRepository}
         hasResolveWorktree={resolveWorktree !== null}
         busy={resolveMergePending || abortResolvePending || detailsPlaceholder}
@@ -3928,14 +4103,17 @@ export function RemotePrView({
           }}
           posting={commentPending}
           // The context above is seeded from the rendered PR, so through a switch
+          // (the selection hold included, which still paints the PR it left)
           // `stale` holds both the run and the post — without the spinner that
           // `posting` shows for a real one.
-          stale={detailsPlaceholder}
+          stale={detailsStale}
+          conversationHoldReason={conversationHold.composer}
           // The panel posts its AI review as a comment and passes `asBot: true`,
           // forwarded to the mutation so GitLab attributes it to the review-bot
           // identity (other providers ignore the flag).
-          onPost={(body, opts) =>
-            comment
+          onPost={(body, opts) => {
+            const postedFor = entityKey;
+            return comment
               .mutateAsync({
                 number,
                 body,
@@ -3943,10 +4121,11 @@ export function RemotePrView({
                 asBot: opts?.asBot,
               })
               .catch((e) => {
+                latchIfArchived(postedFor, e);
                 onError(e);
                 throw e; // let the panel skip its success toast / text clear
-              })
-          }
+              });
+          }}
         />
       )}
 
@@ -3991,9 +4170,10 @@ export function RemotePrView({
                         Copy link
                       </DropdownMenuItem>
                       {/* Absent, not disabled, while the description belongs to
-                          the previous PR — the same shape the thread menus take
-                          when their `onQuote` is withheld. */}
-                      {!detailsPlaceholder && (
+                          the previous PR or the composer is read-only — the
+                          same shape the thread menus take when their `onQuote`
+                          is withheld. */}
+                      {!quoteHeld && (
                         <DropdownMenuItem onClick={() => quoteReply(pr.body)}>
                           Quote reply
                         </DropdownMenuItem>
@@ -4019,8 +4199,10 @@ export function RemotePrView({
                   // bar carries the wait itself (a disabled button swallows `title`).
                   <ReactionBar
                     reactions={reactions.data?.body ?? []}
-                    disabled={detailsPlaceholder}
-                    reason={staleReason}
+                    disabled={
+                      detailsPlaceholder || conversationHold.reactions !== null
+                    }
+                    reason={conversationHold.reactions ?? staleReason}
                     held={reactionPickerHeld}
                     onToggle={(content, active) =>
                       toggleReaction(pr.id, content, active)
@@ -4074,12 +4256,12 @@ export function RemotePrView({
                     setRevealThreadId={setRevealThreadId}
                     revealReviewId={revealReviewId}
                     onReviewRevealed={() => setRevealReviewId(null)}
-                    setSection={setSection}
+                    setSection={pickSection}
                     // Drill into the commit via the Commits-tab machinery
                     // (selectedCommitOid → PrCommitDetail).
                     onSelectCommit={(oid) => {
                       setSelectedCommitOid(oid);
-                      setSection("commits");
+                      pickSection("commits");
                     }}
                     canWrite={canWrite}
                     canThreadReply={canThreadReply}
@@ -4087,7 +4269,7 @@ export function RemotePrView({
                     canEditOwnThreadComments={canEditOwnThreadComments}
                     canEditOwnComments={canEditOwnComments}
                     canReact={canReact}
-                    onQuote={detailsPlaceholder ? undefined : quoteReply}
+                    onQuote={quoteHeld ? undefined : quoteReply}
                     onThreadReply={(threadId, body) =>
                       threadReply.mutateAsync({ number, lens, threadId, body })
                     }
@@ -4119,8 +4301,14 @@ export function RemotePrView({
                     onHideComment={hideComment}
                     onUnhideComment={unhideComment}
                     onToggleReaction={toggleReaction}
-                    reactionsHeld={detailsPlaceholder}
-                    reactionsReason={staleReason ?? null}
+                    // The permission reason ranks above the stale one, as it
+                    // does for the menus above.
+                    reactionsHeld={
+                      detailsPlaceholder || conversationHold.reactions !== null
+                    }
+                    reactionsReason={
+                      conversationHold.reactions ?? staleReason ?? null
+                    }
                     reactionPickerHeld={reactionPickerHeld}
                   />
                   {/* Residual review threads — those NOT shown inline under a review
@@ -4145,7 +4333,7 @@ export function RemotePrView({
                     isPaused={reviewThreads.isPaused}
                     isFetching={reviewThreads.isFetching}
                     onRetry={() => void reviewThreads.refetch()}
-                    onQuote={detailsPlaceholder ? undefined : quoteReply}
+                    onQuote={quoteHeld ? undefined : quoteReply}
                     onReply={
                       canThreadReply
                         ? (threadId, body) =>
@@ -4237,6 +4425,8 @@ export function RemotePrView({
               // including the switch, where the comment would post against the
               // previously rendered PR.
               reason={composerReason}
+              readOnlyReason={conversationHold.composer}
+              holdKey={entityKey}
               actions={
                 <>
                   {/* The Review control opens the batch submit dialog for every
@@ -4472,7 +4662,7 @@ export function RemotePrView({
               files={pr.files}
               binaryPaths={binaryPaths}
               effectivePath={effectivePath}
-              onSelectPath={setSelectedPath}
+              onSelectPath={pickPath}
               fileDiff={fileDiff}
               isPending={prDiff.isPending}
               isError={prDiff.isError}
@@ -4492,7 +4682,7 @@ export function RemotePrView({
               lens={lens}
               number={shownNumber}
               lineWidget={reviewLineWidget}
-              onQuote={detailsPlaceholder ? undefined : quoteReply}
+              onQuote={quoteHeld ? undefined : quoteReply}
               onReply={
                 canThreadReply
                   ? (threadId, body) =>
@@ -4610,6 +4800,7 @@ export function RemotePrView({
             <DisabledReasonButton
               variant="outline"
               size="sm"
+              ref={closeButtonRef}
               disabled={busy || triageBlocked || !!offlineHold}
               reason={triageReason ?? composerReason ?? offlineHold}
               onClick={doClose}
@@ -4703,6 +4894,7 @@ export function RemotePrView({
           <DisabledReasonButton
             variant="outline"
             size="sm"
+            ref={reopenButtonRef}
             disabled={busy || triageBlocked}
             reason={triageReason ?? composerReason}
             onClick={doReopen}

@@ -1,5 +1,6 @@
 import { FORGE_KIND_HOSTS, rateLimitSummary } from "@/lib/forge-backoff";
 import type { DroppedCommit, PullWouldDrop } from "@/lib/git/api";
+import { PR_ARCHIVED_READONLY_MESSAGE } from "@/lib/git/types/prs";
 import { type AppError, errorMessage, isAppError } from "@/lib/tauri/invoke";
 
 /** A humanized error, split into what a toast shows (a calm one-liner) and what
@@ -136,6 +137,16 @@ export function appErrorDetail(
   return lead?.endsWith(": ") && message.startsWith(lead)
     ? message.slice(lead.length)
     : message;
+}
+
+/** Whether a failed PR comment was GitHub refusing an archived pull request.
+ *  Homed here, not beside the copy in git/types/prs.ts, which stays free of
+ *  runtime imports for the hook-less node suites that load it. */
+export function isPrArchivedRefusal(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { kind, message } = error as { kind?: unknown; message?: unknown };
+  if (kind !== "gh" || typeof message !== "string") return false;
+  return appErrorDetail(kind, message) === PR_ARCHIVED_READONLY_MESSAGE;
 }
 
 /** `message` in the summary's register: a known Rust lead swapped for its

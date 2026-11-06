@@ -1140,21 +1140,26 @@ fn from_bb_pr(p: BbPr) -> PrInfo {
 }
 
 /// The `state` query fragment for a PR-list filter: `"open"` → one `state=OPEN`,
-/// `"closed"` → the repeatable-param merge of MERGED/DECLINED/SUPERSEDED. Unknown
-/// filters error (mirroring GitLab). Pure — validated before any I/O.
+/// `"closed"` → the repeatable-param merge of MERGED/DECLINED/SUPERSEDED, `"merged"`
+/// → MERGED, `"unmerged"` → DECLINED/SUPERSEDED. Only the merged and unmerged
+/// fragments pin newest-created first; open and closed keep Bitbucket's default
+/// order. Unknown filters error (mirroring GitLab). Pure — validated before any I/O.
 fn pr_state_filter(state: &str) -> AppResult<&'static str> {
     match state {
         "open" => Ok("state=OPEN"),
         "closed" => Ok("state=MERGED&state=DECLINED&state=SUPERSEDED"),
+        "merged" => Ok("state=MERGED&sort=-created_on"),
+        "unmerged" => Ok("state=DECLINED&state=SUPERSEDED&sort=-created_on"),
         other => Err(AppError::InvalidArgument(format!(
             "unknown PR state filter: {other}"
         ))),
     }
 }
 
-/// The repo's pull requests. `state` is `"open"` (→ one call `state=OPEN`) or
-/// `"closed"` (→ one call merging `MERGED`/`DECLINED`/`SUPERSEDED` via the repeatable
-/// `state` param). `pagelen` maxes at 50 for this endpoint. Unknown filters error.
+/// The repo's pull requests, one call per read. `state` is `"open"`, `"closed"`
+/// (everything not open), `"merged"`, or `"unmerged"` (closed without merging); see
+/// [`pr_state_filter`] for each query fragment. `pagelen` maxes at 50 for this
+/// endpoint. Unknown filters error.
 pub async fn list_prs(repo_path: &str, state: &str, limit: Option<u32>) -> AppResult<Vec<PrInfo>> {
     let states = pr_state_filter(state)?;
     let creds = http::load_credentials().await?;
@@ -1815,6 +1820,12 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // GitHub's "allow edits by maintainers" has no Bitbucket equivalent —
         // unknown, not denied.
         maintainer_can_modify: None,
+        // Bitbucket has no conversation lock, so nothing ever holds the composer.
+        locked: false,
+        lock_unknown: false,
+        active_lock_reason: None,
+        viewer_can_comment: None,
+        viewer_can_react: None,
     })
 }
 
@@ -7595,6 +7606,30 @@ mod tests {
             pr_state_filter("all"),
             Err(AppError::InvalidArgument(_))
         ));
+    }
+
+    #[test]
+    fn pr_state_filter_pins_newest_first_on_the_merged_and_unmerged_lists_only() {
+        assert_eq!(
+            pr_state_filter("merged").unwrap(),
+            "state=MERGED&sort=-created_on"
+        );
+        assert_eq!(
+            pr_state_filter("unmerged").unwrap(),
+            "state=DECLINED&state=SUPERSEDED&sort=-created_on"
+        );
+        for state in ["open", "closed"] {
+            assert!(
+                !pr_state_filter(state).unwrap().contains("sort="),
+                "{state}"
+            );
+        }
+        for bad in ["", "Merged", "declined", "superseded"] {
+            assert!(matches!(
+                pr_state_filter(bad),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
     }
 
     #[tokio::test]

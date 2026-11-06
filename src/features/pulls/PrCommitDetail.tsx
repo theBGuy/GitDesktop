@@ -43,6 +43,7 @@ import type {
   RemoteLens,
 } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
+import { useUiStore } from "@/lib/stores/ui";
 import { parseableDate } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import {
@@ -128,11 +129,17 @@ export function PrCommitDetail({
     selectedPath && files.some((f) => f.path === selectedPath)
       ? selectedPath
       : (files[0]?.path ?? null);
+  // A user file pick, noted first so a pending continuation (a markdown
+  // `#N` lookup) strands; the automatic selections stay silent.
+  const pickPath = (path: string) => {
+    useUiStore.getState().noteUserInteraction();
+    setSelectedPath(path);
+  };
 
   const onFilesKeyDown = listKeyboardNav({
     items: files,
     activeIndex: files.findIndex((f) => f.path === effectivePath),
-    onActivate: (f) => setSelectedPath(f.path),
+    onActivate: (f) => pickPath(f.path),
     rowKey: (f) => f.path,
     rowAttr: "data-path",
   });
@@ -316,7 +323,7 @@ export function PrCommitDetail({
                                 ? "bg-accent text-accent-foreground"
                                 : "hover:bg-muted/60",
                             )}
-                            onClick={() => setSelectedPath(file.path)}
+                            onClick={() => pickPath(file.path)}
                           >
                             <PathText
                               path={file.path}
@@ -376,7 +383,7 @@ export function PrCommitDetail({
                       selectedBinary={sectionIsBinary(
                         sections.get(effectivePath ?? "") ?? "",
                       )}
-                      onSelectFile={setSelectedPath}
+                      onSelectFile={pickPath}
                       lens={lens}
                     />
                   </main>

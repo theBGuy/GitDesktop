@@ -208,7 +208,7 @@ export function usePrListCi(
     // Repo and lens must match: a fork numbers PRs independently of its parent, so a
     // cross-lens map paints wrong icons. State stays free — the panel idles this query
     // while the list serves placeholder rows (mirroring the mergeability gate), and
-    // open/closed sets are disjoint, so a cross-tab serve can't show another PR's status.
+    // the state tabs are disjoint, so a cross-tab serve can't show another PR's status.
     placeholderData: keepPreviousDataForKeyAxes(repo, [[3, lens]]),
   });
 }

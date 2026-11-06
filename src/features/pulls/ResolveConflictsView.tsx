@@ -29,6 +29,7 @@ import { useUpdateLocalPr } from "@/lib/pulls/queries";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -98,6 +99,12 @@ export function ResolveConflictsView({
   const walkActive = scopePath === worktreePath ? activePath : null;
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // A user file pick, noted first so a pending continuation (a markdown
+  // `#N` lookup) strands; the automatic selections stay silent.
+  const pickPath = (path: string) => {
+    useUiStore.getState().noteUserInteraction();
+    setSelectedPath(path);
+  };
 
   // Arming happens at or after mount, so a walk already scoped to this worktree is
   // left over from an earlier visit — clear it, or re-entering a still-living
@@ -226,7 +233,7 @@ export function ResolveConflictsView({
     items: conflicted,
     activeIndex,
     rowKey: (e) => e.path,
-    onActivate: (entry) => setSelectedPath(entry.path),
+    onActivate: (entry) => pickPath(entry.path),
   });
 
   return (
@@ -313,7 +320,7 @@ export function ResolveConflictsView({
                   data-row={entry.path}
                   role="option"
                   aria-selected={active}
-                  onClick={() => setSelectedPath(entry.path)}
+                  onClick={() => pickPath(entry.path)}
                   className={cn(
                     "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs outline-none",
                     active

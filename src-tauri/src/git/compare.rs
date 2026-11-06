@@ -90,11 +90,21 @@ pub async fn git_branch_ahead_count(
     base: String,
     compare: String,
 ) -> AppResult<u32> {
-    validate_ref(&base)?;
-    validate_ref(&compare)?;
-    let (base, compare) = local_branch_revs(&repo_path, &base, &compare).await;
+    branch_ahead_count_core(&repo_path, &base, &compare).await
+}
+
+/// Count of `base..compare` with each side resolved as a LOCAL BRANCH first —
+/// the shared core of [`git_branch_ahead_count`] and the MCP create guard.
+pub(crate) async fn branch_ahead_count_core(
+    repo_path: &str,
+    base: &str,
+    compare: &str,
+) -> AppResult<u32> {
+    validate_ref(base)?;
+    validate_ref(compare)?;
+    let (base, compare) = local_branch_revs(repo_path, base, compare).await;
     let out = run_git(
-        Some(&repo_path),
+        Some(repo_path),
         &["rev-list", "--count", &format!("{base}..{compare}")],
         DEFAULT_TIMEOUT,
     )

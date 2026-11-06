@@ -6,11 +6,12 @@ import {
 import { useCallback } from "react";
 import {
   forgeAwaitingFirstAnswer,
+  remotesOptions,
   useForgeStatus,
   useRemotes,
   useRemoteUrl,
 } from "@/lib/git/queries";
-import type { RemoteLens } from "@/lib/git/types";
+import type { ForgeStatus, RemoteLens } from "@/lib/git/types";
 import { repoNameFromPath } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastErrorWithNote } from "@/lib/toast";
@@ -44,15 +45,61 @@ export function useRepoLensRaw(repo: string) {
 const lensReadSettled = (q: { isPending: boolean; isFetching: boolean }) =>
   !q.isPending && !q.isFetching;
 
+/** The gate and lens from the three reads' data, shared by {@link useLensState} and
+ *  {@link cachedRepoLens} so the two can't drift. A read with no data counts as
+ *  failing its gate input, so a cold cache yields "origin". */
+export function lensFromReads(
+  forge: ForgeStatus | undefined,
+  remotes: readonly string[] | undefined,
+  raw: RemoteLens | undefined,
+): { gate: boolean; lens: RemoteLens } {
+  // Signed out, the status still names a github.com repo, but resolving the
+  // parent needs `gh repo view`, so the upstream lens can't be offered.
+  const gate =
+    forge?.provider === "github" &&
+    Boolean(forge.authenticated) &&
+    Boolean(remotes?.includes("upstream"));
+  return { gate, lens: gate && raw === "upstream" ? "upstream" : "origin" };
+}
+
+/** The imperative twin of {@link useRepoLens} for click-time and post-await reads:
+ *  the same gate over the same three caches, read without subscribing. */
+export function cachedRepoLens(
+  queryClient: QueryClient,
+  repo: string,
+): RemoteLens {
+  return lensFromReads(...cachedLensInputs(queryClient, repo)).lens;
+}
+
+/** Whether every cache {@link cachedRepoLens} reads has answered. Until then its
+ *  "origin" is a default, not a verdict, so an in-app select could later resolve
+ *  under the other lens. */
+export function cachedLensInputsComplete(
+  queryClient: QueryClient,
+  repo: string,
+): boolean {
+  return cachedLensInputs(queryClient, repo).every((v) => v !== undefined);
+}
+
+/** The three caches both imperative reads take, so they can't drift apart. */
+function cachedLensInputs(queryClient: QueryClient, repo: string) {
+  return [
+    queryClient.getQueryData<ForgeStatus>(["repo", repo, "forge-status"]),
+    queryClient.getQueryData<string[]>(remotesOptions(repo).queryKey),
+    queryClient.getQueryData<RemoteLens>(lensKey(repo)),
+  ] as const;
+}
+
 /** Every async read the lens resolves from, each hook called unconditionally in ONE
  *  body and listed once in `inputs`, so `settled` and `answered` can't cover different
  *  sets (a new read must still be added to it); consumers take these, never re-derive them.
  *  `answered` (no input pending) holds through a refetch of an input that already has
  *  data, so a consumer that can take a cached lens the refetch may still move doesn't
- *  wait on each new observer's refetch. `waiting` is the window before the forge's FIRST
- *  answer on a repo with an upstream remote; never `!settled`, which flips on every
- *  background refetch. `storedLens` is the cached choice, ungated: what a supported fork
- *  settles on. */
+ *  wait on each new observer's refetch; a failed read counts as answered, unlike
+ *  {@link cachedLensInputsComplete}, which needs data in every cache. `waiting` is the
+ *  window before the forge's FIRST answer on a repo with an upstream remote; never
+ *  `!settled`, which flips on every background refetch. `storedLens` is the cached
+ *  choice, ungated: what a supported fork settles on. */
 export function useLensState(repo: string): {
   gate: boolean;
   lens: RemoteLens;
@@ -65,15 +112,10 @@ export function useLensState(repo: string): {
   const remotes = useRemotes(repo);
   const raw = useRepoLensRaw(repo);
   const inputs = [forge, remotes, raw];
-  // Signed out, the status still names a github.com repo, but resolving the
-  // parent needs `gh repo view`, so the upstream lens can't be offered.
-  const gate =
-    forge.data?.provider === "github" &&
-    Boolean(forge.data.authenticated) &&
-    Boolean(remotes.data?.includes("upstream"));
+  const { gate, lens } = lensFromReads(forge.data, remotes.data, raw.data);
   return {
     gate,
-    lens: gate && raw.data === "upstream" ? "upstream" : "origin",
+    lens,
     settled: inputs.every(lensReadSettled),
     answered: inputs.every((q) => !q.isPending),
     waiting:

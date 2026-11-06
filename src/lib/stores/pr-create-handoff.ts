@@ -31,7 +31,7 @@ export const GUARD_RELEASE_TIMEOUT_MS = 20_000;
 export const HOLD_LONGSTOP_MS = 30 * 60_000;
 
 /** The PR list key down to its lens (`usePrList` and `usePrListPage` alike):
- *  index 3 is the lens, index 4 the open/closed state. Indices 4+ (state, limit,
+ *  index 3 is the lens, index 4 the state axis. Indices 4+ (state, limit,
  *  filter, the page marker) stay free, so every permutation on screen counts;
  *  the lens stays pinned, since a bare number is only valid under the lens that
  *  produced it. */

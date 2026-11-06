@@ -87,7 +87,7 @@ import {
   useRepoStatus,
   useSetRepoStar,
 } from "@/lib/git/queries";
-import { providerLabel } from "@/lib/git/types";
+import { knownProvider, providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
 import { useRepoNotificationsDialog } from "@/lib/notifications/matrix";
@@ -276,14 +276,8 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
   const remoteLabel = providerLabel(provider);
   // The forge probe ends in a network call, so a repo open leaves the view item
   // missing for its first seconds; until the probe answers, the recents entry's
-  // last-known provider stands in. Membership-narrowed rather than cast: it is a
-  // stored plain string, and providerLabel reads an unrecognized one as "GitHub".
-  const persistedProvider =
-    repoEntry.provider === "github" ||
-    repoEntry.provider === "gitlab" ||
-    repoEntry.provider === "bitbucket"
-      ? repoEntry.provider
-      : undefined;
+  // last-known provider stands in, narrowed because it is a stored plain string.
+  const persistedProvider = knownProvider(repoEntry.provider);
   // Star, fork, and create-issue deliberately stay on `canGh` — they need the
   // authenticated probe, and offering them before auth is known would be worse.
   // View-on-host needs neither for GitLab, Bitbucket, or a `github.com` origin:

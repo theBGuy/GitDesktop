@@ -107,7 +107,7 @@ export function IssueDevelopment({
 
   function openLinkedPr(n: number) {
     // Through the store's navigator: the PRs listed here are usually the ones
-    // that CLOSED the issue, so the Pulls list has to align its open/closed tab
+    // that CLOSED the issue, so the Pulls list has to align its state tab
     // with the PR's real state rather than land on whichever tab was showing.
     // The numbers come from `dev`, read under this view's live `lens`, so they
     // resolve under the lens that produced them without a lens write.

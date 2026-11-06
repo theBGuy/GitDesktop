@@ -1,4 +1,4 @@
-import { SparkleIcon, XIcon } from "@phosphor-icons/react";
+import { SparkleIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { useEffectEvent, useRef } from "react";
@@ -41,6 +41,10 @@ import {
   toastError,
   toastErrorWithNote,
 } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
@@ -269,6 +273,16 @@ export function CreateLocalPrDialog({
   );
   const ahead = comparison.data ?? [];
   const sameBranch = base === head;
+  // Derived from the live pair's read only, never stored: the count's key carries
+  // the pair, so a pair change resets `data` and the hold re-engages. A head
+  // already in its base reads as merged the moment it is created.
+  const noBase = !sameBranch && base === "";
+  const counted = !sameBranch && !noBase;
+  const nothingToMerge = counted && comparison.data?.length === 0;
+  // A failed background refetch keeps the loaded count; only a read that never
+  // answered for this pair counts as failed.
+  const counting = counted && comparison.isPending;
+  const countFailed = counted && comparison.isLoadingError;
 
   // Shared chip state machine — enabled while the dialog is open and the tracker
   // is usable. Local PRs have no lens concept, so read the forge's own issues
@@ -332,8 +346,30 @@ export function CreateLocalPrDialog({
   });
   const generateHint = generateChord.hint;
   // The one submit gate, shared by the button, the mod+enter chord, and the
-  // form's native submit: Enter must submit exactly when the button would.
-  const submitBlocked = generating;
+  // form's native submit: Enter must submit exactly when the button would. A
+  // failed count never holds: it says so and leaves Create enabled.
+  const holdReason = (() => {
+    switch (true) {
+      // An empty pair is no pick at all (no branches to offer); it stays disabled.
+      case sameBranch && head !== "":
+        return "Pick two different branches.";
+      case noBase:
+        return "Choose a base branch to merge into.";
+      case nothingToMerge:
+        return `Nothing to merge: ${head} is already in ${base}.`;
+      case counting:
+        return "Counting commits to merge…";
+      default:
+        return null;
+    }
+  })();
+  const submitBlocked = generating || holdReason !== null;
+  const { blockedReason, reasonId, wrapperTitle, describedBy } =
+    useDisabledReason({
+      disabled: submitBlocked,
+      reason: holdReason,
+      title: SUBMIT_HINT,
+    });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -420,15 +456,50 @@ export function CreateLocalPrDialog({
                 {head || "…"} <span className="text-muted-foreground">→</span>{" "}
                 {base || "…"}
               </p>
-              {sameBranch ? (
-                <p className="text-xs text-warning">
-                  Pick two different branches.
-                </p>
-              ) : (
-                <p className="text-xs text-muted-foreground">
-                  {ahead.length} commit{ahead.length === 1 ? "" : "s"} to merge.
-                </p>
-              )}
+              {(() => {
+                switch (true) {
+                  case sameBranch:
+                    return (
+                      <p className="text-xs text-warning">
+                        Pick two different branches.
+                      </p>
+                    );
+                  case noBase:
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        Choose a base branch to merge into.
+                      </p>
+                    );
+                  case nothingToMerge:
+                    return (
+                      <p className="flex items-start gap-1.5 text-xs text-warning">
+                        <WarningIcon className="mt-px size-3.5 shrink-0" />
+                        <span>
+                          Nothing to merge: {head} is already in {base}.
+                        </span>
+                      </p>
+                    );
+                  case counting:
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        Counting commits to merge…
+                      </p>
+                    );
+                  case countFailed:
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        Couldn't count the commits to merge.
+                      </p>
+                    );
+                  default:
+                    return (
+                      <p className="text-xs text-muted-foreground">
+                        {ahead.length} commit{ahead.length === 1 ? "" : "s"} to
+                        merge.
+                      </p>
+                    );
+                }
+              })()}
             </div>
 
             <form.AppField
@@ -533,9 +604,27 @@ export function CreateLocalPrDialog({
               Cancel
             </Button>
             <form.AppForm>
-              <form.SubmitButton disabled={submitBlocked} title={SUBMIT_HINT}>
-                Create local PR
-              </form.SubmitButton>
+              <span
+                className={cn(
+                  "inline-flex",
+                  blockedReason && "cursor-not-allowed",
+                )}
+                title={wrapperTitle}
+              >
+                <form.SubmitButton
+                  focusableWhenDisabled={!!blockedReason}
+                  disabled={submitBlocked}
+                  aria-describedby={describedBy}
+                  className={ARIA_DISABLED_CLASS}
+                >
+                  Create local PR
+                </form.SubmitButton>
+                {blockedReason ? (
+                  <span id={reasonId} className="sr-only">
+                    {blockedReason}
+                  </span>
+                ) : null}
+              </span>
             </form.AppForm>
           </DialogFooter>
         </form>
