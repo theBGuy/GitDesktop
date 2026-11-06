@@ -499,9 +499,11 @@ the last list up, with a line above it saying it couldn't refresh.
 - File rows show their own **+added -deleted** line counts, left of that button. They
   count per side, so a file you staged and then edited again shows what's staged on
   its Staged row and what's still outside it on its Changes row. Binary files read
-  \`bin\`; untracked files count every line as an addition from the moment they
-  appear (files Git converts as it stores them, such as Git LFS files, wait until
-  they're staged), and conflicted rows show none while the conflict is unresolved.
+  \`bin\`, or \`mode\` / \`renamed\` when only the file mode changed or the file moved
+  and Git can confirm its content is unchanged. Untracked files count every line as an
+  addition from the moment they appear (files Git converts as it stores them, such as
+  Git LFS files, wait until they're staged), and conflicted rows show none while the
+  conflict is unresolved.
 - **Hunk-level staging** — in a file's diff, each hunk has its own Stage hunk and
   Discard… buttons, or Unstage hunk on a staged file's diff. Discard returns the hunk
   to the file's staged version when part of the file is staged, to the last commit
@@ -587,8 +589,9 @@ the last list up, with a line above it saying it couldn't refresh.
   file is detected wrong (or turn highlighting off). A narrow pane drops the override's
   button from the toolbar; *Change diff language…* in the command palette (palette-only
   by default — bind a key in **Settings → Keyboard**) still opens the picker.
-- **Image diffs** render side by side; a file too large to decode safely shows a
-  **Too large to preview** pane instead. A side that couldn't be read says why, with
+- **Image diffs** render side by side, each side captioned with its pixel dimensions and
+  file size; a file too large to decode safely shows a **Too large to preview** pane
+  instead, with the file's size when it's known. A side that couldn't be read says why, with
   **Retry** when reading it again could help. Click a rendered side, or Tab to it and
   press Enter, to open it fullscreen: the image over a dimmed backdrop, its label and pixel
   dimensions along the bottom, and a **Fit** / **100%** toggle. In **Fit** view ← and → move
@@ -599,6 +602,12 @@ the last list up, with a line above it saying it couldn't refresh.
   *1.2 MB → 725 KB · 486 KB smaller (−40%)*, or *Deleted file · 900 KB* for a removed one.
   When two different sizes round to the same figure, the line gives exact byte counts.
   A screen reader always hears the exact counts. A changed file mode gets its own line.
+  GitHub pull requests show sizes too, even for files your clone doesn't have.
+  A non-image binary file changed in the working tree (yours or an agent session's)
+  also offers **Open with default program** and **Show in Explorer**; for a deleted
+  one, **Show in Explorer** opens the nearest folder that still exists. When a binary
+  file and a symbolic link trade places, local diffs show both: the binary side's size
+  line and the link's text.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will

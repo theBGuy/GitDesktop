@@ -122,6 +122,9 @@ pub async fn git_branch_diff_files(
         Some(&repo_path),
         &[
             "diff",
+            "--no-ext-diff",
+            "--raw",
+            "--no-abbrev",
             "--numstat",
             "-z",
             &format!("{base}...{compare}"),
@@ -129,7 +132,7 @@ pub async fn git_branch_diff_files(
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(parse_numstat_z(&out.stdout_lossy()))
+    Ok(crate::git::diff::parse_raw_numstat_z(&out.stdout_lossy()))
 }
 
 /// Both refs resolved to SHAs in ONE spawn, so the AI-ignore filter's two passes

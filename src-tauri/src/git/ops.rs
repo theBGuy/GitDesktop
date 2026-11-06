@@ -5,7 +5,6 @@ use tauri::State;
 
 use crate::error::{AppError, AppResult};
 use crate::git::commit::{ExpectedRef, SWITCH_ROLLBACK_HINT};
-use crate::git::diff::parse_numstat_z;
 use crate::git::history::validate_hash;
 use crate::git::ignored_guard::{self, ignored_files_in_the_way};
 use crate::git::runner::{
@@ -3080,6 +3079,7 @@ pub struct StashFile {
     pub added: u32,
     pub deleted: u32,
     pub is_binary: bool,
+    pub binary_kind: Option<crate::git::types::BinaryKind>,
     /// Lives in the stash's untracked-files parent (^3), so its content reads
     /// from there rather than the stash commit itself.
     pub untracked: bool,
@@ -3105,6 +3105,9 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
         &[
             "stash",
             "show",
+            "--no-ext-diff",
+            "--raw",
+            "--no-abbrev",
             "--numstat",
             "-z",
             "--include-untracked",
@@ -3113,7 +3116,7 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let entries = parse_numstat_z(&out.stdout_lossy());
+    let entries = crate::git::diff::parse_raw_numstat_z(&out.stdout_lossy());
 
     // Paths in the untracked parent (^3, present only when untracked files
     // were stashed) need their "new" content read from there.
@@ -3139,6 +3142,7 @@ async fn stash_files_at(repo: &str, spec: &str) -> AppResult<Vec<StashFile>> {
             added: e.added,
             deleted: e.deleted,
             is_binary: e.is_binary,
+            binary_kind: e.binary_kind,
         })
         .collect())
 }
@@ -7112,6 +7116,73 @@ mod tests {
 
     fn dropping(content: &str, lines: &[u32]) -> String {
         remove_lines(content, &lines.iter().copied().collect())
+    }
+
+    #[test]
+    fn stash_file_wire_keys_are_exact() {
+        for kind in [None, Some(crate::git::types::BinaryKind::Mode)] {
+            let value = serde_json::to_value(StashFile {
+                path: "a".into(),
+                added: 0,
+                deleted: 0,
+                is_binary: true,
+                binary_kind: kind,
+                untracked: false,
+            })
+            .unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "path": "a", "added": 0, "deleted": 0, "isBinary": true,
+                    "binaryKind": kind, "untracked": false,
+                })
+            );
+            assert!(value.get("binary_kind").is_none());
+            assert!(value.get("is_binary").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stash_rows_keep_mode_kinds_and_untracked_unknowns() {
+        let (dir, repo) = setup_repo("binary-kinds").await;
+        for (key, value) in [
+            ("core.filemode", "false"),
+            ("core.autocrlf", "false"),
+            ("core.attributesFile", ""),
+            ("core.excludesFile", ""),
+        ] {
+            git(&repo, &["config", key, value]).await;
+        }
+        std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        for file in ["attributes", "exclude"] {
+            std::fs::write(dir.path().join(".git/info").join(file), "").unwrap();
+        }
+        for file in ["content", "mode"] {
+            std::fs::write(dir.path().join(file), format!("{file}\0binary")).unwrap();
+        }
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "binary base"]).await;
+        std::fs::write(dir.path().join("content"), b"changed\0content").unwrap();
+        std::fs::write(dir.path().join("untracked"), b"new\0binary").unwrap();
+        git(&repo, &["stash", "push", "-u"]).await;
+        let rows = stash_files_at(&repo, "stash@{0}").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert!(row.is_binary);
+            assert_eq!(row.binary_kind, None);
+            assert_eq!(row.untracked, row.path == "untracked");
+        }
+        git(&repo, &["update-index", "--chmod=+x", "mode"]).await;
+        git(&repo, &["stash", "push"]).await;
+        let rows = stash_files_at(&repo, "stash@{0}").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, "mode");
+        assert!(rows[0].is_binary);
+        assert_eq!(
+            rows[0].binary_kind,
+            Some(crate::git::types::BinaryKind::Mode)
+        );
+        assert!(!rows[0].untracked);
     }
 
     /// Tag names are interpolated into `refs/tags/<name>` and `:refs/tags/<name>`

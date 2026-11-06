@@ -37,7 +37,7 @@ fn invalid_id(raw: &str) -> AppError {
 
 /// A side's id as the `index` line spells it: 4..=64 hex, lowercased; `None` when
 /// absent or all-zero.
-fn side_id(raw: Option<String>) -> AppResult<Option<String>> {
+pub(crate) fn side_id(raw: Option<String>) -> AppResult<Option<String>> {
     let Some(raw) = raw else {
         return Ok(None);
     };
@@ -203,7 +203,8 @@ async fn worktree_size(repo: &str, rel: String, new_id: &str) -> AppResult<Optio
 /// its raw bytes hash to `new_oid` (no id, no answer) and a stat after the hash
 /// still finds the same length and modified time; the blob is never read.
 /// `anchor_commit` is the full commit a PR surface shows; every lookup answers
-/// only when it is a local commit.
+/// only when it is a local commit in a full clone. Shallow and partial clones
+/// cannot prove that forge-abbreviated blob ids name the intended objects.
 #[tauri::command]
 pub async fn git_blob_sizes(
     repo_path: String,
@@ -230,12 +231,18 @@ pub async fn git_blob_sizes(
         }
         None => None,
     };
+    if old.is_none() && new.is_none() {
+        return Ok(UNKNOWN);
+    }
     // No real commit is all-zero, so such an anchor withholds both sizes rather
     // than dropping the gate.
     if anchor
         .as_deref()
         .is_some_and(|id| id.bytes().all(|b| b == b'0'))
     {
+        return Ok(UNKNOWN);
+    }
+    if anchor.is_some() && incomplete_clone(&repo_path).await? {
         return Ok(UNKNOWN);
     }
     let (new, worktree) = match worktree {
@@ -289,6 +296,37 @@ pub async fn git_blob_sizes(
         new_size = worktree_size(&repo_path, rel, &id).await?;
     }
     Ok(BlobSizes { old_size, new_size })
+}
+
+// Abbreviated forge ids cannot be proven in shallow or partial clones.
+async fn incomplete_clone(repo: &str) -> AppResult<bool> {
+    let shallow = run_git_raw_input_env(
+        Some(repo),
+        &["rev-parse", "--is-shallow-repository"],
+        None,
+        &NO_LAZY_FETCH,
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .exit_verdict()?;
+    let partial = run_git_raw_input_env(
+        Some(repo),
+        &[
+            "config",
+            "--get-regexp",
+            "^(remote\\..*\\.promisor|extensions\\.partialclone)$",
+        ],
+        None,
+        &NO_LAZY_FETCH,
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let is_partial = match partial.code {
+        0 => !partial.stdout.is_empty(),
+        1 if partial.stdout.is_empty() => false,
+        _ => return partial.exit_verdict().map(|_| false),
+    };
+    Ok(shallow.stdout_lossy().trim() == "true" || is_partial)
 }
 
 #[cfg(test)]
@@ -596,6 +634,16 @@ mod tests {
             sizes(&nowhere, None, None, None, None).await.unwrap(),
             (None, None)
         );
+        for (old, new) in [(None, None), (Some(zero.as_str()), Some(&zero[..7]))] {
+            assert_eq!(
+                sizes(&nowhere, old, new, None, Some(BOGUS)).await.unwrap(),
+                (None, None)
+            );
+        }
+        assert!(matches!(
+            sizes(&nowhere, Some("bad-id"), None, None, Some(BOGUS)).await,
+            Err(AppError::InvalidArgument(_))
+        ));
     }
 
     #[tokio::test]
@@ -1045,6 +1093,103 @@ mod tests {
         } else {
             format!("file:///{spelled}")
         }
+    }
+
+    #[tokio::test]
+    async fn anchored_sizes_withhold_in_shallow_and_partial_clones_only() {
+        let f = fixture(&[]).await.unwrap();
+        std::fs::write(Path::new(&f.repo).join("second.txt"), "second commit\n").unwrap();
+        git(&f.repo, &["add", "second.txt"]).await;
+        git(&f.repo, &["commit", "-q", "-m", "second"]).await;
+        let head = git(&f.repo, &["rev-parse", "HEAD"]).await;
+        git(&f.repo, &["config", "uploadpack.allowFilter", "true"]).await;
+        let root = tempfile::tempdir().unwrap();
+        for (name, flags, incomplete) in [
+            ("shallow", vec!["--depth", "1"], true),
+            ("partial", vec!["--filter=blob:none"], true),
+            ("full", vec![], false),
+        ] {
+            let target = root.path().join(name);
+            let url = file_url(Path::new(&f.repo));
+            let target_text = target.to_string_lossy();
+            let mut args = vec!["clone", "-q"];
+            args.extend(flags);
+            args.extend([url.as_str(), target_text.as_ref()]);
+            let out = run_git_raw(Some(&f.repo), &args, DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            if out.code != 0 {
+                eprintln!("SKIPPED {name} clone: {}", out.stderr.trim());
+                continue;
+            }
+            let repo = target.to_string_lossy().into_owned();
+            pin_config(&repo).await;
+            assert_eq!(git(&repo, &["rev-parse", "HEAD"]).await, head);
+            assert_eq!(
+                git(&repo, &["rev-parse", "--is-shallow-repository"]).await,
+                if name == "shallow" { "true" } else { "false" }
+            );
+            if name == "partial" {
+                assert_eq!(
+                    git(&repo, &["config", "--get", "remote.origin.promisor"]).await,
+                    "true"
+                );
+            }
+            assert_eq!(incomplete_clone(&repo).await.unwrap(), incomplete);
+            // Checkout populated these blobs locally, even in the partial clone.
+            assert_eq!(
+                sizes(&repo, Some(&f.small[..7]), Some(&f.mid[..7]), None, None)
+                    .await
+                    .unwrap(),
+                (Some(3), Some(7)),
+                "{name} unanchored"
+            );
+            for worktree in [None, Some("mid.bin")] {
+                assert_eq!(
+                    sizes(
+                        &repo,
+                        Some(&f.small[..7]),
+                        Some(&f.mid[..7]),
+                        worktree,
+                        Some(&head)
+                    )
+                    .await
+                    .unwrap(),
+                    if incomplete {
+                        (None, None)
+                    } else {
+                        (Some(3), Some(7))
+                    },
+                    "{name} anchored, worktree {worktree:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn any_partial_clone_marker_withholds_only_anchored_reads() {
+        for (key, value) in [
+            ("remote.other.promisor", "false"),
+            ("extensions.partialClone", "origin"),
+        ] {
+            let f = fixture(&[]).await.unwrap();
+            git(&f.repo, &["config", key, value]).await;
+            assert!(incomplete_clone(&f.repo).await.unwrap());
+            assert_eq!(
+                sizes(&f.repo, Some(&f.small), None, None, Some(&f.commit))
+                    .await
+                    .unwrap(),
+                (None, None)
+            );
+            assert_eq!(
+                sizes(&f.repo, Some(&f.small), None, None, None)
+                    .await
+                    .unwrap(),
+                (Some(3), None)
+            );
+        }
+        let (_dir, missing) = nowhere();
+        assert!(incomplete_clone(&missing).await.is_err());
     }
 
     /// Absence probes that never fetch: `--missing=print` and the no-lazy-fetch env.

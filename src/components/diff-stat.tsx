@@ -1,4 +1,17 @@
+import type { BinaryKind } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
+
+const BINARY_KIND_LABEL: Record<BinaryKind, string> = {
+  mode: "mode",
+  renamed: "renamed",
+  renamedMode: "renamed",
+};
+
+const BINARY_KIND_SR: Record<BinaryKind, string> = {
+  mode: "Binary file, mode changed",
+  renamed: "Binary file, renamed",
+  renamedMode: "Binary file, renamed and mode changed",
+};
 
 /**
  * The app's one `+added -deleted` line-count span. The `+`/`-` glyphs carry the
@@ -7,17 +20,23 @@ import { cn } from "@/lib/utils";
  * this component has no opinion beyond `shrink-0` and tabular digits. The
  * glyphs are `aria-hidden` behind an `sr-only` name span, which is absolutely
  * positioned and so never becomes a flex item in a caller's layout.
+ * A binary row's `binaryKind` (wire-sourced, non-null only when the content is
+ * proven unchanged) swaps `bin` for "mode"/"renamed"; it is read only when
+ * `isBinary` is set, so it can never relabel a counts row.
  */
 export function DiffStat({
   added,
   deleted,
   isBinary,
+  binaryKind,
   format = String,
   className,
 }: {
   added: number;
   deleted: number;
   isBinary?: boolean;
+  /** Undefined reads as null: the row keeps `bin`. */
+  binaryKind?: BinaryKind | null;
   /** Number formatter for sites that abbreviate (Insights uses `fmt`). */
   format?: (n: number) => string;
   className?: string;
@@ -25,8 +44,12 @@ export function DiffStat({
   if (isBinary) {
     return (
       <span className={cn("shrink-0 text-muted-foreground", className)}>
-        <span aria-hidden>bin</span>
-        <span className="sr-only">Binary file</span>
+        <span aria-hidden>
+          {binaryKind != null ? BINARY_KIND_LABEL[binaryKind] : "bin"}
+        </span>
+        <span className="sr-only">
+          {binaryKind != null ? BINARY_KIND_SR[binaryKind] : "Binary file"}
+        </span>
       </span>
     );
   }
@@ -51,8 +74,8 @@ export function DiffStat({
   );
 }
 
-/** The reserved width of a file list's counts cell: `+999 -99` and `bin` fit,
- *  larger counts grow past it. */
+/** The reserved width of a file list's counts cell: `+999 -99`, `bin` and
+ *  `renamed` fit, larger counts grow past it. */
 const DIFF_STAT_SLOT_CLASS = "min-w-[8ch] text-right";
 
 /**
@@ -66,7 +89,12 @@ export function DiffStatSlot({
   className,
 }: {
   /** Absent = no counts (yet, or ever): an empty cell of the same width. */
-  stat?: { added: number; deleted: number; isBinary?: boolean };
+  stat?: {
+    added: number;
+    deleted: number;
+    isBinary?: boolean;
+    binaryKind?: BinaryKind | null;
+  };
   className?: string;
 }) {
   if (!stat) {
@@ -82,6 +110,7 @@ export function DiffStatSlot({
       added={stat.added}
       deleted={stat.deleted}
       isBinary={stat.isBinary}
+      binaryKind={stat.binaryKind}
       className={cn(DIFF_STAT_SLOT_CLASS, className)}
     />
   );

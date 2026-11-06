@@ -160,6 +160,14 @@ pub struct FileDiff {
     pub old_path: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BinaryKind {
+    Mode,
+    Renamed,
+    RenamedMode,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffStatEntry {
@@ -167,6 +175,8 @@ pub struct DiffStatEntry {
     pub added: u32,
     pub deleted: u32,
     pub is_binary: bool,
+    /// Only proven unchanged binary content receives a kind; unknown stays null.
+    pub binary_kind: Option<BinaryKind>,
 }
 
 #[derive(Debug, Clone, Serialize)]

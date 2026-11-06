@@ -16,7 +16,7 @@ import {
   DiffPaneHold,
   type DiffPaneHoldValue,
 } from "@/features/diff/diff-pane-hold";
-import { gitBlobSizes } from "@/lib/git/api";
+import { gitBlobSizes, githubBlobSizes } from "@/lib/git/api";
 import {
   MODE_CHANGE,
   sectionIsBinary,
@@ -29,6 +29,14 @@ import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitBlobSizes: vi.fn(),
+  githubBlobSizes: vi.fn(),
+}));
+
+// Anchored panes mount the lens read; its forge and remote reads aren't the
+// subject here.
+vi.mock("@/lib/repo-lens/queries", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/repo-lens/queries")>()),
+  useRepoLens: vi.fn(() => "origin"),
 }));
 
 vi.mock("@/lib/settings/api", async (importOriginal) => ({
@@ -81,15 +89,20 @@ function renderSummary(props: Partial<Props> = {}) {
   return { ...view, client, all };
 }
 
-/** Waits for every query to leave pending. React re-renders on react-query's
- *  later notify, so an absence check follows it with `tick()`. */
+/** Waits for every query to leave pending, except an anchored pane's idle
+ *  GitHub read, which stays pending while disabled. React re-renders on
+ *  react-query's later notify, so an absence check follows it with `tick()`. */
 const settled = (client: QueryClient) =>
   waitFor(() =>
     expect(
       client
         .getQueryCache()
         .getAll()
-        .every((q) => q.state.status !== "pending"),
+        .every(
+          (q) =>
+            q.state.status !== "pending" ||
+            (q.queryKey[0] === "github-blob-sizes" && q.isDisabled()),
+        ),
     ).toBe(true),
   );
 
@@ -113,6 +126,11 @@ function expectNoFocusables(container: HTMLElement) {
 
 beforeEach(() => {
   blobSizes.mockReset();
+  vi.mocked(githubBlobSizes).mockReset();
+  vi.mocked(githubBlobSizes).mockResolvedValue({
+    oldSize: null,
+    newSize: null,
+  });
 });
 
 afterEach(() => {
@@ -431,9 +449,26 @@ describe("BinaryFileSummary layout", () => {
     expect(await screen.findByText("700 KB")).toBeTruthy();
     expect(container.textContent).not.toMatch(/New file|Deleted file/);
   });
+});
 
-  it("DiffContent renders a split typechange through the binary arm", async () => {
+/** @git-diff-view measures text on a 2D canvas, which jsdom leaves null. */
+function stubCanvas() {
+  const measure = {
+    font: "",
+    measureText: (t: string) => ({ width: t.length }),
+  };
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
+    () => measure as unknown as CanvasRenderingContext2D,
+  );
+}
+
+describe("a split symlink-to-binary typechange", () => {
+  beforeAll(stubCanvas);
+
+  it("DiffContent stacks a split symlink-to-binary typechange, text half first", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
     blobSizes.mockResolvedValue({ oldSize: null, newSize: 716800 });
+    const widgetRender = vi.fn(() => <textarea aria-label="composer" />);
     const text = splitUnifiedDiff(TYPECHANGE).get("x.png") ?? "";
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -452,28 +487,42 @@ describe("BinaryFileSummary layout", () => {
           isError={false}
           repoPath="/repo"
           anchorCommit={hex(40)}
+          lineAnchors={[
+            { side: "old", line: 1, render: () => <span>anchored note</span> },
+          ]}
+          lineWidget={{ enabled: true, render: widgetRender }}
         />
       </QueryClientProvider>,
     );
-    expect(
-      await screen.findByText("Binary file — no text diff available"),
-    ).toBeTruthy();
+    const removed = await screen.findByText("target");
+    const band = screen.getByText("Binary file added");
     expect(await screen.findByText("700 KB")).toBeTruthy();
+    // git's order: the symlink's removal, then the binary's creation.
+    expect(
+      removed.compareDocumentPosition(band) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Binary file — no text diff available"),
+    ).toBeNull();
     expect(container.textContent).not.toMatch(/New file|Deleted file/);
+    // The text half is read-only: a host's anchor never renders inline, and
+    // its line widget wires no add trigger or composer.
+    expect(screen.queryByText("anchored note")).toBeNull();
+    expect(widgetRender).not.toHaveBeenCalled();
+    expect(
+      container.querySelector(".diff-add-widget-wrapper, .diff-add-widget"),
+    ).toBeNull();
+    expect(
+      container.querySelector(
+        "button, a, input, textarea, [tabindex]:not([tabindex='-1'])",
+      ),
+    ).toBeNull();
   });
 });
 
 describe("a split binary-to-symlink typechange", () => {
   // @git-diff-view measures text on a 2D canvas, which jsdom leaves null.
-  beforeAll(() => {
-    const measure = {
-      font: "",
-      measureText: (t: string) => ({ width: t.length }),
-    };
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-      () => measure as unknown as CanvasRenderingContext2D,
-    );
-  });
+  beforeAll(stubCanvas);
 
   it("DiffContent renders the symlink text, never the binary placeholder", async () => {
     vi.mocked(loadSettings).mockResolvedValue(DEFAULT_SETTINGS);
@@ -500,6 +549,9 @@ describe("a split binary-to-symlink typechange", () => {
           isError={false}
           repoPath="/repo"
           anchorCommit={hex(40)}
+          lineAnchors={[
+            { side: "new", line: 1, render: () => <span>anchored note</span> },
+          ]}
         />
       </QueryClientProvider>,
     );
@@ -508,6 +560,8 @@ describe("a split binary-to-symlink typechange", () => {
       screen.queryByText("Binary file — no text diff available"),
     ).toBeNull();
     expect(blobSizes).not.toHaveBeenCalled();
+    // The join rule left this pane on the text arm, whose anchors still render.
+    expect(await screen.findByText("anchored note")).toBeTruthy();
   });
 });
 

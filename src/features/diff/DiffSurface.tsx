@@ -11,6 +11,7 @@ import {
   type MultiSelectState,
   SplitSide,
 } from "@git-diff-view/react";
+import { FileIcon } from "@phosphor-icons/react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import {
   Fragment,
@@ -43,6 +44,8 @@ import {
   type HeaderOnlyDiff,
   headerOnlyMessage,
   modeChangeMessage,
+  type TypechangeHalves,
+  typechangeHalves,
 } from "@/lib/git/diff-split";
 import { useFileAtRev } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
@@ -55,6 +58,7 @@ import { toastError } from "@/lib/toast";
 import { useContainerWidth } from "@/lib/use-container-width";
 import { useIsDark } from "@/lib/use-is-dark";
 import { useRetained } from "@/lib/use-retained";
+import { cn } from "@/lib/utils";
 import { BinaryFileSummary } from "./BinaryFileSummary";
 import {
   capDiffText,
@@ -2001,7 +2005,7 @@ export function DiffContent({
   // hooks below run (react-dom 19.3.1 commit order). The Preview rescue also
   // passes a same-file Raw/Preview toggle from <body>; another file's swap
   // passes only held focus. The toolbar rescue falls back to the controls,
-  // since the image arm renders no landing.
+  // since the image and typechange arms render no landing.
   useLayoutEffect(() => {
     const held = paneHeldFocus.current;
     const sameToolbarFile =
@@ -2129,9 +2133,10 @@ export function DiffContent({
       {body}
     </div>
   );
-  // Every arm but the text and image ones is a focus landing for a toolbar
-  // swap: its body, a sibling of the row, never an ancestor of a scroller (it
-  // would take every click into it, so the image arm's body isn't one). Each
+  // Every arm but the text, image and typechange ones is a focus landing for a
+  // toolbar swap: its body, a sibling of the row, never an ancestor of a
+  // scroller (it would take every click into it, so those arms' bodies aren't
+  // one). Each
   // arm's body is keyed apart, since the text body reusing this node would
   // drop its tabIndex under held focus. `busy` marks a blank, loading body.
   const landing = (content: ReactNode, busy = false) => (
@@ -2205,6 +2210,59 @@ export function DiffContent({
             oldPath={oldSidePath}
             revs={imageRevs}
           />
+        </div>,
+        notice,
+      );
+    }
+    // A file↔symlink typechange with one binary half stacks both halves in
+    // git's order. The text half is read-only: hosts that group a binary
+    // pane's comments outside it would render an inline anchor twice.
+    const halves = typechangeHalves(data.text, filePath);
+    if (halves !== null) {
+      const band = (
+        <div
+          key="band"
+          className={cn(
+            "flex flex-col items-center gap-1 py-3 text-muted-foreground",
+            halves.binaryFirst ? "border-b" : "border-t",
+          )}
+        >
+          <p className="flex items-center gap-1.5 text-xs">
+            <FileIcon aria-hidden className="size-4" />
+            {TYPECHANGE_BAND_LABEL[halves.binaryEnd]}
+          </p>
+          {repoPath !== undefined ? (
+            <BinaryFileSummary
+              repoPath={repoPath}
+              filePath={filePath}
+              text={data.text}
+              worktreeNewSide={imageRevs?.new === null}
+              anchorCommit={anchorCommit}
+              held={dataIsPlaceholder === true}
+              variant="band"
+            />
+          ) : null}
+        </div>
+      );
+      const textHalf = (
+        <GitDiffView
+          key="text"
+          filePath={filePath}
+          oldPath={filePath}
+          text={halves.text}
+          repoPath={repoPath}
+          forceUnified={narrowPane}
+          revealLanding={controlsRef}
+          scrollerRef={scrollerRef}
+        />
+      );
+      return shell(
+        <div
+          key="arm-typechange"
+          ref={scrollerCaptureRef}
+          className="min-h-0 flex-1 overflow-auto"
+        >
+          {halves.binaryFirst ? [band, textHalf] : [textHalf, band]}
         </div>,
         notice,
       );
@@ -2325,6 +2383,11 @@ export function DiffContent({
     notice,
   );
 }
+
+const TYPECHANGE_BAND_LABEL: Record<TypechangeHalves["binaryEnd"], string> = {
+  added: "Binary file added",
+  removed: "Binary file removed",
+};
 
 /** A rename or copy's two ends under its header-only message (the path row
  *  above names only the file, and shows no controls here), and the mode

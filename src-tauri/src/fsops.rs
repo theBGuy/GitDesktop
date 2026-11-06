@@ -368,6 +368,80 @@ pub async fn open_with_default(path: String) -> AppResult<()> {
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
 }
 
+/// Only ancestors are opened, so platform restrictions never apply to the leaf.
+/// The chosen repo root may be linked; directories below it must be real.
+fn nearest_existing_dir(repo: &str, rel: &str) -> AppResult<PathBuf> {
+    use crate::git::diff::is_repo_relative;
+    use crate::git::ops::{discard_rel_path, discard_shown, linked_component};
+
+    let invalid =
+        || AppError::InvalidArgument(format!("invalid folder path: {}", discard_shown(rel)));
+    if rel.starts_with(['/', '\\']) {
+        return Err(invalid());
+    }
+    let (parent, leaf) = rel.rsplit_once('/').unwrap_or(("", rel));
+    if leaf.is_empty() || leaf.contains('\0') || matches!(leaf, "." | "..") {
+        return Err(invalid());
+    }
+    let parent = if parent.is_empty() {
+        String::new()
+    } else {
+        if !is_repo_relative(parent) {
+            return Err(invalid());
+        }
+        let parent = discard_rel_path(parent).map_err(|why| {
+            AppError::InvalidArgument(format!(
+                "Can't open folder for {}: {why}.",
+                discard_shown(rel)
+            ))
+        })?;
+        #[cfg(windows)]
+        if path_has_reserved_component(Path::new(&parent)) {
+            return Err(invalid());
+        }
+        parent
+    };
+    let mut ancestor = parent.as_str();
+    loop {
+        let dir = if ancestor.is_empty() {
+            PathBuf::from(repo)
+        } else {
+            Path::new(repo).join(ancestor)
+        };
+        if ancestor.is_empty() {
+            return if std::fs::metadata(&dir)?.is_dir() {
+                Ok(dir)
+            } else {
+                Err(AppError::InvalidArgument(format!(
+                    "not a directory: {repo}"
+                )))
+            };
+        }
+        if !linked_component(repo, ancestor, true)? {
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => return Ok(dir),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        ancestor = ancestor.rsplit_once('/').map_or("", |(parent, _)| parent);
+    }
+}
+
+#[tauri::command]
+pub async fn open_nearest_folder(repo_path: String, rel_path: String) -> AppResult<()> {
+    let dir = nearest_existing_dir(&repo_path, &rel_path)?
+        .to_string_lossy()
+        .into_owned();
+    tauri_plugin_opener::open_path(&dir, None::<&str>)
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))
+}
+
 /// Opens a terminal rooted at `path`. `terminal` is a known kind id (e.g.
 /// "powershell", "windows-terminal", "git-bash", "custom", "custom-command")
 /// and `program` its executable; both empty means pick a sensible default.
@@ -1214,6 +1288,216 @@ pub async fn open_with_program(program: String, path: String) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearest_folder_walks_missing_and_non_directory_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        let a = root.path().join("a");
+        let b = a.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        assert_eq!(nearest_existing_dir(repo, "a/b/c.bin").unwrap(), b);
+        std::fs::remove_dir(&b).unwrap();
+        assert_eq!(nearest_existing_dir(repo, "a/b/c.bin").unwrap(), a);
+        std::fs::remove_dir(&a).unwrap();
+        assert_eq!(
+            nearest_existing_dir(repo, "a/b/c.bin").unwrap(),
+            root.path()
+        );
+        std::fs::write(&a, b"a file, not a directory").unwrap();
+        assert_eq!(
+            nearest_existing_dir(repo, "a/b/c.bin").unwrap(),
+            root.path()
+        );
+        assert_eq!(nearest_existing_dir(repo, "a/c.bin").unwrap(), root.path());
+        assert!(nearest_existing_dir(a.to_str().unwrap(), "c.bin").is_err());
+        assert!(nearest_existing_dir(b.to_str().unwrap(), "c.bin").is_err());
+    }
+
+    #[test]
+    fn nearest_folder_checks_the_leaf_without_opening_it() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        for leaf in [
+            "aux.c",
+            "a:b",
+            "foo.",
+            "foo ",
+            "nul",
+            "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}",
+        ] {
+            assert_eq!(
+                nearest_existing_dir(repo, leaf).unwrap(),
+                root.path(),
+                "{leaf}"
+            );
+            assert_eq!(
+                nearest_existing_dir(repo, &format!("sub/{leaf}")).unwrap(),
+                sub,
+                "{leaf}"
+            );
+        }
+        std::fs::write(sub.join("present.bin"), b"present").unwrap();
+        assert_eq!(nearest_existing_dir(repo, "sub/present.bin").unwrap(), sub);
+        for rel in [
+            "",
+            ".",
+            "..",
+            "bad\0leaf",
+            "sub/",
+            "sub/.",
+            "sub/..",
+            "sub/bad\0leaf",
+        ] {
+            assert!(
+                matches!(
+                    nearest_existing_dir(repo, rel),
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "{rel:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_folder_refuses_unsafe_parents() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        for rel in [
+            "/x",
+            "\\x",
+            "../x",
+            "a/../x",
+            "/absolute/x",
+            "//server/share/x",
+            "./x",
+            "a/./b/x",
+            ".git/config",
+            "a/.git/config",
+            "a\0b/x",
+        ] {
+            assert!(
+                matches!(
+                    nearest_existing_dir(repo, rel),
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "{rel:?}"
+            );
+        }
+        assert_eq!(
+            nearest_existing_dir(repo, ".github/x").unwrap(),
+            root.path()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nearest_folder_refuses_windows_ancestor_reinterpretations() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        for parent in [
+            "aux",
+            "nul",
+            "aux.c",
+            "dir.",
+            "dir ",
+            "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}",
+            "a:b",
+            "C:/absolute",
+            "C:relative",
+            "a\\..\\b",
+        ] {
+            assert!(
+                matches!(
+                    nearest_existing_dir(repo, &format!("{parent}/x")),
+                    Err(AppError::InvalidArgument(_))
+                ),
+                "{parent}"
+            );
+        }
+        for parent in ["auxiliary", "nully", "dir", "x.{not-a-guid}"] {
+            let dir = root.path().join(parent);
+            std::fs::create_dir(&dir).unwrap();
+            assert_eq!(
+                nearest_existing_dir(repo, &format!("{parent}/x")).unwrap(),
+                dir
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nearest_folder_accepts_unix_ancestor_names() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        for parent in [
+            "aux",
+            "nul",
+            "foo.",
+            "foo ",
+            "x.{0AFACED1-E828-11D1-9187-B532F1E9575D}",
+            "a:b",
+        ] {
+            let dir = root.path().join(parent);
+            std::fs::create_dir(&dir).unwrap();
+            assert_eq!(
+                nearest_existing_dir(repo, &format!("{parent}/x")).unwrap(),
+                dir
+            );
+            std::fs::remove_dir(&dir).unwrap();
+            assert_eq!(
+                nearest_existing_dir(repo, &format!("{parent}/x")).unwrap(),
+                root.path()
+            );
+        }
+    }
+
+    #[test]
+    fn nearest_folder_skips_linked_directories_and_their_descendants() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let repo = root.path().to_str().unwrap();
+        let sub = root.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::create_dir(outside.path().join("nested")).unwrap();
+        let link = sub.join("link");
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(outside.path())
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        for rel in ["sub/link/x", "sub/link/nested/x", "sub/link/missing/x"] {
+            assert_eq!(nearest_existing_dir(repo, rel).unwrap(), sub, "{rel}");
+        }
+        for rel in ["x", "missing/x", "nested/missing/x"] {
+            let expected = if rel.starts_with("nested/") {
+                link.join("nested")
+            } else {
+                link.clone()
+            };
+            assert_eq!(
+                nearest_existing_dir(link.to_str().unwrap(), rel).unwrap(),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn trim_ignore_pattern_keeps_an_escaped_trailing_space() {

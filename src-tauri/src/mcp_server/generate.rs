@@ -2467,6 +2467,7 @@ mod tests {
             added,
             deleted,
             is_binary,
+            binary_kind: None,
         }
     }
 

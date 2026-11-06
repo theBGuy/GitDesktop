@@ -81,6 +81,7 @@ import {
 } from "@/lib/git/queries";
 import {
   type CommitCommentOut,
+  type DiffStatEntry,
   type ForgeProvider,
   providerLabel,
   type RepoStatus,
@@ -253,6 +254,52 @@ export function CommitDetailView({
   // only as long as the file list is a placeholder too: a settled list starts
   // the selected commit's diff, which must not take the rendered one's anchors.
   const anchorsMatchDiff = renderedHash === hash || files.isPlaceholderData;
+  const selectedPathProp = anchorsMatchDiff ? deferredPath : null;
+  // The last SETTLED binary verdict and file list, stamped with the commit they
+  // describe: a commit switch's placeholder window keeps the shown file's
+  // comments grouped from them, never from placeholder data (a text file must
+  // never read as binary off the previous selection's diff).
+  const [retainedDiff, setRetainedDiff] = useState<{
+    hash: string;
+    path: string;
+    isBinary: boolean;
+  } | null>(null);
+  if (
+    !shownDiff.isPlaceholderData &&
+    shownDiff.data !== undefined &&
+    deferredPath !== null
+  ) {
+    const isBinary = shownDiff.data.isBinary === true;
+    if (
+      retainedDiff?.hash !== hash ||
+      retainedDiff.path !== deferredPath ||
+      retainedDiff.isBinary !== isBinary
+    )
+      setRetainedDiff({ hash, path: deferredPath, isBinary });
+  }
+  const [retainedFiles, setRetainedFiles] = useState<{
+    hash: string;
+    rows: DiffStatEntry[];
+  } | null>(null);
+  if (
+    !files.isPlaceholderData &&
+    files.data !== undefined &&
+    (retainedFiles?.hash !== hash || retainedFiles.rows !== files.data)
+  )
+    setRetainedFiles({ hash, rows: files.data });
+  const selectedBinary = (() => {
+    if (!shownDiff.isPlaceholderData) return shownDiff.data?.isBinary === true;
+    if (
+      retainedDiff?.hash === renderedHash &&
+      retainedDiff.path === selectedPathProp
+    )
+      return retainedDiff.isBinary;
+    if (retainedFiles?.hash !== renderedHash) return false;
+    // Content-changed binaries only: a proven mode-only or pure-rename row
+    // draws the header-only arm, which places line anchors like text.
+    const row = retainedFiles.rows.find((r) => r.path === selectedPathProp);
+    return row !== undefined && row.isBinary && row.binaryKind == null;
+  })();
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.
   const stale = details.isPlaceholderData || files.isPlaceholderData;
@@ -695,6 +742,7 @@ export function CommitDetailView({
                       added={file.added}
                       deleted={file.deleted}
                       isBinary={file.isBinary}
+                      binaryKind={file.binaryKind}
                     />
                   </button>
                 ))}
@@ -753,11 +801,8 @@ export function CommitDetailView({
           diffReady={providerKey !== "github" || remoteDiff.isSuccess}
           // Inline anchors are off while the diff isn't the rendered commit's, so
           // the list keeps that file's comments too.
-          selectedPath={anchorsMatchDiff ? deferredPath : null}
-          // A placeholder is the previous file's diff, not the selected one's.
-          selectedBinary={
-            !shownDiff.isPlaceholderData && shownDiff.data?.isBinary === true
-          }
+          selectedPath={selectedPathProp}
+          selectedBinary={selectedBinary}
           onSelectFile={selectFileFromComments}
           lens="origin"
           stale={stale}
@@ -816,10 +861,14 @@ function CommitFileDiffSlot({
 }) {
   const diff = useCommitFileDiff(repoPath, hash, path, enabled);
   useSlotRead(reportRead, diff);
+  // A placeholder can be another file's diff: anchoring this path on it would
+  // draw comments the binary group already lists. Only the echoed path decides;
+  // a text file must never read as binary off a placeholder's verdict.
+  const diffIsPath = !diff.isPlaceholderData || diff.data?.filePath === path;
   const lineAnchors = useCommitLineAnchors(
     comments,
     providerKey === "github" ? remoteSections : undefined,
-    anchorsOn ? path : null,
+    anchorsOn && diffIsPath ? path : null,
     commentRefs,
   );
   // The diff query outlasts the commit's own stale window with the previous

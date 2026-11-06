@@ -57,12 +57,18 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
-    label: "Image diffing & collapsible surrounding context",
+    label:
+      "Image diffing with dimensions and file sizes & collapsible surrounding context",
   },
   {
     group: "Diffs & staging",
     label:
-      "Binary files show their size change — old and new size, and how much larger or smaller",
+      "Binary files show their size change — old and new size, and how much larger or smaller, on GitHub pull requests too",
+  },
+  {
+    group: "Diffs & staging",
+    label:
+      "Open a changed non-image binary file in its default program, or show it in Explorer, right from its diff",
   },
   {
     group: "Diffs & staging",

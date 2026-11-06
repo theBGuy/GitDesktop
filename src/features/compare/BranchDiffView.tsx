@@ -295,6 +295,7 @@ export function BranchDiffView({
                     added={file.added}
                     deleted={file.deleted}
                     isBinary={file.isBinary}
+                    binaryKind={file.binaryKind}
                   />
                 </button>
               ))}
