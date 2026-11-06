@@ -63,17 +63,49 @@ function renderPane(patch: string) {
   );
 }
 
+/** A whole-commit comment: it always renders, so awaiting it proves the list
+ *  landed before an absence is asserted. */
+const WHOLE_COMMIT: CommitCommentOut = {
+  ...COMMENT,
+  id: "2",
+  body: "note on the whole commit",
+  path: null,
+  line: null,
+};
+
+/** Only the path truncates: the line suffix sits in its own sibling span, so a
+ *  narrow pane never clips it and two comments on one file stay distinct. */
+function expectSplitLabel(suffix: string) {
+  const note = screen.getByText(/couldn't place in this diff/);
+  const label = note.parentElement;
+  const truncating = label?.querySelector(".truncate");
+  expect(truncating?.textContent).toBe("x");
+  const sibling = truncating?.nextElementSibling;
+  expect(sibling?.textContent).toBe(suffix);
+  expect(truncating?.contains(sibling ?? null)).toBe(false);
+}
+
 describe("CommitComments over a file the binary arm renders", () => {
   it("keeps the open file's line comment in the labelled group", async () => {
     renderPane(LINK_TO_BINARY);
     expect(await screen.findByText("note on the link line")).toBeTruthy();
     expect(screen.getByText(/couldn't place in this diff/)).toBeTruthy();
+    expectSplitLabel(":1");
+  });
+
+  it("labels a range comment on the open file with its line span", async () => {
+    vi.mocked(forgeCommitComments).mockResolvedValue([
+      { ...COMMENT, line: 2, startLine: 1 },
+    ]);
+    renderPane(LINK_TO_BINARY);
+    expect(await screen.findByText("note on the link line")).toBeTruthy();
+    expectSplitLabel(":1–2");
   });
 
   it("keeps a text diff's line comment out of the labelled group", async () => {
+    vi.mocked(forgeCommitComments).mockResolvedValue([COMMENT, WHOLE_COMMIT]);
     renderPane(LINK_ONLY);
-    await vi.waitFor(() => expect(forgeCommitComments).toHaveBeenCalled());
-    await new Promise((r) => setTimeout(r, 0));
+    expect(await screen.findByText("note on the whole commit")).toBeTruthy();
     expect(screen.queryByText("note on the link line")).toBeNull();
   });
 });

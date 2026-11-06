@@ -162,6 +162,7 @@ import {
 import {
   ARM_FAILED_LINES,
   armRead,
+  distinctPrefixLength,
   loadedCheckedLine,
   loadedNoMatchLine,
   mergeSearchResults,
@@ -887,6 +888,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     [shaLookup.data, searchCommits],
   );
   const offBranchShown = searchActive && offBranchRows.length > 0;
+  // One prefix length for every shown notice row, so their SHAs line up and
+  // stay distinct; the overflow rows show no SHA and don't count.
+  const offBranchNoticeRows = offBranchRows.slice(0, OFF_BRANCH_NOTICE_CAP);
+  const offBranchPrefixLen = distinctPrefixLength(
+    offBranchNoticeRows.map((c) => c.hash),
+  );
   const visibleCommits = searchActive ? searchRows : filteredCommits;
   // Squash gating needs the selection's positions in REAL history (not the
   // filtered view), so index against `commits`.
@@ -1782,7 +1789,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           scroll-to-index math never count it. */}
       {offBranchShown && (
         <div className="shrink-0">
-          {offBranchRows.slice(0, OFF_BRANCH_NOTICE_CAP).map((c) => (
+          {offBranchNoticeRows.map((c) => (
             <div
               key={c.hash}
               ref={offBranchRowRef}
@@ -1790,7 +1797,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             >
               <p className="min-w-0">
                 <span className="font-mono text-foreground">
-                  {c.hash.slice(0, 7)}
+                  {c.hash.slice(0, offBranchPrefixLen)}
                 </span>
                 {OFF_BRANCH_NOTICE_SUFFIX}
               </p>
@@ -1798,7 +1805,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
                 variant="ghost"
                 size="xs"
                 className="text-foreground"
-                aria-label={`${OPEN_COMMIT_LABEL} ${c.hash.slice(0, 7)}`}
+                aria-label={`${OPEN_COMMIT_LABEL} ${c.hash.slice(0, offBranchPrefixLen)}`}
                 onClick={() => {
                   openCommit(c.hash);
                   setSelected(new Set());

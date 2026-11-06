@@ -81,6 +81,8 @@ function renderSummary(props: Partial<Props> = {}) {
   return { ...view, client, all };
 }
 
+/** Waits for every query to leave pending. React re-renders on react-query's
+ *  later notify, so an absence check follows it with `tick()`. */
 const settled = (client: QueryClient) =>
   waitFor(() =>
     expect(
@@ -186,6 +188,7 @@ describe("BinaryFileSummary states", () => {
     blobSizes.mockResolvedValue({ oldSize: null, newSize: null });
     const { container, client } = renderSummary({ text: ADDED });
     await settled(client);
+    await tick();
     expect(blobSizes).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("New file")).toBeNull();
     expect(container.textContent).toBe("");
@@ -195,6 +198,7 @@ describe("BinaryFileSummary states", () => {
     blobSizes.mockResolvedValue({ oldSize: null, newSize: 700 });
     const partial = renderSummary();
     await settled(partial.client);
+    await tick();
     expect(partial.container.textContent).toBe("");
     expect(partial.container.querySelector(".sr-only")).toBeNull();
   });
@@ -284,6 +288,44 @@ describe("BinaryFileSummary gating", () => {
     expect(blobSizes).not.toHaveBeenCalled();
   });
 
+  /** The wrapper holds the mode line alone: no reserved size box above it. */
+  function expectModeLineOnly(container: HTMLElement) {
+    const wrapper = container.firstElementChild;
+    expect(wrapper?.className).toContain(" max-w-lg ");
+    expect(wrapper?.children).toHaveLength(1);
+    expect(wrapper?.firstElementChild?.textContent).toBe(
+      MODE_CHANGE["to-exec"]("100644", "100755"),
+    );
+    expect(container.querySelector(".h-4")).toBeNull();
+  }
+
+  it("shows only the mode line for a section with no index line", () => {
+    const { container } = renderSummary({
+      text: section("old mode 100644", "new mode 100755"),
+    });
+    expectModeLineOnly(container);
+    expect(blobSizes).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["null", null],
+    ["7-hex", "abc1234"],
+  ])(
+    "shows only the mode line for a PR surface with a %s anchor",
+    (_, anchor) => {
+      const { container } = renderSummary({
+        text: section(
+          "old mode 100644",
+          "new mode 100755",
+          "index 0123abc..89defab",
+        ),
+        anchorCommit: anchor,
+      });
+      expectModeLineOnly(container);
+      expect(blobSizes).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([
     ["a modified working-tree file", MODIFIED, true, "x.png"],
     ["an untracked file", ADDED, true, "x.png"],
@@ -343,6 +385,7 @@ describe("BinaryFileSummary caching", () => {
       </QueryClientProvider>,
     );
     await settled(client);
+    await tick();
     expect(blobSizes).toHaveBeenCalledTimes(2);
     expect(blobSizes.mock.calls[1][4]).toBe(second);
     expect(screen.queryByText("47.1 KB → 50.7 KB")).toBeNull();

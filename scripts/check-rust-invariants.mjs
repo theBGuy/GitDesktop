@@ -428,6 +428,12 @@ const BARE_REV_ALLOWLIST = [
       "classifies a failed `git show <rev>:<path>`: `base` is that same rev minus its trailing `~`/`^` navigation suffixes, so it must resolve exactly as the read did",
   },
   {
+    file: "git/history.rs",
+    fn: "off_branch_commits",
+    rationale:
+      "`head` is the commit id head_commit resolved once, refused at fn entry unless is_full_hex_id, never a branch name",
+  },
+  {
     file: "git/ops.rs",
     fn: "refuse_untracked_reset_collisions",
     rationale:

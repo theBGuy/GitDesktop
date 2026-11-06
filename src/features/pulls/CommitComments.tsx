@@ -581,6 +581,11 @@ export function CommitComments({
                             >
                               {path}
                             </span>
+                            {lineLabel && (
+                              <span className="shrink-0 font-mono">
+                                {lineLabel}
+                              </span>
+                            )}
                             <span className="shrink-0 font-sans">
                               {" · couldn't place in this diff"}
                             </span>

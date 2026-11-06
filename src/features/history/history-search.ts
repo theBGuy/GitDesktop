@@ -60,6 +60,21 @@ export function searchCoverage(i: {
 /** Off-branch notice rows shown before the overflow line takes over. */
 export const OFF_BRANCH_NOTICE_CAP = 3;
 
+/** The shortest prefix length, at least 7, at which every hash's prefix is
+ *  distinct from the others', so two notice rows never show the same SHA.
+ *  Stops at the longest hash's length, so duplicates still terminate. */
+export function distinctPrefixLength(hashes: readonly string[]): number {
+  const longest = Math.max(0, ...hashes.map((h) => h.length));
+  let len = 7;
+  while (
+    len < longest &&
+    new Set(hashes.map((h) => h.slice(0, len))).size < hashes.length
+  ) {
+    len++;
+  }
+  return len;
+}
+
 export const loadedNoMatchLine = (q: string) =>
   `No loaded commits match "${q}"`;
 export const loadedCheckedLine = (n: number) =>

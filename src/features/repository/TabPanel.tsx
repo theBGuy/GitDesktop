@@ -4,15 +4,12 @@ import {
   PanelPortalBoundary,
 } from "@/components/panel-portal";
 
-// Every repo tab panel goes through this: the <Activity> + boundary pairing
-// is the invariant, and wrapping <Activity> alone re-mints the stranded-popup
-// bug. Module scope is required — declared inside RepositoryView it would be
-// a new component type each render, remounting every panel and losing the
-// state <Activity> exists to preserve (filters, selections, scroll). A hidden
-// <Activity> connects no effects, so hidden panels hold no live query
-// observers and fetch nothing while hidden; the real cost is the RE-SHOW
-// refetch of anything past its staleTime. Heavy tabs keep their
-// `active`-style query gates as a backstop.
+// Every repo tab panel goes through this: the <Activity> + boundary pairing is
+// the invariant, since a bare <Activity> re-mints the stranded-popup bug.
+// Module scope is required: a component declared inside another is a new type
+// each render, remounting every panel and losing its state. Hidden panels
+// connect no effects, so they fetch nothing; the cost is the re-show refetch
+// past staleTime, and heavy tabs keep `active` query gates as a backstop.
 export function TabPanel({
   active,
   children,

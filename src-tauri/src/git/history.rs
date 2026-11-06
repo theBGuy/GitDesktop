@@ -194,7 +194,7 @@ async fn commits_by_prefix(
         )));
     }
     // Nothing is on a branch with no commits, so the walk is skipped there.
-    let unborn = unborn_head(repo).await?;
+    let head = head_commit(repo).await?;
     // Lists only local objects of every type, and never fetches a missing full id
     // in a partial clone; git truncates an overlong prefix to its hash width, so
     // only ids that extend `p` survive.
@@ -251,10 +251,9 @@ async fn commits_by_prefix(
         .take(cap)
         .collect();
     let ids: Vec<&str> = capped.iter().map(|c| c.hash.as_str()).collect();
-    let off = if unborn {
-        ids.iter().map(|id| id.to_ascii_lowercase()).collect()
-    } else {
-        off_branch_commits(repo, &ids).await?
+    let off = match &head {
+        None => ids.iter().map(|id| id.to_ascii_lowercase()).collect(),
+        Some(head) => off_branch_commits(repo, &ids, head).await?,
     };
     let mut matches: Vec<CommitPrefixMatch> = capped
         .into_iter()
@@ -267,20 +266,57 @@ async fn commits_by_prefix(
     Ok(matches)
 }
 
-/// The lowercased ids of `commits` that are NOT ancestors of HEAD (HEAD itself
-/// counts as its own ancestor). One `rev-list <ids> --not HEAD` walk never misses
-/// an off-branch id, but under committer-date skew it stops early and can print
-/// an ancestor too, so each id it prints is re-checked with `merge-base
-/// --is-ancestor`. Every id must be a full-width hex id naming a commit. A
-/// malformed id errs before a spawn and a missing one fails the walk, but rev-list
-/// skips a blob or tree id and walks a tag's commit in place of the tag, so any
-/// non-commit id would read as on-branch. A failed walk is an error, never "on
-/// branch".
+/// HEAD's commit id, or None on an unborn HEAD. A lookup reads it once and
+/// classifies every match against that id, so a checkout landing mid-lookup
+/// can't split the answer across two HEADs. The healthy path is one spawn. On
+/// exit 1 it defers to `unborn_head`; any other failure is rev-parse's error.
+async fn head_commit(repo: &str) -> AppResult<Option<String>> {
+    let probe = run_git_raw(
+        Some(repo),
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let out = match probe.code {
+        0 => probe,
+        1 => {
+            if unborn_head(repo).await? {
+                return Ok(None);
+            }
+            // A first commit landed between the probes.
+            run_git(
+                Some(repo),
+                &["rev-parse", "--verify", "HEAD"],
+                DEFAULT_TIMEOUT,
+            )
+            .await?
+        }
+        _ => return probe.exit_verdict().map(|_| None),
+    };
+    let id = out.stdout_lossy().trim().to_string();
+    if !is_full_hex_id(&id) {
+        return Err(crate::error::AppError::Command(
+            "HEAD doesn't resolve to a commit.".into(),
+        ));
+    }
+    Ok(Some(id))
+}
+
+/// The lowercased ids of `commits` that are NOT ancestors of `head` (a commit id
+/// the caller resolved once; `head` counts as its own ancestor). One `rev-list
+/// <ids> --not <head>` walk never misses an off-branch id, but under
+/// committer-date skew it stops early and can print an ancestor too, so each id
+/// it prints is re-checked with `merge-base --is-ancestor`. Every id, `head`
+/// included, must be a full-width hex id naming a commit. A malformed id errs
+/// before a spawn and a missing one fails the walk, but rev-list skips a blob or
+/// tree id and walks a tag's commit in place of the tag, so any non-commit id
+/// would read as on-branch. A failed walk is an error, never "on branch".
 async fn off_branch_commits(
     repo: &str,
     commits: &[&str],
+    head: &str,
 ) -> AppResult<std::collections::HashSet<String>> {
-    if let Some(bad) = commits.iter().find(|id| !is_full_hex_id(id)) {
+    if let Some(bad) = commits.iter().chain([&head]).find(|id| !is_full_hex_id(id)) {
         return Err(crate::error::AppError::InvalidArgument(format!(
             "invalid commit id: {}",
             crate::git::ops::discard_shown(bad)
@@ -291,7 +327,7 @@ async fn off_branch_commits(
     }
     let mut args = vec!["rev-list"];
     args.extend_from_slice(commits);
-    args.extend(["--not", "HEAD", "--"]);
+    args.extend(["--not", head, "--"]);
     let walked = run_git(Some(repo), &args, DEFAULT_TIMEOUT)
         .await?
         .stdout_lossy();
@@ -307,7 +343,7 @@ async fn off_branch_commits(
     for id in printed {
         let out = run_git_raw(
             Some(repo),
-            &["merge-base", "--is-ancestor", &id, "HEAD"],
+            &["merge-base", "--is-ancestor", &id, head],
             DEFAULT_TIMEOUT,
         )
         .await?;
@@ -1092,7 +1128,7 @@ mod tests {
     /// unborn HEAD: every read through it must fail, never answer empty.
     #[tokio::test]
     async fn unborn_head_errs_on_a_corrupt_branch_ref() {
-        let (dir, repo, _first, _second) = two_commit_repo("corrupt-ref").await;
+        let (dir, repo, first, _second) = two_commit_repo("corrupt-ref").await;
         let branch = run_git(Some(&repo), &["symbolic-ref", "HEAD"], DEFAULT_TIMEOUT)
             .await
             .unwrap()
@@ -1127,6 +1163,9 @@ mod tests {
         let unborn = unborn_head(&repo).await;
         assert!(unborn.is_err(), "unborn_head: {unborn:?}");
         assert!(git_log(repo.clone(), 10, 0, None).await.is_err());
+        // The objects still resolve, so only HEAD's read can fail this lookup.
+        let found = commits_by_prefix(&repo, &first[..7], PREFIX_MATCH_CAP).await;
+        assert!(found.is_err(), "commits_by_prefix: {found:?}");
         let unpushed = crate::git::branches::git_unpushed_count(repo).await;
         assert!(unpushed.is_err(), "{unpushed:?}");
     }
@@ -1924,6 +1963,42 @@ mod tests {
         ids
     }
 
+    /// `off_branch_commits` against the commit HEAD resolves to right now.
+    async fn off_branch_at_head(
+        repo: &str,
+        commits: &[&str],
+    ) -> AppResult<std::collections::HashSet<String>> {
+        let head = head_sha_of(repo, "HEAD").await;
+        off_branch_commits(repo, commits, &head).await
+    }
+
+    #[tokio::test]
+    async fn off_branch_commits_classifies_against_the_pinned_head_not_head() {
+        let (_dir, repo, first, second) = two_commit_repo("prefix-pinned").await;
+        pin_prefix_repo(&repo).await;
+        git(&repo, &["checkout", "-q", "-b", "side", &first]).await;
+        let side1 = commit_file(&repo, "side.txt", "a\n", "s1").await;
+        git(&repo, &["checkout", "-q", "-"]).await;
+        assert_eq!(head_sha_of(&repo, "HEAD").await, second);
+
+        let candidates = [first.as_str(), second.as_str(), side1.as_str()];
+        let off = off_branch_commits(&repo, &candidates, &side1)
+            .await
+            .unwrap();
+        assert_eq!(sorted_ids(off), sorted_of(&[&second]));
+        let off = off_branch_commits(&repo, &candidates, &second)
+            .await
+            .unwrap();
+        assert_eq!(sorted_ids(off), sorted_of(&[&side1]));
+        let err = off_branch_commits(&repo, &candidates, "HEAD")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, crate::error::AppError::InvalidArgument(_)),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn off_branch_commits_splits_ancestors_from_side_and_detached_heads() {
         let (_dir, repo, first, second) = two_commit_repo("prefix-side").await;
@@ -1941,11 +2016,11 @@ mod tests {
             upper.as_str(),
             side2.as_str(),
         ];
-        let off = off_branch_commits(&repo, &candidates).await.unwrap();
+        let off = off_branch_at_head(&repo, &candidates).await.unwrap();
         assert_eq!(sorted_ids(off), sorted_of(&[&side1, &side2]));
 
         git(&repo, &["checkout", "-q", "--detach", &side1]).await;
-        let off = off_branch_commits(&repo, &candidates).await.unwrap();
+        let off = off_branch_at_head(&repo, &candidates).await.unwrap();
         assert_eq!(sorted_ids(off), sorted_of(&[&second, &side2]));
 
         let found = commits_by_prefix(&repo, &side1[..12], PREFIX_MATCH_CAP)
@@ -1957,8 +2032,8 @@ mod tests {
             .unwrap();
         assert_eq!(prefix_hashes(&found), vec![(second.as_str(), false)]);
 
-        assert!(off_branch_commits(&repo, &[]).await.unwrap().is_empty());
-        let err = off_branch_commits(&repo, &[BOGUS_COMMIT])
+        assert!(off_branch_at_head(&repo, &[]).await.unwrap().is_empty());
+        let err = off_branch_at_head(&repo, &[BOGUS_COMMIT])
             .await
             .unwrap_err();
         assert!(
@@ -2013,9 +2088,9 @@ mod tests {
             side_tip.as_str(),
             tip.as_str(),
         ];
-        let off = off_branch_commits(&repo, &candidates).await.unwrap();
+        let off = off_branch_at_head(&repo, &candidates).await.unwrap();
         assert_eq!(sorted_ids(off), sorted_of(&[&deep, &side_tip]));
-        let off = off_branch_commits(&repo, &[deep.as_str(), root.as_str()])
+        let off = off_branch_at_head(&repo, &[deep.as_str(), root.as_str()])
             .await
             .unwrap();
         assert_eq!(sorted_ids(off), sorted_of(&[&deep]));
@@ -2087,7 +2162,7 @@ mod tests {
             walked.lines().any(|id| id == x),
             "the fixture must make rev-list misreport X: {walked:?}"
         );
-        assert!(off_branch_commits(&repo, &[x.as_str()])
+        assert!(off_branch_at_head(&repo, &[x.as_str()])
             .await
             .unwrap()
             .is_empty());
@@ -2107,7 +2182,7 @@ mod tests {
         git(&repo, &["checkout", "-q", "-"]).await;
         let candidates = [side1.as_str(), side2.as_str(), second.as_str()];
         assert_eq!(
-            sorted_ids(off_branch_commits(&repo, &candidates).await.unwrap()),
+            sorted_ids(off_branch_at_head(&repo, &candidates).await.unwrap()),
             sorted_of(&[&side1, &side2])
         );
 
@@ -2117,7 +2192,7 @@ mod tests {
         )
         .await;
         assert_eq!(head_sha_of(&repo, "HEAD^2").await, side2);
-        assert!(off_branch_commits(&repo, &candidates)
+        assert!(off_branch_at_head(&repo, &candidates)
             .await
             .unwrap()
             .is_empty());
@@ -2131,7 +2206,7 @@ mod tests {
     async fn off_branch_commits_refuses_an_id_that_is_not_full_hex() {
         let (_dir, repo, first, _second) = two_commit_repo("prefix-bad-id").await;
         for bad in ["--all", "HEAD", &first[..12], "", &format!("{first}0")] {
-            let err = off_branch_commits(&repo, &[first.as_str(), bad])
+            let err = off_branch_at_head(&repo, &[first.as_str(), bad])
                 .await
                 .unwrap_err();
             assert!(

@@ -342,6 +342,47 @@ describe("off-branch notice", () => {
     ).toBeInTheDocument();
   });
 
+  it("lengthens every shown SHA until two that share 7 chars differ", async () => {
+    const ids = [hash("6201abc1"), hash("6201f"), hash("6201abc2")];
+    shaAnswer = async () => ids.map((h) => hit(h, false));
+    await renderPanel();
+    await searchAll("6201");
+    const buttons = await screen.findAllByRole("button", {
+      name: /^Open commit/,
+    });
+    expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual(
+      ids.map((h) => `Open commit ${h.slice(0, 8)}`),
+    );
+    expect(
+      buttons.map(
+        (b) =>
+          b.previousElementSibling?.querySelector(".font-mono")?.textContent,
+      ),
+    ).toEqual(ids.map((h) => h.slice(0, 8)));
+  });
+
+  it("measures SHA length over the shown rows only, not the overflow", async () => {
+    const shown = [hash("6201abc1"), hash("6201f"), hash("6201d")];
+    // Beyond the cap of three, sharing 7 chars with the first shown row.
+    const overflow = hash("6201abc2");
+    shaAnswer = async () => [...shown, overflow].map((h) => hit(h, false));
+    await renderPanel();
+    await searchAll("6201");
+    expect(
+      await screen.findByText("+1 more match isn't on this branch"),
+    ).toBeInTheDocument();
+    const buttons = screen.getAllByRole("button", { name: /^Open commit/ });
+    expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual(
+      shown.map((h) => `Open commit ${h.slice(0, 7)}`),
+    );
+    expect(
+      buttons.map(
+        (b) =>
+          b.previousElementSibling?.querySelector(".font-mono")?.textContent,
+      ),
+    ).toEqual(shown.map((h) => h.slice(0, 7)));
+  });
+
   it("a focused Open commit whose match turns on-branch hands focus to the panel", async () => {
     shaAnswer = async () => [hit(OFF, false)];
     const { client } = await renderPanel();
@@ -935,14 +976,18 @@ describe("partial failure", () => {
         land = resolve;
       });
     grepAnswer = () => Promise.reject(new Error("grep boom"));
-    await renderPanel();
+    const { client } = await renderPanel();
     await searchAll("62016e63");
     await waitFor(() => expect(grepCalls()).toEqual(["62016e63"]));
     await waitFor(() => expect(land).toBeDefined());
-    // Let the grep's rejection settle into the query before reading the UI.
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 20));
-    });
+    // The grep's failure must reach the cache, then the render, before the UI's
+    // absence of a failure line means anything.
+    await waitFor(() =>
+      expect(client.getQueryState(SEARCH_KEY("62016e63"))?.status).toBe(
+        "error",
+      ),
+    );
+    await settle();
     expect(screen.getByText("Searching all history…")).toBeInTheDocument();
     expect(screen.queryByText("Couldn't search all history.")).toBeNull();
     expect(liveRegion().textContent).toBe("");

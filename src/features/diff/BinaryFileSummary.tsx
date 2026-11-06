@@ -23,14 +23,17 @@ const SIZE_BOX_CLASS =
 const SIZE_PAIR_CLASS =
   "flex items-center gap-x-1.5 @max-[31rem]/diff-pane:flex-col";
 const SIZE_SEPARATOR_CLASS = "@max-[31rem]/diff-pane:hidden";
+const SUMMARY_CLASS =
+  "flex w-full max-w-lg min-w-0 flex-col items-center gap-1 px-4 text-xs tabular-nums";
 
 const BLANK_LINE: BinarySizeLine = { kind: "blank" };
 
 /**
  * The binary placeholder's size change and mode line. Sizes come from the
- * diff's own `index` ids, so it renders nothing for a section without one
- * (forge-reconstructed patches). The size box stays blank until the read
- * answers; while `held` it keeps the line this mount last showed.
+ * diff's own `index` ids, so a section without one (forge-reconstructed
+ * patches), or a PR surface without a full anchor, gets no size box: only its
+ * mode line, or nothing. The size box stays blank until the read answers;
+ * while `held` it keeps the line this mount last showed.
  */
 export function BinaryFileSummary({
   repoPath,
@@ -83,31 +86,52 @@ export function BinaryFileSummary({
   // an unheld render records what it shows, blank included.
   const [shown, setShown] = useState<BinarySizeLine>(BLANK_LINE);
   if (!held && lineKey(fresh) !== lineKey(shown)) setShown(fresh);
-  if (!mount) return null;
+  if (!mount) {
+    return mode === null ? null : (
+      <div className={SUMMARY_CLASS}>
+        <p>{mode}</p>
+      </div>
+    );
+  }
   const line = held ? shown : fresh;
   return (
-    <div className="flex w-full max-w-lg min-w-0 flex-col items-center gap-1 px-4 text-xs tabular-nums">
-      <div className={SIZE_BOX_CLASS}>
-        {line.kind === "blank" ? null : line.kind === "same" ||
-          line.kind === "size" ? (
-          <p aria-hidden className="text-center">
-            {line.text}
-          </p>
-        ) : (
-          <p aria-hidden className={SIZE_PAIR_CLASS}>
-            <span className="whitespace-nowrap">
-              {line.kind === "pair" ? line.sizes : line.label}
-            </span>
-            <span className={SIZE_SEPARATOR_CLASS}>·</span>
-            <span className="whitespace-nowrap">
-              {line.kind === "pair" ? line.delta : line.size}
-            </span>
-          </p>
-        )}
-      </div>
+    <div className={SUMMARY_CLASS}>
+      <div className={SIZE_BOX_CLASS}>{sizeLineBody(line)}</div>
       {line.kind !== "blank" && <span className="sr-only">{line.sr}</span>}
       {mode !== null && <p>{mode}</p>}
     </div>
+  );
+}
+
+function sizeLineBody(line: BinarySizeLine): ReactNode {
+  switch (line.kind) {
+    case "blank":
+      return null;
+    case "same":
+    case "size":
+      return (
+        <p aria-hidden className="text-center">
+          {line.text}
+        </p>
+      );
+    case "pair":
+      return sizePair(line.sizes, line.delta);
+    case "end":
+      return sizePair(line.label, line.size);
+    default: {
+      const _exhaustive: never = line;
+      return _exhaustive;
+    }
+  }
+}
+
+function sizePair(lead: string, trail: string): ReactNode {
+  return (
+    <p aria-hidden className={SIZE_PAIR_CLASS}>
+      <span className="whitespace-nowrap">{lead}</span>
+      <span className={SIZE_SEPARATOR_CLASS}>·</span>
+      <span className="whitespace-nowrap">{trail}</span>
+    </p>
   );
 }
 

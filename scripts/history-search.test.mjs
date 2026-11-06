@@ -1,8 +1,9 @@
 // Pins search all's pure layer (src/features/history/history-search.ts): the
 // SHA arm's on-branch hits lead in wire order, grep rows follow minus any
 // commit already listed, off-branch hits split out; the dead-vs-stale arm
-// read and the coverage table; and the empty-state copy, including the
-// singular count and the checked line's three outcomes.
+// read and the coverage table; the off-branch notices' shared SHA prefix
+// length; and the empty-state copy, including the singular count and the
+// checked line's three outcomes.
 //
 // Not testable here: the hex-shape predicates (they live in the react-query
 // module) and the panel's rendering; src/test/history-search.test.tsx covers
@@ -15,6 +16,7 @@ import { test } from "node:test";
 import {
   ARM_FAILED_LINES,
   armRead,
+  distinctPrefixLength,
   GREP_ARM_FAILED_LINE,
   loadedCheckedLine,
   mergeSearchResults,
@@ -126,4 +128,36 @@ test("search-all checked line: failed arm, short hex, default", () => {
   );
   assert.equal(line({}), SEARCH_ALL_CHECKED_LINE);
   assert.equal(line({}), "Checked the message and SHA of every commit.");
+});
+
+test("prefix length: 7 unless the shown hashes collide there", () => {
+  const hex40 = (lead) => lead + "0".repeat(40 - lead.length);
+  assert.equal(distinctPrefixLength([]), 7);
+  assert.equal(distinctPrefixLength([hex40("abcdef1"), hex40("abcdef2")]), 7);
+  assert.equal(distinctPrefixLength([hex40("abcdef01"), hex40("abcdef02")]), 8);
+  assert.equal(
+    distinctPrefixLength([hex40("abcdef0001"), hex40("abcdef0002")]),
+    10,
+  );
+  // Only two of three collide; the one length covers all three.
+  assert.equal(
+    distinctPrefixLength([
+      hex40("abcdef01"),
+      hex40("1234567"),
+      hex40("abcdef02"),
+    ]),
+    8,
+  );
+});
+
+test("prefix length: duplicates stop at the full hash length", () => {
+  const h = "f".repeat(40);
+  assert.equal(distinctPrefixLength([h, h]), 40);
+  const h64 = "e".repeat(64);
+  assert.equal(distinctPrefixLength([h64, h64]), 64);
+});
+
+test("prefix length: SHA-256 hashes that differ only at the end", () => {
+  const base = "0123456789abcdef".repeat(4).slice(0, 63);
+  assert.equal(distinctPrefixLength([`${base}a`, `${base}b`]), 64);
 });

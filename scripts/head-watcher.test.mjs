@@ -300,11 +300,17 @@ function checkClearSelectedCommit(ui) {
     : [`clearSelectedCommit writes more than the selection: ${setters[0]}`];
 }
 
-/** The one string constant `name` declares in `src`, by the given lead. */
+/** The one string constant `name` declares in `src`, by the given lead. Fails
+ *  on a backslash: the match reads raw source, so an escaped quote would cut
+ *  the value short. */
 function constant(src, lead) {
   const found = [...src.matchAll(new RegExp(`${lead}\\s*"([^"]*)";`, "g"))];
   if (found.length !== 1)
     throw new Error(`expected one ${lead} declaration, found ${found.length}`);
+  if (found[0][1].includes("\\"))
+    throw new Error(
+      `${lead} holds a backslash: escape sequences aren't parsed`,
+    );
   return found[0][1];
 }
 
@@ -879,3 +885,16 @@ for (const name of UNDO_TWINS) {
     );
   });
 }
+
+test("constant() refuses a value holding an escape sequence", () => {
+  assert.throws(
+    () => constant('const X = "a\\";b";', "const X ="),
+    /const X = holds a backslash: escape sequences aren't parsed/,
+  );
+  // Any backslash refuses, not just one before a quote.
+  assert.throws(
+    () => constant('const X = "a\\nb";', "const X ="),
+    /const X = holds a backslash: escape sequences aren't parsed/,
+  );
+  assert.equal(constant('const X = "plain";', "const X ="), "plain");
+});
