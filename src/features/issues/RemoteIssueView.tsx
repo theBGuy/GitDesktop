@@ -1054,7 +1054,7 @@ export function RemoteIssueView({
    *  navigation its own surface uses (Development panel / related issues). */
   function openRef(kind: "pr" | "issue", refNumber: number) {
     if (kind === "pr") {
-      // The store's navigator, so the Pulls list aligns its open/closed tab with
+      // The store's navigator, so the Pulls list aligns its state tab with
       // the referenced PR's real state — a timeline reference points at merged
       // and closed ones as often as open ones. No lens write: this handler is
       // wired only under the origin lens, which is the lens the number came from.

@@ -326,14 +326,14 @@ interface UiState {
    *  review. Consumed by the PR detail view, which hands it to its own reveal
    *  state rather than reading it per render. */
   pendingReviewId: string | null;
-  /** One-shot: the Pulls list should align its open/closed tab with the opened PR's
+  /** One-shot: the Pulls list should align its state tab with the opened PR's
    *  ACTUAL state once that state is known. Raised by `openPr`, the one door every
    *  navigation from outside the list goes through (and `selectPrWithAlign`, its
-   *  in-view twin for stack hops), because that tab is panel state no navigation
-   *  can reach, and the event behind one (a review posted on a PR that merged
-   *  later) can't name the state either. Consumed by the panel once the state
-   *  lands; a list reselection clears it, so it can only ever align the PR it
-   *  opened. */
+   *  in-view twin for stack hops and body links), because that tab is panel state
+   *  no navigation can reach, and the event behind one (a review posted on a PR
+   *  that merged later) can't name the state either. Consumed by the panel once
+   *  the state lands; a list reselection clears it, so it can only ever align the
+   *  PR it opened. */
   pendingPrAlign: boolean;
   /** Selected issue on the Issues tab. */
   selectedIssue: SelectedIssue | null;
@@ -573,7 +573,7 @@ interface UiState {
    *  never advances {@link UiState.interactionEpoch}. */
   clearRemoteSelections: () => void;
   /** `selectPr` that also arms `pendingPrAlign`, for a pick made off the list: the
-   *  list's open/closed tab can't contain every stack member a PR view links to, so
+   *  list's state tab can't contain every PR a view or body links to, so
    *  the panel resolves the chosen PR's real state and aligns the tab to it. */
   selectPrWithAlign: (pr: SelectedPr) => void;
   setPendingPrSection: (section: PrSection | null) => void;
@@ -917,7 +917,7 @@ export const useUiStore = create<UiState>()((set, get) => {
             // (see openCommit's note), and the reveal target must land with the
             // selection it belongs to.
             pendingReviewId: target.reviewId ?? null,
-            // The list's open/closed tab can't contain every PR a navigation opens —
+            // The list's state tab can't contain every PR a navigation opens —
             // arm the align here, where the selection lands, and let the panel resolve
             // the PR's real state.
             pendingPrAlign: true,

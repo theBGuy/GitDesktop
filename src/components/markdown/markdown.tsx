@@ -1243,9 +1243,12 @@ export function Markdown({
     const { number } = target;
     // Fire-time reads of stable store actions: subscribing would put three
     // listeners on every rendered body, most of which never carry a reference.
-    const { selectPr, selectIssue, setRepoTab } = useUiStore.getState();
+    // A PR opens through selectPrWithAlign: the list's state tab can't contain
+    // every PR a body links to, so the panel resolves the real state and aligns.
+    const { selectPrWithAlign, selectIssue, setRepoTab } =
+      useUiStore.getState();
     const openPr = () => {
-      selectPr({ kind: "remote", id: String(number) });
+      selectPrWithAlign({ kind: "remote", id: String(number) });
       setRepoTab("pulls");
     };
     const openIssue = () => {
