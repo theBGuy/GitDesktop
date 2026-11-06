@@ -180,6 +180,7 @@ export function EditHistoryDialog({
   repoPath,
   base,
   commits,
+  emptyNote,
   open,
   onOpenChange,
   onDone,
@@ -188,6 +189,9 @@ export function EditHistoryDialog({
   base: string;
   /** Editable unpushed commits, newest-first (matches the history list). */
   commits: CommitSummary[];
+  /** Why `commits` is empty, shown in the footer while it is; the caller
+   *  derives it from the same hold that disables the menu rows. */
+  emptyNote: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDone: () => void;
@@ -206,21 +210,34 @@ export function EditHistoryDialog({
   // Bumps on every reseed, so focus the reorder dropped can be put back.
   const [reseedNonce, setReseedNonce] = useState(0);
   const [menuHash, setMenuHash] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState({ text: "", seq: 0 });
+  const announce = (text: string) =>
+    setAnnouncement((prev) => ({ text, seq: prev.seq + 1 }));
 
   // Reseed when a different set of commits arrives (render-time adjustment).
   const key = commits.map((c) => c.hash).join();
   const [lastKey, setLastKey] = useState(key);
+  const [lastNote, setLastNote] = useState(emptyNote);
   if (key !== lastKey) {
     setLastKey(key);
     setOrder(commits.map((c) => c.hash));
     setActions({});
     setOverrides({});
     setReseedNonce((n) => n + 1);
+    // The footer's note is spoken whenever it changes under an open dialog:
+    // when the rows vanish (here) or when an empty set's reason moves on (below),
+    // once per change and never on mount.
+    if (commits.length === 0 && emptyNote !== "") announce(emptyNote);
     // A menu whose row left would otherwise reopen by itself if the row came
     // back; one whose row survived stays open.
     if (menuHash !== null && !commits.some((c) => c.hash === menuHash)) {
       setMenuHash(null);
     }
+  }
+  if (emptyNote !== lastNote) {
+    setLastNote(emptyNote);
+    if (key === lastKey && commits.length === 0 && emptyNote !== "")
+      announce(emptyNote);
   }
 
   const subjectOf = useMemo(
@@ -277,9 +294,6 @@ export function EditHistoryDialog({
     hash: string;
     nonce: number;
   } | null>(null);
-  const [announcement, setAnnouncement] = useState({ text: "", seq: 0 });
-  const announce = (text: string) =>
-    setAnnouncement((prev) => ({ text, seq: prev.seq + 1 }));
 
   // A move re-orders keyed nodes, which can drop focus off the moved row (and a
   // button click parks it on a button), so every move lands focus back on it.
@@ -813,34 +827,45 @@ export function EditHistoryDialog({
 
         <DialogFooter className="sm:items-center sm:justify-between">
           <div className="mr-auto text-xs text-muted-foreground">
-            {messages.isError ? (
-              <span className="text-warning">
-                Couldn't load commit messages.{" "}
-                <button
-                  type="button"
-                  className="cursor-pointer underline underline-offset-2"
-                  onClick={() => messages.refetch()}
-                >
-                  Retry
-                </button>
-              </span>
-            ) : plan.error ? (
-              <span className="text-warning">{plan.error}</span>
-            ) : (
-              <>
-                Result:{" "}
-                <span className="tabular-nums text-foreground">
-                  {plan.resultCount}
-                </span>{" "}
-                {plan.resultCount === 1 ? "commit" : "commits"}
-                {plan.hasEdit && (
-                  <span className="block text-[11px]">
-                    Pauses at each Edit so you can amend it, then Continue from
-                    the banner.
-                  </span>
-                )}
-              </>
-            )}
+            {(() => {
+              switch (true) {
+                // First: an empty set has no messages worth retrying and no
+                // plan to fault.
+                case commits.length === 0 && emptyNote !== "":
+                  return emptyNote;
+                case messages.isError:
+                  return (
+                    <span className="text-warning">
+                      Couldn't load commit messages.{" "}
+                      <button
+                        type="button"
+                        className="cursor-pointer underline underline-offset-2"
+                        onClick={() => messages.refetch()}
+                      >
+                        Retry
+                      </button>
+                    </span>
+                  );
+                case Boolean(plan.error):
+                  return <span className="text-warning">{plan.error}</span>;
+                default:
+                  return (
+                    <>
+                      Result:{" "}
+                      <span className="tabular-nums text-foreground">
+                        {plan.resultCount}
+                      </span>{" "}
+                      {plan.resultCount === 1 ? "commit" : "commits"}
+                      {plan.hasEdit && (
+                        <span className="block text-[11px]">
+                          Pauses at each Edit so you can amend it, then Continue
+                          from the banner.
+                        </span>
+                      )}
+                    </>
+                  );
+              }
+            })()}
           </div>
           <DisabledReasonButton
             variant="outline"

@@ -35,7 +35,7 @@ pub struct FileBytes {
 /// Whether `path` stays inside whatever it is joined onto: relative, with no `..`.
 /// `Path::join` REPLACES the base on an absolute or root/drive-prefixed right side,
 /// and a `..` walks out of it, so either would read a file outside the repo.
-fn is_repo_relative(path: &str) -> bool {
+pub(crate) fn is_repo_relative(path: &str) -> bool {
     use std::path::Component;
     std::path::Path::new(path)
         .components()
@@ -52,14 +52,35 @@ fn preview_read_refusal(raw: &str, why: &str) -> AppError {
     AppError::InvalidArgument(format!("Can't read {} — {why}.", discard_shown(raw)))
 }
 
-fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewRead> {
-    use std::io::Read;
+#[cfg(windows)]
+pub(crate) const NO_VERBATIM_FORM: &str = "the path has no verbatim form";
+
+/// What a repo-relative working-tree path names, read through the verbatim,
+/// link-refusing chain the working-tree preview and blob-size reads share. Its
+/// non-regular arms carry reasons only; each caller words its own refusal around
+/// them.
+pub(crate) enum WorktreeEntry {
+    Absent,
+    Linked,
+    NotRegular,
+    Regular {
+        path: std::path::PathBuf,
+        len: u64,
+    },
+    #[cfg(windows)]
+    NoVerbatim,
+}
+
+/// Stats `rel` under `repo` without following a link at any component; `path` is
+/// the spelling it stat'ed, so a caller that opens the file opens the same one.
+pub(crate) fn worktree_entry(repo: &str, rel: &str) -> AppResult<WorktreeEntry> {
     let path = std::path::Path::new(repo).join(rel);
     #[cfg(windows)]
-    let path = crate::fsops::verbatim_path(&path)
-        .ok_or_else(|| preview_read_refusal(raw, "the path has no verbatim form"))?;
+    let Some(path) = crate::fsops::verbatim_path(&path) else {
+        return Ok(WorktreeEntry::NoVerbatim);
+    };
     if linked_component(repo, rel, true)? {
-        return Err(preview_read_refusal(raw, DISCARD_LINKED));
+        return Ok(WorktreeEntry::Linked);
     }
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -69,14 +90,32 @@ fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewR
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            return Ok(PreviewRead::Absent)
+            return Ok(WorktreeEntry::Absent)
         }
         Err(e) => return Err(e.into()),
     };
     if !metadata.is_file() {
-        return Err(preview_read_refusal(raw, "it isn't a regular file"));
+        return Ok(WorktreeEntry::NotRegular);
     }
-    if metadata.len() > IMAGE_MAX_BYTES as u64 {
+    Ok(WorktreeEntry::Regular {
+        len: metadata.len(),
+        path,
+    })
+}
+
+fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewRead> {
+    use std::io::Read;
+    let (path, len) = match worktree_entry(repo, rel)? {
+        WorktreeEntry::Absent => return Ok(PreviewRead::Absent),
+        WorktreeEntry::Linked => return Err(preview_read_refusal(raw, DISCARD_LINKED)),
+        WorktreeEntry::NotRegular => {
+            return Err(preview_read_refusal(raw, "it isn't a regular file"))
+        }
+        #[cfg(windows)]
+        WorktreeEntry::NoVerbatim => return Err(preview_read_refusal(raw, NO_VERBATIM_FORM)),
+        WorktreeEntry::Regular { path, len } => (path, len),
+    };
+    if len > IMAGE_MAX_BYTES as u64 {
         return Ok(PreviewRead::TooLarge);
     }
     let mut bytes = Vec::new();
@@ -188,7 +227,8 @@ pub async fn git_file_base64(
         None => {
             if !is_repo_relative(&file_path) {
                 return Err(AppError::InvalidArgument(format!(
-                    "invalid path: {file_path}"
+                    "invalid path: {}",
+                    discard_shown(&file_path)
                 )));
             }
             let rel = discard_rel_path(&file_path)

@@ -419,3 +419,39 @@ export function deriveEditRange<C extends EditableCommit>(
   const editBase = commits[Math.max(editLen, 0)]?.hash ?? "";
   return { editLen: Math.max(editLen, 0), editCommits, editBase };
 }
+
+/** Why Edit history is held, in display precedence order; null = available. */
+export type EditHistoryHold =
+  | "op" // an operation is in progress (checked FIRST)
+  | "refreshing" // the reads don't agree (viewAgrees is false)
+  | "nothing-unpushed" // the count basis leaves nothing to edit
+  | "merge-on-top" // the newest commit is a merge
+  | "shallow-boundary" // the lone commit's parent isn't in the clone
+  | "lone-commit"; // the lone commit has no older commit to rebase onto
+
+/** Edit history's gate over deriveEditRange's result, as a reason code (not
+ *  copy, so this module stays free of runtime imports). The editLen-0 causes
+ *  follow deriveEditRange's own arithmetic: no count, a merge at the top, or
+ *  the bottom-commit decrement leaving nothing above the base. Takes the
+ *  head-is-merge primitive rather than the commits array, so the panel's call
+ *  never receives the array its CommitList cache order guards. */
+export function editHistoryHold(input: {
+  /** deriveEditRange's editLen over the same view. */
+  editLen: number;
+  /** The view's unpushed count. */
+  count: number;
+  /** The view's newest commit is a merge. */
+  headIsMerge: boolean;
+  /** The panel measured the lone commit's parent as missing (shallow clone). */
+  shallowBoundary: boolean;
+  agreed: boolean;
+  opInProgress: boolean;
+}): EditHistoryHold | null {
+  if (input.opInProgress) return "op";
+  if (!input.agreed) return "refreshing";
+  if (input.editLen >= 1) return null;
+  if (input.count === 0) return "nothing-unpushed";
+  if (input.headIsMerge) return "merge-on-top";
+  if (input.shallowBoundary) return "shallow-boundary";
+  return "lone-commit";
+}

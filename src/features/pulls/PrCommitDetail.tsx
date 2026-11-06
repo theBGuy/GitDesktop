@@ -380,6 +380,9 @@ export function PrCommitDetail({
                       // still resolves.
                       diffReady={diff.data !== undefined}
                       selectedPath={effectivePath}
+                      selectedBinary={sectionIsBinary(
+                        sections.get(effectivePath ?? "") ?? "",
+                      )}
                       onSelectFile={pickPath}
                       lens={lens}
                     />
@@ -472,6 +475,7 @@ function PrCommitFileDiffSlot({
       isError={false}
       repoPath={repoPath}
       previewRev={previewRev}
+      anchorCommit={sha}
       lineAnchors={lineAnchors}
       lineWidget={lineWidget}
     />

@@ -12,6 +12,7 @@ import {
   resolveDetailPane,
 } from "@/features/conversations/remote-section-state";
 import { presentError } from "@/lib/error-summary";
+import { formatBytes } from "@/lib/format-bytes";
 import {
   useBranchStats,
   useDefaultBranch,
@@ -21,7 +22,6 @@ import {
 import {
   DateValue,
   fmt,
-  formatBytes,
   LanguageMakeup,
   SectionTitle,
   Stat,

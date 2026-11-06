@@ -6,7 +6,8 @@
 // and fall to nothing editable otherwise; plus the sync gates that refetch the
 // trailing side without looping, re-read the HEAD-move set only where a read
 // predates the move, and recheck an aged no-upstream count; and squash's gate
-// with its hold precedence.
+// with its hold precedence, and Edit history's hold codes in their precedence
+// order.
 //
 // Not testable here: the component's ref holding the last-seen oid (its update
 // rule is `observeHeadOid`, pinned below), the render-time setState loop,
@@ -21,6 +22,7 @@ import {
   advanceSnapshot,
   deriveEditRange,
   EDIT_MAX,
+  editHistoryHold,
   headAgrees,
   isNoUpstream,
   NO_UPSTREAM_COUNT_RECHECK_MS,
@@ -863,4 +865,66 @@ test("squashGate: hold precedence with no operation in progress", () => {
     holds("filter-hides-range"),
     "the filter hold is checked before refreshing",
   );
+});
+
+test("editHistoryHold: each held case names its code, op before refreshing before empty", () => {
+  // Composed the way the panel does: deriveEditRange first, then the hold
+  // over the head-is-merge primitive.
+  const hold = (commits, count, over = {}) => {
+    const { editLen } = deriveEditRange(commits, count, false);
+    return editHistoryHold({
+      editLen,
+      count,
+      headIsMerge: commits[0]?.isMerge === true,
+      shallowBoundary: false,
+      agreed: true,
+      opInProgress: false,
+      ...over,
+    });
+  };
+  assert.equal(hold(OLD_LOG, 0), "nothing-unpushed");
+  const mergeTop = ["m", "a", "b"].map((h) => commit(h, h === "m"));
+  assert.equal(hold(mergeTop, 3), "merge-on-top");
+  assert.equal(hold([commit("R")], 1), "lone-commit");
+  assert.equal(
+    hold([commit("R")], 1, { shallowBoundary: true }),
+    "shallow-boundary",
+  );
+  assert.equal(hold([commit("b"), commit("a")], 2), null, "editLen 1");
+  // Precedence: an operation outranks the reads disagreeing, which outrank
+  // every empty case.
+  assert.equal(hold(OLD_LOG, 0, { opInProgress: true, agreed: false }), "op");
+  assert.equal(hold(OLD_LOG, 0, { agreed: false }), "refreshing");
+  assert.equal(hold(OLD_LOG, 3, { agreed: false }), "refreshing");
+  assert.equal(hold(OLD_LOG, 3, { opInProgress: true }), "op");
+  // A count of 0 over a merge on top reads as nothing to edit, the first
+  // editLen-0 cause in deriveEditRange's order.
+  assert.equal(hold(mergeTop, 0), "nothing-unpushed");
+  // A merge on top outranks a shallow boundary.
+  assert.equal(
+    hold([commit("R", true)], 1, { shallowBoundary: true }),
+    "merge-on-top",
+  );
+});
+
+test("editHistoryHold: available exactly where the old gate was", () => {
+  for (const editLen of [0, 1, 3]) {
+    for (const agreed of [false, true]) {
+      for (const opInProgress of [false, true]) {
+        const held = editHistoryHold({
+          editLen,
+          count: editLen,
+          headIsMerge: false,
+          shallowBoundary: false,
+          agreed,
+          opInProgress,
+        });
+        assert.equal(
+          held === null,
+          editLen >= 1 && !opInProgress && agreed,
+          `editLen ${editLen}, agreed ${agreed}, op ${opInProgress}`,
+        );
+      }
+    }
+  }
 });

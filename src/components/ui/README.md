@@ -3,7 +3,7 @@
 These are shadcn / Base UI primitives, normally regenerated rather than
 edited. Nine of them carry a sanctioned local delta for one cross-file
 contract: **panel-scoped portals plus activity-aware modality**. Repo tabs
-render inside `<Activity>` (`TabPanel` in `RepositoryView.tsx`), which
+render inside `<Activity>` (`src/features/repository/TabPanel.tsx`), which
 conceals a hidden tab and keeps its subtree mounted. Through react-dom 19.2 a
 popup that portalled to `<body>` sat outside that conceal and stayed on screen
 over whichever tab the user switched to; 19.3 reaches portal hosts and conceals
@@ -28,9 +28,10 @@ rather than rewriting it from scratch. The marker imports are
 
 Coverage is partial and indirect. `pnpm run checks` runs
 `lone-activity-boundary`, which pins the `<Activity>` side of the contract
-(exactly one JSX `<Activity`, in `RepositoryView.tsx`) but cannot see a
-missing `container` prop here. Nothing else guards this folder, so a live
-smoke is the remaining check. Two things decide whether one tests anything:
+(no JSX `<Activity` outside `TabPanel.tsx`; a second one inside that file
+goes uncaught) but cannot see a missing `container` prop here. Nothing
+else guards this folder, so a live smoke is the remaining check. Two things
+decide whether one tests anything:
 
 - **Switch tabs by hotkey, not by clicking a tab.** An outside click
   dismisses an open modal before it is ever concealed, so the click path

@@ -11,7 +11,8 @@
 //   clearSelectedCommit, and both routes that write a commit's message into
 //   the commit box ask replacesMessageConfirm between the message read and the
 //   write;
-// - the frontend's UNDO_SHALLOW_BOUNDARY is byte-for-byte the backend's.
+// - the frontend's UNDO_SHALLOW_BOUNDARY, UNDO_MID_PICK, UNDO_MID_MERGE and
+//   UNDO_DETACHED_ROOT are byte-for-byte the backend's.
 // Every check reads its source whole and fails closed on anything it can't
 // find; each also runs against an in-memory mutated copy, so a green suite
 // proves the pin bites. Runs in CI's installless guards job: Node built-ins only.
@@ -299,18 +300,31 @@ function checkClearSelectedCommit(ui) {
     : [`clearSelectedCommit writes more than the selection: ${setters[0]}`];
 }
 
-/** The one string constant `name` declares in `src`, by the given lead. */
+/** The one string constant `src` declares after `lead`. Fails on a backslash:
+ *  the match reads raw source, so an escaped quote would cut the value short. */
 function constant(src, lead) {
   const found = [...src.matchAll(new RegExp(`${lead}\\s*"([^"]*)";`, "g"))];
   if (found.length !== 1)
     throw new Error(`expected one ${lead} declaration, found ${found.length}`);
+  if (found[0][1].includes("\\"))
+    throw new Error(
+      `${lead} holds a backslash: escape sequences aren't parsed`,
+    );
   return found[0][1];
 }
 
-function checkShallowTwin(rust, panel) {
-  const backend = constant(rust, "const UNDO_SHALLOW_BOUNDARY: &str =");
-  const frontend = constant(panel, "const UNDO_SHALLOW_BOUNDARY =");
-  if (backend === "") return ["the Rust UNDO_SHALLOW_BOUNDARY is empty"];
+/** The undo refusals the panel spells itself, each KEEP IN STEP with commit.rs. */
+const UNDO_TWINS = [
+  "UNDO_SHALLOW_BOUNDARY",
+  "UNDO_MID_PICK",
+  "UNDO_MID_MERGE",
+  "UNDO_DETACHED_ROOT",
+];
+
+function checkUndoTwin(rust, panel, name) {
+  const backend = constant(rust, `const ${name}: &str =`);
+  const frontend = constant(panel, `const ${name} =`);
+  if (backend === "") return [`the Rust ${name} is empty`];
   return Buffer.from(backend, "utf8").equals(Buffer.from(frontend, "utf8"))
     ? []
     : [`TS ${JSON.stringify(frontend)} != Rust ${JSON.stringify(backend)}`];
@@ -853,17 +867,33 @@ test("amend and undo ask before replacing the commit box's message", () => {
   );
 });
 
-test("UNDO_SHALLOW_BOUNDARY matches commit.rs byte for byte", () => {
-  const rust = read(COMMIT_RS);
-  const panel = read(PANEL);
-  assert.deepEqual(checkShallowTwin(rust, panel), []);
-  const tsSentence = constant(panel, "const UNDO_SHALLOW_BOUNDARY =");
-  assert.notDeepEqual(
-    checkShallowTwin(
-      rust,
-      mutate(panel, `"${tsSentence}"`, `"${tsSentence.replace("—", "-")}"`),
-    ),
-    [],
-    "control: the TS sentence drifts",
+for (const name of UNDO_TWINS) {
+  test(`${name} matches commit.rs byte for byte`, () => {
+    const rust = read(COMMIT_RS);
+    const panel = read(PANEL);
+    assert.deepEqual(checkUndoTwin(rust, panel, name), []);
+    const tsSentence = constant(panel, `const ${name} =`);
+    assert.notDeepEqual(
+      checkUndoTwin(
+        rust,
+        mutate(panel, `"${tsSentence}"`, `"${tsSentence.replace("—", "-")}"`),
+        name,
+      ),
+      [],
+      `control: the TS ${name} sentence drifts`,
+    );
+  });
+}
+
+test("constant() refuses a value holding an escape sequence", () => {
+  assert.throws(
+    () => constant('const X = "a\\";b";', "const X ="),
+    /const X = holds a backslash: escape sequences aren't parsed/,
   );
+  // Any backslash refuses, not just one before a quote.
+  assert.throws(
+    () => constant('const X = "a\\nb";', "const X ="),
+    /const X = holds a backslash: escape sequences aren't parsed/,
+  );
+  assert.equal(constant('const X = "plain";', "const X ="), "plain");
 });

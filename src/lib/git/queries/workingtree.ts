@@ -322,6 +322,48 @@ export function useFileAtRev(
   return useQuery({ ...fileAtRevOptions(repo, rev, file), enabled });
 }
 
+/** The byte sizes of a binary diff's sides; idle while `args` is null. */
+export function useBinarySizes(
+  repo: string,
+  args: {
+    oldOid: string | null;
+    newOid: string | null;
+    worktreeFile: string | null;
+    anchorCommit: string | null;
+  } | null,
+) {
+  return useQuery({
+    // Every input is in the key: the answer depends on all of them. Outside
+    // workingTreeKeys' prefixes on purpose, since the ids already re-key on any
+    // content change (the worktree side's newOid is its working-tree hash).
+    queryKey: [
+      "repo",
+      repo,
+      "blob-sizes",
+      args?.oldOid ?? null,
+      args?.newOid ?? null,
+      args?.worktreeFile ?? null,
+      args?.anchorCommit ?? null,
+    ] as const,
+    queryFn: () =>
+      api.gitBlobSizes(
+        repo,
+        args?.oldOid ?? null,
+        args?.newOid ?? null,
+        args?.worktreeFile ?? null,
+        args?.anchorCommit ?? null,
+      ),
+    enabled: args !== null,
+    networkMode: "always",
+    // Content-keyed, so it never goes stale, which also keeps it out of the
+    // focus refetch. No placeholderData: it would show another file's sizes.
+    staleTime: Infinity,
+    retry: (failureCount, error) =>
+      !(isAppError(error) && error.kind === "invalidArgument") &&
+      shouldRetryQuery(failureCount, error),
+  });
+}
+
 export function useApplyPatch(repo: string) {
   return useRepoMutation(
     repo,

@@ -11,6 +11,13 @@ export interface CommitSummary {
   isMerge: boolean;
 }
 
+/** A commit whose id starts with a searched prefix. */
+export interface CommitPrefixMatch {
+  commit: CommitSummary;
+  /** An ancestor of HEAD. */
+  onBranch: boolean;
+}
+
 /** One file-history entry: the commit plus the file's path as of that commit. */
 export interface FileLogEntry extends CommitSummary {
   path: string;

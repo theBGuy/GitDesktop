@@ -5644,14 +5644,15 @@ export const CHECKS = [
   {
     name: "lone-activity-boundary",
     // Both directions ride the allowlist: a hit anywhere else is a violation,
-    // and TabPanel losing its own `<Activity>` reads as a stale entry. Residual:
-    // a SECOND `<Activity` added inside RepositoryView.tsx is not caught, since
-    // the allowlist works per file rather than per occurrence.
+    // and TabPanel losing its own `<Activity>` reads as a stale entry. TabPanel
+    // has its own file, so RepositoryView.tsx is scanned like any other. Residual:
+    // a SECOND `<Activity` added inside TabPanel.tsx is not caught, since the
+    // allowlist works per file rather than per occurrence.
     appliesTo: () => true,
     scan: perLine(ACTIVITY_JSX_RE),
-    allowlist: ["src/features/repository/RepositoryView.tsx"],
+    allowlist: ["src/features/repository/TabPanel.tsx"],
     message:
-      "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (RepositoryView.tsx) rather than a second <Activity>, or extend the allowlist deliberately for a non-tab Activity",
+      "a tab panel's <Activity> must be paired with PanelPortalBoundary and PanelActivityBoundary, or its dialogs and popups strand over the wrong tab — render TabPanel (src/features/repository/TabPanel.tsx) rather than a second <Activity>, or extend the allowlist deliberately for a non-tab Activity",
   },
   {
     name: "null-suspense-fallback",
