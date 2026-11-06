@@ -25,7 +25,7 @@ export const forgePrsForBranch = (
   lens: RemoteLens,
 ) => invoke<PrInfo[]>("forge_prs_for_branch", { repoPath, head, lens });
 
-export type PrStateFilter = "open" | "closed";
+export type PrStateFilter = "open" | "closed" | "merged" | "unmerged";
 
 /** The CI rollup for a PR-list page, keyed by number (provider-neutral). `prs` carries
  *  each row's number plus head SHA (the Bitbucket arm needs the SHA). `sampleUrl` is any

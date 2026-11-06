@@ -858,12 +858,10 @@ fn infer_mr_stacks(open: &[(u64, &str, &str)]) -> HashMap<u64, (String, u32, u32
 }
 
 /// Fill each row's `stack` from the chains inferred over the SAME list. Membership
-/// is only as complete as the list in hand: callers pass the full open page (a
-/// truncated list would hide a chain's bottom and mis-position the rows above it),
-/// so the real limits are >100 open MRs and merged layers, which an open list has
-/// dropped entirely. Cross-repository rows sit out the inference entirely: their
-/// source branch lives in another project, so its name says nothing about a chain
-/// in this one.
+/// is only as complete as the list in hand: callers pass the first open page before
+/// truncating, so later pages and merged layers remain outside inference.
+/// Cross-repository rows sit out the inference entirely: their source branch lives
+/// in another project, so its name says nothing about a chain in this one.
 fn apply_mr_stacks(prs: &mut [PrInfo]) {
     let rows: Vec<(u64, &str, &str)> = prs
         .iter()
@@ -1143,8 +1141,8 @@ fn matches_client_axes(
 /// documents no secondary key, so a deeper page is older-or-EQUAL at the boundary: a
 /// TIE keeps the leg walking (a same-timestamp row can outrank a kept one on the id
 /// tiebreak in [`sort_filtered_rows`]), and tie-heavy repos walk to the horizon: a
-/// filtered list is refused there by design, the unfiltered closed list keeps its newest
-/// min(limit, 500) rows. An absent `limit` always deepens. Pure.
+/// filtered list refuses there; the unfiltered closed list keeps its covered prefix,
+/// with an all-tied fallback. An absent `limit` always deepens. Pure.
 fn leg_needs_deeper(kept_created_at: &[&str], page_oldest: &str, limit: Option<u32>) -> bool {
     let Some(limit) = limit.map(|n| n as usize).filter(|n| *n > 0) else {
         return true;
@@ -1184,8 +1182,8 @@ fn sort_filtered_rows<T>(rows: &mut [T], key: impl Fn(&T) -> (&str, u64)) {
 /// axes, dedupe by iid (the mine legs overlap whenever the viewer is both assignee
 /// and reviewer), order newest-first, and truncate to `limit`.
 ///
-/// Every surviving row is marked `stack_unknown`: chain inference reads the WHOLE
-/// open list (see [`apply_mr_stacks`]) and would mis-position rows over a filtered
+/// Every surviving row is marked `stack_unknown`: chain inference reads an unfiltered
+/// open page (see [`apply_mr_stacks`]) and would mis-position rows over a filtered
 /// subset, so the decoration is unfetched rather than absent. Pure.
 fn merge_filtered_mrs(rows: Vec<PrInfo>, plan: &GlFilterPlan, limit: Option<u32>) -> Vec<PrInfo> {
     let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
@@ -1307,12 +1305,16 @@ where
 /// the budget.
 const MAX_CONCURRENT_LEG_FETCHES: usize = 6;
 
-/// [`walk_filtered_legs`] over any page fetcher, so the walk is testable without `glab`.
-///
-/// A round's pages are FETCHED concurrently (in chunks of [`MAX_CONCURRENT_LEG_FETCHES`])
-/// but PROCESSED in endpoint order: leg N's stop rule reads the rows legs 0..N-1 kept
-/// this round, so completion order must never reach it. The first error in endpoint
-/// order wins, though its chunk may have spent its other spawns first.
+/// A truncated walk's boundary is the newest oldest non-empty timestamp of its cut
+/// legs. `None` on truncation means a cut leg has no readable timestamp; an
+/// untruncated walk has no boundary.
+struct LegWalk<T> {
+    rows: Vec<T>,
+    truncated: bool,
+    boundary: Option<String>,
+}
+
+/// [`walk_filtered_legs`] over any page fetcher, preserving its truncation contract.
 async fn walk_legs_with<R, T, F, Fut>(
     plan: &GlFilterPlan,
     limit: Option<u32>,
@@ -1327,6 +1329,31 @@ where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = AppResult<String>>,
 {
+    walk_legs_bounded_with(plan, limit, what, parse_failure, map, row, fetch)
+        .await
+        .map(|w| (w.rows, w.truncated))
+}
+
+/// Track the ordering boundary over every returned row, independent of client axes.
+///
+/// A round's pages are FETCHED concurrently (in chunks of [`MAX_CONCURRENT_LEG_FETCHES`])
+/// but PROCESSED in endpoint order: leg N's stop rule reads the rows legs 0..N-1 kept
+/// this round, so completion order must never reach it. The first error in endpoint
+/// order wins, though its chunk may have spent its other spawns first.
+async fn walk_legs_bounded_with<R, T, F, Fut>(
+    plan: &GlFilterPlan,
+    limit: Option<u32>,
+    what: &str,
+    parse_failure: &str,
+    map: impl Fn(R) -> T,
+    row: impl Fn(&T) -> (u64, &str, Option<&PrAuthor>, &[PrListLabel]),
+    fetch: F,
+) -> AppResult<LegWalk<T>>
+where
+    R: serde::de::DeserializeOwned,
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
     let mut fetched: Vec<T> = Vec::new();
     // Rows that would survive the client axes, tracked alongside the raw fetch so the
     // stop rule counts real matches rather than raw hits.
@@ -1335,6 +1362,8 @@ where
     let mut requests = 0usize;
     let mut truncated = false;
     let mut active: Vec<&String> = plan.endpoints.iter().collect();
+    let mut oldest_by_endpoint: std::collections::HashMap<&String, String> =
+        std::collections::HashMap::new();
 
     for page in 1..=MAX_LEG_PAGES {
         if active.is_empty() {
@@ -1361,6 +1390,14 @@ where
                 for item in &fetched[start..] {
                     let (id, created_at, author, labels) = row(item);
                     page_oldest = Some(created_at);
+                    if !created_at.is_empty() {
+                        let oldest = oldest_by_endpoint
+                            .entry(endpoint)
+                            .or_insert_with(|| created_at.to_string());
+                        if created_at < oldest.as_str() {
+                            *oldest = created_at.to_string();
+                        }
+                    }
                     if matches_client_axes(plan, author, labels) && kept_ids.insert(id) {
                         kept_times.push(created_at.to_string());
                     }
@@ -1386,7 +1423,21 @@ where
         active = deeper;
     }
     // Legs still wanting a page when the horizon ran out are truncated by definition.
-    Ok((fetched, truncated || !active.is_empty()))
+    let truncated = truncated || !active.is_empty();
+    let boundary = if truncated {
+        active
+            .iter()
+            .map(|endpoint| oldest_by_endpoint.get(endpoint))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|times| times.into_iter().max().cloned())
+    } else {
+        None
+    };
+    Ok(LegWalk {
+        rows: fetched,
+        truncated,
+        boundary,
+    })
 }
 
 /// Refuse a walk that a cap cut short, whatever it managed to collect.
@@ -1500,27 +1551,24 @@ fn plan_unfiltered_states(enc: &str, resource: &str, states: &[&str]) -> GlFilte
     }
 }
 
-/// Offset pages can repeat an iid; dedupe before ordering and limiting the union.
+/// Offset pages can repeat an iid; dedupe before ordering the union.
 /// Closed rows keep their known-absent stack decoration.
-fn merge_unfiltered_closed(rows: Vec<PrInfo>, limit: Option<u32>) -> Vec<PrInfo> {
+fn merge_unfiltered_closed(rows: Vec<PrInfo>) -> Vec<PrInfo> {
     let mut seen = std::collections::HashSet::new();
     let mut out: Vec<PrInfo> = rows.into_iter().filter(|p| seen.insert(p.number)).collect();
     sort_filtered_rows(&mut out, |p| (p.created_at.as_str(), p.number));
-    if let Some(n) = limit {
-        out.truncate(n as usize);
-    }
     out
 }
 
-/// A horizon-limited union retains only the prefix covered by every state's walk.
+/// Maximum union size at the horizon, before dropping the uncovered timestamp suffix.
 const UNFILTERED_CLOSED_HORIZON: u32 = MAX_LEG_PAGES * FILTER_PAGE_SIZE;
 
 /// An absent limit preserves one full page per state for audit coverage. Explicit
 /// limits deepen within the walk's horizon, returning its covered prefix on a cap.
 ///
-/// The flag reports that the horizon CLAMPED the cap. A walk that truncates below the
-/// horizon returns the newest rows by created_at, though rows tied at the limit can be
-/// missed as they can at the cap, so it reports false.
+/// Cut legs bound the prefix to rows strictly newer than their newest oldest timestamp.
+/// Known limit: an all-tied cut keeps the pre-drop prefix so the page never empties.
+/// The flag reports a page short of its requested limit because the horizon cut it.
 async fn unfiltered_closed_with<F, Fut>(
     enc: &str,
     states: &[&str],
@@ -1544,9 +1592,9 @@ where
             })?;
             rows.extend(mrs.into_iter().map(from_glab_mr));
         }
-        return Ok((merge_unfiltered_closed(rows, None), false));
+        return Ok((merge_unfiltered_closed(rows), false));
     };
-    let (rows, truncated) = walk_legs_with(
+    let walk = walk_legs_bounded_with(
         &plan,
         Some(n.max(1)),
         "merge requests",
@@ -1563,27 +1611,46 @@ where
         fetch,
     )
     .await?;
-    let capped = truncated && n >= UNFILTERED_CLOSED_HORIZON;
-    let cap = if truncated {
-        n.min(UNFILTERED_CLOSED_HORIZON)
+    let mut rows = merge_unfiltered_closed(walk.rows);
+    let cap = if walk.truncated {
+        let boundary = walk.boundary.ok_or_else(|| {
+            gl_unreadable(
+                "merge requests",
+                "could not order GitLab merge requests at the read horizon: created_at missing"
+                    .into(),
+            )
+        })?;
+        let covered = rows
+            .iter()
+            .take_while(|p| p.created_at.as_str() > boundary.as_str())
+            .count();
+        let cap = n.min(UNFILTERED_CLOSED_HORIZON) as usize;
+        let kept = covered.min(cap);
+        if kept == 0 {
+            cap
+        } else {
+            kept
+        }
     } else {
-        n
+        n as usize
     };
-    Ok((merge_unfiltered_closed(rows, Some(cap)), capped))
+    rows.truncate(cap);
+    let capped = walk.truncated && rows.len() < n as usize;
+    Ok((rows, capped))
 }
 
-/// The signed-in user's merge requests for this repo. `state` is `"open"` or
-/// `"closed"`; the Closed tab shows closed **and** merged (matching the GitHub
-/// panel). GitLab splits those into separate server states, so we fetch each on
-/// its own page budget and merge newest-first, so open MRs cannot dilute the
-/// closed/merged coverage.
+/// The signed-in user's merge requests for this repo. `state` is `"open"`,
+/// `"closed"` (closed **and** merged, matching GitHub's Closed tab), `"merged"`, or
+/// `"unmerged"` (closed without merging). GitLab splits closed and merged into
+/// separate server states, so every non-open read walks each state on its own page
+/// budget and merges newest-first; see [`mr_list_states`] for the mapping.
 ///
 /// A non-empty `filter` narrows the list SERVER-side instead, through the leg fan-out
 /// described above [`plan_filtered_list`]; an absent, empty, or GitLab-inexpressible
 /// one keeps the unfiltered read below unchanged.
 ///
-/// The flag is [`unfiltered_closed_with`]'s horizon clamp. Every other read reports
-/// false: a filtered walk refuses rather than return a truncated page.
+/// The flag reports a horizon-shortened unfiltered page, including an open walk.
+/// A filtered walk refuses truncation and always reports false.
 pub async fn list_prs_page(
     repo_path: &str,
     state: &str,
@@ -1591,15 +1658,7 @@ pub async fn list_prs_page(
     filter: Option<&RemoteListFilter>,
 ) -> AppResult<(Vec<PrInfo>, bool)> {
     let enc = encode_project(&project_path(repo_path).await?);
-    let states: &[&str] = match state {
-        "open" => &["opened"],
-        "closed" => &["closed", "merged"],
-        other => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown PR state filter: {other}"
-            )));
-        }
-    };
+    let states = mr_list_states(state)?;
     if let Some(filter) = filter.filter(|f| !f.is_empty()) {
         let viewer = filter_viewer(repo_path, filter, true).await?;
         if let Some(plan) = plan_filtered_list(
@@ -1613,34 +1672,133 @@ pub async fn list_prs_page(
             return Ok((filtered_mr_page(repo_path, &plan, limit).await?, false));
         }
     }
-    if state == "closed" {
-        return unfiltered_closed_with(&enc, states, limit, |url: String| async move {
-            run_glab(Some(repo_path), &["api", &url], GLAB_NETWORK_TIMEOUT)
-                .await
-                .map(|out| out.stdout_lossy())
-        })
-        .await;
+    unfiltered_mr_page_with(&enc, state, states, limit, |url: String| async move {
+        run_glab(Some(repo_path), &["api", &url], GLAB_NETWORK_TIMEOUT)
+            .await
+            .map(|out| out.stdout_lossy())
+    })
+    .await
+}
+
+/// The PR-list state's GitLab server states. `locked` is never requested: GitLab's
+/// `state=closed` omits locked MRs, so a transiently locked MR (which
+/// [`map_mr_state`] renders as CLOSED) is absent from the unmerged list by design.
+fn mr_list_states(state: &str) -> AppResult<&'static [&'static str]> {
+    match state {
+        "open" => Ok(&["opened"]),
+        "closed" => Ok(&["closed", "merged"]),
+        "merged" => Ok(&["merged"]),
+        "unmerged" => Ok(&["closed"]),
+        other => Err(AppError::InvalidArgument(format!(
+            "unknown PR state filter: {other}"
+        ))),
     }
-    // The open set requests GitLab's full 100-row page regardless of `limit`:
-    // stack inference needs the whole page to keep chain bottoms and positions.
-    // The limit narrows only the result after inference.
-    let per_page = 100;
-    let endpoint = format!("projects/{enc}/merge_requests?state=opened&per_page={per_page}");
-    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-    let mrs: Vec<GlabMr> = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
-        gl_unreadable(
+}
+
+/// The unfiltered list read behind [`list_prs_page`], over an injected fetch. Every
+/// state except open takes the per-state walk: [`open_mrs_with`] hardcodes
+/// `state=opened`, so it must stay reachable from "open" alone.
+async fn unfiltered_mr_page_with<F, Fut>(
+    enc: &str,
+    state: &str,
+    states: &[&str],
+    limit: Option<u32>,
+    fetch: F,
+) -> AppResult<(Vec<PrInfo>, bool)>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    if state != "open" {
+        return unfiltered_closed_with(enc, states, limit, fetch).await;
+    }
+    open_mrs_with(enc, limit, fetch).await
+}
+
+/// Offset pages retain server order; only explicit limits above one page deepen.
+/// Rows dedupe on `key` (first sighting wins) as they arrive, and the walk counts
+/// unique rows: a row that shifts between offset pages repeats, so a raw count
+/// would stop one page short. It ends at `limit` unique rows, a short page, or the
+/// horizon, and reports capped only for a full horizon still short of `limit`.
+async fn unfiltered_pages_with<R, F, Fut>(
+    endpoint: &str,
+    limit: u32,
+    what: &str,
+    parse_failure: &str,
+    key: impl Fn(&R) -> u64,
+    fetch: F,
+) -> AppResult<(Vec<R>, bool)>
+where
+    R: serde::de::DeserializeOwned,
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    let mut short_page = false;
+    for page in 1..=MAX_LEG_PAGES {
+        let body = fetch(format!("{endpoint}&page={page}")).await?;
+        let page_rows: Vec<R> = serde_json::from_str(&body)
+            .map_err(|e| gl_unreadable(what, format!("{parse_failure}: {e}")))?;
+        short_page = page_rows.len() < FILTER_PAGE_SIZE as usize;
+        rows.extend(page_rows.into_iter().filter(|r| seen.insert(key(r))));
+        if short_page || rows.len() >= limit as usize {
+            break;
+        }
+    }
+    let capped = !short_page && rows.len() < limit as usize;
+    Ok((rows, capped))
+}
+
+/// Inference reads the first page in full at every limit, the rows the MR view's
+/// single-page read infers from, so a chain never differs between list and detail.
+/// Rows past it are marked `stack_unknown`.
+async fn open_mrs_with<F, Fut>(
+    enc: &str,
+    limit: Option<u32>,
+    fetch: F,
+) -> AppResult<(Vec<PrInfo>, bool)>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let (mrs, capped) = if let Some(n) = limit.filter(|n| *n > FILTER_PAGE_SIZE) {
+        let endpoint = format!(
+            "projects/{enc}/merge_requests?state=opened&per_page={FILTER_PAGE_SIZE}&order_by=created_at&sort=desc"
+        );
+        unfiltered_pages_with(
+            &endpoint,
+            n,
             "merge requests",
-            format!("could not parse GitLab merge requests: {e}"),
+            "could not parse GitLab merge requests",
+            |mr: &GlabMr| mr.iid,
+            fetch,
         )
-    })?;
+        .await?
+    } else {
+        let endpoint = format!("projects/{enc}/merge_requests?state=opened&per_page=100");
+        let body = fetch(endpoint).await?;
+        let mrs: Vec<GlabMr> = serde_json::from_str(&body).map_err(|e| {
+            gl_unreadable(
+                "merge requests",
+                format!("could not parse GitLab merge requests: {e}"),
+            )
+        })?;
+        (mrs, false)
+    };
     let mut prs: Vec<PrInfo> = mrs.into_iter().map(from_glab_mr).collect();
-    // Chains are inferred over the open set only. Inference sees the full page (see
-    // `per_page`), so a `limit` narrows what's returned without distorting positions.
-    apply_mr_stacks(&mut prs);
+    // Truncation must follow inference so an omitted child still decorates its parent.
+    let first_page = prs.len().min(FILTER_PAGE_SIZE as usize);
+    let (inferred, beyond) = prs.split_at_mut(first_page);
+    apply_mr_stacks(inferred);
+    for pr in beyond {
+        pr.stack = None;
+        pr.stack_unknown = true;
+    }
     if let Some(n) = limit {
         prs.truncate(n as usize);
     }
-    Ok((prs, false))
+    Ok((prs, capped))
 }
 
 /// [`list_prs_page`] without its cap flag, for callers that read rows only.
@@ -1978,6 +2136,9 @@ struct GlabMrChanges {
     source_project_id: Option<u64>,
     #[serde(default, deserialize_with = "null_to_default")]
     target_project_id: Option<u64>,
+    /// The MR's conversation is locked (only project members may comment).
+    #[serde(default, deserialize_with = "null_to_default")]
+    discussion_locked: bool,
 }
 
 /// The MR's head pipeline and its owning project, which can differ from the target.
@@ -2305,7 +2466,8 @@ async fn project_label_colors(repo_path: &str, enc: &str) -> HashMap<String, Str
 /// GitLab approval carries no reviewable body — approvals surface via the timeline
 /// and the approve/unapprove control instead).
 pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
-    let enc = encode_project(&project_path(repo_path).await?);
+    let path = project_path(repo_path).await?;
+    let enc = encode_project(&path);
 
     // Core fields + changed files in one call, alongside the open-MR list that
     // stack inference needs — GitLab has no per-MR stack object, so membership can
@@ -2461,6 +2623,14 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         })
         .collect();
 
+    // Only a locked MR asks whether the viewer may still comment, so unlocked MRs
+    // pay no extra call; a failed read stays unknown and never holds the composer.
+    let viewer_can_comment = if mr.discussion_locked {
+        mr_viewer_can_note(repo_path, &path, number).await
+    } else {
+        None
+    };
+
     Ok(PrDetails {
         // No GraphQL node id on GitLab; the GitLab mutations key on the iid (labels
         // by name, assignees by resolved numeric id), so an empty id is fine.
@@ -2547,7 +2717,43 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // GitHub's "allow edits by maintainers" has no GitLab equivalent — unknown,
         // not denied.
         maintainer_can_modify: None,
+        locked: mr.discussion_locked,
+        // The lock is a field of the core read, so it is never unknown, and GitLab
+        // has no lock reason.
+        lock_unknown: false,
+        active_lock_reason: None,
+        viewer_can_comment,
+        // GitLab has no separate emoji permission; a lock blocks both for non-members.
+        viewer_can_react: viewer_can_comment,
     })
+}
+
+/// Whether the viewer may comment on the MR, from GraphQL `userPermissions.createNote`.
+/// The project path rides as a variable; the iid is digits by type. Any failure or
+/// missing field is `None` (unknown).
+async fn mr_viewer_can_note(repo_path: &str, path: &str, iid: u64) -> Option<bool> {
+    let query = format!(
+        "query($path:ID!){{ project(fullPath: $path){{ mergeRequest(iid: \"{iid}\"){{ userPermissions{{ createNote }} }} }} }}"
+    );
+    let query_arg = format!("query={query}");
+    let path_arg = format!("path={path}");
+    let out = run_glab(
+        Some(repo_path),
+        &["api", "graphql", "-f", &query_arg, "-f", &path_arg],
+        GLAB_NETWORK_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    mr_create_note_from(&out.stdout_lossy())
+}
+
+/// The `createNote` permission out of [`mr_viewer_can_note`]'s answer; `None` for an
+/// unparseable body or a null/missing field.
+fn mr_create_note_from(body: &str) -> Option<bool> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .pointer("/data/project/mergeRequest/userPermissions/createNote")
+        .and_then(serde_json::Value::as_bool)
 }
 
 /// A full single page heuristically signals incomplete commits; exact-cap totals
@@ -4521,8 +4727,8 @@ pub async fn mr_list_mergeability(
     // mergeability to report.
     debug_assert_eq!(state, "open", "only the open filter reaches the providers");
     let enc = encode_project(&project_path(repo_path).await?);
-    // per_page=100 matches `list_prs`' own deliberate open-state cap, so every row
-    // the list can render is answerable here — a limit param would add nothing.
+    // Only the first 100 open MRs are read here. Rows past them get no conflict chip;
+    // absence is no claim about mergeability.
     let endpoint = format!(
         "projects/{enc}/merge_requests?state=opened&per_page=100&with_merge_status_recheck=true"
     );
@@ -4701,9 +4907,8 @@ struct GlabIssueDetail {
 }
 
 /// The repo's issues for the Issues list. `state` is `"open"` or `"closed"`.
-/// GitLab issue state is a single `opened`/`closed` axis (no `merged`), so unlike
-/// `list_prs` this is one fetch. GitLab's `/issues` endpoint already excludes merge
-/// requests, so no extra filtering is needed.
+/// GitLab issue state is a single `opened`/`closed` axis (no `merged`); limits above
+/// 100 walk newest-created pages up to 500 rows. `/issues` excludes merge requests.
 ///
 /// A `filter` with an axis that applies to issues — assigned to me, author, label —
 /// narrows the list SERVER-side through the same leg fan-out [`list_prs`] uses;
@@ -4737,11 +4942,46 @@ pub async fn list_issues(
             return filtered_issue_page(repo_path, &plan, limit).await;
         }
     }
-    // GitLab pages at `per_page` (max 100); default to a full page, or cap it to `limit`.
+    unfiltered_issues_with(&enc, gl_state, limit, |url: String| async move {
+        run_glab(Some(repo_path), &["api", &url], GLAB_NETWORK_TIMEOUT)
+            .await
+            .map(|out| out.stdout_lossy())
+    })
+    .await
+}
+
+/// Small limits preserve the single request; larger ones retain server page order.
+async fn unfiltered_issues_with<F, Fut>(
+    enc: &str,
+    gl_state: &str,
+    limit: Option<u32>,
+    fetch: F,
+) -> AppResult<Vec<IssueInfo>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    if let Some(n) = limit.filter(|n| *n > FILTER_PAGE_SIZE) {
+        let endpoint = format!(
+            "projects/{enc}/issues?state={gl_state}&per_page={FILTER_PAGE_SIZE}&order_by=created_at&sort=desc"
+        );
+        let (issues, _) = unfiltered_pages_with(
+            &endpoint,
+            n,
+            "issues",
+            "could not parse GitLab issues",
+            |issue: &GlabIssue| issue.iid,
+            fetch,
+        )
+        .await?;
+        let mut rows: Vec<IssueInfo> = issues.into_iter().map(from_glab_issue).collect();
+        rows.truncate(n as usize);
+        return Ok(rows);
+    }
     let per_page = limit.map_or(100, |n| n.clamp(1, 100));
     let endpoint = format!("projects/{enc}/issues?state={gl_state}&per_page={per_page}");
-    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
-    let issues: Vec<GlabIssue> = serde_json::from_str(&out.stdout_lossy())
+    let body = fetch(endpoint).await?;
+    let issues: Vec<GlabIssue> = serde_json::from_str(&body)
         .map_err(|e| gl_unreadable("issues", format!("could not parse GitLab issues: {e}")))?;
     Ok(issues.into_iter().map(from_glab_issue).collect())
 }
@@ -12297,6 +12537,307 @@ mod tests {
         (rows, requested.into_inner().unwrap(), capped)
     }
 
+    const OPEN_PAGE_ENDPOINT: &str =
+        "projects/group%2Frepo/merge_requests?state=opened&per_page=100";
+    const OPEN_WALK_ENDPOINT: &str =
+        "projects/group%2Frepo/merge_requests?state=opened&per_page=100&order_by=created_at&sort=desc";
+    const ISSUE_WALK_ENDPOINT: &str =
+        "projects/group%2Frepo/issues?state=closed&per_page=100&order_by=created_at&sort=desc";
+
+    fn page_responses(endpoint: &str, pages: Vec<String>) -> Vec<(String, String)> {
+        pages
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| (format!("{endpoint}&page={}", i + 1), body))
+            .collect()
+    }
+
+    fn list_page_fetch<'a>(
+        responses: &'a [(String, String)],
+        requested: &'a std::sync::Mutex<Vec<String>>,
+    ) -> impl Fn(String) -> std::future::Ready<AppResult<String>> + 'a {
+        move |url| {
+            let (_, body) = responses
+                .iter()
+                .find(|(endpoint, _)| endpoint == &url)
+                .unwrap_or_else(|| panic!("unexpected list endpoint: {url}"));
+            requested.lock().unwrap().push(url);
+            std::future::ready(Ok(body.clone()))
+        }
+    }
+
+    async fn read_open_pages(
+        limit: Option<u32>,
+        responses: Vec<(String, String)>,
+    ) -> (Vec<PrInfo>, Vec<String>, bool) {
+        let requested = std::sync::Mutex::new(Vec::new());
+        let (rows, capped) = unfiltered_mr_page_with(
+            "group%2Frepo",
+            "open",
+            mr_list_states("open").unwrap(),
+            limit,
+            list_page_fetch(&responses, &requested),
+        )
+        .await
+        .unwrap();
+        (rows, requested.into_inner().unwrap(), capped)
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_up_to_100_keep_the_single_unpinned_request() {
+        for (limit, count) in [(None, 100), (Some(1), 1), (Some(100), 100)] {
+            let pages = closed_state_pages("opened", 1, 300, 5000);
+            let (rows, urls, capped) =
+                read_open_pages(limit, vec![(OPEN_PAGE_ENDPOINT.into(), pages[0].clone())]).await;
+            assert_eq!(urls, [OPEN_PAGE_ENDPOINT]);
+            assert_eq!(rows.len(), count);
+            assert!(!capped);
+        }
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_walk_past_100_newest_first() {
+        // Equal timestamps keep the served iid order across the page boundary.
+        let corpus: Vec<_> = (1..=300)
+            .map(|iid| (iid, 5000 - (iid as u32 / 10)))
+            .collect();
+        let responses = page_responses(
+            OPEN_WALK_ENDPOINT,
+            corpus.chunks(100).map(walk_page).collect(),
+        );
+        let expected_urls: Vec<_> = responses.iter().map(|(url, _)| url.clone()).collect();
+        let (rows, urls, capped) = read_open_pages(Some(250), responses).await;
+        assert_eq!(urls, expected_urls);
+        assert_eq!(
+            rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=250).collect::<Vec<_>>()
+        );
+        assert!(!capped);
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_stop_on_a_short_page() {
+        let responses = page_responses(
+            OPEN_WALK_ENDPOINT,
+            closed_state_pages("opened", 1, 150, 5000),
+        );
+        let expected_urls: Vec<_> = responses.iter().map(|(url, _)| url.clone()).collect();
+        let (rows, urls, capped) = read_open_pages(Some(400), responses).await;
+        assert_eq!(urls, expected_urls);
+        assert_eq!(rows.len(), 150);
+        assert!(!capped);
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_cap_at_the_horizon() {
+        for (limit, expected_cap) in [(700, true), (500, false)] {
+            let responses = page_responses(
+                OPEN_WALK_ENDPOINT,
+                closed_state_pages("opened", 1, 800, 5000),
+            );
+            let expected_urls: Vec<_> = responses
+                .iter()
+                .take(5)
+                .map(|(url, _)| url.clone())
+                .collect();
+            let (rows, urls, capped) = read_open_pages(Some(limit), responses).await;
+            assert_eq!(urls, expected_urls);
+            assert_eq!(rows.len(), 500);
+            assert_eq!(capped, expected_cap);
+        }
+    }
+
+    /// Open pages where each row heads `b{iid}`, retargeted per `targets` (iid, base).
+    fn open_stack_pages(count: u32, targets: &[(u64, &str)]) -> Vec<String> {
+        closed_state_pages("opened", 1, count, 5000)
+            .into_iter()
+            .map(|body| {
+                let mut rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+                for row in rows.as_array_mut().unwrap() {
+                    let iid = row["iid"].as_u64().unwrap();
+                    row["source_branch"] = serde_json::json!(format!("b{iid}"));
+                    if let Some((_, base)) = targets.iter().find(|(t, _)| *t == iid) {
+                        row["target_branch"] = serde_json::json!(base);
+                    }
+                }
+                rows.to_string()
+            })
+            .collect()
+    }
+
+    /// A row's number, inferred `(id, position, size)`, and `stack_unknown` flag.
+    type StackCell = (u64, Option<(String, u32, u32)>, bool);
+
+    fn stack_cells(rows: &[PrInfo]) -> Vec<StackCell> {
+        rows.iter()
+            .map(|p| {
+                let stack = p.stack.as_ref();
+                let cell = stack.map(|s| (s.id.clone(), s.position, s.size));
+                (p.number, cell, p.stack_unknown)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_infer_stacks_over_the_first_page_only() {
+        let pages = open_stack_pages(250, &[(7, "b3"), (150, "b5")]);
+        let single_page = vec![(OPEN_PAGE_ENDPOINT.to_string(), pages[0].clone())];
+        let (rows, urls, capped) =
+            read_open_pages(Some(500), page_responses(OPEN_WALK_ENDPOINT, pages)).await;
+        assert_eq!(urls.len(), 3);
+        assert_eq!(rows.len(), 250);
+        assert!(!capped);
+        // The first page decorates exactly as the MR view's single-page read does.
+        let (detail_rows, _, _) = read_open_pages(None, single_page).await;
+        assert_eq!(stack_cells(&rows[..100]), stack_cells(&detail_rows));
+        let row = |n: u64| rows.iter().find(|p| p.number == n).unwrap();
+        let stack = row(7).stack.as_ref().unwrap();
+        assert_eq!(
+            (stack.id.as_str(), stack.position, stack.size),
+            ("mr-3", 2, 2)
+        );
+        // A child past row 100 infers no chain at either end of the boundary.
+        assert!(row(5).stack.is_none() && !row(5).stack_unknown);
+        assert!(row(150).stack.is_none() && row(150).stack_unknown);
+        assert!(rows[100..]
+            .iter()
+            .all(|p| p.stack.is_none() && p.stack_unknown));
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_keep_a_first_page_stack_past_the_limit() {
+        let pages = open_stack_pages(100, &[(50, "b5")]);
+        let (rows, _, _) = read_open_pages(
+            Some(20),
+            vec![(OPEN_PAGE_ENDPOINT.into(), pages[0].clone())],
+        )
+        .await;
+        assert_eq!(rows.len(), 20);
+        assert!(!rows.iter().any(|p| p.number == 50));
+        let stack = rows
+            .iter()
+            .find(|p| p.number == 5)
+            .unwrap()
+            .stack
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            (stack.id.as_str(), stack.position, stack.size),
+            ("mr-5", 1, 2)
+        );
+        assert!(rows.iter().all(|p| !p.stack_unknown));
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_dedupe_a_repeated_iid_and_read_on() {
+        let mut pages = closed_state_pages("opened", 1, 300, 5000);
+        let mut second: serde_json::Value = serde_json::from_str(&pages[1]).unwrap();
+        second[0]["iid"] = serde_json::json!(5);
+        second[0]["title"] = serde_json::json!("later duplicate");
+        pages[1] = second.to_string();
+        let responses = page_responses(OPEN_WALK_ENDPOINT, pages);
+        let expected_urls: Vec<_> = responses.iter().map(|(url, _)| url.clone()).collect();
+        let (rows, urls, capped) = read_open_pages(Some(200), responses).await;
+        assert_eq!(urls, expected_urls);
+        assert_eq!(rows.len(), 200);
+        assert_eq!(rows.iter().filter(|p| p.number == 5).count(), 1);
+        assert_eq!(rows[4].number, 5);
+        assert!(rows[4].title.is_empty());
+        assert!(!rows.iter().any(|p| p.number == 101));
+        assert_eq!(rows[199].number, 201);
+        assert!(!capped);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_issue_pages_count_unique_rows() {
+        let mut pages = closed_state_pages("closed", 1, 300, 5000);
+        let mut second: serde_json::Value = serde_json::from_str(&pages[1]).unwrap();
+        second[0]["iid"] = serde_json::json!(7);
+        pages[1] = second.to_string();
+        let responses = page_responses(ISSUE_WALK_ENDPOINT, pages);
+        let requested = std::sync::Mutex::new(Vec::new());
+        let rows = unfiltered_issues_with(
+            "group%2Frepo",
+            "closed",
+            Some(200),
+            list_page_fetch(&responses, &requested),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 200);
+        assert_eq!(rows.iter().filter(|i| i.number == 7).count(), 1);
+        assert_eq!(requested.into_inner().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn open_mr_pages_with_repeats_cap_at_the_horizon() {
+        let mut pages = closed_state_pages("opened", 1, 800, 5000);
+        let mut second: serde_json::Value = serde_json::from_str(&pages[1]).unwrap();
+        second[0]["iid"] = serde_json::json!(5);
+        pages[1] = second.to_string();
+        let (rows, urls, capped) =
+            read_open_pages(Some(500), page_responses(OPEN_WALK_ENDPOINT, pages)).await;
+        assert_eq!(urls.len(), 5);
+        assert_eq!(rows.len(), 499);
+        assert!(capped);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_issue_pages_keep_todays_requests_up_to_100() {
+        for (limit, count) in [(None, 100), (Some(50), 50)] {
+            let endpoint = format!("projects/group%2Frepo/issues?state=opened&per_page={count}");
+            let body = walk_page(
+                &(1..=count)
+                    .map(|iid| (iid, 5000 - iid as u32))
+                    .collect::<Vec<_>>(),
+            );
+            let responses = vec![(endpoint.clone(), body)];
+            let requested = std::sync::Mutex::new(Vec::new());
+            let rows = unfiltered_issues_with(
+                "group%2Frepo",
+                "opened",
+                limit,
+                list_page_fetch(&responses, &requested),
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), count as usize);
+            assert_eq!(requested.into_inner().unwrap(), [endpoint]);
+        }
+    }
+
+    #[tokio::test]
+    async fn unfiltered_issue_pages_walk_past_100() {
+        for (count, limit, returned, pages_read) in [(260, 250, 250, 3), (900, 900, 500, 5)] {
+            let responses = page_responses(
+                ISSUE_WALK_ENDPOINT,
+                closed_state_pages("closed", 1, count, 5000),
+            );
+            let requested = std::sync::Mutex::new(Vec::new());
+            let rows = unfiltered_issues_with(
+                "group%2Frepo",
+                "closed",
+                Some(limit),
+                list_page_fetch(&responses, &requested),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows.iter().map(|i| i.number).collect::<Vec<_>>(),
+                (1..=returned).collect::<Vec<_>>()
+            );
+            assert!(rows.iter().all(|i| i.state == "CLOSED"));
+            assert_eq!(
+                requested.into_inner().unwrap(),
+                responses
+                    .iter()
+                    .take(pages_read)
+                    .map(|(url, _)| url.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unfiltered_closed_orders_both_states_before_limiting() {
         for (limit, expected) in [(Some(10), vec![10, 9, 5, 8, 1]), (Some(3), vec![10, 9, 5])] {
@@ -12409,7 +12950,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unfiltered_closed_horizon_returns_500_overall_without_refusing() {
+    async fn unfiltered_closed_horizon_returns_its_covered_prefix_without_refusing() {
         for limit in [600, 1000] {
             let (rows, urls, capped) = read_closed_pages(
                 Some(limit),
@@ -12417,8 +12958,8 @@ mod tests {
                 closed_state_pages("merged", 1001, 300, 2000),
             )
             .await;
-            assert_eq!(rows.len(), 500);
-            let expected: Vec<_> = (1..=500).collect();
+            assert_eq!(rows.len(), 499);
+            let expected: Vec<_> = (1..=499).collect();
             assert_eq!(rows.iter().map(|p| p.number).collect::<Vec<_>>(), expected);
             assert!(urls.iter().any(|url| url.ends_with("&page=5")));
             assert!(urls.iter().all(|url| !url.ends_with("&page=6")));
@@ -12435,25 +12976,226 @@ mod tests {
             closed_state_pages("merged", 1001, 300, 2000),
         )
         .await;
-        let expected: Vec<_> = (1..=500).collect();
+        let expected: Vec<_> = (1..=499).collect();
         assert_eq!(rows.iter().map(|p| p.number).collect::<Vec<_>>(), expected);
         assert!(urls.iter().any(|url| url.ends_with("&page=5")));
         assert!(capped);
     }
 
     #[tokio::test]
-    async fn unfiltered_closed_tie_walk_below_the_horizon_cap_is_not_capped() {
-        let tied: Vec<_> = (1..=600).map(|iid| (iid, 1000)).collect();
-        let closed = tied
-            .chunks(100)
-            .map(|page| closed_state_page("closed", page))
+    async fn unfiltered_closed_all_tied_cut_keeps_the_pre_drop_prefix() {
+        for (limit, count, expected_cap) in [(100, 100, false), (600, 500, true)] {
+            let tied: Vec<_> = (1..=600).map(|iid| (iid, 1000)).collect();
+            let closed = tied
+                .chunks(100)
+                .map(|page| closed_state_page("closed", page))
+                .collect();
+            let (rows, urls, capped) = read_closed_pages(Some(limit), closed, vec![]).await;
+            assert!(urls.iter().any(|url| url.ends_with("&page=5")));
+            assert!(urls.iter().all(|url| !url.ends_with("&page=6")));
+            assert_eq!(
+                rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+                (1..=500).rev().take(count).collect::<Vec<_>>()
+            );
+            assert_eq!(capped, expected_cap);
+        }
+    }
+
+    fn horizon_tie_pages(state: &str) -> Vec<String> {
+        let rows: Vec<_> = (1..=600)
+            .map(|iid| (iid, if iid <= 498 { 5000 - iid as u32 } else { 1000 }))
             .collect();
-        let (rows, urls, capped) = read_closed_pages(Some(100), closed, vec![]).await;
-        assert!(urls.iter().any(|url| url
-            == "projects/group%2Frepo/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc&page=5"));
+        rows.chunks(100)
+            .map(|page| closed_state_page(state, page))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_horizon_drops_rows_tying_the_cut_boundary() {
+        let (rows, urls, capped) =
+            read_closed_pages(Some(600), horizon_tie_pages("closed"), vec![]).await;
+        assert_eq!(
+            rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=498).collect::<Vec<_>>()
+        );
+        assert!(capped);
         assert!(urls.iter().all(|url| !url.ends_with("&page=6")));
-        assert_eq!(rows.len(), 100);
-        assert!(!capped);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_horizon_keeps_the_full_cap_when_the_cut_is_above_the_boundary() {
+        let (rows, _, capped) = read_closed_pages(
+            Some(600),
+            closed_state_pages("closed", 1, 600, 3000),
+            closed_state_pages("merged", 1001, 100, 5000),
+        )
+        .await;
+        assert_eq!(
+            rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1001..=1100).chain(1..=400).collect::<Vec<_>>()
+        );
+        assert!(capped);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_single_state_slice_drops_the_boundary_tie() {
+        let pages = horizon_tie_pages("merged");
+        let requested = std::sync::Mutex::new(Vec::new());
+        let (rows, capped) = unfiltered_closed_with(
+            "group%2Frepo",
+            &["merged"],
+            Some(600),
+            |url: String| {
+                let (endpoint, page) = url.split_once("&page=").unwrap();
+                assert_eq!(
+                    endpoint,
+                    "projects/group%2Frepo/merge_requests?state=merged&per_page=100&order_by=created_at&sort=desc"
+                );
+                let page = page.parse::<usize>().unwrap();
+                assert!(page <= 5);
+                let body = pages[page - 1].clone();
+                requested.lock().unwrap().push(url);
+                std::future::ready(Ok(body))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=498).collect::<Vec<_>>()
+        );
+        assert!(capped);
+        assert_eq!(requested.into_inner().unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_horizon_with_no_readable_created_at_errors() {
+        let pages: Vec<_> = closed_state_pages("closed", 1, 600, 3000)
+            .into_iter()
+            .map(|body| {
+                let mut rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+                for row in rows.as_array_mut().unwrap() {
+                    row["created_at"] = serde_json::json!("");
+                }
+                rows.to_string()
+            })
+            .collect();
+        let result = unfiltered_closed_with(
+            "group%2Frepo",
+            &["closed"],
+            Some(600),
+            |url: String| {
+                let (endpoint, page) = url.split_once("&page=").unwrap();
+                assert_eq!(
+                    endpoint,
+                    "projects/group%2Frepo/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc"
+                );
+                std::future::ready(Ok(pages[page.parse::<usize>().unwrap() - 1].clone()))
+            },
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn leg_walk_boundary_is_the_newest_cut_leg_oldest_stamp() {
+        for count in [600, 150] {
+            let pages = closed_state_pages("opened", 1, count, 5000);
+            let walk = walk_legs_bounded_with(
+                &walk_plan(2),
+                Some(600),
+                "merge requests",
+                "could not parse GitLab merge requests",
+                from_glab_mr,
+                |p: &PrInfo| {
+                    (
+                        p.number,
+                        p.created_at.as_str(),
+                        p.author.as_ref(),
+                        p.labels.as_slice(),
+                    )
+                },
+                |url: String| {
+                    let body = match walk_target(&url) {
+                        (0, page) => pages
+                            .get(page as usize - 1)
+                            .cloned()
+                            .unwrap_or_else(|| "[]".into()),
+                        (1, 1) => walk_page(&[(1001, 1000)]),
+                        _ => panic!("unexpected endpoint: {url}"),
+                    };
+                    std::future::ready(Ok(body))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(walk.truncated, count == 600);
+            assert_eq!(
+                walk.boundary,
+                if count == 600 {
+                    Some(walk_stamp(4501))
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn leg_walk_boundary_is_the_newest_of_several_cut_legs_oldest_stamps() {
+        // Legs 0 and 1 are both cut at the horizon (oldest stamps 4501 and 4301); leg 2
+        // is exhausted and newer than both, so it must not set the boundary.
+        let leg_pages = |first: u64, newest: u32| closed_state_pages("opened", first, 500, newest);
+        let (leg0, leg1) = (leg_pages(1, 5000), leg_pages(2001, 4800));
+        let leg2 = walk_page(&(0..10).map(|i| (3001 + i, 5100 - i as u32)).collect::<Vec<_>>());
+        let walk = walk_legs_bounded_with(
+            &walk_plan(3),
+            Some(2000),
+            "merge requests",
+            "could not parse GitLab merge requests",
+            from_glab_mr,
+            |p: &PrInfo| {
+                (
+                    p.number,
+                    p.created_at.as_str(),
+                    p.author.as_ref(),
+                    p.labels.as_slice(),
+                )
+            },
+            |url: String| {
+                let body = match walk_target(&url) {
+                    (0, page) => leg0.get(page as usize - 1),
+                    (1, page) => leg1.get(page as usize - 1),
+                    (2, 1) => Some(&leg2),
+                    _ => panic!("unexpected endpoint: {url}"),
+                };
+                std::future::ready(Ok(body.cloned().unwrap_or_else(|| "[]".into())))
+            },
+        )
+        .await
+        .unwrap();
+        assert!(walk.truncated);
+        let boundary = walk.boundary.expect("both cut legs have readable stamps");
+        assert_eq!(boundary, walk_stamp(4501));
+        let mut rows = walk.rows;
+        sort_filtered_rows(&mut rows, |p| (p.created_at.as_str(), p.number));
+        let covered: Vec<_> = rows
+            .iter()
+            .take_while(|p| p.created_at.as_str() > boundary.as_str())
+            .collect();
+        // Leg 2's 10 rows, leg 0's rows newer than its own oldest (499), and leg 1's
+        // rows newer than the boundary (stamps 4800 to 4502).
+        assert_eq!(covered.len(), 10 + 499 + 299);
+        assert!(
+            covered
+                .iter()
+                .all(|p| p.created_at.as_str() > walk_stamp(4501).as_str()),
+            "the prefix holds nothing at or older than the boundary"
+        );
+        assert!(
+            !covered.iter().any(|p| p.number == 2300 || p.number == 2500),
+            "leg 1 rows at 4501 and older are outside the covered prefix"
+        );
     }
 
     #[tokio::test]
@@ -12469,6 +13211,119 @@ mod tests {
         assert_eq!(urls.len(), 10);
         assert!(urls.iter().all(|url| !url.ends_with("&page=6")));
         assert!(!capped);
+    }
+
+    /// The unfiltered list read for one PR-list `state`, over a mock that serves only
+    /// `server_state`'s walk endpoint and panics on any other, `state=opened` included.
+    async fn read_single_state_pages(
+        state: &str,
+        server_state: &str,
+        limit: Option<u32>,
+        pages: Vec<String>,
+    ) -> (Vec<PrInfo>, Vec<String>, bool) {
+        let requested = std::sync::Mutex::new(Vec::new());
+        let served = format!(
+            "projects/group%2Frepo/merge_requests?state={server_state}&per_page=100&order_by=created_at&sort=desc"
+        );
+        let states = mr_list_states(state).unwrap();
+        let (rows, capped) =
+            unfiltered_mr_page_with("group%2Frepo", state, states, limit, |url: String| {
+                let (endpoint, page) = url
+                    .split_once("&page=")
+                    .map_or((url.as_str(), 1), |(endpoint, page)| {
+                        (endpoint, page.parse::<usize>().unwrap())
+                    });
+                assert_eq!(endpoint, served, "unexpected list endpoint: {url}");
+                let body = pages.get(page - 1).cloned().unwrap_or_else(|| "[]".into());
+                requested.lock().unwrap().push(url);
+                std::future::ready(Ok(body))
+            })
+            .await
+            .unwrap();
+        (rows, requested.into_inner().unwrap(), capped)
+    }
+
+    #[test]
+    fn mr_list_states_map_each_pr_list_state() {
+        assert_eq!(mr_list_states("open").unwrap(), ["opened"]);
+        assert_eq!(mr_list_states("closed").unwrap(), ["closed", "merged"]);
+        assert_eq!(mr_list_states("merged").unwrap(), ["merged"]);
+        assert_eq!(mr_list_states("unmerged").unwrap(), ["closed"]);
+        for bad in ["all", "", "opened", "locked"] {
+            assert!(matches!(
+                mr_list_states(bad),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_merged_only_without_limit_reads_the_first_page() {
+        let (rows, urls, capped) = read_single_state_pages(
+            "merged",
+            "merged",
+            None,
+            closed_state_pages("merged", 1, 150, 1000),
+        )
+        .await;
+        assert_eq!(
+            rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=100).collect::<Vec<_>>()
+        );
+        assert!(rows.iter().all(|p| p.state == "MERGED"));
+        assert_eq!(urls.len(), 1);
+        assert!(!urls[0].contains("&page="));
+        assert!(!capped);
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_unmerged_walk_clamps_at_the_horizon() {
+        for limit in [600, 1000] {
+            let (rows, urls, capped) = read_single_state_pages(
+                "unmerged",
+                "closed",
+                Some(limit),
+                closed_state_pages("closed", 1, 600, 3000),
+            )
+            .await;
+            assert_eq!(
+                rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+                (1..=499).collect::<Vec<_>>()
+            );
+            assert!(urls.iter().any(|url| url.ends_with("&page=5")));
+            assert!(urls.iter().all(|url| !url.ends_with("&page=6")));
+            assert!(capped);
+        }
+    }
+
+    #[tokio::test]
+    async fn unfiltered_closed_unmerged_walk_below_the_horizon_is_not_capped() {
+        let (rows, urls, capped) = read_single_state_pages(
+            "unmerged",
+            "closed",
+            Some(300),
+            closed_state_pages("closed", 1, 600, 3000),
+        )
+        .await;
+        assert_eq!(
+            rows.iter().map(|p| p.number).collect::<Vec<_>>(),
+            (1..=300).collect::<Vec<_>>()
+        );
+        assert!(urls.iter().all(|url| !url.ends_with("&page=5")));
+        assert!(!capped);
+    }
+
+    #[test]
+    fn plan_filtered_single_state_lists_request_only_their_own_state() {
+        let f = filter_of(false, false, &["octocat"], &[]);
+        assert_eq!(
+            plan("merge_requests", mr_list_states("merged").unwrap(), true, &f).endpoints,
+            ["projects/grp%2Fproj/merge_requests?state=merged&per_page=100&order_by=created_at&sort=desc&author_username=octocat"]
+        );
+        assert_eq!(
+            plan("merge_requests", mr_list_states("unmerged").unwrap(), true, &f).endpoints,
+            ["projects/grp%2Fproj/merge_requests?state=closed&per_page=100&order_by=created_at&sort=desc&author_username=octocat"]
+        );
     }
 
     /// Endpoint prefixes `leg0?per_page=100`, `leg1?…`, with no client axes.
@@ -14206,6 +15061,68 @@ mod tests {
             .0;
         assert!(constructor.contains("files_unknown: mr.overflow,"));
         assert!(constructor.contains("files_truncated: mr.overflow,"));
+    }
+
+    #[test]
+    fn mr_changes_discussion_locked_true_false_null_and_missing() {
+        let base = r#""iid":6,"web_url":"u","title":"t","target_branch":"main",
+            "source_branch":"feat","state":"opened","changes":[]"#;
+        for (field, expected) in [
+            (r#", "discussion_locked":true"#, true),
+            (r#", "discussion_locked":false"#, false),
+            (r#", "discussion_locked":null"#, false),
+            ("", false),
+        ] {
+            let mr: GlabMrChanges = serde_json::from_str(&format!("{{{base}{field}}}")).unwrap();
+            assert_eq!(mr.discussion_locked, expected, "{field}");
+        }
+
+        // The async constructor has no pure seam: the lock maps straight to `locked`,
+        // and the createNote read runs only inside the locked arm.
+        let constructor = include_str!("gitlab.rs")
+            .split_once("pub async fn view_pr(")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        assert!(constructor.contains("locked: mr.discussion_locked,"));
+        assert!(constructor.contains("viewer_can_react: viewer_can_comment,"));
+        let locked_arm = constructor
+            .split_once("let viewer_can_comment = if mr.discussion_locked {")
+            .expect("the createNote read is gated on the lock")
+            .1
+            .split_once("} else {")
+            .unwrap()
+            .0;
+        assert!(locked_arm.contains("mr_viewer_can_note("));
+        assert_eq!(constructor.matches("mr_viewer_can_note(").count(), 1);
+    }
+
+    #[test]
+    fn mr_create_note_envelope_true_false_null_and_missing() {
+        use super::mr_create_note_from;
+        let envelope = |perm: &str| {
+            format!(
+                r#"{{"data":{{"project":{{"mergeRequest":{{"userPermissions":{{{perm}}}}}}}}}}}"#
+            )
+        };
+        assert_eq!(
+            mr_create_note_from(&envelope(r#""createNote":true"#)),
+            Some(true)
+        );
+        assert_eq!(
+            mr_create_note_from(&envelope(r#""createNote":false"#)),
+            Some(false)
+        );
+        assert_eq!(mr_create_note_from(&envelope(r#""createNote":null"#)), None);
+        assert_eq!(mr_create_note_from(&envelope("")), None);
+        assert_eq!(mr_create_note_from(r#"{"data":{"project":null}}"#), None);
+        assert_eq!(
+            mr_create_note_from(r#"{"data":{"project":{"mergeRequest":null}}}"#),
+            None
+        );
+        assert_eq!(mr_create_note_from("not json"), None);
     }
 
     /// The `/changes` payload the MR view already fetches carries the conflict and

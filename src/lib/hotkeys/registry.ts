@@ -1103,6 +1103,25 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  // The list's Open / Merged / Closed tabs, palette-only like the scopes.
+  {
+    id: "pr-state-open",
+    label: "Filter pull requests: open",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-state-merged",
+    label: "Filter pull requests: merged",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
+  {
+    id: "pr-state-closed",
+    label: "Filter pull requests: closed",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
   {
     id: "pr-group-review",
     label: "Toggle grouping by my review",

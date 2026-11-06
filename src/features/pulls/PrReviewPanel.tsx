@@ -8,10 +8,11 @@ import {
   WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, m } from "motion/react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { ElapsedTime } from "@/components/elapsed-time";
 import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
@@ -39,7 +40,6 @@ import { LOGIN_COMMAND } from "@/lib/ai/cli-client";
 import {
   buildAiCommentBody,
   findSuspectRefs,
-  formatRefList,
   REF_TRIGGERS,
 } from "@/lib/ai/comment-branding";
 import { modelPickerEmptyText, useAvailableModels } from "@/lib/ai/models";
@@ -57,26 +57,43 @@ import { copyText } from "@/lib/clipboard";
 import { useForgeStatus } from "@/lib/git/queries";
 import { quickTransition } from "@/lib/motion";
 import {
+  ACT_PENDING_REASON,
+  COMMENT_POST_PENDING_REASON,
+} from "@/lib/offline-writes";
+import {
   useExternalReviews,
   useReviewerNotes,
   useReviewHistory,
+  useReviewPartials,
 } from "@/lib/pulls/queries";
+import {
+  type ReviewIncomplete,
+  recordIncomplete,
+  reviewPostConfirm,
+  reviewPostedToast,
+} from "@/lib/pulls/review-post-confirm";
+import { stampReviewPosted } from "@/lib/pulls/review-posted-stamp";
 import {
   getLatestPartialReview,
   type PersistedReview,
   partialReviewReason,
   reviewPartialKey,
+  reviewPostedAt,
   reviewText,
 } from "@/lib/pulls/reviews-history";
 import { useSecretPreview, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import {
   type ReviewContext,
+  type ReviewPhase,
   type ReviewTarget,
+  reviewRunSeq,
   useReviewRun,
 } from "@/lib/stores/reviews";
 import { useUiStore } from "@/lib/stores/ui";
 import { formatDuration, validEpochMs } from "@/lib/time";
+import { useLatestRef } from "@/lib/use-latest-ref";
+import { PR_SWITCH_LOADING_REASON } from "./PrMergeabilityBanner";
 import { ReviewHistory } from "./ReviewHistory";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
@@ -92,6 +109,12 @@ const DELTA_NOTE: Partial<Record<string, string>> = {
 
 const PROVIDER_IDS = Object.keys(PROVIDER_LABELS) as AiProviderId[];
 
+/** A live run that stopped early keeps whatever streamed before it stopped. */
+const LIVE_INCOMPLETE: Partial<Record<ReviewPhase, ReviewIncomplete>> = {
+  cancelled: "cancelled",
+  error: "failed",
+};
+
 export function PrReviewPanel({
   context,
   prKind,
@@ -100,6 +123,7 @@ export function PrReviewPanel({
   onPost,
   posting,
   stale = false,
+  conversationHoldReason = null,
 }: {
   context: ReviewContext;
   /** Whether this PR is a GitHub PR or a local-only one. */
@@ -114,6 +138,10 @@ export function PrReviewPanel({
   /** The caller is still rendering a previously selected PR, so `context` describes
    *  that one while the run would persist under this `prRef` — holds the run. */
   stale?: boolean;
+  /** Why the conversation won't take a comment (locked or archived): holds both
+   *  Posts (live and history) with it. A post in flight outranks it; it outranks
+   *  `stale`. Local PRs pass none. */
+  conversationHoldReason?: string | null;
 }) {
   const settings = useSettings();
   const repoName = useUiStore((s) => s.repoName) ?? "";
@@ -148,7 +176,10 @@ export function PrReviewPanel({
     thoughts,
     startedAt,
     endedAt,
+    recordId,
+    timedOut,
   } = useReviewRun(target);
+  const queryClient = useQueryClient();
 
   // Prior reviews for this PR, used for the per-mode context banner. Read-only —
   // never creates a record, so a first-ever review is unaffected.
@@ -194,6 +225,22 @@ export function PrReviewPanel({
       ? record
       : undefined;
   }, [partialRun.data, history.data]);
+  // The live run's own stored record, so a post from its history row shows here
+  // too. The same keys ReviewHistory reads, so the shared cache answers both and
+  // the read stays live while that disclosure is collapsed.
+  const partials = useReviewPartials(
+    context.repoPath,
+    context.lens,
+    prKind,
+    prRef,
+  );
+  const liveRecord = recordId
+    ? [...(history.data ?? []), ...(partials.data ?? [])].find(
+        (r) => r.id === recordId,
+      )
+    : undefined;
+  const livePosted =
+    liveRecord !== undefined && reviewPostedAt(liveRecord) !== undefined;
   // Which modes the next run should ignore the prior review for — derived from
   // the clicked button's mode, never the shared store entry (avoids mislabeling).
   const [ignoredModes, setIgnoredModes] = useState<Set<ReviewMode>>(new Set());
@@ -355,14 +402,63 @@ export function PrReviewPanel({
     });
   }
 
+  // A post's reset unmounts the output and its controls (Post, Copy, links), so
+  // focus there falls to <body>; this lands it where the confirm-swap fallback does
+  // (the provider picker, else the panel host) once that commit is in. Armed by
+  // every reset that ran, for the review target it ran on; focus a surviving
+  // control holds is left alone. The panel is unkeyed across PR switches, so an
+  // arm for another target is dropped (a render-time adjustment).
+  const scopeKey = `${prKind}:${context.repoPath}#${context.lens}#${prRef}`;
+  const scopeKeyRef = useLatestRef(scopeKey);
+  const holdRef = useLatestRef(conversationHoldReason);
+  const staleRef = useLatestRef(stale);
+  // The confirm host is app-level, so a dialog can outlive this panel, whose
+  // refs then freeze at the scope it left.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const [focusArmedFor, setFocusArmedFor] = useState<string | null>(null);
+  if (focusArmedFor !== null && focusArmedFor !== scopeKey)
+    setFocusArmedFor(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const pickerRef = useRef<HTMLButtonElement>(null);
+  const showPost = Boolean(onPost) && text.trim() !== "" && !generating;
+  useLayoutEffect(() => {
+    if (showPost || focusArmedFor === null) return;
+    setFocusArmedFor(null);
+    const active = document.activeElement;
+    if (active !== null && active !== document.body) return;
+    const picker = pickerRef.current;
+    picker?.focus();
+    if (document.activeElement !== picker) hostRef.current?.focus();
+  }, [showPost, focusArmedFor]);
+  // LocalPrView's `posting` covers every update write on the PR, not only comments.
+  const postPendingReason =
+    prKind === "local" ? ACT_PENDING_REASON : COMMENT_POST_PENDING_REASON;
+
   async function post() {
-    if (!onPost || !text.trim() || posting || stale) return;
-    // Two reasons to stop and ask, merged into ONE dialog: a failed or cancelled run
-    // keeps whatever streamed before it stopped, and text carrying `#N`-style tokens
-    // posts as live cross-references that notify the threads they name. A second ask
-    // would cancel the first (the confirm store keeps one request live), and the text
-    // is never rewritten here — the user decides.
-    const partial = phase === "error" || phase === "cancelled";
+    if (
+      !onPost ||
+      !text.trim() ||
+      posting ||
+      conversationHoldReason !== null ||
+      stale
+    )
+      return;
+    // The stamp target and the posted run, pinned before any await: a run starting
+    // mid-post takes the entry (and clears its recordId), and a PR switch moves
+    // context. The stamp and the reset stay with this one.
+    const stampId = recordId;
+    const stampRepo = context.repoPath;
+    const stampLens = context.lens;
+    const stampKind = prKind;
+    const stampRef = prRef;
+    const postedRun = reviewRunSeq(target);
+    const postedScope = scopeKey;
     // A local PR is posted into app data, where no forge cross-reference or
     // notification exists — the refs warning would be false there.
     const suspectRefs =
@@ -379,30 +475,28 @@ export function PrReviewPanel({
             forgeProvider !== "gitlab",
           )
         : [];
-    if (partial || suspectRefs.length > 0) {
-      const partialSentence =
-        phase === "cancelled"
-          ? "This run was cancelled before it finished, so the text may be incomplete."
-          : phase === "error"
-            ? "This run failed before completing, so the text may be incomplete."
-            : "";
-      const refsTail =
-        suspectRefs.length === 1
-          ? "it becomes a live cross-reference that notifies the thread it names. Backticks keep it plain."
-          : "each becomes a live cross-reference that notifies the thread it names. Backticks keep them plain.";
-      const refsSentence = suspectRefs.length
-        ? `The text mentions ${formatRefList(suspectRefs)} — posted as-is, ${refsTail}`
-        : "";
-      const ok = await useConfirm.getState().ask({
-        title: partial
-          ? "Post partial review?"
-          : "Post review with live references?",
-        body: [partialSentence, refsSentence, "Post it as a comment anyway?"]
-          .filter(Boolean)
-          .join(" "),
-        confirmLabel: "Post anyway",
-      });
-      if (!ok) return;
+    // The text is never rewritten here — the user decides.
+    // The run's stored record tells a timeout from a failure, which the phase
+    // can't; until it loads the live entry's flag does. A cancelled run saves none.
+    let incomplete = LIVE_INCOMPLETE[phase] ?? null;
+    if (liveRecord) incomplete = recordIncomplete(liveRecord);
+    else if (phase === "error" && timedOut) incomplete = "timed-out";
+    const confirm = reviewPostConfirm({
+      incomplete,
+      already: livePosted,
+      suspectRefs,
+    });
+    if (confirm) {
+      if (!(await useConfirm.getState().ask(confirm))) return;
+      // Read fresh: the dialog's answer counts only for the PR still selected
+      // and shown here (mounted, no hold, not stale, same scope).
+      if (
+        !mountedRef.current ||
+        holdRef.current !== null ||
+        staleRef.current ||
+        scopeKeyRef.current !== postedScope
+      )
+        return;
     }
     const label = mode === "security" ? "security audit" : "review";
     const body = buildAiCommentBody({
@@ -413,11 +507,26 @@ export function PrReviewPanel({
     });
     try {
       await onPost(body, { asBot: true });
-      reset();
-      toast.success("Review posted to the conversation");
     } catch {
       // The caller surfaces the error; keep the text so it isn't lost.
+      return;
     }
+    // No await before these: while the text stays up, a second click posts again.
+    // Read fresh: a run started mid-post owns the entry now and keeps its output.
+    if (postedRun !== undefined && reviewRunSeq(target) === postedRun) {
+      // The target on screen now, read fresh: a switch mid-post renders another PR.
+      if (scopeKeyRef.current === postedScope) setFocusArmedFor(postedScope);
+      reset();
+    }
+    toast.success(reviewPostedToast(mode));
+    if (stampId)
+      stampReviewPosted(queryClient, {
+        repo: stampRepo,
+        lens: stampLens,
+        kind: stampKind,
+        ref: stampRef,
+        id: stampId,
+      });
   }
 
   return (
@@ -429,6 +538,7 @@ export function PrReviewPanel({
           focus lands on the provider picker (its Enter only opens a menu,
           never a run), else here. */}
       <div
+        ref={hostRef}
         data-confirm-host
         tabIndex={-1}
         className="shrink-0 space-y-2 border-b p-3 outline-none"
@@ -457,7 +567,11 @@ export function PrReviewPanel({
               });
             }}
           >
-            <SelectTrigger data-confirm-fallback className="w-full">
+            <SelectTrigger
+              ref={pickerRef}
+              data-confirm-fallback
+              className="w-full"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -588,10 +702,11 @@ export function PrReviewPanel({
                     starts when this run finishes. Hidden once something's queued
                     (only two modes exist). */}
                 {!queuedMode && (
-                  <Button
+                  <DisabledReasonButton
                     variant="ghost"
                     size="sm"
                     disabled={stale}
+                    reason={PR_SWITCH_LOADING_REASON}
                     onClick={() =>
                       run(mode === "security" ? "general" : "security")
                     }
@@ -602,7 +717,7 @@ export function PrReviewPanel({
                       <ShieldCheckIcon data-icon="inline-start" />
                     )}
                     Queue {mode === "security" ? "review" : "security audit"}
-                  </Button>
+                  </DisabledReasonButton>
                 )}
               </m.div>
             ) : (
@@ -614,23 +729,25 @@ export function PrReviewPanel({
                 exit={{ opacity: 0, scale: 0.96 }}
                 transition={quickTransition}
               >
-                <Button
+                <DisabledReasonButton
                   size="sm"
                   disabled={stale}
+                  reason={PR_SWITCH_LOADING_REASON}
                   onClick={() => run("general")}
                 >
                   <SparkleIcon data-icon="inline-start" />
                   Review
-                </Button>
-                <Button
+                </DisabledReasonButton>
+                <DisabledReasonButton
                   variant="outline"
                   size="sm"
                   disabled={stale}
+                  reason={PR_SWITCH_LOADING_REASON}
                   onClick={() => run("security")}
                 >
                   <ShieldCheckIcon data-icon="inline-start" />
                   Security audit
-                </Button>
+                </DisabledReasonButton>
               </m.div>
             )}
           </AnimatePresence>
@@ -644,16 +761,22 @@ export function PrReviewPanel({
               Copy
             </Button>
           )}
-          {onPost && text.trim() && !generating && (
-            <Button
+          {/* ONE element across the posted flip, so focus stays on it. */}
+          {showPost && (
+            <DisabledReasonButton
               variant="ghost"
               size="sm"
-              disabled={posting || stale}
+              disabled={posting || conversationHoldReason !== null || stale}
+              reason={
+                posting
+                  ? postPendingReason
+                  : (conversationHoldReason ?? PR_SWITCH_LOADING_REASON)
+              }
               onClick={post}
             >
               {posting && <Spinner data-icon="inline-start" />}
-              Post as comment
-            </Button>
+              {livePosted ? "Post again" : "Post as comment"}
+            </DisabledReasonButton>
           )}
           {phase === "done" &&
             text.trim() &&
@@ -831,6 +954,10 @@ export function PrReviewPanel({
           lens={context.lens}
           prKind={prKind}
           prRef={prRef}
+          onPost={onPost}
+          posting={posting}
+          stale={stale}
+          conversationHoldReason={conversationHoldReason}
         />
       </div>
 

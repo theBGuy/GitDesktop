@@ -901,10 +901,12 @@ pub struct PrInfo {
     /// joined in from a supplementary call — hence the serde default.
     #[serde(default)]
     pub stack: Option<PrStackInfo>,
-    /// The list's stack probe FAILED, so `stack` being `None` proves nothing — these
-    /// rows may be stacked without showing it. `false` (the default) means the join
-    /// answered, empty or not. Callers that act on membership must treat `true` as
-    /// "don't know", never as "not stacked".
+    /// This row's stack membership wasn't read, so `None` in `stack` proves
+    /// nothing. GitHub sets it on every row when the list's stack probe fails;
+    /// GitLab also on rows its chain inference doesn't read (past the first open
+    /// page, or a filtered page's rows). `false` (the default) means it was read,
+    /// empty or not. Callers that act on membership must treat `true` as "don't
+    /// know", never as "not stacked".
     #[serde(default)]
     pub stack_unknown: bool,
     /// The head branch lives in a FORK, so this PR can never be a stack member
@@ -966,8 +968,28 @@ pub async fn gh_pr_comment(
         &["pr", "comment", &n, "--body", &body, "--repo", &slug],
         GH_NETWORK_TIMEOUT,
     )
-    .await?;
+    .await
+    .map_err(classify_gh_comment_refusal)?;
     Ok(())
+}
+
+/// The app's copy for GitHub refusing a comment on an ARCHIVED pull request. The
+/// frontend latches the conversation read-only on an exact match, so the TS mirror
+/// (`PR_ARCHIVED_READONLY_MESSAGE`) must stay byte-identical.
+pub(crate) const GH_PR_ARCHIVED_READONLY: &str =
+    "This pull request is archived, so its conversation is read-only.";
+
+/// Maps the archived-PR comment refusal onto [`GH_PR_ARCHIVED_READONLY`]; any other
+/// error passes through unchanged. GitHub exposes no read signal for a per-PR
+/// archive, so this refusal (`GraphQL: Pull request is archived and its conversation
+/// is read-only (addComment)`) is the only evidence the app gets.
+fn classify_gh_comment_refusal(e: AppError) -> AppError {
+    match e {
+        AppError::Gh(msg) if msg.contains("is archived and its conversation is read-only") => {
+            AppError::Gh(GH_PR_ARCHIVED_READONLY.to_string())
+        }
+        other => other,
+    }
 }
 
 /// The outcome of a successful merge — the merge was accepted; `cleanup_warning`
@@ -2806,9 +2828,9 @@ pub(crate) const STACKS_TIMEOUT: std::time::Duration = std::time::Duration::from
 const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,state,author,\
      labels,createdAt,isCrossRepository";
 
-/// PRs for the Pull Requests list. `state` is "open" or "closed"; closed
-/// uses the search qualifier so merged PRs are included, matching the
-/// semantics of GitHub's own Closed tab.
+/// PRs for the Pull Requests list. `state` is "open", "closed" (everything not
+/// open, merged included, matching GitHub's own Closed tab), "merged", or
+/// "unmerged" (closed without merging); see [`gh_pr_list_args`] for each argv.
 ///
 /// A non-empty `filter` narrows the list SERVER-side through `ISSUE_ADVANCED`
 /// search instead (see [`crate::github::pr_search`]); an absent or empty one keeps
@@ -2826,34 +2848,8 @@ pub async fn gh_pr_list(
     if let Some(q) = crate::github::pr_search::search_query(&slug, true, &state, filter.as_ref())? {
         return gh_pr_list_filtered(&repo_path, &slug, &state, limit, &q).await;
     }
-    let mut args: Vec<&str> = match state.as_str() {
-        "open" => vec![
-            "pr", "list", "--repo", &slug, "--state", "open", "--json", PR_LIST_FIELDS,
-        ],
-        "closed" => vec![
-            "pr",
-            "list",
-            "--repo",
-            &slug,
-            "--search",
-            "is:closed",
-            "--json",
-            PR_LIST_FIELDS,
-        ],
-        _ => {
-            return Err(AppError::InvalidArgument(format!(
-                "unknown PR state filter: {state}"
-            )));
-        }
-    };
-    // gh defaults to 30. Clamp to gh's accepted 1..=1000 (`--limit 0` errors at
-    // runtime); `None` leaves gh's default untouched.
-    let limit_str;
-    if let Some(n) = limit {
-        limit_str = n.clamp(1, 1000).to_string();
-        args.push("--limit");
-        args.push(&limit_str);
-    }
+    let args = gh_pr_list_args(&slug, &state, limit)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     // Stack membership needs its own endpoint (`gh pr list --json` has no stack
     // field) and depends only on the slug. Open rows only: a closed list describes
     // merges already made.
@@ -2878,6 +2874,36 @@ pub async fn gh_pr_list(
         .map_err(|e| gh_unreadable("pull requests", format!("could not parse gh pr list: {e}")))?;
     apply_stack_join(&mut prs, stacks.as_ref());
     Ok(prs)
+}
+
+/// The unfiltered `gh pr list` argv for one list state. Every arm emits literals and
+/// an unknown state errors. `is:unmerged` alone also matches open PRs, so the
+/// unmerged arm always pairs it with `is:closed`.
+fn gh_pr_list_args(slug: &str, state: &str, limit: Option<u32>) -> AppResult<Vec<String>> {
+    let scope: &[&str] = match state {
+        "open" => &["--state", "open"],
+        "closed" => &["--search", "is:closed"],
+        "merged" => &["--state", "merged"],
+        "unmerged" => &["--search", "is:closed is:unmerged"],
+        _ => {
+            return Err(AppError::InvalidArgument(format!(
+                "unknown PR state filter: {state}"
+            )));
+        }
+    };
+    let mut args: Vec<String> = ["pr", "list", "--repo", slug]
+        .into_iter()
+        .chain(scope.iter().copied())
+        .chain(["--json", PR_LIST_FIELDS])
+        .map(str::to_string)
+        .collect();
+    // gh defaults to 30. Clamp to gh's accepted 1..=1000 (`--limit 0` errors at
+    // runtime); `None` leaves gh's default untouched.
+    if let Some(n) = limit {
+        args.push("--limit".to_string());
+        args.push(n.clamp(1, 1000).to_string());
+    }
+    Ok(args)
 }
 
 /// The filtered PR list: the search read, joined with stack membership exactly as
@@ -4634,6 +4660,23 @@ pub struct PrDetails {
     /// ("allow edits by maintainers"). GitHub only — `None` means unknown
     /// (GitLab/Bitbucket, or a projection that didn't carry it), never "no".
     pub maintainer_can_modify: Option<bool>,
+    /// The conversation is locked. GitHub: `pullRequest.locked` (false when unreadable,
+    /// see `lock_unknown`); GitLab: the MR's `discussion_locked`; Bitbucket: false.
+    pub locked: bool,
+    /// GitHub only: the lock read failed or carried no readable `locked`, so `locked`
+    /// reads false without being an answer. Always false on GitLab and Bitbucket.
+    pub lock_unknown: bool,
+    /// GitHub's lock reason, lowercased (off_topic/resolved/spam/too_heated); `None`
+    /// elsewhere or when GitHub gave none.
+    pub active_lock_reason: Option<String>,
+    /// Whether the viewer may add to a LOCKED conversation. `Some(false)` only on an
+    /// affirmative forge answer; `None` is unknown (including any unlocked PR) and
+    /// never holds the composer. GitHub derives it from the viewer's permission,
+    /// GitLab reads `userPermissions.createNote`; Bitbucket is always `None`.
+    pub viewer_can_comment: Option<bool>,
+    /// Whether the viewer may react. GitHub: `pullRequest.viewerCanReact` verbatim;
+    /// GitLab: the same value as `viewer_can_comment`; Bitbucket: `None`.
+    pub viewer_can_react: Option<bool>,
 }
 
 /// GitHub's pull-request commits endpoint returns at most 250 commits.
@@ -4714,28 +4757,63 @@ pub struct ApprovalState {
 
 const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify";
 
-const REPO_MERGE_SETTINGS_QUERY: &str = "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed } }";
+/// Never add review-level `viewerCannotUpdateReasons` here: it errors while a PR is
+/// archived and would take the merge settings down with it. The top-level PR fields
+/// below were measured readable on an archived PR.
+const REPO_MERGE_SETTINGS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed viewerPermission pullRequest(number:$number){ locked activeLockReason viewerCanReact } } }";
 
 /// The three repository-level merge-method toggles (allow merge / squash / rebase),
-/// each `None` when unknown.
+/// each `None` when unknown, plus the PR's conversation lock state read in the same
+/// call.
 #[derive(Default)]
 struct RepoMergeSettings {
     merge_commit_allowed: Option<bool>,
     squash_merge_allowed: Option<bool>,
     rebase_merge_allowed: Option<bool>,
+    conversation: PrConversationState,
+}
+
+/// The PR's lock state as [`PrDetails`] carries it; see its field docs for meanings.
+#[derive(Debug, PartialEq)]
+struct PrConversationState {
+    locked: bool,
+    lock_unknown: bool,
+    active_lock_reason: Option<String>,
+    viewer_can_comment: Option<bool>,
+    viewer_can_react: Option<bool>,
+}
+
+/// Unknown, never "unlocked": a failed side-call must not read as an answer.
+impl Default for PrConversationState {
+    fn default() -> Self {
+        Self {
+            locked: false,
+            lock_unknown: true,
+            active_lock_reason: None,
+            viewer_can_comment: None,
+            viewer_can_react: None,
+        }
+    }
 }
 
 /// The repository's server-side merge-method settings for the repo the PR LIVES IN.
 /// `pr_url` is the PR's html url — always the BASE repo, so a fork's outgoing PR
-/// reports the parent's settings, not origin's. Best-effort by contract: the caller
-/// treats any `Err` as "unknown" (all fields `None`).
-async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<RepoMergeSettings> {
+/// reports the parent's settings, not origin's, and `number` is the PR there.
+/// Best-effort by contract: the caller treats any `Err` as unknown (merge flags
+/// `None`, lock state unknown).
+async fn gh_repo_merge_settings(
+    repo_path: &str,
+    pr_url: &str,
+    number: u64,
+) -> AppResult<RepoMergeSettings> {
     let (host, owner, name) = parse_pr_url_repo(pr_url)?;
     let hostname_arg = (host != "github.com").then_some(host);
 
     let query_arg = format!("query={REPO_MERGE_SETTINGS_QUERY}");
     let owner_arg = format!("owner={owner}");
     let name_arg = format!("name={name}");
+    // `-F` sends the number typed (`Int!`); `-f` would send a string GitHub refuses.
+    let number_arg = format!("number={number}");
     let mut args: Vec<&str> = vec!["api", "graphql"];
     if let Some(h) = &hostname_arg {
         args.push("--hostname");
@@ -4747,6 +4825,8 @@ async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<Repo
     args.push(&owner_arg);
     args.push("-f");
     args.push(&name_arg);
+    args.push("-F");
+    args.push(&number_arg);
 
     let out = run_gh(Some(repo_path), &args, GH_NETWORK_TIMEOUT).await?;
     let value: serde_json::Value = serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
@@ -4755,6 +4835,12 @@ async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<Repo
             format!("could not parse merge settings: {e}"),
         )
     })?;
+    Ok(repo_merge_settings_from(&value))
+}
+
+/// Parses the side-call's answer. Every field is null-tolerant and a miss degrades
+/// only its own field.
+fn repo_merge_settings_from(value: &serde_json::Value) -> RepoMergeSettings {
     let repo = value.pointer("/data/repository");
     // A field GitHub omits/nulls stays `None` (unknown) rather than defaulting to a
     // gating value — the picker never disables an option on unknown.
@@ -4762,11 +4848,48 @@ async fn gh_repo_merge_settings(repo_path: &str, pr_url: &str) -> AppResult<Repo
         repo.and_then(|r| r.get(key))
             .and_then(serde_json::Value::as_bool)
     };
-    Ok(RepoMergeSettings {
+    RepoMergeSettings {
         merge_commit_allowed: flag("mergeCommitAllowed"),
         squash_merge_allowed: flag("squashMergeAllowed"),
         rebase_merge_allowed: flag("rebaseMergeAllowed"),
-    })
+        conversation: pr_conversation_from(repo),
+    }
+}
+
+/// GitHub has no viewer-can-comment field on a PR, so it is derived from its lock
+/// rule: while locked, only people with write access (and owners/collaborators) may
+/// comment. TRIAGE isn't settled by that rule and maps to unknown, like an
+/// unreadable permission.
+fn pr_conversation_from(repo: Option<&serde_json::Value>) -> PrConversationState {
+    let pr = repo.and_then(|r| r.get("pullRequest"));
+    let locked = pr
+        .and_then(|p| p.get("locked"))
+        .and_then(serde_json::Value::as_bool);
+    let viewer_can_comment = match locked {
+        Some(true) => match repo
+            .and_then(|r| r.get("viewerPermission"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("READ") => Some(false),
+            Some("WRITE" | "MAINTAIN" | "ADMIN") => Some(true),
+            _ => None,
+        },
+        _ => None,
+    };
+    PrConversationState {
+        locked: locked.unwrap_or(false),
+        lock_unknown: locked.is_none(),
+        // GraphQL spells the enum `TOO_HEATED`; the wire carries the REST form the
+        // issue view already renders (`too_heated`).
+        active_lock_reason: pr
+            .and_then(|p| p.get("activeLockReason"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase),
+        viewer_can_comment,
+        viewer_can_react: pr
+            .and_then(|p| p.get("viewerCanReact"))
+            .and_then(serde_json::Value::as_bool),
+    }
 }
 
 /// One CheckRun from [`check_run_events_query`]. Its `event` is the collapse-key part
@@ -5355,12 +5478,14 @@ pub async fn gh_pr_view(
     let (comments, comments_unknown, comments_truncated) =
         comments_with_top_up(&repo_path, number, lens.as_deref(), raw.comments).await;
 
-    // Repo-level merge-method settings — one extra `gh api graphql` call the
-    // `gh pr view --json` surface can't supply. Best-effort: on failure all three
-    // stay `None` and the picker gates exactly as before.
-    let merge_settings = gh_repo_merge_settings(&repo_path, &raw.url)
+    // Repo-level merge-method settings and the PR's lock state — one extra
+    // `gh api graphql` call the `gh pr view --json` surface can't supply.
+    // Best-effort: on failure the merge flags stay `None` (the picker gates exactly
+    // as before) and the lock state is unknown.
+    let merge_settings = gh_repo_merge_settings(&repo_path, &raw.url, raw.number)
         .await
         .unwrap_or_default();
+    let conversation = merge_settings.conversation;
 
     // The list can stop at GH_REST_PR_COMMITS_CEILING or the GraphQL fallback;
     // use the view's head oid because the list's last entry may not be the head.
@@ -5450,6 +5575,11 @@ pub async fn gh_pr_view(
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
+        locked: conversation.locked,
+        lock_unknown: conversation.lock_unknown,
+        active_lock_reason: conversation.active_lock_reason,
+        viewer_can_comment: conversation.viewer_can_comment,
+        viewer_can_react: conversation.viewer_can_react,
     })
 }
 
@@ -7656,7 +7786,7 @@ mod tests {
     use super::{
         apply_stack_join, classify_gh_merge_refusal, classify_merge_async, escape_head_branch_path,
         external_items_from_thread_nodes, external_reviews_truncated, fallback_auth_outcome,
-        flatten_slurped_pages, fork_head_identity, gh_api_error_message,
+        flatten_slurped_pages, fork_head_identity, gh_api_error_message, gh_pr_list_args,
         gh_pr_discard_pending_review, gh_repo_url, host_from_url, is_canonical_github_remote,
         is_diff_too_large, is_object_id, map_timeline_node, parse_actions_run_job,
         parse_auth_accounts, parse_pr_url_repo, parse_publish_owners, pr_edit_args,
@@ -8505,7 +8635,232 @@ mod tests {
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
+            locked: false,
+            lock_unknown: false,
+            active_lock_reason: None,
+            viewer_can_comment: None,
+            viewer_can_react: None,
         }
+    }
+
+    /// The lock fields are read by the TS mirror verbatim, so their wire keys are
+    /// pinned, and an unknown tri-state is an explicit null, never a missing key.
+    #[test]
+    fn conversation_fields_serialize_camel_case() {
+        let mut details = details_with_stack(None, Vec::new(), false, false);
+        details.locked = true;
+        details.lock_unknown = false;
+        details.active_lock_reason = Some("too_heated".to_string());
+        details.viewer_can_comment = Some(false);
+        details.viewer_can_react = Some(true);
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["locked"], true);
+        assert_eq!(v["lockUnknown"], false);
+        assert_eq!(v["activeLockReason"], "too_heated");
+        assert_eq!(v["viewerCanComment"], false);
+        assert_eq!(v["viewerCanReact"], true);
+        for snake in [
+            "lock_unknown",
+            "active_lock_reason",
+            "viewer_can_comment",
+            "viewer_can_react",
+        ] {
+            assert!(v.get(snake).is_none(), "{snake}");
+        }
+
+        let v = serde_json::to_value(details_with_stack(None, Vec::new(), false, false)).unwrap();
+        for key in ["activeLockReason", "viewerCanComment", "viewerCanReact"] {
+            assert!(v.get(key).is_some_and(serde_json::Value::is_null), "{key}");
+        }
+    }
+
+    #[test]
+    fn archived_comment_refusal_maps_to_the_pinned_copy() {
+        use super::{classify_gh_comment_refusal, GH_PR_ARCHIVED_READONLY};
+        let archived = |e: AppError| matches!(e, AppError::Gh(m) if m == GH_PR_ARCHIVED_READONLY);
+        // The measured refusal, verbatim.
+        assert!(archived(classify_gh_comment_refusal(AppError::Gh(
+            "GraphQL: Pull request is archived and its conversation is read-only (addComment)"
+                .to_string()
+        ))));
+        // Inside a multi-line stderr.
+        assert!(archived(classify_gh_comment_refusal(AppError::Gh(
+            "warning: something first\nGraphQL: Pull request is archived and its conversation is read-only (addComment)\n"
+                .to_string()
+        ))));
+        // Negative control: an unrelated refusal passes through unchanged.
+        let other =
+            "GraphQL: Could not resolve to a PullRequest with the number of 9. (repository.pullRequest)";
+        assert!(matches!(
+            classify_gh_comment_refusal(AppError::Gh(other.to_string())),
+            AppError::Gh(m) if m == other
+        ));
+        assert!(matches!(
+            classify_gh_comment_refusal(AppError::Timeout(30)),
+            AppError::Timeout(30)
+        ));
+        // The TS mirror matches this text byte for byte; it names the PR, never the repo.
+        assert_eq!(
+            GH_PR_ARCHIVED_READONLY,
+            "This pull request is archived, so its conversation is read-only."
+        );
+    }
+
+    #[test]
+    fn side_call_lock_state_per_permission_and_null_field() {
+        use super::{repo_merge_settings_from, PrConversationState};
+        let answer =
+            |repo: serde_json::Value| serde_json::json!({ "data": { "repository": repo } });
+        let locked_with = |perm: serde_json::Value| {
+            answer(serde_json::json!({
+                "mergeCommitAllowed": true,
+                "squashMergeAllowed": false,
+                "rebaseMergeAllowed": true,
+                "viewerPermission": perm,
+                "pullRequest": {
+                    "locked": true,
+                    "activeLockReason": "TOO_HEATED",
+                    "viewerCanReact": false
+                }
+            }))
+        };
+        for (perm, expected) in [
+            (serde_json::json!("READ"), Some(false)),
+            (serde_json::json!("TRIAGE"), None),
+            (serde_json::json!("WRITE"), Some(true)),
+            (serde_json::json!("MAINTAIN"), Some(true)),
+            (serde_json::json!("ADMIN"), Some(true)),
+            (serde_json::Value::Null, None),
+            (serde_json::json!("SOMETHING_NEW"), None),
+        ] {
+            let s = repo_merge_settings_from(&locked_with(perm.clone()));
+            assert_eq!(
+                s.conversation,
+                PrConversationState {
+                    locked: true,
+                    lock_unknown: false,
+                    active_lock_reason: Some("too_heated".to_string()),
+                    viewer_can_comment: expected,
+                    viewer_can_react: Some(false),
+                },
+                "{perm}"
+            );
+            // Merge settings parse exactly as before.
+            assert_eq!(
+                (
+                    s.merge_commit_allowed,
+                    s.squash_merge_allowed,
+                    s.rebase_merge_allowed
+                ),
+                (Some(true), Some(false), Some(true))
+            );
+        }
+
+        // Each reason lowercases to the REST form; a null reason stays None.
+        for (reason, expected) in [
+            (serde_json::json!("OFF_TOPIC"), Some("off_topic")),
+            (serde_json::json!("RESOLVED"), Some("resolved")),
+            (serde_json::json!("SPAM"), Some("spam")),
+            (serde_json::json!("TOO_HEATED"), Some("too_heated")),
+            (serde_json::Value::Null, None),
+        ] {
+            let s = repo_merge_settings_from(&answer(serde_json::json!({
+                "viewerPermission": "READ",
+                "pullRequest": { "locked": true, "activeLockReason": reason, "viewerCanReact": true }
+            })));
+            assert_eq!(
+                s.conversation.active_lock_reason.as_deref(),
+                expected,
+                "{reason}"
+            );
+            assert!(s.conversation.locked && !s.conversation.lock_unknown);
+        }
+
+        // Unlocked: never holds the composer, whatever the permission.
+        let s = repo_merge_settings_from(&answer(serde_json::json!({
+            "viewerPermission": "READ",
+            "pullRequest": { "locked": false, "activeLockReason": null, "viewerCanReact": true }
+        })));
+        assert_eq!(
+            s.conversation,
+            PrConversationState {
+                locked: false,
+                lock_unknown: false,
+                active_lock_reason: None,
+                viewer_can_comment: None,
+                viewer_can_react: Some(true),
+            }
+        );
+
+        // viewerCanReact passes through verbatim, null as unknown.
+        for (react, expected) in [
+            (serde_json::json!(true), Some(true)),
+            (serde_json::json!(false), Some(false)),
+            (serde_json::Value::Null, None),
+        ] {
+            let s = repo_merge_settings_from(&answer(serde_json::json!({
+                "viewerPermission": "WRITE",
+                "pullRequest": { "locked": true, "activeLockReason": null, "viewerCanReact": react }
+            })));
+            assert_eq!(s.conversation.viewer_can_react, expected, "{react}");
+            assert_eq!(s.conversation.viewer_can_comment, Some(true));
+        }
+
+        // locked unreadable: unknown, the other PR fields still read.
+        let s = repo_merge_settings_from(&answer(serde_json::json!({
+            "mergeCommitAllowed": true,
+            "viewerPermission": "READ",
+            "pullRequest": { "locked": null, "activeLockReason": null, "viewerCanReact": true }
+        })));
+        assert_eq!(
+            s.conversation,
+            PrConversationState {
+                locked: false,
+                lock_unknown: true,
+                active_lock_reason: None,
+                viewer_can_comment: None,
+                viewer_can_react: Some(true),
+            }
+        );
+        assert_eq!(s.merge_commit_allowed, Some(true));
+
+        // pullRequest null: lock unknown, merge settings keep reading.
+        let s = repo_merge_settings_from(&answer(serde_json::json!({
+            "mergeCommitAllowed": false,
+            "viewerPermission": "ADMIN",
+            "pullRequest": null
+        })));
+        assert_eq!(s.conversation, PrConversationState::default());
+        assert_eq!(s.merge_commit_allowed, Some(false));
+
+        // repository null, or no data at all: everything unknown.
+        for value in [answer(serde_json::Value::Null), serde_json::json!({})] {
+            let s = repo_merge_settings_from(&value);
+            assert_eq!(s.conversation, PrConversationState::default());
+            assert_eq!(
+                (
+                    s.merge_commit_allowed,
+                    s.squash_merge_allowed,
+                    s.rebase_merge_allowed
+                ),
+                (None, None, None)
+            );
+        }
+
+        // A failed side-call (the caller's unwrap_or_default) reads unknown, not unlocked.
+        let failed = super::RepoMergeSettings::default();
+        assert!(failed.conversation.lock_unknown && !failed.conversation.locked);
+    }
+
+    /// The query must select the lock fields, type `$number` as `Int!`, and never the
+    /// review-level `viewerCannotUpdateReasons` (it errors on archived PRs).
+    #[test]
+    fn side_call_query_selects_lock_fields_and_stays_archive_safe() {
+        let q = super::REPO_MERGE_SETTINGS_QUERY;
+        assert!(q.contains("$number:Int!"));
+        assert!(q.contains("viewerPermission"));
+        assert!(q.contains("pullRequest(number:$number){ locked activeLockReason viewerCanReact }"));
+        assert!(!q.contains("viewerCannotUpdateReasons"));
     }
 
     /// The frontend reads these keys verbatim; a serde rename slip here has
@@ -9091,6 +9446,63 @@ mod tests {
             matches!(err, AppError::Gh(ref m) if m.contains("members")),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn gh_pr_list_args_emit_each_state_arms_exact_argv() {
+        let base = |scope: &[&str]| -> Vec<String> {
+            ["pr", "list", "--repo", "o/r"]
+                .into_iter()
+                .chain(scope.iter().copied())
+                .chain(["--json", PR_LIST_FIELDS])
+                .map(str::to_string)
+                .collect()
+        };
+        let cases: [(&str, &[&str]); 4] = [
+            ("open", &["--state", "open"]),
+            ("closed", &["--search", "is:closed"]),
+            ("merged", &["--state", "merged"]),
+            ("unmerged", &["--search", "is:closed is:unmerged"]),
+        ];
+        for (state, scope) in cases {
+            assert_eq!(
+                gh_pr_list_args("o/r", state, None).unwrap(),
+                base(scope),
+                "{state}"
+            );
+            let mut low = base(scope);
+            low.extend(["--limit".to_string(), "1".to_string()]);
+            assert_eq!(
+                gh_pr_list_args("o/r", state, Some(0)).unwrap(),
+                low,
+                "{state}"
+            );
+            let mut high = base(scope);
+            high.extend(["--limit".to_string(), "1000".to_string()]);
+            assert_eq!(
+                gh_pr_list_args("o/r", state, Some(2000)).unwrap(),
+                high,
+                "{state}"
+            );
+            let mut mid = base(scope);
+            mid.extend(["--limit".to_string(), "250".to_string()]);
+            assert_eq!(
+                gh_pr_list_args("o/r", state, Some(250)).unwrap(),
+                mid,
+                "{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn gh_pr_list_args_reject_an_unknown_state() {
+        for state in ["all", "", "Merged", "is:merged"] {
+            let err = gh_pr_list_args("o/r", state, Some(10)).unwrap_err();
+            assert!(
+                err.to_string().contains("unknown PR state filter"),
+                "{state}: {err}"
+            );
+        }
     }
 
     /// The PR edit PATCH sends `base` only when retargeting — the no-base form must

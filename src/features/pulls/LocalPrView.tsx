@@ -161,6 +161,13 @@ export function LocalPrView({
   const pendingPrSection = useUiStore((s) => s.pendingPrSection);
   const setPendingPrSection = useUiStore((s) => s.setPendingPrSection);
   const [section, setSection] = useState<PrSection>("conversation");
+  // A section pick is a user action whose state lives here, so it claims the
+  // epoch first and a pending continuation yields to it. The automatic
+  // corrections below (the pending landing, the fallback) set it silently.
+  const pickSection = (next: PrSection) => {
+    useUiStore.getState().noteUserInteraction();
+    setSection(next);
+  };
   // Commits-tab drill-in: the selected commit's hash, or null for the list.
   // Reset when the viewed PR changes (below).
   const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(
@@ -875,7 +882,7 @@ export function LocalPrView({
               variant={section === s ? "secondary" : "ghost"}
               size="xs"
               aria-pressed={section === s}
-              onClick={() => setSection(s)}
+              onClick={() => pickSection(s)}
             >
               {SECTION_LABEL[s]({
                 comments: pr.comments.length,
@@ -1083,7 +1090,7 @@ export function LocalPrView({
                       commits={run}
                       onSelectCommit={(hash) => {
                         setSelectedCommitHash(hash);
-                        setSection("commits");
+                        pickSection("commits");
                       }}
                     />
                   ),

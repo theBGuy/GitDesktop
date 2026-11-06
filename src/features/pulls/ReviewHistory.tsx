@@ -1,11 +1,15 @@
 import {
   CaretDownIcon,
   CaretRightIcon,
+  ChatCircleIcon,
+  CheckIcon,
   CopyIcon,
   PencilSimpleIcon,
   TrashIcon,
 } from "@phosphor-icons/react";
-import { useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   InlineConfirm,
   useConfirmSwapFocus,
@@ -15,12 +19,22 @@ import { Markdown } from "@/components/markdown/markdown";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  buildAiCommentBody,
+  findSuspectRefs,
+  REF_TRIGGERS,
+} from "@/lib/ai/comment-branding";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { useForgeStatus, usePendingRepoWrites } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
-import { ACT_PENDING_REASON } from "@/lib/offline-writes";
+import {
+  ACT_PENDING_REASON,
+  COMMENT_POST_PENDING_REASON,
+} from "@/lib/offline-writes";
 import {
   REVIEW_HISTORY_WRITES_FAMILY,
   useClearReviews,
@@ -30,13 +44,23 @@ import {
   useUpdateReviewText,
 } from "@/lib/pulls/queries";
 import {
+  recordIncomplete,
+  reviewPostConfirm,
+  reviewPostedToast,
+} from "@/lib/pulls/review-post-confirm";
+import { stampReviewPosted } from "@/lib/pulls/review-posted-stamp";
+import {
   isPartialReview,
+  type PersistedReview,
   partialReviewReason,
+  reviewPostedAt,
   reviewText,
 } from "@/lib/pulls/reviews-history";
+import { useConfirm } from "@/lib/stores/confirm";
 import { formatDuration, validEpochMs } from "@/lib/time";
 import { toastError } from "@/lib/toast";
 import { useLatestRef } from "@/lib/use-latest-ref";
+import { PR_SWITCH_LOADING_REASON } from "./PrMergeabilityBanner";
 import { ThoughtsDisclosure } from "./ThoughtsDisclosure";
 
 /**
@@ -53,6 +77,10 @@ export function ReviewHistory({
   lens,
   prKind,
   prRef,
+  onPost,
+  posting,
+  stale = false,
+  conversationHoldReason = null,
 }: {
   repoPath: string;
   /** The origin|upstream lens the PR was opened under — a fork's two lenses keep
@@ -60,7 +88,17 @@ export function ReviewHistory({
   lens: RemoteLens;
   prKind: "remote" | "local";
   prRef: string;
+  /** The panel's post route; absent hides every row's Post. */
+  onPost?: (body: string, opts?: { asBot?: boolean }) => void | Promise<void>;
+  /** The PR view's comment write is in flight (shared with the live Post). */
+  posting?: boolean;
+  /** The PR view still renders a previously selected PR — holds Post. */
+  stale?: boolean;
+  /** Why the conversation won't take a comment (locked or archived): holds Post
+   *  with it. A post in flight outranks it; it outranks `stale`. */
+  conversationHoldReason?: string | null;
 }) {
+  const queryClient = useQueryClient();
   // Stored review text cites `#N` the same way a live run does, so it linkifies
   // against this repo's forge.
   const provider = useForgeStatus(repoPath).data?.provider;
@@ -78,6 +116,10 @@ export function ReviewHistory({
   // stays live during a save, so a settle closes only the trim it was saved from.
   const editSessionRef = useRef<object | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
+  // The row whose post is in flight: a click-time object token, cleared
+  // compare-and-clear. It resets on a scope switch: RemotePrView's `posting` is per
+  // PR, so a return to the posting PR is still held by `posting`.
+  const [postingFor, setPostingFor] = useState<{ id: string } | null>(null);
   const [activeIndex, setActiveIndex] = useState(-1);
   // A deleted row hands focus to the next row's toggle, else the previous
   // row's (never another Trash); a clear or last delete unmounts all of this,
@@ -89,10 +131,22 @@ export function ReviewHistory({
   // scope's confirm alone.
   const scopeKey = `${repoPath}#${lens}#${prKind}#${prRef}`;
   const scopeKeyRef = useLatestRef(scopeKey);
+  const holdRef = useLatestRef(conversationHoldReason);
+  const staleRef = useLatestRef(stale);
+  // The confirm host is app-level, so a dialog can outlive this disclosure,
+  // whose refs then freeze at the scope it left.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const [lastScopeKey, setLastScopeKey] = useState(scopeKey);
   if (scopeKey !== lastScopeKey) {
     setLastScopeKey(scopeKey);
     setConfirmingClear(false);
+    setPostingFor(null);
   }
   // The clear and trim holds, read from the cache by review scope: this disclosure
   // outlives a PR switch, and the cache keeps a write another scope started (or a
@@ -107,6 +161,9 @@ export function ReviewHistory({
   // variables to match on.
   const clearing = historyWrites.some((w) => w.kind === "clear");
   const saving = historyWrites.some((w) => w.kind === "update");
+  // LocalPrView's `posting` covers every update write on the PR, not only comments.
+  const postPendingReason =
+    prKind === "local" ? ACT_PENDING_REASON : COMMENT_POST_PENDING_REASON;
 
   // ONE list: completed reviews and kept partial runs interleave by time, so the
   // disclosure, its count, and the arrow-key walk all cover every stored record — a PR
@@ -157,6 +214,82 @@ export function ReviewHistory({
       // No failure surface (see above).
     } finally {
       if (startedFor === scopeKeyRef.current) setConfirmingClear(false);
+    }
+  }
+
+  // Posts a stored record as a PR comment. Never touches the live run: no reset, no
+  // review-store write — a run may be streaming beside this. Every value the
+  // continuation writes with is pinned here, before the confirm's await.
+  async function postRecord(r: PersistedReview) {
+    const text = reviewText(r);
+    if (
+      !onPost ||
+      postingFor !== null ||
+      posting ||
+      conversationHoldReason !== null ||
+      stale ||
+      !text.trim()
+    )
+      return;
+    const record = r;
+    const repo = repoPath;
+    const kind = prKind;
+    const ref = prRef;
+    const scopeLens = lens;
+    const post = onPost;
+    const startedFor = scopeKey;
+    // Same wiring as the live post: a local PR posts into app data, where no forge
+    // cross-reference exists; GitLab alone honors the `\#N` escape (measured).
+    const suspectRefs =
+      kind === "remote"
+        ? findSuspectRefs(
+            text,
+            provider ? REF_TRIGGERS[provider] : undefined,
+            provider !== "gitlab",
+          )
+        : [];
+    const confirm = reviewPostConfirm({
+      incomplete: recordIncomplete(record),
+      already: reviewPostedAt(record) !== undefined,
+      suspectRefs,
+    });
+    if (confirm) {
+      if (!(await useConfirm.getState().ask(confirm))) return;
+      // Read fresh: the dialog's answer counts only for the PR still selected
+      // and shown here (mounted, no hold, not stale, same scope).
+      if (
+        !mountedRef.current ||
+        holdRef.current !== null ||
+        staleRef.current ||
+        scopeKeyRef.current !== startedFor
+      )
+        return;
+    }
+    const token = { id: record.id };
+    setPostingFor(token);
+    // The RECORD's mode and model, never the live run's.
+    const body = buildAiCommentBody({
+      kind: record.mode === "security" ? "security audit" : "review",
+      model: record.model || "model",
+      automated: false,
+      text,
+    });
+    try {
+      await post(body, { asBot: true });
+      // The row is released without waiting on the store write: the stamp's
+      // optimistic patch already makes the next Post ask first.
+      stampReviewPosted(queryClient, {
+        repo,
+        lens: scopeLens,
+        kind,
+        ref,
+        id: record.id,
+      });
+      toast.success(reviewPostedToast(record.mode));
+    } catch {
+      // The PR view surfaces the failure; no stamp, no toast.
+    } finally {
+      setPostingFor((cur) => (cur === token ? null : cur));
     }
   }
 
@@ -237,6 +370,8 @@ export function ReviewHistory({
                 ? formatDuration(r.finishedAt - r.startedAt)
                 : null;
             const partial = isPartialReview(r);
+            const postedAt = reviewPostedAt(r);
+            const postable = Boolean(onPost) && reviewText(r).trim() !== "";
             return (
               <div
                 key={r.id}
@@ -249,7 +384,7 @@ export function ReviewHistory({
                     type="button"
                     data-row={r.id}
                     data-confirm-swap
-                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 text-left"
                     aria-expanded={expanded}
                     onFocus={() =>
                       setActiveIndex(records.findIndex((x) => x.id === r.id))
@@ -275,7 +410,10 @@ export function ReviewHistory({
                           : "Stopped early"}
                       </Badge>
                     )}
-                    <span className="truncate font-mono text-muted-foreground">
+                    <span
+                      className="min-w-0 truncate font-mono text-muted-foreground"
+                      onMouseEnter={clipTitleFromText}
+                    >
                       {r.model || "model"}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1 text-muted-foreground">
@@ -348,7 +486,55 @@ export function ReviewHistory({
                             <ThoughtsDisclosure thoughts={r.thoughts} />
                           )}
                         </div>
+                        {postable && postedAt !== undefined && (
+                          <div className="mt-1 flex items-center gap-1 text-muted-foreground">
+                            <CheckIcon className="size-3 shrink-0" />
+                            <span>
+                              Posted to the conversation{" "}
+                              <RelativeTime
+                                date={new Date(postedAt).toISOString()}
+                              />
+                            </span>
+                          </div>
+                        )}
                         <div className="mt-1 flex flex-wrap items-center gap-1">
+                          {/* ONE element across the posted flip, so focus stays on it
+                              when the stamp lands; posted, it drops its emphasis. */}
+                          {postable && (
+                            <DisabledReasonButton
+                              variant={
+                                postedAt === undefined ? "outline" : "ghost"
+                              }
+                              size="xs"
+                              className={
+                                postedAt === undefined
+                                  ? undefined
+                                  : "text-muted-foreground"
+                              }
+                              disabled={
+                                postingFor !== null ||
+                                posting ||
+                                conversationHoldReason !== null ||
+                                stale
+                              }
+                              reason={
+                                postingFor !== null || posting
+                                  ? postPendingReason
+                                  : (conversationHoldReason ??
+                                    PR_SWITCH_LOADING_REASON)
+                              }
+                              onClick={() => void postRecord(r)}
+                            >
+                              {postingFor?.id === r.id ? (
+                                <Spinner data-icon="inline-start" />
+                              ) : (
+                                <ChatCircleIcon data-icon="inline-start" />
+                              )}
+                              {postedAt === undefined
+                                ? "Post as comment"
+                                : "Post again"}
+                            </DisabledReasonButton>
+                          )}
                           {/* Kept output feeds no later run, so it gets no trim — only the
                               copy path, since it may be the only copy left. */}
                           {!partial && (

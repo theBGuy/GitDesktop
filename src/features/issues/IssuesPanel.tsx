@@ -44,8 +44,11 @@ import {
 } from "@/lib/git/queries";
 import {
   type ForgeProvider,
-  providerLabel,
   remoteListFilterKey,
+  savedProvider,
+  shownProvider,
+  shownProviderLabel,
+  UNKNOWN_HOST,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { reloadLocalIssues } from "@/lib/issues/local";
@@ -63,6 +66,7 @@ import {
   useRemoteSlug,
   useSetRepoLens,
 } from "@/lib/repo-lens/queries";
+import { useSettings } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { parseableDate } from "@/lib/time";
@@ -120,16 +124,23 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
   const provider = gh.data?.provider;
   const isGitLab = provider === "gitlab";
   const isBitbucket = provider === "bitbucket";
+  // Copy names the saved provider until the probe answers; gates keep the raw probe.
+  const settings = useSettings();
+  const shown = shownProvider(
+    gh.data,
+    savedProvider(settings.data?.recentRepos, repoPath),
+  );
+  const hostName = shownProviderLabel(shown);
   // The origin|upstream lens (GitHub forks only) scopes ONLY the remote section
   // below — local + Jira issues are lens-independent. It decides which repo feeds
   // `remotes`, not how rows are partitioned.
   const { lens, gate: lensGate } = useLensState(repoPath);
   const setLens = useSetRepoLens(repoPath);
   const upstreamSlug = useRemoteSlug(repoPath, "upstream", lens === "upstream");
-  const providerName = providerLabel(provider);
+  const providerName = hostName ?? UNKNOWN_HOST;
   // When browsing the parent, the remote section header names the parent slug.
   const remoteLabel =
-    lens === "upstream" ? (upstreamSlug ?? "Upstream") : providerName;
+    lens === "upstream" ? (upstreamSlug ?? "Upstream") : (hostName ?? "Remote");
   // Issue *reads* are provider-neutral (the panel-level `issues` flag); issue
   // *creation* follows its own per-action write flag — ready GitHub AND GitLab
   // repos both offer the create dialog (which hides GitHub-only fields per
@@ -480,7 +491,10 @@ export function IssuesPanel({ repoPath }: { repoPath: string }) {
         }
         lensControl={<RepoLensSwitcher repoPath={repoPath} />}
         newMenu={{
-          ghLabel: NEW_ISSUE_LABEL[provider ?? "github"],
+          ghLabel:
+            shown === undefined
+              ? "Remote issue…"
+              : NEW_ISSUE_LABEL[shown ?? "github"],
           // Issues disabled on the repo (a fork's default) also blocks creation, even
           // when the forge is otherwise ready — gate it with the reason so "New" isn't
           // a button that can only fail.

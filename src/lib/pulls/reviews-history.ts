@@ -11,6 +11,7 @@ import {
   reloadToleratingEmptyStore,
 } from "@/lib/plugin-store";
 import { writeWithRollback } from "@/lib/plugin-store-rollback";
+import { validEpochMs } from "@/lib/time";
 
 /**
  * A finished AI review, persisted so the NEXT run of the same PR + mode can feed
@@ -54,6 +55,12 @@ export interface PersistedReview {
   /** The partial run was killed at its timeout (rather than failing outright) — the
    *  distinction the kept output is labeled with. Partial records only. */
   timedOut?: boolean;
+  /** Epoch ms the record's text was posted to the PR conversation — set by the
+   *  automation writer when it persists a DELIVERED review, and by every successful
+   *  manual Post (live panel and history row). Absent reads as unposted, legacy
+   *  records included. Additive optional field; schemaVersion stays 1. Read it
+   *  through {@link reviewPostedAt}, never raw. */
+  postedAt?: number;
 }
 
 /** Whether a stored record is a kept PARTIAL run rather than a completed review.
@@ -78,6 +85,17 @@ export function partialReviewReason(
     timedOut: r.timedOut === true,
     error: typeof r.error === "string" ? r.error : "",
   };
+}
+
+/** A record's posted stamp, type-checked out of untrusted store JSON: anything but a
+ *  valid epoch number reads as unposted, so a hand-edited stamp never throws in
+ *  `toISOString` or claims a post that can't be dated. */
+export function reviewPostedAt(
+  r: Pick<PersistedReview, "postedAt">,
+): number | undefined {
+  return typeof r.postedAt === "number" && validEpochMs(r.postedAt)
+    ? r.postedAt
+    : undefined;
 }
 
 /** Reviews kept per `(lens, kind, ref, mode)` — enough to show iteration, bounded
@@ -118,6 +136,29 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
   // Keep the queue alive whether `op` fulfilled or rejected; callers still get `run`.
   opChain = run.catch(() => undefined);
   return run;
+}
+
+// Session receipts: posted stamps by record id, set when {@link markReviewPosted} is
+// called and kept whatever its write's outcome. Every read overlays them, so a read
+// holding a store copy from before the write persisted (any path's query, a sibling
+// worktree's included) can't serve the record unposted and re-offer a plain Post.
+const pendingStamps = new Map<string, number>();
+
+/** `r` stamped `stamp`, unless its valid stored stamp is at least as late: a
+ *  stamp covers a stale or failed write, but never rolls a newer post back. */
+function withLaterStamp(r: PersistedReview, stamp: number): PersistedReview {
+  const stored = reviewPostedAt(r);
+  return stored !== undefined && stored >= stamp
+    ? r
+    : { ...r, postedAt: stamp };
+}
+
+function withPendingStamps(records: PersistedReview[]): PersistedReview[] {
+  if (pendingStamps.size === 0) return records;
+  return records.map((r) => {
+    const receipt = pendingStamps.get(r.id);
+    return receipt === undefined ? r : withLaterStamp(r, receipt);
+  });
 }
 
 async function reloadRaw(): Promise<void> {
@@ -201,10 +242,10 @@ async function read(
   repo: string,
   opts?: { fresh?: boolean },
 ): Promise<PersistedReview[]> {
-  if (!opts?.fresh) return readMerged(repo);
+  if (!opts?.fresh) return withPendingStamps(await readMerged(repo));
   return serialize(async () => {
     await reloadRaw();
-    return readMerged(repo);
+    return withPendingStamps(await readMerged(repo));
   });
 }
 
@@ -376,6 +417,35 @@ export async function updateReviewText(
         await writeAll(
           key,
           all.map((r) => (r.id === id ? { ...r, text } : r)),
+        );
+      });
+    });
+  });
+}
+
+/** Stamps a stored record as posted to the PR conversation. Rides the same queue as
+ *  {@link saveReview}, so a stamp enqueued after a save targets the saved record; an
+ *  id the prune or a delete already removed is a no-op. Never reorders: rows sort by
+ *  `finishedAt`, which this leaves alone. Callers invalidate. Reads return the
+ *  record as posted from this call on, for the rest of the session, whatever the
+ *  write's outcome (see `pendingStamps`). A later stored stamp is kept. */
+export async function markReviewPosted(
+  repo: string,
+  id: string,
+  postedAt: number,
+): Promise<void> {
+  pendingStamps.set(id, postedAt);
+  await serialize(async () => {
+    const identity = await repoIdentity(repo);
+    await withAppStoreLock(STORE_FILE, async () => {
+      await reloadRaw();
+      const store = await getStore();
+      return writeWithRollback(store, async () => {
+        const key = await keyFor(repo, identity);
+        const all = await readByKey(key);
+        await writeAll(
+          key,
+          all.map((r) => (r.id === id ? withLaterStamp(r, postedAt) : r)),
         );
       });
     });

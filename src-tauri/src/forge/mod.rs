@@ -1321,8 +1321,9 @@ pub async fn forge_clone(
     .await
 }
 
-/// A repo's merge/pull requests, behind the provider abstraction. `state` is `"open"`
-/// or `"closed"` (closed includes merged, matching the GitHub panel's Closed tab).
+/// A repo's merge/pull requests, behind the provider abstraction. `state` is `"open"`,
+/// `"closed"` (everything not open, merged included), `"merged"` (merged only), or
+/// `"unmerged"` (closed without merging); any other value errors.
 ///
 /// `lens` (`None`/`Some("origin")`/`Some("upstream")`) is threaded to the GitHub arm
 /// ONLY: it selects whether a fork addresses its own PRs or the parent's. GitLab and
@@ -1360,7 +1361,7 @@ pub async fn forge_pr_list(
 #[derive(serde::Serialize)]
 pub struct PrListPage {
     pub rows: Vec<crate::github::pr::PrInfo>,
-    /// True only when GitLab's unfiltered Closed walk stopped at its horizon and the
+    /// True only when a GitLab unfiltered list walk stopped at its row horizon and the
     /// horizon clamped the requested limit; every other provider and read says false.
     /// It means the walk stopped there, never that older rows were proven to exist: a
     /// leg holding exactly its horizon's rows and nothing older still reports true.

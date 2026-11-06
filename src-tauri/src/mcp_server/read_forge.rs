@@ -31,12 +31,24 @@ struct RunListArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct PrListArgs {
-    /// "open" (default) or "closed".
+    /// "open" (default), "closed" (everything not open: merged and closed without
+    /// merging), "merged" (merged only), or "unmerged" (closed without merging).
     #[serde(default)]
     state: Option<String>,
     /// Max pull requests to return. Omit for the provider default: GitHub ~30;
-    /// GitLab open 100, closed up to 100 per state (200 total, newest-created first);
+    /// GitLab open 100, closed up to 100 per state (closed and merged, 200 total),
+    /// merged or unmerged up to 100 (one state each), newest-created first;
     /// Bitbucket a full page.
+    /// With `limit`, GitHub returns up to 1000 and Bitbucket up to 50. GitLab
+    /// reads up to 500 per state, newest-created first: open, merged and unmerged
+    /// read one state each, and closed reads both closed and merged. GitLab open
+    /// past that horizon returns up to the newest min(limit, 500); MRs opened or
+    /// closed during the walk can leave it a few rows short. When a closed,
+    /// merged or unmerged state needs a sixth page to cover `limit`, the call
+    /// returns at most the newest min(limit, 500) rows overall and usually stops
+    /// short of that, because rows sharing the cutoff's creation time are left
+    /// out. Neither response marks a capped list. Otherwise a GitLab closed call
+    /// can return up to `limit` rows across both states.
     #[serde(default)]
     limit: Option<u32>,
 }
@@ -132,14 +144,25 @@ pub(super) async fn ensure_github(repo: &str) -> Result<(), McpError> {
 impl GitDesktopMcp {
     #[tool(
         description = "List pull requests from the repository's forge (GitHub, GitLab, or \
-                       Bitbucket, per its remote). `state` is \"open\" (default) or \"closed\". \
+                       Bitbucket, per its remote). `state` is \"open\" (default), \"closed\" \
+                       (everything not open: merged and closed without merging), \"merged\" \
+                       (merged only), or \"unmerged\" (closed without merging). \
                        Without `limit`, returns the provider default: GitHub ~30; GitLab open \
-                       100, closed up to 100 per state (200 total, newest-created first); \
+                       100, closed up to 100 per state (closed and merged, 200 total), merged \
+                       or unmerged up to 100 (one state each), newest-created first; \
                        Bitbucket a full page. Per-call ceiling with `limit`: GitHub 1000; \
-                       GitLab open 100, closed up to 500 per state (closed and merged, \
-                       newest-created first), capped at the newest 500 overall when either state \
-                       needs a sixth page to cover `limit`; Bitbucket 50. A larger `limit` \
-                       returns the ceiling. Open rows carry a `stack` object \
+                       GitLab open 500 (newest-created first); closed, merged and unmerged up \
+                       to 500 per state (closed walks both closed and merged; merged and \
+                       unmerged one state each; newest-created first); Bitbucket 50. A larger \
+                       `limit` returns the ceiling. GitLab open past its horizon returns up \
+                       to the newest min(`limit`, 500); MRs opened or closed during the walk \
+                       can leave it a few rows short. When a GitLab closed, merged or \
+                       unmerged state needs a sixth page to cover `limit`, the call returns \
+                       at most the newest min(`limit`, 500) rows overall and usually stops \
+                       short of that, because rows sharing the cutoff's creation time are \
+                       left out. Neither response marks a capped list. Otherwise a closed \
+                       call can return up to `limit` rows across both states. Open rows carry \
+                       a `stack` object \
                        ({id, position, size}, position 1 = bottom and merges first) when the \
                        PR belongs to a stack — GitHub stacks, or a chain of GitLab MRs each \
                        targeting the next one's source branch; null otherwise. On GitHub, \
@@ -290,8 +313,8 @@ impl GitDesktopMcp {
                        repo with a linked Jira project, use list_jira_issues instead). \
                        `state` is \"open\" (default) or \"closed\". Without `limit`, returns the \
                        provider default (GitHub ~30; GitLab a full page); pass `limit` to raise or \
-                       lower that cap. Per-call ceiling: GitHub 1000, GitLab 100 — a larger \
-                       `limit` returns the ceiling (no pagination). Requires the forge's \
+                       lower that cap. Per-call ceiling: GitHub 1000, GitLab 500 — a larger \
+                       `limit` returns the ceiling. Requires the forge's \
                        authenticated CLI/credential. Returns JSON."
     )]
     async fn list_issues(

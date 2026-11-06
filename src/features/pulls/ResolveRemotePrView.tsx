@@ -24,6 +24,7 @@ import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
 import { useAiEnabled, useReviewConfigured } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 
@@ -98,6 +99,12 @@ export function ResolveRemotePrView({
   const walkActive = scopePath === worktreePath ? activePath : null;
 
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // A user file pick, noted first so a pending continuation (a markdown
+  // `#N` lookup) strands; the automatic selections stay silent.
+  const pickPath = (path: string) => {
+    useUiStore.getState().noteUserInteraction();
+    setSelectedPath(path);
+  };
 
   // The one place a walk is armed for this tree. Any walk already scoped here is
   // left over from an earlier visit, so it's cleared before the seed — otherwise
@@ -200,7 +207,7 @@ export function ResolveRemotePrView({
     items: conflicted,
     activeIndex,
     rowKey: (e) => e.path,
-    onActivate: (entry) => setSelectedPath(entry.path),
+    onActivate: (entry) => pickPath(entry.path),
   });
 
   return (
@@ -290,7 +297,7 @@ export function ResolveRemotePrView({
                   data-row={entry.path}
                   role="option"
                   aria-selected={active}
-                  onClick={() => setSelectedPath(entry.path)}
+                  onClick={() => pickPath(entry.path)}
                   className={cn(
                     "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-xs outline-none",
                     active

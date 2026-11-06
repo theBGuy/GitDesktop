@@ -113,6 +113,11 @@ import {
   type RepoOverride,
 } from "./types";
 
+/** The failed outcome's detail when the local PR a review was for was deleted
+ *  before it could be posted. */
+export const VANISHED_LOCAL_PR_DETAIL =
+  "The local pull request was deleted before the review could be posted.";
+
 export type AutomationEvent =
   | {
       kind: "commit";
@@ -281,6 +286,18 @@ type RunActionOutcome = {
    *  history store, which this id family doesn't address. */
   resultId?: string;
 };
+
+/** The outcome a finished delivery settles to: `delivered` false means the local
+ *  PR was deleted mid-run and nothing was posted, so the run failed. */
+export function deliveryOutcome(
+  action: ActionId,
+  delivered: boolean,
+  resultId: string | undefined,
+): RunActionOutcome {
+  if (!delivered)
+    return { action, code: "failed", detail: VANISHED_LOCAL_PR_DETAIL };
+  return { action, code: "delivered", ...(resultId ? { resultId } : {}) };
+}
 
 /** What a {@link run} pass did, so a re-run can tell outcomes apart:
  *  - `matched`: rules that exist AND apply (past the `only` + branch gates). 0 = the rule
@@ -892,7 +909,7 @@ async function runOneAction({
       neutralizeRefs: true,
       text,
     });
-    const resultId = await deliver(event, action, body, text);
+    const { resultId, delivered } = await deliver(event, action, body, text);
     // Seed the review-history store so the next run (manual or auto) builds on these
     // findings and this headSha joins the heads pr-sync treats as covered. Best-effort.
     if (event.kind === "pr-open" || event.kind === "pr-sync") {
@@ -903,15 +920,15 @@ async function runOneAction({
         reviewCfg.model,
         thoughts,
         runStartedMs,
+        delivered,
       ).catch(() => undefined);
     }
-    // Success: remove the dock row — a delivered review lands in Notifications.
+    // The local PR was deleted mid-run (deliver toasted it), so nothing was
+    // posted: the run records as failed and gives its claim back.
+    if (!delivered) releaseClaim();
+    // Remove the dock row — a delivered review lands in Notifications.
     handle.settle();
-    settled.push({
-      action,
-      code: "delivered",
-      ...(resultId ? { resultId } : {}),
-    });
+    settled.push(deliveryOutcome(action, delivered, resultId));
     await recordProgress();
   } catch (e) {
     // Release the claim on every failure/cancel path so a transient error doesn't
@@ -1870,15 +1887,16 @@ async function generateReviewText(
   return { text: buffer, thoughts: "" };
 }
 
-/** Delivers one finished review to wherever its event's output belongs, returning
- *  the stored result's id for a COMMIT event — the only arm whose output has a
- *  record to point at. PR arms post a comment and return undefined. */
+/** Delivers one finished review to wherever its event's output belongs. `resultId` is
+ *  the stored result's id for a COMMIT event, the only arm whose output has a record
+ *  to point at. `delivered` is false only when the output landed nowhere (a local PR
+ *  deleted mid-run), so the history record is never stamped posted for it. */
 async function deliver(
   event: AutomationEvent,
   mode: ReviewMode,
   body: string,
   rawText: string,
-): Promise<string | undefined> {
+): Promise<{ resultId?: string; delivered: boolean }> {
   const label = modeLabel(mode);
 
   if (event.kind === "commit") {
@@ -1926,7 +1944,7 @@ async function deliver(
         focus: "unfocused",
       },
     });
-    return result.id;
+    return { resultId: result.id, delivered: true };
   }
 
   if (event.target.type === "remote") {
@@ -1979,7 +1997,7 @@ async function deliver(
         focus: "unfocused",
       },
     });
-    return;
+    return { delivered: true };
   }
 
   // Hoisted: the narrowing to the local target doesn't flow into closures.
@@ -1988,7 +2006,7 @@ async function deliver(
   const pr = prs.find((p) => p.id === targetId);
   if (!pr) {
     toast.error(`AI ${label} finished, but the local PR no longer exists.`);
-    return;
+    return { delivered: false };
   }
   await updateLocalPr(event.repoPath, targetId, (cur) => ({
     ...cur,
@@ -2023,6 +2041,7 @@ async function deliver(
       focus: "unfocused",
     },
   });
+  return { delivered: true };
 }
 
 /**
@@ -2039,6 +2058,9 @@ async function persistReviewHistory(
   thoughts: string,
   /** The run's wall-clock start — persisted so history shows a real duration. */
   startedAtMs: number,
+  /** deliver() actually posted the comment — only then is the record stamped
+   *  posted, so its history row never claims a comment that didn't land. */
+  delivered: boolean,
 ): Promise<void> {
   if (!text.trim()) return;
   const kind = event.target.type;
@@ -2059,6 +2081,7 @@ async function persistReviewHistory(
     headSha: event.headSha ?? "",
     startedAt: startedAtMs,
     finishedAt: now,
+    ...(delivered ? { postedAt: now } : {}),
   });
   await queryClient.invalidateQueries({
     queryKey: reviewHistoryKey(event.repoPath, "origin", kind, ref),

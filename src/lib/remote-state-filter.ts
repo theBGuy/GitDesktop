@@ -1,28 +1,72 @@
 /**
- * The Open/Closed tab predicate the PR and issue lists share. A remote row is
- * filed by its own `state`, never by the list read that returned it: a forge's
- * open-list membership can lag a merge, close or reopen the row itself already
- * reports. Every provider maps open to "OPEN" (a locked GitLab MR arrives as
- * "CLOSED"); merged, closed and any other state land in Closed.
+ * The state-tab predicates the PR and issue lists share. A remote row is filed
+ * by its own `state`, never by the list read that returned it: a forge's list
+ * membership can lag a merge, close or reopen the row itself already reports.
+ * Every provider maps open to "OPEN" and merged to "MERGED" (a locked GitLab MR
+ * arrives as "CLOSED"). "closed" means everything not open (the issue lists'
+ * Closed tab and the legacy PR callers); the PR panel's tabs split that into
+ * "merged" and "unmerged", where every state but OPEN and MERGED lands.
  *
  * Import-free at runtime on purpose: `scripts/remote-state-filter.test.mjs`
- * loads it straight from `src/` under Node's type stripping.
+ * and `scripts/pr-state-tabs.test.mjs` load it straight from `src/` under
+ * Node's type stripping, so any import here must be type-only.
  */
 
-export type LocalRemoteState = "open" | "closed";
+export type LocalRemoteState = "open" | "closed" | "merged" | "unmerged";
+
+/** The PR panel's three tabs (never "closed"). */
+export type PrListTab = "open" | "merged" | "unmerged";
 
 export function remoteStateMatches(
   state: string,
   filter: LocalRemoteState,
 ): boolean {
-  return filter === "open" ? state === "OPEN" : state !== "OPEN";
+  switch (filter) {
+    case "open":
+      return state === "OPEN";
+    case "closed":
+      return state !== "OPEN";
+    case "merged":
+      return state === "MERGED";
+    case "unmerged":
+      return state !== "OPEN" && state !== "MERGED";
+  }
 }
 
+/** Mirrors {@link remoteStateMatches}, so a stored status this build doesn't
+ *  know (the app-data file is hand-editable) still lands under Closed. */
 export function localStateMatches(
   status: string,
   filter: LocalRemoteState,
 ): boolean {
-  return filter === "open" ? status === "open" : status !== "open";
+  switch (filter) {
+    case "open":
+      return status === "open";
+    case "closed":
+      return status !== "open";
+    case "merged":
+      return status === "merged";
+    case "unmerged":
+      return status !== "open" && status !== "merged";
+  }
+}
+
+/** Which PR tab a remote PR's own state lands on. Total by construction, and
+ *  congruent with {@link remoteStateMatches}: the align never lands on a tab
+ *  that won't list the row. */
+export function prAlignTab(state: string): PrListTab {
+  if (state === "OPEN") return "open";
+  if (state === "MERGED") return "merged";
+  return "unmerged";
+}
+
+/** Which PR tab a local PR's status lands on. Mirrors {@link prAlignTab} and
+ *  {@link localStateMatches}: the stored status is untrusted, so anything but
+ *  "open" or "merged" lands on Closed, the tab that lists it. */
+export function localPrAlignTab(status: unknown): PrListTab {
+  if (status === "open") return "open";
+  if (status === "merged") return "merged";
+  return "unmerged";
 }
 
 /** `rows` narrowed to `filter`'s tab. Placeholder rows pass through untouched:

@@ -49,7 +49,15 @@ import {
   useRepoWriteAccess,
   writeAccessReason,
 } from "@/lib/git/queries";
-import { type ForgeProvider, providerLabel } from "@/lib/git/types";
+import {
+  type ForgeProvider,
+  OPEN_IN_BROWSER,
+  type ProviderName,
+  savedProvider,
+  shownProvider,
+  shownProviderLabel,
+  UNKNOWN_HOST,
+} from "@/lib/git/types";
 import type { RunJob } from "@/lib/github/actions";
 import {
   isRunActive,
@@ -68,7 +76,7 @@ import {
   refuseWhileOffline,
   useOfflineHold,
 } from "@/lib/offline-writes";
-import { useAiEnabled } from "@/lib/settings/queries";
+import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { formatDurationBetween, parseableDate } from "@/lib/time";
 import { toastError } from "@/lib/toast";
@@ -486,7 +494,8 @@ function RunHeader({
   /** The leading Cancel or re-run offers. */
   actions: ReactNode;
   viewOn: {
-    remoteLabel: string;
+    /** The shown provider's name; null while nothing names the host. */
+    remoteLabel: ProviderName | null;
     disabled: boolean;
     reason: string;
     onClick?: () => void;
@@ -558,11 +567,17 @@ function RunHeader({
           className="cursor-pointer"
           disabled={viewOn.disabled}
           reason={viewOn.reason}
-          title={`Open this ${noun} on ${viewOn.remoteLabel}`}
+          title={
+            viewOn.remoteLabel
+              ? `Open this ${noun} on ${viewOn.remoteLabel}`
+              : `Open this ${noun} in your browser`
+          }
           onClick={viewOn.onClick}
         >
           <ArrowSquareOutIcon data-icon="inline-start" />
-          View on {viewOn.remoteLabel}
+          {viewOn.remoteLabel
+            ? `View on ${viewOn.remoteLabel}`
+            : OPEN_IN_BROWSER}
         </DisabledReasonButton>
       </div>
     </div>
@@ -720,6 +735,14 @@ export function RunDetailView({
   // `rerunOffers`; these flags only decide whether the group renders at all.
   const forge = useForgeStatus(repoPath);
   const provider = forge.data?.provider;
+  // Copy names the saved provider until the probe answers; gates keep the raw probe.
+  const settings = useSettings();
+  const hostName = shownProviderLabel(
+    shownProvider(
+      forge.data,
+      savedProvider(settings.data?.recentRepos, repoPath),
+    ),
+  );
   const canWrite = !isPipelineProvider(provider);
   const canRerun = canWrite || forgeFeatureReady(forge.data, "ciRerun");
   const canCancel = canWrite || forgeFeatureReady(forge.data, "ciCancel");
@@ -743,7 +766,7 @@ export function RunDetailView({
   );
   const writeReason = writeAccessReason(writeAccess.data);
   const writeBlocked = writeAccess.data?.canPush === false;
-  const remoteLabel = providerLabel(provider);
+  const remoteLabel = hostName ?? UNKNOWN_HOST;
   // GitLab pipelines and Bitbucket steps carry no per-job step list; only GitHub
   // jobs do — so the steps placeholder is suppressed for both.
   const stepsExpected = !isPipelineProvider(provider);
@@ -1150,7 +1173,7 @@ export function RunDetailView({
             })
           }
           viewOn={{
-            remoteLabel,
+            remoteLabel: hostName,
             disabled: true,
             reason: frame.reason,
           }}
@@ -1255,7 +1278,7 @@ export function RunDetailView({
               })
         }
         viewOn={{
-          remoteLabel,
+          remoteLabel: hostName,
           disabled: !run.url,
           reason: `No URL for this ${runNoun}`,
           onClick: () => run.url && openUrl(run.url),

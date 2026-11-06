@@ -7,6 +7,7 @@ import {
   type MarkdownEditorHandle,
 } from "@/components/markdown-editor";
 import { SUBMIT_HINT } from "@/lib/hotkeys/binding";
+import { useLatestRef } from "@/lib/use-latest-ref";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { useComposerCollapsed } from "./useComposerCollapsed";
 import type { MentionSource } from "./useMentionCandidates";
@@ -57,6 +58,8 @@ export function CommentComposer({
   leadingActions,
   mentions,
   toastClearance,
+  readOnlyReason,
+  holdKey,
 }: {
   /** The editor handle, so a caller can focus/fill the box from elsewhere
    *  (quote reply). Both methods expand a collapsed box first. */
@@ -89,17 +92,35 @@ export function CommentComposer({
   /** This mount is its pane's bottom bar (or docks on one): toasts lift above
    *  its top edge. */
   toastClearance?: boolean;
+  /** The conversation won't take a comment (a locked or archived one): the
+   *  editor and submit hold with this reason, busy or not. Clear stays live, as
+   *  discarding a draft is local. */
+  readOnlyReason?: string | null;
+  /** The entity `readOnlyReason` is read for. The hold hands focus from the
+   *  editor to the held submit only when it engages on the same entity. */
+  holdKey?: string;
 }) {
   const hasDraft = value.trim().length > 0;
-  // Only the `busy` hold gets words: an empty draft explains itself, and a reason
-  // there would add a tab stop for every viewer who simply hasn't typed yet.
-  const blockedReason = busy ? (reason ?? null) : null;
+  // Only the `busy` and read-only holds get words: an empty draft explains
+  // itself, and a reason there would add a tab stop for every viewer who simply
+  // hasn't typed yet.
+  const readOnly = readOnlyReason != null;
+  const blockedReason = readOnlyReason ?? (busy ? (reason ?? null) : null);
   const showClear = !!onClear && hasDraft;
   const editorId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<MarkdownEditorHandle>(null);
   const editorWrapRef = useRef<HTMLDivElement>(null);
   const peekRef = useRef<HTMLButtonElement>(null);
+  const submitRef = useRef<HTMLButtonElement>(null);
+  // The editor holds focus as far as React has seen. Chromium blurs a focused
+  // textarea as `disabled` lands, inside React's commit, where its event system
+  // is off, so that blur never reaches onBlur and ownership stays true; any
+  // processed blur (a click-away included) clears it.
+  const editorOwnsFocusRef = useRef(false);
+  const prevHoldRef = useRef({ readOnly, holdKey });
+  // Read when a hand-off lands, which can be a frame after the render that armed it.
+  const readOnlyRef = useLatestRef(readOnly);
   useToastClearance(rootRef, toastClearance === true);
   // The scroll region measured before the box grows (an expand, or the rollback
   // of a refused collapse), when the reader was sitting at its bottom; null
@@ -124,6 +145,15 @@ export function CommentComposer({
     collapse,
     rollback,
   );
+
+  /** A hand-off that means "type here". A held editor is disabled, so its
+   *  focus() is a no-op that strands focus on <body>; the held submit, which
+   *  carries the reason, takes it instead (the expand commit inlines the same
+   *  choice, so its effect reads only refs). */
+  function focusEditor() {
+    if (readOnlyRef.current) submitRef.current?.focus();
+    else editorRef.current?.focus();
+  }
 
   /** The scroll region an about-to-grow box owes a re-pin, or null when the
    *  reader isn't sitting at its bottom. Call BEFORE the flip: growing the box
@@ -189,7 +219,7 @@ export function CommentComposer({
   useImperativeHandle(ref, () => ({
     focus() {
       if (collapsed) expand("focus");
-      else editorRef.current?.focus();
+      else focusEditor();
     },
     showPreview() {
       if (collapsed) expand("preview");
@@ -239,9 +269,31 @@ export function CommentComposer({
     requestAnimationFrame(() => {
       handoffRef.current = false;
       if (pending === "preview") editorRef.current?.showPreview();
+      else if (readOnlyRef.current) submitRef.current?.focus();
       else editorRef.current?.focus();
     });
   }, [collapsed]);
+
+  // The hold engaging under the typing user (an archived latch, a lock answer)
+  // disables the editor, so focus moves to the held submit, which carries the
+  // reason. Only on the engage edge for the same entity, and only while focus is
+  // still in that editor.
+  useLayoutEffect(() => {
+    const prev = prevHoldRef.current;
+    prevHoldRef.current = { readOnly, holdKey };
+    if (prev.holdKey !== holdKey) {
+      editorOwnsFocusRef.current = false;
+      return;
+    }
+    if (!readOnly || prev.readOnly) return;
+    const owned = editorOwnsFocusRef.current;
+    editorOwnsFocusRef.current = false;
+    const active = document.activeElement;
+    const inEditor =
+      !!editorWrapRef.current?.contains(active) ||
+      ((active === null || active === document.body) && owned);
+    if (inEditor) submitRef.current?.focus();
+  }, [readOnly, holdKey]);
 
   return (
     <div ref={rootRef} className="border-t p-3">
@@ -253,6 +305,12 @@ export function CommentComposer({
         id={editorId}
         hidden={collapsed}
         className="mb-2"
+        onFocus={() => {
+          editorOwnsFocusRef.current = true;
+        }}
+        onBlur={() => {
+          editorOwnsFocusRef.current = false;
+        }}
       >
         <MarkdownEditor
           ref={editorRef}
@@ -266,11 +324,11 @@ export function CommentComposer({
               // fires inside editable targets, so a chord this handler declines to
               // submit would otherwise reach the global action.
               e.preventDefault();
-              if (hasDraft && !busy) onSubmit();
+              if (hasDraft && !busy && !readOnly) onSubmit();
             }
           }}
           rows={2}
-          disabled={disabled}
+          disabled={disabled || readOnly}
           mentions={mentions}
           textareaClassName="max-h-32 min-h-12 resize-y"
         />
@@ -321,9 +379,10 @@ export function CommentComposer({
         {leadingActions}
         {!collapsed && (
           <DisabledReasonButton
+            ref={submitRef}
             variant="outline"
             size="sm"
-            disabled={!hasDraft || busy}
+            disabled={!hasDraft || busy || readOnly}
             reason={blockedReason}
             onClick={onSubmit}
             title={SUBMIT_HINT}
@@ -338,7 +397,7 @@ export function CommentComposer({
             size="sm"
             wrapperClassName="ml-auto"
             disabled={busy}
-            reason={blockedReason}
+            reason={busy ? (reason ?? null) : null}
             onClick={onClear}
             title="Discard this draft (e.g. a quote reply)"
           >
