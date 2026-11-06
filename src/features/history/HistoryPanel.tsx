@@ -1065,20 +1065,23 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     shaRetryInEmpty ||
     shaRetryInFooter ||
     grepRetryInFooter;
-  const notice = searchShown
-    ? search.data === undefined && shaRead !== "stale"
-      ? null
-      : listNotice({
+  const notice = (() => {
+    switch (true) {
+      case searchShown && search.data === undefined && shaRead !== "stale":
+        return null;
+      case searchShown:
+        return listNotice({
           noun: "matches",
           failed: !armLineShown && (grepSplit.failed || shaRead === "stale"),
           loadMoreFailed: grepSplit.loadMoreFailed,
           offline: false,
           placeholder: false,
           hasRows: searchRows.length + offBranchRows.length > 0,
-        })
-    : log.data === undefined
-      ? null
-      : listNotice({
+        });
+      case log.data === undefined:
+        return null;
+      default:
+        return listNotice({
           noun: "commits",
           ...splitInfiniteFailure(log),
           offline: false,
@@ -1087,6 +1090,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           // over the last loaded results.
           hasRows: commits.length > 0,
         });
+    }
+  })();
   // Each Retry's arm unmounts as its read refetches; focus lands on the shell.
   const { hostRef: logHostRef, retryRef: logRetryRef } =
     useRetryFocusRescue(logLoadFailed);
@@ -1138,11 +1143,27 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   }, []);
   // Pre-mounted at one tree position, never under aria-busy: a live region
   // created together with its text announces unreliably.
-  const announcement = logLoadFailed
-    ? `Couldn't load the history. ${presentError(log.error).summary}`
-    : searchLoadFailed
-      ? `${SEARCH_ALL_FAILED_LINE} ${presentError(search.error).summary}`
-      : "";
+  const announcement = (() => {
+    switch (true) {
+      case logLoadFailed:
+        return `Couldn't load the history. ${presentError(log.error).summary}`;
+      case searchLoadFailed:
+        return `${SEARCH_ALL_FAILED_LINE} ${presentError(search.error).summary}`;
+      default:
+        return "";
+    }
+  })();
+
+  const noticeRetry = (() => {
+    switch (true) {
+      case notice?.cause !== "refresh":
+        return undefined;
+      case searchShown:
+        return retryFailedArms;
+      default:
+        return () => void log.refetch();
+    }
+  })();
   const shell = (body: ReactNode, header: ReactNode = null) => (
     <div
       ref={(node) => {
@@ -1167,13 +1188,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         degraded={notice !== null}
         message={notice?.message}
         retryLabel={notice?.retryLabel}
-        onRetry={
-          notice?.cause !== "refresh"
-            ? undefined
-            : searchShown
-              ? retryFailedArms
-              : () => void log.refetch()
-        }
+        onRetry={noticeRetry}
         className="shrink-0 border-b px-3 py-1.5"
       />
       {body}
@@ -1783,6 +1798,119 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     );
   }
 
+  const emptyHeadline = (() => {
+    switch (true) {
+      case !searchActive:
+        return loadedNoMatchLine(filterText.trim());
+      case searchSettling:
+        return "Searching all history…";
+      case coverage === "sha-failed":
+        return searchMessagesNoMatchLine(debouncedQuery);
+      default:
+        return searchAllNoMatchLine(debouncedQuery);
+    }
+  })();
+  const emptyDetail = (() => {
+    switch (true) {
+      case !searchActive:
+        return (
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {loadedCheckedLine(commits.length)}
+          </p>
+        );
+      case searchSettling:
+        return null;
+      case shaRetryInEmpty:
+        return (
+          <div className="mt-1 flex items-center justify-center gap-2 text-[11px] text-destructive">
+            <span>{SHA_ARM_FAILED_LINE}</span>
+            <Button
+              ref={shaEmptyRetryRef}
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              onClick={retryFailedArms}
+            >
+              Retry
+            </Button>
+          </div>
+        );
+      default:
+        return (
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {searchAllCheckedLineFor({
+              shortHex,
+              armFailed: coverage !== "full",
+            })}
+          </p>
+        );
+    }
+  })();
+  // What replaces the list. The list itself renders by name from the JSX
+  // ternary, the placement scripts/commit-list-cache-order.test.mjs pins.
+  const listHidden = searchLoadFailed || visibleCommits.length === 0;
+  const listFallback = (() => {
+    switch (true) {
+      case searchLoadFailed:
+        return (
+          <div className="px-3 py-8 text-center text-xs">
+            <p className="font-medium text-destructive">
+              {SEARCH_ALL_FAILED_LINE}
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              {presentError(search.error).summary}
+            </p>
+            <div className="mt-2 flex justify-center gap-2">
+              <Button
+                ref={searchRetryRef}
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                onClick={retryFailedArms}
+              >
+                Retry
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={() => {
+                  setFilterText("");
+                  setSearchMode(false);
+                  filterRef.current?.focus();
+                }}
+              >
+                Clear filter
+              </Button>
+            </div>
+          </div>
+        );
+      case searchActive && !searchEmptyShown:
+        return null;
+      default:
+        return (
+          <div className="px-3 py-8 text-center">
+            <p className="text-xs text-muted-foreground">{emptyHeadline}</p>
+            {emptyDetail}
+            {!(searchActive && searchSettling) && (
+              <Button
+                variant="ghost"
+                size="xs"
+                className="mt-2 text-muted-foreground"
+                onClick={() => {
+                  setFilterText("");
+                  setSearchMode(false);
+                  filterRef.current?.focus();
+                }}
+              >
+                Clear filter
+              </Button>
+            )}
+          </div>
+        );
+    }
+  })();
+
   return shell(
     <>
       {/* Outside the scroll container, so the virtualizer's range and
@@ -1842,94 +1970,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             />
           }
         >
-          {searchLoadFailed ? (
-            <div className="px-3 py-8 text-center text-xs">
-              <p className="font-medium text-destructive">
-                {SEARCH_ALL_FAILED_LINE}
-              </p>
-              <p className="mt-1 text-muted-foreground">
-                {presentError(search.error).summary}
-              </p>
-              <div className="mt-2 flex justify-center gap-2">
-                <Button
-                  ref={searchRetryRef}
-                  variant="outline"
-                  size="sm"
-                  className="cursor-pointer"
-                  onClick={retryFailedArms}
-                >
-                  Retry
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-muted-foreground"
-                  onClick={() => {
-                    setFilterText("");
-                    setSearchMode(false);
-                    filterRef.current?.focus();
-                  }}
-                >
-                  Clear filter
-                </Button>
-              </div>
-            </div>
-          ) : visibleCommits.length === 0 ? (
-            searchActive && !searchEmptyShown ? null : (
-              <div className="px-3 py-8 text-center">
-                <p className="text-xs text-muted-foreground">
-                  {searchActive
-                    ? searchSettling
-                      ? "Searching all history…"
-                      : coverage === "sha-failed"
-                        ? searchMessagesNoMatchLine(debouncedQuery)
-                        : searchAllNoMatchLine(debouncedQuery)
-                    : loadedNoMatchLine(filterText.trim())}
-                </p>
-                {!searchActive ? (
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {loadedCheckedLine(commits.length)}
-                  </p>
-                ) : searchSettling ? null : shaRetryInEmpty ? (
-                  <div className="mt-1 flex items-center justify-center gap-2 text-[11px] text-destructive">
-                    <span>{SHA_ARM_FAILED_LINE}</span>
-                    <Button
-                      ref={shaEmptyRetryRef}
-                      variant="ghost"
-                      size="xs"
-                      className="text-muted-foreground"
-                      onClick={retryFailedArms}
-                    >
-                      Retry
-                    </Button>
-                  </div>
-                ) : (
-                  <p className="mt-1 text-[11px] text-muted-foreground">
-                    {searchAllCheckedLineFor({
-                      shortHex,
-                      armFailed: coverage !== "full",
-                    })}
-                  </p>
-                )}
-                {!(searchActive && searchSettling) && (
-                  <Button
-                    variant="ghost"
-                    size="xs"
-                    className="mt-2 text-muted-foreground"
-                    onClick={() => {
-                      setFilterText("");
-                      setSearchMode(false);
-                      filterRef.current?.focus();
-                    }}
-                  >
-                    Clear filter
-                  </Button>
-                )}
-              </div>
-            )
-          ) : (
-            commitList
-          )}
+          {listHidden ? listFallback : commitList}
           {searchActive ? (
             <div className="space-y-0.5 px-3 py-2 text-center">
               {(shaRetryInFooter || grepRetryInFooter) && (

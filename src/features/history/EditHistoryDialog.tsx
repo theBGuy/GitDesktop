@@ -827,38 +827,45 @@ export function EditHistoryDialog({
 
         <DialogFooter className="sm:items-center sm:justify-between">
           <div className="mr-auto text-xs text-muted-foreground">
-            {/* First: an empty set has no messages worth retrying and no plan
-                to fault. */}
-            {commits.length === 0 && emptyNote !== "" ? (
-              emptyNote
-            ) : messages.isError ? (
-              <span className="text-warning">
-                Couldn't load commit messages.{" "}
-                <button
-                  type="button"
-                  className="cursor-pointer underline underline-offset-2"
-                  onClick={() => messages.refetch()}
-                >
-                  Retry
-                </button>
-              </span>
-            ) : plan.error ? (
-              <span className="text-warning">{plan.error}</span>
-            ) : (
-              <>
-                Result:{" "}
-                <span className="tabular-nums text-foreground">
-                  {plan.resultCount}
-                </span>{" "}
-                {plan.resultCount === 1 ? "commit" : "commits"}
-                {plan.hasEdit && (
-                  <span className="block text-[11px]">
-                    Pauses at each Edit so you can amend it, then Continue from
-                    the banner.
-                  </span>
-                )}
-              </>
-            )}
+            {(() => {
+              switch (true) {
+                // First: an empty set has no messages worth retrying and no
+                // plan to fault.
+                case commits.length === 0 && emptyNote !== "":
+                  return emptyNote;
+                case messages.isError:
+                  return (
+                    <span className="text-warning">
+                      Couldn't load commit messages.{" "}
+                      <button
+                        type="button"
+                        className="cursor-pointer underline underline-offset-2"
+                        onClick={() => messages.refetch()}
+                      >
+                        Retry
+                      </button>
+                    </span>
+                  );
+                case Boolean(plan.error):
+                  return <span className="text-warning">{plan.error}</span>;
+                default:
+                  return (
+                    <>
+                      Result:{" "}
+                      <span className="tabular-nums text-foreground">
+                        {plan.resultCount}
+                      </span>{" "}
+                      {plan.resultCount === 1 ? "commit" : "commits"}
+                      {plan.hasEdit && (
+                        <span className="block text-[11px]">
+                          Pauses at each Edit so you can amend it, then Continue
+                          from the banner.
+                        </span>
+                      )}
+                    </>
+                  );
+              }
+            })()}
           </div>
           <DisabledReasonButton
             variant="outline"

@@ -300,9 +300,8 @@ function checkClearSelectedCommit(ui) {
     : [`clearSelectedCommit writes more than the selection: ${setters[0]}`];
 }
 
-/** The one string constant `name` declares in `src`, by the given lead. Fails
- *  on a backslash: the match reads raw source, so an escaped quote would cut
- *  the value short. */
+/** The one string constant `src` declares after `lead`. Fails on a backslash:
+ *  the match reads raw source, so an escaped quote would cut the value short. */
 function constant(src, lead) {
   const found = [...src.matchAll(new RegExp(`${lead}\\s*"([^"]*)";`, "g"))];
   if (found.length !== 1)

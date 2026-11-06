@@ -88,7 +88,17 @@ export function BlameDialog({
   const name = path.split("/").pop() ?? path;
   const lang = diffLang(path);
   // Abbreviate a full commit id to 7 chars; show branch/tag names verbatim.
-  const shortRev = rev ? (FULL_OID_RE.test(rev) ? rev.slice(0, 7) : rev) : null;
+  const shortRev = (() => {
+    const r = rev ?? "";
+    switch (true) {
+      case r === "":
+        return null;
+      case FULL_OID_RE.test(r):
+        return r.slice(0, 7);
+      default:
+        return r;
+    }
+  })();
   // Native scroll container held in STATE (not a ref) so attaching it
   // re-renders and the child's virtualizer re-initializes with the real node —
   // a plain ref stays null at the virtualizer's mount effect, so
