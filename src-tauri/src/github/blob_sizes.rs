@@ -8,8 +8,9 @@ const UNKNOWN: BlobSizes = BlobSizes {
     new_size: None,
 };
 
-/// Resolve only local remote metadata. Missing or unparseable remotes stay unknown;
-/// failed Git reads remain errors so callers never cache a transient failure as null.
+/// Resolve only local remote metadata. Missing or unparseable remotes, and a lens remote
+/// whose host isn't github.com, stay unknown; failed Git reads remain errors so callers
+/// never cache a transient failure as null.
 async fn sizes_repo_slug(repo: &str, lens: Option<&str>) -> AppResult<Option<String>> {
     let remote = lens_remote(lens)?;
     let url = match crate::git::remote::git_remote_url(repo.to_string(), remote.to_string()).await {
@@ -23,7 +24,8 @@ async fn sizes_repo_slug(repo: &str, lens: Option<&str>) -> AppResult<Option<Str
         }
         Err(error) => return Err(error),
     };
-    // This GraphQL request targets github.com; the selected lens must name that host.
+    // The query pins github.com (run_gh would aim it at origin's login host), so the
+    // selected lens must name that host.
     if crate::forge::remote_host(&url).as_deref() != Some("github.com") {
         return Ok(None);
     }
@@ -70,16 +72,27 @@ pub async fn github_blob_sizes(
     let (owner, name) = slug
         .split_once('/')
         .ok_or_else(|| AppError::InvalidArgument("invalid GitHub repository slug".into()))?;
-    let query = format!("query={}", sizes_query(old.as_deref(), new.as_deref()));
-    let owner = format!("owner={owner}");
-    let name = format!("name={name}");
-    let result = run_gh(
-        Some(&repo_path),
-        &["api", "graphql", "-f", &query, "-f", &owner, "-f", &name],
-        GH_NETWORK_TIMEOUT,
-    )
-    .await;
+    let args = sizes_args(&sizes_query(old.as_deref(), new.as_deref()), owner, name);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = run_gh(Some(&repo_path), &args, GH_NETWORK_TIMEOUT).await;
     github_sizes_outcome(result, old.as_deref(), new.as_deref())
+}
+
+/// An explicit `--hostname` outranks run_gh's `GH_HOST` pin to origin's login host,
+/// which would send a github.com lens slug to origin's (possibly GHE) host.
+fn sizes_args(query: &str, owner: &str, name: &str) -> Vec<String> {
+    vec![
+        "api".into(),
+        "graphql".into(),
+        "--hostname".into(),
+        "github.com".into(),
+        "-f".into(),
+        format!("query={query}"),
+        "-f".into(),
+        format!("owner={owner}"),
+        "-f".into(),
+        format!("name={name}"),
+    ]
 }
 
 fn alias_size(value: Option<&serde_json::Value>, requested: Option<&str>) -> Option<u64> {
@@ -276,6 +289,22 @@ mod tests {
         }
         assert!(!sizes_query(None, Some("1234")).contains("o:object"));
         assert!(!sizes_query(Some("abcd"), None).contains("n:object"));
+    }
+
+    #[test]
+    fn sizes_args_pin_github_com() {
+        let args = sizes_args("q", "owner", "name");
+        let at = args.iter().position(|arg| arg == "--hostname");
+        assert_eq!(
+            at.and_then(|at| args.get(at + 1)).map(String::as_str),
+            Some("github.com"),
+            "{args:?}"
+        );
+        assert_eq!(&args[..2], ["api", "graphql"]);
+        for field in ["query=q", "owner=owner", "name=name"] {
+            let at = args.iter().position(|arg| arg == field).unwrap();
+            assert_eq!(args[at - 1], "-f", "{field}");
+        }
     }
 
     fn nowhere() -> (tempfile::TempDir, String) {

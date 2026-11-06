@@ -65,7 +65,7 @@ describe("ImagePanes captions", () => {
     measure(screen.getByAltText("New"), 640, 480);
     // formatBytes rounds to whole units at 100 and above.
     expect(screen.getByText("1280 × 720 · 105 KB").tagName).toBe("P");
-    // An unknown size keeps today's caption exactly.
+    // An unknown size leaves the caption at the dimensions alone.
     expect(screen.getByText("640 × 480").textContent).toBe("640 × 480");
   });
 
@@ -83,7 +83,7 @@ describe("ImagePanes captions", () => {
     expect(
       await screen.findByText("Too large to preview (24.0 MB)"),
     ).toBeTruthy();
-    // A dimension refusal arrives without a size: today's text, no suffix.
+    // A dimension refusal arrives without a size: no suffix.
     expect(screen.getByText("Too large to preview").textContent).toBe(
       "Too large to preview",
     );

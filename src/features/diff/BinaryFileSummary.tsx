@@ -1,5 +1,11 @@
 import { ArrowSquareOutIcon, FolderOpenIcon } from "@phosphor-icons/react";
-import { type ReactNode, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "@/components/ui/button";
 import {
   openNearestFolder,
@@ -79,13 +85,14 @@ export function BinaryFileSummary({
    *  the line last shown, which sized that same patch. */
   held?: boolean;
   /** `band`: a typechange's binary half above or below its text half. It never
-   *  offers actions: the path still exists, as the other half's kind. */
+   *  offers actions: the path on disk may be the other half's kind. */
   variant?: "placeholder" | "band";
 }): ReactNode {
   const oids = binaryIndexOids(text, filePath);
   const mode = parseModeChange(text, filePath);
   // A PR surface's ids abbreviate against the forge's store: lookups need a full
-  // anchor commit, though a partial or shallow clone can still match another blob.
+  // anchor commit; a shallow or partial clone answers unknown, and on GitHub.com
+  // GitHub fills those sides.
   const mount =
     oids !== null &&
     (anchorCommit === undefined || FULL_OID_RE.test(anchorCommit ?? ""));
@@ -240,21 +247,41 @@ function BinaryFileActions({
   // git spells paths with "/"; reveal and open expect the OS separator.
   const sep = isWindows ? "\\" : "/";
   const absolutePath = `${repoPath}${sep}${filePath.replaceAll("/", sep)}`;
-  // Open leaves when a poll reads the file as deleted; focus it held lands on
-  // Show in Explorer, never on <body>.
+  // Open leaves when a poll reads the file as deleted: only focus it held as it
+  // left (read in its wrapper's ref cleanup, which runs before removal) lands on
+  // Show in Explorer; focus on <body> or anywhere else never moves.
+  const openHeldFocus = useRef(false);
+  const captureOpenRef = useCallback(
+    (node: HTMLSpanElement | null) => () => {
+      if (node !== null && node.contains(document.activeElement))
+        openHeldFocus.current = true;
+    },
+    [],
+  );
   const showRef = useRef<HTMLButtonElement>(null);
-  useFocusOnControlsSwap(deleted, showRef);
+  const rescueRef = useRef<HTMLElement | null>(null);
+  // No dependency array: it consumes the record every commit, after that
+  // commit's ref cleanups wrote it and before the swap rescue below runs.
+  useLayoutEffect(() => {
+    rescueRef.current = openHeldFocus.current ? showRef.current : null;
+    openHeldFocus.current = false;
+  });
+  useFocusOnControlsSwap(deleted, rescueRef);
   return (
     <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
       {!deleted && (
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => openWithDefault(absolutePath).catch(toastError)}
-        >
-          <ArrowSquareOutIcon data-icon="inline-start" />
-          Open with default program
-        </Button>
+        // `contents` keeps the button a flex item of the row; a plain host span
+        // runs the cleanup only when Open leaves, never on Button's ref churn.
+        <span ref={captureOpenRef} className="contents">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => openWithDefault(absolutePath).catch(toastError)}
+          >
+            <ArrowSquareOutIcon data-icon="inline-start" />
+            Open with default program
+          </Button>
+        </span>
       )}
       <Button
         ref={showRef}

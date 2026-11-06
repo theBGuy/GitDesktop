@@ -376,8 +376,10 @@ export function useGithubBlobSizes(
 ) {
   return useQuery({
     // Outside the ["repo", …] subtree, as the lens key is: a repo mutation's
-    // invalidation would refetch this active network read, and an oid-keyed
-    // answer can't change. The lens picks which GitHub repo answers.
+    // invalidation would refetch this active network read, and oid-keyed sizes
+    // can't change; a null side (a missing or unparseable lens remote, the host
+    // gate, or an id GitHub doesn't know) also holds until the query is collected.
+    // The lens picks which GitHub repo answers.
     queryKey: [
       "github-blob-sizes",
       repo,

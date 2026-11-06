@@ -1104,6 +1104,7 @@ mod tests {
         let head = git(&f.repo, &["rev-parse", "HEAD"]).await;
         git(&f.repo, &["config", "uploadpack.allowFilter", "true"]).await;
         let root = tempfile::tempdir().unwrap();
+        let mut ran = Vec::new();
         for (name, flags, incomplete) in [
             ("shallow", vec!["--depth", "1"], true),
             ("partial", vec!["--filter=blob:none"], true),
@@ -1163,7 +1164,10 @@ mod tests {
                     "{name} anchored, worktree {worktree:?}"
                 );
             }
+            ran.push(name);
         }
+        // Any failed partial clone skips that arm; shallow and full must run.
+        assert!(ran.contains(&"shallow") && ran.contains(&"full"), "{ran:?}");
     }
 
     #[tokio::test]

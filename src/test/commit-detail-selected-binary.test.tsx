@@ -9,6 +9,7 @@ import {
 import { startTransition } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiffLineAnchor } from "@/features/diff/DiffSurface";
+import { HOLD_BOUND_MS } from "@/features/diff/diff-pane-slots";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import {
   commitOnRemote,
@@ -47,6 +48,15 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitStatus: vi.fn(),
   readRepoBranchRules: vi.fn(),
 }));
+/** Every pane render's read and the commit it renders for, so a test can
+ *  prove what a pane drew (or never drew) under which commit. */
+const paneReads = vi.hoisted(
+  () =>
+    [] as { data?: FileDiff; isPlaceholderData: boolean; commit?: string }[],
+);
+/** Binary paths whose size read is still out: like BinaryFileSummary, the pane
+ *  withholds its settle report, so the slot stays preparing. */
+const sizesPending = vi.hoisted(() => new Set<string>());
 // The pane stands in for DiffSurface's settle report and anchor placement: a
 // text diff draws its line anchors inline, a binary one draws none.
 vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
@@ -56,11 +66,22 @@ vi.mock("@/features/diff/DiffSurfaceLazy", async () => {
   function DiffSurface({
     diff,
     lineAnchors,
+    contentRevs,
   }: {
     diff: { data?: FileDiff; isPlaceholderData: boolean };
     lineAnchors?: DiffLineAnchor[];
+    contentRevs?: { newRev?: string };
   }) {
-    useReportPaneSettled(diff.data !== undefined && !diff.isPlaceholderData);
+    paneReads.push({
+      data: diff.data,
+      isPlaceholderData: diff.isPlaceholderData,
+      commit: contentRevs?.newRev,
+    });
+    useReportPaneSettled(
+      diff.data !== undefined &&
+        !diff.isPlaceholderData &&
+        !(diff.data.isBinary && sizesPending.has(diff.data.filePath)),
+    );
     if (diff.data?.isBinary !== false) return null;
     return (
       <div data-testid="inline-anchors">
@@ -111,11 +132,12 @@ const binDiff = (path: string): FileDiff => ({
   isTruncated: false,
   text: `diff --git a/${path} b/${path}\nindex 1111aaa..2222bbb 100644\nBinary files a/${path} and b/${path} differ\n`,
 });
-const textDiff = (path: string): FileDiff => ({
+/** `line` tells two commits' diffs of one path apart: the gates compare content. */
+const textDiff = (path: string, line = "new"): FileDiff => ({
   filePath: path,
   isBinary: false,
   isTruncated: false,
-  text: `diff --git a/${path} b/${path}\nindex 1111aaa..2222bbb 100644\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+  text: `diff --git a/${path} b/${path}\nindex 1111aaa..2222bbb 100644\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+${line}\n`,
 });
 
 const comment = (id: string, path: string | null): CommitCommentOut => ({
@@ -156,6 +178,8 @@ function serveA(
 
 beforeEach(() => {
   unmockedCommands.length = 0;
+  paneReads.length = 0;
+  sizesPending.clear();
   vi.mocked(forgeStatus).mockResolvedValue({
     provider: "github",
     installed: true,
@@ -254,7 +278,13 @@ describe("CommitDetailView keeps a binary file's comments grouped", () => {
     ]);
     const { switchTo } = renderView(A);
     expect(await screen.findByText("note on the whole commit")).toBeTruthy();
-    await waitFor(() => expect(grouped("note on y.txt")).toBeNull());
+    // A's settled diff must render first, or the switch beats both stamps.
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors").textContent).toContain(
+        "note on y.txt",
+      ),
+    );
+    expect(grouped("note on y.txt")).toBeNull();
     await settle();
     switchTo(B);
     await settle();
@@ -343,6 +373,289 @@ describe("CommitDetailView keeps a binary file's comments grouped", () => {
     expect(screen.getByTestId("inline-anchors").textContent).not.toContain(
       "note on f.bin",
     );
+  });
+
+  // Negative control: gating a placeholder's anchors on its echoed path alone
+  // fails this test (f.dat's comment renders inline on A's text and in the group).
+  it("never anchors a binary file's comment on the same path held from another commit", async () => {
+    // B's header and file list are cached from an earlier visit; only its f.dat
+    // diff is still loading, so the slot serves A's text f.dat as a placeholder.
+    vi.mocked(gitCommitDetails).mockImplementation(async (_r, hash) =>
+      details(hash),
+    );
+    vi.mocked(gitCommitFiles).mockImplementation(async (_r, hash) =>
+      hash === B ? [bin("f.dat")] : [text("f.dat")],
+    );
+    vi.mocked(gitCommitFileDiff).mockImplementation((_r, hash, path) =>
+      hash === A && path === "f.dat"
+        ? Promise.resolve(textDiff("f.dat"))
+        : pending(),
+    );
+    vi.mocked(forgeCommitComments).mockImplementation(async (_r, sha) =>
+      sha === B ? [comment("f", "f.dat"), WHOLE] : [WHOLE],
+    );
+    const { switchTo } = renderView(B);
+    await screen.findByText("subject bbcd");
+    await settle();
+    switchTo(A);
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors")).toBeTruthy(),
+    );
+    await settle();
+    await act(() => startTransition(() => switchTo(B)));
+    await expectGroupedAsShown("f.dat");
+    await settle();
+    expect(screen.getByText("subject bbcd")).toBeTruthy();
+    expect(screen.getByTestId("inline-anchors")).toBeTruthy();
+    expect(screen.getAllByText("note on f.dat")).toHaveLength(1);
+    expect(screen.getByTestId("inline-anchors").textContent).not.toContain(
+      "note on f.dat",
+    );
+  });
+
+  // Negative control: passing the shown path to the list through the window
+  // fails this test (f.txt's comment renders nowhere until B's diff lands).
+  it("lists a text file's comment while the same path loads from another commit", async () => {
+    let resolveB: ((d: FileDiff) => void) | undefined;
+    const bDiff = new Promise<FileDiff>((r) => {
+      resolveB = r;
+    });
+    vi.mocked(gitCommitDetails).mockImplementation(async (_r, hash) =>
+      details(hash),
+    );
+    vi.mocked(gitCommitFiles).mockImplementation(async () => [text("f.txt")]);
+    vi.mocked(gitCommitFileDiff).mockImplementation((_r, hash) =>
+      hash === A ? Promise.resolve(textDiff("f.txt")) : bDiff,
+    );
+    vi.mocked(forgeCommitComments).mockImplementation(async (_r, sha) =>
+      sha === B ? [comment("f", "f.txt"), WHOLE] : [WHOLE],
+    );
+    const { switchTo } = renderView(B);
+    await screen.findByText("subject bbcd");
+    await settle();
+    switchTo(A);
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors")).toBeTruthy(),
+    );
+    await settle();
+    await act(() => startTransition(() => switchTo(B)));
+    await settle();
+    // B's header, list and comments are cached; only its diff is pending.
+    expect(screen.getByText("subject bbcd")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getAllByText("note on f.txt")).toHaveLength(1);
+      expect(grouped("note on f.txt")).toBeTruthy();
+    });
+    await act(async () => resolveB?.(textDiff("f.txt", "newer")));
+    await waitFor(() => {
+      expect(screen.getAllByText("note on f.txt")).toHaveLength(1);
+      expect(grouped("note on f.txt")).toBeNull();
+      expect(screen.getByTestId("inline-anchors").textContent).toContain(
+        "note on f.txt",
+      );
+    });
+  });
+
+  // Negative controls: dropping the content term from the slot's gate (the
+  // comment renders twice) or from the parent's (it renders nowhere) fails this.
+  it("lists a text file's comment over a settled read that never rendered", async () => {
+    const C = `c${A.slice(1)}`;
+    const settledB = textDiff("p.txt", "newer");
+    let resolveB: ((d: FileDiff) => void) | undefined;
+    const bDiff = new Promise<FileDiff>((r) => {
+      resolveB = r;
+    });
+    // A settles; B's details never land, so A stays the rendered commit while
+    // B's file list and diff load; C's details, file list and diff never settle.
+    vi.mocked(gitCommitDetails).mockImplementation((_r, hash) =>
+      hash === A ? Promise.resolve(details(A)) : pending(),
+    );
+    vi.mocked(gitCommitFiles).mockImplementation((_r, hash) =>
+      hash === C ? pending() : Promise.resolve([text("p.txt")]),
+    );
+    vi.mocked(gitCommitFileDiff).mockImplementation((_r, hash) => {
+      if (hash === A) return Promise.resolve(textDiff("p.txt"));
+      return hash === B ? bDiff : pending();
+    });
+    vi.mocked(forgeCommitComments).mockImplementation(async (_r, sha) =>
+      sha === A ? [comment("p", "p.txt"), WHOLE] : [WHOLE],
+    );
+    const { switchTo } = renderView(A);
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors").textContent).toContain(
+        "note on p.txt",
+      ),
+    );
+    await settle();
+    switchTo(B);
+    await waitFor(() =>
+      expect(
+        vi.mocked(gitCommitFileDiff).mock.calls.some(([, h]) => h === B),
+      ).toBe(true),
+    );
+    await settle();
+    // B's diff settles in the cache, and the switch to C lands before React
+    // renders that answer: both observers then serve it as C's placeholder.
+    await act(async () => {
+      resolveB?.(settledB);
+      await new Promise((r) => setTimeout(r, 0));
+      switchTo(C);
+    });
+    await settle();
+    // The window's premise: B's answer reached the pane only as a placeholder.
+    expect(
+      paneReads.some(
+        (r) => !r.isPlaceholderData && r.data?.text === settledB.text,
+      ),
+    ).toBe(false);
+    expect(paneReads.some((r) => r.data?.text === settledB.text)).toBe(true);
+    expect(screen.getByText("subject abcd")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getAllByText("note on p.txt")).toHaveLength(1);
+      expect(grouped("note on p.txt")).toBeTruthy();
+    });
+  });
+
+  // Negative control: dropping the parent's path term while the header lags
+  // fails this test (f.txt's comment renders nowhere until B lands).
+  it("lists the reset file's comment over another file's read while the header lags", async () => {
+    // B's details and file list never land: the selection resets to f.txt off
+    // A's list while the pane still serves A's x.txt read.
+    vi.mocked(gitCommitDetails).mockImplementation((_r, hash) =>
+      hash === A ? Promise.resolve(details(A)) : pending(),
+    );
+    vi.mocked(gitCommitFiles).mockImplementation((_r, hash) =>
+      hash === A ? Promise.resolve([text("f.txt"), text("x.txt")]) : pending(),
+    );
+    vi.mocked(gitCommitFileDiff).mockImplementation((_r, hash, path) =>
+      hash === A ? Promise.resolve(textDiff(path)) : pending(),
+    );
+    vi.mocked(forgeCommitComments).mockImplementation(async (_r, sha) =>
+      sha === A ? [comment("f", "f.txt"), WHOLE] : [],
+    );
+    const { switchTo } = renderView(A);
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors").textContent).toContain(
+        "note on f.txt",
+      ),
+    );
+    await settle();
+    fireEvent.click(railRow("x.txt"));
+    await waitFor(() => expect(jumpTo("f.txt")).toBeTruthy());
+    await settle();
+    switchTo(B);
+    await settle();
+    expect(screen.getByText("subject abcd")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getAllByText("note on f.txt")).toHaveLength(1);
+      expect(grouped("note on f.txt")).toBeTruthy();
+    });
+  });
+
+  // A switch's selection reset retargets through the previous path (y.bin) and
+  // replaces the held x.txt slot; a click back on x.txt first reuses it in place
+  // under B. Negative control: gating the slots' anchors on `anchorsMatchDiff`
+  // alone fails this test (x.txt's comment renders inline and in the list).
+  it("never anchors inline while the list keeps every file's comments", async () => {
+    sizesPending.add("y.bin");
+    // The hold's bound would promote y.bin's slot unsettled; pinning it open
+    // makes the switch land while that slot is still preparing.
+    const realSetTimeout = window.setTimeout.bind(window);
+    const pinBound = vi
+      .spyOn(window, "setTimeout")
+      .mockImplementation(((
+        handler: TimerHandler,
+        ms?: number,
+        ...args: unknown[]
+      ) =>
+        ms === HOLD_BOUND_MS
+          ? 0
+          : realSetTimeout(handler, ms, ...args)) as typeof window.setTimeout);
+    try {
+      vi.mocked(gitCommitDetails).mockImplementation((_r, hash) =>
+        hash === A ? Promise.resolve(details(A)) : pending(),
+      );
+      vi.mocked(gitCommitFiles).mockImplementation((_r, hash) =>
+        hash === A ? Promise.resolve([text("x.txt"), bin("y.bin")]) : pending(),
+      );
+      vi.mocked(gitCommitFileDiff).mockImplementation((_r, hash, path) => {
+        if (hash !== A) return pending();
+        return Promise.resolve(
+          path === "y.bin" ? binDiff("y.bin") : textDiff("x.txt"),
+        );
+      });
+      vi.mocked(forgeCommitComments).mockImplementation(async (_r, sha) =>
+        sha === A ? [comment("x", "x.txt"), WHOLE] : [],
+      );
+      const { switchTo } = renderView(A);
+      await waitFor(() =>
+        expect(screen.getByTestId("inline-anchors").textContent).toContain(
+          "note on x.txt",
+        ),
+      );
+      await settle();
+      fireEvent.click(railRow("y.bin"));
+      await waitFor(() =>
+        expect(
+          paneReads.some(
+            (r) => !r.isPlaceholderData && r.data?.filePath === "y.bin",
+          ),
+        ).toBe(true),
+      );
+      await settle();
+      // y.bin settled but its slot is still preparing: x.txt's stays painted.
+      expect(screen.getByTestId("inline-anchors")).toBeTruthy();
+      // The click is urgent and leaves the deferred path on y.bin; the switch,
+      // a transition, reads x.txt at once and retargets the held slot to B.
+      // B's details and file list never land.
+      await act(async () => {
+        fireEvent.click(railRow("x.txt"));
+        startTransition(() => switchTo(B));
+      });
+      await settle();
+      // The precondition: the x.txt pane drew under B from A's x.txt read.
+      expect(
+        paneReads.some(
+          (r) =>
+            r.commit === B &&
+            r.isPlaceholderData &&
+            r.data?.filePath === "x.txt",
+        ),
+      ).toBe(true);
+      expect(screen.getByText("subject abcd")).toBeTruthy();
+      await waitFor(() => {
+        expect(screen.getAllByText("note on x.txt")).toHaveLength(1);
+        expect(grouped("note on x.txt")).toBeTruthy();
+      });
+      expect(
+        screen.queryByTestId("inline-anchors")?.textContent ?? "",
+      ).not.toContain("note on x.txt");
+    } finally {
+      pinBound.mockRestore();
+    }
+  });
+
+  // Negative control: gating the anchors on `!diff.isPlaceholderData` fails this
+  // test (the comment leaves the held text and no group lists it).
+  it("keeps a text file's inline anchor while the next commit's details load", async () => {
+    serveA([text("y.txt")], { "y.txt": textDiff("y.txt") }, [
+      comment("y", "y.txt"),
+    ]);
+    const { switchTo } = renderView(A);
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-anchors").textContent).toContain(
+        "note on y.txt",
+      ),
+    );
+    await settle();
+    switchTo(B);
+    await settle();
+    // B's details never land, so A stays the rendered commit.
+    expect(screen.getByText("subject abcd")).toBeTruthy();
+    expect(screen.getByTestId("inline-anchors").textContent).toContain(
+      "note on y.txt",
+    );
+    expect(screen.getAllByText("note on y.txt")).toHaveLength(1);
   });
 });
 

@@ -353,6 +353,36 @@ describe("the binary pane's actions", () => {
     );
   });
 
+  // Negative control: rescuing on every `deleted` flip, held or not, fails this
+  // test (focus resting on <body> jumps to Show in Explorer).
+  it("leaves focus resting on <body> when the file's deleted state flips", () => {
+    const { at } = renderSummary({ worktreeNewSide: true });
+    expect(document.activeElement).toBe(document.body);
+    at({ text: DELETED });
+    expect(actionButtons()).toEqual(["Show in Explorer"]);
+    expect(document.activeElement).toBe(document.body);
+    at({ text: MODIFIED });
+    expect(actionButtons()).toEqual(ACTION_NAMES);
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  // Focus resting outside the actions is never captured, so nothing is rescued;
+  // the <body> test above covers the held-focus gate.
+  it("never pulls focus off a control outside the actions", () => {
+    const outside = document.createElement("button");
+    outside.textContent = "Elsewhere";
+    document.body.append(outside);
+    try {
+      const { at } = renderSummary({ worktreeNewSide: true });
+      outside.focus();
+      at({ text: DELETED });
+      expect(actionButtons()).toEqual(["Show in Explorer"]);
+      expect(document.activeElement).toBe(outside);
+    } finally {
+      outside.remove();
+    }
+  });
+
   it("follows the size and mode lines in tab order", () => {
     const { container } = renderSummary({
       text: bin(

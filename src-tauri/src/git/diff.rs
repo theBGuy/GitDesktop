@@ -107,7 +107,6 @@ pub(crate) fn worktree_entry(repo: &str, rel: &str) -> AppResult<WorktreeEntry> 
 }
 
 fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewRead> {
-    use std::io::Read;
     let (path, len) = match worktree_entry(repo, rel)? {
         WorktreeEntry::Absent => return Ok(PreviewRead::Absent),
         WorktreeEntry::Linked => return Err(preview_read_refusal(raw, DISCARD_LINKED)),
@@ -118,14 +117,24 @@ fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewR
         WorktreeEntry::NoVerbatim => return Err(preview_read_refusal(raw, NO_VERBATIM_FORM)),
         WorktreeEntry::Regular { path, len } => (path, len),
     };
+    read_worktree_capped(len, || std::fs::File::open(&path))
+}
+
+fn read_worktree_capped<R: std::io::Read>(
+    len: u64,
+    open: impl FnOnce() -> std::io::Result<R>,
+) -> AppResult<PreviewRead> {
+    use std::io::Read;
     if len > IMAGE_MAX_BYTES as u64 {
         return Ok(PreviewRead::TooLarge(len));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(&path)?
+    open()?
         .take(IMAGE_MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    Ok(PreviewRead::Bytes(bytes, Some(len)))
+    // A read past the cap means the file grew since the stat, so `len` is stale there;
+    // a complete read reports its own length, so the stat size is never needed.
+    Ok(PreviewRead::Bytes(bytes, None))
 }
 
 /// Absence is what git reports as a missing path or stage (it words an unknown
@@ -1645,7 +1654,8 @@ fn raw_numstat_rows(
     (entries, raw)
 }
 
-// One batch budget bounds content re-reads on every working-tree poll.
+// One batch budget bounds content re-reads on every working-tree poll; a file past
+// the remaining budget is skipped and keeps `bin`, and later files may still fit.
 const MODE_PROOF_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 async fn prove_unstaged_modes(
@@ -1673,7 +1683,7 @@ async fn prove_unstaged_modes(
             continue;
         }
         if meta.len() > MODE_PROOF_MAX_BYTES - bytes {
-            break;
+            continue;
         }
         bytes += meta.len();
         candidates.push((index, record.old_id));
@@ -2062,7 +2072,7 @@ mod tests {
         .unwrap();
         assert_eq!(filtered.stdout_lossy().trim(), index.trim());
         HASH_SPAWNS.with(|n| n.set(0));
-        let stats = git_working_line_stats(repo).await.unwrap();
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
         let text = stats
             .unstaged
             .iter()
@@ -2071,31 +2081,58 @@ mod tests {
         assert!(!text.is_binary);
         assert_eq!(text.binary_kind, None);
         assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0);
+
+        // `-diff` makes the row binary while leaving the CRLF conversion on (the
+        // `binary` macro would also unset `text`), so only a filtered hash proves it.
+        let info = dir.join(".git").join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("attributes"), "crlf-bin -diff\n").unwrap();
+        std::fs::write(dir.join("crlf-bin"), "one\r\ntwo\r\n").unwrap();
+        git_ok(&repo, &["add", "crlf-bin"]).await;
+        git_ok(&repo, &["update-index", "--chmod=+x", "crlf-bin"]).await;
+        let blob = git_ok(&repo, &["cat-file", "-p", ":crlf-bin"]).await;
+        assert_eq!(blob, "one\ntwo\n");
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo).await.unwrap();
+        assert_binary_kind(&stats.unstaged, "crlf-bin", Some(BinaryKind::Mode));
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 1);
     }
 
     #[tokio::test]
     async fn unstaged_mode_candidates_exclude_non_files_and_unrepresentable_names() {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-mode-exclusions-").await;
-        std::fs::write(dir.join("regular"), b"\0binary").unwrap();
+        // Every path exists on disk, so each arm is excluded only by its own predicate.
+        let names = [
+            "regular",
+            "lossy\u{fffd}",
+            #[cfg(unix)]
+            "line\nname",
+        ];
+        for name in names {
+            std::fs::write(dir.join(name), b"\0binary").unwrap();
+        }
+        std::fs::create_dir(dir.join("folder")).unwrap();
         let id = "a".repeat(64);
         let zero = "0".repeat(64);
         for (old_mode, new_mode, path) in [
             ("120000", "100755", "regular"),
             ("100644", "160000", "regular"),
+            #[cfg(unix)]
             ("100644", "100755", "line\nname"),
             ("100644", "100755", "lossy\u{fffd}"),
+            ("100644", "100755", "folder"),
         ] {
             let raw = format!(":{old_mode} {new_mode} {id} {zero} M\0{path}\0-\t-\t{path}\0");
             let (mut rows, records) = raw_numstat_rows(&raw);
             HASH_SPAWNS.with(|n| n.set(0));
             prove_unstaged_modes(&repo, &mut rows, &records).await;
-            assert_eq!(rows[0].binary_kind, None);
-            assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0);
+            assert_eq!(rows[0].binary_kind, None, "{path:?}");
+            assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0, "{path:?}");
         }
     }
 
     #[tokio::test]
-    async fn unstaged_mode_proof_stops_at_the_total_batch_budget() {
+    async fn unstaged_mode_proof_skips_files_past_the_remaining_budget() {
         let (_tmp, dir, repo) = init_line_stats_repo("gd-mode-batch-budget-").await;
         git_ok(&repo, &["config", "core.filemode", "false"]).await;
         for (name, len) in [
@@ -2126,7 +2163,7 @@ mod tests {
         let stats = git_working_line_stats(repo).await.unwrap();
         assert_binary_kind(&stats.unstaged, "a-first", Some(BinaryKind::Mode));
         assert_binary_kind(&stats.unstaged, "b-over-budget", None);
-        assert_binary_kind(&stats.unstaged, "c-later", None);
+        assert_binary_kind(&stats.unstaged, "c-later", Some(BinaryKind::Mode));
         assert_eq!(HASH_SPAWNS.with(|n| n.get()), 1);
     }
 
@@ -4382,8 +4419,8 @@ mod tests {
     }
 
     #[test]
-    fn capped_worktree_reads_never_report_the_buffer_length_as_the_file_size() {
-        for size in [None, Some(17)] {
+    fn overflowing_reads_report_the_producers_size_never_the_buffer_length() {
+        for size in [None, Some(IMAGE_MAX_BYTES as u64 + 9)] {
             let result = finish_preview(PreviewRead::Bytes(vec![0; IMAGE_MAX_BYTES + 1], size))
                 .unwrap()
                 .unwrap();
@@ -4393,6 +4430,24 @@ mod tests {
         let complete = finish_preview(PreviewRead::Bytes(vec![0; 7], Some(4)))
             .unwrap()
             .unwrap();
+        assert!(!complete.too_large);
+        assert_eq!(complete.size, Some(7));
+    }
+
+    #[test]
+    fn a_worktree_read_past_the_cap_reports_an_unknown_size() {
+        let preview = |len: u64, content: Vec<u8>| {
+            let read = read_worktree_capped(len, || Ok(std::io::Cursor::new(content))).unwrap();
+            finish_preview(read).unwrap().unwrap()
+        };
+        let grown = preview(3, vec![0; IMAGE_MAX_BYTES + 1]);
+        assert!(grown.too_large);
+        assert_eq!(grown.size, None);
+        let stat = IMAGE_MAX_BYTES as u64 + 1;
+        let refused = preview(stat, Vec::new());
+        assert!(refused.too_large);
+        assert_eq!(refused.size, Some(stat));
+        let complete = preview(99, vec![0; 7]);
         assert!(!complete.too_large);
         assert_eq!(complete.size, Some(7));
     }

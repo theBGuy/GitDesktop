@@ -133,8 +133,8 @@ delete), and deep links to the settings GitHub keeps browser-only.
 A unified or split diff with syntax highlighting, collapsible surrounding
 context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
-GitHub pull requests included. A non-image binary file changed in your working
-copy opens in its default program, or shows in Explorer, right from its diff.
+GitHub pull requests included. A non-image binary file with unstaged changes
+opens in its default program, or shows in Explorer, right from its diff.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.

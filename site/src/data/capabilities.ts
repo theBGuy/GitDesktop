@@ -68,7 +68,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Open a changed non-image binary file in its default program, or show it in Explorer, right from its diff",
+      "Open a non-image binary file with unstaged changes in its default program, or show it in Explorer, right from its diff",
   },
   {
     group: "Diffs & staging",

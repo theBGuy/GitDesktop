@@ -77,7 +77,8 @@ export interface FileBytes {
    *  webview's decoder should be handed. */
   tooLarge: boolean;
   /** u64 rides as a JS number (byte sizes stay < 2^53), like BlobSizes/stats.
-   *  Dimension refusals send null. */
+   *  Null when unknown: dimension refusals, and a working-tree file that grew
+   *  past the cap mid-read. */
   size: number | null;
 }
 

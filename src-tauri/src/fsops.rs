@@ -376,7 +376,8 @@ fn nearest_existing_dir(repo: &str, rel: &str) -> AppResult<PathBuf> {
 
     let invalid =
         || AppError::InvalidArgument(format!("invalid folder path: {}", discard_shown(rel)));
-    if rel.starts_with(['/', '\\']) {
+    // A leading `\` is a legal name byte on Unix; only Windows reads it as a root.
+    if rel.starts_with('/') || (cfg!(windows) && rel.starts_with('\\')) {
         return Err(invalid());
     }
     let (parent, leaf) = rel.rsplit_once('/').unwrap_or(("", rel));
@@ -1367,6 +1368,7 @@ mod tests {
         let repo = root.path().to_str().unwrap();
         for rel in [
             "/x",
+            #[cfg(windows)]
             "\\x",
             "../x",
             "a/../x",
@@ -1390,6 +1392,8 @@ mod tests {
             nearest_existing_dir(repo, ".github/x").unwrap(),
             root.path()
         );
+        #[cfg(unix)]
+        assert_eq!(nearest_existing_dir(repo, "\\x").unwrap(), root.path());
     }
 
     #[cfg(windows)]

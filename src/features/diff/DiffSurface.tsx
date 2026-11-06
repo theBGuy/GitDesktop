@@ -2136,9 +2136,8 @@ export function DiffContent({
   // Every arm but the text, image and typechange ones is a focus landing for a
   // toolbar swap: its body, a sibling of the row, never an ancestor of a
   // scroller (it would take every click into it, so those arms' bodies aren't
-  // one). Each
-  // arm's body is keyed apart, since the text body reusing this node would
-  // drop its tabIndex under held focus. `busy` marks a blank, loading body.
+  // one). Each arm's body is keyed apart, since the text body reusing this node
+  // would drop its tabIndex under held focus. `busy` marks a blank, loading body.
   const landing = (content: ReactNode, busy = false) => (
     <div
       key="arm-landing"

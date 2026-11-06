@@ -1,3 +1,5 @@
-- When a binary file becomes a symbolic link, or a link becomes a binary file,
-  its diff in the changes list, history, branch comparisons and stashes now shows
-  both sides: the binary file's size and the link's text.
+- When a binary file other than an image becomes a symbolic link, or a link
+  becomes one, its diff now shows both sides: the binary file's size, when
+  known, and the link's text. This covers the changes list, history, branch
+  comparisons, stashes and agent sessions, plus pull requests where a link
+  became a binary file.
