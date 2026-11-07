@@ -14,6 +14,7 @@ import {
   useEffect,
   useId,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -42,7 +43,11 @@ import {
   splitPath,
   underPickedParent,
 } from "@/features/repository/worktree-paths";
-import { isWorktreeDiverged, type WorktreeDiverged } from "@/lib/git/api";
+import {
+  DIVERGED_COMMIT_CAP,
+  isWorktreeDiverged,
+  type WorktreeDiverged,
+} from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import {
   type PendingPrWrite,
@@ -57,6 +62,7 @@ import {
 } from "@/lib/git/queries";
 import type { RemoteLens } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
+import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
 import { useConfirm } from "@/lib/stores/confirm";
 import { landedIn } from "@/lib/stores/notifications";
@@ -141,11 +147,16 @@ function GhVersionGate({
   return children(versionReason(gh.data?.version));
 }
 
-/** Base UI activates on keydown without a repeat check, so a key still held from
- *  the previous step would act again. */
+/** Base UI activates on keydown without a repeat or modifier check, so a key
+ *  still held from the previous step would act again, and a chord (which
+ *  belongs to the hotkey layer) would act too: it skips Base UI unconsumed. */
 function ignoreHeldActivation(
   e: KeyboardEvent & { preventBaseUIHandler?(): void },
 ) {
+  if (hasChordModifier(e)) {
+    e.preventBaseUIHandler?.();
+    return;
+  }
   if (e.repeat && (e.key === "Enter" || e.key === " ")) {
     e.preventDefault();
     e.preventBaseUIHandler?.();
@@ -171,8 +182,9 @@ function removingNow(path: string): boolean {
 
 /** The PR branch's own worktree. The repository's own checkout is never it:
  *  opening that is a no-op, and gh refuses to update it as a worktree.
- *  Accepted miss: a cross-repository PR checks out as `<owner>/<head>`, and the
- *  PR details carry no head owner, so only its bare head name is matched. */
+ *  Matching by bare head name is this phase's limit (the head owner isn't read
+ *  yet), so a fork PR can match the user's own branch: the backend refuses the
+ *  update, and "Check out into a new folder…" leaves that state. */
 function branchRow(
   rows: UserWorktree[] | undefined,
   branch: string,
@@ -194,15 +206,42 @@ function pathRow(
   return rows?.find((w) => folderKey(w.path) === want);
 }
 
-/** The worktree a run wrote. gh resolves a relative folder against the
- *  repository while opening one resolves against the process, so when the
- *  typed path matches no row the branch's row (git's absolute path) answers. */
+/** Where gh writes a typed folder, resolved lexically as gh does: a relative
+ *  one against the repository, a root-relative one ("/x") against its drive or
+ *  share. A drive-relative one ("C:x") depends on that drive's working
+ *  directory, so it stays unresolved and matches no row. Only the toast's Open
+ *  reads this; the hold predicates still decline relative paths. */
+export function resolveTarget(repoPath: string, target: string): string {
+  if (isAbsolutePath(target)) return target;
+  const typed = target.replace(/\\/g, "/");
+  if (/^[A-Za-z]:/.test(typed)) return target;
+  let joined: string;
+  if (typed.startsWith("/")) {
+    const drive = /^(?:\/\/[^/]+\/[^/]+|[A-Za-z]:)/.exec(
+      repoPath.replace(/\\/g, "/"),
+    )?.[0];
+    if (drive === undefined) return target;
+    joined = drive + typed;
+  } else joined = `${repoPath}/${typed}`.replace(/\\/g, "/");
+  // A drive, a UNC share or a leading "/" is never popped by "..".
+  const root = /^(?:\/\/[^/]+\/[^/]+|[A-Za-z]:)?\/?/.exec(joined)?.[0] ?? "";
+  const out: string[] = [];
+  for (const s of joined.slice(root.length).split("/")) {
+    if (s === "" || s === ".") continue;
+    if (s === "..") out.pop();
+    else out.push(s);
+  }
+  return root + out.join("/");
+}
+
+/** The worktree a run wrote, matched by folder only: a branch name can't tell
+ *  a fork PR's checkout from the user's own same-named branch. */
 function writtenRow(
   rows: UserWorktree[] | undefined,
   p: Pin,
   target: string,
 ): UserWorktree | undefined {
-  return pathRow(rows, target) ?? branchRow(rows, p.headRefName, p.repoPath);
+  return pathRow(rows, resolveTarget(p.repoPath, target));
 }
 
 /** The folder a success toast may open: the row the run wrote, else the typed
@@ -227,7 +266,7 @@ const SUCCESS_COPY: Record<SuccessKind, (n: number) => string> = {
 
 const DISCARD_LABEL: Record<"listed" | "more", (n: number) => string> = {
   listed: (n) => `Discard ${n} commit${n === 1 ? "" : "s"} and reset`,
-  more: () => "Discard more than 20 commits and reset",
+  more: () => `Discard more than ${DIVERGED_COMMIT_CAP} commits and reset`,
 };
 
 /** The PR and repository a popover was opened on: every continuation re-checks
@@ -236,7 +275,6 @@ interface Pin {
   repoPath: string;
   number: number;
   lens: RemoteLens;
-  headRefName: string;
 }
 
 export interface PrWorktreeCheckoutHandle {
@@ -249,10 +287,10 @@ export interface PrWorktreeCheckoutHandle {
  * "Checked out" chip), and the caret beside it opens "Check out in a worktree…",
  * whose popover names a sibling folder by PR number and runs
  * `gh pr checkout --worktree`. When the PR's head branch already has a worktree
- * the same popover offers Open and Update instead (fork PRs: see `branchRow`;
- * the create path then surfaces the backend's own refusal). Busy state comes from the view's
- * pending-write cache reads (`runningReason`, `pending`), never this component's
- * own mutation observer: the view is reused across PRs.
+ * the same popover offers Open and Update instead (fork PRs: see `branchRow`).
+ * Busy state comes from the view's pending-write cache reads (`runningReason`,
+ * `pending`), never this component's own mutation observer: the view is reused
+ * across PRs.
  */
 export function PrWorktreeCheckout({
   ref,
@@ -296,6 +334,9 @@ export function PrWorktreeCheckout({
   const anchorRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const pinRef = useRef<Pin | null>(null);
+  // The pin whose popover the user dismissed: a run it started still lands its
+  // result, but never opens the reset confirm over a popover the user closed.
+  const dismissedFor = useRef<Pin | null>(null);
   // Compare-and-clear token: holds from the click, before the pending-write cache
   // read re-renders the controls held.
   const flight = useRef<object | null>(null);
@@ -347,6 +388,14 @@ export function PrWorktreeCheckout({
   const [existing, setExisting] = useState<UserWorktree | undefined>();
   // Display only: the handlers re-read every repo's removals at fire time.
   const removing = useIsRemovingWorktree(repoPath, existing?.path);
+  // Leaving the existing state unmounts the focused button, so the folder
+  // field takes focus once the create body has committed.
+  const focusFolder = useRef(false);
+  useLayoutEffect(() => {
+    if (existing || !focusFolder.current) return;
+    focusFolder.current = false;
+    inputRef.current?.focus();
+  }, [existing]);
 
   const checkout = useCheckoutPrWorktree(repoPath);
   const queryClient = useQueryClient();
@@ -355,7 +404,7 @@ export function PrWorktreeCheckout({
   /** The selection is read from the store: the view's own `number` lags a
    *  switch through its deferred render, so it can still name the PR the user
    *  already left. */
-  function stillOn(p: Omit<Pin, "headRefName">): boolean {
+  function stillOn(p: Pin): boolean {
     const now = live.current;
     const selected = useUiStore.getState().selectedPr;
     return (
@@ -384,7 +433,8 @@ export function PrWorktreeCheckout({
 
   function openPopover(from: "menu" | "palette") {
     if (detailsStale) return;
-    pinRef.current = { repoPath, number, lens, headRefName };
+    pinRef.current = { repoPath, number, lens };
+    dismissedFor.current = null;
     // `data` only: a pending or failed read opens the create form, never a
     // claim.
     setExisting(branchRow(rows, headRefName, repoPath));
@@ -438,7 +488,8 @@ export function PrWorktreeCheckout({
   }
 
   async function askReset(p: Pin, d: WorktreeDiverged): Promise<boolean> {
-    if (!ownsPopover(p)) return leftBeforeReset(p);
+    if (!ownsPopover(p) || dismissedFor.current === p)
+      return leftBeforeReset(p);
     // The popover closes first: a dialog opened over its close would lose its
     // initial focus to the popover's focus return.
     setPopoverOpen(false);
@@ -467,6 +518,7 @@ export function PrWorktreeCheckout({
     if (!p || !target || refusedAtFire()) return;
     const token = {};
     flight.current = token;
+    dismissedFor.current = null;
     let force = false;
     let expectedHead: string | undefined;
     try {
@@ -660,8 +712,13 @@ export function PrWorktreeCheckout({
       <Popover.Root
         modal="trap-focus"
         open={popoverOpen}
-        onOpenChange={(o) => {
-          if (!o) setPopoverOpen(false);
+        onOpenChange={(o, d) => {
+          if (o) return;
+          // The component's own closes set state directly and never come
+          // through here; anything but these two reasons is the user's.
+          if (d.reason !== "imperative-action" && d.reason !== "none")
+            dismissedFor.current = pinRef.current;
+          setPopoverOpen(false);
         }}
         onOpenChangeComplete={popoverClose.onOpenChangeComplete}
       >
@@ -755,6 +812,20 @@ export function PrWorktreeCheckout({
                           Close
                         </Popover.Close>
                       </div>
+                      {/* A fork PR's bare head name can latch the user's own
+                          branch here, whose update the backend refuses. */}
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="self-start"
+                        onClick={() => {
+                          focusFolder.current = true;
+                          setExisting(undefined);
+                        }}
+                        onKeyDown={ignoreHeldActivation}
+                      >
+                        Check out into a new folder…
+                      </Button>
                     </>
                   ) : (
                     <CreateForm
@@ -827,9 +898,10 @@ function CreateForm({
           spellCheck={false}
           value={value}
           onChange={(e) => onEdit(e.target.value)}
-          // A held Enter (from the menu item, say) must never run the checkout.
+          // A held Enter (from the menu item, say) must never run the checkout,
+          // and a chorded one is the hotkey layer's.
           onKeyDown={(e) => {
-            if (e.key !== "Enter") return;
+            if (e.key !== "Enter" || hasChordModifier(e)) return;
             e.preventDefault();
             if (!e.repeat && reason === undefined) onSubmit();
           }}
@@ -875,7 +947,7 @@ function CreateForm({
  *  description paragraph. Commits wrap rather than truncate, so every subject
  *  reads in full. */
 function ResetBody({ diverged }: { diverged: WorktreeDiverged }) {
-  const untracked = untrackedCount(diverged);
+  const untracked = diverged.untracked ?? 0;
   return (
     <>
       <span className="block">
@@ -907,6 +979,12 @@ function ResetBody({ diverged }: { diverged: WorktreeDiverged }) {
           {UNTRACKED_LINE[untracked === 1 ? "one" : "many"](untracked)}
         </span>
       )}
+      {/* Unconditional: the lines above were measured before this opened, and
+          the reset discards whatever the tracked files hold when it runs. */}
+      <span className="mt-2 block">
+        Edits saved to its tracked files before you confirm are discarded as
+        well.
+      </span>
     </>
   );
 }
@@ -917,11 +995,3 @@ const UNTRACKED_LINE: Record<"one" | "many", (n: number) => string> = {
   many: (n) =>
     `${n} untracked files at paths the pull request tracks are overwritten too.`,
 };
-
-/** Untracked files the reset overwrites: only those at paths the PR tracks,
- *  since every other untracked file survives it. An older payload carries no
- *  count, which reads as none. */
-function untrackedCount(d: WorktreeDiverged): number {
-  const n = (d as unknown as Record<string, unknown>).untracked;
-  return typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0;
-}

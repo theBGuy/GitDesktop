@@ -315,6 +315,10 @@ export interface WorktreeDiverged {
   untracked?: number;
 }
 
+/** How many commits a divergence lists before `more`; owned by the Rust
+ *  `DIVERGED_COMMIT_CAP` in src-tauri/src/git/worktree.rs. */
+export const DIVERGED_COMMIT_CAP = 20;
+
 /** A full object id as the backend spells it: lowercase only, since a forced
  *  retry carrying any other spelling is refused. */
 const LOWERCASE_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;

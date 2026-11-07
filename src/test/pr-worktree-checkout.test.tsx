@@ -23,6 +23,7 @@ import {
   checkoutRunningReason,
   PrWorktreeCheckout,
   type PrWorktreeCheckoutHandle,
+  resolveTarget,
   supportsWorktreeCheckout,
 } from "@/features/pulls/PrWorktreeCheckout";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
@@ -58,6 +59,8 @@ import { unmockedCommands } from "./setup";
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
+  // Off the real cap, so the discard label pins that it interpolates the constant.
+  DIVERGED_COMMIT_CAP: 25,
   ghAccounts: vi.fn(),
   ghPrCheckout: vi.fn(async () => undefined),
   ghPrCheckoutWorktree: vi.fn(),
@@ -92,6 +95,8 @@ const toastSuccess = vi.spyOn(toast, "success");
 const toastErrorSpy = vi.spyOn(toast, "error");
 const HEAD_A = "a".repeat(40);
 const HEAD_B = "b".repeat(40);
+const SAVED_EDITS_LINE =
+  "Edits saved to its tracked files before you confirm are discarded as well.";
 
 function worktree(over: Partial<UserWorktree>): UserWorktree {
   return {
@@ -197,6 +202,26 @@ async function openFromMenu(user: ReturnType<typeof userEvent.setup>) {
     await screen.findByRole("menuitem", { name: /Check out in a worktree/ }),
   );
   await waitFor(() => expect(document.activeElement).toBe(folder()));
+}
+
+/** Presses Enter under each platform's chord (Control, then Meta) and reports, per
+ *  press, whether it reached the window undefaulted: the app-wide hotkey
+ *  layer's view of it. */
+async function chordedEntersReachWindow(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<boolean[]> {
+  const reached: boolean[] = [];
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Enter") reached.push(!e.defaultPrevented);
+  };
+  window.addEventListener("keydown", onKey);
+  try {
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    await user.keyboard("{Meta>}{Enter}{/Meta}");
+  } finally {
+    window.removeEventListener("keydown", onKey);
+  }
+  return reached;
 }
 
 beforeEach(() => {
@@ -308,6 +333,29 @@ describe("PR split checkout", () => {
     expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
   });
 
+  it("a chorded Enter on the menu item passes through without opening", async () => {
+    const { user } = setup();
+    await user.click(caret());
+    const item = await screen.findByRole("menuitem", {
+      name: /Check out in a worktree/,
+    });
+    await user.keyboard("{ArrowDown}");
+    await waitFor(() => expect(document.activeElement).toBe(item));
+    const reached = await chordedEntersReachWindow(user);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(reached).toEqual([true, true]);
+    expect(screen.queryByLabelText("Folder")).toBeNull();
+    expect(screen.getByRole("menuitem", { hidden: true })).toBe(item);
+  });
+
+  it("a chorded Enter in the folder field passes through without checking out", async () => {
+    const { user } = setup();
+    await openFromMenu(user);
+    expect(await chordedEntersReachWindow(user)).toEqual([true, true]);
+    await act(async () => undefined);
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
+  });
+
   it("an existing worktree flips the popover to Open and Update", async () => {
     vi.mocked(listUserWorktrees).mockResolvedValue([
       worktree({}),
@@ -383,9 +431,12 @@ describe("PR split checkout", () => {
     expect(
       within(dialog).getByText("Its uncommitted changes are discarded too."),
     ).toBeInTheDocument();
+    expect(within(dialog).getByText(SAVED_EDITS_LINE)).toBeInTheDocument();
+    // The label reads the (mocked) cap; the real one matches the Rust twin.
+    expect(api.DIVERGED_COMMIT_CAP).toBe(20);
     await user.click(
       within(dialog).getByRole("button", {
-        name: "Discard more than 20 commits and reset",
+        name: "Discard more than 25 commits and reset",
       }),
     );
     await waitFor(() => expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(2));
@@ -1228,7 +1279,12 @@ describe("PR split checkout edges", () => {
     await openLoadedFromMenu(user);
     const open = await screen.findByRole("button", { name: "Open worktree" });
     await waitFor(() => expect(document.activeElement).toBe(open));
-    for (const name of ["Update to PR", "Close", "Open worktree"]) {
+    for (const name of [
+      "Update to PR",
+      "Close",
+      "Check out into a new folder…",
+      "Open worktree",
+    ]) {
       await user.tab();
       await waitFor(() =>
         expect(document.activeElement).toHaveAccessibleName(name),
@@ -1245,6 +1301,76 @@ describe("PR split checkout edges", () => {
       screen.getByRole("button", { name: "Elsewhere", hidden: true }),
     );
     await waitFor(() => expect(screen.queryByLabelText("Folder")).toBeNull());
+  });
+
+  it.each([
+    [
+      "Escape",
+      (u: ReturnType<typeof userEvent.setup>) => u.keyboard("{Escape}"),
+    ],
+    [
+      "a press outside",
+      (u: ReturnType<typeof userEvent.setup>) =>
+        u.click(
+          screen.getByRole("button", { name: "Elsewhere", hidden: true }),
+        ),
+    ],
+    [
+      "its Close button",
+      (u: ReturnType<typeof userEvent.setup>) =>
+        u.click(screen.getByRole("button", { name: "Close" })),
+    ],
+  ])(
+    "closing the popover with %s mid-update retires the reset confirm",
+    async (_, dismiss) => {
+      withReviewTree();
+      const reject = deferredRejection();
+      const { user } = setup();
+      await openLoadedFromMenu(user);
+      await user.click(
+        await screen.findByRole("button", { name: "Update to PR" }),
+      );
+      await waitFor(() =>
+        expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(1),
+      );
+      await dismiss(user);
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("button", { name: "Update to PR" }),
+        ).toBeNull(),
+      );
+      await act(async () => reject(diverged({ path: REVIEW_TREE })));
+      await waitFor(() =>
+        expect(toastInfo).toHaveBeenCalledWith(
+          "You left #7 before its worktree could be reset, so nothing was discarded.",
+        ),
+      );
+      expect(screen.queryByRole("dialog", RESET_DIALOG)).toBeNull();
+      expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("a run whose popover the user closed still toasts its success", async () => {
+    let resolve!: () => void;
+    vi.mocked(ghPrCheckoutWorktree).mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          resolve = res;
+        }),
+    );
+    const { user } = setup();
+    await openFromMenu(user);
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await waitFor(() => expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(1));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByLabelText("Folder")).toBeNull());
+    await act(async () => resolve());
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(
+        "Checked out #7 in a worktree",
+        expect.anything(),
+      ),
+    );
   });
 
   it("a malformed divergence keeps the ordinary error toast", async () => {
@@ -1285,6 +1411,7 @@ describe("PR split checkout edges", () => {
   });
 
   it("a relative folder's toast action opens the worktree's own path", async () => {
+    // "../review" resolves against the repository, C:/repos/demo.
     const created = worktree({
       path: "C:/repos/review",
       branch: "feat/x",
@@ -1311,6 +1438,146 @@ describe("PR split checkout edges", () => {
   });
 
   it.each([
+    ["a row at the resolved folder opens it", true],
+    ["no row at the resolved folder offers nothing", false],
+  ])(
+    "a relative folder never opens a same-named namesake: %s",
+    async (_, written) => {
+      // A fork PR's bare head name matches the user's own `feat/x` worktree, at
+      // the very commit the PR points at, in another folder.
+      const own = worktree({
+        path: "C:/repos/mine",
+        branch: "feat/x",
+        isMain: false,
+        head: HEAD_A,
+      });
+      const created = worktree({
+        path: "C:/repos/review",
+        branch: "owner/feat/x",
+        isMain: false,
+        head: HEAD_A,
+      });
+      let wrote = false;
+      vi.mocked(listUserWorktrees).mockImplementation(async () =>
+        wrote && written ? [worktree({}), own, created] : [worktree({}), own],
+      );
+      vi.mocked(ghPrCheckoutWorktree).mockImplementation(async () => {
+        wrote = true;
+      });
+      const { user } = setup();
+      // The namesake latches the existing state; its escape route reaches the
+      // create form.
+      await openLoadedFromMenu(user);
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Check out into a new folder…",
+        }),
+      );
+      await waitFor(() => expect(document.activeElement).toBe(folder()));
+      await user.clear(folder());
+      await user.type(folder(), "../review");
+      await user.click(screen.getByRole("button", { name: "Check out" }));
+      await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+      const opts = toastSuccess.mock.calls[0]?.[1] as {
+        action?: { onClick: () => void };
+      };
+      if (!written) {
+        expect(opts.action).toBeUndefined();
+        return;
+      }
+      act(() => opts.action?.onClick());
+      expect(openWorktree).toHaveBeenLastCalledWith("C:/repos/review");
+    },
+  );
+
+  it.each([
+    ["C:/repos/demo", "../review", "C:/repos/review"],
+    ["C:/repos/demo", "./sub/../x", "C:/repos/demo/x"],
+    ["C:/repos/demo", "..\\..\\..\\..\\x", "C:/x"],
+    ["//srv/share/demo", "../x", "//srv/share/x"],
+    ["C:/repos/demo", "D:/abs/x", "D:/abs/x"],
+    ["C:/repos/demo", "C:\\abs\\x", "C:\\abs\\x"],
+    ["C:/repos/demo", "\\reviews", "C:/reviews"],
+    ["C:/repos/demo", "/reviews", "C:/reviews"],
+    ["//srv/share/demo", "/x", "//srv/share/x"],
+    ["C:/repos/demo", "C:reviews", "C:reviews"],
+  ])("resolveTarget(%s, %s) is %s", (repo, typed, want) => {
+    expect(resolveTarget(repo, typed)).toBe(want);
+  });
+
+  it("a root-relative folder opens the drive's folder, not the repository's", async () => {
+    const atRoot = worktree({
+      path: "C:/reviews",
+      branch: "owner/feat/x",
+      isMain: false,
+    });
+    const inRepo = worktree({
+      path: "C:/repos/demo/reviews",
+      branch: "other",
+      isMain: false,
+    });
+    vi.mocked(listUserWorktrees).mockResolvedValue([
+      worktree({}),
+      inRepo,
+      atRoot,
+    ]);
+    const { user } = setup();
+    await openFromMenu(user);
+    await user.clear(folder());
+    await user.type(folder(), "\\reviews");
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalledTimes(1));
+    act(() => toastAction(0).onClick());
+    expect(openWorktree).toHaveBeenLastCalledWith("C:/reviews");
+  });
+
+  it("the existing state can switch to a new folder", async () => {
+    withReviewTree();
+    const { user } = setup();
+    await openLoadedFromMenu(user);
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Check out into a new folder…",
+      }),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(folder()));
+    expect(folder().value).toBe("C:/repos/demo-pr-7");
+    expect(screen.queryByRole("button", { name: "Update to PR" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await waitFor(() =>
+      expect(ghPrCheckoutWorktree).toHaveBeenCalledWith(
+        REPO,
+        7,
+        "origin",
+        "C:/repos/demo-pr-7",
+        false,
+        undefined,
+      ),
+    );
+  });
+
+  it("Escape and Cancel still close after switching to a new folder", async () => {
+    withReviewTree();
+    const { user } = setup();
+    const toNewFolder = async () => {
+      await openLoadedFromMenu(user);
+      await user.click(
+        await screen.findByRole("button", {
+          name: "Check out into a new folder…",
+        }),
+      );
+      await waitFor(() => expect(document.activeElement).toBe(folder()));
+    };
+    await toNewFolder();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(document.activeElement).toBe(caret()));
+    await toNewFolder();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(document.activeElement).toBe(caret()));
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
+  });
+
+  it.each([
     [
       1,
       "1 untracked file at a path the pull request tracks is overwritten too.",
@@ -1322,10 +1589,9 @@ describe("PR split checkout edges", () => {
   ])(
     "%i untracked file(s) the reset overwrites get their line",
     async (n, line) => {
-      vi.mocked(ghPrCheckoutWorktree).mockRejectedValueOnce({
-        ...diverged({ dirty: true }),
-        untracked: n,
-      });
+      vi.mocked(ghPrCheckoutWorktree).mockRejectedValueOnce(
+        diverged({ dirty: true, untracked: n }),
+      );
       const { user } = setup();
       await openFromMenu(user);
       await user.click(screen.getByRole("button", { name: "Check out" }));
@@ -1353,6 +1619,11 @@ describe("PR split checkout edges", () => {
     await user.click(screen.getByRole("button", { name: "Check out" }));
     const dialog = await screen.findByRole("dialog", RESET_DIALOG);
     expect(within(dialog).queryByText(/untracked/)).toBeNull();
+    // Unmeasured edits saved while the confirm is open are named regardless.
+    expect(
+      within(dialog).queryByText("Its uncommitted changes are discarded too."),
+    ).toBeNull();
+    expect(within(dialog).getByText(SAVED_EDITS_LINE)).toBeInTheDocument();
     await cancelConfirm(user, dialog);
   });
 

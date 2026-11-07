@@ -1371,7 +1371,14 @@ beside the repository named after the pull request (\`<repo>-pr-<number>\`); edi
 **Browse** for a different parent folder, then **Check out**. Nothing is created until
 you confirm. This needs GitHub CLI 2.98 or newer; with an older one the menu item is
 disabled and says which version you have. When the pull request's branch already has a
-worktree, the popover offers **Open worktree** and **Update to PR** instead. A worktree that already
+worktree, the popover offers **Open worktree** and **Update to PR** instead, along with
+**Check out into a new folder…**. A pull request from a fork is usually checked out on a
+branch named after the fork's owner (\`<owner>/<branch>\`), or on the plain branch name
+when that owner can no longer be read, so GitDesktop may not recognize that worktree when
+you come back; **Worktrees…** still lists it. The popover matches by branch
+name alone, so it can find a worktree on your own branch of the same name: **Update to
+PR** is refused there, which keeps your work intact, and **Check out into a new folder…**
+creates a separate one. A worktree that already
 contains the pull request's tip reports "Worktree already up to date." and is left as
 it is. If the two histories have diverged, updating asks first (**Reset this
 worktree to the PR?**), listing the commits that resetting would discard (the newest 20, with a note when

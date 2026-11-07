@@ -2186,16 +2186,20 @@ fn refuse_plain_checkout_session_names(pr: &PrHead) -> AppResult<()> {
 }
 
 /// The local branch the worktree checkout names itself (`--branch`), so gh never
-/// picks one: a fork PR is always `<owner>/<head>`, which can't collide with the
-/// user's own branches, and the bare head otherwise, a deleted fork (no owner)
-/// included. The UI matches existing worktrees by the same rule.
+/// picks one: `<owner>/<head>` for a fork with a known owner, else the bare head. The
+/// bare head CAN name the user's own branch for a deleted fork (no owner), so the
+/// worktree gate refuses a bare-head namesake for every cross-repository PR.
 fn pr_local_branch(pr: &PrHead) -> String {
     match head_owner(&pr.view) {
-        Some(owner) if pr.view.is_cross_repository == Some(true) => {
-            format!("{owner}/{}", pr.head)
-        }
+        Some(owner) if pr_is_fork(pr) => format!("{owner}/{}", pr.head),
         _ => pr.head.clone(),
     }
+}
+
+/// Whether gh says the PR is cross-repository. An absent field counts as same-repo,
+/// matching the local name it composes.
+fn pr_is_fork(pr: &PrHead) -> bool {
+    pr.view.is_cross_repository == Some(true)
 }
 
 /// The head repository owner's login, trimmed and non-empty.
@@ -2488,7 +2492,9 @@ pub async fn gh_pr_checkout_worktree(
     } else {
         CheckoutMode::Sync
     };
-    let pre = checkout_pre_spawn_gate(&repo_path, path, &resolved, oid, local, mode).await?;
+    let fork = pr_is_fork(&pr);
+    let pre =
+        checkout_pre_spawn_gate(&repo_path, path, &resolved, oid, head, local, fork, mode).await?;
 
     refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -13530,7 +13536,7 @@ github.acme.com
     mod worktree_checkout {
         use super::super::{
             classifiable, gh_version_at_least, head_oid, head_owner, is_full_lowercase_oid,
-            parse_gh_version, pr_head_from, pr_local_branch, refuse_non_github,
+            parse_gh_version, pr_head_from, pr_is_fork, pr_local_branch, refuse_non_github,
             refuse_plain_checkout_session_names, refuse_session_head, update_guard_branch,
             worktree_checkout_args, worktree_not_empty, PrHeadView, GH_WORKTREE_FLOOR,
         };
@@ -13602,22 +13608,43 @@ github.acme.com
                 assert!(!message.contains("you have )"), "{message}");
             }
             // The local name rides every argv, spelled exactly as pr_local_branch makes it.
-            for (json, local) in [
+            for (json, local, refused) in [
                 (
                     r#"{"headRefName":"feat","isCrossRepository":false,"headRepositoryOwner":{"login":"base"}}"#,
                     "feat",
+                    false,
                 ),
                 (
                     r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
                     "alice/main",
+                    true,
                 ),
                 (
                     r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":null}"#,
                     "main",
+                    true,
                 ),
             ] {
                 let pr = pr_head_from(json, "7").unwrap();
                 assert_eq!(pr_local_branch(&pr), local, "{json}");
+                // The gate gets the same derivations: a linked worktree on the bare head
+                // passes only for the same-repo PR, so the null-owner fork's bare `main`
+                // still refuses there.
+                let own = crate::git::worktree::WtEntry {
+                    is_main: false,
+                    branch: pr.head.clone(),
+                    head: "1".repeat(40),
+                    detached: false,
+                    path: "C:/wt".to_string(),
+                };
+                let gate = crate::git::worktree::refuse_own_head_namesake(
+                    Some(&own),
+                    "C:/wt",
+                    &pr.head,
+                    local,
+                    pr_is_fork(&pr),
+                );
+                assert_eq!(gate.is_err(), refused, "{json}");
                 let pinned = [
                     "pr",
                     "checkout",

@@ -1115,6 +1115,8 @@ pub(crate) fn resolve_worktree_path(repo_path: &str, path: &str) -> String {
 }
 
 /// The most commits a divergence report lists; `more` says a further one exists.
+/// Frontend prose repeats it: PrWorktreeCheckout.tsx's "more than 20" and the help
+/// guide's "newest 20" change with it.
 const DIVERGED_COMMIT_CAP: usize = 20;
 
 /// A commit a forced re-sync would reset away: full sha and subject line.
@@ -1196,26 +1198,36 @@ fn exit_bool(out: crate::git::runner::GitOutput) -> AppResult<bool> {
     }
 }
 
-/// Probes the checkout target. `tip_local` needs the `^{commit}` peel: `--verify` on
-/// a bare full hex succeeds even when no such object exists.
+/// Probes the checkout target: the PR tip's presence (false without an oid) and the
+/// worktree registered at the path.
 pub(crate) async fn probe_worktree(
     repo_path: &str,
     resolved: &str,
     oid: Option<&str>,
 ) -> AppResult<WtProbe> {
     let tip_local = match oid {
-        Some(oid) => {
-            let peeled = format!("{oid}^{{commit}}");
-            let out = run_git_raw(
-                Some(repo_path),
-                &["rev-parse", "--verify", "--quiet", &peeled],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
-            exit_bool(out)?
-        }
+        Some(oid) => tip_is_local(repo_path, oid).await?,
         None => false,
     };
+    let entry = registered_worktree(repo_path, resolved).await?;
+    Ok(WtProbe { tip_local, entry })
+}
+
+/// Whether `oid` names a local commit. Needs the `^{commit}` peel: `--verify` on a
+/// bare full hex succeeds even when no such object exists.
+async fn tip_is_local(repo_path: &str, oid: &str) -> AppResult<bool> {
+    let peeled = format!("{oid}^{{commit}}");
+    let out = run_git_raw(
+        Some(repo_path),
+        &["rev-parse", "--verify", "--quiet", &peeled],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    exit_bool(out)
+}
+
+/// The non-prunable worktree `git worktree list` registers at `resolved`, if any.
+async fn registered_worktree(repo_path: &str, resolved: &str) -> AppResult<Option<WtEntry>> {
     let porcelain = run_git(
         Some(repo_path),
         &["worktree", "list", "--porcelain"],
@@ -1223,18 +1235,24 @@ pub(crate) async fn probe_worktree(
     )
     .await?
     .stdout_lossy();
-    let entry = parse_worktree_porcelain(&porcelain)
-        .into_iter()
-        .enumerate()
-        .find(|(_, w)| !w.prunable && same_wt_path(&w.path, resolved))
-        .map(|(i, w)| WtEntry {
-            is_main: i == 0,
-            branch: w.branch,
-            head: w.head,
-            detached: w.detached,
-            path: w.path,
-        });
-    Ok(WtProbe { tip_local, entry })
+    // same_wt_path's canonicalize fallback is blocking filesystem I/O (slow on a
+    // network share), so the row match runs off the async workers.
+    let rows = parse_worktree_porcelain(&porcelain);
+    let resolved = resolved.to_string();
+    tokio::task::spawn_blocking(move || {
+        rows.into_iter()
+            .enumerate()
+            .find(|(_, w)| !w.prunable && same_wt_path(&w.path, &resolved))
+            .map(|(i, w)| WtEntry {
+                is_main: i == 0,
+                branch: w.branch,
+                head: w.head,
+                detached: w.detached,
+                path: w.path,
+            })
+    })
+    .await
+    .map_err(|e| AppError::Command(format!("Worktree lookup task failed: {e}")))
 }
 
 /// Whether a linked worktree has the PR's local branch checked out: the exact name the
@@ -1366,13 +1384,39 @@ pub(crate) async fn divergence_error(
 /// gh's existing-worktree arm checks the PR's branch out in place, so a path naming the
 /// main checkout would switch the user's own branch. A linked worktree on another
 /// branch stays allowed: switching it is gh's documented contract.
-fn refuse_main_worktree(probe: &WtProbe, path: &str) -> AppResult<()> {
-    if probe.entry.as_ref().is_some_and(|e| e.is_main) {
+fn refuse_main_worktree(entry: Option<&WtEntry>, path: &str) -> AppResult<()> {
+    if entry.is_some_and(|e| e.is_main) {
         return Err(AppError::InvalidArgument(format!(
             "{path} is this repository's main checkout — pick a new folder, or the pull request's own worktree."
         )));
     }
     Ok(())
+}
+
+/// A fork PR's worktree is matched by the bare head, so a linked worktree on the user's
+/// same-named branch would be switched or reset to the fork's. Keyed on `fork`, never
+/// `head != local`: an ownerless fork's local name is the bare head too. That also
+/// refuses such a fork's own earlier worktree, deliberately; a new folder is the way in.
+pub(crate) fn refuse_own_head_namesake(
+    entry: Option<&WtEntry>,
+    path: &str,
+    head: &str,
+    local: &str,
+    fork: bool,
+) -> AppResult<()> {
+    let own = entry.is_some_and(|e| !e.is_main && !e.detached && e.branch == head);
+    if !(fork && own) {
+        return Ok(());
+    }
+    Err(AppError::InvalidArgument(if head == local {
+        format!(
+            "{path} is on branch {head}, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — pick a new folder."
+        )
+    } else {
+        format!(
+            "{path} is on your own branch {head}, not the pull request's {local} — pick a new folder."
+        )
+    }))
 }
 
 /// The pre-spawn candidate: an existing worktree on the PR's branch with the PR's tip
@@ -1429,27 +1473,45 @@ pub(crate) enum CheckoutMode<'a> {
     Force { expected: &'a str },
 }
 
-/// The worktree checkout's local refusals, in order, before gh spawns. Sync: a
-/// probe that answered refuses the main checkout, then a provable divergence; a
-/// failed probe proceeds to gh. Force: only an answered probe of a linked worktree
-/// on gh's branch, still at `expected`, proceeds. Returns the sync pre-probe the
-/// post-spawn classification compares against (only when there is an oid).
+/// The worktree checkout's local refusals, in order, before gh spawns. Sync: the
+/// registry read refuses the main checkout, then a fork PR's bare-head namesake, and
+/// a failed registry read refuses too (gh run from a linked worktree would switch the
+/// main checkout); with the tip probe answered, a provable divergence refuses, while
+/// a failed tip probe proceeds to gh unclassified. Force: only an answered probe of a
+/// linked worktree on gh's branch, still at `expected` and no fork's namesake,
+/// proceeds. `head` is the PR's bare head branch, `local` the `--branch` name, `fork`
+/// whether the PR is cross-repository. Returns the sync pre-probe the post-spawn
+/// classification compares against (only with an answered tip probe).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn checkout_pre_spawn_gate(
     repo_path: &str,
     echo_path: &str,
     resolved: &str,
     oid: Option<&str>,
+    head: &str,
     local: &str,
+    fork: bool,
     mode: CheckoutMode<'_>,
 ) -> AppResult<Option<WtProbe>> {
     let CheckoutMode::Force { expected } = mode else {
-        let Ok(probe) = probe_worktree(repo_path, resolved, oid).await else {
-            return Ok(None);
-        };
-        refuse_main_worktree(&probe, echo_path)?;
+        let entry = registered_worktree(repo_path, resolved)
+            .await
+            .map_err(|_| {
+                AppError::InvalidArgument(format!(
+                    "Couldn't check the worktree at {echo_path} — try again."
+                ))
+            })?;
+        refuse_main_worktree(entry.as_ref(), echo_path)?;
+        refuse_own_head_namesake(entry.as_ref(), echo_path, head, local, fork)?;
         let Some(oid) = oid else {
             return Ok(None);
         };
+        // An unknown tip proves no divergence and is no baseline for post-spawn
+        // progress evidence, so gh's own error stays the answer.
+        let Ok(tip_local) = tip_is_local(repo_path, oid).await else {
+            return Ok(None);
+        };
+        let probe = WtProbe { tip_local, entry };
         if let Some(e) = pre_spawn_candidate(&probe, local) {
             if let Some(diverged) = divergence_error(repo_path, echo_path, e, oid).await {
                 return Err(diverged);
@@ -1469,7 +1531,11 @@ pub(crate) async fn checkout_pre_spawn_gate(
             "The worktree at {echo_path} changed since you confirmed, so nothing was reset — run the checkout again."
         ))
     };
-    match force_gate(&probe, expected, local) {
+    let verdict = force_gate(&probe, expected, local);
+    if matches!(verdict, ForceGate::Moved(_) | ForceGate::Proceed) {
+        refuse_own_head_namesake(probe.entry.as_ref(), echo_path, head, local, fork)?;
+    }
+    match verdict {
         ForceGate::NotAWorktree => Err(AppError::InvalidArgument(format!(
             "Only an existing worktree of this repository can be reset to the pull request — {echo_path} isn't one."
         ))),
@@ -2979,6 +3045,37 @@ prunable gitdir file points to non-existent location
         WtProbe { tip_local, entry }
     }
 
+    /// Only a fork PR refuses, and only for a linked worktree on the bare head, an
+    /// ownerless fork (local == head) included: the PR's own `<owner>/<head>` worktree,
+    /// the main checkout (its own refusal), a detached one and a same-repo PR all pass.
+    #[test]
+    fn own_branch_namesake_of_a_fork_head_is_refused() {
+        let sha = "1111111111111111111111111111111111111111";
+        let check = |entry: WtEntry, head: &str, local: &str, fork: bool| {
+            refuse_own_head_namesake(Some(&entry), "C:/wt/x", head, local, fork)
+        };
+        let on = |branch: &str| wt_entry(false, branch, sha, false);
+        // Owner-known fork, worktree on the bare head.
+        assert_eq!(
+            invalid_argument(check(on("main"), "main", "alice/main", true)),
+            "C:/wt/x is on your own branch main, not the pull request's alice/main — pick a new folder."
+        );
+        // Ownerless fork: the local name is the bare head, and the identity is unknown.
+        assert_eq!(
+            invalid_argument(check(on("main"), "main", "main", true)),
+            "C:/wt/x is on branch main, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — pick a new folder."
+        );
+        // Same-repo PR on its own branch, and an owner-known fork on its prefixed one.
+        assert!(check(on("main"), "main", "main", false).is_ok());
+        assert!(check(on("alice/main"), "main", "alice/main", true).is_ok());
+        assert!(check(on("other"), "main", "alice/main", true).is_ok());
+        assert!(check(on("other"), "main", "main", true).is_ok());
+        assert!(check(on("other"), "main", "main", false).is_ok());
+        assert!(check(wt_entry(false, "", sha, true), "main", "main", true).is_ok());
+        assert!(check(wt_entry(true, "main", sha, false), "main", "main", true).is_ok());
+        assert!(refuse_own_head_namesake(None, "C:/wt/x", "main", "main", true).is_ok());
+    }
+
     #[test]
     fn force_gate_refuses_non_worktrees_and_moved_heads() {
         let expected = "1111111111111111111111111111111111111111";
@@ -3081,7 +3178,7 @@ prunable gitdir file points to non-existent location
     fn main_worktree_is_refused_before_any_spawn() {
         assert_eq!(
             invalid_argument(refuse_main_worktree(
-                &wt_probe(true, Some(wt_entry(true, "main", "h", false))),
+                Some(&wt_entry(true, "main", "h", false)),
                 "C:/repo"
             )),
             "C:/repo is this repository's main checkout — pick a new folder, or the pull request's own worktree."
@@ -3092,7 +3189,7 @@ prunable gitdir file points to non-existent location
             Some(wt_entry(false, "", "h", true)),
             Some(wt_entry(false, "feat", "h", false)),
         ] {
-            assert!(refuse_main_worktree(&wt_probe(false, entry), "C:/wt").is_ok());
+            assert!(refuse_main_worktree(entry.as_ref(), "C:/wt").is_ok());
         }
     }
 
@@ -3217,9 +3314,9 @@ prunable gitdir file points to non-existent location
         assert!(probe.tip_local);
         assert!(pre_spawn_candidate(&probe, "master").is_none());
         assert!(pre_spawn_candidate(&probe, "main").is_none());
-        assert!(refuse_main_worktree(&probe, &repo).is_err());
+        assert!(refuse_main_worktree(probe.entry.as_ref(), &repo).is_err());
         let linked = probe_worktree(&repo, &wt_s, None).await.unwrap();
-        assert!(refuse_main_worktree(&linked, &wt_s).is_ok());
+        assert!(refuse_main_worktree(linked.entry.as_ref(), &wt_s).is_ok());
 
         let relative = resolve_worktree_path(&repo, "../wt");
         let probe = probe_worktree(&repo, &relative, None).await.unwrap();
@@ -3230,10 +3327,13 @@ prunable gitdir file points to non-existent location
         let oid = Some(sibling.as_str());
         let sync = || CheckoutMode::Sync;
         assert_eq!(
-            invalid_argument(checkout_pre_spawn_gate(&repo, &repo, &repo, oid, "feat", sync()).await),
+            invalid_argument(checkout_pre_spawn_gate(&repo, &repo, &repo, oid, "feat", "feat", false, sync()).await),
             format!("{repo} is this repository's main checkout — pick a new folder, or the pull request's own worktree.")
         );
-        match checkout_pre_spawn_gate(&repo, "wt-echo", &wt_s, oid, "feat", sync()).await {
+        // A same-repo PR on its own branch's worktree keeps the divergence flow.
+        match checkout_pre_spawn_gate(&repo, "wt-echo", &wt_s, oid, "feat", "feat", false, sync())
+            .await
+        {
             Err(AppError::WorktreeDiverged {
                 path,
                 head,
@@ -3249,37 +3349,131 @@ prunable gitdir file points to non-existent location
             }
             other => panic!("{other:?}"),
         }
-        // A worktree on another name than the PR's local branch: nothing is provable,
-        // so gh decides.
-        let pre = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "alice/feat", sync())
-            .await
-            .unwrap();
+        // A fork PR whose bare head names the worktree's own branch: gh would switch
+        // the user's branch to the fork's, so the gate refuses.
         assert_eq!(
-            pre.and_then(|p| p.entry).map(|e| e.branch).as_deref(),
-            Some("feat")
+            invalid_argument(
+                checkout_pre_spawn_gate(
+                    &repo,
+                    "wt",
+                    &wt_s,
+                    oid,
+                    "feat",
+                    "alice/feat",
+                    true,
+                    sync()
+                )
+                .await
+            ),
+            "wt is on your own branch feat, not the pull request's alice/feat — pick a new folder."
         );
+        // An ownerless fork's local name is the bare head, so only `fork` can refuse it.
+        assert!(invalid_argument(
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", "feat", true, sync()).await
+        )
+        .starts_with("wt is on branch feat, which may be your own"));
+        // A fork whose local name is the worktree's branch keeps the divergence flow:
+        // the refusal keys on the bare head, never the local name.
+        let gate =
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "x", "feat", true, sync()).await;
+        assert!(
+            matches!(gate, Err(AppError::WorktreeDiverged { .. })),
+            "{gate:?}"
+        );
+        // A worktree on another name than the PR's local branch, same-repo or fork:
+        // nothing is provable, so gh decides.
+        for (head, local, fork) in [
+            ("other", "other", false),
+            ("other", "alice/other", true),
+            ("other", "other", true),
+        ] {
+            let pre = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, head, local, fork, sync())
+                .await
+                .unwrap();
+            assert_eq!(
+                pre.and_then(|p| p.entry).map(|e| e.branch).as_deref(),
+                Some("feat")
+            );
+        }
         let fresh = base.path().join("new-wt").to_string_lossy().into_owned();
-        let pre = checkout_pre_spawn_gate(&repo, &fresh, &fresh, oid, "feat", sync())
+        let pre = checkout_pre_spawn_gate(&repo, &fresh, &fresh, oid, "feat", "feat", true, sync())
             .await
             .unwrap();
         assert!(pre.is_some_and(|p| p.tip_local && p.entry.is_none()));
 
-        let proceed = CheckoutMode::Force { expected: &ahead };
-        let gate = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", proceed).await;
+        // A failed registry read fails closed: from a linked worktree, gh would
+        // switch whatever checkout the path names, the main one included.
+        let missing = base.path().join("missing").to_string_lossy().into_owned();
+        assert_eq!(
+            invalid_argument(
+                checkout_pre_spawn_gate(
+                    &missing,
+                    "root",
+                    &repo,
+                    oid,
+                    "feat",
+                    "feat",
+                    false,
+                    sync()
+                )
+                .await
+            ),
+            "Couldn't check the worktree at root — try again."
+        );
+        // A failed tip probe (git exits 128 on a reflog entry that doesn't exist)
+        // still runs the registry refusals, then proceeds unclassified.
+        let bad_tip = Some("HEAD@{99}");
+        assert!(tip_is_local(&repo, "HEAD@{99}").await.is_err());
+        assert!(invalid_argument(
+            checkout_pre_spawn_gate(&repo, "root", &repo, bad_tip, "feat", "feat", false, sync())
+                .await
+        )
+        .starts_with("root is this repository's main checkout"));
+        assert!(invalid_argument(
+            checkout_pre_spawn_gate(
+                &repo,
+                "wt",
+                &wt_s,
+                bad_tip,
+                "feat",
+                "alice/feat",
+                true,
+                sync()
+            )
+            .await
+        )
+        .starts_with("wt is on your own branch feat"));
+        let gate =
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, bad_tip, "feat", "feat", false, sync())
+                .await;
         assert!(matches!(gate, Ok(None)), "{gate:?}");
+
+        let proceed = CheckoutMode::Force { expected: &ahead };
+        let gate =
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", "feat", false, proceed).await;
+        assert!(matches!(gate, Ok(None)), "{gate:?}");
+        // A forced reset never lands on an ownerless fork's namesake either.
+        let ownerless = CheckoutMode::Force { expected: &ahead };
+        let gate =
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", "feat", true, ownerless).await;
+        assert!(invalid_argument(gate).starts_with("wt is on branch feat, which may be your own"));
         let moved = CheckoutMode::Force { expected: &t };
-        let gate = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", moved).await;
+        let gate =
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", "feat", false, moved).await;
         assert!(
             matches!(&gate, Err(AppError::WorktreeDiverged { head, .. }) if *head == ahead),
             "{gate:?}"
         );
         let other = CheckoutMode::Force { expected: &ahead };
-        let gate = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "alice/feat", other).await;
+        let gate =
+            checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", "alice/feat", true, other)
+                .await;
         assert!(
             invalid_argument(gate).starts_with("The worktree at wt changed since you confirmed")
         );
         let main = CheckoutMode::Force { expected: &ahead };
-        let gate = checkout_pre_spawn_gate(&repo, "root", &repo, oid, "side", main).await;
+        let gate =
+            checkout_pre_spawn_gate(&repo, "root", &repo, oid, "side", "side", false, main).await;
         assert!(invalid_argument(gate).starts_with("Only an existing worktree of this repository"));
     }
 }
