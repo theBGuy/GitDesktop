@@ -294,14 +294,40 @@ export const ghPrCheckoutWorktree = (
     expectedHead: expectedHead ?? null,
   });
 
+/** The app's own engine for `ghPrCheckout`, for hosts gh can't serve. */
+export const nativePrCheckout = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+) => invoke<void>("native_pr_checkout", { repoPath, number, lens });
+
+/** The app's own engine for `ghPrCheckoutWorktree`: the same arguments, the
+ *  same fast-forward re-run and the same divergence refusal. */
+export const nativePrCheckoutWorktree = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+  path: string,
+  force: boolean,
+  expectedHead?: string,
+) =>
+  invoke<void>("native_pr_checkout_worktree", {
+    repoPath,
+    number,
+    lens,
+    path,
+    force,
+    expectedHead: expectedHead ?? null,
+  });
+
 /** One commit a worktree reset would discard. */
 export interface WorktreeDivergedCommit {
   sha: string;
   subject: string;
 }
 
-/** `gh_pr_checkout_worktree`'s refusal when the PR's worktree holds commits the
- *  PR lacks. `head` is the worktree HEAD measured at the refusal; `commits` is
+/** The worktree checkout's refusal (either route) when the PR's worktree holds
+ *  commits the PR lacks. `head` is the worktree HEAD measured at the refusal; `commits` is
  *  newest first and capped, `more` marks the cut (there is no total); `dirty`
  *  means uncommitted changes to tracked files; `untracked` counts the untracked
  *  files at paths the PR tracks, which the reset overwrites. */

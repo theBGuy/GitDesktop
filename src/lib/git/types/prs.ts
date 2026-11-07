@@ -439,6 +439,10 @@ export interface PrDetails {
    *  by maintainers"). GitHub only; absent/null = unknown, which must not be read
    *  as a denial. */
   maintainerCanModify?: boolean | null;
+  /** The head repository owner: GitHub's login, Bitbucket's workspace slug.
+   *  Absent/null = unknown (a deleted fork, a row cached before the field, and
+   *  always on GitLab); never read as "same repository". */
+  headRepositoryOwner?: string | null;
   /** The conversation is locked: GitHub's `locked`, GitLab's
    *  `discussion_locked`; always false on Bitbucket, which has no lock. Optional
    *  for the same cache reason; only `=== true` renders the badge. */

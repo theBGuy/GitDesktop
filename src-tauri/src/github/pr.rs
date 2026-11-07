@@ -23,7 +23,7 @@ use crate::github::runner::{
 use crate::github::{gh_failure_reason, gh_unreadable};
 use crate::state::AppState;
 
-fn validate_branch(name: &str) -> AppResult<()> {
+pub(crate) fn validate_branch(name: &str) -> AppResult<()> {
     // The shared ref validator (empty / leading `-` / refspec metacharacters);
     // remapped so this surface keeps its own wording.
     crate::git::branches::validate_ref_name(name)
@@ -2193,10 +2193,7 @@ fn refuse_plain_checkout_session_names(pr: &PrHead) -> AppResult<()> {
 /// bare head CAN name the user's own branch for a deleted fork (no owner), so the
 /// worktree gate refuses a bare-head namesake for every cross-repository PR.
 fn pr_local_branch(pr: &PrHead) -> String {
-    match head_owner(&pr.view) {
-        Some(owner) if pr_is_fork(pr) => format!("{owner}/{}", pr.head),
-        _ => pr.head.clone(),
-    }
+    crate::git::pr_checkout::pr_local_branch_name(&pr.head, pr_is_fork(pr), head_owner(&pr.view))
 }
 
 /// Whether gh says the PR is cross-repository. An absent field counts as same-repo,
@@ -2207,8 +2204,13 @@ fn pr_is_fork(pr: &PrHead) -> bool {
 
 /// The head repository owner's login, trimmed and non-empty.
 fn head_owner(view: &PrHeadView) -> Option<&str> {
-    view.head_repository_owner
-        .as_ref()
+    head_owner_login(view.head_repository_owner.as_ref())
+}
+
+/// The one trim-and-non-empty reading of gh's `headRepositoryOwner`, shared by the
+/// checkout view and the detail view so the two can't drift.
+fn head_owner_login(owner: Option<&HeadOwner>) -> Option<&str> {
+    owner
         .and_then(|o| o.login.as_deref())
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -2216,7 +2218,7 @@ fn head_owner(view: &PrHeadView) -> Option<&str> {
 
 /// A full lowercase object id (SHA-1 or SHA-256): the only shape a forge-supplied
 /// or confirmed sha may take before it reaches a git rev position.
-fn is_full_lowercase_oid(s: &str) -> bool {
+pub(crate) fn is_full_lowercase_oid(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
@@ -2255,7 +2257,7 @@ async fn refuse_if_pr_branch_updating(
 
 /// A forge-named head in `gd/session/` would land a branch every surface hides. Its
 /// own wording: the shared refusal's "choose another name" is not the user's to act on.
-fn refuse_session_head(head: &str) -> AppResult<()> {
+pub(crate) fn refuse_session_head(head: &str) -> AppResult<()> {
     if crate::git::branches::is_session_branch_name(head) {
         return Err(AppError::InvalidArgument(format!(
             "\"{head}\" is in gd/session/, which is reserved for agent sessions, so this pull request's branch can't be checked out."
@@ -2371,18 +2373,21 @@ fn worktree_not_empty(err: &AppError, path: &str) -> Option<AppError> {
             if raw.contains("--worktree path must be empty")
                 || raw.lines().any(is_git_worktree_path_exists) =>
         {
-            Some(AppError::Gh(format!(
-                "{path} isn't empty — pick a new or empty folder.\n\n{raw}"
-            )))
+            Some(AppError::Gh(worktree_not_empty_message(path, raw)))
         }
         _ => None,
     }
 }
 
+/// The not-empty refusal's text, shared by the gh and native worktree checkouts.
+pub(crate) fn worktree_not_empty_message(path: &str, raw: &str) -> String {
+    format!("{path} isn't empty — pick a new or empty folder.\n\n{raw}")
+}
+
 /// gh gained its own empty-folder check in 2.99; on the 2.98 floor `git worktree add`
 /// reports the folder as `fatal: '<path>' already exists` instead. The quote right
 /// after `fatal: ` keeps git's branch-collision line (`a branch named '…'`) out.
-fn is_git_worktree_path_exists(line: &str) -> bool {
+pub(crate) fn is_git_worktree_path_exists(line: &str) -> bool {
     line.trim()
         .strip_prefix("fatal: '")
         .and_then(|rest| rest.strip_suffix("' already exists"))
@@ -2425,6 +2430,66 @@ pub async fn gh_pr_checkout(
     Ok(())
 }
 
+/// The worktree checkout's mode: a forced reset needs the full oid the user confirmed.
+pub(crate) fn force_mode<'a>(
+    force: bool,
+    expected_head: Option<&'a str>,
+) -> AppResult<crate::git::worktree::CheckoutMode<'a>> {
+    use crate::git::worktree::CheckoutMode;
+    let mode = if force {
+        let expected = expected_head
+            .filter(|h| is_full_lowercase_oid(h))
+            .ok_or_else(|| {
+                AppError::InvalidArgument(
+                    "Resetting the worktree needs the commit you confirmed — run the checkout again."
+                        .into(),
+                )
+            })?;
+        CheckoutMode::Force { expected }
+    } else {
+        CheckoutMode::Sync
+    };
+    Ok(mode)
+}
+
+/// The GitHub arm of the native worktree checkout: the PR's head from the lens remote
+/// (the PR's base repository). Same-repo only on gh's explicit `false`, so a PR whose
+/// cross-repository flag is absent is named bare but never tracked.
+pub(crate) async fn gh_pr_checkout_source(
+    repo_path: &str,
+    number: u64,
+    lens: Option<&str>,
+) -> AppResult<crate::git::pr_checkout::PrCheckoutSource> {
+    let slug = crate::github::gh_lens_slug(repo_path, lens).await?;
+    let pr = read_pr_head(
+        repo_path,
+        &number.to_string(),
+        &slug,
+        "headRefName,isCrossRepository,headRepositoryOwner",
+    )
+    .await?;
+    gh_checkout_source_from(pr, lens, number)
+}
+
+/// The GitHub source from gh's view, fetched from the remote `lens` names: the same
+/// remote the view was read from.
+fn gh_checkout_source_from(
+    pr: PrHead,
+    lens: Option<&str>,
+    number: u64,
+) -> AppResult<crate::git::pr_checkout::PrCheckoutSource> {
+    use crate::git::pr_checkout::{FetchFrom, PrCheckoutSource, SourceRef};
+    let remote = crate::github::lens_remote(lens)?;
+    Ok(PrCheckoutSource {
+        fork: pr_is_fork(&pr),
+        same_repo: pr.view.is_cross_repository == Some(false),
+        owner: head_owner(&pr.view).map(str::to_string),
+        head: pr.head,
+        from: FetchFrom::Remote(remote),
+        source_ref: SourceRef::PullHead(number),
+    })
+}
+
 /// Checks a PR out into a new or existing worktree at `path` (the final path, taken
 /// verbatim) through `gh pr checkout --worktree`. An existing worktree re-syncs by
 /// fast-forward; a diverged one returns `WorktreeDiverged`, and only a retry with
@@ -2442,7 +2507,6 @@ pub async fn gh_pr_checkout_worktree(
 ) -> AppResult<()> {
     use crate::git::worktree::{
         checkout_pre_spawn_gate, divergence_error, post_spawn_candidate, probe_worktree,
-        CheckoutMode,
     };
     refuse_non_github(
         crate::forge::detect_non_github(&repo_path)
@@ -2481,25 +2545,15 @@ pub async fn gh_pr_checkout_worktree(
     // error is the answer.
     let oid = head_oid(&pr.view);
     let resolved = crate::git::worktree::resolve_worktree_path(&repo_path, path);
-    let mode = if force {
-        let expected = expected_head
-            .as_deref()
-            .filter(|h| is_full_lowercase_oid(h))
-            .ok_or_else(|| {
-                AppError::InvalidArgument(
-                    "Resetting the worktree needs the commit you confirmed — run the checkout again."
-                        .into(),
-                )
-            })?;
-        CheckoutMode::Force { expected }
-    } else {
-        CheckoutMode::Sync
-    };
+    let mode = force_mode(force, expected_head.as_deref())?;
     let fork = pr_is_fork(&pr);
+    refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
+    // Before the spawn, since the divergence arm below can create the worktree and still
+    // Err; before the gate too, so no app-side await sits between its head check and gh.
+    crate::git::worktree::exclude_if_inside_gitdesktop(&repo_path, &resolved).await;
     let pre =
         checkout_pre_spawn_gate(&repo_path, path, &resolved, oid, head, local, fork, mode).await?;
 
-    refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     let err = match run_gh(Some(&repo_path), &argv, GH_NETWORK_TIMEOUT).await {
         Ok(_) => return Ok(()),
@@ -4558,6 +4612,9 @@ struct RawPr {
     /// it, which the frontend must not read as a denial.
     #[serde(default)]
     maintainer_can_modify: Option<bool>,
+    /// `HeadOwner`, never `RawLogin`: a `{"login":null}` must not fail this one parse.
+    #[serde(default)]
+    head_repository_owner: Option<HeadOwner>,
 }
 
 /// Whether a merge/pull request can currently merge, provider-neutral. `state` is
@@ -5009,6 +5066,10 @@ pub struct PrDetails {
     /// ("allow edits by maintainers"). GitHub only — `None` means unknown
     /// (GitLab/Bitbucket, or a projection that didn't carry it), never "no".
     pub maintainer_can_modify: Option<bool>,
+    /// The head repository owner's login (GitHub) or workspace slug (Bitbucket),
+    /// trimmed. `None` when the forge can't name it: a deleted or unreadable fork,
+    /// and always on GitLab, whose MR payload carries only the project id.
+    pub head_repository_owner: Option<String>,
     /// The conversation is locked. GitHub: `pullRequest.locked` (false when unreadable,
     /// see `lock_unknown`); GitLab: the MR's `discussion_locked`; Bitbucket: false.
     pub locked: bool,
@@ -5104,7 +5165,7 @@ pub struct ApprovalState {
     pub viewer_requested_changes: bool,
 }
 
-const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify";
+const PR_VIEW_FIELDS: &str = "id,number,title,body,author,state,isDraft,baseRefName,headRefName,headRefOid,additions,deletions,url,commits,files,reviews,comments,statusCheckRollup,labels,assignees,reviewRequests,mergeable,mergeStateStatus,isCrossRepository,maintainerCanModify,headRepositoryOwner";
 
 /// Never add review-level `viewerCannotUpdateReasons` here: it errors while a PR is
 /// archived and would take the merge settings down with it. The top-level PR fields
@@ -5924,6 +5985,8 @@ pub async fn gh_pr_view(
         mergeability,
         cross_repository: raw.is_cross_repository,
         maintainer_can_modify: raw.maintainer_can_modify,
+        head_repository_owner: head_owner_login(raw.head_repository_owner.as_ref())
+            .map(str::to_string),
         locked: conversation.locked,
         lock_unknown: conversation.lock_unknown,
         active_lock_reason: conversation.active_lock_reason,
@@ -8148,7 +8211,7 @@ mod tests {
         stack_members_from_output, PrStackProbe,
         map_gh_mergeability, stack_memberships_from, stack_write_args, stack_write_outcome_from,
         PR_LIST_FIELDS, PR_VIEW_FIELDS, PRS_FOR_BRANCH_FIELDS, upstream_pulls_endpoint, GhPrFile,
-        EMPTY_BLOB_SHA,
+        EMPTY_BLOB_SHA, head_owner_login,
         GhPrRestComment,
         GhPrRestCommit, GhPrRestCommitGitAuthor, GhPrRestCommitInner, GhPrRestPull, GhPrRestReview,
         GhStackEntry, MergeAsyncOutcome, MergeAsyncStatus, PrDetails, PrInfo, PrMergeOutcome,
@@ -8984,6 +9047,7 @@ mod tests {
             mergeability: PrMergeability::unavailable(),
             cross_repository: false,
             maintainer_can_modify: None,
+            head_repository_owner: None,
             locked: false,
             lock_unknown: false,
             active_lock_reason: None,
@@ -10613,6 +10677,7 @@ mod tests {
             "mergeStateStatus",
             "isCrossRepository",
             "headRefOid",
+            "headRepositoryOwner",
         ] {
             assert!(view.contains(&f), "{f} missing from: {PR_VIEW_FIELDS}");
         }
@@ -10827,6 +10892,44 @@ mod tests {
             map_gh_mergeability(&raw.state, &raw.mergeable, &raw.merge_state_status).state,
             "checking"
         );
+    }
+
+    /// The head owner rides the shared view parse, so no owner shape may fail it.
+    #[test]
+    fn raw_pr_head_owner_tolerates_null_and_blank_logins() {
+        let owner = |body: &str| {
+            let raw: RawPr = serde_json::from_str(body).unwrap();
+            head_owner_login(raw.head_repository_owner.as_ref()).map(str::to_string)
+        };
+        for v in ["null", "{}", r#"{"login":null}"#, r#"{"login":"  "}"#] {
+            let body = format!(r#"{{"number":7,"state":"OPEN","headRepositoryOwner":{v}}}"#);
+            assert_eq!(owner(&body), None, "{v}");
+        }
+        assert_eq!(owner(r#"{"number":7,"state":"OPEN"}"#), None);
+        assert_eq!(
+            owner(r#"{"number":7,"state":"OPEN","headRepositoryOwner":{"login":" alice "}}"#),
+            Some("alice".to_string())
+        );
+        // A deleted fork: gh nulls the owner while still reporting cross-repository.
+        let raw: RawPr = serde_json::from_str(
+            r#"{"number":7,"state":"OPEN","isCrossRepository":true,"headRepositoryOwner":null}"#,
+        )
+        .unwrap();
+        assert!(raw.is_cross_repository);
+        assert!(head_owner_login(raw.head_repository_owner.as_ref()).is_none());
+    }
+
+    /// The wire key the frontend reads: always present, `null` when unknown.
+    #[test]
+    fn head_repository_owner_serializes_camel_case() {
+        let mut details = details_with_stack(None, Vec::new(), false, false);
+        let v = serde_json::to_value(&details).unwrap();
+        assert!(v.get("headRepositoryOwner").is_some_and(|o| o.is_null()));
+        assert!(v.get("head_repository_owner").is_none());
+        details.head_repository_owner = Some("alice".to_string());
+        let v = serde_json::to_value(&details).unwrap();
+        assert_eq!(v["headRepositoryOwner"], "alice");
+        assert!(v.get("head_repository_owner").is_none());
     }
 
     /// The narrow poll projections take the same null tolerance as the shared
@@ -13965,5 +14068,64 @@ github.acme.com
                 assert_eq!(classifiable(&err), expected, "{err:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod checkout_source_tests {
+    use super::*;
+    use crate::git::pr_checkout::{FetchFrom, SourceRef};
+
+    fn head(body: &str) -> PrHead {
+        pr_head_from(body, "7").unwrap()
+    }
+
+    /// The fetch remote follows the lens, and the flags map onto naming and proof.
+    #[test]
+    fn gh_checkout_source_fetches_from_the_lens_remote() {
+        let pull_head = |r: &SourceRef| matches!(r, SourceRef::PullHead(7));
+        let same = r#"{"headRefName":" feat ","isCrossRepository":false}"#;
+        for (lens, remote) in [
+            (None, "origin"),
+            (Some("origin"), "origin"),
+            (Some("upstream"), "upstream"),
+        ] {
+            let src = gh_checkout_source_from(head(same), lens, 7).unwrap();
+            assert!(
+                matches!(src.from, FetchFrom::Remote(r) if r == remote),
+                "{lens:?}"
+            );
+            assert_eq!(src.head, "feat");
+            assert!(!src.fork && src.same_repo);
+            assert!(pull_head(&src.source_ref), "{lens:?}");
+        }
+        // The pin rejects the other namespaces, which the fixtures publish at one commit.
+        assert!(!pull_head(&SourceRef::MergeRequestHead(7)));
+        assert!(!pull_head(&SourceRef::Branch("feat".into())));
+        assert!(gh_checkout_source_from(head(same), Some("junk"), 7).is_err());
+
+        let fork = r#"{"headRefName":"feat","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#;
+        let src = gh_checkout_source_from(head(fork), None, 7).unwrap();
+        assert!(src.fork && !src.same_repo);
+        assert_eq!(src.owner.as_deref(), Some("alice"));
+
+        // An absent flag is named bare but never proven same-repo.
+        let unknown = r#"{"headRefName":"feat"}"#;
+        let src = gh_checkout_source_from(head(unknown), None, 7).unwrap();
+        assert!(!src.fork && !src.same_repo);
+    }
+
+    /// The view is read through the same lens the fetch remote follows.
+    #[test]
+    fn gh_checkout_source_reads_the_view_through_the_lens() {
+        let body = crate::github::repo_meta::tests::wiring_body(
+            include_str!("pr.rs"),
+            "gh_pr_checkout_source",
+        );
+        assert!(body.contains("gh_lens_slug(repo_path, lens)"), "{body}");
+        assert!(
+            body.contains("gh_checkout_source_from(pr, lens, number)"),
+            "{body}"
+        );
     }
 }

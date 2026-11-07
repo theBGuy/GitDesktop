@@ -239,17 +239,20 @@ default's name), and a PR badge.
   with are easy to spot. One-click jumps to the main workspace sit right in
   the branch switcher, where selecting a branch that's checked out elsewhere
   opens that folder straight away, that branch's context menu carries the
-  worktree actions, and a *Worktrees* row opens the full manager. A GitHub
-  pull request can be checked out into its own worktree straight from its
-  view, so you can review it without touching your current branch or
-  uncommitted files (needs GitHub CLI 2.98 or newer).
-- **Compare**: a tab with a three-dot diff, commits ahead/behind, and
-  jump-to-PR, against a local branch or any remote's branch (fetched when
-  you pick it, so a GitHub fork can compare against its parent through
-  `upstream` and, while you're signed in to GitHub, open the PR there).
-  Each ahead/behind commit shows its tag chips and carries a context menu —
-  checkout, cherry-pick, create a branch or tag, copy the SHA, plus revert
-  for commits on your branch.
+  worktree actions, and a *Worktrees* row opens the full manager. A pull
+  request (GitHub, Bitbucket) or merge request (GitLab) can be checked out
+  in place or into its own worktree straight from its view; the worktree
+  route lets you review it without touching your current branch or
+  uncommitted files. The suggested folder,
+  `.gitdesktop/worktrees/pr-<number>`, sits inside the repository and is
+  kept out of `git status`.
+- **Compare**: a tab with a three-dot diff, commits ahead/behind,
+  merge/rebase, and jump-to-PR, against a local branch or any remote's
+  branch (fetched when you pick it, so a GitHub fork can compare against its
+  parent through `upstream` and, while you're signed in to GitHub, open the
+  PR there). Each ahead/behind commit shows its tag chips and carries a
+  context menu — checkout, cherry-pick, create a branch or tag, copy the SHA,
+  plus revert for commits on your branch.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
   force-push rules, shareable via a committed file or importable from
   GitHub. A promotion-branches list marks pull requests from those branches

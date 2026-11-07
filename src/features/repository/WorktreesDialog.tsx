@@ -47,9 +47,8 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
-import { clipTitleFromText } from "@/lib/clip-title";
+import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
-import { normPath } from "@/lib/git/path";
 import {
   useAddUserWorktree,
   useBranches,
@@ -62,6 +61,13 @@ import {
 } from "@/lib/git/queries";
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { UserWorktree } from "@/lib/git/worktree";
+import {
+  deriveDefaultWorktreePath,
+  isAbsolutePath,
+  resolveTarget,
+  sameCheckout,
+  worktreeLeaf,
+} from "@/lib/git/worktree-default-path";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { useUiStore } from "@/lib/stores/ui";
 import {
@@ -78,7 +84,6 @@ import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
 import {
   composePickedPath,
-  deriveSiblingPath,
   splitPath,
   underPickedParent,
 } from "./worktree-paths";
@@ -145,7 +150,9 @@ function WorktreeList({
   const unlock = useUnlockUserWorktree(repoPath);
   const repair = useRepairWorktrees(repoPath);
   const activeRepo = useUiStore((s) => s.repoPath);
-  const activeNorm = activeRepo ? normPath(activeRepo) : "";
+  // Host-exact: on a case-sensitive filesystem a case twin is another checkout.
+  const isActive = (w: UserWorktree) =>
+    !!activeRepo && sameCheckout(w.path, activeRepo);
 
   const [highlight, setHighlight] = useState(-1);
   const [deleteTarget, setDeleteTarget] = useState<UserWorktree | null>(null);
@@ -169,7 +176,7 @@ function WorktreeList({
   });
 
   async function handleOpen(w: UserWorktree) {
-    if (normPath(w.path) === activeNorm) return; // already here
+    if (isActive(w)) return; // already here
     // Its folder is on its way out. Not just the removal entry: a promote's
     // claim opens before markRemoval and releases only after the entry has
     // settled, so the entry alone misses both ends.
@@ -228,7 +235,7 @@ function WorktreeList({
                 key={w.path}
                 worktree={w}
                 highlighted={i === highlight}
-                isCurrent={normPath(w.path) === activeNorm}
+                isCurrent={isActive(w)}
                 isRemoving={removingPaths.has(w.path)}
                 onFocus={() => setHighlight(i)}
                 onOpen={() => handleOpen(w)}
@@ -603,7 +610,9 @@ export function RenameWorktreeDialog({
 
   const trimmed = name.trim();
   const newPath = parent ? `${parent}/${trimmed}` : trimmed;
-  const unchanged = !!worktree && normPath(newPath) === normPath(worktree.path);
+  // Case folds by platform, not by volume: on Windows and macOS a case-only
+  // rename reads as unchanged, which also blocks one on a case-sensitive volume.
+  const unchanged = !!worktree && sameCheckout(newPath, worktree.path);
   // A rename keeps the worktree in place, so block path separators (that'd be a
   // move into another folder) — keep this a simple in-place rename.
   const invalid = /[\\/]/.test(trimmed);
@@ -821,7 +830,6 @@ function CreateWorktree({
   const add = useAddUserWorktree(repoPath);
 
   const list = worktrees.data ?? [];
-  const mainPath = list.find((w) => w.isMain)?.path ?? repoPath;
   const checkedOut = new Set(
     list.map((w) => w.branch).filter((b): b is string => Boolean(b)),
   );
@@ -854,14 +862,24 @@ function CreateWorktree({
 
   const branch = source === "new" ? newBranch.trim() : existing;
 
-  // Default the folder to a sibling of the main worktree, named for the branch,
-  // until the user takes the path field over.
-  const derivedPath = deriveSiblingPath(mainPath, branch);
+  // The folder follows the branch until the user takes the field over; null
+  // until the worktree list says which checkout is main.
+  const derivedPath = deriveDefaultWorktreePath(
+    repoPath,
+    worktrees.data,
+    branch,
+  );
   const followingPath =
     pickedParent === null
-      ? derivedPath
-      : underPickedParent(pickedParent, splitPath(derivedPath).name);
+      ? (derivedPath ?? "")
+      : underPickedParent(pickedParent, worktreeLeaf(branch));
   const effectivePath = pathEdited ? path : followingPath;
+  // A failed read leaves no default but lets the user type one.
+  const findingMain =
+    !pathEdited &&
+    pickedParent === null &&
+    derivedPath === null &&
+    !worktrees.isError;
 
   async function browseParent() {
     let picked: string | null;
@@ -876,16 +894,17 @@ function CreateWorktree({
     }
     if (typeof picked !== "string" || !picked) return;
     // After a direct edit the latch stands, and the typed folder name with it.
-    if (pathEdited) setPath(composePickedPath(picked, path, derivedPath));
+    if (pathEdited)
+      setPath(
+        composePickedPath(picked, path, derivedPath ?? worktreeLeaf(branch)),
+      );
     else setPickedParent(picked);
   }
 
-  const missing =
-    !branch || !effectivePath
-      ? source === "new"
-        ? "Enter a branch name and folder to continue."
-        : "Pick a branch and folder to continue."
-      : "";
+  const missing = (() => {
+    if (branch && findingMain) return FINDING_MAIN_REASON;
+    return !branch || !effectivePath ? MISSING_COPY[source] : "";
+  })();
 
   async function handleCreate() {
     try {
@@ -1007,7 +1026,7 @@ function CreateWorktree({
           </div>
         )}
 
-        <div className="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 text-xs">
+        <div className="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1.5 text-xs">
           <label htmlFor="wt-path" className="text-muted-foreground">
             Folder
           </label>
@@ -1020,7 +1039,11 @@ function CreateWorktree({
               setPath(e.target.value);
               setPathEdited(true);
             }}
-            placeholder="Path for the new worktree"
+            onMouseEnter={clipTitle(effectivePath)}
+            aria-describedby="wt-path-full"
+            placeholder={
+              findingMain ? FINDING_MAIN_REASON : "Path for the new worktree"
+            }
             className="h-7 font-mono"
           />
           <DisabledReasonButton
@@ -1034,6 +1057,11 @@ function CreateWorktree({
           >
             <FolderOpenIcon />
           </DisabledReasonButton>
+          <FullPathRow
+            id="wt-path-full"
+            repoPath={repoPath}
+            value={effectivePath}
+          />
         </div>
       </div>
 
@@ -1054,6 +1082,41 @@ function CreateWorktree({
           Create worktree
         </Button>
       </DialogFooter>
+    </>
+  );
+}
+
+const MISSING_COPY: Record<"new" | "existing", string> = {
+  new: "Enter a branch name and folder to continue.",
+  existing: "Pick a branch and folder to continue.",
+};
+
+/** Holds a default folder until the worktree list names the main checkout. */
+export const FINDING_MAIN_REASON = "Finding the main worktree…";
+
+/** Where a Folder field's value lands, in the field's grid and named by its
+ *  `aria-describedby`. The line stays reserved while nothing resolves, so the
+ *  controls below never move. */
+export function FullPathRow({
+  id,
+  repoPath,
+  value,
+}: {
+  id: string;
+  repoPath: string;
+  value: string;
+}) {
+  const typed = value.trim();
+  const full = typed ? resolveTarget(repoPath, typed) : "";
+  return (
+    <>
+      <span className="text-[11px] text-muted-foreground">Full path</span>
+      <span
+        id={id}
+        className="col-span-2 flex h-4 min-w-0 items-center text-[11px]"
+      >
+        {isAbsolutePath(full) && <PathText path={full} className="font-mono" />}
+      </span>
     </>
   );
 }

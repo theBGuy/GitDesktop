@@ -121,6 +121,12 @@ const NETWORKED_ALWAYS = [
     reason:
       "the About screen's diagnostics are most wanted offline; a failed auth check maps to a status",
   },
+  {
+    file: "src/lib/git/queries/accounts.ts",
+    queryKey: '["gh-accounts"]',
+    reason:
+      "gh spawns the gh CLI locally; must run regardless of navigator.onLine, like system-health",
+  },
 ];
 
 /** Justified misses: the file, the query's key literal as its source spells it (so a

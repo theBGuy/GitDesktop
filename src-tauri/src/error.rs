@@ -45,9 +45,11 @@ pub enum AppError {
         remote: String,
         remote_branch: String,
     },
-    #[error("{}", crate::git::worktree::diverged_message(path, commits.len(), *more, *dirty))]
+    #[error("{}", crate::git::worktree::diverged_message(shown_path, commits.len(), *more, *dirty))]
     WorktreeDiverged {
         path: String,
+        /// git's spelling of the worktree, shown through the Display (`message`); never a wire key.
+        shown_path: String,
         head: String,
         commits: Vec<crate::git::worktree::DivergedCommit>,
         more: bool,
@@ -188,6 +190,7 @@ impl Serialize for AppError {
             }
             AppError::WorktreeDiverged {
                 path,
+                shown_path: _,
                 head,
                 commits,
                 more,

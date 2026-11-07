@@ -24,7 +24,6 @@ import {
   PrWorktreeCheckout,
   type PrWorktreeCheckoutHandle,
   resolveTarget,
-  supportsWorktreeCheckout,
 } from "@/features/pulls/PrWorktreeCheckout";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import {
@@ -32,20 +31,24 @@ import {
   ghPrCheckout,
   ghPrCheckoutWorktree,
   isWorktreeDiverged,
+  nativePrCheckout,
+  nativePrCheckoutWorktree,
   type WorktreeDiverged,
 } from "@/lib/git/api";
 import * as api from "@/lib/git/api/pr-actions";
 import {
+  ghAccountsOptions,
   pendingWriteOfKind,
   useCheckoutPr,
   useCheckoutPrWorktree,
   usePendingPrWrites,
   worktreeKey,
 } from "@/lib/git/queries";
-import type { RemoteLens } from "@/lib/git/types";
+import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
 import { ACTIONS } from "@/lib/hotkeys/registry";
 import { OFFLINE_WRITE_REASON } from "@/lib/offline-writes";
+import type { PrNoun } from "@/lib/pulls/pr-state";
 import { useUiStore } from "@/lib/stores/ui";
 import {
   promotionBlocksCheckout,
@@ -64,6 +67,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ghAccounts: vi.fn(),
   ghPrCheckout: vi.fn(async () => undefined),
   ghPrCheckoutWorktree: vi.fn(),
+  nativePrCheckout: vi.fn(async () => undefined),
+  nativePrCheckoutWorktree: vi.fn(),
 }));
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
@@ -130,6 +135,10 @@ function Harness({
   runningReason,
   apiRef,
   show = true,
+  provider = "github",
+  prNoun = "pull request",
+  crossRepository = false,
+  headRepositoryOwner = "base",
 }: {
   show?: boolean;
   number?: number;
@@ -137,6 +146,10 @@ function Harness({
   staleReason?: string;
   runningReason?: string;
   apiRef?: React.Ref<PrWorktreeCheckoutHandle>;
+  provider?: ForgeProvider | null;
+  prNoun?: PrNoun;
+  crossRepository?: boolean | null;
+  headRepositoryOwner?: string | null;
 }) {
   const checkout = useCheckoutPr(REPO);
   return (
@@ -150,6 +163,10 @@ function Harness({
           lens={lens}
           prNumber={number}
           headRefName="feat/x"
+          provider={provider ?? undefined}
+          crossRepository={crossRepository}
+          headRepositoryOwner={headRepositoryOwner}
+          prNoun={prNoun}
           staleReason={staleReason}
           runningReason={runningReason}
           pending={false}
@@ -159,7 +176,11 @@ function Harness({
             variant="outline"
             size="xs"
             onClick={() =>
-              void checkout.mutateAsync({ number, lens: "origin" })
+              void checkout.mutateAsync({
+                number,
+                lens: "origin",
+                provider: provider ?? undefined,
+              })
             }
           >
             Checkout
@@ -171,13 +192,23 @@ function Harness({
   );
 }
 
-function setup(props: Parameters<typeof Harness>[0] = {}) {
+/** `ghVersion` seeds the cached gh-accounts answer the worktree route reads;
+ *  null leaves the cache cold. */
+function setup(
+  props: Parameters<typeof Harness>[0] = {},
+  { ghVersion = "2.98.0" }: { ghVersion?: string | null } = {},
+) {
   const user = userEvent.setup();
   const client = new QueryClient({
     // Queries only: react-query mutations don't retry by default, and the
     // mutation-defaults guard passes only a bare `queries` entry.
     defaultOptions: { queries: { retry: false } },
   });
+  if (ghVersion !== null)
+    client.setQueryData(ghAccountsOptions().queryKey, {
+      version: ghVersion,
+      accounts: [],
+    });
   const view = render(
     <QueryClientProvider client={client}>
       <Harness {...props} />
@@ -234,6 +265,9 @@ beforeEach(() => {
   vi.mocked(ghPrCheckout).mockClear();
   vi.mocked(ghPrCheckoutWorktree).mockReset();
   vi.mocked(ghPrCheckoutWorktree).mockResolvedValue(undefined);
+  vi.mocked(nativePrCheckout).mockClear();
+  vi.mocked(nativePrCheckoutWorktree).mockReset();
+  vi.mocked(nativePrCheckoutWorktree).mockResolvedValue(undefined);
   vi.mocked(listUserWorktrees).mockResolvedValue([worktree({})]);
   vi.mocked(openDialog).mockReset();
   openWorktree.mockClear();
@@ -257,10 +291,10 @@ describe("PR split checkout", () => {
     expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
   });
 
-  it("the menu item opens the popover prefilled with the PR's sibling folder", async () => {
+  it("the menu item opens the popover prefilled with the PR's in-repo folder", async () => {
     const { user } = setup();
     await openFromMenu(user);
-    expect(folder().value).toBe("C:/repos/demo-pr-7");
+    expect(folder().value).toBe(".gitdesktop/worktrees/pr-7");
     expect(screen.getByText("feat/x")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Check out" }));
     await waitFor(() =>
@@ -268,7 +302,7 @@ describe("PR split checkout", () => {
         REPO,
         7,
         "origin",
-        "C:/repos/demo-pr-7",
+        ".gitdesktop/worktrees/pr-7",
         false,
         undefined,
       ),
@@ -314,7 +348,7 @@ describe("PR split checkout", () => {
       REPO,
       7,
       "origin",
-      "C:/repos/demo-pr-7",
+      ".gitdesktop/worktrees/pr-7",
       true,
       HEAD_A,
     ]);
@@ -486,56 +520,44 @@ describe("PR split checkout", () => {
     expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(1);
   });
 
-  it.each([
-    ["2.98.0", false],
-    ["2.98", false],
-    ["", false],
-    ["2.40.0", true],
-  ])("gh %j holds the worktree flavor: %s", async (version, held) => {
-    vi.mocked(ghAccounts).mockResolvedValue({ version, accounts: [] });
+  it("a gh below 2.98 leaves the worktree flavor enabled and routes it native", async () => {
     const apiRef = createRef<PrWorktreeCheckoutHandle>();
-    const { user } = setup({ apiRef });
-    await user.click(caret());
-    const item = await screen.findByRole("menuitem", {
-      name: /Check out in a worktree/,
-    });
-    const reason = `Needs GitHub CLI 2.98 or newer (you have ${version})`;
-    await waitFor(() => expect(ghAccounts).toHaveBeenCalled());
-    await act(async () => undefined);
-    if (held) {
-      expect(item).toHaveAttribute("aria-disabled", "true");
-      expect(item).toHaveTextContent(reason);
-    } else {
-      expect(item).not.toHaveAttribute("aria-disabled", "true");
-    }
-    await user.keyboard("{Escape}");
-    // The palette route skips the menu; the popover's primary holds the same way.
-    act(() => apiRef.current?.openFromPalette());
-    const primary = await screen.findByRole("button", { name: "Check out" });
-    if (held) {
-      expect(primary).toHaveAttribute("aria-disabled", "true");
-      expect(primary).toHaveAccessibleDescription(reason);
-    } else {
-      expect(primary).not.toHaveAttribute("aria-disabled", "true");
-    }
-  });
-
-  it("an unread gh version leaves the item enabled", async () => {
-    vi.mocked(ghAccounts).mockImplementation(
-      () => new Promise(() => undefined),
-    );
-    const { user } = setup();
+    const { user } = setup({ apiRef }, { ghVersion: "2.94.0" });
     await user.click(caret());
     const item = await screen.findByRole("menuitem", {
       name: /Check out in a worktree/,
     });
     expect(item).not.toHaveAttribute("aria-disabled", "true");
+    expect(item).toHaveTextContent(/^Check out in a worktree…$/);
+    await user.keyboard("{Escape}");
+    // The palette route skips the menu; its primary is enabled the same way.
+    act(() => apiRef.current?.openFromPalette());
+    const primary = await screen.findByRole("button", { name: "Check out" });
+    expect(primary).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(primary);
+    await waitFor(() => expect(nativePrCheckoutWorktree).toHaveBeenCalled());
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
   });
 
-  it("parses missing version parts as zero", () => {
-    expect(supportsWorktreeCheckout("2.98")).toBe(true);
-    expect(supportsWorktreeCheckout("2.97.9")).toBe(false);
-    expect(supportsWorktreeCheckout("3.0.0")).toBe(true);
+  it("a cold-cache press never waits on the gh read and routes native", async () => {
+    vi.mocked(ghAccounts).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    const { user } = setup({}, { ghVersion: null });
+    await openFromMenu(user);
+    expect(ghAccounts).toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await waitFor(() =>
+      expect(nativePrCheckoutWorktree).toHaveBeenCalledWith(
+        REPO,
+        7,
+        "origin",
+        ".gitdesktop/worktrees/pr-7",
+        false,
+        undefined,
+      ),
+    );
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
   });
 
   it("Browse composes the picked parent with the still-derived leaf", async () => {
@@ -547,7 +569,7 @@ describe("PR split checkout", () => {
         name: "Browse for the folder to create it in",
       }),
     );
-    await waitFor(() => expect(folder().value).toBe("D:/reviews/demo-pr-7"));
+    await waitFor(() => expect(folder().value).toBe("D:/reviews/pr-7"));
   });
 
   it("menu-route Cancel and Escape land on the caret", async () => {
@@ -871,7 +893,11 @@ describe("PR split checkout edges", () => {
     const dialog = await screen.findByRole("dialog", RESET_DIALOG);
     act(() =>
       useWorktreeRemovalStore.setState({
-        byRepo: { [REPO]: { [`${REPO}-pr-7`]: {} as WorktreeRemoval } },
+        byRepo: {
+          [REPO]: {
+            [`${REPO}/.gitdesktop/worktrees/pr-7`]: {} as WorktreeRemoval,
+          },
+        },
       }),
     );
     await user.click(
@@ -1079,6 +1105,24 @@ describe("PR split checkout edges", () => {
   });
 
   it("every success toast offers to open the worktree it wrote", async () => {
+    // The default is relative, so Open comes from the row the run wrote. Its
+    // branch isn't the head name, so the next open still shows the create form.
+    let wrote = false;
+    vi.mocked(listUserWorktrees).mockImplementation(async () =>
+      wrote
+        ? [
+            worktree({}),
+            worktree({
+              path: "C:/repos/demo/.gitdesktop/worktrees/pr-7",
+              branch: "pr-7",
+              isMain: false,
+            }),
+          ]
+        : [worktree({})],
+    );
+    vi.mocked(ghPrCheckoutWorktree).mockImplementationOnce(async () => {
+      wrote = true;
+    });
     const { user } = setup();
     await openFromMenu(user);
     await user.click(screen.getByRole("button", { name: "Check out" }));
@@ -1100,7 +1144,9 @@ describe("PR split checkout edges", () => {
       expect(toastAction(call).label).toBe("Open worktree");
     // The path each run wrote, pinned at success: the field moved on since.
     act(() => toastAction(0).onClick());
-    expect(openWorktree).toHaveBeenLastCalledWith("C:/repos/demo-pr-7");
+    expect(openWorktree).toHaveBeenLastCalledWith(
+      "C:/repos/demo/.gitdesktop/worktrees/pr-7",
+    );
     act(() => toastAction(1).onClick());
     expect(openWorktree).toHaveBeenLastCalledWith("E:/typed/review");
   });
@@ -1191,30 +1237,44 @@ describe("PR split checkout edges", () => {
     );
   });
 
-  it("the gh version is read only while the menu or popover is open", async () => {
-    const { user, client } = setup();
+  it("the gh version is prefetched only when the menu opens, never on mount", async () => {
+    const { user, client } = setup({}, { ghVersion: null });
     await act(async () => undefined);
     expect(ghAccounts).not.toHaveBeenCalled();
     await openFromMenu(user);
-    await waitFor(() => expect(ghAccounts).toHaveBeenCalled());
+    await waitFor(() => expect(ghAccounts).toHaveBeenCalledTimes(1));
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByLabelText("Folder")).toBeNull());
-    expect(screen.queryByRole("menuitem")).toBeNull();
-    const reads = vi.mocked(ghAccounts).mock.calls.length;
-    // Only a still-mounted observer would refetch an invalidated key.
+    // A prefetch leaves no observer, so an invalidated key is not re-read.
     await act(() => client.invalidateQueries({ queryKey: ["gh-accounts"] }));
-    expect(ghAccounts).toHaveBeenCalledTimes(reads);
+    expect(ghAccounts).toHaveBeenCalledTimes(1);
   });
 
-  it("a cold palette opening reads the gh version once", async () => {
+  it("a cold palette opening prefetches the gh version once", async () => {
     const apiRef = createRef<PrWorktreeCheckoutHandle>();
-    setup({ apiRef });
+    setup({ apiRef }, { ghVersion: null });
     await act(async () => undefined);
     expect(ghAccounts).not.toHaveBeenCalled();
     act(() => apiRef.current?.openFromPalette());
     await waitFor(() => expect(document.activeElement).toBe(folder()));
     await waitFor(() => expect(ghAccounts).toHaveBeenCalledTimes(1));
   });
+
+  it.each<[ForgeProvider | null]>([["gitlab"], ["bitbucket"], [null]])(
+    "%s never reads the gh version",
+    async (provider) => {
+      const apiRef = createRef<PrWorktreeCheckoutHandle>();
+      const { user } = setup({ apiRef, provider }, { ghVersion: null });
+      await openFromMenu(user);
+      await user.click(screen.getByRole("button", { name: "Check out" }));
+      await waitFor(() => expect(nativePrCheckoutWorktree).toHaveBeenCalled());
+      await waitFor(() => expect(document.activeElement).toBe(caret()));
+      act(() => apiRef.current?.openFromPalette());
+      await waitFor(() => expect(document.activeElement).toBe(folder()));
+      await act(async () => undefined);
+      expect(ghAccounts).not.toHaveBeenCalled();
+    },
+  );
 
   it("a padded folder meets the removal its trimmed spelling names", async () => {
     useWorktreeRemovalStore.setState({
@@ -1497,13 +1557,34 @@ describe("PR split checkout edges", () => {
     ["C:/repos/demo", "..\\..\\..\\..\\x", "C:/x"],
     ["//srv/share/demo", "../x", "//srv/share/x"],
     ["C:/repos/demo", "D:/abs/x", "D:/abs/x"],
-    ["C:/repos/demo", "C:\\abs\\x", "C:\\abs\\x"],
+    ["C:/repos/demo", "C:\\abs\\x", "C:/abs/x"],
+    ["C:/repos/demo", "C:/repos/tmp/../review", "C:/repos/review"],
+    ["C:/repos/demo", "C:\\repos\\tmp\\..\\review", "C:/repos/review"],
+    ["C:/repos/demo", "C:/../x", "C:/x"],
+    ["C:/repos/demo", "C:/a/./b/", "C:/a/b"],
+    ["C:/repos/demo", "//srv/share/../x", "//srv/share/x"],
+    ["C:/repos/demo", "\\\\srv\\share\\a\\..\\x", "//srv/share/x"],
+    ["C:/repos/demo", "\\\\srv", "\\\\srv"],
     ["C:/repos/demo", "\\reviews", "C:/reviews"],
     ["C:/repos/demo", "/reviews", "C:/reviews"],
     ["//srv/share/demo", "/x", "//srv/share/x"],
     ["C:/repos/demo", "C:reviews", "C:reviews"],
+    ["C:/repos/demo", "C:x/../y", "C:x/../y"],
   ])("resolveTarget(%s, %s) is %s", (repo, typed, want) => {
     expect(resolveTarget(repo, typed)).toBe(want);
+  });
+
+  // Off Windows a backslash is a filename character, so it is never split on.
+  it.each([
+    ["/repos/demo", "review\\one", "/repos/demo/review\\one"],
+    ["/repos/demo", "..\\x", "/repos/demo/..\\x"],
+    ["/repos/demo", "../a\\b/./c", "/repos/a\\b/c"],
+    ["/repos/demo", "C:x", "/repos/demo/C:x"],
+    ["/repos/demo", "/abs\\x", "/abs\\x"],
+    ["/repos/demo", "/a/b/../c", "/a/c"],
+    ["/repos/demo", "/../x", "/x"],
+  ])("on POSIX resolveTarget(%s, %s) is %s", (repo, typed, want) => {
+    expect(resolveTarget(repo, typed, false)).toBe(want);
   });
 
   it("a root-relative folder opens the drive's folder, not the repository's", async () => {
@@ -1542,7 +1623,7 @@ describe("PR split checkout edges", () => {
       }),
     );
     await waitFor(() => expect(document.activeElement).toBe(folder()));
-    expect(folder().value).toBe("C:/repos/demo-pr-7");
+    expect(folder().value).toBe(".gitdesktop/worktrees/pr-7");
     expect(screen.queryByRole("button", { name: "Update to PR" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Check out" }));
     await waitFor(() =>
@@ -1550,7 +1631,7 @@ describe("PR split checkout edges", () => {
         REPO,
         7,
         "origin",
-        "C:/repos/demo-pr-7",
+        ".gitdesktop/worktrees/pr-7",
         false,
         undefined,
       ),
@@ -1658,7 +1739,7 @@ describe("PR split checkout edges", () => {
     await waitFor(() => expect(screen.queryByLabelText("Folder")).toBeNull());
     await openFromMenu(user);
     await act(async () => answer("D:/reviews"));
-    expect(folder().value).toBe("C:/repos/demo-pr-7");
+    expect(folder().value).toBe(".gitdesktop/worktrees/pr-7");
   });
 
   /** Starts a create, closes the popover, reopens it from the palette and edits
@@ -1749,6 +1830,7 @@ describe("PR split checkout edges", () => {
                 .mutateAsync({
                   number: 7,
                   lens: "origin",
+                  provider: "github",
                   path: "C:/repos/demo-pr-7",
                   force: false,
                 })
@@ -1764,6 +1846,10 @@ describe("PR split checkout edges", () => {
     const user = userEvent.setup();
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
+    });
+    client.setQueryData(ghAccountsOptions().queryKey, {
+      version: "2.98.0",
+      accounts: [],
     });
     render(
       <QueryClientProvider client={client}>
@@ -1907,5 +1993,555 @@ describe("ghPrCheckoutWorktree wire shape", () => {
       "repoPath",
     ]);
     expect(calls[0]?.args).toMatchObject({ force: true, expectedHead: HEAD_A });
+  });
+});
+
+const DEFAULT_TARGET = ".gitdesktop/worktrees/pr-7";
+const RESOLVED_DEFAULT = "C:/repos/demo/.gitdesktop/worktrees/pr-7";
+const LINKED_DEFAULT = "C:/repos/main/.gitdesktop/worktrees/pr-7";
+const linkedRows = () => [
+  worktree({ path: "C:/repos/main", isMain: true }),
+  worktree({ path: REPO, branch: "other", isMain: false }),
+];
+const checkOutButton = () => screen.getByRole("button", { name: "Check out" });
+const fullPathRow = () =>
+  document.getElementById(
+    folder().getAttribute("aria-describedby") as string,
+  ) as HTMLElement;
+
+/** jsdom lays nothing out, so a clip is stubbed: content wider than its box. */
+function clip(el: HTMLElement) {
+  Object.defineProperty(el, "scrollWidth", { configurable: true, value: 400 });
+  Object.defineProperty(el, "clientWidth", { configurable: true, value: 100 });
+}
+
+async function openDefault(user: ReturnType<typeof userEvent.setup>) {
+  await openFromMenu(user);
+  await waitFor(() => expect(folder().value).toBe(DEFAULT_TARGET));
+}
+
+/** Opens from the palette over a row read that answers only when told. */
+async function openBeforeRows(): Promise<{
+  user: ReturnType<typeof userEvent.setup>;
+  answer: (rows: UserWorktree[]) => void;
+}> {
+  // Every read made before the answer settles with it.
+  const waiting: ((rows: UserWorktree[]) => void)[] = [];
+  vi.mocked(listUserWorktrees).mockImplementation(
+    () => new Promise((res) => void waiting.push(res)),
+  );
+  const apiRef = createRef<PrWorktreeCheckoutHandle>();
+  const { user } = setup({ apiRef });
+  act(() => apiRef.current?.openFromPalette());
+  await waitFor(() => expect(document.activeElement).toBe(folder()));
+  await waitFor(() => expect(listUserWorktrees).toHaveBeenCalled());
+  return {
+    user,
+    answer: (rows) => {
+      for (const res of waiting.splice(0)) res(rows);
+    },
+  };
+}
+
+describe("PR worktree default folder", () => {
+  it("the Full path row resolves the folder as it is typed", async () => {
+    const { user } = setup();
+    await openDefault(user);
+    expect(screen.getByText("Full path")).toBeInTheDocument();
+    const row = fullPathRow();
+    expect(row.textContent).toBe(RESOLVED_DEFAULT);
+    expect(row.querySelector("span.flex.min-w-0")).not.toBeNull();
+    expect(row.tabIndex).toBe(-1);
+    for (const [typed, shown] of [
+      ["E:/x/y", "E:/x/y"],
+      ["../review", "C:/repos/review"],
+      ["\\reviews", "C:/reviews"],
+      ["C:x", ""],
+    ]) {
+      await user.clear(folder());
+      await user.type(folder(), typed);
+      expect(row.textContent).toBe(shown);
+    }
+    await user.clear(folder());
+    expect(row.textContent).toBe("");
+    expect(fullPathRow()).toBe(row);
+  });
+
+  it("a clipped folder value shows its tooltip, an unclipped one none", async () => {
+    const { user } = setup();
+    await openDefault(user);
+    fireEvent.mouseEnter(folder());
+    expect(folder()).not.toHaveAttribute("title");
+    clip(folder());
+    fireEvent.mouseEnter(folder());
+    expect(folder()).toHaveAttribute("title", DEFAULT_TARGET);
+  });
+
+  it("a clipped Full path shows the whole resolved path", async () => {
+    const { user } = setup();
+    await openDefault(user);
+    const pathText = fullPathRow().firstElementChild as HTMLElement;
+    clip(pathText.firstElementChild as HTMLElement);
+    fireEvent.mouseEnter(pathText);
+    expect(pathText).toHaveAttribute("title", RESOLVED_DEFAULT);
+  });
+
+  it("from a linked checkout the default sits under the main worktree", async () => {
+    vi.mocked(listUserWorktrees).mockResolvedValue(linkedRows());
+    const { user } = setup();
+    await openFromMenu(user);
+    await waitFor(() => expect(folder().value).toBe(LINKED_DEFAULT));
+    expect(fullPathRow().textContent).toBe(LINKED_DEFAULT);
+    await user.click(checkOutButton());
+    await waitFor(() =>
+      expect(ghPrCheckoutWorktree).toHaveBeenCalledWith(
+        REPO,
+        7,
+        "origin",
+        LINKED_DEFAULT,
+        false,
+        undefined,
+      ),
+    );
+  });
+
+  it("a removal of the resolved default refuses the create", async () => {
+    useWorktreeRemovalStore.setState({
+      byRepo: { [REPO]: { [RESOLVED_DEFAULT]: {} as WorktreeRemoval } },
+    });
+    const { user } = setup();
+    await openDefault(user);
+    await user.click(checkOutButton());
+    await waitFor(() =>
+      expect(toastInfo).toHaveBeenCalledWith("This worktree is being removed."),
+    );
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
+  });
+
+  it("holds the default until the rows name the main checkout", async () => {
+    const { user, answer } = await openBeforeRows();
+    expect(folder().value).toBe("");
+    expect(folder()).toHaveAttribute(
+      "placeholder",
+      "Finding the main worktree…",
+    );
+    expect(checkOutButton()).toHaveAttribute("aria-disabled", "true");
+    expect(checkOutButton()).toHaveAccessibleDescription(
+      "Finding the main worktree…",
+    );
+    await user.keyboard("{Enter}");
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
+    await act(async () => answer(linkedRows()));
+    await waitFor(() => expect(folder().value).toBe(LINKED_DEFAULT));
+    expect(checkOutButton()).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("a failed row read lets the user type a folder", async () => {
+    vi.mocked(listUserWorktrees).mockRejectedValue(new Error("read failed"));
+    const apiRef = createRef<PrWorktreeCheckoutHandle>();
+    const { user } = setup({ apiRef });
+    act(() => apiRef.current?.openFromPalette());
+    await waitFor(() =>
+      expect(folder()).toHaveAttribute(
+        "placeholder",
+        "Path for the new worktree",
+      ),
+    );
+    expect(folder().value).toBe("");
+    expect(checkOutButton()).toHaveAccessibleDescription(
+      "Enter a folder for the worktree.",
+    );
+    await user.type(folder(), "E:/x/y");
+    expect(checkOutButton()).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("a Browse pick before the rows answer is submittable", async () => {
+    vi.mocked(openDialog).mockResolvedValue("D:\\reviews");
+    const { user } = await openBeforeRows();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Browse for the folder to create it in",
+      }),
+    );
+    await waitFor(() => expect(folder().value).toBe("D:/reviews/pr-7"));
+    expect(checkOutButton()).not.toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("the reset confirm names the resolved folder and retries the echo", async () => {
+    vi.mocked(ghPrCheckoutWorktree).mockRejectedValueOnce(
+      diverged({ path: DEFAULT_TARGET }),
+    );
+    const { user } = setup();
+    await openDefault(user);
+    await user.click(checkOutButton());
+    const dialog = await screen.findByRole("dialog", RESET_DIALOG);
+    const shown = dialog.querySelector("span.block > span.flex.min-w-0");
+    expect(shown?.textContent).toBe(RESOLVED_DEFAULT);
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Discard 1 commit and reset",
+      }),
+    );
+    await waitFor(() => expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(ghPrCheckoutWorktree).mock.calls[1]?.[3]).toBe(
+      DEFAULT_TARGET,
+    );
+    expect(vi.mocked(ghPrCheckoutWorktree).mock.calls[1]?.[5]).toBe(HEAD_A);
+  });
+});
+
+type Flavor = "plain" | "worktree";
+type Route = "gh" | "native";
+
+const CHECKOUT_SPIES = {
+  plain: { gh: ghPrCheckout, native: nativePrCheckout },
+  worktree: { gh: ghPrCheckoutWorktree, native: nativePrCheckoutWorktree },
+} as const;
+
+const ALL_CHECKOUT_SPIES = [
+  ghPrCheckout,
+  nativePrCheckout,
+  ghPrCheckoutWorktree,
+  nativePrCheckoutWorktree,
+];
+
+async function pressCheckout(
+  user: ReturnType<typeof userEvent.setup>,
+  flavor: Flavor,
+) {
+  if (flavor === "plain") {
+    await user.click(screen.getByRole("button", { name: "Checkout" }));
+    return;
+  }
+  await openFromMenu(user);
+  await user.click(screen.getByRole("button", { name: "Check out" }));
+}
+
+async function expectRoute(flavor: Flavor, route: Route) {
+  const fired = CHECKOUT_SPIES[flavor][route];
+  await waitFor(() => expect(fired).toHaveBeenCalledTimes(1));
+  for (const spy of ALL_CHECKOUT_SPIES)
+    if (spy !== fired) expect(spy).not.toHaveBeenCalled();
+}
+
+describe("checkout routing", () => {
+  it.each<[string, ForgeProvider | null, string, Flavor, Route]>([
+    ["github, cached 2.98.0", "github", "2.98.0", "plain", "gh"],
+    ["github, cached 2.98.0", "github", "2.98.0", "worktree", "gh"],
+    ["github, cached 2.94.0", "github", "2.94.0", "plain", "gh"],
+    ["github, cached 2.94.0", "github", "2.94.0", "worktree", "native"],
+    ["gitlab", "gitlab", "2.98.0", "plain", "native"],
+    ["gitlab", "gitlab", "2.98.0", "worktree", "native"],
+    ["bitbucket", "bitbucket", "2.98.0", "plain", "native"],
+    ["bitbucket", "bitbucket", "2.98.0", "worktree", "native"],
+    ["unknown provider", null, "2.98.0", "plain", "gh"],
+    ["unknown provider", null, "2.98.0", "worktree", "native"],
+  ])(
+    "%s (provider %s, gh %s): the %s checkout routes %s",
+    async (_label, provider, ghVersion, flavor, route) => {
+      const { user } = setup({ provider }, { ghVersion });
+      await pressCheckout(user, flavor);
+      await expectRoute(flavor, route);
+      // The cache already answers: no press, and no opening, spawns gh here.
+      expect(ghAccounts).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each<[string, string, Route]>([
+    ["gh not found, or a version line that won't parse", "", "native"],
+    ["an unparseable version", "garbage", "native"],
+    ["a version missing its patch", "2.98", "gh"],
+  ])(
+    "github with %s (gh %j) routes the worktree flavor %s",
+    async (_label, ghVersion, route) => {
+      const { user } = setup({}, { ghVersion });
+      await pressCheckout(user, "worktree");
+      await expectRoute("worktree", route);
+    },
+  );
+
+  it("github with a failed gh read routes the worktree flavor native", async () => {
+    vi.mocked(ghAccounts).mockRejectedValue(new Error("gh exploded"));
+    const { user, client } = setup({}, { ghVersion: null });
+    await openFromMenu(user);
+    await waitFor(() =>
+      expect(client.getQueryState(ghAccountsOptions().queryKey)?.status).toBe(
+        "error",
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    await expectRoute("worktree", "native");
+  });
+
+  it("a forced retry stays on the route its first attempt took", async () => {
+    vi.mocked(ghAccounts).mockImplementation(
+      () => new Promise(() => undefined),
+    );
+    vi.mocked(nativePrCheckoutWorktree).mockRejectedValueOnce(diverged());
+    const { user, client } = setup({}, { ghVersion: null });
+    await openFromMenu(user);
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    const dialog = await screen.findByRole("dialog", RESET_DIALOG);
+    // A version landing now would route a fresh press to gh; the retry must
+    // still reach the engine whose refusal measured the head.
+    act(() =>
+      client.setQueryData(ghAccountsOptions().queryKey, {
+        version: "2.98.0",
+        accounts: [],
+      }),
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Discard 1 commit and reset",
+      }),
+    );
+    await waitFor(() =>
+      expect(nativePrCheckoutWorktree).toHaveBeenCalledTimes(2),
+    );
+    expect(vi.mocked(nativePrCheckoutWorktree).mock.calls[1]).toEqual([
+      REPO,
+      7,
+      "origin",
+      ".gitdesktop/worktrees/pr-7",
+      true,
+      HEAD_A,
+    ]);
+    expect(ghPrCheckoutWorktree).not.toHaveBeenCalled();
+  });
+
+  it("a merge request's reset names the MR and retries native", async () => {
+    vi.mocked(nativePrCheckoutWorktree).mockRejectedValueOnce(diverged());
+    const { user } = setup({ provider: "gitlab", prNoun: "merge request" });
+    await openFromMenu(user);
+    await user.click(screen.getByRole("button", { name: "Check out" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Reset this worktree to the MR?",
+    });
+    expect(dialog).toHaveTextContent(
+      "has commits that aren't on the merge request, so it can't fast-forward.",
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Discard 1 commit and reset",
+      }),
+    );
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith(
+        "Worktree reset to the MR",
+        expect.anything(),
+      ),
+    );
+    expect(vi.mocked(nativePrCheckoutWorktree).mock.calls[1]?.slice(4)).toEqual(
+      [true, HEAD_A],
+    );
+  });
+
+  it("a merge request's existing worktree names the MR", async () => {
+    withReviewTree();
+    const { user } = setup({
+      provider: "gitlab",
+      prNoun: "merge request",
+      crossRepository: false,
+      headRepositoryOwner: null,
+    });
+    await openLoadedFromMenu(user);
+    expect(
+      await screen.findByText("This merge request already has a worktree."),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Update to MR" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a native worktree checkout holds under the shared checkout write kind", async () => {
+    let settle!: () => void;
+    vi.mocked(nativePrCheckoutWorktree).mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          settle = res;
+        }),
+    );
+    function Probe() {
+      const run = useCheckoutPrWorktree(REPO);
+      const running = pendingWriteOfKind(usePendingPrWrites(REPO), "checkout");
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() =>
+              void run
+                .mutateAsync({
+                  number: 7,
+                  lens: "origin",
+                  provider: "bitbucket",
+                  path: "C:/repos/demo-pr-7",
+                  force: false,
+                })
+                .catch(() => undefined)
+            }
+          >
+            Run
+          </button>
+          <output>{checkoutRunningReason(running, true) ?? "idle"}</output>
+        </>
+      );
+    }
+    const user = userEvent.setup();
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <Probe />
+      </QueryClientProvider>,
+    );
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    // The reason the plain half and the caret item show while it runs.
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("Checking out…"),
+    );
+    expect(nativePrCheckoutWorktree).toHaveBeenCalledTimes(1);
+    await act(async () => settle());
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("idle"),
+    );
+  });
+});
+
+describe("existing-worktree match", () => {
+  it.each<
+    [
+      string,
+      ForgeProvider | null,
+      boolean | null,
+      string | null,
+      string[],
+      string | null,
+    ]
+  >([
+    [
+      "a fork beside the user's bare namesake",
+      "github",
+      true,
+      "alice",
+      ["feat/x"],
+      null,
+    ],
+    [
+      "a fork with its owner-prefixed worktree",
+      "github",
+      true,
+      "alice",
+      ["feat/x", "alice/feat/x"],
+      "alice/feat/x",
+    ],
+    ["a fork whose owner is gone", "github", true, null, ["feat/x"], null],
+    [
+      "a same-repo PR with its owner",
+      "github",
+      false,
+      "base",
+      ["feat/x"],
+      "feat/x",
+    ],
+    ["a GitHub row missing its owner", "github", false, null, ["feat/x"], null],
+    [
+      "the Bitbucket deleted-fork shape",
+      "bitbucket",
+      false,
+      null,
+      ["feat/x"],
+      null,
+    ],
+    ["a GitLab same-project MR", "gitlab", false, null, ["feat/x"], "feat/x"],
+    [
+      "a Bitbucket fork by workspace",
+      "bitbucket",
+      true,
+      "ws",
+      ["feat/x", "ws/feat/x"],
+      "ws/feat/x",
+    ],
+    ["a GitLab cross-project MR", "gitlab", true, null, ["feat/x"], null],
+  ])(
+    "%s",
+    async (_label, provider, crossRepository, headRepositoryOwner, branches, want) => {
+      vi.mocked(listUserWorktrees).mockResolvedValue([
+        worktree({}),
+        ...branches.map((branch, i) =>
+          worktree({ path: `D:/elsewhere/tree-${i}`, branch, isMain: false }),
+        ),
+      ]);
+      const { user } = setup({
+        provider,
+        crossRepository,
+        headRepositoryOwner,
+      });
+      await openLoadedFromMenu(user);
+      if (want === null) {
+        await waitFor(() => expect(document.activeElement).toBe(folder()));
+        expect(screen.queryByRole("button", { name: /^Update to/ })).toBeNull();
+      } else {
+        expect(
+          await screen.findByRole("button", { name: /^Update to/ }),
+        ).toBeInTheDocument();
+        expect(
+          screen.getByText(want, { selector: "code" }),
+        ).toBeInTheDocument();
+      }
+    },
+  );
+});
+
+describe("native checkout wire shapes", () => {
+  async function capture(send: () => Promise<void>) {
+    const previous = getTransport();
+    const calls: { cmd: string; args: unknown }[] = [];
+    installTransport({
+      invoke: async (cmd: string, args?: unknown) => {
+        calls.push({ cmd, args });
+        return undefined;
+      },
+    } as Parameters<typeof installTransport>[0]);
+    try {
+      await send();
+    } finally {
+      installTransport(previous);
+    }
+    expect(calls).toHaveLength(1);
+    return calls[0] as { cmd: string; args: object };
+  }
+
+  it("the plain checkout sends its command's camelCase keys", async () => {
+    const call = await capture(() => api.nativePrCheckout(REPO, 7, "origin"));
+    expect(call.cmd).toBe("native_pr_checkout");
+    expect(Object.keys(call.args).sort()).toEqual([
+      "lens",
+      "number",
+      "repoPath",
+    ]);
+  });
+
+  it("the worktree checkout sends its command's camelCase keys", async () => {
+    const call = await capture(() =>
+      api.nativePrCheckoutWorktree(
+        REPO,
+        7,
+        "origin",
+        "C:/repos/demo-pr-7",
+        true,
+        HEAD_A,
+      ),
+    );
+    expect(call.cmd).toBe("native_pr_checkout_worktree");
+    expect(Object.keys(call.args).sort()).toEqual([
+      "expectedHead",
+      "force",
+      "lens",
+      "number",
+      "path",
+      "repoPath",
+    ]);
+    expect(call.args).toMatchObject({ force: true, expectedHead: HEAD_A });
   });
 });
