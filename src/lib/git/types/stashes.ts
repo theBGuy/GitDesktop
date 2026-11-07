@@ -1,3 +1,5 @@
+import type { BinaryKind } from "./workingtree";
+
 export interface StashEntry {
   index: number;
   /** The stash commit's id: the stable identity. `index` is its current slot,
@@ -12,6 +14,7 @@ export interface StashFile {
   added: number;
   deleted: number;
   isBinary: boolean;
+  binaryKind: BinaryKind | null;
   /** In the stash's untracked-files parent; its content reads from there. */
   untracked: boolean;
 }

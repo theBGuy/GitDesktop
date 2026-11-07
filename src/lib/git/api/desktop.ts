@@ -6,6 +6,9 @@ export const revealInExplorer = (path: string) =>
 export const openWithDefault = (path: string) =>
   invoke<void>("open_with_default", { path });
 
+export const openNearestFolder = (repoPath: string, relPath: string) =>
+  invoke<void>("open_nearest_folder", { repoPath, relPath });
+
 export const openInTerminal = (
   path: string,
   terminal?: string,

@@ -180,6 +180,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     /\bif\s*\(\s*repoPath\s*&&\s*imageRevs\s*&&\s*imageMime\s*\(\s*filePath\s*\)\s*\)/,
   );
   const headerOnlyAt = armReturn(/\bif\s*\(\s*headerOnly\s*!==\s*null\s*\)/);
+  const typechangeAt = armReturn(/\bif\s*\(\s*halves\s*!==\s*null\s*\)/);
   const textAt = returns[returns.length - 1];
   const arms = [
     ["pending", armReturn(/\bif\s*\(\s*isPending\s*\)/), false],
@@ -190,10 +191,15 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     ],
     ["no-data", armReturn(/\bif\s*\(\s*!\s*data\s*\)/), false],
     ["image", imageAt, true],
-    // The binary placeholder is the image guard's else branch.
+    // A typechange with one binary half stacks both halves after the image arm.
+    ["typechange", typechangeAt > imageAt ? typechangeAt : -1, true],
+    // The binary placeholder is the image guard's else branch, past the
+    // typechange arm's guard.
     [
       "binary placeholder",
-      imageAt < 0 ? -1 : (returns.find((r) => r > imageAt) ?? -1),
+      imageAt < 0 || typechangeAt < 0
+        ? -1
+        : (returns.find((r) => r > imageAt && r !== typechangeAt) ?? -1),
       true,
     ],
     ["empty", armReturn(/\bif\s*\(\s*emptyDiff\s*\)/), true],
@@ -204,7 +210,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     arms.every(([, at]) => at >= 0) &&
       new Set(arms.map(([, at]) => at)).size === arms.length &&
       returns.length === arms.length,
-    "every DiffContent return is one of the eight named arms",
+    "every DiffContent return is one of the nine named arms",
   );
   for (const [name, at, data] of arms) {
     if (at < 0) continue;
@@ -486,15 +492,16 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     "the held record has exactly two writes: the cleanup's true and the gate's reset",
   );
 
-  // The five nodes that can hold focus and leave on a watched flip: the text
-  // scroller, the Preview body, both toolbar clusters, and the notice. The
-  // scroller's capture rides its merged ref, shared with the line anchor.
+  // The six nodes that can hold focus and leave on a watched flip: the text
+  // and typechange scrollers, the Preview body, both toolbar clusters, and the
+  // notice. Each scroller's capture rides the merged ref, shared with the line
+  // anchor.
   need(
     codeOccurrences(surfaceRaw, masked, "ref={captureHeldRef}", body).length ===
       4 &&
       codeOccurrences(surfaceRaw, masked, "ref={scrollerCaptureRef}", body)
-        .length === 1,
-    "five capture nodes carry captureHeldRef, the scroller through its merged ref",
+        .length === 2,
+    "six capture nodes carry captureHeldRef, the scrollers through their merged ref",
   );
   // Identity-stable, so a re-render never runs the capture's cleanup; its own
   // cleanup runs the capture's before the scroller stops being readable.
@@ -534,6 +541,14 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
         "ref={scrollerCaptureRef}",
       ),
       "the text scroller is a capture node",
+    ],
+    [
+      captureAt(
+        String.raw`<div\s+key="arm-typechange"\s+(?<ref>ref=\{scrollerCaptureRef\})\s+className="min-h-0 flex-1 overflow-auto"\s*>\s*(?<child>\{halves\.binaryFirst\b)`,
+        "{halves.binaryFirst",
+        "ref={scrollerCaptureRef}",
+      ),
+      "the typechange scroller is a capture node",
     ],
     [
       captureAt(
@@ -896,7 +911,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<div className="min-h-0 flex-1 overflow-auto">',
     ),
     image,
-    "five capture nodes carry captureHeldRef",
+    "six capture nodes carry captureHeldRef",
   );
   // The merged ref dropping the capture's cleanup, or its stable identity.
   caught(
@@ -932,7 +947,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     image,
     "the held record is consumed after its one read",
   );
-  // A capture ref moved to another node: the count holds at five, the
+  // A capture ref moved to another node: the count holds at six, the
   // placement trips.
   const unref = (raw, from) =>
     swap(raw, from, from.replace(" ref={captureHeldRef}", ""));
@@ -942,7 +957,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<span className="contents" ref={captureHeldRef}>\n            <MarkdownDocPreview',
     ),
     image,
-    "five capture nodes carry captureHeldRef",
+    "six capture nodes carry captureHeldRef",
   );
   caught(
     swap(
@@ -1079,7 +1094,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       image,
       `the ${arm} arm passes the shell no notice`,
     );
-  // A ninth arm the pins above don't name.
+  // A tenth arm the pins above don't name.
   caught(
     swap(
       surface,
@@ -1087,7 +1102,49 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       "  if (narrowPane) return shell(null);\n  if (emptyDiff) {\n",
     ),
     image,
-    "every DiffContent return is one of the eight named arms",
+    "every DiffContent return is one of the nine named arms",
+  );
+  // The typechange arm returning outside the shell, or dropping its notice.
+  caught(
+    swap(
+      surface,
+      '      return shell(\n        <div\n          key="arm-typechange"',
+      '      return (\n        <div\n          key="arm-typechange"',
+    ),
+    image,
+    UNSHELLED,
+  );
+  caught(
+    swap(
+      surface,
+      "[textHalf, band]}\n        </div>,\n        notice,\n",
+      "[textHalf, band]}\n        </div>,\n",
+    ),
+    image,
+    "the typechange arm passes the notice to the shell",
+  );
+  // A third scroller capture, or the typechange scroller's moved to its band.
+  caught(
+    swap(
+      surface,
+      '<InfoNote className="shrink-0">',
+      '<InfoNote ref={scrollerCaptureRef} className="shrink-0">',
+    ),
+    image,
+    "six capture nodes carry captureHeldRef",
+  );
+  caught(
+    swap(
+      swap(
+        surface,
+        '          key="arm-typechange"\n          ref={scrollerCaptureRef}\n',
+        '          key="arm-typechange"\n',
+      ),
+      '          key="band"\n',
+      '          key="band"\n          ref={scrollerCaptureRef}\n',
+    ),
+    image,
+    "the typechange scroller is a capture node",
   );
   // Fail closed on a component the scan can't find.
   caught(
@@ -1138,10 +1195,11 @@ test("diff shell: the shell and the lazy fallback root on one shared class", () 
   );
 });
 
-/** What the binary arm's `<BinaryFileSummary>` must be handed: the placeholder
+/** What each of the binary arm's two `<BinaryFileSummary>` tags (the
+ *  typechange band's and the placeholder's) must be handed: the placeholder
  *  flag as `held` (no lookup on another read's ids), the working-tree side
  *  from the image revs, the surface's anchor commit, and a mount only with a
- *  repo. */
+ *  repo. Only the band's is the band variant, which never offers actions. */
 function binaryArmViolations(surfaceRaw) {
   const masked = maskNonCode(surfaceRaw, true);
   const at = masked.indexOf("if (data.isBinary) {");
@@ -1149,32 +1207,59 @@ function binaryArmViolations(surfaceRaw) {
   const open = masked.indexOf("{", at);
   const close = matchBrace(masked, open);
   const tags = [...masked.slice(open, close).matchAll(/<BinaryFileSummary\b/g)];
-  if (tags.length !== 1 || masked.split("<BinaryFileSummary").length !== 2)
-    return ["the binary arm renders the file's one BinaryFileSummary"];
-  const from = open + tags[0].index;
-  const end = masked.indexOf("/>", from);
-  const attrs = flat(surfaceRaw.slice(from, end));
+  if (tags.length !== 2 || masked.split("<BinaryFileSummary").length !== 3)
+    return ["the binary arm renders the file's two BinaryFileSummary tags"];
+  const guard = /\bif\s*\(\s*halves\s*!==\s*null\s*\)\s*\{/.exec(
+    masked.slice(open, close),
+  );
+  const armOpen =
+    guard === null ? -1 : open + guard.index + guard[0].length - 1;
+  const armClose = armOpen < 0 ? -1 : matchBrace(masked, armOpen);
+  if (armClose < 0) return ["the typechange arm is not found"];
   const problems = [];
   const need = (ok, what) => {
     if (!ok) problems.push(what);
   };
-  need(
-    attrs.includes("held={dataIsPlaceholder===true}"),
-    "held is the placeholder flag",
+  const inBand = tags.map(
+    (tag) => open + tag.index > armOpen && open + tag.index < armClose,
   );
   need(
-    attrs.includes("worktreeNewSide={imageRevs?.new===null}"),
-    "worktreeNewSide reads the image revs' new side",
+    inBand.filter(Boolean).length === 1,
+    "one summary is the typechange band's, the other the placeholder's",
   );
-  need(
-    attrs.includes("anchorCommit={anchorCommit}"),
-    "anchorCommit passes through",
-  );
-  need(
-    flat(surfaceRaw.slice(open, from)).endsWith("repoPath!==undefined?(") &&
-      attrs.includes("repoPath={repoPath}"),
-    "the summary mounts only with a repo path",
-  );
+  for (const [i, tag] of tags.entries()) {
+    const from = open + tag.index;
+    const end = masked.indexOf("/>", from);
+    const attrs = flat(surfaceRaw.slice(from, end));
+    need(
+      attrs.includes("held={dataIsPlaceholder===true}"),
+      "held is the placeholder flag",
+    );
+    need(
+      attrs.includes("worktreeNewSide={imageRevs?.new===null}"),
+      "worktreeNewSide reads the image revs' new side",
+    );
+    need(
+      attrs.includes("anchorCommit={anchorCommit}"),
+      "anchorCommit passes through",
+    );
+    need(
+      flat(surfaceRaw.slice(open, from)).endsWith("repoPath!==undefined?(") &&
+        attrs.includes("repoPath={repoPath}"),
+      "the summary mounts only with a repo path",
+    );
+    if (inBand[i])
+      need(
+        attrs.includes('variant="band"'),
+        "the band's summary is the band variant",
+      );
+    // Any variant expression could evaluate to the band's.
+    else
+      need(
+        !attrs.includes("variant="),
+        "the placeholder's summary carries no variant",
+      );
+  }
   return problems;
 }
 
@@ -1200,6 +1285,33 @@ test("diff shell: the binary arm wires BinaryFileSummary's gates", () => {
       "the summary mounts only with a repo path",
       "repoPath !== undefined ? (\n              <BinaryFileSummary",
       "(\n              <BinaryFileSummary",
+    ],
+    // The anchors above hit the band's tag first; the placeholder's is
+    // checked on its own.
+    [
+      "held is the placeholder flag",
+      "                held={dataIsPlaceholder === true}\n              />",
+      "              />",
+    ],
+    [
+      "the band's summary is the band variant",
+      '              variant="band"\n',
+      "",
+    ],
+    [
+      "the placeholder's summary carries no variant",
+      "                held={dataIsPlaceholder === true}\n              />",
+      '                held={dataIsPlaceholder === true}\n                variant="band"\n              />',
+    ],
+    [
+      "the binary arm renders the file's two BinaryFileSummary tags",
+      "{TYPECHANGE_BAND_LABEL[halves.binaryEnd]}",
+      "{TYPECHANGE_BAND_LABEL[halves.binaryEnd]}<BinaryFileSummary />",
+    ],
+    [
+      "the binary arm renders the file's two BinaryFileSummary tags",
+      "function HeaderOnlyDetail(",
+      "const extra = <BinaryFileSummary />;\nfunction HeaderOnlyDetail(",
     ],
   ]) {
     const got = binaryArmViolations(swap(from, to));
@@ -1466,8 +1578,7 @@ test("commit comment hosts derive selectedBinary for the shown file", () => {
   // host in a listed file, and a new host in an unlisted one.
   const prValue =
     'selectedBinary={sectionIsBinary(\n                        sections.get(effectivePath ?? "") ?? "",\n                      )}';
-  const historyValue =
-    "selectedBinary={\n            !shownDiff.isPlaceholderData && shownDiff.data?.isBinary === true\n          }";
+  const historyValue = "selectedBinary={selectedBinary}";
   const newHost =
     'function NewHost() {\n  return <CommitComments repoPath="x" />;\n}\n\n';
   for (const [file, from, to, want] of [

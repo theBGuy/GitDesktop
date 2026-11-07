@@ -60,6 +60,7 @@ import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { copyText } from "@/lib/clipboard";
 import { presentError } from "@/lib/error-summary";
 import type { CommitParent } from "@/lib/git/api";
+import { sameDiffContent } from "@/lib/git/diff-content";
 import { splitUnifiedDiff } from "@/lib/git/diff-split";
 import {
   commitParentsOptions,
@@ -81,6 +82,8 @@ import {
 } from "@/lib/git/queries";
 import {
   type CommitCommentOut,
+  type DiffStatEntry,
+  type FileDiff,
   type ForgeProvider,
   providerLabel,
   type RepoStatus,
@@ -253,6 +256,69 @@ export function CommitDetailView({
   // only as long as the file list is a placeholder too: a settled list starts
   // the selected commit's diff, which must not take the rendered one's anchors.
   const anchorsMatchDiff = renderedHash === hash || files.isPlaceholderData;
+  const anchorPath = anchorsMatchDiff ? deferredPath : null;
+  // The last SETTLED binary verdict and file list, stamped with the commit they
+  // describe: a commit switch's placeholder window keeps the shown file's
+  // comments grouped from them, never from placeholder data (a text file must
+  // never read as binary off the previous selection's diff).
+  const [retainedDiff, setRetainedDiff] = useState<{
+    hash: string;
+    path: string;
+    isBinary: boolean;
+    data: FileDiff;
+  } | null>(null);
+  if (
+    !shownDiff.isPlaceholderData &&
+    shownDiff.data !== undefined &&
+    deferredPath !== null
+  ) {
+    const isBinary = shownDiff.data.isBinary === true;
+    if (
+      retainedDiff?.hash !== hash ||
+      retainedDiff.path !== deferredPath ||
+      retainedDiff.isBinary !== isBinary ||
+      retainedDiff.data !== shownDiff.data
+    )
+      setRetainedDiff({
+        hash,
+        path: deferredPath,
+        isBinary,
+        data: shownDiff.data,
+      });
+  }
+  // A settled read, or a placeholder whose content is the rendered commit's last
+  // settled read (of the shown, anchored path while the header lags the
+  // selection): a placeholder can be a settled read never rendered.
+  const shownIsRendered =
+    !shownDiff.isPlaceholderData ||
+    (retainedDiff?.hash === renderedHash &&
+      (hash === renderedHash || retainedDiff.path === anchorPath) &&
+      sameDiffContent(retainedDiff.data, shownDiff.data));
+  const [retainedFiles, setRetainedFiles] = useState<{
+    hash: string;
+    rows: DiffStatEntry[];
+  } | null>(null);
+  if (
+    !files.isPlaceholderData &&
+    files.data !== undefined &&
+    (retainedFiles?.hash !== hash || retainedFiles.rows !== files.data)
+  )
+    setRetainedFiles({ hash, rows: files.data });
+  const selectedBinary = (() => {
+    if (!shownDiff.isPlaceholderData) return shownDiff.data?.isBinary === true;
+    if (shownIsRendered && retainedDiff?.path === anchorPath)
+      return retainedDiff.isBinary;
+    if (retainedFiles?.hash !== renderedHash) return false;
+    // Content-changed binaries only: a proven mode-only or pure-rename row's own
+    // diff carries no Binary line, so its settled verdict is non-binary too.
+    const row = retainedFiles.rows.find((r) => r.path === anchorPath);
+    return row !== undefined && row.isBinary && row.binaryKind == null;
+  })();
+  // A shown diff whose placeholder isn't the rendered commit's settled read draws
+  // no inline anchors, so the list keeps a text file's comments too; a binary
+  // file's stay in its group.
+  const selectedPathProp =
+    !shownIsRendered && !selectedBinary ? null : anchorPath;
   // Both commit queries keep serving the PREVIOUS commit while the selected one
   // loads, so everything derived from them is that commit's until it lands.
   const stale = details.isPlaceholderData || files.isPlaceholderData;
@@ -695,6 +761,7 @@ export function CommitDetailView({
                       added={file.added}
                       deleted={file.deleted}
                       isBinary={file.isBinary}
+                      binaryKind={file.binaryKind}
                     />
                   </button>
                 ))}
@@ -717,12 +784,15 @@ export function CommitDetailView({
                   <CommitFileDiffSlot
                     repoPath={repoPath}
                     hash={hash}
+                    renderedHash={renderedHash}
                     path={view.file}
                     enabled={diffEnabledFor(view.file)}
                     stale={stale}
                     comments={comments.data}
                     commentsReady={commentsReady}
-                    anchorsOn={commentsReady && anchorsMatchDiff}
+                    // A null list path keeps every file's comments in the
+                    // list, so no slot may draw them inline then.
+                    anchorsOn={commentsReady && selectedPathProp !== null}
                     commentRefs={commentRefs}
                     providerKey={providerKey}
                     remoteSections={remoteSections}
@@ -751,13 +821,10 @@ export function CommitDetailView({
           // GitHub has to wait for it; the others anchor by plain line and are always
           // ready.
           diffReady={providerKey !== "github" || remoteDiff.isSuccess}
-          // Inline anchors are off while the diff isn't the rendered commit's, so
-          // the list keeps that file's comments too.
-          selectedPath={anchorsMatchDiff ? deferredPath : null}
-          // A placeholder is the previous file's diff, not the selected one's.
-          selectedBinary={
-            !shownDiff.isPlaceholderData && shownDiff.data?.isBinary === true
-          }
+          // Null keeps every file's comments in the list, so every slot's inline
+          // anchors are off then (the slots' `anchorsOn`).
+          selectedPath={selectedPathProp}
+          selectedBinary={selectedBinary}
           onSelectFile={selectFileFromComments}
           lens="origin"
           stale={stale}
@@ -786,6 +853,7 @@ export function CommitDetailView({
 function CommitFileDiffSlot({
   repoPath,
   hash,
+  renderedHash,
   path,
   enabled,
   stale,
@@ -800,13 +868,17 @@ function CommitFileDiffSlot({
 }: {
   repoPath: string;
   hash: string;
+  /** The commit the header and `comments` describe, which lags `hash` while
+   *  the selected commit's details are a placeholder. */
+  renderedHash: string;
   path: string;
   enabled: boolean;
   /** The commit's details or file list are still the previous commit's. */
   stale: boolean;
   comments: CommitCommentOut[] | undefined;
   commentsReady: boolean;
-  /** Inline anchors are on: the diff is the rendered commit's. */
+  /** Inline anchors are allowed: the list names a file (null makes the list
+   *  keep every comment, so no slot may draw inline then). */
   anchorsOn: boolean;
   commentRefs: MarkdownRefs | undefined;
   providerKey: ForgeProvider;
@@ -816,10 +888,32 @@ function CommitFileDiffSlot({
 }) {
   const diff = useCommitFileDiff(repoPath, hash, path, enabled);
   useSlotRead(reportRead, diff);
+  // A placeholder anchors only when its content is this slot's last settled read
+  // of the rendered commit's path: FileDiff echoes only the path, a placeholder
+  // can be a settled read this slot never rendered, and other lines would
+  // misplace its comments or duplicate ones the binary group lists.
+  const [settledRead, setSettledRead] = useState<{
+    hash: string;
+    path: string;
+    data: FileDiff;
+  } | null>(null);
+  if (
+    !diff.isPlaceholderData &&
+    diff.data !== undefined &&
+    (settledRead?.hash !== hash ||
+      settledRead.path !== path ||
+      settledRead.data !== diff.data)
+  )
+    setSettledRead({ hash, path, data: diff.data });
+  const diffIsRendered =
+    !diff.isPlaceholderData ||
+    (settledRead?.hash === renderedHash &&
+      settledRead.path === path &&
+      sameDiffContent(settledRead.data, diff.data));
   const lineAnchors = useCommitLineAnchors(
     comments,
     providerKey === "github" ? remoteSections : undefined,
-    anchorsOn ? path : null,
+    anchorsOn && diffIsRendered ? path : null,
     commentRefs,
   );
   // The diff query outlasts the commit's own stale window with the previous

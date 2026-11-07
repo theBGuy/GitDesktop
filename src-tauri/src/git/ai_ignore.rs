@@ -675,6 +675,7 @@ fn parse_numstat_z_rows_bytes(bytes: &[u8]) -> Vec<DiffStatRowBytes> {
                 added,
                 deleted,
                 is_binary,
+                binary_kind: None,
             },
             names,
         });

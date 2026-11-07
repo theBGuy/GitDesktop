@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod auth;
 pub mod avatar;
+pub mod blob_sizes;
 pub mod collaborators;
 pub mod discussion;
 pub mod insights;

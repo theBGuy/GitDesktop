@@ -4,9 +4,9 @@ use crate::error::{AppError, AppResult};
 use crate::git::history::unborn_head;
 use crate::git::ops::{discard_rel_path, discard_shown, linked_component, DISCARD_LINKED};
 use crate::git::runner::{
-    run_git, run_git_mutating_input, run_git_raw, GitOutput, DEFAULT_TIMEOUT,
+    run_git, run_git_input, run_git_mutating_input, run_git_raw, GitOutput, DEFAULT_TIMEOUT,
 };
-use crate::git::types::{DiffStatEntry, FileDiff, StagedDiff};
+use crate::git::types::{BinaryKind, DiffStatEntry, FileDiff, StagedDiff};
 use crate::image_sniff::{dimensions_within_caps, has_raster_magic, sniff_image};
 use crate::state::AppState;
 
@@ -18,6 +18,7 @@ thread_local! {
     static PROBE_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SHOW_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static VERIFY_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static HASH_SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// One file's bytes for the webview, or a size refusal the diff view can display.
@@ -30,6 +31,8 @@ pub struct FileBytes {
     /// anything else (SVG, BMP, ICO, text, …), which ships bounded by bytes alone.
     pub mime: Option<String>,
     pub too_large: bool,
+    /// Content bytes when known; dimension refusals deliberately carry no byte size.
+    pub size: Option<u64>,
 }
 
 /// Whether `path` stays inside whatever it is joined onto: relative, with no `..`.
@@ -44,8 +47,8 @@ pub(crate) fn is_repo_relative(path: &str) -> bool {
 
 enum PreviewRead {
     Absent,
-    TooLarge,
-    Bytes(Vec<u8>),
+    TooLarge(u64),
+    Bytes(Vec<u8>, Option<u64>),
 }
 
 fn preview_read_refusal(raw: &str, why: &str) -> AppError {
@@ -104,7 +107,6 @@ pub(crate) fn worktree_entry(repo: &str, rel: &str) -> AppResult<WorktreeEntry> 
 }
 
 fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewRead> {
-    use std::io::Read;
     let (path, len) = match worktree_entry(repo, rel)? {
         WorktreeEntry::Absent => return Ok(PreviewRead::Absent),
         WorktreeEntry::Linked => return Err(preview_read_refusal(raw, DISCARD_LINKED)),
@@ -115,14 +117,24 @@ fn read_preview_worktree(repo: &str, raw: &str, rel: &str) -> AppResult<PreviewR
         WorktreeEntry::NoVerbatim => return Err(preview_read_refusal(raw, NO_VERBATIM_FORM)),
         WorktreeEntry::Regular { path, len } => (path, len),
     };
+    read_worktree_capped(len, || std::fs::File::open(&path))
+}
+
+fn read_worktree_capped<R: std::io::Read>(
+    len: u64,
+    open: impl FnOnce() -> std::io::Result<R>,
+) -> AppResult<PreviewRead> {
+    use std::io::Read;
     if len > IMAGE_MAX_BYTES as u64 {
-        return Ok(PreviewRead::TooLarge);
+        return Ok(PreviewRead::TooLarge(len));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(&path)?
+    open()?
         .take(IMAGE_MAX_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    Ok(PreviewRead::Bytes(bytes))
+    // A read past the cap means the file grew since the stat, so `len` is stale there;
+    // a complete read reports its own length, so the stat size is never needed.
+    Ok(PreviewRead::Bytes(bytes, None))
 }
 
 /// Absence is what git reports as a missing path or stage (it words an unknown
@@ -183,7 +195,6 @@ pub async fn git_file_base64(
     file_path: String,
     probe_size: Option<bool>,
 ) -> AppResult<Option<FileBytes>> {
-    use base64::Engine;
     let read = match rev {
         Some(rev) => {
             if rev.is_empty() || rev.starts_with('-') {
@@ -211,6 +222,7 @@ pub async fn git_file_base64(
                         base64: None,
                         mime: None,
                         too_large: true,
+                        size: Some(size),
                     }));
                 }
             }
@@ -221,7 +233,8 @@ pub async fn git_file_base64(
                 preview_rev_failure(&repo_path, &rev, out).await?;
                 PreviewRead::Absent
             } else {
-                PreviewRead::Bytes(out.stdout)
+                let size = out.stdout.len() as u64;
+                PreviewRead::Bytes(out.stdout, Some(size))
             }
         }
         None => {
@@ -238,22 +251,29 @@ pub async fn git_file_base64(
                 .map_err(|e| AppError::Command(e.to_string()))??
         }
     };
-    let bytes = match read {
+    finish_preview(read)
+}
+
+fn finish_preview(read: PreviewRead) -> AppResult<Option<FileBytes>> {
+    use base64::Engine;
+    let (bytes, size) = match read {
         PreviewRead::Absent => return Ok(None),
-        PreviewRead::TooLarge => {
+        PreviewRead::TooLarge(size) => {
             return Ok(Some(FileBytes {
                 base64: None,
                 mime: None,
                 too_large: true,
+                size: Some(size),
             }))
         }
-        PreviewRead::Bytes(bytes) => bytes,
+        PreviewRead::Bytes(bytes, size) => (bytes, size),
     };
     if bytes.len() > IMAGE_MAX_BYTES {
         return Ok(Some(FileBytes {
             base64: None,
             mime: None,
             too_large: true,
+            size,
         }));
     }
     // The byte cap bounds the compressed copy and says nothing about the decode the
@@ -276,6 +296,7 @@ pub async fn git_file_base64(
             base64: None,
             mime: sniffed.map(|(media_type, _, _)| media_type.to_string()),
             too_large: true,
+            size: None,
         }));
     }
     // Bytes that open with no raster magic at all ship under the byte cap alone. SVG is
@@ -289,6 +310,7 @@ pub async fn git_file_base64(
         base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
         mime: sniffed.map(|(media_type, _, _)| media_type.to_string()),
         too_large: false,
+        size: Some(bytes.len() as u64),
     }))
 }
 
@@ -1309,6 +1331,7 @@ fn untracked_line_stats(
             added,
             deleted: 0,
             is_binary,
+            binary_kind: None,
         };
         let path = root.join(rel);
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
@@ -1387,12 +1410,27 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
     let (staged, unstaged, untracked) = tokio::try_join!(
         run_git(
             Some(&repo_path),
-            &["diff", "--cached", "--numstat", "-z"],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--cached",
+                "--raw",
+                "--no-abbrev",
+                "--numstat",
+                "-z",
+            ],
             DEFAULT_TIMEOUT,
         ),
         run_git(
             Some(&repo_path),
-            &["diff", "--numstat", "-z"],
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--raw",
+                "--no-abbrev",
+                "--numstat",
+                "-z",
+            ],
             DEFAULT_TIMEOUT,
         ),
         // Enumerating untracked paths is the one arm allowed to fail: an error or a
@@ -1413,7 +1451,9 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
             )
         }
     )?;
-    let mut unstaged_entries = parse_numstat_z(&unstaged.stdout_lossy());
+    let unstaged_text = unstaged.stdout_lossy();
+    let (mut unstaged_entries, raw) = raw_numstat_rows(&unstaged_text);
+    prove_unstaged_modes(&repo_path, &mut unstaged_entries, &raw).await;
     let paths: Vec<&str> = untracked.split('\0').filter(|p| !p.is_empty()).collect();
     // No probe matters without untracked paths, so an empty set spawns none of them.
     // A FAILED probe must not substitute sniff semantics for git's: every path this
@@ -1452,7 +1492,7 @@ pub async fn git_working_line_stats(repo_path: String) -> AppResult<WorkingLineS
         unstaged_entries.extend(untracked_entries);
     }
     Ok(WorkingLineStats {
-        staged: parse_numstat_z(&staged.stdout_lossy()),
+        staged: parse_raw_numstat_z(&staged.stdout_lossy()),
         unstaged: unstaged_entries,
     })
 }
@@ -1526,6 +1566,178 @@ pub fn parse_numstat_z(text: &str) -> Vec<DiffStatEntry> {
         .collect()
 }
 
+struct RawStat<'a> {
+    old_mode: &'a str,
+    new_mode: &'a str,
+    old_id: &'a str,
+    new_id: &'a str,
+    status: &'a str,
+}
+
+impl RawStat<'_> {
+    fn kind(&self) -> Option<BinaryKind> {
+        // Equal non-zero ids prove unchanged content; zero ids carry no such proof.
+        if self.old_id != self.new_id || self.old_id.bytes().all(|b| b == b'0') {
+            return None;
+        }
+        match (self.status, self.old_mode != self.new_mode) {
+            ("M", true) => Some(BinaryKind::Mode),
+            ("R100", false) => Some(BinaryKind::Renamed),
+            ("R100", true) => Some(BinaryKind::RenamedMode),
+            _ => None,
+        }
+    }
+
+    fn needs_worktree_proof(&self) -> bool {
+        self.status == "M"
+            && self.new_id.bytes().all(|b| b == b'0')
+            && self.old_mode != self.new_mode
+            && matches!(self.old_mode, "100644" | "100755")
+            && matches!(self.new_mode, "100644" | "100755")
+    }
+}
+
+/// Only binary rows with proven unchanged content receive a kind.
+pub fn parse_raw_numstat_z(text: &str) -> Vec<DiffStatEntry> {
+    raw_numstat_rows(text).0
+}
+
+// Raw and numstat share one spawn so rename pairing agrees. The first non-raw
+// token ends the raw block permanently; path tokens are consumed by record count.
+fn raw_numstat_rows(
+    text: &str,
+) -> (
+    Vec<DiffStatEntry>,
+    std::collections::HashMap<&str, RawStat<'_>>,
+) {
+    let mut raw = std::collections::HashMap::new();
+    let mut rest = text;
+    while let Some((header, after_header)) = rest.split_once('\0') {
+        let Some(header) = header.strip_prefix(':') else {
+            break;
+        };
+        let fields: Vec<_> = header.split(' ').collect();
+        let [old_mode, new_mode, old_id, new_id, status] = fields.as_slice() else {
+            break;
+        };
+        if fields.iter().any(|field| field.is_empty()) {
+            break;
+        }
+        let Some((mut path, mut after_path)) = after_header.split_once('\0') else {
+            break;
+        };
+        if status.starts_with(['R', 'C']) {
+            let Some((new_path, tail)) = after_path.split_once('\0') else {
+                break;
+            };
+            path = new_path;
+            after_path = tail;
+        }
+        raw.insert(
+            path,
+            RawStat {
+                old_mode,
+                new_mode,
+                old_id,
+                new_id,
+                status,
+            },
+        );
+        rest = after_path;
+    }
+    let mut entries = parse_numstat_z(rest);
+    for entry in &mut entries {
+        if entry.is_binary && !entry.path.contains(char::REPLACEMENT_CHARACTER) {
+            entry.binary_kind = raw.get(entry.path.as_str()).and_then(RawStat::kind);
+        }
+    }
+    (entries, raw)
+}
+
+// One batch budget bounds content re-reads on every working-tree poll; a file past
+// the remaining budget is skipped and keeps `bin`, and later files may still fit.
+const MODE_PROOF_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+async fn prove_unstaged_modes(
+    repo: &str,
+    entries: &mut [DiffStatEntry],
+    raw: &std::collections::HashMap<&str, RawStat<'_>>,
+) {
+    let mut candidates = Vec::new();
+    let mut bytes = 0;
+    for (index, entry) in entries.iter().enumerate() {
+        let Some(record) = raw.get(entry.path.as_str()) else {
+            continue;
+        };
+        if !entry.is_binary
+            || !record.needs_worktree_proof()
+            || entry.path.contains(['\n', char::REPLACEMENT_CHARACTER])
+        {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(std::path::Path::new(repo).join(&entry.path))
+        else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.len() > MODE_PROOF_MAX_BYTES - bytes {
+            continue;
+        }
+        bytes += meta.len();
+        candidates.push((index, record.old_id));
+    }
+    if candidates.is_empty() {
+        return;
+    }
+    hash_mode_candidates(repo, entries, &candidates).await;
+}
+
+async fn hash_mode_candidates(
+    repo: &str,
+    entries: &mut [DiffStatEntry],
+    candidates: &[(usize, &str)],
+) {
+    // hash-object has line-delimited stdin, with C quoting for unusual path bytes.
+    // Default filters are required: the comparison is against index content.
+    let mut input = String::new();
+    for (index, _) in candidates {
+        input.push('"');
+        for ch in entries[*index].path.chars() {
+            match ch {
+                '"' => input.push_str("\\\""),
+                '\\' => input.push_str("\\\\"),
+                ch if ch.is_ascii_control() => input.push_str(&format!("\\{:03o}", ch as u8)),
+                ch => input.push(ch),
+            }
+        }
+        input.push_str("\"\n");
+    }
+    #[cfg(test)]
+    HASH_SPAWNS.with(|n| n.set(n.get() + 1));
+    let Ok(out) = run_git_input(
+        Some(repo),
+        &["hash-object", "--stdin-paths"],
+        Some(&input),
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    else {
+        return;
+    };
+    let output = out.stdout_lossy();
+    let ids: Vec<_> = output.lines().collect();
+    if ids.len() != candidates.len() {
+        return;
+    }
+    for ((index, old_id), id) in candidates.iter().zip(ids) {
+        if id == *old_id && !id.bytes().all(|b| b == b'0') {
+            entries[*index].binary_kind = Some(BinaryKind::Mode);
+        }
+    }
+}
+
 /// [`parse_numstat_z`] keeping both sides of a rename (see [`DiffStatRow`]).
 pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
     let mut rows = Vec::new();
@@ -1566,6 +1778,7 @@ pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
                 added,
                 deleted,
                 is_binary,
+                binary_kind: None,
             },
             names,
         });
@@ -1577,6 +1790,382 @@ pub(crate) fn parse_numstat_z_rows(text: &str) -> Vec<DiffStatRow> {
 mod tests {
     use super::*;
     use crate::image_sniff::{jpeg_fixture, png_fixture, stuffed_pair_jpeg};
+
+    #[test]
+    fn raw_numstat_kinds_require_binary_unchanged_content() {
+        for width in [40, 64] {
+            let id = "a".repeat(width);
+            let other = "b".repeat(width);
+            let zero = "0".repeat(width);
+            for (status, new_mode, new_id, counts, expected) in [
+                ("M", "100755", &id, "-\t-", Some(BinaryKind::Mode)),
+                ("R100", "100644", &id, "-\t-", Some(BinaryKind::Renamed)),
+                ("R100", "100755", &id, "-\t-", Some(BinaryKind::RenamedMode)),
+                ("R87", "100755", &id, "-\t-", None),
+                ("C100", "100755", &id, "-\t-", None),
+                ("A", "100755", &id, "-\t-", None),
+                ("D", "100755", &id, "-\t-", None),
+                ("T", "120000", &id, "-\t-", None),
+                ("M", "100755", &other, "-\t-", None),
+                ("M", "100755", &zero, "-\t-", None),
+                ("M", "100644", &id, "-\t-", None),
+                ("M", "100755", &id, "0\t0", None),
+                ("R100", "100644", &id, "0\t0", None),
+            ] {
+                let paths = if status.starts_with(['R', 'C']) {
+                    "old\0:new\0"
+                } else {
+                    ":new\0"
+                };
+                let numpath = if status.starts_with(['R', 'C']) {
+                    "\0old\0:new\0"
+                } else {
+                    ":new\0"
+                };
+                let text = format!(
+                    ":100644 {new_mode} {id} {new_id} {status}\0{paths}{counts}\t{numpath}"
+                );
+                let rows = parse_raw_numstat_z(&text);
+                assert_eq!(rows.len(), 1, "{text:?}");
+                assert_eq!(rows[0].path, ":new");
+                assert_eq!(rows[0].binary_kind, expected, "{text:?}");
+            }
+            let zero_ids = format!(":100644 100755 {zero} {zero} M\0zero\0-\t-\tzero\0");
+            assert_eq!(parse_raw_numstat_z(&zero_ids)[0].binary_kind, None);
+            let missing = format!(":100644 100755 {id} {id} M\0raw-only\0-\t-\tmissing\0");
+            let rows = parse_raw_numstat_z(&missing);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].binary_kind, None);
+        }
+        assert!(parse_raw_numstat_z("").is_empty());
+        let rows = parse_raw_numstat_z("-\t-\t:plain\0-\t-\t\0old\0new\0");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.binary_kind.is_none()));
+    }
+
+    #[test]
+    fn binary_kind_and_stat_wire_keys_are_exact() {
+        for (kind, tag) in [
+            (BinaryKind::Mode, "mode"),
+            (BinaryKind::Renamed, "renamed"),
+            (BinaryKind::RenamedMode, "renamedMode"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), tag);
+        }
+        for kind in [None, Some(BinaryKind::Mode)] {
+            let value = serde_json::to_value(DiffStatEntry {
+                path: "a".into(),
+                added: 0,
+                deleted: 0,
+                is_binary: true,
+                binary_kind: kind,
+            })
+            .unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "path": "a", "added": 0, "deleted": 0, "isBinary": true, "binaryKind": kind,
+                })
+            );
+            assert!(value.get("binary_kind").is_none());
+            assert!(value.get("is_binary").is_none());
+        }
+    }
+
+    #[test]
+    fn raw_numstat_lossy_path_collisions_never_receive_a_kind() {
+        let id = "a".repeat(40);
+        let other = "b".repeat(40);
+        let paths: [&[u8]; 3] = [b"bad\xff", b"bad\xfe", b"plain"];
+        let mut bytes = Vec::new();
+        for (path, new_id) in paths.iter().zip([&other, &id, &id]) {
+            bytes.extend_from_slice(format!(":100644 100755 {id} {new_id} M\0").as_bytes());
+            bytes.extend_from_slice(path);
+            bytes.push(0);
+        }
+        for path in paths {
+            bytes.extend_from_slice(b"-\t-\t");
+            bytes.extend_from_slice(path);
+            bytes.push(0);
+        }
+        let rows = parse_raw_numstat_z(&String::from_utf8_lossy(&bytes));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].path, rows[1].path);
+        assert!(rows[0].path.contains(char::REPLACEMENT_CHARACTER));
+        assert_eq!(rows[0].binary_kind, None);
+        assert_eq!(rows[1].binary_kind, None);
+        assert_eq!(rows[2].binary_kind, Some(BinaryKind::Mode));
+    }
+
+    fn assert_binary_kind(rows: &[DiffStatEntry], path: &str, kind: Option<BinaryKind>) {
+        let matches: Vec<_> = rows.iter().filter(|row| row.path == path).collect();
+        assert_eq!(matches.len(), 1, "{path}: {rows:?}");
+        assert!(matches[0].is_binary, "{path}");
+        assert_eq!(matches[0].binary_kind, kind, "{path}");
+    }
+
+    #[tokio::test]
+    async fn working_and_compare_rows_preserve_binary_kinds() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-binary-kinds-").await;
+        git_ok(&repo, &["config", "core.filemode", "false"]).await;
+        git_ok(&repo, &["config", "diff.renames", "true"]).await;
+        for name in ["content", "mode", "rename", "renmode", "edited", "b2l"] {
+            std::fs::write(dir.join(name), format!("{name}\0before")).unwrap();
+        }
+        for name in ["text", "text-rename", "l2b"] {
+            std::fs::write(dir.join(name), "text\n").unwrap();
+        }
+        git_ok(&repo, &["add", "-A"]).await;
+        let link = git_ok(&repo, &["hash-object", "l2b"]).await;
+        git_ok(
+            &repo,
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("120000,{},l2b", link.trim()),
+            ],
+        )
+        .await;
+        git_ok(&repo, &["commit", "-qm", "base"]).await;
+        git_ok(&repo, &["branch", "kind-base"]).await;
+        std::fs::write(dir.join("content"), b"content\0staged").unwrap();
+        git_ok(&repo, &["add", "content"]).await;
+        std::fs::write(dir.join("content"), b"content\0unstaged").unwrap();
+        git_ok(&repo, &["update-index", "--chmod=+x", "mode"]).await;
+        for (from, to) in [
+            ("rename", "renamed"),
+            ("renmode", "renamed-mode"),
+            ("edited", "edited-new"),
+            ("text-rename", "text-renamed"),
+        ] {
+            git_ok(&repo, &["mv", from, to]).await;
+        }
+        git_ok(&repo, &["update-index", "--chmod=+x", "renamed-mode"]).await;
+        std::fs::write(dir.join("edited-new"), b"\0unrelated payload").unwrap();
+        std::fs::write(dir.join("text"), "new text\n").unwrap();
+        std::fs::write(dir.join("empty"), "").unwrap();
+        std::fs::write(dir.join("added"), b"added\0binary").unwrap();
+        std::fs::write(dir.join("l2b"), b"binary\0target").unwrap();
+        git_ok(
+            &repo,
+            &["add", "edited-new", "text", "empty", "added", "l2b"],
+        )
+        .await;
+        let blob = git_ok(&repo, &["hash-object", "l2b"]).await;
+        git_ok(
+            &repo,
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("100644,{},l2b", blob.trim()),
+            ],
+        )
+        .await;
+        git_ok(
+            &repo,
+            &[
+                "update-index",
+                "--cacheinfo",
+                &format!("120000,{},b2l", link.trim()),
+            ],
+        )
+        .await;
+        std::fs::write(dir.join("untracked"), b"new\0binary").unwrap();
+
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0);
+        assert_binary_kind(&stats.unstaged, "content", None);
+        assert_binary_kind(&stats.unstaged, "untracked", None);
+        git_ok(&repo, &["commit", "-qm", "changes"]).await;
+        git_ok(&repo, &["branch", "kind-tip"]).await;
+        let compare = crate::git::compare::git_branch_diff_files(
+            repo.clone(),
+            "kind-base".into(),
+            "kind-tip".into(),
+        )
+        .await
+        .unwrap();
+        for rows in [&stats.staged, &compare] {
+            assert_binary_kind(rows, "mode", Some(BinaryKind::Mode));
+            assert_binary_kind(rows, "renamed", Some(BinaryKind::Renamed));
+            assert_binary_kind(rows, "renamed-mode", Some(BinaryKind::RenamedMode));
+            for name in ["content", "edited", "edited-new", "added", "b2l", "l2b"] {
+                assert_binary_kind(rows, name, None);
+            }
+            for name in ["text", "text-renamed", "empty"] {
+                let row = rows.iter().find(|row| row.path == name).unwrap();
+                assert!(!row.is_binary);
+                assert_eq!(row.binary_kind, None);
+            }
+        }
+        git_ok(&repo, &["config", "diff.renames", "false"]).await;
+        let unpaired =
+            crate::git::compare::git_branch_diff_files(repo, "kind-base".into(), "kind-tip".into())
+                .await
+                .unwrap();
+        assert_binary_kind(&unpaired, "rename", None);
+        assert_binary_kind(&unpaired, "renamed", None);
+    }
+
+    #[tokio::test]
+    async fn unstaged_mode_proof_is_filtered_bounded_and_one_spawn() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-mode-proof-").await;
+        git_ok(&repo, &["config", "core.filemode", "false"]).await;
+        for name in ["mode", "changed"] {
+            std::fs::write(dir.join(name), format!("{name}\0binary")).unwrap();
+        }
+        git_ok(&repo, &["add", "-A"]).await;
+        git_ok(&repo, &["update-index", "--chmod=+x", "mode", "changed"]).await;
+        git_ok(&repo, &["commit", "-qm", "executable index"]).await;
+        git_ok(&repo, &["config", "core.filemode", "true"]).await;
+        std::fs::write(dir.join("changed"), b"changed\0content").unwrap();
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
+        assert_binary_kind(&stats.unstaged, "mode", Some(BinaryKind::Mode));
+        assert_binary_kind(&stats.unstaged, "changed", None);
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 1);
+
+        let raw = git_ok(
+            &repo,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--raw",
+                "--no-abbrev",
+                "--numstat",
+                "-z",
+            ],
+        )
+        .await;
+        let (mut rows, records) = raw_numstat_rows(&raw);
+        let candidates: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| (i, records[row.path.as_str()].old_id))
+            .collect();
+        std::fs::remove_file(dir.join("changed")).unwrap();
+        hash_mode_candidates(&repo, &mut rows, &candidates).await;
+        assert!(rows.iter().all(|row| row.binary_kind.is_none()));
+
+        std::fs::File::create(dir.join("mode"))
+            .unwrap()
+            .set_len(MODE_PROOF_MAX_BYTES + 1)
+            .unwrap();
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
+        assert_binary_kind(&stats.unstaged, "mode", None);
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0);
+
+        git_ok(&repo, &["config", "core.autocrlf", "true"]).await;
+        std::fs::write(dir.join("crlf"), "one\r\ntwo\r\n").unwrap();
+        git_ok(&repo, &["add", "crlf"]).await;
+        git_ok(&repo, &["update-index", "--chmod=+x", "crlf"]).await;
+        let index = git_ok(&repo, &["rev-parse", ":crlf"]).await;
+        let filtered = run_git_input(
+            Some(&repo),
+            &["hash-object", "--stdin-paths"],
+            Some("crlf\n"),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.stdout_lossy().trim(), index.trim());
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo.clone()).await.unwrap();
+        let text = stats
+            .unstaged
+            .iter()
+            .find(|row| row.path == "crlf")
+            .unwrap();
+        assert!(!text.is_binary);
+        assert_eq!(text.binary_kind, None);
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0);
+
+        // `-diff` makes the row binary while leaving the CRLF conversion on (the
+        // `binary` macro would also unset `text`), so only a filtered hash proves it.
+        let info = dir.join(".git").join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("attributes"), "crlf-bin -diff\n").unwrap();
+        std::fs::write(dir.join("crlf-bin"), "one\r\ntwo\r\n").unwrap();
+        git_ok(&repo, &["add", "crlf-bin"]).await;
+        git_ok(&repo, &["update-index", "--chmod=+x", "crlf-bin"]).await;
+        let blob = git_ok(&repo, &["cat-file", "-p", ":crlf-bin"]).await;
+        assert_eq!(blob, "one\ntwo\n");
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo).await.unwrap();
+        assert_binary_kind(&stats.unstaged, "crlf-bin", Some(BinaryKind::Mode));
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 1);
+    }
+
+    #[tokio::test]
+    async fn unstaged_mode_candidates_exclude_non_files_and_unrepresentable_names() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-mode-exclusions-").await;
+        // Every path exists on disk, so each arm is excluded only by its own predicate.
+        let names = [
+            "regular",
+            "lossy\u{fffd}",
+            #[cfg(unix)]
+            "line\nname",
+        ];
+        for name in names {
+            std::fs::write(dir.join(name), b"\0binary").unwrap();
+        }
+        std::fs::create_dir(dir.join("folder")).unwrap();
+        let id = "a".repeat(64);
+        let zero = "0".repeat(64);
+        for (old_mode, new_mode, path) in [
+            ("120000", "100755", "regular"),
+            ("100644", "160000", "regular"),
+            #[cfg(unix)]
+            ("100644", "100755", "line\nname"),
+            ("100644", "100755", "lossy\u{fffd}"),
+            ("100644", "100755", "folder"),
+        ] {
+            let raw = format!(":{old_mode} {new_mode} {id} {zero} M\0{path}\0-\t-\t{path}\0");
+            let (mut rows, records) = raw_numstat_rows(&raw);
+            HASH_SPAWNS.with(|n| n.set(0));
+            prove_unstaged_modes(&repo, &mut rows, &records).await;
+            assert_eq!(rows[0].binary_kind, None, "{path:?}");
+            assert_eq!(HASH_SPAWNS.with(|n| n.get()), 0, "{path:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unstaged_mode_proof_skips_files_past_the_remaining_budget() {
+        let (_tmp, dir, repo) = init_line_stats_repo("gd-mode-batch-budget-").await;
+        git_ok(&repo, &["config", "core.filemode", "false"]).await;
+        for (name, len) in [
+            ("a-first", MODE_PROOF_MAX_BYTES / 2 + 1),
+            ("b-over-budget", MODE_PROOF_MAX_BYTES / 2 + 1),
+            ("c-later", 1),
+        ] {
+            std::fs::File::create(dir.join(name))
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        }
+        git_ok(&repo, &["add", "-A"]).await;
+        git_ok(
+            &repo,
+            &[
+                "update-index",
+                "--chmod=+x",
+                "a-first",
+                "b-over-budget",
+                "c-later",
+            ],
+        )
+        .await;
+        git_ok(&repo, &["commit", "-qm", "executable binaries"]).await;
+        git_ok(&repo, &["config", "core.filemode", "true"]).await;
+        HASH_SPAWNS.with(|n| n.set(0));
+        let stats = git_working_line_stats(repo).await.unwrap();
+        assert_binary_kind(&stats.unstaged, "a-first", Some(BinaryKind::Mode));
+        assert_binary_kind(&stats.unstaged, "b-over-budget", None);
+        assert_binary_kind(&stats.unstaged, "c-later", Some(BinaryKind::Mode));
+        assert_eq!(HASH_SPAWNS.with(|n| n.get()), 1);
+    }
 
     #[test]
     fn parses_numstat_with_rename_and_binary() {
@@ -3196,6 +3785,7 @@ mod tests {
                 assert!(got.too_large, "{name} at {rev:?} must be refused");
                 assert_eq!(got.base64, None, "{name} must not ship its bytes");
                 assert_eq!(got.mime.as_deref(), Some("image/png"));
+                assert_eq!(got.size, None);
             }
         }
     }
@@ -3211,6 +3801,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(!ok.too_large);
+            assert_eq!(ok.size, Some(png_fixture(1200, 630).len() as u64));
             assert_eq!(ok.mime.as_deref(), Some("image/png"));
             assert!(ok.base64.is_some());
 
@@ -3276,6 +3867,7 @@ mod tests {
             .unwrap()
             .expect("an over-cap file is a refusal, not an absence");
         assert!(huge.too_large);
+        assert_eq!(huge.size, Some(IMAGE_MAX_BYTES as u64 + 1));
         assert_eq!(huge.base64, None);
         assert_eq!(huge.mime, None);
 
@@ -3435,6 +4027,7 @@ mod tests {
             assert_eq!(got.mime, None);
             let probe = usize::from(probe_size == Some(true));
             assert_preview_spawns(probe, 1 - probe, 0);
+            assert_eq!(got.size, Some(IMAGE_MAX_BYTES as u64 + 1));
 
             reset_preview_spawns();
             let got = git_file_base64(
@@ -3667,7 +4260,7 @@ mod tests {
         }
         assert!(matches!(
             read_preview_worktree(&repo, "huge.png", "huge.png").unwrap(),
-            PreviewRead::TooLarge
+            PreviewRead::TooLarge(size) if size == IMAGE_MAX_BYTES as u64 + 1
         ));
     }
 
@@ -3799,24 +4392,64 @@ mod tests {
     /// rename trap the repo has been bitten by, so the wire shape is pinned.
     #[test]
     fn file_bytes_serializes_to_the_pinned_wire_shape() {
+        let value =
+            serde_json::to_value(finish_preview(PreviewRead::TooLarge(23)).unwrap().unwrap())
+                .unwrap();
+        assert!(value.get("too_large").is_none());
         assert_eq!(
             serde_json::to_value(FileBytes {
                 base64: Some("AAAA".into()),
                 mime: Some("image/png".into()),
                 too_large: false,
+                size: Some(3),
             })
             .unwrap(),
-            serde_json::json!({ "base64": "AAAA", "mime": "image/png", "tooLarge": false })
+            serde_json::json!({ "base64": "AAAA", "mime": "image/png", "tooLarge": false, "size": 3 })
         );
         assert_eq!(
             serde_json::to_value(FileBytes {
                 base64: None,
                 mime: None,
                 too_large: true,
+                size: None,
             })
             .unwrap(),
-            serde_json::json!({ "base64": null, "mime": null, "tooLarge": true })
+            serde_json::json!({ "base64": null, "mime": null, "tooLarge": true, "size": null })
         );
+    }
+
+    #[test]
+    fn overflowing_reads_report_the_producers_size_never_the_buffer_length() {
+        for size in [None, Some(IMAGE_MAX_BYTES as u64 + 9)] {
+            let result = finish_preview(PreviewRead::Bytes(vec![0; IMAGE_MAX_BYTES + 1], size))
+                .unwrap()
+                .unwrap();
+            assert!(result.too_large);
+            assert_eq!(result.size, size);
+        }
+        let complete = finish_preview(PreviewRead::Bytes(vec![0; 7], Some(4)))
+            .unwrap()
+            .unwrap();
+        assert!(!complete.too_large);
+        assert_eq!(complete.size, Some(7));
+    }
+
+    #[test]
+    fn a_worktree_read_past_the_cap_reports_an_unknown_size() {
+        let preview = |len: u64, content: Vec<u8>| {
+            let read = read_worktree_capped(len, || Ok(std::io::Cursor::new(content))).unwrap();
+            finish_preview(read).unwrap().unwrap()
+        };
+        let grown = preview(3, vec![0; IMAGE_MAX_BYTES + 1]);
+        assert!(grown.too_large);
+        assert_eq!(grown.size, None);
+        let stat = IMAGE_MAX_BYTES as u64 + 1;
+        let refused = preview(stat, Vec::new());
+        assert!(refused.too_large);
+        assert_eq!(refused.size, Some(stat));
+        let complete = preview(99, vec![0; 7]);
+        assert!(!complete.too_large);
+        assert_eq!(complete.size, Some(7));
     }
 
     /// A committed ASCII `file.txt` in a pinned-config repo, for the

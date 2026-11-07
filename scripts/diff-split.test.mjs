@@ -20,6 +20,7 @@ import {
   sectionFilePath,
   sectionIsBinary,
   splitUnifiedDiff,
+  typechangeHalves,
 } from "../src/lib/git/diff-split.ts";
 
 // ---------------------------------------------------------------- headerShapes
@@ -1633,6 +1634,91 @@ test("splitUnifiedDiff: a text typechange keeps only its creation section", () =
     assert.equal(split.get("x"), made, name);
     assert.equal(isTypechangeDiff(split.get("x"), "x"), false, name);
   }
+});
+
+// The PR split's join rule: only a binary LATER section joins its path's
+// earlier one; every other same-path pair keeps the later section alone.
+test("splitUnifiedDiff: two binary sections of one path join, in order", () => {
+  const pair = binaryEnd("x", "deleted") + binaryEnd("x", "new");
+  const split = splitUnifiedDiff(
+    OTHER_SECTION + pair + OTHER_SECTION.replace(/y/g, "z"),
+  );
+  assert.deepEqual([...split.keys()], ["y.txt", "x", "z.txt"]);
+  assert.equal(split.get("x"), pair);
+  assert.equal(split.get("y.txt"), OTHER_SECTION);
+});
+
+test("splitUnifiedDiff: a text section after a binary one stays last-wins", () => {
+  const made = TYPECHANGE_TO_LINK.slice(
+    TYPECHANGE_TO_LINK.indexOf("diff --git", 1),
+  );
+  assert.equal(splitUnifiedDiff(TYPECHANGE_TO_LINK).get("x"), made);
+  // The all-text pair, in either order of kinds.
+  const pair = textSection("x", "deleted") + textSection("x", "new");
+  assert.equal(splitUnifiedDiff(pair).get("x"), textSection("x", "new"));
+  // A binary creation still joins, byte for byte.
+  assert.equal(splitUnifiedDiff(TYPECHANGE).get("x"), TYPECHANGE);
+});
+
+test("typechangeHalves: both orders, in git's order", () => {
+  const linkToBinary = typechangeHalves(TYPECHANGE, "x");
+  const textEnd = TYPECHANGE.indexOf("diff --git", 1);
+  assert.deepEqual(linkToBinary, {
+    binary: TYPECHANGE.slice(textEnd),
+    text: TYPECHANGE.slice(0, textEnd),
+    binaryFirst: false,
+    binaryEnd: "added",
+  });
+  const binaryEndAt = TYPECHANGE_TO_LINK.indexOf("diff --git", 1);
+  assert.deepEqual(typechangeHalves(TYPECHANGE_TO_LINK, "x"), {
+    binary: TYPECHANGE_TO_LINK.slice(0, binaryEndAt),
+    text: TYPECHANGE_TO_LINK.slice(binaryEndAt),
+    binaryFirst: true,
+    binaryEnd: "removed",
+  });
+  // CRLF line ends still name the end.
+  const crlf = TYPECHANGE.replace(/\n/g, "\r\n");
+  assert.equal(typechangeHalves(crlf, "x")?.binaryEnd, "added");
+  // The PR split's joined pair halves the same way.
+  assert.deepEqual(
+    typechangeHalves(splitUnifiedDiff(TYPECHANGE).get("x"), "x"),
+    linkToBinary,
+  );
+});
+
+test("typechangeHalves: a C-quoted path halves by its decoded name", () => {
+  const path = "café.png";
+  const q = "caf\\303\\251.png";
+  const patch =
+    `diff --git "a/${q}" "b/${q}"\ndeleted file mode 120000\n` +
+    `index 3333ccc..0000000\n--- "a/${q}"\n+++ /dev/null\n@@ -1 +0,0 @@\n-target\n` +
+    `diff --git "a/${q}" "b/${q}"\nnew file mode 100644\n` +
+    `index 0000000..4444ddd\nBinary files /dev/null and "b/${q}" differ\n`;
+  const text = splitUnifiedDiff(patch).get(path);
+  assert.equal(text, patch);
+  assert.equal(typechangeHalves(text, path)?.binaryEnd, "added");
+});
+
+test("typechangeHalves: null on every other shape", () => {
+  const binary = binaryEnd("x", "new");
+  const textGone = textSection("x", "deleted");
+  const noEnd = binary.replace("new file mode 100755\n", "");
+  const bothEnds = binary.replace(
+    "new file mode 100755\n",
+    "deleted file mode 100644\nnew file mode 100755\n",
+  );
+  for (const [name, text] of [
+    ["one binary section", binary],
+    ["one text section", textGone],
+    ["three sections", textGone + binary + textSection("x", "new")],
+    ["two binary sections", binaryEnd("x", "deleted") + binary],
+    ["two text sections", textGone + textSection("x", "new")],
+    ["a binary half naming no end", textGone + noEnd],
+    ["a binary half naming both ends", textGone + bothEnds],
+    ["a nested path's section", textGone + binaryEnd("x/a.png", "new")],
+    ["an empty text", ""],
+  ])
+    assert.equal(typechangeHalves(text, "x"), null, name);
 });
 
 test("binarySizeSummary: a 0-byte side takes no parenthetical", () => {

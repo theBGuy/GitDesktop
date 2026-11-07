@@ -6,6 +6,7 @@ import {
   type LightboxImage,
 } from "@/components/ui/image-lightbox";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
+import { formatBytes } from "@/lib/format-bytes";
 import type { FileBytes } from "@/lib/git/api";
 import { useFileAtRev } from "@/lib/git/queries";
 import { isAppError } from "@/lib/tauri/invoke";
@@ -58,6 +59,8 @@ interface Pane {
   error?: SideError;
   /** The side is reading again after a failure; the other side stays shown. */
   pending?: true;
+  /** The side's byte length; null or absent = unknown, so no size is shown. */
+  bytes?: number | null;
 }
 
 /** A side's read: its bytes (null = not in that version), why it couldn't be
@@ -88,6 +91,7 @@ function sideRead(read: {
 function ImageSide({
   label,
   size,
+  bytes,
   src,
   onOpen,
   onMeasure,
@@ -97,6 +101,8 @@ function ImageSide({
   /** The parent's record of this side's measurement — the caption's only
    *  source, so the two can't disagree about which file is on screen. */
   size: Size | undefined;
+  /** Rides the measured caption only, so it never adds a line of its own. */
+  bytes?: number | null;
   src: string;
   onOpen: () => void;
   onMeasure: (size: Size) => void;
@@ -140,6 +146,9 @@ function ImageSide({
       {size !== undefined && (
         <p className="text-[11px] text-muted-foreground tabular-nums">
           {size.w} × {size.h}
+          {bytes != null
+            ? ` · ${formatBytes(bytes).replace(" ", "\u00a0")}`
+            : ""}
         </p>
       )}
     </figure>
@@ -148,8 +157,15 @@ function ImageSide({
 
 /** A side whose bytes the backend withheld — an oversized file, or a raster whose
  *  header declares more than the webview's decoder should be handed. Visible, so a
- *  refusal never reads as a blank pane. */
-function RefusedSide({ label }: { label: string }) {
+ *  refusal never reads as a blank pane. A pixel-count refusal arrives without
+ *  a size, so only a byte-cap refusal names one. */
+function RefusedSide({
+  label,
+  bytes,
+}: {
+  label: string;
+  bytes?: number | null;
+}) {
   return (
     <figure className="min-w-0 max-w-[45%] space-y-1.5 text-center">
       <figcaption className="text-xs font-medium text-muted-foreground">
@@ -158,6 +174,9 @@ function RefusedSide({ label }: { label: string }) {
       <div className="flex h-40 w-56 max-w-full items-center justify-center border px-4">
         <p className="text-xs text-muted-foreground">
           {IMAGE_CAPTION_REASON.tooLarge}
+          {bytes != null
+            ? ` (${formatBytes(bytes).replace(" ", "\u00a0")})`
+            : ""}
         </p>
       </div>
     </figure>
@@ -300,7 +319,12 @@ export function ImagePanes({
     if ("error" in read) return { key, label, src: null, error: read.error };
     return read.bytes === null
       ? null
-      : { key, label, src: paneSrc(read.bytes, path) };
+      : {
+          key,
+          label,
+          src: paneSrc(read.bytes, path),
+          bytes: read.bytes.size,
+        };
   };
   const panes = [
     toPane("old", oldRead, oldPath, newAbsent ? "Deleted" : "Old"),
@@ -376,7 +400,9 @@ export function ImagePanes({
           );
         }
         if (pane.src === null) {
-          return <RefusedSide key={key} label={pane.label} />;
+          return (
+            <RefusedSide key={key} label={pane.label} bytes={pane.bytes} />
+          );
         }
         const { src } = pane;
         return (
@@ -389,6 +415,7 @@ export function ImagePanes({
               patch({ viewing: shown.findIndex((s) => s.key === pane.key) })
             }
             size={current?.[pane.key]}
+            bytes={pane.bytes}
             src={src}
           />
         );

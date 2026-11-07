@@ -753,8 +753,12 @@ pub async fn git_commit_files(repo_path: String, hash: String) -> AppResult<Vec<
         Some(&repo_path),
         &[
             "show",
+            "--no-ext-diff",
             "-m",
             "--first-parent",
+            "--no-show-signature",
+            "--raw",
+            "--no-abbrev",
             "--numstat",
             "-z",
             "--format=",
@@ -763,7 +767,7 @@ pub async fn git_commit_files(repo_path: String, hash: String) -> AppResult<Vec<
         DEFAULT_TIMEOUT,
     )
     .await?;
-    Ok(parse_numstat_z(&out.stdout_lossy()))
+    Ok(crate::git::diff::parse_raw_numstat_z(&out.stdout_lossy()))
 }
 
 /// The combined diff a commit introduced (vs its first parent) plus numstat —
@@ -867,6 +871,86 @@ pub async fn git_commit_file_diff(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[tokio::test]
+    async fn commit_file_rows_keep_proven_binary_kinds() {
+        use crate::git::types::BinaryKind;
+        let (dir, repo) = temp_repo("binary-kinds");
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "T"],
+            vec!["config", "core.autocrlf", "false"],
+            vec!["config", "core.filemode", "false"],
+            vec!["config", "core.attributesFile", ""],
+            vec!["config", "core.excludesFile", ""],
+            vec!["config", "diff.renames", "true"],
+        ] {
+            git(&repo, &args).await;
+        }
+        std::fs::create_dir_all(dir.path().join(".git/info")).unwrap();
+        for file in ["attributes", "exclude"] {
+            std::fs::write(dir.path().join(".git/info").join(file), "").unwrap();
+        }
+        for file in ["mode", "rename", "renmode", "content"] {
+            std::fs::write(dir.path().join(file), format!("{file}\0binary")).unwrap();
+        }
+        git(&repo, &["add", "-A"]).await;
+        git(&repo, &["commit", "-qm", "base"]).await;
+        git(&repo, &["mv", "rename", "renamed"]).await;
+        git(&repo, &["mv", "renmode", "renamed-mode"]).await;
+        git(
+            &repo,
+            &["update-index", "--chmod=+x", "mode", "renamed-mode"],
+        )
+        .await;
+        std::fs::write(dir.path().join("content"), b"changed\0content").unwrap();
+        git(&repo, &["add", "content"]).await;
+        git(&repo, &["commit", "-qm", "changes"]).await;
+        let sha = run_git(Some(&repo), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_string();
+        let rows = git_commit_files(repo.clone(), sha.clone()).await.unwrap();
+        assert_eq!(rows.len(), 4);
+        for (path, kind) in [
+            ("mode", Some(BinaryKind::Mode)),
+            ("renamed", Some(BinaryKind::Renamed)),
+            ("renamed-mode", Some(BinaryKind::RenamedMode)),
+            ("content", None),
+        ] {
+            let row = rows.iter().find(|row| row.path == path).unwrap();
+            assert!(row.is_binary);
+            assert_eq!(row.binary_kind, kind, "{path}");
+        }
+        let raw = run_git(Some(&repo), &["cat-file", "commit", &sha], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout_lossy();
+        let (headers, message) = raw.split_once("\n\n").unwrap();
+        let signed = format!(
+            "{headers}\ngpgsig -----BEGIN PGP SIGNATURE-----\n invalid\n -----END PGP SIGNATURE-----\n\n{message}"
+        );
+        let signed_sha = run_git_input(
+            Some(&repo),
+            &["hash-object", "-t", "commit", "-w", "--stdin"],
+            Some(&signed),
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap()
+        .stdout_lossy()
+        .trim()
+        .to_string();
+        git(&repo, &["config", "log.showSignature", "true"]).await;
+        let signed_rows = git_commit_files(repo, signed_sha).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(signed_rows).unwrap(),
+            serde_json::to_value(rows).unwrap()
+        );
+    }
 
     fn temp_repo(tag: &str) -> (tempfile::TempDir, String) {
         let dir = tempfile::Builder::new()

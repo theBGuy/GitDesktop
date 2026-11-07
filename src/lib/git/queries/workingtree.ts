@@ -14,7 +14,7 @@ import {
   resolveConflict,
 } from "../conflict";
 import { literalPathspec } from "../glob";
-import type { RepoOp, UnignoreRule } from "../types";
+import type { RemoteLens, RepoOp, UnignoreRule } from "../types";
 import { repoKeys } from "./core";
 import { useRepoMutation, workingTreeKeys } from "./internal";
 
@@ -361,6 +361,44 @@ export function useBinarySizes(
     retry: (failureCount, error) =>
       !(isAppError(error) && error.kind === "invalidArgument") &&
       shouldRetryQuery(failureCount, error),
+  });
+}
+
+/** GitHub's byte sizes for an anchored binary diff's sides the local store
+ *  couldn't size (a null id sends no lookup); idle while `args` is null. */
+export function useGithubBlobSizes(
+  repo: string,
+  args: {
+    oldOid: string | null;
+    newOid: string | null;
+    lens: RemoteLens;
+  } | null,
+) {
+  return useQuery({
+    // Outside the ["repo", …] subtree, as the lens key is: a repo mutation's
+    // invalidation would refetch this active network read, and oid-keyed sizes
+    // can't change; a null side (a missing or unparseable lens remote, the host
+    // gate, or an id GitHub doesn't know) also holds until the query is collected.
+    // The lens picks which GitHub repo answers.
+    queryKey: [
+      "github-blob-sizes",
+      repo,
+      args?.lens ?? null,
+      args?.oldOid ?? null,
+      args?.newOid ?? null,
+    ] as const,
+    queryFn: () =>
+      api.githubBlobSizes(
+        repo,
+        args?.oldOid ?? null,
+        args?.newOid ?? null,
+        args?.lens ?? "origin",
+      ),
+    enabled: args !== null,
+    // A forge read: the default network mode parks it offline. No placeholderData:
+    // the oids are the identity, so it would show another file's sizes.
+    staleTime: Infinity,
+    retry: shouldRetryQuery,
   });
 }
 

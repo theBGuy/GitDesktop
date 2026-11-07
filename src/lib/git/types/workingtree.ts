@@ -38,11 +38,16 @@ export interface BlobSizes {
   newSize: number | null;
 }
 
+export type BinaryKind = "mode" | "renamed" | "renamedMode";
+
 export interface DiffStatEntry {
   path: string;
   added: number;
   deleted: number;
   isBinary: boolean;
+  /** Backend rows always send it; rows built from forge patches and stored
+   *  review records lack it, which reads as unproven, the same as null. */
+  binaryKind?: BinaryKind | null;
 }
 
 /** Per-file line counts for the working tree, one list per diff side. Untracked

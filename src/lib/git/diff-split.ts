@@ -477,6 +477,49 @@ export function isTypechangeDiff(text: string, path: string): boolean {
   return ownSections(text, path).length > 1;
 }
 
+/** A typechange's two sections when exactly one is binary, in git's order. */
+export interface TypechangeHalves {
+  binary: string;
+  text: string;
+  binaryFirst: boolean;
+  /** Which end of the path the binary section holds. */
+  binaryEnd: "added" | "removed";
+}
+
+const FILE_END_LINE = /^(new|deleted) file mode [0-7]{6}$/;
+
+const BINARY_END: Record<"new" | "deleted", TypechangeHalves["binaryEnd"]> = {
+  new: "added",
+  deleted: "removed",
+};
+
+/**
+ * The binary and text halves of a file↔symlink typechange: exactly two of the
+ * path's own sections, exactly one of them binary, whose header names exactly
+ * one end (`new file mode` or `deleted file mode`). Any other shape is null,
+ * so the pane keeps its whole-file binary placeholder.
+ */
+export function typechangeHalves(
+  text: string,
+  path: string,
+): TypechangeHalves | null {
+  const sections = ownSections(text, path);
+  if (sections.length !== 2) return null;
+  const binaryAt = sections.findIndex(sectionIsBinary);
+  if (binaryAt === -1 || sectionIsBinary(sections[1 - binaryAt])) return null;
+  const binary = sections[binaryAt];
+  const ends = binary
+    .split("\n")
+    .flatMap((line) => FILE_END_LINE.exec(line.replace(/\r$/, ""))?.[1] ?? []);
+  if (ends.length !== 1) return null;
+  return {
+    binary,
+    text: sections[1 - binaryAt],
+    binaryFirst: binaryAt === 0,
+    binaryEnd: BINARY_END[ends[0] as "new" | "deleted"],
+  };
+}
+
 /** A size change's ratio, read once so the visible glyphs and the spoken
  *  words can't disagree. `value` is already formatted. */
 type ChangeRatio =

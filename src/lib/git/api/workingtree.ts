@@ -6,6 +6,7 @@ import type {
   FileDiff,
   IgnoredFile,
   PathListingEntry,
+  RemoteLens,
   StagedDiff,
   UnignoreRule,
 } from "../types";
@@ -75,6 +76,10 @@ export interface FileBytes {
   /** Past the byte cap, or a raster whose header declares more than the
    *  webview's decoder should be handed. */
   tooLarge: boolean;
+  /** u64 rides as a JS number (byte sizes stay < 2^53), like BlobSizes/stats.
+   *  Null when unknown: dimension refusals, and a working-tree file that grew
+   *  past the cap mid-read. */
+  size: number | null;
 }
 
 /** File content at a rev (null rev = working tree; null result = absent).
@@ -111,6 +116,13 @@ export const gitBlobSizes = (
     worktreeFile,
     anchorCommit,
   });
+
+export const githubBlobSizes = (
+  repoPath: string,
+  oldOid: string | null,
+  newOid: string | null,
+  lens: RemoteLens,
+) => invoke<BlobSizes>("github_blob_sizes", { repoPath, oldOid, newOid, lens });
 
 /** Decode base64 file bytes (from git_file_base64) to a UTF-8 string. */
 export function decodeBase64Utf8(b64: string): string {
