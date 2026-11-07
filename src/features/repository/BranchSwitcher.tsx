@@ -308,6 +308,9 @@ interface BranchPr {
   /** The branch this PR targets. A merge into anything but the default branch
    *  can't stand in for "merged into the default branch". */
   base: string;
+  /** The PR head commit, unvalidated; null for a local PR or a forge row that
+   *  left it empty. */
+  headSha: string | null;
   select: SelectedPr;
 }
 
@@ -959,6 +962,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         state,
         label: `#${pr.number}`,
         base: pr.baseRefName,
+        headSha: pr.headSha || null,
         select: { kind: "remote", id: String(pr.number) },
       });
     }
@@ -968,6 +972,7 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
         state,
         label: "local",
         base: pr.base,
+        headSha: null,
         select: { kind: "local", id: pr.id },
       });
     }
@@ -979,16 +984,17 @@ export function BranchSwitcher({ repoPath }: { repoPath: string }) {
   // sees, and it has no PR number to attribute the badge to. The base must be the
   // default branch — a PR merged into a release branch or a stack parent says
   // nothing about the default branch, which is what that dialog is about. A null
-  // `defaultName` matches nothing, so an unresolved default badges nothing.
+  // `defaultName` matches nothing, so an unresolved default badges nothing. The
+  // head rides along for the dialog's content check.
   const mergedPrByBranch = useMemo(() => {
-    const map = new Map<string, string>();
+    const map = new Map<string, { label: string; headSha: string | null }>();
     for (const [name, pr] of prByBranch) {
       if (
         pr.state === "merged" &&
         pr.select.kind === "remote" &&
         pr.base === defaultName
       )
-        map.set(name, pr.label);
+        map.set(name, { label: pr.label, headSha: pr.headSha });
     }
     return map;
   }, [prByBranch, defaultName]);

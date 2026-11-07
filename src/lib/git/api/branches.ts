@@ -178,9 +178,11 @@ export const gitUpdateBranchFrom = (
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
 
-/** "clean": merging the branch into the base writes exactly the base's tree.
- *  "changes": it writes another tree or conflicts, which doesn't prove the branch
- *  was never merged. "unknown": the check couldn't decide; never read as clean. */
+/** "clean": every change on the branch is in the base, at its tip or in a
+ *  first-parent commit of its history, or the branch is an older version of a
+ *  merged pull request whose final head passes the same check.
+ *  "changes": no route cleared it, which doesn't prove the branch was never
+ *  merged. "unknown": the check couldn't decide; never read as clean. */
 export type ContentVerdict = "clean" | "changes" | "unknown";
 
 /** The commit content verdicts compare against. `refName` is the short display
@@ -196,29 +198,54 @@ export interface BranchContentMerged {
   verdict: ContentVerdict;
   /** The tip the verdict was computed for; null when the branch didn't resolve. */
   headSha: string | null;
+  /** The base-history commit that cleared the check, for the branch or its PR
+   *  head; null for any clean at the base tip, and whenever not clean. Never the
+   *  base tip itself, so it is never a stand-in for the base sha. */
+  landedIn: string | null;
+  /** True only when the clean came through the merged pull request's head. */
+  viaPrHead: boolean;
 }
 
-/** The newer of the default branch and its remote-tracking counterpart; null on
- *  git older than 2.38 (or a git version that can't be read), when neither side
- *  resolves, or when a merge driver or merge.default is configured or the config
- *  can't be read. */
+/** Why an open has no base: a configured merge driver, merge.default or
+ *  merge.renormalize (checked in that order), an unreadable config, git older
+ *  than 2.38 (or a version that can't be read), or neither side resolving. */
+export type ContentCheckOff =
+  | "mergeDriver"
+  | "mergeDefault"
+  | "mergeRenormalize"
+  | "configUnreadable"
+  | "gitTooOld"
+  | "noBase";
+
+/** Exactly one of `base` and `offReason` is non-null. */
+export interface ContentCheckBaseRead {
+  base: ContentCheckBase | null;
+  offReason: ContentCheckOff | null;
+}
+
+/** The newer of the default branch and its remote-tracking counterpart, or why
+ *  the check is off. */
 export const gitContentCheckBase = (repoPath: string, defaultBranch: string) =>
-  invoke<ContentCheckBase | null>("git_content_check_base", {
+  invoke<ContentCheckBaseRead>("git_content_check_base", {
     repoPath,
     defaultBranch,
   });
 
 /** One branch's verdict against a base from {@link gitContentCheckBase}. Git
- *  failures read as "unknown"; it rejects only on invalid input. */
+ *  failures read as "unknown"; it rejects only on invalid input. `prHead` is the
+ *  head of the branch's merged pull request, lowercase hex or null: callers
+ *  validate it, so nothing relies on the backend ignoring a bad one. */
 export const gitBranchContentMerged = (
   repoPath: string,
   baseSha: string,
   baseTree: string,
   branch: string,
+  prHead: string | null,
 ) =>
   invoke<BranchContentMerged>("git_branch_content_merged", {
     repoPath,
     baseSha,
     baseTree,
     branch,
+    prHead,
   });

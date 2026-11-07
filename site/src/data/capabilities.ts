@@ -148,7 +148,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "See whether a stale branch still holds work the default branch lacks before you delete it (Git 2.38+)",
+      "See whether a stale branch still holds work that never went into the default branch before you delete it, even after a squash merge (Git 2.38+)",
   },
   {
     group: "Branches & history",

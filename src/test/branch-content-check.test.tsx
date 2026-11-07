@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type BranchContentMerged,
   type ContentCheckBase,
+  type ContentCheckBaseRead,
   type ContentVerdict,
   gitBranchContentMerged,
   gitContentCheckBase,
@@ -41,13 +42,23 @@ const baseFor = (n: string): ContentCheckBase => ({
   tree: "e".repeat(40),
 });
 
+/** What gitContentCheckBase answers when a base resolves. */
+const readFor = (n: string): ContentCheckBaseRead => ({
+  base: baseFor(n),
+  offReason: null,
+});
+
 interface CheckCall {
   repo: string;
   baseSha: string;
   baseTree: string;
   branch: string;
+  prHead: string | null;
   settled: boolean;
-  settle: (verdict?: ContentVerdict) => void;
+  settle: (
+    verdict?: ContentVerdict,
+    detail?: Partial<Pick<BranchContentMerged, "landedIn" | "viaPrHead">>,
+  ) => void;
   fail: () => void;
 }
 
@@ -60,17 +71,19 @@ interface Props {
   defaultBranch: string | null | undefined;
   branches: readonly string[];
   enabled: boolean;
+  prHeads?: ReadonlyMap<string, string>;
 }
 
 /** One entry per COMMITTED render: render-time adjusts never commit. */
 const commits: BranchContentCheck[] = [];
 
-function Probe({ repoPath, defaultBranch, branches, enabled }: Props) {
+function Probe({ repoPath, defaultBranch, branches, enabled, prHeads }: Props) {
   const check = useBranchContentCheck(
     repoPath,
     defaultBranch,
     branches,
     enabled,
+    prHeads,
   );
   useLayoutEffect(() => {
     commits.push({ ...check, verdicts: new Map(check.verdicts) });
@@ -122,7 +135,7 @@ beforeEach(() => {
   vi.mocked(gitContentCheckBase).mockReset();
   vi.mocked(gitBranchContentMerged)
     .mockReset()
-    .mockImplementation((repo, baseSha, baseTree, branch) => {
+    .mockImplementation((repo, baseSha, baseTree, branch, prHead) => {
       const d = deferred<BranchContentMerged>();
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
@@ -131,10 +144,18 @@ beforeEach(() => {
         baseSha,
         baseTree,
         branch,
+        prHead,
         settled: false,
-        settle: (verdict = "clean") => {
+        settle: (verdict = "clean", detail = {}) => {
           call.settled = true;
-          d.resolve({ branch, verdict, headSha: "f".repeat(40) });
+          d.resolve({
+            branch,
+            verdict,
+            headSha: "f".repeat(40),
+            landedIn: null,
+            viaPrHead: false,
+            ...detail,
+          });
         },
         fail: () => {
           call.settled = true;
@@ -160,7 +181,7 @@ describe("useBranchContentCheck", () => {
   it("never runs more than four checks at once, then settles every branch", async () => {
     const repo = "C:/repos/cc-bound";
     const branches = names("bound", 10);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("a"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("a"));
     const view = mount({
       repoPath: repo,
       defaultBranch: "main",
@@ -198,7 +219,7 @@ describe("useBranchContentCheck", () => {
     const repoB = "C:/repos/cc-shared-b";
     const branchesA = names("shared-a", 6);
     const branchesB = names("shared-b", 6);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("b"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("b"));
     const a = mount({
       repoPath: repoA,
       defaultBranch: "main",
@@ -236,7 +257,7 @@ describe("useBranchContentCheck", () => {
   it("closing stops queued checks and drops the open's cache entries", async () => {
     const repo = "C:/repos/cc-close";
     const branches = names("close", 6);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("b"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("b"));
     const view = mount({
       repoPath: repo,
       defaultBranch: "main",
@@ -263,7 +284,7 @@ describe("useBranchContentCheck", () => {
   it("a name that leaves the list never has its queued check started", async () => {
     const repo = "C:/repos/cc-depart";
     const branches = names("depart", 5);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("c"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("c"));
     const view = mount({
       repoPath: repo,
       defaultBranch: "main",
@@ -291,7 +312,7 @@ describe("useBranchContentCheck", () => {
     const repo = "C:/repos/cc-reopen";
     const branches = names("reopen", 2);
     const props = { repoPath: repo, defaultBranch: "main", branches };
-    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(baseFor("d"));
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(readFor("d"));
     const view = mount({ ...props, enabled: true });
     await waitFor(() => expect(calls).toHaveLength(2));
     for (const call of calls) call.settle();
@@ -310,7 +331,7 @@ describe("useBranchContentCheck", () => {
     view.update({ ...props, enabled: false });
     expect(view.entries(repo)).toEqual([]);
 
-    const nextBase = deferred<ContentCheckBase | null>();
+    const nextBase = deferred<ContentCheckBaseRead>();
     vi.mocked(gitContentCheckBase).mockReturnValueOnce(nextBase.promise);
     const mark = commits.length;
     view.update({ ...props, enabled: true });
@@ -323,7 +344,7 @@ describe("useBranchContentCheck", () => {
     await flush();
     expect(view.latest().verdicts.size).toBe(0);
     expect(gitContentCheckBase).toHaveBeenCalledTimes(2);
-    await act(async () => nextBase.resolve(baseFor("d")));
+    await act(async () => nextBase.resolve(readFor("d")));
     await waitFor(() => expect(calls).toHaveLength(4));
     expect(view.latest().verdicts.size).toBe(0);
     expect(view.latest().pendingCount).toBe(2);
@@ -334,7 +355,7 @@ describe("useBranchContentCheck", () => {
   it("a repo switch while open starts a fresh open for the new repo", async () => {
     const repoA = "C:/repos/cc-switch-a";
     const repoB = "C:/repos/cc-switch-b";
-    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(baseFor("1"));
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(readFor("1"));
     const view = mount({
       repoPath: repoA,
       defaultBranch: "main",
@@ -345,7 +366,7 @@ describe("useBranchContentCheck", () => {
     calls[0].settle();
     await waitFor(() => expect(view.latest().verdicts.size).toBe(1));
 
-    const baseB = deferred<ContentCheckBase | null>();
+    const baseB = deferred<ContentCheckBaseRead>();
     vi.mocked(gitContentCheckBase).mockReturnValueOnce(baseB.promise);
     const mark = commits.length;
     view.update({
@@ -366,7 +387,7 @@ describe("useBranchContentCheck", () => {
     expect(view.latest().verdicts.size).toBe(0);
     expect(view.entries(repoA)).toEqual([]);
 
-    await act(async () => baseB.resolve(baseFor("2")));
+    await act(async () => baseB.resolve(readFor("2")));
     await waitFor(() => expect(calls).toHaveLength(3));
     expect(calls[2]).toMatchObject({
       repo: repoB,
@@ -383,7 +404,7 @@ describe("useBranchContentCheck", () => {
   it("waits while the default branch loads, then checks against it", async () => {
     const repo = "C:/repos/cc-loading";
     const branches = names("loading", 2);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("3"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("3"));
     const view = mount({
       repoPath: repo,
       defaultBranch: undefined,
@@ -391,7 +412,11 @@ describe("useBranchContentCheck", () => {
       enabled: true,
     });
     await flush();
-    expect(view.latest()).toMatchObject({ status: "pending", base: null });
+    expect(view.latest()).toMatchObject({
+      status: "pending",
+      base: null,
+      offReason: null,
+    });
     expect(view.latest().pendingCount).toBe(2);
     expect(gitContentCheckBase).not.toHaveBeenCalled();
     expect(calls).toHaveLength(0);
@@ -419,6 +444,7 @@ describe("useBranchContentCheck", () => {
     expect(none.latest()).toMatchObject({
       status: "unsupported",
       base: null,
+      offReason: "noDefaultBranch",
       pendingCount: 0,
     });
     none.unmount();
@@ -452,7 +478,10 @@ describe("useBranchContentCheck", () => {
   });
 
   it("an unresolvable or failed base is unsupported; a failed check is unknown", async () => {
-    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(null);
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce({
+      base: null,
+      offReason: "mergeRenormalize",
+    });
     const noBase = mount({
       repoPath: "C:/repos/cc-nobase",
       defaultBranch: "main",
@@ -460,6 +489,7 @@ describe("useBranchContentCheck", () => {
       enabled: true,
     });
     await waitFor(() => expect(noBase.latest().status).toBe("unsupported"));
+    expect(noBase.latest().offReason).toBe("mergeRenormalize");
     noBase.unmount();
 
     vi.mocked(gitContentCheckBase).mockRejectedValueOnce(new Error("spawn"));
@@ -470,10 +500,11 @@ describe("useBranchContentCheck", () => {
       enabled: true,
     });
     await waitFor(() => expect(badBase.latest().status).toBe("unsupported"));
+    expect(badBase.latest().offReason).toBe("baseFailed");
     expect(calls).toHaveLength(0);
     badBase.unmount();
 
-    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(baseFor("4"));
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(readFor("4"));
     const view = mount({
       repoPath: "C:/repos/cc-unknown",
       defaultBranch: "main",
@@ -484,6 +515,7 @@ describe("useBranchContentCheck", () => {
     calls[0].settle();
     calls[1].fail();
     await waitFor(() => expect(view.latest().status).toBe("settled"));
+    expect(view.latest().offReason).toBeNull();
     expect(view.latest().verdicts).toEqual(
       new Map([
         ["unknown-ok", "clean"],
@@ -496,7 +528,7 @@ describe("useBranchContentCheck", () => {
     const repo = "C:/repos/cc-rebase";
     const branches = names("rebase", 2);
     const props = { repoPath: repo, defaultBranch: "main", branches };
-    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(baseFor("5"));
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(readFor("5"));
     const view = mount({ ...props, enabled: true });
     await waitFor(() => expect(calls).toHaveLength(2));
     for (const call of calls) call.settle();
@@ -513,7 +545,7 @@ describe("useBranchContentCheck", () => {
     expect(view.latest().status).toBe("settled");
     expect(view.latest().base).toEqual(baseFor("5"));
 
-    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(baseFor("6"));
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(readFor("6"));
     await act(async () => {
       await view.client.invalidateQueries();
     });
@@ -531,7 +563,7 @@ describe("useBranchContentCheck", () => {
   it("keeps each first verdict through a filterless refetch, without re-running git", async () => {
     const repo = "C:/repos/cc-latch-verdicts";
     const branches = ["vlatch-changes", "vlatch-clean", "vlatch-failed"];
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("a"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("a"));
     const view = mount({
       repoPath: repo,
       defaultBranch: "main",
@@ -561,6 +593,8 @@ describe("useBranchContentCheck", () => {
         branch,
         verdict: later[branch],
         headSha: "f".repeat(40),
+        landedIn: null,
+        viaPrHead: false,
       }),
     );
     const mark = commits.length;
@@ -581,7 +615,7 @@ describe("useBranchContentCheck", () => {
   it("keeps a verdict whose row leaves and returns within the open", async () => {
     const repo = "C:/repos/cc-return";
     const branches = names("return", 2);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("7"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("7"));
     const view = mount({
       repoPath: repo,
       defaultBranch: "main",
@@ -616,7 +650,7 @@ describe("useBranchContentCheck", () => {
     const repo = "C:/repos/cc-hide";
     const branches = names("hide", 2);
     const props = { repoPath: repo, defaultBranch: "main", branches };
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("8"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("8"));
     const view = mount({ ...props, enabled: true });
     await waitFor(() => expect(calls).toHaveLength(2));
     for (const call of calls) call.settle();
@@ -636,7 +670,7 @@ describe("useBranchContentCheck", () => {
   it("a check cancelled as its slot is granted never starts", async () => {
     const repo = "C:/repos/cc-grant";
     const branches = names("grant", 6);
-    vi.mocked(gitContentCheckBase).mockResolvedValue(baseFor("9"));
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("9"));
     const view = mount({
       repoPath: repo,
       defaultBranch: "main",
@@ -676,5 +710,253 @@ describe("useBranchContentCheck", () => {
       branches[5],
     ]);
     expect(maxInFlight).toBe(4);
+  });
+});
+
+describe("useBranchContentCheck's merged-PR heads", () => {
+  /** Settles every check in flight, oldest first, as each takes a slot. */
+  async function drain(verdict: ContentVerdict) {
+    while (calls.some((c) => !c.settled)) {
+      calls.find((c) => !c.settled)?.settle(verdict);
+      await flush();
+    }
+  }
+
+  it("sends each head lowercased, and null for an absent, empty or non-hex one", async () => {
+    const repo = "C:/repos/cc-heads";
+    const hex40 = "1a2b3c4d5e".repeat(4);
+    const hex64 = "abcdef0123456789".repeat(4);
+    const short = "0a1b2c3d4e5f";
+    const heads = new Map([
+      ["heads-40", hex40],
+      ["heads-64", hex64],
+      ["heads-12", short],
+      ["heads-upper", hex40.toUpperCase()],
+      ["heads-empty", ""],
+      ["heads-garbage", "not-a-sha"],
+    ]);
+    const branches = [...heads.keys(), "heads-absent"];
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("a"));
+    const view = mount({
+      repoPath: repo,
+      defaultBranch: "main",
+      branches,
+      enabled: true,
+      prHeads: heads,
+    });
+    await waitFor(() => expect(calls).toHaveLength(4));
+    await drain("changes");
+    expect(Object.fromEntries(calls.map((c) => [c.branch, c.prHead]))).toEqual({
+      "heads-40": hex40,
+      "heads-64": hex64,
+      "heads-12": short,
+      "heads-upper": hex40,
+      "heads-empty": null,
+      "heads-garbage": null,
+      "heads-absent": null,
+    });
+    // A run that already sent its head, or had none to send, never re-runs.
+    expect(calls).toHaveLength(branches.length);
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+    expect(view.latest().verdicts.size).toBe(branches.length);
+  });
+
+  it("a head arriving mid-check never re-keys it; its upgrade waits for a changes verdict", async () => {
+    const repo = "C:/repos/cc-late-head";
+    const branches = names("late", 6);
+    const head = "b".repeat(40);
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("b"));
+    const view = mount({ ...props, enabled: true });
+    await waitFor(() => expect(calls).toHaveLength(4));
+
+    // late-0 and late-1 are running and late-5 is queued when the heads land.
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map([
+        ["late-0", head],
+        ["late-1", head],
+        ["late-5", head],
+      ]),
+    });
+    await flush();
+    expect(calls).toHaveLength(4);
+    expect(view.latest().pendingCount).toBe(6);
+
+    calls[0].settle("clean");
+    calls[1].settle("changes");
+    await flush();
+    expect(view.latest().verdicts.get("late-0")).toBe("clean");
+    expect(view.latest().verdicts.get("late-1")).toBe("changes");
+
+    await drain("changes");
+    expect(calls.map((c) => [c.branch, c.prHead])).toEqual([
+      ...branches.map((b) => [b, null]),
+      ["late-1", head],
+      ["late-5", head],
+    ]);
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+  });
+
+  it("an upgrade reaches git, serves the latched verdict meanwhile, and replaces it when clean", async () => {
+    const repo = "C:/repos/cc-upgrade";
+    const props = {
+      repoPath: repo,
+      defaultBranch: "main",
+      branches: ["up-row"],
+    };
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("c"));
+    const view = mount({ ...props, enabled: true });
+    await waitFor(() => expect(calls).toHaveLength(1));
+    calls[0].settle("changes");
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+
+    const mark = commits.length;
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map([["up-row", "C".repeat(40)]]),
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].prHead).toBe("c".repeat(40));
+    await flush();
+    expect(commits.length).toBeGreaterThan(mark);
+    for (const commit of commits.slice(mark)) {
+      expect(commit.status).toBe("settled");
+      expect(commit.pendingCount).toBe(0);
+      expect(commit.verdicts.get("up-row")).toBe("changes");
+    }
+
+    calls[1].settle("clean", { landedIn: "d".repeat(40), viaPrHead: true });
+    await waitFor(() =>
+      expect(view.latest().verdicts.get("up-row")).toBe("clean"),
+    );
+    expect(view.latest().results.get("up-row")).toMatchObject({
+      landedIn: "d".repeat(40),
+      viaPrHead: true,
+    });
+
+    // The head is spent: neither another head nor a refetch runs it again.
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map([["up-row", "e".repeat(40)]]),
+    });
+    await act(async () => {
+      await view.client.invalidateQueries();
+    });
+    await flush();
+    expect(calls).toHaveLength(2);
+    expect(view.latest().verdicts.get("up-row")).toBe("clean");
+  });
+
+  it("an upgrade that doesn't land clean keeps the latched changes and never runs again", async () => {
+    const repo = "C:/repos/cc-upgrade-keep";
+    const branches = ["keep-unknown", "keep-failed", "keep-changes"];
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("d"));
+    const view = mount({ ...props, enabled: true });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    for (const call of calls) call.settle("changes");
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map(branches.map((b) => [b, "f".repeat(40)])),
+    });
+    await waitFor(() => expect(calls).toHaveLength(6));
+    const upgrade = (name: string) =>
+      calls.find((c, i) => i >= 3 && c.branch === name);
+    upgrade("keep-unknown")?.settle("unknown");
+    upgrade("keep-failed")?.fail();
+    upgrade("keep-changes")?.settle("changes");
+    await flush();
+
+    const latched = new Map(branches.map((b) => [b, "changes"]));
+    expect(view.latest().verdicts).toEqual(latched);
+    expect(view.latest().results.get("keep-unknown")?.verdict).toBe("changes");
+    await act(async () => {
+      await view.client.invalidateQueries();
+    });
+    await flush();
+    expect(calls).toHaveLength(6);
+    expect(view.latest().verdicts).toEqual(latched);
+  });
+
+  it("clean, unknown and failed rows never upgrade", async () => {
+    const repo = "C:/repos/cc-no-upgrade";
+    const branches = ["nu-clean", "nu-unknown", "nu-failed"];
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("e"));
+    const view = mount({ ...props, enabled: true });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    calls[0].settle("clean");
+    calls[1].settle("unknown");
+    calls[2].fail();
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map(branches.map((b) => [b, "1".repeat(40)])),
+    });
+    await flush();
+    expect(calls).toHaveLength(3);
+    expect(view.latest().verdicts).toEqual(
+      new Map([
+        ["nu-clean", "clean"],
+        ["nu-unknown", "unknown"],
+        ["nu-failed", "unknown"],
+      ]),
+    );
+  });
+
+  it("an upgrade landing after a repo switch lands nowhere", async () => {
+    const repoA = "C:/repos/cc-upgrade-switch-a";
+    const repoB = "C:/repos/cc-upgrade-switch-b";
+    vi.mocked(gitContentCheckBase).mockResolvedValueOnce(readFor("1"));
+    const view = mount({
+      repoPath: repoA,
+      defaultBranch: "main",
+      branches: ["us-shared"],
+      enabled: true,
+    });
+    await waitFor(() => expect(calls).toHaveLength(1));
+    calls[0].settle("changes");
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+    view.update({
+      repoPath: repoA,
+      defaultBranch: "main",
+      branches: ["us-shared"],
+      enabled: true,
+      prHeads: new Map([["us-shared", "2".repeat(40)]]),
+    });
+    await waitFor(() => expect(calls).toHaveLength(2));
+
+    const baseB = deferred<ContentCheckBaseRead>();
+    vi.mocked(gitContentCheckBase).mockReturnValueOnce(baseB.promise);
+    view.update({
+      repoPath: repoB,
+      defaultBranch: "trunk",
+      branches: ["us-shared"],
+      enabled: true,
+    });
+    calls[1].settle("clean", { viaPrHead: true });
+    await flush();
+    expect(view.latest().verdicts.size).toBe(0);
+    expect(view.entries(repoA)).toEqual([]);
+
+    await act(async () => baseB.resolve(readFor("3")));
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls[2]).toMatchObject({
+      repo: repoB,
+      branch: "us-shared",
+      prHead: null,
+    });
+    calls[2].settle("changes");
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+    expect(view.latest().verdicts).toEqual(new Map([["us-shared", "changes"]]));
   });
 });

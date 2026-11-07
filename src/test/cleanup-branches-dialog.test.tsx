@@ -26,6 +26,8 @@ import {
 import {
   type BranchContentMerged,
   type ContentCheckBase,
+  type ContentCheckBaseRead,
+  type ContentCheckOff,
   type ContentVerdict,
   gitBranchContentMerged,
   gitBranchDivergence,
@@ -100,6 +102,11 @@ const BASE: ContentCheckBase = {
   sha: "a".repeat(40),
   tree: "b".repeat(40),
 };
+const READY: ContentCheckBaseRead = { base: BASE, offReason: null };
+const offRead = (offReason: ContentCheckOff): ContentCheckBaseRead => ({
+  base: null,
+  offReason,
+});
 const DAY_MS = 86_400_000;
 const OLD = 200;
 const FRESH = 1;
@@ -107,8 +114,12 @@ const FRESH = 1;
 interface VerdictCall {
   repo: string;
   branch: string;
+  prHead: string | null;
   settled: boolean;
-  resolve: (verdict: ContentVerdict) => void;
+  resolve: (
+    verdict: ContentVerdict,
+    detail?: Partial<Pick<BranchContentMerged, "landedIn" | "viaPrHead">>,
+  ) => void;
 }
 interface RemovalCall {
   args: Parameters<typeof removeWorktreeForCleanup>[1];
@@ -117,10 +128,9 @@ interface RemovalCall {
 
 let verdictCalls: VerdictCall[] = [];
 let removalCalls: RemovalCall[] = [];
-/** What gitContentCheckBase answers: a base, null (unsupported git), or a
- *  promise the test resolves. */
-let baseAnswer: ContentCheckBase | null | Promise<ContentCheckBase | null> =
-  BASE;
+/** What gitContentCheckBase answers: a base, an off reason, or a promise the
+ *  test resolves. */
+let baseAnswer: ContentCheckBaseRead | Promise<ContentCheckBaseRead> = READY;
 /** Ancestry-merged branch names per repo (divergence ahead 0, behind 3). */
 let mergedByRepo = new Map<string, string[]>();
 /** Worktree status answers by path; a missing path stays in flight, and a
@@ -148,7 +158,7 @@ function branch(name: string, days: number, archived = false): Branch {
 beforeEach(() => {
   verdictCalls = [];
   removalCalls = [];
-  baseAnswer = BASE;
+  baseAnswer = READY;
   mergedByRepo = new Map();
   statusByPath = new Map();
   onCommit = null;
@@ -163,15 +173,23 @@ beforeEach(() => {
   );
   vi.mocked(gitContentCheckBase).mockImplementation(async () => baseAnswer);
   vi.mocked(gitBranchContentMerged).mockImplementation(
-    (repo, _sha, _tree, name) => {
+    (repo, _sha, _tree, name, prHead) => {
       const d = deferred<BranchContentMerged>();
       const call: VerdictCall = {
         repo,
         branch: name,
+        prHead,
         settled: false,
-        resolve: (verdict) => {
+        resolve: (verdict, detail = {}) => {
           call.settled = true;
-          d.resolve({ branch: name, verdict, headSha: null });
+          d.resolve({
+            branch: name,
+            verdict,
+            headSha: null,
+            landedIn: null,
+            viaPrHead: false,
+            ...detail,
+          });
         },
       };
       verdictCalls.push(call);
@@ -227,6 +245,8 @@ interface Setup {
   branches: Branch[];
   merged?: string[];
   prMerged?: Record<string, string>;
+  /** Merged-PR head per branch, as the forge reported it; absent is null. */
+  prHeads?: Record<string, string>;
   prClosed?: Record<string, string>;
   worktrees?: Record<
     string,
@@ -266,7 +286,12 @@ function propsFor(s: Setup): DialogProps {
     isWorktreeRemoving: (name) => removing.has(name),
     worktreeCheckState: "checked",
     rulesSettling: false,
-    prMergedByBranch: new Map(Object.entries(s.prMerged ?? {})),
+    prMergedByBranch: new Map(
+      Object.entries(s.prMerged ?? {}).map(([name, label]) => [
+        name,
+        { label, headSha: s.prHeads?.[name] ?? null },
+      ]),
+    ),
     prClosedByBranch: new Map(Object.entries(s.prClosed ?? {})),
     prCheckState: s.prCheckState ?? "checked",
     prCheckPaused: s.prCheckPaused ?? false,
@@ -326,6 +351,25 @@ async function landVerdicts(want: Record<string, ContentVerdict>) {
 /** Every verdict check the test hasn't landed yet answers `verdict`. */
 async function landRest(names: string[], verdict: ContentVerdict) {
   await landVerdicts(Object.fromEntries(names.map((n) => [n, verdict])));
+}
+
+/** Lands `name`'s next check with `verdict` and what it rests on. */
+async function landOne(
+  name: string,
+  verdict: ContentVerdict,
+  detail: Partial<Pick<BranchContentMerged, "landedIn" | "viaPrHead">>,
+) {
+  await waitFor(() =>
+    expect(verdictCalls.some((c) => !c.settled && c.branch === name)).toBe(
+      true,
+    ),
+  );
+  await act(async () => {
+    verdictCalls
+      .find((c) => !c.settled && c.branch === name)
+      ?.resolve(verdict, detail);
+    await new Promise((r) => setTimeout(r, 0));
+  });
 }
 
 const listed = () =>
@@ -568,7 +612,7 @@ describe("pre-checks", () => {
   // while the user has Idle off; turning Idle on adds it (untouched).
   describe("an idle fallback counts only while Idle is on", () => {
     it("when the check is unsupported", async () => {
-      const base = deferred<ContentCheckBase | null>();
+      const base = deferred<ContentCheckBaseRead>();
       baseAnswer = base.promise;
       const { user } = renderDialog({
         repoPath: "C:/repos/fallback-unsupported",
@@ -578,7 +622,7 @@ describe("pre-checks", () => {
       await waitFor(() => expect(listed()).toEqual(["f1-closed-old"]));
       await setCriteria(user, { merged: true, closed: true, idle: false });
       expect(listed()).toEqual(["f1-closed-old"]);
-      await act(async () => base.resolve(null));
+      await act(async () => base.resolve(offRead("gitTooOld")));
       // Unsupported: the verdict slot goes away.
       await waitFor(() =>
         expect(
@@ -1970,8 +2014,71 @@ describe("a default-branch read that failed", () => {
     await waitFor(() => expect(isChecked("df-old")).toBe(true));
   });
 
+  // Verbatim per reason: the status line's clause in place of the compared ref.
+  const OFF_CAPTIONS: [string, string][] = [
+    ["mergeDriver", "Content check off: your Git config sets a merge driver."],
+    ["mergeDefault", "Content check off: your Git config sets merge.default."],
+    [
+      "mergeRenormalize",
+      "Content check off: your Git config sets merge.renormalize.",
+    ],
+    [
+      "configUnreadable",
+      "Content check off: your Git config couldn't be read.",
+    ],
+    ["gitTooOld", "Content check off: it needs Git 2.38 or later."],
+    ["noBase", "Content check off: the default branch couldn't be found."],
+    [
+      "noDefaultBranch",
+      "Content check off: the default branch couldn't be found.",
+    ],
+    ["baseFailed", "Content check off: the default branch couldn't be read."],
+  ];
+
+  it.each(OFF_CAPTIONS)(
+    "names why the content check is off (%s)",
+    async (reason, caption) => {
+      const repoPath = `C:/repos/off-${reason}`;
+      if (reason === "baseFailed")
+        vi.mocked(gitContentCheckBase).mockRejectedValueOnce(
+          new Error("spawn"),
+        );
+      else if (reason !== "noDefaultBranch")
+        baseAnswer = offRead(reason as ContentCheckOff);
+      renderDialog({
+        repoPath,
+        branches: [branch(`${reason}-old`, OLD)],
+        ...(reason === "noDefaultBranch" ? { defaultBranch: null } : {}),
+      });
+      const note = await screen.findByText(caption);
+      expect(note).not.toHaveClass("sr-only");
+      expect(note.closest('[role="status"]')).not.toHaveClass("sr-only");
+      // The resting line keeps only the count, so the note is announced once.
+      const resting = screen.getByText("1 branch to review.");
+      expect(resting).toHaveClass("sr-only");
+      expect(resting).not.toHaveTextContent("Content check off");
+      expect(resting).not.toHaveTextContent("Contents compared with");
+    },
+  );
+
+  it("still pre-checks an idle row while the content check is off", async () => {
+    // The owner's chosen policy: the note explains the fallback, never replaces it.
+    baseAnswer = offRead("mergeRenormalize");
+    renderDialog({
+      repoPath: "C:/repos/off-precheck",
+      branches: [branch("op-unlanded", OLD)],
+    });
+    await waitFor(() => expect(isChecked("op-unlanded")).toBe(true));
+    expect(
+      screen.getByText(
+        "Content check off: your Git config sets merge.renormalize.",
+      ),
+    ).not.toHaveClass("sr-only");
+    expect(gitBranchContentMerged).not.toHaveBeenCalled();
+  });
+
   it("still lists a repo whose read answered with no default", async () => {
-    baseAnswer = null;
+    baseAnswer = offRead("gitTooOld");
     renderDialog({
       repoPath: "C:/repos/default-none",
       branches: [branch("main", OLD), branch("dn-old", OLD)],
@@ -2054,7 +2161,7 @@ describe("new ancestry data within one open", () => {
   });
 
   it("keeps an unchecked row unchecked when a refetch moves the merged set, without a content check", async () => {
-    baseAnswer = null;
+    baseAnswer = offRead("gitTooOld");
     const view = renderDialog({
       repoPath: "C:/repos/merge-refetch",
       branches: [
@@ -3263,11 +3370,30 @@ describe("frozen rows keep their measured ref", () => {
     }
   });
 
+  it("keeps a history-clean row's own explanation through the close", async () => {
+    const HISTORY = "Its changes went into origin/main in 1234567";
+    const view = renderDialog({
+      repoPath: "C:/repos/frozen-history",
+      branches: [branch("fh-1", OLD)],
+    });
+    await landOne("fh-1", "clean", { landedIn: "1234567".padEnd(40, "0") });
+    await waitFor(() => expect(isChecked("fh-1")).toBe(true));
+    await view.user.click(primary());
+    await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    const closing = rowFrames("fh-1", () => view.rerender({ open: false }));
+    expect(closing.length).toBeGreaterThan(0);
+    for (const frame of closing) {
+      expect(frame.titles).toContain(HISTORY);
+      expect(frame.titles).not.toContain(MEASURED);
+      expect(frame.description).toContain(HISTORY);
+    }
+  });
+
   it("never lets the next repo's check speak while they show", async () => {
     const { release } = await switchMidBatch(
       "C:/repos/frozen-ticker",
       ["ft-1", "ft-2"],
-      { ...BASE, refName: "origin/trunk" },
+      { base: { ...BASE, refName: "origin/trunk" }, offReason: null },
     );
     await waitFor(() =>
       expect(
@@ -3405,6 +3531,177 @@ describe("a row that turns out to be checked out in a worktree", () => {
     });
     expect(confirm).toHaveTextContent(
       "Removes 1 worktree and deletes 2 branches",
+    );
+  });
+});
+
+describe("what a clean verdict rests on", () => {
+  const LANDED = "1234567".padEnd(40, "0");
+  it.each([
+    {
+      key: "tip",
+      detail: {},
+      pr: undefined,
+      title: "Nothing on it is missing from origin/main",
+    },
+    {
+      key: "history",
+      detail: { landedIn: LANDED },
+      pr: undefined,
+      title: "Its changes went into origin/main in 1234567",
+    },
+    {
+      key: "head-history",
+      detail: { landedIn: LANDED, viaPrHead: true },
+      pr: "#41",
+      title:
+        "An earlier version of #41, whose changes went into origin/main in 1234567",
+    },
+    {
+      key: "head-tip",
+      detail: { viaPrHead: true },
+      pr: "#42",
+      title: "An earlier version of #42, whose changes are all in origin/main",
+    },
+    {
+      key: "head-unlabeled",
+      detail: { viaPrHead: true },
+      pr: undefined,
+      title:
+        "An earlier version of its pull request, whose changes are all in origin/main",
+    },
+  ])(
+    "explains a $key clean on the badge and the checkbox",
+    async ({ key, detail, pr, title }) => {
+      const name = `cv-${key}`;
+      renderDialog({
+        repoPath: `C:/repos/clean-variant-${key}`,
+        branches: [branch(name, OLD)],
+        prMerged: pr === undefined ? undefined : { [name]: pr },
+        prHeads: pr === undefined ? undefined : { [name]: "ABCDEF".repeat(7) },
+      });
+      await landOne(name, "clean", detail);
+      await waitFor(() =>
+        expect(
+          within(rowOf(name)).getByText(/^in$/).closest("[title]"),
+        ).toHaveAttribute("title", title),
+      );
+      expect(boxOf(name)).toHaveAccessibleDescription(
+        pr === undefined
+          ? title
+          : `Merged via pull request ${pr} — matched by branch name. ${title}`,
+      );
+      expect(verdictCalls.find((c) => c.branch === name)?.prHead).toBe(
+        pr === undefined ? null : "abcdef".repeat(7),
+      );
+    },
+  );
+
+  it("pre-checks a row cleared through history or its pull request like any clean row", async () => {
+    const { user } = renderDialog({
+      repoPath: "C:/repos/clean-routes",
+      branches: [
+        branch("cr-history", FRESH),
+        branch("cr-head", FRESH),
+        branch("cr-changes", FRESH),
+        branch("cr-nohead", FRESH),
+      ],
+      prMerged: {
+        "cr-history": "#1",
+        "cr-head": "#2",
+        "cr-changes": "#3",
+        "cr-nohead": "#4",
+      },
+      prHeads: { "cr-head": "c".repeat(40), "cr-nohead": "" },
+    });
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await landOne("cr-history", "clean", { landedIn: LANDED });
+    await landOne("cr-head", "clean", { viaPrHead: true });
+    await landVerdicts({ "cr-changes": "changes", "cr-nohead": "clean" });
+    await waitFor(() => expect(isChecked("cr-nohead")).toBe(true));
+    expect(isChecked("cr-history")).toBe(true);
+    expect(isChecked("cr-head")).toBe(true);
+    expect(isChecked("cr-changes")).toBe(false);
+    // A forge row with an empty head still checks, without one.
+    expect(verdictCalls.find((c) => c.branch === "cr-nohead")?.prHead).toBe(
+      null,
+    );
+    await user.click(boxOf("cr-changes"));
+    await user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    expect(confirm).toHaveTextContent(
+      "1 of the branches has changes not in origin/main.",
+    );
+  });
+
+  it("an upgrade that comes back unknown leaves the row flagged and unchecked", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/upgrade-unknown",
+      branches: [branch("uu-idle", OLD)],
+      prMerged: { "uu-idle": "#5" },
+    });
+    await landVerdicts({ "uu-idle": "changes" });
+    await waitFor(() =>
+      expect(
+        within(rowOf("uu-idle")).getByText(/^changes not in$/),
+      ).toBeInTheDocument(),
+    );
+    expect(isChecked("uu-idle")).toBe(false);
+    view.rerender({
+      prMergedByBranch: new Map([
+        ["uu-idle", { label: "#5", headSha: "5".repeat(40) }],
+      ]),
+    });
+    await waitFor(() => expect(verdictCalls).toHaveLength(2));
+    expect(verdictCalls[1].prHead).toBe("5".repeat(40));
+    await landVerdicts({ "uu-idle": "unknown" });
+    for (let i = 0; i < 3; i++)
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    expect(
+      within(rowOf("uu-idle")).getByText(/^changes not in$/),
+    ).toBeInTheDocument();
+    expect(isChecked("uu-idle")).toBe(false);
+  });
+
+  it("a clean upgrade pre-checks an untouched row, never a touched one, and never re-counts", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/upgrade-clean",
+      branches: [branch("uc-free", FRESH), branch("uc-touched", FRESH)],
+      prMerged: { "uc-free": "#6", "uc-touched": "#7" },
+    });
+    await waitFor(() => expect(listed()).toHaveLength(2));
+    await view.user.click(boxOf("uc-touched"));
+    await view.user.click(boxOf("uc-touched"));
+    await landVerdicts({ "uc-free": "changes", "uc-touched": "changes" });
+    await waitFor(() =>
+      expect(screen.queryByText(/^Checked \d+ of/)).toBeNull(),
+    );
+    view.rerender({
+      prMergedByBranch: new Map([
+        ["uc-free", { label: "#6", headSha: "6".repeat(40) }],
+        ["uc-touched", { label: "#7", headSha: "7".repeat(40) }],
+      ]),
+    });
+    await waitFor(() => expect(verdictCalls).toHaveLength(4));
+    // The rows keep their verdicts while the upgrades run.
+    expect(screen.queryByText(/^Checked \d+ of/)).toBeNull();
+    expect(screen.getAllByText(/^changes not in$/)).toHaveLength(2);
+    await act(async () => {
+      for (const c of verdictCalls.slice(2))
+        c.resolve("clean", { viaPrHead: true });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitFor(() => expect(isChecked("uc-free")).toBe(true));
+    expect(isChecked("uc-touched")).toBe(false);
+    expect(
+      within(rowOf("uc-free")).getByText(/^in$/).closest("[title]"),
+    ).toHaveAttribute(
+      "title",
+      "An earlier version of #6, whose changes are all in origin/main",
     );
   });
 });

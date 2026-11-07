@@ -891,10 +891,12 @@ pub struct PrInfo {
     /// `created_at`, Bitbucket `created_on`) so the list row can show its age.
     #[serde(default)]
     pub created_at: String,
-    /// The PR head commit's SHA. Populated ONLY by the Bitbucket list arm, to feed
-    /// its per-commit CI probe (Bitbucket has no batch pipeline endpoint). GitHub
-    /// and GitLab query by number/iid and leave this "".
-    #[serde(default)]
+    /// The PR head commit's SHA; "" when the source didn't supply it. The list arms
+    /// fill it (GitHub from gh's `headRefOid`, hence the alias; GitLab `sha`;
+    /// Bitbucket a short `source.commit.hash`, which also feeds its per-commit CI
+    /// probe), except GitHub's filtered search leg (`pr_search`), which leaves "".
+    /// Branch cleanup reads it as a merged PR's head hint.
+    #[serde(default, alias = "headRefOid")]
     pub head_sha: String,
     /// Stack membership, when the PR is in one. No provider's list payload carries
     /// it (`gh pr list --json` has no stack field), so it defaults to `None` and is
@@ -2826,7 +2828,7 @@ pub async fn gh_stack_dissolve(
 pub(crate) const STACKS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const PR_LIST_FIELDS: &str = "number,url,title,baseRefName,headRefName,isDraft,state,author,\
-     labels,createdAt,isCrossRepository";
+     labels,createdAt,isCrossRepository,headRefOid";
 
 /// PRs for the Pull Requests list. `state` is "open", "closed" (everything not
 /// open, merged included, matching GitHub's own Closed tab), "merged", or
@@ -2947,7 +2949,7 @@ pub struct PrCiStatus {
 /// One PR reference the frontend hands `forge_pr_list_ci` to hydrate row CI icons:
 /// the PR number plus its head SHA. The GitHub/GitLab arms need only the number
 /// (they query by number / iid); the Bitbucket arm needs `head_sha` for its
-/// per-commit statuses probe (it's "" for GitHub/GitLab list rows).
+/// per-commit statuses probe.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrCiRefIn {
@@ -9754,12 +9756,31 @@ mod tests {
         assert_eq!(serde_json::to_value(&same).unwrap()["crossRepository"], false);
     }
 
+    /// `head_sha` reads gh's `headRefOid` but ships as `headSha`, so both directions
+    /// are pinned: without the alias the field silently stays "".
+    #[test]
+    fn pr_info_reads_gh_head_ref_oid_and_ships_head_sha() {
+        let row: PrInfo = serde_json::from_str(
+            r#"{"number":21,"url":"","title":"t","baseRefName":"main","headRefName":"f",
+                "isDraft":false,"state":"MERGED",
+                "headRefOid":"0123456789abcdef0123456789abcdef01234567"}"#,
+        )
+        .unwrap();
+        assert_eq!(row.head_sha, "0123456789abcdef0123456789abcdef01234567");
+        let v = serde_json::to_value(&row).unwrap();
+        assert_eq!(v["headSha"], "0123456789abcdef0123456789abcdef01234567");
+        assert!(v.get("headRefOid").is_none());
+        assert!(v.get("head_sha").is_none());
+    }
+
     /// The list query must actually ASK for the fork marker — the field defaults to
     /// false, so omitting it from the gh projection fails silently.
     #[test]
     fn pr_list_fields_request_the_fork_marker() {
         let fields: Vec<&str> = PR_LIST_FIELDS.split(',').collect();
         assert!(fields.contains(&"isCrossRepository"), "got: {PR_LIST_FIELDS}");
+        // So must the head sha: `head_sha` defaults to "" too.
+        assert!(fields.contains(&"headRefOid"), "got: {PR_LIST_FIELDS}");
         // The line-continuation join must not have leaked whitespace into a field name.
         assert!(
             fields.iter().all(|f| f.trim() == *f && !f.is_empty()),

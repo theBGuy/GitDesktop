@@ -836,13 +836,20 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Closed PR** (a pull request closed without merging), and **Idle** for 30, 60, or 90 days.
   Each row names every reason that applies, such as **merged #123**, **closed #45**, or
   **worktree**, and the dialog names pull requests only where it read them. On Git 2.38 or
-  later, unless your Git configuration sets a merge driver, a branch your history doesn't
-  already call merged is also checked against the newer of your local default branch and
-  its remote copy: the row shows whether everything on it is in the default branch or it
-  still carries changes the default branch lacks, and a check that can't decide shows
-  nothing. Branches your own history calls merged start **pre-checked**. While **Idle** is
-  on, idle branches do too unless that check finds changes still to merge; any other listed
-  branch starts checked only once the check shows nothing would be lost. Turn on **Include
+  later, unless your Git configuration sets a merge driver or \`merge.renormalize\`, a branch
+  your history doesn't already call merged is also checked against the newer of your local
+  default branch and its remote copy: the row shows whether its changes went into the
+  default branch, at its tip or in an earlier commit, or it still carries work that never
+  went in, and a check that can't decide shows nothing; when the check is off, the dialog
+  says why. A squash-merged branch reads as
+  merged even after later commits edit the same lines, and the badge's explanation names
+  the commit its changes went into. A branch that is an older version of a merged pull
+  request counts too once the pull request's final version passes the check, even if a
+  later commit on that pull request undid part of it. Branches your own history calls
+  merged start **pre-checked**. While **Idle** is on, idle branches do too unless that check
+  finds work that never went in; any other listed branch starts checked only once the check
+  shows its work went into the default branch, directly or through its merged pull
+  request's final version. Turn on **Include
   branches checked out in a worktree** to list branches held by another linked folder.
   Acting on one removes that worktree first, never by force; a worktree row never starts
   checked; and a worktree that is locked, has uncommitted changes, or couldn't be checked
