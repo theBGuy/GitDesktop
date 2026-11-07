@@ -39,7 +39,7 @@ const EXPECTED = {
     "runningCheckout !== undefined || detailsPlaceholder || !!offlineHold",
   "checkout reason": "checkoutRunning ?? staleReason ?? offlineHold",
   defaultBranchName:
-    '(lens === "origin" ? defaultBranch.data : undefined) ?? pr.baseRefName',
+    '(lens === "origin" ? defaultBranch.data : undefined) ?? null',
 };
 
 const CHECKOUT_BUTTON_PROPS = ["disabled", "reason"];
@@ -267,7 +267,7 @@ test("the plain checkout's offline guards and default-branch fact are pinned", (
   );
   assertCaught(
     "defaultBranchName",
-    /\(lens === "origin" \? defaultBranch\.data : undefined\) \?\? pr\.baseRefName/,
+    /\(lens === "origin" \? defaultBranch\.data : undefined\) \?\? null/,
     () => "pr.baseRefName",
   );
 });

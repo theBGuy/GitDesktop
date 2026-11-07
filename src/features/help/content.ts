@@ -1410,8 +1410,8 @@ for you; the **Full path** line under the folder field shows exactly where it wi
 Edit it, or **Browse** for a different parent folder, then **Check out**. Nothing is
 created until you confirm. When the pull request's branch already has a
 worktree, the popover offers **Open worktree** and **Update to PR** (**Update to MR** on
-GitLab) instead, along with **Check out into a new folder…**. A pull request from a fork
-is checked out on a branch named after the fork's owner (\`<owner>/<branch>\`), so it never
+GitLab) instead, along with **Check out into a new folder…**. A fork's pull request checked out this way
+lands on a branch named after the fork's owner (\`<owner>/<branch>\`), so it never
 collides with your own branch of the same name. On GitHub and Bitbucket the popover
 recognizes the fork's worktree by that name when you come back. On GitLab the owner is the
 fork project's full path, and the branch reads \`<group>/<project>/<branch>\`; the merge

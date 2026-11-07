@@ -3605,9 +3605,10 @@ export function RemotePrView({
     provider,
     headRefName: pr.headRefName,
     // gh keys on the PR repository's default branch; `useDefaultBranch` reads
-    // origin's, so another lens, or a read not yet resolved, falls back to the base.
+    // origin's, so another lens, or a read not yet resolved, stays unknown — the
+    // chip then under-claims rather than match against the wrong branch.
     defaultBranchName:
-      (lens === "origin" ? defaultBranch.data : undefined) ?? pr.baseRefName,
+      (lens === "origin" ? defaultBranch.data : undefined) ?? null,
     crossRepository: pr.crossRepository,
     headRepositoryOwner: pr.headRepositoryOwner,
   };

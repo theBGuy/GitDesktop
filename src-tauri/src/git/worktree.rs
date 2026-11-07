@@ -2554,14 +2554,14 @@ prunable gitdir file points to non-existent location
         let (_base, repo) = setup_repo("exclude-unwritable").await;
         std::fs::remove_file(exclude_file(&repo)).ok();
         // POSIX git refuses an exclude path that is a directory, so there a missing file
-        // in a read-only info/ makes only the app's create fail. Restored on drop: a
-        // read-only dir can fail TempDir cleanup.
+        // in a read-only info/ makes only the app's create fail.
         // Root ignores directory permissions, so the read-only trick can't block it.
         // SAFETY: geteuid has no preconditions and cannot fail.
         #[cfg(unix)]
         if unsafe { libc::geteuid() } == 0 {
             return;
         }
+        // Restored on drop: a read-only dir can fail TempDir cleanup.
         #[cfg(unix)]
         let _readonly = {
             use std::os::unix::fs::PermissionsExt;
