@@ -48,7 +48,6 @@ import { required, useAppForm } from "@/lib/form";
 import * as api from "@/lib/git/api";
 import {
   forgeFeatureReady,
-  useAddRemote,
   useBranchAhead,
   useCreatePr,
   useDefaultBranch,
@@ -110,6 +109,7 @@ import {
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { cn } from "@/lib/utils";
+import { AddUpstreamOfferCard, useAddUpstreamOffer } from "./AddUpstreamOffer";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import {
   type AiLabelProposal,
@@ -169,11 +169,11 @@ function laneHintFor(lane: PrCreate): string {
 
 /** The open PR a create into `base` would duplicate. The probe already keys on the
  *  head, so only the base and the lens rule remain: the origin path skips
- *  cross-repository rows for the same reason ComparePanel does — an origin-pinned
- *  probe can only reach them via a contributor's same-named fork branch — while on
- *  the upstream lens your own fork→parent duplicate IS cross-repository (that arm
- *  reports the flag false for every row today, so the qualifier guards the future). */
-function duplicateOf(
+ *  cross-repository rows, which an origin-pinned probe reaches only through a
+ *  contributor's same-named fork branch, while on the upstream lens your own
+ *  fork→parent duplicate IS cross-repository (that arm reports the flag false
+ *  for every row today, so the qualifier guards the future). */
+export function duplicateOf(
   prs: PrInfo[] | undefined,
   base: string,
   lens: RemoteLens,
@@ -184,10 +184,24 @@ function duplicateOf(
   );
 }
 
+/** An opener's fixed target and base, applied on every open (a kept draft
+ *  included, which keeps only its other fields). */
+export interface CreatePrPreset {
+  /** Seeds the "Create in" picker; inert while the lens gate is off. */
+  target: RemoteLens;
+  /** The BARE branch name seeded as the base. */
+  base: string;
+  /** The full remote-tracking ref the base's reads use, only while the dialog
+   *  is on `target` with `base` selected; leaving either restores that
+   *  target's own ref. */
+  baseRef?: string;
+}
+
 export function CreatePrDialog({
   repoPath,
   defaultBase,
   defaultHead,
+  preset,
   open,
   onOpenChange,
 }: {
@@ -196,6 +210,7 @@ export function CreatePrDialog({
   defaultBase?: string;
   /** Seeds the head ("merge") branch; defaults to the current branch. */
   defaultHead?: string;
+  preset?: CreatePrPreset;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -219,45 +234,19 @@ export function CreatePrDialog({
   // The effective lens for this create — always "origin" when the gate is off.
   const createLens: RemoteLens = targetIsParent ? "upstream" : "origin";
   const targetSlug = targetIsParent ? upstreamSlug : forkSlug;
+  // A preset's remote-tracking base, while the dialog is on the preset's target:
+  // offered there even when no local branch has its name, and kept by the
+  // reconcile. Selected, its ref drives the base's reads (`activeBaseRef`).
+  const presetBase =
+    preset?.baseRef !== undefined && target === preset.target
+      ? { name: preset.base, ref: preset.baseRef }
+      : null;
 
-  // Fork without an `upstream` remote (plain `git clone`): the lens gate is off and
-  // the pinned origin path would silently open the PR on the fork. When the persisted
-  // fork provenance says this GitHub repo IS a fork with a known parent, offer to add
-  // the remote so the parent-target path returns.
+  // Fork without an `upstream` remote (plain `git clone`): offer to add it, so the
+  // parent-target path returns — the "Create in" picker then appears (default
+  // Parent, unless a preset names the target).
   const settings = useSettings();
-  const isGithub = forge.data?.provider === "github";
-  const forkRecord = settings.data?.recentRepos.find(
-    (r) => r.path === repoPath,
-  );
-  const forkParent = forkRecord?.forkParent ?? null;
-  // Only when: GitHub, the lens gate is OFF (no upstream remote), settings have
-  // loaded (no flash), the repo is a fork, AND the parent slug is known. A fork
-  // whose parent is unreadable renders nothing rather than a broken hint.
-  const canOfferUpstream =
-    isGithub &&
-    !lensGate &&
-    settings.isSuccess &&
-    forkRecord?.isFork === true &&
-    forkParent !== null;
-  const addRemote = useAddRemote(repoPath);
-  // Awaited rather than per-call callbacks: this dialog can close (Esc, ✕,
-  // backdrop) mid-write, and react-query drops those once the observer has no
-  // listeners. On success the broad invalidation refreshes remotes →
-  // `useLensGate` flips true → the "Create in" picker appears (default Parent).
-  async function addUpstreamRemote() {
-    if (!forkParent) return;
-    // Derive the host — on GitHub Enterprise `isGithub` still holds, and a
-    // hardcoded github.com would add a wrong-host remote that fails later.
-    const ghHost = forge.data?.host || "github.com";
-    try {
-      await addRemote.mutateAsync({
-        name: "upstream",
-        url: `https://${ghHost}/${forkParent}.git`,
-      });
-    } catch (e) {
-      toastError(e);
-    }
-  }
+  const upstreamOffer = useAddUpstreamOffer(repoPath);
 
   // Create-TIME reviewers stay Bitbucket-only: `forge_pr_create` rejects a reviewer
   // list for GitHub/GitLab. The `mrReviewers` capability covers all three but only
@@ -403,7 +392,10 @@ export function CreatePrDialog({
   const parentFetchError = parentBranches.data?.fetchError ?? null;
   const parentBase = parentBranches.data?.defaultBase || parentNames[0] || "";
 
-  const baseItems = targetIsParent ? parentItems : items;
+  const targetItems = targetIsParent ? parentItems : items;
+  const baseItems = presetBase
+    ? { ...targetItems, [presetBase.name]: presetBase.name }
+    : targetItems;
   const baseAnnotations = targetIsParent ? undefined : annotations;
   const baseLoading = targetIsParent && parentBranches.isPending;
 
@@ -766,6 +758,13 @@ export function CreatePrDialog({
           (prCreatePhase(repoPath, retained) === "creating" ||
             consumeLastFailed(repoPath, retained)))
       ) {
+        // A kept draft still takes the opener's target and base, which its
+        // label promised; everything else stays the draft's. This mount's own
+        // running create keeps its pair: its identity controls are frozen.
+        if (preset && !form.state.isSubmitting) {
+          setTarget(preset.target);
+          form.setFieldValue("base", preset.base);
+        }
         focusTitleIfEmpty();
         return;
       }
@@ -793,9 +792,9 @@ export function CreatePrDialog({
     resetLinkedIssues([]);
     // Same for the Jira mention cluster (Bitbucket + linked project).
     resetJiraChips([]);
-    // Reset the target to the default (parent) every open, so a prior fork/parent
-    // choice doesn't leak into the next PR.
-    setTarget("upstream");
+    // Reset the target to the default (parent, or the preset's) every open, so a
+    // prior fork/parent choice doesn't leak into the next PR.
+    setTarget(preset?.target ?? "upstream");
     const fallbackBase =
       defaultBranch.data && defaultBranch.data !== h
         ? defaultBranch.data
@@ -806,8 +805,9 @@ export function CreatePrDialog({
         // Seed the LOCAL (fork) base first; the base-reconcile effect below
         // swaps in the parent's default branch when the parent target is active
         // (and its branches have loaded). A ComparePanel-seeded `defaultBase` is
-        // a local branch, so it only applies to the fork target.
-        base: defaultBase ?? fallbackBase,
+        // a local branch, so it only applies to the fork target; a preset's base
+        // is already its own target's.
+        base: preset?.base ?? defaultBase ?? fallbackBase,
         title: "",
         body: "",
         // Seed each open from the setting so the draft default reflects the current
@@ -861,6 +861,9 @@ export function CreatePrDialog({
       ? defaultBranch.data
       : (names.find((n) => n !== h) ?? "");
   });
+  // The preset's ref, exactly while its base is selected on its target.
+  const activeBaseRef =
+    presetBase !== null && base === presetBase.name ? presetBase.ref : null;
   // Reconcile the base when the target changes (or the parent's branches arrive):
   // re-seed ONLY when the current base isn't a valid option for the active target, so
   // a user-picked base survives a target toggle where it still fits — this never
@@ -871,10 +874,10 @@ export function CreatePrDialog({
       // Wait for the parent refs before touching the base — otherwise we'd clear
       // it to "" mid-fetch and lose the seed.
       if (parentBranches.isPending) return;
-      if (!base || !parentNames.includes(base)) {
+      if (!base || (!parentNames.includes(base) && activeBaseRef === null)) {
         form.setFieldValue("base", parentBase);
       }
-    } else if (base && !names.includes(base)) {
+    } else if (base && !names.includes(base) && activeBaseRef === null) {
       // Back on the fork target: re-seed only when the current value (e.g. a
       // parent branch that isn't a local one) no longer fits.
       form.setFieldValue("base", defaultBase ?? forkFallbackBase());
@@ -887,6 +890,7 @@ export function CreatePrDialog({
     base,
     parentNames,
     names,
+    activeBaseRef,
     defaultBase,
     form,
   ]);
@@ -896,9 +900,10 @@ export function CreatePrDialog({
   // the parent's branch; on the fork target both pickers offer only local branches.
   // While the parent fetch is in flight `base` is still the fork-seeded local name
   // and the upstream ref may not exist yet → yield null so the compare query stays
-  // idle rather than erroring.
+  // idle rather than erroring. A selected preset base reads its own ref instead.
   const compareBaseRef = (() => {
     if (!base || (targetIsParent && parentBranches.isPending)) return null;
+    if (activeBaseRef !== null) return activeBaseRef;
     return targetIsParent
       ? `refs/remotes/upstream/${base}`
       : `refs/heads/${base}`;
@@ -1082,6 +1087,9 @@ export function CreatePrDialog({
         targetAcceptsLabels: runAcceptsLabels,
         stillCurrent: () => sameLabelTarget(runTarget, labelTargetRef.current),
       },
+      // Diffs the preset's remote-tracking base while it is selected; the
+      // prompt still names the bare base.
+      { baseDiffRef: activeBaseRef ?? undefined },
     ).then(
       (final) => {
         if (final) {
@@ -1208,32 +1216,13 @@ export function CreatePrDialog({
             )}
 
             {/* Fork without an `upstream` remote: offer to add it. Mutually exclusive
-                with the picker above (`canOfferUpstream` requires the gate OFF). */}
-            {canOfferUpstream && (
-              <div className="space-y-1.5 rounded-none bg-muted/40 p-2.5 ring-1 ring-foreground/10">
-                <p className="text-xs text-muted-foreground">
-                  This repository is a fork of{" "}
-                  <span className="font-mono text-foreground/80">
-                    {forkParent}
-                  </span>
-                  . Add an upstream remote to open pull requests against{" "}
-                  <span className="font-mono text-foreground/80">
-                    {forkParent}
-                  </span>
-                  .
-                </p>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="xs"
-                  disabled={addRemote.isPending}
-                  onClick={() => void addUpstreamRemote()}
-                >
-                  {addRemote.isPending
-                    ? "Adding upstream remote…"
-                    : "Add upstream remote"}
-                </Button>
-              </div>
+                with the picker above (`canOffer` requires the gate OFF). */}
+            {upstreamOffer.canOffer && upstreamOffer.forkParent !== null && (
+              <AddUpstreamOfferCard
+                forkParent={upstreamOffer.forkParent}
+                pending={upstreamOffer.pending}
+                onAdd={() => void upstreamOffer.addUpstream()}
+              />
             )}
 
             <div className="flex items-end gap-2">

@@ -112,6 +112,14 @@ export function useAmendWithConfirm(repoPath: string) {
   const rulesSettling = useEffectiveBranchRulesSettling(repoPath);
   const amend = useAmendCommit(repoPath);
   const [pendingHash, setPendingHash] = useState<string | null>(null);
+  // A pending amend belongs to the repo it was asked in: a confirm left open
+  // across a switch would amend the old repo's commit. Reset in render: an
+  // effect would paint the dialog open over the new repo first.
+  const [pendingRepo, setPendingRepo] = useState(repoPath);
+  if (pendingRepo !== repoPath) {
+    setPendingRepo(repoPath);
+    setPendingHash(null);
+  }
 
   const upstream = branch?.upstream ?? null;
   // A gone upstream (remote branch deleted) reads as no upstream: the commit

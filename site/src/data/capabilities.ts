@@ -114,7 +114,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Branch compare — ahead/behind, three-dot diff, jump to PR, commit menu + tags",
+      "Branch compare — ahead/behind, three-dot diff, jump to PR, commit menu + tags, against local or any remote's branches",
     highlight: true,
   },
   {
@@ -172,7 +172,7 @@ export const capabilities: Capability[] = [
   {
     group: "Rewrite & recovery",
     label:
-      "Interactive rebase — reword / squash / fixup / edit / drop / reorder, atomic replay",
+      "Interactive rebase — reword / squash / fixup / edit / drop / reorder, atomic replay, newest- or oldest-first list",
     highlight: true,
   },
   {

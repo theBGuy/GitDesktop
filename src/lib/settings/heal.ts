@@ -120,6 +120,9 @@ export const DIFF_VIEW_MODES = ["unified", "split"] as const;
 /** The layouts offered in the Changes panel's view toggle. */
 export const CHANGES_VIEW_MODES = ["list", "tree"] as const;
 
+/** The commit orders offered by the Edit history dialog's header toggle. */
+export const EDIT_HISTORY_ORDERS = ["newest-first", "oldest-first"] as const;
+
 export const DEFAULT_SETTINGS: AppSettings = {
   ai: {
     provider: "anthropic",
@@ -194,6 +197,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   diffViewMode: "unified",
   changesViewMode: "list",
+  editHistoryOrder: "newest-first",
   collapsedConversationSections: [],
   commentComposerCollapsed: false,
   diffFileListCollapsed: false,
@@ -428,6 +432,11 @@ function healEnumerated(settings: AppSettings): AppSettings {
       settings.changesViewMode,
       CHANGES_VIEW_MODES,
       DEFAULT_SETTINGS.changesViewMode,
+    ),
+    editHistoryOrder: pick(
+      settings.editHistoryOrder,
+      EDIT_HISTORY_ORDERS,
+      DEFAULT_SETTINGS.editHistoryOrder,
     ),
     // A corrupt container is passed through, never substituted: every writer in the
     // serialized RMW chain re-reads through loadSettings, so a stand-in [] would

@@ -332,6 +332,9 @@ export function useGeneratePrDescription(repoPath: string) {
       jiraCandidates?: JiraCandidate[],
       /** Gates the structured label pick on the run's target. */
       labelPick?: LabelPickGate,
+      /** `baseDiffRef` diffs the base as that ref (a remote-tracking base);
+       *  the prompt still names `base`. */
+      opts?: { baseDiffRef?: string },
     ) =>
       runFromDiff(
         async (settings) => {
@@ -341,7 +344,7 @@ export function useGeneratePrDescription(repoPath: string) {
           );
           return gitBranchDiff(
             repoPath,
-            base,
+            opts?.baseDiffRef ?? base,
             head,
             RAW_DIFF_MAX_BYTES,
             exclude,

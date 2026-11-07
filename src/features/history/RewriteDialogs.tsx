@@ -1,6 +1,6 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -76,6 +76,10 @@ export function useGenerateSquashMessage(
 
   const cancel = () => abortRef.current?.abort();
 
+  // Every close of both hosts unmounts this hook, so the paid stream stops with
+  // the dialog; an Activity hide of the History tab stops it too, by design.
+  useEffect(() => () => abortRef.current?.abort(), []);
+
   async function generate(base: string, head: string) {
     const abort = new AbortController();
     abortRef.current = abort;
@@ -91,6 +95,8 @@ export function useGenerateSquashMessage(
         gitRecentCommits(repoPath, 10),
         readRepoInstructions(repoPath),
       ]);
+      // Aborted while the context loaded: no prompt, no client, no toast.
+      if (abort.signal.aborted) return;
       if (!diff.text.trim()) {
         const cause = hiddenCause(diff.excludedFiles, diff.unreadableFiles);
         toast.error(

@@ -18,6 +18,7 @@ import {
   type CHANGES_VIEW_MODES,
   type DEFAULT_AGENT_IDS,
   type DIFF_VIEW_MODES,
+  type EDIT_HISTORY_ORDERS,
   healLoadedSettings,
   type MCP_REPO_STATES,
   type MCP_TRANSPORTS,
@@ -38,6 +39,7 @@ export {
   DEFAULT_AGENT_IDS,
   DEFAULT_SETTINGS,
   DIFF_VIEW_MODES,
+  EDIT_HISTORY_ORDERS,
   healNotifications,
   isOutcomeSource,
   MCP_REPO_STATES,
@@ -378,6 +380,9 @@ export interface AppSettings {
   /** Changes panel layout: flat list or compacted directory tree. Applied outside
    *  the bulk settings form (apply-on-change), like diffViewMode. */
   changesViewMode: (typeof CHANGES_VIEW_MODES)[number];
+  /** Edit history dialog's commit order. Applied outside the bulk settings
+   *  form (apply-on-change), like changesViewMode. */
+  editHistoryOrder: (typeof EDIT_HISTORY_ORDERS)[number];
   /** Which conversation-list sections the user collapsed, keyed `"<feature>:<kind>"`
    *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
    *  feature-scoped, so the remote key collapses that section across every repo. */

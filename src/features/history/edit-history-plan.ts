@@ -64,7 +64,7 @@ export const FOLD_HELD_LABEL = "no older kept commit to combine into";
 const leads = (a: RowAction) => a === "pick" || a === "reword" || a === "edit";
 
 /**
- * Compiles Edit-history rows (newest-first display order) into the oldest-first
+ * Compiles Edit-history rows (data order, newest-first) into the oldest-first
  * `RewriteStep[]` the replay engine runs, plus per-row view metadata and
  * validation.
  *
@@ -97,7 +97,7 @@ export function compilePlan(
   let error: string | null = null;
   let errorHash: string | null = null;
 
-  // Walk oldest→newest (display bottom-up). Leaders create a step; folds attach
+  // Walk oldest→newest (data bottom-up). Leaders create a step; folds attach
   // to the nearest older leader and append their hash (chronological).
   for (let i = n - 1; i >= 0; i--) {
     const { action } = rows[i];
@@ -191,6 +191,39 @@ export function compilePlan(
   };
 }
 
+/** Maps an index between data order (newest-first) and display order. Its own
+ *  inverse, so it converts in either direction. */
+export function displayIndex(
+  index: number,
+  total: number,
+  reversed: boolean,
+): number {
+  return reversed ? total - 1 - index : index;
+}
+
+export type ChronoEnd = "newest" | "oldest";
+export type VisualMove = { to: number } | { at: ChronoEnd };
+
+/**
+ * Where a VISUAL move of the row at data `index` lands (a data index), or which
+ * chronological end refuses it. `dir` is the direction on the DISPLAYED list, so
+ * reversing flips both the data arithmetic and the refusing end: the top row is
+ * the newest commit newest-first and the oldest one oldest-first.
+ */
+export function visualMoveTarget(
+  index: number,
+  total: number,
+  dir: "up" | "down" | "top" | "bottom",
+  reversed: boolean,
+): VisualMove {
+  const towardNewest = (dir === "up" || dir === "top") !== reversed;
+  const end: ChronoEnd = towardNewest ? "newest" : "oldest";
+  const edge = towardNewest ? 0 : total - 1;
+  if (index === edge) return { at: end };
+  if (dir === "top" || dir === "bottom") return { to: edge };
+  return { to: towardNewest ? index - 1 : index + 1 };
+}
+
 /**
  * The live-region text for a move of the row at `from` (action `action`, hash
  * `hash`) to `to` of `total`, given the plans before and after it. It names the
@@ -206,16 +239,21 @@ export function moveAnnouncement({
   from,
   to,
   total,
+  reversed = false,
 }: {
   prev: CompiledPlan;
   next: CompiledPlan;
   action: RowAction;
   hash: string;
+  /** Data indices (newest-first): they index the plans' `views`. */
   from: number;
   to: number;
   total: number;
+  /** Whether the list displays oldest-first; the spoken position counts display
+   *  order. */
+  reversed?: boolean;
 }): string {
-  let text = `Moved to ${to + 1} of ${total}`;
+  let text = `Moved to ${displayIndex(to, total, reversed) + 1} of ${total}`;
   // By hash: two leaders can share a subject.
   const retargeted =
     next.views[to].foldTargetHash !== prev.views[from].foldTargetHash;

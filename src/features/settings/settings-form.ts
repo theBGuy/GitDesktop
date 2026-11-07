@@ -11,6 +11,7 @@ export type SettingsDraft = Omit<
   | "recentRepos"
   | "diffViewMode"
   | "changesViewMode"
+  | "editHistoryOrder"
   | "defaultBranch"
   | "theme"
   | "diffFileListCollapsed"
@@ -26,6 +27,7 @@ export function toDraft(settings: AppSettings): SettingsDraft {
     recentRepos,
     diffViewMode,
     changesViewMode,
+    editHistoryOrder,
     defaultBranch,
     theme,
     diffFileListCollapsed,

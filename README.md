@@ -235,10 +235,12 @@ default's name), and a PR badge.
   the branch switcher, where selecting a branch that's checked out elsewhere
   opens that folder straight away, that branch's context menu carries the
   worktree actions, and a *Worktrees* row opens the full manager.
-- **Compare**: a tab with a three-dot diff, commits ahead/behind,
-  merge/rebase, and jump-to-PR. Each ahead/behind commit shows its tag chips
-  and carries a context menu — checkout, cherry-pick, create a branch or tag,
-  copy the SHA, plus revert for commits on your branch.
+- **Compare**: a tab with a three-dot diff, commits ahead/behind, and
+  jump-to-PR, against a local branch or any remote's branch (fetched when
+  you pick it, so a fork can compare against its parent through `upstream`
+  and open the PR there). Each ahead/behind commit shows
+  its tag chips and carries a context menu — checkout, cherry-pick, create a
+  branch or tag, copy the SHA, plus revert for commits on your branch.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
   force-push rules, shareable via a committed file or importable from
   GitHub. A promotion-branches list marks pull requests from those branches
@@ -263,6 +265,7 @@ click to jump to it in History.
   (a conflict rolls it back), or **edit** a commit to pause and amend its
   contents in a real, resumable rebase (GitHub Desktop's history editing
   stops at squashing and reordering, plus amending only the latest commit).
+  The list reads newest or oldest first, and remembers which.
   Cherry-pick onto the current or another branch, too.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but

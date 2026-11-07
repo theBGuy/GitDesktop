@@ -40,6 +40,7 @@ import {
 } from "@/lib/git/queries";
 import { listKeyboardNav } from "@/lib/list-keyboard-nav";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
+import { displayCompareValue } from "./compare-remote-ref";
 
 /**
  * The net change `compare` introduces relative to `base` (the three-dot diff,
@@ -203,7 +204,7 @@ export function BranchDiffView({
       <>
         {notice}
         <DiffPlaceholder
-          message={`${compare} has no changes relative to ${base}`}
+          message={`${displayCompareValue(compare)} has no changes relative to ${displayCompareValue(base)}`}
         />
       </>,
     );
@@ -244,8 +245,8 @@ export function BranchDiffView({
           className="min-w-0 truncate font-medium"
           onMouseEnter={clipTitleFromText}
         >
-          <span className="font-mono">{compare}</span> vs{" "}
-          <span className="font-mono">{base}</span>
+          <span className="font-mono">{displayCompareValue(compare)}</span> vs{" "}
+          <span className="font-mono">{displayCompareValue(base)}</span>
         </span>
         <span className="flex-1" />
         <span
