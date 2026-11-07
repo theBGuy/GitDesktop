@@ -226,12 +226,22 @@ export function CreatePrDialog({
   // ("origin"); hidden entirely otherwise. Default = parent, matching what gh's
   // implicit auto-resolution used to pick for the common contribution flow.
   const lensGate = useLensGate(repoPath);
+  // The gate a running create captured, null while none runs. The dialog shows
+  // it in place of the live gate, so an upstream added or removed meanwhile
+  // can't show a target the request isn't using. Only in the create's own repo:
+  // the mount outlives a repo switch, and another repo shows its own gate.
+  const [submittedGate, setSubmittedGate] = useState<{
+    repo: string;
+    gate: boolean;
+  } | null>(null);
+  const shownGate =
+    submittedGate?.repo === repoPath ? submittedGate.gate : lensGate;
   const [target, setTarget] = useState<RemoteLens>("upstream");
   // Resolved slugs label the two target buttons and the success toast; only
   // fetched while the picker is shown.
-  const forkSlug = useRemoteSlug(repoPath, "origin", lensGate && open);
-  const upstreamSlug = useRemoteSlug(repoPath, "upstream", lensGate && open);
-  const targetIsParent = lensGate && target === "upstream";
+  const forkSlug = useRemoteSlug(repoPath, "origin", shownGate && open);
+  const upstreamSlug = useRemoteSlug(repoPath, "upstream", shownGate && open);
+  const targetIsParent = shownGate && target === "upstream";
   // The effective lens for this create — always "origin" when the gate is off.
   const createLens: RemoteLens = targetIsParent ? "upstream" : "origin";
   const targetSlug = targetIsParent ? upstreamSlug : forkSlug;
@@ -440,6 +450,7 @@ export function CreatePrDialog({
           : undefined,
     },
     onSubmit: async ({ value }) => {
+      setSubmittedGate({ repo: repoPath, gate: lensGate });
       // The push and create would park offline; the button holds on the same
       // verdict, and this refuses a submit that lands before it repaints.
       if (refuseWhileOffline()) return;
@@ -859,6 +870,9 @@ export function CreatePrDialog({
   const notes = useSelector(form.store, (s) => s.values.notes);
   const isSubmitting = useSelector(form.store, (s) => s.isSubmitting);
   const shownSubmitting = useRetained(isSubmitting, open);
+  // Released with the retained flag: a successful create closes the dialog
+  // before form-core clears isSubmitting, and the fade keeps the submitted pair.
+  if (!shownSubmitting && submittedGate !== null) setSubmittedGate(null);
   // Why the identity controls freeze: they pick what the create targets, and the
   // push plus the forge call can run for minutes, so the picker reads as dead
   // without a reason. Null when idle, which is what re-enables the controls.
@@ -1200,7 +1214,7 @@ export function CreatePrDialog({
           <div className={cn(DIALOG_SCROLL, "min-h-0 flex-1 space-y-4")}>
             {/* Fork PR-create: choose the repo the PR opens against. Hidden unless
                 this is a GitHub fork with an upstream remote. Default = parent. */}
-            {lensGate && (
+            {shownGate && (
               <div className="space-y-1.5">
                 <Label id={createInGroupId}>Create in</Label>
                 <div
@@ -1246,15 +1260,18 @@ export function CreatePrDialog({
             )}
 
             {/* Fork without an `upstream` remote: offer to add it. Mutually exclusive
-                with the picker above (`canOffer` requires the gate OFF). */}
-            {upstreamOffer.canOffer && upstreamOffer.forkParent !== null && (
-              <AddUpstreamOfferCard
-                forkParent={upstreamOffer.forkParent}
-                pending={upstreamOffer.pending}
-                heldReason={identityLockReason}
-                onAdd={() => void upstreamOffer.addUpstream()}
-              />
-            )}
+                with the picker above (`canOffer` requires the live gate OFF, the
+                picker the shown one ON). */}
+            {!shownGate &&
+              upstreamOffer.canOffer &&
+              upstreamOffer.forkParent !== null && (
+                <AddUpstreamOfferCard
+                  forkParent={upstreamOffer.forkParent}
+                  pending={upstreamOffer.pending}
+                  heldReason={identityLockReason}
+                  onAdd={() => void upstreamOffer.addUpstream()}
+                />
+              )}
 
             <div className="flex items-end gap-2">
               <div className="min-w-0 flex-initial">

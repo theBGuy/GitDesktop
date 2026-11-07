@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CreatePrDialog,
@@ -11,6 +12,7 @@ import {
   gitBranchAhead,
   gitBranchDiff,
   gitBranches,
+  gitFetchRemote,
   gitRemoteAdd,
   gitRemoteBranches,
   gitRemotes,
@@ -497,7 +499,8 @@ describe("CreatePrDialog reopen over a running create", () => {
       screen.getByRole("button", { name: "Create pull request" }),
     );
     await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
-    // The gate settles off mid-create: release is no local branch.
+    // The gate settles off mid-create: release is no local branch. The dialog
+    // keeps showing the parent target the create captured.
     vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
     await act(() =>
       dialog.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
@@ -506,9 +509,47 @@ describe("CreatePrDialog reopen over a running create", () => {
     const route = screen.getByText(
       (_, el) => el?.tagName === "P" && /^feat →/.test(el.textContent ?? ""),
     );
-    expect(route).toHaveTextContent("feat → release");
+    expect(route).toHaveTextContent("feat → upstream/release");
+    expect(targetButton("Parent")).toHaveAttribute("aria-pressed", "true");
     await act(async () =>
       finish({ number: 7, url: "https://github.com/me/project/pull/7" }),
+    );
+  });
+
+  it("shows the fork a running create targets while the gate turns on", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    const dialog = renderDialog({ defaultBase: "main" });
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Parent" })).toBeNull();
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    // Upstream lands elsewhere mid-create: the live gate turns on.
+    vi.mocked(gitRemotes).mockResolvedValue(["origin", "upstream"]);
+    await act(() =>
+      dialog.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(screen.queryByRole("button", { name: "Parent" })).toBeNull();
+    const route = screen.getByText(
+      (_, el) => el?.tagName === "P" && /^feat →/.test(el.textContent ?? ""),
+    );
+    expect(route).toHaveTextContent("feat → main");
+    expect(route.textContent).not.toMatch(/upstream\//);
+    expect(aheadBases()).not.toContain("refs/remotes/upstream/main");
+    // Settled, the dialog follows the live gate.
+    await act(async () => fail({ message: "No commits between" }));
+    await waitFor(() =>
+      expect(targetButton("Parent")).toHaveAttribute("aria-pressed", "true"),
     );
   });
 
@@ -674,6 +715,109 @@ describe("CreatePrDialog reopen over a running create", () => {
   });
 });
 
+describe("CreatePrDialog frozen target", () => {
+  const OTHER = "C:/other";
+
+  /** A host whose own state owns `open`, so the create's close lands, and
+   *  whose repo can move. */
+  function renderHost() {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    let setShown!: (open: boolean) => void;
+    function Host({ repoPath }: { repoPath: string }) {
+      const [open, setOpen] = useState(true);
+      setShown = setOpen;
+      return (
+        <CreatePrDialog
+          repoPath={repoPath}
+          defaultHead="feat"
+          defaultBase="main"
+          open={open}
+          onOpenChange={setOpen}
+        />
+      );
+    }
+    const ui = (repoPath: string) => (
+      <QueryClientProvider client={client}>
+        <Host repoPath={repoPath} />
+      </QueryClientProvider>
+    );
+    const view = render(ui(REPO));
+    return {
+      client,
+      setOpen: (open: boolean) => act(() => setShown(open)),
+      switchTo: (repo: string) => view.rerender(ui(repo)),
+    };
+  }
+
+  const routeLine = () =>
+    screen.getByText(
+      (_, el) => el?.tagName === "P" && /^feat →/.test(el.textContent ?? ""),
+    );
+
+  it("keeps the submitted target through a successful create's close", async () => {
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    let finish!: (v: { number: number; url: string }) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const host = renderHost();
+    expect(await screen.findByText("1 commit to merge.")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    vi.mocked(gitRemotes).mockResolvedValue(["origin", "upstream"]);
+    await act(() =>
+      host.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(routeLine()).toHaveTextContent("feat → main");
+    await act(async () =>
+      finish({ number: 7, url: "https://github.com/me/project/pull/7" }),
+    );
+    // The closing popup still paints the fork the create used.
+    expect(routeLine()).toHaveTextContent("feat → main");
+    expect(screen.queryByRole("button", { name: "Parent" })).toBeNull();
+  });
+
+  it("shows another repo its own gate while a create runs in the first", async () => {
+    forkWithUpstream();
+    vi.mocked(gitRemotes).mockImplementation(async (repo) =>
+      repo === REPO ? ["origin", "upstream"] : ["origin"],
+    );
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    const host = renderHost();
+    await waitFor(() =>
+      expect(targetButton("Parent")).toHaveAttribute("aria-pressed", "true"),
+    );
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await host.setOpen(false);
+    useUiStore.setState({ repoPath: OTHER });
+    host.switchTo(OTHER);
+    await host.setOpen(true);
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(screen.queryByRole("button", { name: "Parent" })).toBeNull();
+    expect(gitFetchRemote).not.toHaveBeenCalledWith(OTHER, "upstream");
+    await act(async () => fail({ message: "No commits between" }));
+  });
+});
+
 describe("Add upstream remote offer", () => {
   const FORK_SETTINGS = {
     ...DEFAULT_SETTINGS,
@@ -759,6 +903,49 @@ describe("Add upstream remote offer", () => {
     expect(gitRemoteAdd).not.toHaveBeenCalled();
     await act(async () => fail({ message: "No commits between" }));
     await waitFor(() => expect(add).not.toHaveAttribute("aria-disabled"));
+  });
+
+  it("shows the fork a create targets when an add started before it lands", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(FORK_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    let added!: () => void;
+    vi.mocked(gitRemoteAdd).mockReturnValue(
+      new Promise<void>((resolve) => {
+        added = resolve;
+      }),
+    );
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "main" });
+    await user.click(
+      await screen.findByRole("button", { name: "Add upstream remote" }),
+    );
+    await waitFor(() => expect(gitRemoteAdd).toHaveBeenCalledTimes(1));
+    await screen.findByText("1 commit to merge.");
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    // The add lands mid-create: the live gate turns on.
+    vi.mocked(gitRemotes).mockResolvedValue(["origin", "upstream"]);
+    await act(async () => added());
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(screen.queryByRole("button", { name: "Parent" })).toBeNull();
+    const route = screen.getByText(
+      (_, el) => el?.tagName === "P" && /^feat →/.test(el.textContent ?? ""),
+    );
+    expect(route).toHaveTextContent("feat → main");
+    expect(route.textContent).not.toMatch(/upstream\//);
+    await act(async () => fail({ message: "No commits between" }));
+    await waitFor(() =>
+      expect(targetButton("Parent")).toHaveAttribute("aria-pressed", "true"),
+    );
   });
 
   it("withdraws the card when a remotes refresh fails over the cached list", async () => {
