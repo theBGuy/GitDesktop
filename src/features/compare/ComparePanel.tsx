@@ -401,13 +401,15 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     );
   const goneOrPruned = remoteGone || pruned;
   // The pick's post-fetch read failed and nothing newer has answered: the
-  // cached comparison predates the fetch, so it can't decide Create.
+  // cached comparison predates the fetch, so it can't decide Create. Any later
+  // success clears `isError` (a refetch in flight keeps it), whatever the clock.
   const failedRead = fetcher.failedRead;
   const staleAfterFetch =
     failedRead !== null &&
     failedRead.repoPath === repoPath &&
     failedRead.pickedValue === compareBranch &&
     failedRead.currentBranch === currentName &&
+    comparison.isError &&
     comparison.dataUpdatedAt <= failedRead.over;
   // A pruned or gone pick holds even while a running fetch's line outranks its
   // line: the ref a PR would target is gone either way.

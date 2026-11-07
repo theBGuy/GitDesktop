@@ -359,9 +359,10 @@ describe("Add upstream remote palette command", () => {
     expect(offer.failedOnForgeOnly).toBe(true);
     expect(dispatchAction("add-upstream-remote")).toBe(false);
 
+    // Origin was re-pointed meanwhile: the add takes the recovered read's host.
     vi.mocked(forgeStatus).mockResolvedValue({
       ...GITHUB,
-      host: "ghe.example.com",
+      host: "ghe2.example.com",
     });
     act(() => offer.retry());
     await waitFor(() =>
@@ -371,7 +372,7 @@ describe("Add upstream remote palette command", () => {
       expect(gitRemoteAdd).toHaveBeenCalledWith(
         REPO,
         "upstream",
-        "https://ghe.example.com/octo/project.git",
+        "https://ghe2.example.com/octo/project.git",
       ),
     );
   });

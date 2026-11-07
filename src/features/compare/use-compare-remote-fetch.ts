@@ -334,7 +334,17 @@ export function useCompareRemoteFetch(
       return;
     }
     const pickFire = req.pickedValue === null ? null : ++pickFires.current;
-    if (pickFire !== null) setFailedRead(null);
+    // Only another pick drops the hold: a re-fire of the same one that fails
+    // or parks would otherwise free Create over the pre-fetch answer.
+    if (pickFire !== null)
+      setFailedRead((f) =>
+        f !== null &&
+        f.repoPath === req.repo &&
+        f.pickedValue === req.pickedValue &&
+        f.currentBranch === req.currentBranch
+          ? f
+          : null,
+      );
     epoch.current += 1;
     const next: CompareFetchStamp = {
       repoPath: req.repo,

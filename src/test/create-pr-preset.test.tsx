@@ -730,6 +730,37 @@ describe("Add upstream remote offer", () => {
     await act(async () => finish());
   });
 
+  it("holds the add while a create runs, since the add would flip its target", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(FORK_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "main" });
+    const add = await screen.findByRole("button", {
+      name: "Add upstream remote",
+    });
+    expect(add).not.toHaveAttribute("aria-disabled");
+    await screen.findByText("1 commit to merge.");
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(add).toHaveAttribute("aria-disabled", "true"));
+    expect(add).toHaveAccessibleDescription(
+      "Creating the pull request — the target is locked until it finishes.",
+    );
+    await user.click(add);
+    expect(gitRemoteAdd).not.toHaveBeenCalled();
+    await act(async () => fail({ message: "No commits between" }));
+    await waitFor(() => expect(add).not.toHaveAttribute("aria-disabled"));
+  });
+
   it("withdraws the card when a remotes refresh fails over the cached list", async () => {
     vi.mocked(loadSettings).mockResolvedValue(FORK_SETTINGS);
     vi.mocked(forgeStatus).mockResolvedValue(GITHUB);

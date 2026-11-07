@@ -1251,6 +1251,7 @@ export function CreatePrDialog({
               <AddUpstreamOfferCard
                 forkParent={upstreamOffer.forkParent}
                 pending={upstreamOffer.pending}
+                heldReason={identityLockReason}
                 onAdd={() => void upstreamOffer.addUpstream()}
               />
             )}

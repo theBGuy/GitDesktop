@@ -663,6 +663,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
    *  reject until `heal()`, then answer `fresh`. */
   function failingRereads(cached: CommitSummary[], fresh: CommitSummary[]) {
     let healed = false;
+    let gate: Promise<void> | null = null;
     let pickReads = 0;
     vi.mocked(gitCompareBranches).mockImplementation(
       async (_repo, base, compare) => {
@@ -671,6 +672,7 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
         pickReads += 1;
         if (pickReads === 1) return { ahead: cached, behind: [] };
         if (!healed) throw new Error("compare boom");
+        if (gate) await gate;
         return { ahead: fresh, behind: [] };
       },
     );
@@ -678,6 +680,12 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
       reads: () => pickReads,
       heal: () => {
         healed = true;
+      },
+      /** Healed reads wait until the returned release is called. */
+      holdHealed: () => {
+        const held = deferred<void>();
+        gate = held.promise;
+        return held.resolve;
       },
     };
   }
@@ -702,6 +710,75 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     await settle();
     return { user, ...compare };
   }
+
+  /** Reselecting the failed pick re-fires it; heal, then a held Retry keeps
+   *  the hold until its success lands. */
+  async function reselectKeepsHold(
+    run: Awaited<ReturnType<typeof pickOverFailedReread>>,
+    line: string,
+  ) {
+    const before = fetchedRemotes().length;
+    await pickOption(run.user, /^origin\/feature-x/);
+    await statusLine(line);
+    await settle();
+    expect(createButton()).toHaveAttribute("aria-disabled", "true");
+    expect(createButton()).toHaveAccessibleDescription(COMPARE_FAILED);
+    expect(dispatchAction("create-pr")).toBe(false);
+    run.heal();
+    const release = run.holdHealed();
+    await run.user.click(
+      screen.getByRole("button", { name: "Retry loading this comparison" }),
+    );
+    await settle();
+    // A refetch in flight keeps the read's error status, so the hold stays.
+    expect(createButton()).toHaveAccessibleDescription(COMPARE_FAILED);
+    await act(async () => release());
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    return fetchedRemotes().length - before;
+  }
+
+  it("keeps the failed-read hold when the same pick's re-fetch fails", async () => {
+    const run = await pickOverFailedReread([COMMIT], [COMMIT]);
+    vi.mocked(gitFetchRemote).mockRejectedValue(new Error("fetch boom"));
+    const fetches = await reselectKeepsHold(
+      run,
+      "Couldn't fetch origin, so this compares against its last fetch.",
+    );
+    expect(fetches).toBe(1);
+  });
+
+  it("keeps the failed-read hold when the same pick's re-fetch parks offline", async () => {
+    const run = await pickOverFailedReread([COMMIT], [COMMIT]);
+    act(() => onlineManager.setOnline(false));
+    const fetches = await reselectKeepsHold(
+      run,
+      "You're offline, so this compares against origin's last fetch.",
+    );
+    expect(fetches).toBe(0);
+  });
+
+  it("frees Create on a later success even when the clock stepped back", async () => {
+    const run = await pickOverFailedReread([COMMIT], [COMMIT]);
+    run.heal();
+    const release = run.holdHealed();
+    await run.user.click(
+      screen.getByRole("button", { name: "Retry loading this comparison" }),
+    );
+    await settle();
+    // The success lands stamped before the answer the failed read left.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1);
+    try {
+      await act(async () => release());
+      await act(async () => undefined);
+    } finally {
+      clock.mockRestore();
+    }
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+  });
 
   it("keeps the failed-read hold when the add-upstream follow-up takes the slot", async () => {
     forkWithoutUpstream();

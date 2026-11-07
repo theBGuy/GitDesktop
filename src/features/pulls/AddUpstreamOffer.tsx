@@ -159,10 +159,14 @@ const ADDING_REASON = "Adding the upstream remote";
 export function AddUpstreamOfferCard({
   forkParent,
   pending,
+  heldReason,
   onAdd,
 }: {
   forkParent: string;
   pending: boolean;
+  /** Why the host holds the add (null when it doesn't): adding the remote
+   *  flips the dialog's target, which a running create has already captured. */
+  heldReason: string | null;
   onAdd: () => void;
 }) {
   return (
@@ -177,8 +181,8 @@ export function AddUpstreamOfferCard({
         type="button"
         variant="outline"
         size="xs"
-        disabled={pending}
-        reason={pending ? ADDING_REASON : null}
+        disabled={pending || heldReason !== null}
+        reason={pending ? ADDING_REASON : heldReason}
         onClick={onAdd}
       >
         {pending ? "Adding upstream remote…" : "Add upstream remote"}
