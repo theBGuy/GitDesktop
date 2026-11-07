@@ -171,8 +171,9 @@ export function usePrListPage(
  *  it keeps such a result from ever caching under another page's key, and — because
  *  Bitbucket's rollup is addressed by `headSha` — a pushed head re-keys the query, so a
  *  refetch concurrent with the list's cannot leave a map built from the outgoing SHAs
- *  sitting fresh-stamped. GitHub/GitLab leave `headSha` empty (their CI reads by number),
- *  so their digests only gain a colon per row. */
+ *  sitting fresh-stamped. GitHub/GitLab CI reads by number, but their rows carry
+ *  headSha too, so a pushed head re-keys their digests as well, at the cost of one
+ *  extra rollup read. */
 export function usePrListCi(
   repo: string,
   enabled: boolean,
