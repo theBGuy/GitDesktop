@@ -9487,8 +9487,11 @@ test("reused-view-pending fails closed on inputs it cannot read", () => {
 });
 
 test("reused-view-pending keeps its member list, reasons and limitations", () => {
-  assert.equal(REUSED_VIEW_MEMBERS.length, 19);
-  assert.equal(new Set(REUSED_VIEW_MEMBERS).size, 19);
+  assert.equal(REUSED_VIEW_MEMBERS.length, 20);
+  assert.equal(new Set(REUSED_VIEW_MEMBERS).size, 20);
+  assert.ok(
+    REUSED_VIEW_MEMBERS.includes("src/features/pulls/PrWorktreeCheckout.tsx"),
+  );
   for (const e of REUSED_VIEW_ALLOWLIST) {
     assert.ok(REUSED_VIEW_MEMBERS.includes(e.file), e.file);
     assert.ok(e.reason.trim().length > 5, `${e.file} ${e.receiver} says why`);

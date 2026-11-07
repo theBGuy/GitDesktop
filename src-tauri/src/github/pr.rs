@@ -417,6 +417,17 @@ pub struct GhAccounts {
     pub accounts: Vec<GhAccount>,
 }
 
+/// gh's version from `gh --version`'s first line ("gh version 2.18.1 (2022-10-20)"
+/// gives "2.18.1"), or "" when that line has no third token.
+fn parse_gh_version(stdout: &str) -> String {
+    stdout
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(2))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// The gh CLI's signed-in accounts and version (account switching needs
 /// gh ≥ 2.40).
 #[tauri::command]
@@ -429,14 +440,7 @@ pub async fn gh_accounts() -> AppResult<GhAccounts> {
             });
         }
         Err(e) => return Err(e),
-        // "gh version 2.18.1 (2022-10-20)" → "2.18.1"
-        Ok(out) => out
-            .stdout_lossy()
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(2))
-            .unwrap_or("")
-            .to_string(),
+        Ok(out) => parse_gh_version(&out.stdout_lossy()),
     };
     let accounts = match run_gh_raw(None, &["auth", "status"], GH_TIMEOUT).await {
         Ok(out) => {
@@ -2122,6 +2126,266 @@ pub async fn gh_pr_discard_pending_review(repo_path: String, review_id: String) 
     Ok(())
 }
 
+/// The `gh pr view` fields a checkout reads. Tolerant: gh output is untrusted, and a
+/// read asking for fewer fields leaves the rest `None`.
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PrHeadView {
+    head_ref_name: Option<String>,
+    is_cross_repository: Option<bool>,
+    head_ref_oid: Option<String>,
+    head_repository_owner: Option<HeadOwner>,
+}
+
+#[derive(Deserialize, Default)]
+struct HeadOwner {
+    login: Option<String>,
+}
+
+/// A checkout's mandatory view: the PR's head, trimmed and non-empty, beside the rest.
+struct PrHead {
+    head: String,
+    view: PrHeadView,
+}
+
+/// Parses a checkout's `gh pr view` body. An unreadable body or a blank head is
+/// refused, so every guard after it knows the branch.
+fn pr_head_from(body: &str, n: &str) -> AppResult<PrHead> {
+    let unreadable = || {
+        AppError::Gh(format!(
+            "Couldn't read pull request #{n}'s branch from GitHub."
+        ))
+    };
+    let view: PrHeadView = serde_json::from_str(body).map_err(|_| unreadable())?;
+    let head = match view.head_ref_name.as_deref().map(str::trim) {
+        Some(h) if !h.is_empty() => h.to_string(),
+        _ => return Err(unreadable()),
+    };
+    Ok(PrHead { head, view })
+}
+
+/// Reads a checkout's view; gh's own failure (offline, rate limit, no such PR)
+/// propagates, since the checkout would fail on it too.
+async fn read_pr_head(repo_path: &str, n: &str, slug: &str, fields: &str) -> AppResult<PrHead> {
+    let out = run_gh(
+        Some(repo_path),
+        &["pr", "view", n, "--repo", slug, "--json", fields],
+        GH_TIMEOUT,
+    )
+    .await?;
+    pr_head_from(&out.stdout_lossy(), n)
+}
+
+/// The plain checkout's session refusal. gh names that branch itself, and whether it
+/// prefixes a fork's owner hangs on its live default-branch read, which this side
+/// can't know, so either spelling being reserved refuses (an owner literally named
+/// `gd` is over-refused, deliberately).
+fn refuse_plain_checkout_session_names(pr: &PrHead) -> AppResult<()> {
+    refuse_session_head(&pr.head)?;
+    refuse_session_head(&pr_local_branch(pr))
+}
+
+/// The local branch the worktree checkout names itself (`--branch`), so gh never
+/// picks one: `<owner>/<head>` for a fork with a known owner, else the bare head. The
+/// bare head CAN name the user's own branch for a deleted fork (no owner), so the
+/// worktree gate refuses a bare-head namesake for every cross-repository PR.
+fn pr_local_branch(pr: &PrHead) -> String {
+    match head_owner(&pr.view) {
+        Some(owner) if pr_is_fork(pr) => format!("{owner}/{}", pr.head),
+        _ => pr.head.clone(),
+    }
+}
+
+/// Whether gh says the PR is cross-repository. An absent field counts as same-repo,
+/// matching the local name it composes.
+fn pr_is_fork(pr: &PrHead) -> bool {
+    pr.view.is_cross_repository == Some(true)
+}
+
+/// The head repository owner's login, trimmed and non-empty.
+fn head_owner(view: &PrHeadView) -> Option<&str> {
+    view.head_repository_owner
+        .as_ref()
+        .and_then(|o| o.login.as_deref())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+}
+
+/// A full lowercase object id (SHA-1 or SHA-256): the only shape a forge-supplied
+/// or confirmed sha may take before it reaches a git rev position.
+fn is_full_lowercase_oid(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The PR head's oid, or `None` when gh's value isn't a full lowercase id.
+fn head_oid(view: &PrHeadView) -> Option<&str> {
+    view.head_ref_oid
+        .as_deref()
+        .filter(|o| is_full_lowercase_oid(o))
+}
+
+/// The branch the update guard may name. Only a PR from this same repo checks out
+/// under its own `headRefName`; gh gives a fork's branch a prefixed local name whose
+/// shape has changed between gh versions, so a cross-repository PR keeps repo scope.
+/// `isCrossRepository` must say false explicitly: an absent field proves nothing.
+fn update_guard_branch(view: Option<&PrHeadView>) -> Option<&str> {
+    view.filter(|v| v.is_cross_repository == Some(false))
+        .and_then(|v| v.head_ref_name.as_deref())
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+}
+
+/// Refuses while an update holds the PR's branch, or any branch when the branch is
+/// unknown.
+async fn refuse_if_pr_branch_updating(
+    state: &AppState,
+    repo_path: &str,
+    view: Option<&PrHeadView>,
+) -> AppResult<()> {
+    match update_guard_branch(view) {
+        Some(branch) => {
+            crate::git::update_marker::refuse_if_branch_updating(state, repo_path, branch).await
+        }
+        None => crate::git::update_marker::refuse_if_any_updating(state, repo_path).await,
+    }
+}
+
+/// A forge-named head in `gd/session/` would land a branch every surface hides. Its
+/// own wording: the shared refusal's "choose another name" is not the user's to act on.
+fn refuse_session_head(head: &str) -> AppResult<()> {
+    if crate::git::branches::is_session_branch_name(head) {
+        return Err(AppError::InvalidArgument(format!(
+            "\"{head}\" is in gd/session/, which is reserved for agent sessions, so this pull request's branch can't be checked out."
+        )));
+    }
+    Ok(())
+}
+
+/// `gh pr checkout` needs a GitHub origin. Only a DETECTED GitLab or Bitbucket origin
+/// refuses; an unknown provider is left to gh.
+fn refuse_non_github(provider: Option<crate::forge::model::Provider>) -> AppResult<()> {
+    use crate::forge::model::Provider;
+    let name = match provider {
+        Some(Provider::GitLab) => "GitLab",
+        Some(Provider::Bitbucket) => "Bitbucket",
+        Some(Provider::GitHub) | None => return Ok(()),
+    };
+    Err(AppError::InvalidArgument(format!(
+        "Checking out with the GitHub CLI isn't available for a {name} repository."
+    )))
+}
+
+/// The first gh release whose `pr checkout` takes `--worktree`.
+const GH_WORKTREE_FLOOR: (u64, u64, u64) = (2, 98, 0);
+
+/// (major, minor, patch) from a gh version. Each present part reads its leading ASCII
+/// digits; a missing minor or patch is 0; a part with no leading digit is unparsable.
+fn gh_version_triple(v: &str) -> Option<(u64, u64, u64)> {
+    let part = |p: &str| -> Option<u64> {
+        let digits = &p[..p.bytes().take_while(u8::is_ascii_digit).count()];
+        digits.parse().ok()
+    };
+    let mut parts = v.split('.');
+    let major = part(parts.next()?)?;
+    let minor = parts.next().map_or(Some(0), part)?;
+    let patch = parts.next().map_or(Some(0), part)?;
+    Some((major, minor, patch))
+}
+
+/// Numeric, never lexical; an unparsable version fails closed.
+fn gh_version_at_least(v: &str, min: (u64, u64, u64)) -> bool {
+    gh_version_triple(v).is_some_and(|got| got >= min)
+}
+
+/// Refuses a gh older than the worktree floor, or one whose version can't be read.
+fn refuse_gh_below_worktree_floor(version: &str) -> AppResult<()> {
+    let (major, minor, _) = GH_WORKTREE_FLOOR;
+    let version = version.trim();
+    if gh_version_triple(version).is_none() {
+        return Err(AppError::InvalidArgument(format!(
+            "Checking out into a worktree needs GitHub CLI {major}.{minor} or newer (your gh version could not be read)."
+        )));
+    }
+    if !gh_version_at_least(version, GH_WORKTREE_FLOOR) {
+        return Err(AppError::InvalidArgument(format!(
+            "Checking out into a worktree needs GitHub CLI {major}.{minor} or newer (you have {version})."
+        )));
+    }
+    Ok(())
+}
+
+/// The worktree checkout's argv, and the only producer of `--worktree`: below the
+/// floor (or on an unreadable version) no argv exists for a spawn to carry. `--branch`
+/// composes with `--worktree` and only names the local branch (checkout.go:208-211,
+/// :253-256), so gh never picks it.
+fn worktree_checkout_args(
+    version: &str,
+    n: &str,
+    slug: &str,
+    path: &str,
+    local: &str,
+    force: bool,
+) -> AppResult<Vec<String>> {
+    refuse_gh_below_worktree_floor(version)?;
+    let mut argv: Vec<String> = [
+        "pr",
+        "checkout",
+        n,
+        "--repo",
+        slug,
+        "--branch",
+        local,
+        "--worktree",
+        path,
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    if force {
+        argv.push("--force".to_string());
+    }
+    Ok(argv)
+}
+
+/// Whether a failed worktree checkout may be read as divergence. A rate-limit hold
+/// returns gh-shaped stderr without spawning, and a not-found never fetched; transport
+/// stays in, because its words false-fire on branch and slug names, and the state and
+/// progress probes are the authority.
+fn classifiable(err: &AppError) -> bool {
+    matches!(
+        err,
+        AppError::Gh(stderr)
+            if matches!(classify_gh_failure(stderr), GhFailure::Answered | GhFailure::Transport)
+    )
+}
+
+/// gh's refusal of a non-empty folder that isn't a worktree, rewritten as the app's
+/// sentence with gh's raw text kept below it for Details. gh refuses before it
+/// fetches or writes anything, so there is nothing to classify.
+fn worktree_not_empty(err: &AppError, path: &str) -> Option<AppError> {
+    match err {
+        AppError::Gh(raw)
+            if raw.contains("--worktree path must be empty")
+                || raw.lines().any(is_git_worktree_path_exists) =>
+        {
+            Some(AppError::Gh(format!(
+                "{path} isn't empty — pick a new or empty folder.\n\n{raw}"
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// gh gained its own empty-folder check in 2.99; on the 2.98 floor `git worktree add`
+/// reports the folder as `fatal: '<path>' already exists` instead. The quote right
+/// after `fatal: ` keeps git's branch-collision line (`a branch named '…'`) out.
+fn is_git_worktree_path_exists(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("fatal: '")
+        .and_then(|rest| rest.strip_suffix("' already exists"))
+        .is_some_and(|quoted| !quoted.is_empty())
+}
+
 /// Checks out a PR's branch locally (handles fork-sourced PRs too).
 #[tauri::command]
 pub async fn gh_pr_checkout(
@@ -2130,45 +2394,25 @@ pub async fn gh_pr_checkout(
     number: u64,
     lens: Option<String>,
 ) -> AppResult<()> {
+    refuse_non_github(
+        crate::forge::detect_non_github(&repo_path)
+            .await
+            .map(|(p, _)| p),
+    )?;
     let n = number.to_string();
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    // Ask gh which branch this PR lands on, so the guard can name it: an update's
-    // window runs to minutes on the diverged path, and a repo-scoped refusal would
-    // block checkouts of every OTHER branch for all of it. Any failure of this extra
-    // read (offline, no such PR, an older gh) falls back to the repo-scoped guard
-    // rather than failing the checkout on a guard's behalf.
-    let view = run_gh(
-        Some(&repo_path),
-        &[
-            "pr",
-            "view",
-            &n,
-            "--repo",
-            &slug,
-            "--json",
-            "headRefName,isCrossRepository",
-        ],
-        GH_TIMEOUT,
+    // The head must be known before anything runs: the session refusal needs it, and
+    // the update guard names the branch rather than holding every checkout in the
+    // repo for an update's minutes-long window.
+    let pr = read_pr_head(
+        &repo_path,
+        &n,
+        &slug,
+        "headRefName,isCrossRepository,headRepositoryOwner",
     )
-    .await
-    .ok()
-    .and_then(|out| serde_json::from_str::<serde_json::Value>(&out.stdout_lossy()).ok());
-    // Only a PR from this same repo checks out under its own `headRefName`; gh gives a
-    // fork's branch a prefixed local name whose shape has changed between gh versions,
-    // so guessing it is not worth the guard — a cross-repository PR keeps repo scope.
-    // `isCrossRepository` must say false explicitly: an absent field proves nothing.
-    let branch = view
-        .as_ref()
-        .filter(|v| v["isCrossRepository"].as_bool() == Some(false))
-        .and_then(|v| v["headRefName"].as_str())
-        .map(str::trim)
-        .filter(|b| !b.is_empty());
-    match branch {
-        Some(branch) => {
-            crate::git::update_marker::refuse_if_branch_updating(&state, &repo_path, branch).await?
-        }
-        None => crate::git::update_marker::refuse_if_any_updating(&state, &repo_path).await?,
-    }
+    .await?;
+    refuse_plain_checkout_session_names(&pr)?;
+    refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
     run_gh(
         Some(&repo_path),
         &["pr", "checkout", &n, "--repo", &slug],
@@ -2176,6 +2420,108 @@ pub async fn gh_pr_checkout(
     )
     .await?;
     Ok(())
+}
+
+/// Checks a PR out into a new or existing worktree at `path` (the final path, taken
+/// verbatim) through `gh pr checkout --worktree`. An existing worktree re-syncs by
+/// fast-forward; a diverged one returns `WorktreeDiverged`, and only a retry with
+/// `force` and the confirmed `expected_head` resets it. Every refusal precedes the
+/// checkout spawn.
+#[tauri::command]
+pub async fn gh_pr_checkout_worktree(
+    state: tauri::State<'_, crate::state::AppState>,
+    repo_path: String,
+    number: u64,
+    lens: Option<String>,
+    path: String,
+    force: bool,
+    expected_head: Option<String>,
+) -> AppResult<()> {
+    use crate::git::worktree::{
+        checkout_pre_spawn_gate, divergence_error, post_spawn_candidate, probe_worktree,
+        CheckoutMode,
+    };
+    refuse_non_github(
+        crate::forge::detect_non_github(&repo_path)
+            .await
+            .map(|(p, _)| p),
+    )?;
+    let path = crate::git::worktree::worktree_path_arg(&path)?;
+    crate::git::worktree::refuse_ambiguous_worktree_path(path, cfg!(windows))?;
+    let n = number.to_string();
+    let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
+    let version = parse_gh_version(
+        &run_gh_raw(None, &["--version"], GH_TIMEOUT)
+            .await?
+            .stdout_lossy(),
+    );
+    refuse_gh_below_worktree_floor(&version)?;
+
+    let pr = read_pr_head(
+        &repo_path,
+        &n,
+        &slug,
+        "headRefName,isCrossRepository,headRefOid,headRepositoryOwner",
+    )
+    .await?;
+    let head = pr.head.as_str();
+    refuse_session_head(head)?;
+    validate_branch(head)?;
+    // The local name is ours, so it passes the same refusals: an owner prefix can
+    // spell a reserved `gd/session/` name the head alone doesn't.
+    let local = pr_local_branch(&pr);
+    let local = local.as_str();
+    refuse_session_head(local)?;
+    validate_branch(local)?;
+    let argv = worktree_checkout_args(&version, &n, &slug, path, local, force)?;
+    // Without a well-formed oid nothing is classified: gh still runs, and its own
+    // error is the answer.
+    let oid = head_oid(&pr.view);
+    let resolved = crate::git::worktree::resolve_worktree_path(&repo_path, path);
+    let mode = if force {
+        let expected = expected_head
+            .as_deref()
+            .filter(|h| is_full_lowercase_oid(h))
+            .ok_or_else(|| {
+                AppError::InvalidArgument(
+                    "Resetting the worktree needs the commit you confirmed — run the checkout again."
+                        .into(),
+                )
+            })?;
+        CheckoutMode::Force { expected }
+    } else {
+        CheckoutMode::Sync
+    };
+    let fork = pr_is_fork(&pr);
+    let pre =
+        checkout_pre_spawn_gate(&repo_path, path, &resolved, oid, head, local, fork, mode).await?;
+
+    refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
+    let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let err = match run_gh(Some(&repo_path), &argv, GH_NETWORK_TIMEOUT).await {
+        Ok(_) => return Ok(()),
+        Err(err) => err,
+    };
+    if let Some(not_empty) = worktree_not_empty(&err, path) {
+        return Err(not_empty);
+    }
+    // A forced run, a timeout (gh's git children can outlive the kill) and every
+    // failure without fresh state evidence keep gh's own error.
+    let (Some(oid), Some(pre)) = (oid, pre.as_ref()) else {
+        return Err(err);
+    };
+    if force || !classifiable(&err) {
+        return Err(err);
+    }
+    let Ok(post) = probe_worktree(&repo_path, &resolved, Some(oid)).await else {
+        return Err(err);
+    };
+    let Some(e) = post_spawn_candidate(pre, &post, local) else {
+        return Err(err);
+    };
+    Err(divergence_error(&repo_path, path, e, oid)
+        .await
+        .unwrap_or(err))
 }
 
 /// "owner/repo" from a remote URL — handles https://host/owner/repo(.git)
@@ -13185,5 +13531,417 @@ github.acme.com
             parse_publish_owners(r#"{"data":{"viewer":{"login":""}}}"#),
             Err(AppError::Gh(_))
         ));
+    }
+
+    mod worktree_checkout {
+        use super::super::{
+            classifiable, gh_version_at_least, head_oid, head_owner, is_full_lowercase_oid,
+            parse_gh_version, pr_head_from, pr_is_fork, pr_local_branch, refuse_non_github,
+            refuse_plain_checkout_session_names, refuse_session_head, update_guard_branch,
+            worktree_checkout_args, worktree_not_empty, PrHeadView, GH_WORKTREE_FLOOR,
+        };
+        use crate::error::AppError;
+        use crate::forge::model::Provider;
+
+        fn view(json: &str) -> PrHeadView {
+            serde_json::from_str(json).unwrap()
+        }
+
+        fn invalid_argument<T: std::fmt::Debug>(result: Result<T, AppError>) -> String {
+            match result {
+                Err(AppError::InvalidArgument(message)) => message,
+                other => panic!("expected InvalidArgument, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_gh_version_reads_the_first_line_token() {
+            assert_eq!(
+                parse_gh_version(
+                    "gh version 2.103.3 (2026-10-26)\nhttps://github.com/cli/cli/releases/tag/v2.103.3\n"
+                ),
+                "2.103.3"
+            );
+            assert_eq!(parse_gh_version(""), "");
+            assert_eq!(parse_gh_version("gh version"), "");
+        }
+
+        #[test]
+        fn gh_version_at_least_compares_numerically() {
+            for v in [
+                "2.98.0",
+                "2.98",
+                "2.98.1",
+                "2.100.0",
+                "3",
+                "3.0.0",
+                "2.98.0-rc1",
+            ] {
+                assert!(gh_version_at_least(v, GH_WORKTREE_FLOOR), "{v:?} passes");
+            }
+            for v in [
+                "2.97.9", "2.97", "2.9.99", "1.200.0", "", "DEV", "2.x", "2..1",
+            ] {
+                assert!(!gh_version_at_least(v, GH_WORKTREE_FLOOR), "{v:?} fails");
+            }
+        }
+
+        /// The negative control: below the floor no argv exists, so `--worktree` can't
+        /// reach a spawn on a gh that would misread it.
+        #[test]
+        fn worktree_checkout_args_never_carry_worktree_below_the_floor() {
+            for v in ["2.97.0", "2.97.9"] {
+                assert_eq!(
+                    invalid_argument(worktree_checkout_args(v, "7", "o/r", "C:/wt", "feat", false)),
+                    format!(
+                        "Checking out into a worktree needs GitHub CLI 2.98 or newer (you have {v})."
+                    )
+                );
+            }
+            for v in ["", "DEV"] {
+                let message =
+                    invalid_argument(worktree_checkout_args(v, "7", "o/r", "C:/wt", "feat", true));
+                assert_eq!(
+                    message,
+                    "Checking out into a worktree needs GitHub CLI 2.98 or newer (your gh version could not be read)."
+                );
+                assert!(!message.contains("you have )"), "{message}");
+            }
+            // The local name rides every argv, spelled exactly as pr_local_branch makes it.
+            for (json, local) in [
+                (
+                    r#"{"headRefName":"feat","isCrossRepository":false,"headRepositoryOwner":{"login":"base"}}"#,
+                    "feat",
+                ),
+                (
+                    r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+                    "alice/main",
+                ),
+                (
+                    r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":null}"#,
+                    "main",
+                ),
+            ] {
+                let pr = pr_head_from(json, "7").unwrap();
+                assert_eq!(pr_local_branch(&pr), local, "{json}");
+                let pinned = [
+                    "pr",
+                    "checkout",
+                    "7",
+                    "--repo",
+                    "o/r",
+                    "--branch",
+                    local,
+                    "--worktree",
+                    "C:/wt",
+                ];
+                assert_eq!(
+                    worktree_checkout_args("2.98.0", "7", "o/r", "C:/wt", local, false).unwrap(),
+                    pinned
+                );
+                let mut forced = pinned.to_vec();
+                forced.push("--force");
+                assert_eq!(
+                    worktree_checkout_args("2.98.0", "7", "o/r", "C:/wt", local, true).unwrap(),
+                    forced
+                );
+            }
+        }
+
+        /// The gate gets the command's own derivations (`pr_local_branch`, `pr_is_fork`):
+        /// a linked worktree on the bare head passes only for a same-repo PR, so a
+        /// null-owner fork, whose local name is that bare head, still refuses.
+        #[test]
+        fn every_fork_refuses_a_worktree_on_its_bare_head() {
+            for (json, local, refused) in [
+                (
+                    r#"{"headRefName":"feat","isCrossRepository":false,"headRepositoryOwner":{"login":"base"}}"#,
+                    "feat",
+                    false,
+                ),
+                (
+                    r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+                    "alice/main",
+                    true,
+                ),
+                (
+                    r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":null}"#,
+                    "main",
+                    true,
+                ),
+            ] {
+                let pr = pr_head_from(json, "7").unwrap();
+                assert_eq!(pr_local_branch(&pr), local, "{json}");
+                let own = crate::git::worktree::WtEntry {
+                    is_main: false,
+                    branch: pr.head.clone(),
+                    head: "1".repeat(40),
+                    detached: false,
+                    path: "C:/wt".to_string(),
+                };
+                let gate = crate::git::worktree::refuse_own_head_namesake(
+                    Some(&own),
+                    "C:/wt",
+                    &pr.head,
+                    local,
+                    pr_is_fork(&pr),
+                );
+                assert_eq!(gate.is_err(), refused, "{json}");
+            }
+        }
+
+        /// A fork PR is always owner-prefixed, whatever gh's own default naming would
+        /// pick; a same-repo PR, an unstated isCrossRepository and a deleted fork (no
+        /// owner) keep the bare head.
+        #[test]
+        fn pr_local_branch_prefixes_only_a_fork_with_a_known_owner() {
+            for (json, local) in [
+                (
+                    r#"{"headRefName":"feat","isCrossRepository":true,"headRepositoryOwner":{"login":" alice "}}"#,
+                    "alice/feat",
+                ),
+                (
+                    r#"{"headRefName":"feat","isCrossRepository":false,"headRepositoryOwner":{"login":"alice"}}"#,
+                    "feat",
+                ),
+                (
+                    r#"{"headRefName":"feat","headRepositoryOwner":{"login":"alice"}}"#,
+                    "feat",
+                ),
+                (
+                    r#"{"headRefName":"feat","isCrossRepository":true,"headRepositoryOwner":{"login":""}}"#,
+                    "feat",
+                ),
+                (r#"{"headRefName":"feat","isCrossRepository":true}"#, "feat"),
+            ] {
+                assert_eq!(
+                    pr_local_branch(&pr_head_from(json, "7").unwrap()),
+                    local,
+                    "{json}"
+                );
+            }
+            // The prefix can spell a reserved name the head alone doesn't; the command
+            // runs the session refusal on the composed name too.
+            let pr = pr_head_from(
+                r#"{"headRefName":"session/x","isCrossRepository":true,"headRepositoryOwner":{"login":"gd"}}"#,
+                "7",
+            )
+            .unwrap();
+            assert!(refuse_session_head(&pr.head).is_ok());
+            assert!(refuse_session_head(&pr_local_branch(&pr)).is_err());
+        }
+
+        /// The plain checkout refuses when either spelling gh might pick is reserved:
+        /// the bare head, or the `<owner>/<head>` it composes for a fork's default branch.
+        #[test]
+        fn plain_checkout_refuses_a_session_name_gh_could_compose() {
+            let pr = |json: &str| pr_head_from(json, "7").unwrap();
+            let composed = pr(
+                r#"{"headRefName":"session/x","isCrossRepository":true,"headRepositoryOwner":{"login":"gd"}}"#,
+            );
+            assert_eq!(
+                invalid_argument(refuse_plain_checkout_session_names(&composed)),
+                "\"gd/session/x\" is in gd/session/, which is reserved for agent sessions, so this pull request's branch can't be checked out."
+            );
+            let bare = pr(r#"{"headRefName":"GD/Session/x","isCrossRepository":false}"#);
+            assert!(refuse_plain_checkout_session_names(&bare).is_err());
+            for json in [
+                r#"{"headRefName":"session/x","isCrossRepository":false,"headRepositoryOwner":{"login":"gd"}}"#,
+                r#"{"headRefName":"session/x","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+                r#"{"headRefName":"feat","isCrossRepository":true,"headRepositoryOwner":{"login":"gd"}}"#,
+            ] {
+                assert!(
+                    refuse_plain_checkout_session_names(&pr(json)).is_ok(),
+                    "{json}"
+                );
+            }
+        }
+
+        #[test]
+        fn update_guard_branch_names_only_same_repo_heads() {
+            assert_eq!(update_guard_branch(None), None);
+            let absent = view(r#"{"headRefName":"feat"}"#);
+            assert_eq!(update_guard_branch(Some(&absent)), None);
+            let cross = view(r#"{"headRefName":"feat","isCrossRepository":true}"#);
+            assert_eq!(update_guard_branch(Some(&cross)), None);
+            let blank = view(r#"{"headRefName":"  ","isCrossRepository":false}"#);
+            assert_eq!(update_guard_branch(Some(&blank)), None);
+            let padded = view(r#"{"headRefName":" feat ","isCrossRepository":false}"#);
+            assert_eq!(update_guard_branch(Some(&padded)), Some("feat"));
+        }
+
+        #[test]
+        fn pr_head_view_tolerates_missing_and_null_fields() {
+            for json in [
+                "{}",
+                r#"{"headRefName":null,"isCrossRepository":null,"headRefOid":null,"headRepositoryOwner":null}"#,
+                r#"{"headRepositoryOwner":{}}"#,
+                r#"{"headRepositoryOwner":{"login":null}}"#,
+                r#"{"headRepositoryOwner":{"login":"  "}}"#,
+            ] {
+                let v = view(json);
+                assert!(v.head_ref_name.is_none() && v.is_cross_repository.is_none());
+                assert_eq!(head_oid(&v), None, "{json}");
+                assert_eq!(head_owner(&v), None, "{json}");
+            }
+            let v = view(r#"{"headRepositoryOwner":{"login":" alice ","id":"x"},"extra":1}"#);
+            assert_eq!(head_owner(&v), Some("alice"));
+        }
+
+        #[test]
+        fn head_oid_accepts_full_lowercase_hex_only() {
+            let sha1 = "0123456789abcdef0123456789abcdef01234567";
+            let sha256 = "a".repeat(64);
+            for ok in [sha1, sha256.as_str()] {
+                assert!(is_full_lowercase_oid(ok), "{ok}");
+                let v = view(&format!(r#"{{"headRefOid":"{ok}"}}"#));
+                assert_eq!(head_oid(&v), Some(ok));
+            }
+            let bad = [
+                "0123456789ABCDEF0123456789ABCDEF01234567".to_string(),
+                "0123456789abcdef".to_string(),
+                format!("-x{}", "a".repeat(38)),
+                "g".repeat(40),
+                "a".repeat(41),
+                String::new(),
+            ];
+            for bad in &bad {
+                assert!(!is_full_lowercase_oid(bad), "{bad}");
+                let v = view(&format!(r#"{{"headRefOid":"{bad}"}}"#));
+                assert_eq!(head_oid(&v), None, "{bad}");
+            }
+        }
+
+        #[test]
+        fn session_head_refusal_is_case_insensitive_and_names_the_branch() {
+            for head in ["GD/Session/x", "gd/session/x"] {
+                let message = invalid_argument(refuse_session_head(head));
+                assert_eq!(
+                    message,
+                    format!("\"{head}\" is in gd/session/, which is reserved for agent sessions, so this pull request's branch can't be checked out.")
+                );
+            }
+            assert!(refuse_session_head("feat/gd/session").is_ok());
+        }
+
+        #[test]
+        fn provider_guard_refuses_only_detected_gitlab_and_bitbucket() {
+            assert!(refuse_non_github(None).is_ok());
+            assert!(refuse_non_github(Some(Provider::GitHub)).is_ok());
+            for (provider, name) in [
+                (Provider::GitLab, "GitLab"),
+                (Provider::Bitbucket, "Bitbucket"),
+            ] {
+                assert_eq!(
+                    invalid_argument(refuse_non_github(Some(provider))),
+                    format!(
+                        "Checking out with the GitHub CLI isn't available for a {name} repository."
+                    )
+                );
+            }
+        }
+
+        /// Both checkout commands refuse before any guard or spawn when the view can't
+        /// name the head: no fail-open fallback to a repo-scoped guard remains.
+        #[test]
+        fn a_checkout_refuses_an_unreadable_view_or_a_blank_head() {
+            let refused = "Couldn't read pull request #7's branch from GitHub.";
+            for body in [
+                "",
+                "not json",
+                "null",
+                "{}",
+                r#"{"headRefName":null}"#,
+                r#"{"headRefName":"  ","isCrossRepository":false}"#,
+                r#"{"headRefName":7}"#,
+            ] {
+                match pr_head_from(body, "7") {
+                    Err(AppError::Gh(message)) => assert_eq!(message, refused, "{body:?}"),
+                    Err(other) => panic!("{body:?}: {other:?}"),
+                    Ok(pr) => panic!("{body:?} read head {:?}", pr.head),
+                }
+            }
+            let pr =
+                pr_head_from(r#"{"headRefName":" feat ","isCrossRepository":false}"#, "7").unwrap();
+            assert_eq!(pr.head, "feat");
+            assert_eq!(update_guard_branch(Some(&pr.view)), Some("feat"));
+        }
+
+        /// gh's raw refusal leads nothing: the app's sentence is the headline, and
+        /// the raw line stays in the message for Details.
+        #[test]
+        fn a_non_empty_folder_refusal_reads_as_the_apps_sentence() {
+            let raw = "--worktree path must be empty: C:\\wt\\pr-7";
+            let Some(AppError::Gh(message)) =
+                worktree_not_empty(&AppError::Gh(raw.into()), "C:/wt/pr-7")
+            else {
+                panic!("the refusal is mapped");
+            };
+            assert_eq!(
+                message,
+                format!("C:/wt/pr-7 isn't empty — pick a new or empty folder.\n\n{raw}")
+            );
+            for other in [
+                AppError::Gh("fatal: 'x' is already used by worktree at 'C:/wt'".into()),
+                AppError::InvalidArgument("--worktree path must be empty".into()),
+                AppError::Timeout(120),
+            ] {
+                assert!(worktree_not_empty(&other, "C:/wt").is_none(), "{other:?}");
+            }
+        }
+
+        /// gh 2.98 has no empty-folder check of its own, so git's refusal reaches the
+        /// user; it maps to the same sentence with the raw lines kept below.
+        #[test]
+        fn gits_existing_folder_refusal_reads_as_the_apps_sentence() {
+            let raw = "Preparing worktree (new branch 'feat')\r\nfatal: 'C:\\wt\\pr-7' already exists\r\n";
+            let Some(AppError::Gh(message)) =
+                worktree_not_empty(&AppError::Gh(raw.into()), "C:/wt/pr-7")
+            else {
+                panic!("git's refusal is mapped");
+            };
+            assert_eq!(
+                message,
+                format!("C:/wt/pr-7 isn't empty — pick a new or empty folder.\n\n{raw}")
+            );
+        }
+
+        /// A branch-name collision means the claim layer was bypassed, so it keeps
+        /// git's own loud error rather than the folder sentence.
+        #[test]
+        fn a_branch_name_collision_is_not_read_as_a_non_empty_folder() {
+            for raw in [
+                "fatal: a branch named 'feat' already exists",
+                "Preparing worktree (new branch 'feat')\nfatal: a branch named 'feat' already exists\n",
+                "fatal: A branch named 'feat' already exists.",
+                "fatal: '' already exists",
+                "error: 'C:/wt' already exists",
+            ] {
+                assert!(
+                    worktree_not_empty(&AppError::Gh(raw.into()), "C:/wt").is_none(),
+                    "{raw:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn classifiable_excludes_only_rate_limited_and_not_found() {
+            let gh = |s: &str| AppError::Gh(s.to_string());
+            for (err, expected) in [
+                (gh("API rate limit exceeded for user ID 1."), false),
+                (gh("HTTP 404: Not Found (https://api.github.com/repos/o/r/pulls/7)"), false),
+                (gh("dial tcp: lookup api.github.com: no such host"), true),
+                (gh("gh exited with code 1"), true),
+                (
+                    gh(" * branch fix/proxy-timeout -> FETCH_HEAD\nfatal: Not possible to fast-forward, aborting."),
+                    true,
+                ),
+                (AppError::Timeout(120), false),
+                (AppError::GhNotFound, false),
+                (AppError::InvalidArgument("x".to_string()), false),
+            ] {
+                assert_eq!(classifiable(&err), expected, "{err:?}");
+            }
+        }
     }
 }

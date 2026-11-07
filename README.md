@@ -234,7 +234,10 @@ default's name), and a PR badge.
   with are easy to spot. One-click jumps to the main workspace sit right in
   the branch switcher, where selecting a branch that's checked out elsewhere
   opens that folder straight away, that branch's context menu carries the
-  worktree actions, and a *Worktrees* row opens the full manager.
+  worktree actions, and a *Worktrees* row opens the full manager. A GitHub
+  pull request can be checked out into its own worktree straight from its
+  view, so you can review it without touching your current branch or
+  uncommitted files (needs GitHub CLI 2.98 or newer).
 - **Compare**: a tab with a three-dot diff, commits ahead/behind,
   merge/rebase, and jump-to-PR. Each ahead/behind commit shows its tag chips
   and carries a context menu — checkout, cherry-pick, create a branch or tag,

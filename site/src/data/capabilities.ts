@@ -553,6 +553,11 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
+      "Check out a GitHub pull request into its own worktree, so reviewing it never touches your current branch or files",
+  },
+  {
+    group: "Repository & workspace",
+    label:
       "Submodule manager — add, remove, update & track branches, edit URLs, open as repo",
     highlight: true,
   },

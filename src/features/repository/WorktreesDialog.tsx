@@ -12,6 +12,7 @@ import {
   TrashIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -75,6 +76,12 @@ import { cn } from "@/lib/utils";
 import { DeleteWorktreeDialog } from "./DeleteWorktreeDialog";
 import { PromoteWorktreeDialog } from "./PromoteWorktreeDialog";
 import { useOpenWorktree } from "./useOpenRepoByPath";
+import {
+  composePickedPath,
+  deriveSiblingPath,
+  splitPath,
+  underPickedParent,
+} from "./worktree-paths";
 
 /**
  * The user-facing Git worktree manager. Lists the repo's worktrees (agent-session
@@ -841,13 +848,37 @@ function CreateWorktree({
   const [path, setPath] = useState("");
   // Stop auto-deriving the path once the user edits it by hand.
   const [pathEdited, setPathEdited] = useState(false);
+  // A Browse pick replaces only the folder's parent: the leaf keeps following
+  // the branch until a direct edit latches the whole field.
+  const [pickedParent, setPickedParent] = useState<string | null>(null);
 
   const branch = source === "new" ? newBranch.trim() : existing;
 
   // Default the folder to a sibling of the main worktree, named for the branch,
   // until the user takes the path field over.
   const derivedPath = deriveSiblingPath(mainPath, branch);
-  const effectivePath = pathEdited ? path : derivedPath;
+  const followingPath =
+    pickedParent === null
+      ? derivedPath
+      : underPickedParent(pickedParent, splitPath(derivedPath).name);
+  const effectivePath = pathEdited ? path : followingPath;
+
+  async function browseParent() {
+    let picked: string | null;
+    try {
+      picked = await openDialog({
+        directory: true,
+        title: "Folder to create the worktree in",
+      });
+    } catch (e) {
+      toastError(e);
+      return;
+    }
+    if (typeof picked !== "string" || !picked) return;
+    // After a direct edit the latch stands, and the typed folder name with it.
+    if (pathEdited) setPath(composePickedPath(picked, path, derivedPath));
+    else setPickedParent(picked);
+  }
 
   const missing =
     !branch || !effectivePath
@@ -976,7 +1007,7 @@ function CreateWorktree({
           </div>
         )}
 
-        <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 text-xs">
+        <div className="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 text-xs">
           <label htmlFor="wt-path" className="text-muted-foreground">
             Folder
           </label>
@@ -992,6 +1023,17 @@ function CreateWorktree({
             placeholder="Path for the new worktree"
             className="h-7 font-mono"
           />
+          <DisabledReasonButton
+            variant="outline"
+            size="icon-sm"
+            disabled={add.isPending}
+            reason="The worktree is being created."
+            onClick={() => void browseParent()}
+            aria-label="Browse for the folder to create it in"
+            title="Browse for the folder to create it in"
+          >
+            <FolderOpenIcon />
+          </DisabledReasonButton>
         </div>
       </div>
 
@@ -1014,24 +1056,4 @@ function CreateWorktree({
       </DialogFooter>
     </>
   );
-}
-
-/** Splits a path into its parent and last segment, tolerating both separators
- *  and a trailing slash. Parent is "" when there's no separator. */
-function splitPath(p: string): { parent: string; name: string } {
-  const base = p.replace(/[/\\]+$/, "");
-  const i = Math.max(base.lastIndexOf("/"), base.lastIndexOf("\\"));
-  return i >= 0
-    ? { parent: base.slice(0, i), name: base.slice(i + 1) }
-    : { parent: "", name: base };
-}
-
-/** A sibling folder of the main worktree named for the branch:
- *  `<parent>/<repo>-<branch>` (branch slashes flattened to dashes). */
-function deriveSiblingPath(mainPath: string, branch: string): string {
-  if (!mainPath) return "";
-  const { parent, name } = splitPath(mainPath);
-  const safe = branch.trim().replace(/[\\/]+/g, "-");
-  if (!safe) return "";
-  return parent ? `${parent}/${name}-${safe}` : `${name}-${safe}`;
 }
