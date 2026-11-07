@@ -829,20 +829,33 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   Renaming changes only the local name: a branch already on a remote keeps its name there
   (the dialog notes it when that applies). Names under \`gd/session/\` are reserved
   for agent sessions.
-- **Clean up branches** — from the switcher's menu or the command palette — opens a bulk
-  sweep of stale branches: those **merged** into the default branch — directly, or, where
-  the repository's forge connection can supply them, through a recent pull request, so
-  squash- and rebase-merged branches turn up too, each badged **merged #123** with the pull
-  request that took them — and those with no commits in a chosen window (30/60/90 days).
-  The dialog describes exactly the checks it made, naming pull requests only where it read
-  them, so you always know what the list in front of you covers. Branches your own history
-  calls merged, and idle ones, start **pre-checked**; a pull-request match goes by branch
-  name, so it never pre-checks a row on its own — it badges one for you to confirm. Review
-  the list, then **archive** them (reversible) or **delete** them together. The current
-  branch, the default branch, and branches checked out in another folder are never
-  included (archiving still offers one whose worktree you're already deleting); deleting
-  also skips protected branches. A branch that couldn't be archived or deleted stays in the
-  list with the reason under its name, ready to retry.
+- **Clean up branches** opens from the switcher's menu or the command palette and gathers
+  stale branches into one reviewed list. Three toggles choose what it lists, in any mix:
+  **Merged** (into the default branch directly, or through a recent pull request where the
+  repository's forge connection can supply one, so squash and rebase merges count),
+  **Closed PR** (a pull request closed without merging), and **Idle** for 30, 60, or 90 days.
+  Each row names every reason that applies, such as **merged #123**, **closed #45**, or
+  **worktree**, and the dialog names pull requests only where it read them. On Git 2.38 or
+  later, unless your Git configuration sets a merge driver, a branch your history doesn't
+  already call merged is also checked against the newer of your local default branch and
+  its remote copy: the row shows whether everything on it is in the default branch or it
+  still carries changes the default branch lacks, and a check that can't decide shows
+  nothing. Branches your own history calls merged start **pre-checked**. While **Idle** is
+  on, idle branches do too unless that check finds changes still to merge; any other listed
+  branch starts checked only once the check shows nothing would be lost. Turn on **Include
+  branches checked out in a worktree** to list branches held by another linked folder.
+  Acting on one removes that worktree first, never by force; a worktree row never starts
+  checked; and a worktree that is locked, has uncommitted changes, or couldn't be checked
+  is listed but can't be selected. If, when its turn comes, the worktree has switched to
+  another branch or is in the middle of a merge, rebase, cherry-pick, or revert, it's left
+  in place. Review the list, then **archive** the checked branches (reversible) or
+  **delete** them. Deleting asks first, and so does archiving when it removes a worktree;
+  the confirmation names how many worktrees it removes and how many branches it archives
+  or deletes. The current branch, the default branch, branches checked out in the main
+  workspace, and agent session branches are never included (when the default branch can't
+  be read, the list stays empty and says why), and deleting skips protected branches. A
+  branch that couldn't be archived or deleted stays in the list with the reason under its
+  name, ready to retry.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -1046,7 +1059,8 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
   **archive that branch after the worktree is removed**, so a branch you're finished with
   drops into the "Archived" section on its own (offered whenever the worktree is on a
   branch other than the default one that isn't already archived — the dialog says so when
-  it is). A worktree with uncommitted changes, or a locked one, asks before
+  it is). If you check the branch out again before the removal finishes, it stays
+  unarchived. A worktree with uncommitted changes, or a locked one, asks before
   force-removing. Removing a worktree can take a few minutes, and you can
   close the dialog and carry on: the removal keeps a line at the top of the repository view
   until it finishes, its row here reads **Removing…**, and the actions held while it runs

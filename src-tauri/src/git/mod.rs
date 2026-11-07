@@ -6,6 +6,7 @@ pub mod commit;
 pub mod compare;
 pub mod config;
 pub mod conflict;
+pub mod content_merged;
 pub mod diff;
 pub mod history;
 pub(crate) mod ignored_guard;

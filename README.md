@@ -186,13 +186,15 @@ branches), its +/− divergence vs. the default branch (labeled with the
 default's name), and a PR badge.
 
 - **Clean up branches** ⭐: one reviewed list that archives or deletes your
-  stale branches — merged into the default branch (directly, or, where the
-  forge connection supplies them, by a recent pull request, so squash and
-  rebase merges count) or with no commits in a chosen window. Pull-request
-  matches go by branch name, so they only badge a row with the PR that took
-  it; pre-checking still comes from your own history: merged into the
-  default branch, or idle past that window. The dialog names pull requests
-  only where it read them, so its wording matches the checks behind the list.
+  stale branches. Toggles narrow it to branches merged into the default
+  branch (directly, or by a recent pull request where the forge connection
+  supplies one, so squash and rebase merges count), branches whose pull
+  request was closed without merging, branches with no commits in a chosen
+  window, or any mix. On Git 2.38+, unless your Git configuration sets a
+  merge driver, a content check shows whether a stale branch still holds
+  work the default branch lacks, and pre-checking leaves those branches out.
+  Branches checked out in another linked worktree can join the list; acting
+  on one removes its clean worktree first.
 - **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
   memory before you commit (fast-forward, already up to date, clean, or
   exactly which files will conflict), with `--no-ff` and a clearly cautioned

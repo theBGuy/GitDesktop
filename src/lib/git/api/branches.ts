@@ -177,3 +177,48 @@ export const gitUpdateBranchFrom = (
  *  Branches that don't exist are omitted. Used to watch open local PRs' heads. */
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
+
+/** "clean": merging the branch into the base writes exactly the base's tree.
+ *  "changes": it writes another tree or conflicts, which doesn't prove the branch
+ *  was never merged. "unknown": the check couldn't decide; never read as clean. */
+export type ContentVerdict = "clean" | "changes" | "unknown";
+
+/** The commit content verdicts compare against. `refName` is the short display
+ *  form ("main" / "origin/main"); `tree` is `sha`'s tree, resolved once. */
+export interface ContentCheckBase {
+  refName: string;
+  sha: string;
+  tree: string;
+}
+
+export interface BranchContentMerged {
+  branch: string;
+  verdict: ContentVerdict;
+  /** The tip the verdict was computed for; null when the branch didn't resolve. */
+  headSha: string | null;
+}
+
+/** The newer of the default branch and its remote-tracking counterpart; null on
+ *  git older than 2.38 (or a git version that can't be read), when neither side
+ *  resolves, or when a merge driver or merge.default is configured or the config
+ *  can't be read. */
+export const gitContentCheckBase = (repoPath: string, defaultBranch: string) =>
+  invoke<ContentCheckBase | null>("git_content_check_base", {
+    repoPath,
+    defaultBranch,
+  });
+
+/** One branch's verdict against a base from {@link gitContentCheckBase}. Git
+ *  failures read as "unknown"; it rejects only on invalid input. */
+export const gitBranchContentMerged = (
+  repoPath: string,
+  baseSha: string,
+  baseTree: string,
+  branch: string,
+) =>
+  invoke<BranchContentMerged>("git_branch_content_merged", {
+    repoPath,
+    baseSha,
+    baseTree,
+    branch,
+  });

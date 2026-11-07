@@ -318,6 +318,8 @@ pub fn run() {
             git::ops::git_abort_remote_pr_resolve,
             git::ops::git_find_remote_pr_resolve,
             git::ops::git_conflict_preview,
+            git::content_merged::git_content_check_base,
+            git::content_merged::git_branch_content_merged,
             git::ai_ignore::git_filter_ai_ignored,
             git::ai_ignore::git_ai_ignore_verdicts,
             git::conflict::git_conflict_sides,

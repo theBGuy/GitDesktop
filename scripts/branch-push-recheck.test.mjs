@@ -170,7 +170,7 @@ const PINS = [
       "processed = i;",
       "break;",
       "await api.gitSetBranchArchived",
-      "const ok = processed - fails.size;",
+      "const ok = processed - fails.size - skipped.size;",
       "if (processed < names.length) {",
       "} else if (ok > 0) toast.success(`${verb} ${pluralBranches(ok)}`);",
       "return;",
@@ -180,7 +180,7 @@ const PINS = [
     mutate: [
       "if (refuseWhilePushRuns(queryClient, repoPath)) return;",
       "if (refuseWhilePushRuns(queryClient, repoPath)) {",
-      "const ok = processed - fails.size;",
+      "const ok = processed - fails.size - skipped.size;",
       "if (processed < names.length) {",
     ],
   },
