@@ -184,8 +184,9 @@ export interface PrInfo {
   createdAt: string;
   /** The PR head commit's SHA, filled by all three providers' unfiltered list
    *  reads (Bitbucket's `source.commit.hash` may be a 12-char short hash); ""
-   *  when a read didn't supply one, as GitHub's filtered search doesn't. Bitbucket's per-commit CI-status probe keys on it;
-   *  GitHub/GitLab CI keys on PR number / MR iid instead. */
+   *  when a read didn't supply one, as GitHub's filtered search doesn't.
+   *  Bitbucket's per-commit CI-status probe keys on it; GitHub/GitLab CI keys on
+   *  PR number / MR iid instead. */
   headSha: string;
   /** Stack membership, driving the row's position badge. Null/absent = unstacked. */
   stack?: PrStackInfo | null;

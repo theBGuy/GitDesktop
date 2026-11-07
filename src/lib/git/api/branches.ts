@@ -178,11 +178,12 @@ export const gitUpdateBranchFrom = (
 export const gitBranchTips = (repoPath: string, branches: string[]) =>
   invoke<Record<string, string>>("git_branch_tips", { repoPath, branches });
 
-/** "clean": every change on the branch is in the base, at its tip or in a
+/** "clean": every change on the branch reached the base, at its tip or in a
  *  first-parent commit of its history, or the branch is an older version of a
  *  merged pull request whose final head passes the same check.
- *  "changes": no route cleared it, which doesn't prove the branch was never
- *  merged. "unknown": the check couldn't decide; never read as clean. */
+ *  "changes": merging into the base tip wrote another tree or conflicted, and
+ *  no other route cleared it, which doesn't prove the branch was never merged.
+ *  "unknown": the check couldn't decide; never read as clean. */
 export type ContentVerdict = "clean" | "changes" | "unknown";
 
 /** The commit content verdicts compare against. `refName` is the short display
@@ -208,13 +209,14 @@ export interface BranchContentMerged {
 
 /** Why an open has no base: a configured merge driver, merge.default or
  *  merge.renormalize (checked in that order), an unreadable config, git older
- *  than 2.38 (or a version that can't be read), or neither side resolving. */
+ *  than 2.38, a git version that can't be read, or neither side resolving. */
 export type ContentCheckOff =
   | "mergeDriver"
   | "mergeDefault"
   | "mergeRenormalize"
   | "configUnreadable"
   | "gitTooOld"
+  | "gitVersionUnreadable"
   | "noBase";
 
 /** Exactly one of `base` and `offReason` is non-null. */
@@ -231,10 +233,12 @@ export const gitContentCheckBase = (repoPath: string, defaultBranch: string) =>
     defaultBranch,
   });
 
-/** One branch's verdict against a base from {@link gitContentCheckBase}. Git
- *  failures read as "unknown"; it rejects only on invalid input. `prHead` is the
- *  head of the branch's merged pull request, lowercase hex or null: callers
- *  validate it, so nothing relies on the backend ignoring a bad one. */
+/** One branch's verdict against a base from {@link gitContentCheckBase}. A git
+ *  failure never reads clean: it reads "unknown", or keeps the base-tip run's
+ *  "changes" when a later route fails; it rejects only on invalid input.
+ *  `prHead` is the head of the branch's merged pull request, lowercase hex or
+ *  null: callers validate it, so nothing relies on the backend ignoring a bad
+ *  one. */
 export const gitBranchContentMerged = (
   repoPath: string,
   baseSha: string,

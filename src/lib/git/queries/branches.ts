@@ -414,10 +414,11 @@ export function useBranchResetToUpstream(repo: string) {
   );
 }
 
-/** Content checks in flight app-wide: each runs git one to five times (a tip
- *  that no longer resolves stops after one rev-parse; a clean verdict adds a
- *  merge-base read, and a content merge two more), and one open checks every
- *  listed branch (150+ in real repos). */
+/** Content checks in flight app-wide: each runs git from once (a tip that no
+ *  longer resolves) to a few dozen times (a base-tip "changes" that searches
+ *  history and then a pull request's head, each route running up to three
+ *  guarded merges), and one open checks every listed branch (150+ in real
+ *  repos). */
 const CONTENT_CHECK_SLOTS = 4;
 
 /** FIFO slot queue. A queued acquire rejects with the abort reason, so a
@@ -527,7 +528,7 @@ function validPrHead(raw: string | undefined): string | null {
 }
 
 export interface BranchContentCheck {
-  /** "unsupported": git < 2.38 (or a version that can't be read), no resolvable
+  /** "unsupported": git older than 2.38 or a version that can't be read, no resolvable
    *  default branch, a failed base read (final for the open), or a configured
    *  merge driver, merge.default or merge.renormalize (or an unreadable config).
    *  "pending": the base or some requested verdict is still running.
@@ -547,7 +548,7 @@ export interface BranchContentCheck {
 }
 
 /**
- * Whether each of `branches` carries work that never went into its repo's
+ * Whether each of `branches` carries work the check can't trace into its repo's
  * default branch, checked once per open (`enabled` false→true) against the
  * newer of the default branch and its remote-tracking counterpart. A branch
  * reads clean when its changes are at that tip or landed in a first-parent
@@ -735,9 +736,10 @@ export function useBranchContentCheck(
           })
         : [],
   });
-  // Latched like the base (`settledRead`/`landedRead`): a branch's first settled
-  // answer is final for the open, and its queryFn hands it back without git, so
-  // a filterless refetch never moves a verdict.
+  // Latched like the base (`settledRead`/`landedRead`): a branch's settled answer
+  // is final for the open, except a head-less "changes" that one later
+  // pull-request-head run may upgrade to clean; its queryFn hands the latched
+  // answer back without git, so a filterless refetch never moves a verdict.
   let freshAnswers: Map<string, LatchedCheck> | null = null;
   if (live !== null && base !== null) {
     for (let i = 0; i < branches.length; i++) {

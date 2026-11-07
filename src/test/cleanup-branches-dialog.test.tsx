@@ -566,12 +566,6 @@ describe("pre-checks", () => {
     // Nothing verdict-gated is checked before its verdict lands.
     for (const n of listed().filter((n) => n !== "p-anc"))
       expect(isChecked(n as string)).toBe(false);
-    expect(gitBranchContentMerged).not.toHaveBeenCalledWith(
-      "C:/repos/policy",
-      expect.anything(),
-      expect.anything(),
-      "p-anc",
-    );
     await landVerdicts({
       "p-idle-clean": "clean",
       "p-idle-changes": "changes",
@@ -580,6 +574,9 @@ describe("pre-checks", () => {
       "p-pr-changes": "changes",
       "p-pr-unknown": "unknown",
     });
+    // landVerdicts throws unless every gated row was requested, so the list is
+    // populated here and the ancestry row's absence is measured.
+    expect(verdictCalls.map((c) => c.branch)).not.toContain("p-anc");
     await waitFor(() => expect(isChecked("p-idle-clean")).toBe(true));
     expect(isChecked("p-anc")).toBe(true);
     expect(isChecked("p-idle-changes")).toBe(false);
@@ -2027,12 +2024,26 @@ describe("a default-branch read that failed", () => {
       "Content check off: your Git config couldn't be read.",
     ],
     ["gitTooOld", "Content check off: it needs Git 2.38 or later."],
-    ["noBase", "Content check off: the default branch couldn't be found."],
+    [
+      "gitVersionUnreadable",
+      "Content check off: Git's version couldn't be read.",
+    ],
+    [
+      "noBase",
+      "Content check off: the default branch has no local or origin copy.",
+    ],
     [
       "noDefaultBranch",
       "Content check off: the default branch couldn't be found.",
     ],
-    ["baseFailed", "Content check off: the default branch couldn't be read."],
+    [
+      "baseFailed",
+      "Content check off: the default branch couldn't be read. Reopen this dialog to try again.",
+    ],
+    // A reason this build's Record doesn't name.
+    ["someFutureReason", "Content check off for this repository."],
+    // A prototype member's name never reads as a note.
+    ["constructor", "Content check off for this repository."],
   ];
 
   it.each(OFF_CAPTIONS)(
@@ -2053,13 +2064,54 @@ describe("a default-branch read that failed", () => {
       const note = await screen.findByText(caption);
       expect(note).not.toHaveClass("sr-only");
       expect(note.closest('[role="status"]')).not.toHaveClass("sr-only");
-      // The resting line keeps only the count, so the note is announced once.
+      // The note is never repeated in the sr-only resting line: it keeps only
+      // the count.
       const resting = screen.getByText("1 branch to review.");
       expect(resting).toHaveClass("sr-only");
       expect(resting).not.toHaveTextContent("Content check off");
       expect(resting).not.toHaveTextContent("Contents compared with");
     },
   );
+
+  it("shows the off note only once the ancestry read settles", async () => {
+    const divergence =
+      deferred<Awaited<ReturnType<typeof gitBranchDivergence>>>();
+    vi.mocked(gitBranchDivergence).mockImplementationOnce(
+      () => divergence.promise,
+    );
+    baseAnswer = offRead("gitTooOld");
+    renderDialog({
+      repoPath: "C:/repos/off-ancestry",
+      branches: [branch("oa-old", OLD)],
+    });
+    await waitFor(() => expect(listed()).toEqual(["oa-old"]));
+    await waitFor(() => expect(gitContentCheckBase).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const caption = "Content check off: it needs Git 2.38 or later.";
+    expect(screen.queryByText(caption)).toBeNull();
+    await act(async () => divergence.resolve([]));
+    expect(await screen.findByText(caption)).not.toHaveClass("sr-only");
+  });
+
+  it("shows the off note only once a held worktree read settles", async () => {
+    baseAnswer = offRead("mergeRenormalize");
+    const view = renderDialog({
+      repoPath: "C:/repos/off-held",
+      branches: [branch("oh-old", OLD)],
+    });
+    view.rerender({ worktreeCheckState: "pending" });
+    await waitFor(() => expect(gitContentCheckBase).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const caption =
+      "Content check off: your Git config sets merge.renormalize.";
+    expect(screen.queryByText(caption)).toBeNull();
+    view.rerender({ worktreeCheckState: "checked" });
+    expect(await screen.findByText(caption)).not.toHaveClass("sr-only");
+  });
 
   it("still pre-checks an idle row while the content check is off", async () => {
     // The owner's chosen policy: the note explains the fallback, never replaces it.
@@ -3555,20 +3607,21 @@ describe("what a clean verdict rests on", () => {
       detail: { landedIn: LANDED, viaPrHead: true },
       pr: "#41",
       title:
-        "An earlier version of #41, whose changes went into origin/main in 1234567",
+        "An earlier version of #41. The pull request's final version went into origin/main in 1234567",
     },
     {
       key: "head-tip",
       detail: { viaPrHead: true },
       pr: "#42",
-      title: "An earlier version of #42, whose changes are all in origin/main",
+      title:
+        "An earlier version of #42. The pull request's final version is all in origin/main",
     },
     {
       key: "head-unlabeled",
       detail: { viaPrHead: true },
       pr: undefined,
       title:
-        "An earlier version of its pull request, whose changes are all in origin/main",
+        "An earlier version of its pull request. The pull request's final version is all in origin/main",
     },
   ])(
     "explains a $key clean on the badge and the checkbox",
@@ -3701,7 +3754,7 @@ describe("what a clean verdict rests on", () => {
       within(rowOf("uc-free")).getByText(/^in$/).closest("[title]"),
     ).toHaveAttribute(
       "title",
-      "An earlier version of #6, whose changes are all in origin/main",
+      "An earlier version of #6. The pull request's final version is all in origin/main",
     );
   });
 });

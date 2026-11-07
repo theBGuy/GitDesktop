@@ -55,6 +55,7 @@ pub enum ContentCheckOff {
     MergeRenormalize,
     ConfigUnreadable,
     GitTooOld,
+    GitVersionUnreadable,
     NoBase,
 }
 
@@ -99,11 +100,13 @@ pub struct BranchContentMerged {
 }
 
 /// The most first-parent base commits a landed search reads; a larger window keeps
-/// route 1's verdict. Measured windows ran to 688 commits.
+/// route 1's verdict. Measured windows ran to 688 commits (a mirror of the owner's
+/// repo, measured for PR #663).
 const WINDOW_CAP: usize = 2000;
 
-/// The most candidate runs per searched tip (the branch tip or the PR head). The first candidate is the landing in
-/// practice (measured: 464 of 480 landed branches had exactly one).
+/// The most candidate runs per searched tip (the branch tip or the PR head). The first
+/// candidate is the landing in practice: 464 of 480 landed branches had exactly one (a
+/// mirror of the owner's repo, measured for PR #663).
 const CANDIDATE_CAP: usize = 3;
 
 fn parse_git_version(stdout: &str) -> Option<(u32, u32)> {
@@ -111,24 +114,54 @@ fn parse_git_version(stdout: &str) -> Option<(u32, u32)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-/// `merge-tree --write-tree`, `--name-only`, `--messages` and `-z` exist from git 2.38.
-/// The guard parses the structured `-z` message records, and any output it can't parse
-/// reads unknown. An unparseable version reads as unsupported.
-fn supports_write_tree(version_stdout: &str) -> bool {
-    parse_git_version(version_stdout).is_some_and(|v| v >= (2, 38))
+/// What a `git version` probe says about the content check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitVersionSupport {
+    Supported,
+    TooOld,
+    Unreadable,
 }
 
-async fn merge_tree_write_supported() -> bool {
+/// `merge-tree --write-tree`, `--name-only`, `--messages` and `-z` exist from git 2.38.
+/// The guard parses the structured `-z` message records, and any output it can't parse
+/// reads unknown. A failed probe or an unparseable version is Unreadable, never TooOld.
+fn classify_git_version(exited_ok: bool, version_stdout: &str) -> GitVersionSupport {
+    match parse_git_version(version_stdout) {
+        Some(v) if exited_ok && v >= (2, 38) => GitVersionSupport::Supported,
+        Some(_) if exited_ok => GitVersionSupport::TooOld,
+        _ => GitVersionSupport::Unreadable,
+    }
+}
+
+/// Caches only a parsed answer: an unreadable probe is retried at the next open.
+async fn merge_tree_write_support() -> GitVersionSupport {
     static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    match SUPPORTED
+    let parsed = SUPPORTED
         .get_or_try_init(|| async {
-            let out = run_git_raw(None, &["version"], DEFAULT_TIMEOUT).await?;
-            Ok::<bool, AppError>(out.code == 0 && supports_write_tree(&out.stdout_lossy()))
+            let support = match run_git_raw(None, &["version"], DEFAULT_TIMEOUT).await {
+                Ok(out) => classify_git_version(out.code == 0, &out.stdout_lossy()),
+                Err(_) => GitVersionSupport::Unreadable,
+            };
+            match support {
+                GitVersionSupport::Supported => Ok(true),
+                GitVersionSupport::TooOld => Ok(false),
+                GitVersionSupport::Unreadable => Err(()),
+            }
         })
-        .await
-    {
-        Ok(supported) => *supported,
-        Err(_) => false,
+        .await;
+    match parsed {
+        Ok(true) => GitVersionSupport::Supported,
+        Ok(false) => GitVersionSupport::TooOld,
+        Err(()) => GitVersionSupport::Unreadable,
+    }
+}
+
+/// Why the content check is off for a version probe's answer; None when it can run.
+fn version_off_reason(support: GitVersionSupport) -> Option<ContentCheckOff> {
+    match support {
+        GitVersionSupport::Supported => None,
+        GitVersionSupport::TooOld => Some(ContentCheckOff::GitTooOld),
+        GitVersionSupport::Unreadable => Some(ContentCheckOff::GitVersionUnreadable),
     }
 }
 
@@ -207,10 +240,10 @@ async fn remote_side(repo_path: &str, default_branch: &str) -> AppResult<Option<
 
 /// Config keys that can put a merge other than git's text merge in play: any
 /// `merge.<name>.driver`, `merge.default`, or `merge.renormalize`, each with any value
-/// (parsing git's boolean spellings risks a missed one). Renormalize runs both sides
-/// through the clean filters first, so a filter dropping a branch's line writes the
-/// base tree. Stricter on purpose than [`merge_attr_has_union`], which demotes only the
-/// built-in `union`.
+/// (parsing git's boolean spellings risks a missed one). Renormalize re-runs all three
+/// stages through a virtual check-out and check-in, so a filter that drops a branch's
+/// line writes the base tree. Stricter on purpose than [`merge_attr_has_union`], which
+/// demotes only the built-in `union`.
 const MERGE_DRIVER_KEYS: &str = r"^merge\.(.+\.driver|default|renormalize)$";
 
 /// The key class a `--get-regexp --name-only` [`MERGE_DRIVER_KEYS`] listing names, by
@@ -257,7 +290,7 @@ async fn merge_driver_configured(repo_path: &str) -> bool {
 
 /// The base the cleanup dialog's verdicts compare against, resolved once per open, or
 /// why there is none: a merge driver, `merge.default` or `merge.renormalize` configured
-/// or an unreadable config, then git older than 2.38 (or a version that can't be read),
+/// or an unreadable config, then git older than 2.38 or a version that can't be read,
 /// then neither side resolving. The config gate lives here because only a verdict's
 /// merge-tree can run a driver or a filter, and the dialog never asks for verdicts
 /// without a base.
@@ -270,8 +303,8 @@ pub async fn git_content_check_base(
     if let Some(reason) = merge_driver_off_reason(&repo_path).await {
         return Ok(ContentCheckBaseRead::off(reason));
     }
-    if !merge_tree_write_supported().await {
-        return Ok(ContentCheckBaseRead::off(ContentCheckOff::GitTooOld));
+    if let Some(reason) = version_off_reason(merge_tree_write_support().await) {
+        return Ok(ContentCheckBaseRead::off(reason));
     }
     Ok(
         match resolve_check_base(&repo_path, default_branch).await? {
@@ -537,11 +570,12 @@ fn parse_window(stdout: &[u8]) -> Option<Vec<WindowCommit<'_>>> {
     Some(commits)
 }
 
-/// Route 2, the landed search: the oldest first-parent base commit after the sole
-/// merge base of `base_sha` and `tip` that a guarded run of `tip` clears. Candidates
-/// touch every path the branch changed and exclude `base_sha` (route 1's run). None
-/// when nothing clears, or on several merge bases, an empty or unreadable path set or
-/// window, or a window past `window_cap`.
+/// Route 2, the landed search: the oldest of the first `candidate_cap` candidates
+/// (oldest first) whose guarded run of `tip` clears. Candidates are first-parent base
+/// commits after the sole merge base of `base_sha` and `tip` that touch every path the
+/// branch changed, excluding `base_sha` (route 1's run). None when none of those
+/// clears, or on several merge bases, an empty or unreadable path set or window, or a
+/// window past `window_cap`.
 async fn landed_search(
     repo_path: &str,
     base_sha: &str,
@@ -1802,11 +1836,39 @@ mod tests {
             parse_git_version("git version 2.51.1.windows.1\n"),
             Some((2, 51))
         );
-        assert!(!supports_write_tree("git version 2.37.9"));
-        assert!(supports_write_tree("git version 2.38.0"));
-        assert!(supports_write_tree("git version 3.0.0"));
-        assert!(!supports_write_tree("garbage"));
-        assert!(!supports_write_tree(""));
+        use GitVersionSupport::{Supported, TooOld, Unreadable};
+        for (exited_ok, stdout, want) in [
+            (true, "git version 2.37.0", TooOld),
+            (true, "git version 2.37.9", TooOld),
+            (true, "git version 2.38.0", Supported),
+            (true, "git version 3.0.0", Supported),
+            (true, "garbage", Unreadable),
+            (true, "", Unreadable),
+            (true, "git version x.y", Unreadable),
+            (false, "git version 2.38.0", Unreadable),
+            (false, "git version 2.37.0", Unreadable),
+            (false, "", Unreadable),
+        ] {
+            assert_eq!(
+                classify_git_version(exited_ok, stdout),
+                want,
+                "{exited_ok} {stdout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_probe_maps_to_its_off_reason() {
+        for (support, want) in [
+            (GitVersionSupport::Supported, None),
+            (GitVersionSupport::TooOld, Some(ContentCheckOff::GitTooOld)),
+            (
+                GitVersionSupport::Unreadable,
+                Some(ContentCheckOff::GitVersionUnreadable),
+            ),
+        ] {
+            assert_eq!(version_off_reason(support), want, "{support:?}");
+        }
     }
 
     #[test]
@@ -1892,6 +1954,10 @@ mod tests {
             (ContentCheckOff::MergeRenormalize, "mergeRenormalize"),
             (ContentCheckOff::ConfigUnreadable, "configUnreadable"),
             (ContentCheckOff::GitTooOld, "gitTooOld"),
+            (
+                ContentCheckOff::GitVersionUnreadable,
+                "gitVersionUnreadable",
+            ),
             (ContentCheckOff::NoBase, "noBase"),
         ] {
             let off = serde_json::to_value(ContentCheckBaseRead::off(reason)).unwrap();

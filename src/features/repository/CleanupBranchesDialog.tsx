@@ -317,10 +317,19 @@ const CHECK_OFF_NOTE: Record<ContentCheckOffReason, string> = {
     "Content check off: your Git config sets merge.renormalize.",
   configUnreadable: "Content check off: your Git config couldn't be read.",
   gitTooOld: "Content check off: it needs Git 2.38 or later.",
-  noBase: "Content check off: the default branch couldn't be found.",
+  gitVersionUnreadable: "Content check off: Git's version couldn't be read.",
+  noBase: "Content check off: the default branch has no local or origin copy.",
   noDefaultBranch: "Content check off: the default branch couldn't be found.",
-  baseFailed: "Content check off: the default branch couldn't be read.",
+  baseFailed:
+    "Content check off: the default branch couldn't be read. Reopen this dialog to try again.",
 };
+/** A reason this build's Record doesn't name still gets a line. */
+const CHECK_OFF_GENERIC = "Content check off for this repository.";
+function checkOffNoteFor(reason: ContentCheckOffReason): string {
+  return Object.hasOwn(CHECK_OFF_NOTE, reason)
+    ? CHECK_OFF_NOTE[reason]
+    : CHECK_OFF_GENERIC;
+}
 
 /** A parked pull-request read's line, naming the criteria it serves. */
 const WAITING_COPY: Record<PrScope, string> = {
@@ -438,14 +447,15 @@ interface VerdictDetail {
 
 type CleanRoute = "direct" | "pr";
 /** A clean verdict cleared at the base tip. Only the direct arm may say nothing
- *  is missing: a history clean's changes can since have been edited away. */
+ *  is missing: a pull-request clean covers the pull request's final head, and a
+ *  later commit on it may have undone part of this older tip. */
 const CLEAN_AT_TIP: Record<
   CleanRoute,
   (baseRef: string, pr: string) => string
 > = {
   direct: (baseRef) => `${VERDICT_BADGE.clean.title} ${baseRef}`,
   pr: (baseRef, pr) =>
-    `An earlier version of ${pr}, whose changes are all in ${baseRef}`,
+    `An earlier version of ${pr}. The pull request's final version is all in ${baseRef}`,
 };
 /** A clean verdict cleared by a base-history commit (`at`, short form). */
 const CLEAN_LANDED: Record<
@@ -454,7 +464,7 @@ const CLEAN_LANDED: Record<
 > = {
   direct: (baseRef, _pr, at) => `Its changes went into ${baseRef} in ${at}`,
   pr: (baseRef, pr, at) =>
-    `An earlier version of ${pr}, whose changes went into ${baseRef} in ${at}`,
+    `An earlier version of ${pr}. The pull request's final version went into ${baseRef} in ${at}`,
 };
 
 function verdictDetail(
@@ -1196,8 +1206,9 @@ export function CleanupBranchesDialog({
     [candidates],
   );
   // Content verdicts for every row ancestry doesn't already prove merged; the
-  // hook latches each branch's first settled verdict for the open, so a landed
-  // verdict never changes within it.
+  // hook latches each branch's settled verdict for the open, final except a
+  // head-less "changes" that one later pull-request-head run may upgrade to
+  // clean.
   const checkNames = useMemo(
     () => candidates.filter((c) => !c.merged).map((c) => c.branch.name),
     [candidates],
@@ -1431,14 +1442,17 @@ export function CleanupBranchesDialog({
     checkNames.length > 0
       ? ` Contents compared with ${check.base.refName}.`
       : "";
-  // Shown in the live region, so it is announced once and never repeated in
-  // the resting line.
+  // Drawn in the live region and never repeated in its sr-only resting line.
+  // Only over a settled list: the reads that decide which rows list (ancestry,
+  // worktrees, branch rules) may still be running.
   const checkOffNote =
     shownFrozen === null &&
+    !showSkeleton &&
+    !ancestryLoading &&
     check.status === "unsupported" &&
     check.offReason !== null &&
     checkNames.length > 0
-      ? CHECK_OFF_NOTE[check.offReason]
+      ? checkOffNoteFor(check.offReason)
       : null;
   const baseRef = check.base?.refName ?? defaultShort;
   // Frozen rows name the ref their frozen verdicts were measured against.

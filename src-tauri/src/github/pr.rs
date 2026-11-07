@@ -891,11 +891,12 @@ pub struct PrInfo {
     /// `created_at`, Bitbucket `created_on`) so the list row can show its age.
     #[serde(default)]
     pub created_at: String,
-    /// The PR head commit's SHA; "" when the source didn't supply it. The list arms
-    /// fill it (GitHub from gh's `headRefOid`, hence the alias; GitLab `sha`;
+    /// The PR head commit's SHA; "" when the source didn't supply it. The full list
+    /// arms fill it (GitHub from gh's `headRefOid`, hence the alias; GitLab `sha`;
     /// Bitbucket a short `source.commit.hash`, which also feeds its per-commit CI
-    /// probe), except GitHub's filtered search leg (`pr_search`), which leaves "".
-    /// Branch cleanup reads it as a merged PR's head hint.
+    /// probe). Other GitHub reads leave "": the filtered search leg (`pr_search`),
+    /// `gh_prs_for_branch`, and `rest_pull_to_pr_info`. Branch cleanup reads it as a
+    /// merged PR's head hint.
     #[serde(default, alias = "headRefOid")]
     pub head_sha: String,
     /// Stack membership, when the PR is in one. No provider's list payload carries
