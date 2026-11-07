@@ -156,6 +156,11 @@ describe("checkedOutNames", () => {
     expect(names(facts("github", true, "alice", "feat", null))).toEqual([
       "alice/feat",
     ]);
+    // The user's own `main` with the default still unresolved: bare absent, so
+    // the header can't claim "Checked out" and the checkout action stays.
+    expect(names(facts("github", true, "alice", "main", null))).toEqual([
+      "alice/main",
+    ]);
   });
 
   it.each<[Provider, boolean, string | null, string[]]>([

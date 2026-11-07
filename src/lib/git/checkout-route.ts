@@ -108,8 +108,8 @@ export function plainCheckoutBranch(pr: PrBranchFacts): string | null {
 /** Every local branch name that reads as this PR checked out. A fork also
  *  matches its bare head where the plain checkout runs on gh, since gh names a
  *  fork's branch bare; the native engine names it `owner/head`. Not when the
- *  head is the default branch's name: gh prefixes that one too, so the bare name
- *  is the user's own branch. */
+ *  head may be the default branch's name (equal to it, or the default unknown):
+ *  gh prefixes that one too, so the bare name may be the user's own branch. */
 export function checkedOutNames(pr: PrBranchFacts): ReadonlySet<string> {
   const local = prLocalBranch(pr);
   if (local === null) return new Set();
