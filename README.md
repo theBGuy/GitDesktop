@@ -245,10 +245,11 @@ default's name), and a PR badge.
   uncommitted files (needs GitHub CLI 2.98 or newer).
 - **Compare**: a tab with a three-dot diff, commits ahead/behind, and
   jump-to-PR, against a local branch or any remote's branch (fetched when
-  you pick it, so a fork can compare against its parent through `upstream`
-  and open the PR there). Each ahead/behind commit shows
-  its tag chips and carries a context menu — checkout, cherry-pick, create a
-  branch or tag, copy the SHA, plus revert for commits on your branch.
+  you pick it, so a GitHub fork can compare against its parent through
+  `upstream` and, while you're signed in to GitHub, open the PR there).
+  Each ahead/behind commit shows its tag chips and carries a context menu —
+  checkout, cherry-pick, create a branch or tag, copy the SHA, plus revert
+  for commits on your branch.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
   force-push rules, shareable via a committed file or importable from
   GitHub. A promotion-branches list marks pull requests from those branches

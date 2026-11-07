@@ -5,8 +5,19 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { EditHistoryDialog } from "@/features/history/EditHistoryDialog";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import {
+  EditHistoryDialog,
+  resetOrderBaselineForTests,
+} from "@/features/history/EditHistoryDialog";
 import { gitUnpushedMessages } from "@/lib/git/api";
 import type { CommitSummary } from "@/lib/git/types";
 import {
@@ -23,12 +34,51 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitRewriteCommits: vi.fn(),
   gitRebaseEdit: vi.fn(),
 }));
-// The real writer would reach the rejecting test transport and roll the
-// optimistic patch back.
-vi.mock("@/lib/settings/api", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/settings/api")>()),
-  loadSettings: vi.fn(),
-  saveSettingsMerged: vi.fn(),
+// Writes land through the real settings writer over an in-memory
+// settings.json, so each landed snapshot reaches subscribeSettingsWritten as it
+// does in the app; the mocks only decide when (and whether) a write runs.
+const disk = vi.hoisted(() => {
+  const state: { settings: unknown } = { settings: undefined };
+  const store = {
+    get: async () => structuredClone(state.settings),
+    set: async (_key: string, value: unknown) => {
+      state.settings = structuredClone(value);
+    },
+    save: async () => undefined,
+  };
+  return { state, store };
+});
+const realApi = vi.hoisted(() => ({
+  saveSettingsMerged: undefined as
+    | undefined
+    | typeof import("@/lib/settings/api").saveSettingsMerged,
+}));
+vi.mock("@/lib/settings/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/settings/api")>();
+  realApi.saveSettingsMerged = actual.saveSettingsMerged;
+  return { ...actual, loadSettings: vi.fn(), saveSettingsMerged: vi.fn() };
+});
+vi.mock("@/lib/plugin-store", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/plugin-store")>();
+  return {
+    ...actual,
+    memoizedStoreLoader: (file: string) =>
+      file === "settings.json"
+        ? async () => disk.store
+        : actual.memoizedStoreLoader(file),
+    reloadToleratingEmptyStore: async (
+      store: Parameters<typeof actual.reloadToleratingEmptyStore>[0],
+    ) =>
+      (store as unknown) === disk.store
+        ? undefined
+        : actual.reloadToleratingEmptyStore(store),
+  };
+});
+vi.mock("@/lib/app-store-lock", () => ({
+  withAppStoreLock: (_file: string, fn: () => Promise<unknown>) => fn(),
+}));
+vi.mock("@/lib/plugin-store-rollback", () => ({
+  writeWithRollback: (_store: unknown, fn: () => Promise<unknown>) => fn(),
 }));
 
 type ListOrder = AppSettings["editHistoryOrder"];
@@ -111,12 +161,54 @@ async function setSquash(
   await user.click(await screen.findByRole("menuitem", { name: /^Squash/ }));
 }
 
+/** Runs `settings` through the real writer over the in-memory store. */
+async function landOnDisk(settings: AppSettings): Promise<AppSettings> {
+  const save = realApi.saveSettingsMerged;
+  if (save === undefined) throw new Error("real settings writer not captured");
+  disk.state.settings = structuredClone(stored);
+  const committed = await save(settings);
+  stored = structuredClone(disk.state.settings as AppSettings);
+  return committed;
+}
+
+/** Settings writes a test holds open, settled by hand. */
+type HeldWrite = {
+  settings: AppSettings;
+  resolve: () => void;
+  reject: (e: Error) => void;
+};
+let heldWrites: HeldWrite[] = [];
+function holdWrites(): HeldWrite[] {
+  vi.mocked(saveSettingsMerged).mockImplementation(
+    (settings) =>
+      new Promise((res, rej) => {
+        heldWrites.push({
+          settings,
+          resolve: () => res(landOnDisk(settings)),
+          reject: rej,
+        });
+      }),
+  );
+  return heldWrites;
+}
+
+// A held write left open would settle inside the next test: landing moves the
+// dialog's module-level order baseline, failing rolls the order back there.
+afterEach(async () => {
+  const open = heldWrites;
+  heldWrites = [];
+  await act(async () => {
+    for (const w of open) w.reject(new Error("teardown"));
+  });
+});
+
 // jsdom has no scrollIntoView; the dialog scrolls a moved or reseeded row in.
 beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
 beforeEach(() => {
+  resetOrderBaselineForTests();
   vi.mocked(gitUnpushedMessages).mockReset();
   vi.mocked(gitUnpushedMessages).mockResolvedValue(
     COMMITS.map((c) => ({ hash: c.hash, message: c.subject })),
@@ -126,10 +218,7 @@ beforeEach(() => {
     structuredClone(stored),
   );
   vi.mocked(saveSettingsMerged).mockReset();
-  vi.mocked(saveSettingsMerged).mockImplementation(async (s) => {
-    stored = structuredClone(s);
-    return structuredClone(s);
-  });
+  vi.mocked(saveSettingsMerged).mockImplementation(landOnDisk);
 });
 
 describe("Edit history order toggle", () => {
@@ -191,17 +280,12 @@ describe("Edit history order toggle", () => {
   it("rolls back only the order when the write fails", async () => {
     const user = userEvent.setup();
     const client = newClient("newest-first");
-    let reject: ((e: Error) => void) | undefined;
-    vi.mocked(saveSettingsMerged).mockImplementation(
-      () =>
-        new Promise((_, rej) => {
-          reject = rej;
-        }),
-    );
+    const writes = holdWrites();
     renderDialog(client);
     await user.click(screen.getByRole("button", { name: "Oldest first" }));
     expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
-    // A concurrent unrelated write lands before the failure.
+    // A concurrent unrelated change, still only in the cache (its own write
+    // pending), lands before the failure.
     const latest = client.getQueryData<AppSettings>(settingsKeys.settings);
     if (latest === undefined) throw new Error("settings not cached");
     act(() => {
@@ -210,60 +294,166 @@ describe("Edit history order toggle", () => {
         changesViewMode: "tree",
       });
     });
-    await act(async () => reject?.(new Error("disk full")));
+    await act(async () => writes[0].reject(new Error("disk full")));
     await waitFor(() =>
       expect(shownSubjects()).toEqual(["Third", "Second", "First"]),
     );
     const after = client.getQueryData<AppSettings>(settingsKeys.settings);
     expect(after?.editHistoryOrder).toBe("newest-first");
     expect(after?.changesViewMode).toBe("tree");
+    expect(loadSettings).not.toHaveBeenCalled();
   });
 
   it("lets a stale failure roll nothing back after a later change", async () => {
     const user = userEvent.setup();
     const client = newClient("newest-first");
-    const rejects: ((e: Error) => void)[] = [];
-    vi.mocked(saveSettingsMerged).mockImplementation(
-      () =>
-        new Promise((_, rej) => {
-          rejects.push(rej);
-        }),
-    );
+    const writes = holdWrites();
     renderDialog(client);
     const press = (name: string) =>
       user.click(screen.getByRole("button", { name }));
     await press("Oldest first");
     await press("Newest first");
     await press("Oldest first");
-    await waitFor(() => expect(rejects.length).toBeGreaterThan(0));
+    await waitFor(() => expect(writes.length).toBeGreaterThan(0));
     // The first change's failure lands while the third is still pending,
     // with the order back on the value the first change set.
-    await act(async () => rejects[0](new Error("disk full")));
+    await act(async () => writes[0].reject(new Error("disk full")));
     expect(cachedOrder(client)).toBe("oldest-first");
     expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
+  });
+
+  it("rolls back to the persisted order when every pending order write fails", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    const press = (name: string) =>
+      user.click(screen.getByRole("button", { name }));
+    await press("Oldest first");
+    await press("Newest first");
+    await waitFor(() => expect(writes.length).toBe(2));
+    await act(async () => writes[0].reject(new Error("disk full")));
+    await act(async () => writes[1].reject(new Error("disk full")));
+    // Not the first change's unpersisted value the second change replaced.
+    expect(cachedOrder(client)).toBe("newest-first");
+    expect(stored.editHistoryOrder).toBe("newest-first");
+    expect(shownSubjects()).toEqual(["Third", "Second", "First"]);
+  });
+
+  it("rolls back to an earlier change that persisted", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    const press = (name: string) =>
+      user.click(screen.getByRole("button", { name }));
+    await press("Oldest first");
+    await press("Newest first");
+    await waitFor(() => expect(writes.length).toBe(2));
+    await act(async () => writes[0].resolve());
+    await act(async () => writes[1].reject(new Error("disk full")));
+    await waitFor(() => expect(cachedOrder(client)).toBe("oldest-first"));
+    expect(stored.editHistoryOrder).toBe("oldest-first");
+    expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
+  });
+
+  it("rolls back to a write that landed while its re-read is still running", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    const press = (name: string) =>
+      user.click(screen.getByRole("button", { name }));
+    await press("Oldest first");
+    await press("Newest first");
+    await waitFor(() => expect(writes.length).toBe(2));
+    // The first write lands on disk; the settings re-read after it hangs.
+    let failRead: ((e: Error) => void) | undefined;
+    vi.mocked(loadSettings).mockReturnValueOnce(
+      new Promise((_, rej) => {
+        failRead = rej;
+      }),
+    );
+    await act(async () => writes[0].resolve());
+    await waitFor(() => expect(loadSettings).toHaveBeenCalled());
+    await act(async () => writes[1].reject(new Error("disk full")));
+    expect(cachedOrder(client)).toBe("oldest-first");
+    await waitFor(() =>
+      expect(shownSubjects()).toEqual(["First", "Second", "Third"]),
+    );
+    // The re-read failing too leaves the cache on what the disk holds.
+    await act(async () => failRead?.(new Error("unreadable")));
+    expect(stored.editHistoryOrder).toBe("oldest-first");
+    expect(cachedOrder(client)).toBe("oldest-first");
+  });
+
+  it("rolls back to an order another settings write persisted", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    const press = (name: string) =>
+      user.click(screen.getByRole("button", { name }));
+    await press("Oldest first");
+    await waitFor(() => expect(writes.length).toBe(1));
+    // A rail- or composer-style save of the whole cached snapshot lands while
+    // the order write waits, carrying its optimistic order to disk.
+    const cached = client.getQueryData<AppSettings>(settingsKeys.settings);
+    if (cached === undefined) throw new Error("settings not cached");
+    await act(async () => {
+      await landOnDisk({ ...cached, changesViewMode: "tree" });
+    });
+    expect(stored.editHistoryOrder).toBe("oldest-first");
+    await press("Newest first");
+    await waitFor(() => expect(writes.length).toBe(2));
+    await act(async () => writes[0].reject(new Error("disk full")));
+    await act(async () => writes[1].reject(new Error("disk full")));
+    expect(cachedOrder(client)).toBe("oldest-first");
+    await waitFor(() =>
+      expect(shownSubjects()).toEqual(["First", "Second", "Third"]),
+    );
+  });
+
+  it("keeps a landed order over a stale cache once the baseline is known", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    renderDialog(client);
+    // A first change lands, so the baseline is known.
+    await user.click(screen.getByRole("button", { name: "Oldest first" }));
+    await waitFor(() => expect(stored.editHistoryOrder).toBe("oldest-first"));
+    await user.click(screen.getByRole("button", { name: "Newest first" }));
+    await waitFor(() => expect(stored.editHistoryOrder).toBe("newest-first"));
+    // Another writer lands oldest-first; this cache hasn't heard yet.
+    const cached = client.getQueryData<AppSettings>(settingsKeys.settings);
+    if (cached === undefined) throw new Error("settings not cached");
+    expect(cached.editHistoryOrder).toBe("newest-first");
+    await act(async () => {
+      await landOnDisk({ ...cached, editHistoryOrder: "oldest-first" });
+    });
+    // No order write is in flight; the next one fails.
+    const writes = holdWrites();
+    await user.click(screen.getByRole("button", { name: "Oldest first" }));
+    await waitFor(() => expect(writes.length).toBe(1));
+    await act(async () => writes[0].reject(new Error("disk full")));
+    expect(stored.editHistoryOrder).toBe("oldest-first");
+    expect(cachedOrder(client)).toBe("oldest-first");
   });
 
   it("lets a closed dialog's late failure roll back nothing after a reopen", async () => {
     const user = userEvent.setup();
     const client = newClient("newest-first");
-    const rejects: ((e: Error) => void)[] = [];
-    vi.mocked(saveSettingsMerged).mockImplementation(
-      () =>
-        new Promise((_, rej) => {
-          rejects.push(rej);
-        }),
-    );
+    const writes = holdWrites();
     const press = (name: string) =>
       user.click(screen.getByRole("button", { name }));
     const first = renderDialog(client);
     await press("Oldest first");
-    await waitFor(() => expect(rejects.length).toBe(1));
+    await waitFor(() => expect(writes.length).toBe(1));
     first.unmount();
     renderDialog(client);
     await press("Newest first");
     await press("Oldest first");
     // The closed dialog's change fails while the reopened one's are pending.
-    await act(async () => rejects[0](new Error("disk full")));
+    await act(async () => writes[0].reject(new Error("disk full")));
     expect(cachedOrder(client)).toBe("oldest-first");
     expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
   });
@@ -293,7 +483,8 @@ describe("Edit history order toggle", () => {
 
   it("holds the toggle with a reason until settings load", async () => {
     let resolve: ((s: AppSettings) => void) | undefined;
-    vi.mocked(loadSettings).mockReturnValue(
+    // Once: the save after the hold lifts re-reads through the stored value.
+    vi.mocked(loadSettings).mockReturnValueOnce(
       new Promise((r) => {
         resolve = r;
       }),
@@ -302,17 +493,29 @@ describe("Edit history order toggle", () => {
       defaultOptions: { queries: { retry: false } },
     });
     stored = structuredClone(DEFAULT_SETTINGS);
+    const user = userEvent.setup();
     renderDialog(client);
-    const group = await screen.findByRole("group", { name: "Commit order" });
-    expect(group).toHaveAttribute("title", "Loading settings…");
-    expect(screen.getByRole("button", { name: "Oldest first" })).toBeDisabled();
-    await act(async () => resolve?.(structuredClone(stored)));
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Oldest first" }),
-      ).toBeEnabled(),
+    const oldest = await screen.findByRole("button", { name: "Oldest first" });
+    // Focusable and described, never natively disabled.
+    expect(oldest).toBeEnabled();
+    expect(oldest).toHaveAttribute("aria-disabled", "true");
+    expect(oldest).toHaveAccessibleDescription("Loading settings…");
+    expect(oldest.parentElement?.parentElement).toHaveAttribute(
+      "title",
+      "Loading settings…",
     );
-    expect(group).not.toHaveAttribute("title");
+    await act(async () => oldest.focus());
+    expect(oldest).toHaveFocus();
+    // A held press moves nothing.
+    await act(async () => oldest.click());
+    expect(oldest).toHaveAttribute("aria-pressed", "false");
+    expect(shownSubjects()).toEqual(["Third", "Second", "First"]);
+    await act(async () => resolve?.(structuredClone(stored)));
+    await waitFor(() => expect(oldest).not.toHaveAttribute("aria-disabled"));
+    expect(oldest).not.toHaveAccessibleDescription();
+    expect(oldest.parentElement?.parentElement).not.toHaveAttribute("title");
+    await user.click(oldest);
+    expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
   });
 
   it("says why the toggle is held when settings fail to load", async () => {
@@ -321,23 +524,45 @@ describe("Edit history order toggle", () => {
       defaultOptions: { queries: { retry: false } },
     });
     renderDialog(client);
-    const group = await screen.findByRole("group", { name: "Commit order" });
+    const newest = await screen.findByRole("button", { name: "Newest first" });
     await waitFor(() =>
-      expect(group).toHaveAttribute("title", "Couldn't load settings"),
+      expect(newest).toHaveAccessibleDescription("Couldn't load settings"),
     );
-    expect(screen.getByRole("button", { name: "Newest first" })).toBeDisabled();
+    expect(newest).toBeEnabled();
+    expect(newest).toHaveAttribute("aria-disabled", "true");
   });
 
   it("keeps the roving tab stop on the same commit across a flip", async () => {
     const user = userEvent.setup();
     renderDialog(newClient("newest-first"));
-    await focusRow(SECOND);
-    expect(rowOf(SECOND)).toHaveAttribute("tabindex", "0");
+    // An end row, so the stop has to follow the commit to the other end.
+    await focusRow(FIRST);
+    expect(shownSubjects().at(-1)).toBe("First");
+    expect(rowOf(FIRST)).toHaveAttribute("tabindex", "0");
     await user.click(screen.getByRole("button", { name: "Oldest first" }));
-    expect(rowOf(SECOND)).toHaveAttribute("tabindex", "0");
-    expect(rowOf(FIRST)).toHaveAttribute("tabindex", "-1");
+    expect(shownSubjects()[0]).toBe("First");
+    expect(rowOf(FIRST)).toHaveAttribute("tabindex", "0");
+    expect(rowOf(SECOND)).toHaveAttribute("tabindex", "-1");
     expect(rowOf(THIRD)).toHaveAttribute("tabindex", "-1");
   });
+
+  it.each([
+    ["oldest-first", [FIRST, SECOND, THIRD]],
+    ["newest-first", [THIRD, SECOND, FIRST]],
+  ] as const)(
+    "walks plain arrows down the displayed list in %s",
+    async (order, shown) => {
+      const user = userEvent.setup();
+      renderDialog(newClient(order));
+      await focusRow(shown[0]);
+      await user.keyboard("{ArrowDown}");
+      expect(rowOf(shown[1])).toHaveFocus();
+      await user.keyboard("{ArrowDown}");
+      expect(rowOf(shown[2])).toHaveFocus();
+      await user.keyboard("{ArrowUp}");
+      expect(rowOf(shown[1])).toHaveFocus();
+    },
+  );
 
   it("keeps the reversal across a reseed", async () => {
     const view = renderDialog(newClient("oldest-first"));
@@ -433,6 +658,8 @@ describe.each(FOLD_CASES)("Fold copy in %s", (order, position, towardOlder) => {
     await focusRow(SECOND);
     await user.keyboard(`{Alt>}{${towardOlder}}{/Alt}`);
     const held = `no older kept commit ${position} to combine into`;
+    const at = order === "oldest-first" ? 1 : 3;
+    expect(status()).toHaveTextContent(`Moved to ${at} of 3, ${held}`);
     expect(rowOf(SECOND)).toHaveTextContent(held);
     expect(rowOf(SECOND).getAttribute("aria-label")).toContain(held);
     expect(screen.getByRole("dialog")).toHaveTextContent(
@@ -444,6 +671,20 @@ describe.each(FOLD_CASES)("Fold copy in %s", (order, position, towardOlder) => {
     const squash = await screen.findByRole("menuitem", { name: /^Squash/ });
     expect(squash).toHaveTextContent(
       `No older kept commit ${position} in this list to combine into`,
+    );
+  });
+
+  it("speaks another row's held fold the way the footer words it", async () => {
+    const user = userEvent.setup();
+    renderDialog(newClient(order));
+    await setSquash(user, SECOND);
+    // Its leader moves to the newest end, leaving the squash the oldest row.
+    await focusRow(FIRST);
+    await user.keyboard(
+      `{Alt>}{${order === "oldest-first" ? "End" : "Home"}}{/Alt}`,
+    );
+    expect(status()).toHaveTextContent(
+      `Moved to ${order === "oldest-first" ? 3 : 1} of 3. "Second" can't be squashed — no older commit ${position} in this list is kept to combine it into.`,
     );
   });
 });

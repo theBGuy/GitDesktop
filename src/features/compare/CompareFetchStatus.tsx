@@ -13,6 +13,7 @@ export type CompareFetchStatusState =
   | "offline"
   | "pruned"
   | "remote-gone"
+  | "missing"
   | "upstream-fetching"
   | "upstream-failed"
   | "upstream-offline";
@@ -28,6 +29,7 @@ const STATUS_COPY: Record<
     `You're offline, so this compares against ${remote}'s last fetch.`,
   pruned: GONE_PICK_COPY.pruned,
   "remote-gone": GONE_PICK_COPY["remote-gone"],
+  missing: GONE_PICK_COPY.missing,
   "upstream-fetching": (remote) => `Fetching ${remote}…`,
   "upstream-failed": (remote) => `Couldn't fetch ${remote}.`,
   "upstream-offline": (remote) =>
@@ -41,6 +43,7 @@ const STATUS_ICON: Record<CompareFetchStatusState, "spinner" | "warning"> = {
   offline: "warning",
   pruned: "warning",
   "remote-gone": "warning",
+  missing: "warning",
   "upstream-fetching": "spinner",
   "upstream-failed": "warning",
   "upstream-offline": "warning",
@@ -53,6 +56,7 @@ const STATUS_ACTION: Partial<
   "upstream-failed": "retry",
   pruned: "pick-another",
   "remote-gone": "pick-another",
+  missing: "pick-another",
 };
 
 /**

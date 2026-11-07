@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -140,13 +140,13 @@ function renderDialog(props: {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  const ui = (open: boolean) => (
+  const ui = (open: boolean, preset = props.preset) => (
     <QueryClientProvider client={client}>
       <CreatePrDialog
         repoPath={REPO}
         defaultHead={props.defaultHead ?? "feat"}
         defaultBase={props.defaultBase}
-        preset={props.preset}
+        preset={preset}
         open={open}
         onOpenChange={() => undefined}
       />
@@ -154,8 +154,10 @@ function renderDialog(props: {
   );
   const view = render(ui(true));
   return {
+    client,
     close: () => view.rerender(ui(false)),
     reopen: () => view.rerender(ui(true)),
+    reopenWith: (preset: CreatePrPreset) => view.rerender(ui(true, preset)),
   };
 }
 
@@ -367,6 +369,95 @@ describe("CreatePrDialog preset over a kept draft", () => {
     expect(baseField()).toHaveTextContent("feature-x");
     await waitFor(() => expect(aheadBases().at(-1)).toBe(ORIGIN_REF));
     expect(screen.getByLabelText("Title")).toHaveValue("Kept title");
+  });
+});
+
+describe("CreatePrDialog preset under a lens-gate flip", () => {
+  const UPSTREAM_REF = "refs/remotes/upstream/release";
+
+  it("drops the parent ref once the gate turns off", async () => {
+    forkWithUpstream();
+    const user = userEvent.setup();
+    const dialog = renderDialog({
+      preset: { target: "upstream", base: "release", baseRef: UPSTREAM_REF },
+    });
+    await waitFor(() => expect(aheadBases()).toContain(UPSTREAM_REF));
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    await act(() =>
+      dialog.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    // The fork reconcile reseeds: release is no local branch.
+    await waitFor(() => expect(aheadBases().at(-1)).toBe("refs/heads/main"));
+    await user.click(screen.getByRole("button", { name: "Generate" }));
+    await waitFor(() => expect(gitBranchDiff).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(gitBranchDiff).mock.calls[0][1]).not.toBe(UPSTREAM_REF);
+  });
+});
+
+describe("CreatePrDialog preset base row", () => {
+  it("keeps the same-named local branch's chip off the remote row only", async () => {
+    vi.mocked(gitBranches).mockResolvedValue(
+      LOCALS.map((b) => (b.name === "main" ? { ...b, archived: true } : b)),
+    );
+    const user = userEvent.setup();
+    renderDialog({
+      preset: {
+        target: "origin",
+        base: "main",
+        baseRef: "refs/remotes/origin/main",
+      },
+      defaultBase: "main",
+    });
+    await waitFor(() =>
+      expect(aheadBases()).toContain("refs/remotes/origin/main"),
+    );
+    await user.click(baseField());
+    const baseRow = await screen.findByRole("option", { name: /^main/ });
+    expect(baseRow).not.toHaveTextContent("archived");
+    await user.keyboard("{Escape}");
+    // Control: the head picker lists local branches and keeps the chip.
+    await user.click(screen.getByRole("combobox", { name: "Merge" }));
+    expect(
+      await screen.findByRole("option", { name: /^main/ }),
+    ).toHaveTextContent("archived");
+  });
+});
+
+describe("CreatePrDialog reopen over a running create", () => {
+  it("keeps the submitted target and base when another preset reopens it", async () => {
+    forkWithUpstream();
+    let finish!: (v: { number: number; url: string }) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const dialog = renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+    });
+    await waitFor(() =>
+      expect(targetButton("Fork")).toHaveAttribute("aria-pressed", "true"),
+    );
+    await waitFor(() => expect(aheadBases()).toContain(ORIGIN_REF));
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    dialog.close();
+    dialog.reopenWith({
+      target: "upstream",
+      base: "release",
+      baseRef: "refs/remotes/upstream/release",
+    });
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(targetButton("Fork")).toHaveAttribute("aria-pressed", "true");
+    expect(baseField()).toHaveTextContent("feature-x");
+    await act(async () =>
+      finish({ number: 7, url: "https://github.com/me/project/pull/7" }),
+    );
   });
 });
 

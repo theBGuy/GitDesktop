@@ -240,6 +240,8 @@ export function moveAnnouncement({
   to,
   total,
   reversed = false,
+  heldLabel = FOLD_HELD_LABEL,
+  errorText = next.error,
 }: {
   prev: CompiledPlan;
   next: CompiledPlan;
@@ -252,6 +254,10 @@ export function moveAnnouncement({
   /** Whether the list displays oldest-first; the spoken position counts display
    *  order. */
   reversed?: boolean;
+  /** The held-fold suffix, so the spoken text can match the row's label. */
+  heldLabel?: string;
+  /** How `next.error` is spoken, when the screen words it differently. */
+  errorText?: string | null;
 }): string {
   let text = `Moved to ${displayIndex(to, total, reversed) + 1} of ${total}`;
   // By hash: two leaders can share a subject.
@@ -260,14 +266,14 @@ export function moveAnnouncement({
   const spoke = (action === "squash" || action === "fixup") && retargeted;
   if (spoke) {
     const target = next.views[to].foldTarget;
-    text += target === null ? `, ${FOLD_HELD_LABEL}` : `, into "${target}"`;
+    text += target === null ? `, ${heldLabel}` : `, into "${target}"`;
   }
   if (
     next.error !== null &&
     next.error !== prev.error &&
     !(spoke && next.errorHash === hash)
   ) {
-    text += `. ${next.error}`;
+    text += `. ${errorText ?? next.error}`;
   }
   return text;
 }

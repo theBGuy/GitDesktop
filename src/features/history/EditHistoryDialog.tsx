@@ -49,7 +49,11 @@ import {
   formatBinding,
 } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
-import { type AppSettings, EDIT_HISTORY_ORDERS } from "@/lib/settings/api";
+import {
+  type AppSettings,
+  EDIT_HISTORY_ORDERS,
+  subscribeSettingsWritten,
+} from "@/lib/settings/api";
 import {
   settingsKeys,
   useAiEnabled,
@@ -59,10 +63,15 @@ import {
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 import {
   type ChronoEnd,
+  type CompiledPlan,
   compilePlan,
   displayIndex,
   type EditRow,
@@ -157,6 +166,19 @@ const ORDER_SEGMENT_CLASS =
 // back to its value, and a closed dialog's late failure must not undo a
 // reopened one's change.
 let orderChangeSeq = 0;
+// The order a failed latest change rolls back to: the last one on disk. Every
+// settings write that lands moves it, whoever made it (other writers save whole
+// snapshots, which carry the cached order too); the cache seeds it only while
+// it is still unknown, since a landed write can be ahead of the cache.
+let persistedOrder: AppSettings["editHistoryOrder"] | null = null;
+subscribeSettingsWritten((saved) => {
+  persistedOrder = saved.editHistoryOrder;
+});
+
+/** Test-only: module state would otherwise carry the baseline between cases. */
+export function resetOrderBaselineForTests() {
+  persistedOrder = null;
+}
 
 type OrderHold = "loading" | "failed";
 /** Why the order toggle is held while there are no settings to patch. */
@@ -300,8 +322,8 @@ export function EditHistoryDialog({
 
   // The display order only: `order` and the plan stay newest-first.
   const settings = useSettings();
-  const saveSettings = useSaveSettings();
   const queryClient = useQueryClient();
+  const saveSettings = useSaveSettings();
   const listOrder = settings.data?.editHistoryOrder ?? "newest-first";
   const reversed = listOrder === "oldest-first";
   // Until settings load there is nothing to patch, so the toggle holds.
@@ -309,24 +331,31 @@ export function EditHistoryDialog({
   if (settings.data === undefined) {
     orderHold = settings.isError ? "failed" : "loading";
   }
+  // Held by aria-disabled, not native disabled, so the segments keep their tab
+  // stop and the reason reaches keyboard and AT.
+  const orderToggleHold = useDisabledReason({
+    disabled: orderHold !== null,
+    reason: orderHold === null ? null : ORDER_HOLD_REASON[orderHold],
+  });
   function applyListOrder(next: ListOrder) {
     const current = settings.data;
     if (!current || current.editHistoryOrder === next) return;
-    const previous = current.editHistoryOrder;
+    persistedOrder ??= current.editHistoryOrder;
     const updated = { ...current, editHistoryOrder: next };
     const seq = ++orderChangeSeq;
     // Patched first, so the click's own commit reverses the list.
     queryClient.setQueryData(settingsKeys.settings, updated);
     void saveSettings.mutateAsync(updated).catch(() => {
-      // Only this field: a concurrent unrelated settings write must survive.
       if (seq !== orderChangeSeq) return;
       const latest = queryClient.getQueryData<AppSettings>(
         settingsKeys.settings,
       );
-      if (latest === undefined) return;
+      if (latest === undefined || persistedOrder === null) return;
+      // Only this field, and no re-read: a concurrent settings change still
+      // pending must keep its own optimistic value and rollback.
       queryClient.setQueryData(settingsKeys.settings, {
         ...latest,
-        editHistoryOrder: previous,
+        editHistoryOrder: persistedOrder,
       });
     });
   }
@@ -398,16 +427,18 @@ export function EditHistoryDialog({
   const needsMessages = rows.some(
     (r) => r.action === "reword" || r.action === "squash",
   );
-  // A held fold's footer error says where the missing older commit would sit
-  // in the displayed list; every other plan error renders verbatim.
-  const heldFoldError = (() => {
-    if (plan.error === null || plan.errorHash === null) return null;
-    const i = order.indexOf(plan.errorHash);
-    const row = rows[i];
+  // A held fold's error says where the missing older commit would sit in the
+  // displayed list; every other plan error reads verbatim. Shared by the footer
+  // and the move announcement, so both say the same thing.
+  function heldFoldErrorOf(p: CompiledPlan, r: EditRow[]): string | null {
+    if (p.error === null || p.errorHash === null) return null;
+    const i = r.findIndex((x) => x.hash === p.errorHash);
+    const row = r[i];
     if (row === undefined || !isFold(row.action)) return null;
-    if (plan.views[i].foldTarget !== null) return null;
+    if (p.views[i].foldTarget !== null) return null;
     return `"${row.subject}" can't be ${FOLD_VERB[row.action]} — no older commit ${ORDER_COPY[listOrder].foldPosition} in this list is kept to combine it into.`;
-  })();
+  }
+  const heldFoldError = heldFoldErrorOf(plan, rows);
 
   // Display order; each displayed row maps back to its data index through
   // `displayIndex`, which `plan.views` and the moves index by.
@@ -484,6 +515,8 @@ export function EditHistoryDialog({
         to,
         total: order.length,
         reversed,
+        heldLabel: ORDER_COPY[listOrder].heldLabel,
+        errorText: heldFoldErrorOf(nextPlan, nextRows),
       }),
     );
   }
@@ -652,37 +685,49 @@ export function EditHistoryDialog({
           <div className="flex items-center gap-3 pr-8">
             <DialogTitle>Edit history</DialogTitle>
             {/* Enabled while busy: it changes the rendering, never the plan. */}
-            <ToggleGroup
-              aria-label="Commit order"
-              variant="outline"
-              size="sm"
-              spacing={0}
-              className="ml-auto"
-              disabled={orderHold !== null}
-              title={
-                orderHold === null ? undefined : ORDER_HOLD_REASON[orderHold]
-              }
-              value={[listOrder]}
-              onValueChange={(next) => {
-                // Pressing the pressed segment reports [], which keeps it.
-                const picked = EDIT_HISTORY_ORDERS.find((o) => o === next[0]);
-                if (picked === undefined || picked === listOrder) return;
-                applyListOrder(picked);
-              }}
+            <span
+              className={cn(
+                "ml-auto inline-flex",
+                orderToggleHold.blockedReason !== null && "cursor-not-allowed",
+              )}
+              title={orderToggleHold.wrapperTitle}
             >
-              <ToggleGroupItem
-                value="newest-first"
-                className={ORDER_SEGMENT_CLASS}
+              <ToggleGroup
+                aria-label="Commit order"
+                variant="outline"
+                size="sm"
+                spacing={0}
+                value={[listOrder]}
+                onValueChange={(next) => {
+                  // Pressing the pressed segment reports [], which keeps it.
+                  const picked = EDIT_HISTORY_ORDERS.find((o) => o === next[0]);
+                  if (picked === undefined || picked === listOrder) return;
+                  applyListOrder(picked);
+                }}
               >
-                Newest first
-              </ToggleGroupItem>
-              <ToggleGroupItem
-                value="oldest-first"
-                className={ORDER_SEGMENT_CLASS}
-              >
-                Oldest first
-              </ToggleGroupItem>
-            </ToggleGroup>
+                <ToggleGroupItem
+                  value="newest-first"
+                  aria-disabled={orderHold !== null || undefined}
+                  aria-describedby={orderToggleHold.describedBy}
+                  className={cn(ARIA_DISABLED_CLASS, ORDER_SEGMENT_CLASS)}
+                >
+                  Newest first
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="oldest-first"
+                  aria-disabled={orderHold !== null || undefined}
+                  aria-describedby={orderToggleHold.describedBy}
+                  className={cn(ARIA_DISABLED_CLASS, ORDER_SEGMENT_CLASS)}
+                >
+                  Oldest first
+                </ToggleGroupItem>
+              </ToggleGroup>
+              {orderToggleHold.blockedReason !== null && (
+                <span id={orderToggleHold.reasonId} className="sr-only">
+                  {orderToggleHold.blockedReason}
+                </span>
+              )}
+            </span>
           </div>
           <DialogDescription>
             Reshape your unpushed commits — reword, squash, fixup, drop, or

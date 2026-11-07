@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import { isSessionBranchName } from "@/lib/git/ref-name";
 import type { RemoteBranch } from "@/lib/git/types";
 
@@ -10,19 +11,104 @@ export const REMOTE_REF_PREFIX = "refs/remotes/";
  *  branch can collide with it. */
 export const ADD_UPSTREAM_VALUE = "::add-upstream::";
 
-/** Null for a local pick. Splits once on the first "/" after the prefix, the
- *  same split the backend's remote-branch list makes. */
+/** Splits `remote/name` at the longest known remote followed by "/", since a
+ *  remote name may itself hold "/". Unknown remotes (or none matching) fall
+ *  back to the first "/", the backend's own split. */
+function splitRemoteDisplay(
+  display: string,
+  remotes: readonly string[] | undefined,
+): { remote: string; name: string } | null {
+  let slash = display.indexOf("/");
+  for (const r of remotes ?? []) {
+    if (r.length > slash && display.startsWith(`${r}/`)) slash = r.length;
+  }
+  if (slash <= 0 || slash === display.length - 1) return null;
+  return { remote: display.slice(0, slash), name: display.slice(slash + 1) };
+}
+
+/** Null for a local pick. `remotes` is the repo's remote list when known. */
 export function parseRemoteCompareValue(
   v: string | null,
+  remotes?: readonly string[],
 ): { remote: string; name: string; display: string } | null {
   if (v === null || !v.startsWith(REMOTE_REF_PREFIX)) return null;
   const display = v.slice(REMOTE_REF_PREFIX.length);
-  const slash = display.indexOf("/");
-  if (slash <= 0 || slash === display.length - 1) return null;
+  const split = splitRemoteDisplay(display, remotes);
+  return split === null ? null : { ...split, display };
+}
+
+// The remote each remote pick was made against, by repo and stored value:
+// removing a slash remote would re-split the stored ref against a shorter one,
+// and the fetch stamp that also names it is replaceable. Outlives remounts.
+const pickRemotes = new Map<string, string>();
+const pickRemoteListeners = new Set<() => void>();
+const pickRemoteKey = (repo: string, value: string) => `${repo}\0${value}`;
+function notifyPickRemotes() {
+  for (const listener of pickRemoteListeners) listener();
+}
+
+/** Records only against a KNOWN remotes list: a split made without one is a
+ *  guess, and a recorded guess would outrank the right split once the list
+ *  arrives. Returns the pick as {@link resolvePick} now reads it. */
+export function recordPickRemote(
+  repo: string,
+  value: string,
+  remotes: readonly string[] | undefined,
+): { remote: string; name: string; display: string } | null {
+  const key = pickRemoteKey(repo, value);
+  const split = parseRemoteCompareValue(value, remotes);
+  if (split !== null && remotes !== undefined) {
+    if (pickRemotes.get(key) !== split.remote) {
+      pickRemotes.set(key, split.remote);
+      notifyPickRemotes();
+    }
+  }
+  return resolvePick(value, remotes, pickRemotes.get(key) ?? null);
+}
+
+/** Test-only: module state would otherwise carry records between cases. */
+export function clearPickRemotesForTests() {
+  pickRemotes.clear();
+  notifyPickRemotes();
+}
+
+function subscribePickRemotes(listener: () => void) {
+  pickRemoteListeners.add(listener);
+  return () => {
+    pickRemoteListeners.delete(listener);
+  };
+}
+
+export function usePickRemote(
+  repo: string,
+  value: string | null,
+): string | null {
+  return useSyncExternalStore(subscribePickRemotes, () =>
+    value === null
+      ? null
+      : (pickRemotes.get(pickRemoteKey(repo, value)) ?? null),
+  );
+}
+
+/** The one identity of a stored pick: its recorded remote when that still
+ *  prefixes it, else the split against the current remotes list. */
+export function resolvePick(
+  value: string | null,
+  remotes: readonly string[] | undefined,
+  recorded: string | null,
+): { remote: string; name: string; display: string } | null {
+  const split = parseRemoteCompareValue(value, remotes);
+  if (
+    split === null ||
+    recorded === null ||
+    !split.display.startsWith(`${recorded}/`) ||
+    split.display.length === recorded.length + 1
+  )
+    return split;
   return {
-    remote: display.slice(0, slash),
-    name: display.slice(slash + 1),
-    display,
+    remote: recorded,
+    name: split.display.slice(recorded.length + 1),
+    display: split.display,
   };
 }
 
@@ -60,12 +146,19 @@ function remoteRank(remote: string): number {
  * (a local literally named `origin/x` would make two identical combobox values).
  * A remote branch merely sharing a local's bare name stays offered. Ordered by
  * remote (upstream, origin, then alphabetical), each remote's rows by recency.
+ * Each row is re-split against `remotes` first: the backend splits at the
+ * first "/", which mis-splits a remote whose name holds one.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
   localNames: ReadonlySet<string>,
+  remotes?: readonly string[],
 ): RemoteCompareRow[] {
   return (remoteBranches ?? [])
+    .map((b) => ({
+      ...(splitRemoteDisplay(`${b.remote}/${b.name}`, remotes) ?? b),
+      lastCommitDate: b.lastCommitDate,
+    }))
     .filter((b) => !isSessionBranchName(b.name))
     .map((b) => ({
       remote: b.remote,
@@ -90,9 +183,12 @@ export function remoteCompareRows(
 /** Why a remote pick can't be compared any more: the status line's words and
  *  the Create PR hold's reason, so the two never disagree. */
 export const GONE_PICK_COPY: Record<
-  "pruned" | "remote-gone",
+  "pruned" | "remote-gone" | "missing",
   (remote: string, name: string) => string
 > = {
   pruned: (remote, name) => `${remote}/${name} was deleted on ${remote}.`,
   "remote-gone": (remote) => `${remote} is no longer a remote.`,
+  // The ref is gone but no successful remotes read says why.
+  missing: (remote, name) =>
+    `${remote}/${name} is no longer in your remote branches.`,
 };

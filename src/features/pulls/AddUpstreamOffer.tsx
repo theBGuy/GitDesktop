@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
+import { failedSinceLastSuccess } from "@/features/conversations/remote-section-state";
 import { useAddRemote, useForgeStatus, useRemotes } from "@/lib/git/queries";
 import { useLensGate } from "@/lib/repo-lens/queries";
 import { useSettings } from "@/lib/settings/queries";
@@ -30,8 +31,18 @@ function setAddInFlight(repo: string, running: boolean) {
  */
 export function useAddUpstreamOffer(repoPath: string): {
   canOffer: boolean;
-  /** Every input `canOffer` reads has answered, so a false is an answer. */
+  /** `canOffer` is an answer: every input it reads answered, or one that did
+   *  already rules the offer out. An errored read is not an answer, even over
+   *  cached data. */
   settled: boolean;
+  /** Not settled because a read failed, held while it retries (a poll or
+   *  `retry`) so a host's failed arm doesn't blink; `retry` re-reads the
+   *  failed ones. */
+  failed: boolean;
+  /** `failed` rests on the forge read alone, the one input a reconnect re-runs;
+   *  a failed local read (remotes, settings) still wants `retry` offline. */
+  failedOnForgeOnly: boolean;
+  retry: () => void;
   forkParent: string | null;
   /** An add started in THIS repo is running. */
   pending: boolean;
@@ -59,7 +70,24 @@ export function useAddUpstreamOffer(repoPath: string): {
     forkParent !== null &&
     remotes.data !== undefined &&
     !remotes.data.includes("upstream");
-  const settled = !forge.isPending && !remotes.isPending && !settings.isPending;
+  // One successful read that already rules the offer out answers it, whatever
+  // the other reads did.
+  const answeredNo =
+    lensGate ||
+    (forge.isSuccess && forge.data.provider !== "github") ||
+    (settings.isSuccess &&
+      (forkRecord?.isFork !== true || forkParent === null)) ||
+    (remotes.isSuccess && remotes.data.includes("upstream"));
+  const inputs = [forge, remotes, settings];
+  const settled = answeredNo || inputs.every((q) => q.isSuccess);
+  const failed = !answeredNo && inputs.some(failedSinceLastSuccess);
+  const failedOnForgeOnly =
+    failed &&
+    !failedSinceLastSuccess(remotes) &&
+    !failedSinceLastSuccess(settings);
+  function retry() {
+    for (const q of inputs) if (q.isError) void q.refetch();
+  }
   const addRemote = useAddRemote(repoPath);
   const pending = useSyncExternalStore(subscribeAdds, () =>
     addsInFlight.has(repoPath),
@@ -91,6 +119,9 @@ export function useAddUpstreamOffer(repoPath: string): {
   return {
     canOffer,
     settled,
+    failed,
+    failedOnForgeOnly,
+    retry,
     forkParent,
     pending,
     addUpstream,

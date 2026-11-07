@@ -53,6 +53,7 @@ import {
   useDefaultBranch,
   useForgeStatus,
   usePrsForBranch,
+  useRemotes,
   useRepoLabels,
   useRepoStatus,
 } from "@/lib/git/queries";
@@ -234,11 +235,18 @@ export function CreatePrDialog({
   // The effective lens for this create — always "origin" when the gate is off.
   const createLens: RemoteLens = targetIsParent ? "upstream" : "origin";
   const targetSlug = targetIsParent ? upstreamSlug : forkSlug;
-  // A preset's remote-tracking base, while the dialog is on the preset's target:
-  // offered there even when no local branch has its name, and kept by the
-  // reconcile. Selected, its ref drives the base's reads (`activeBaseRef`).
+  // A preset's remote-tracking base, while the dialog is on the preset's target
+  // and that target is the EFFECTIVE one: offered there even when no local
+  // branch has its name, and kept by the reconcile. Selected, its ref drives the
+  // base's reads (`activeBaseRef`). It holds until the gate's reads settle,
+  // success or failure; a gate settled off drops it, so the fork reconcile
+  // reseeds and the base's reads never describe a target the create won't use.
+  const remotes = useRemotes(repoPath);
+  const gateAnswered = !forge.isPending && !remotes.isPending;
   const presetBase =
-    preset?.baseRef !== undefined && target === preset.target
+    preset?.baseRef !== undefined &&
+    target === preset.target &&
+    (createLens === preset.target || !gateAnswered)
       ? { name: preset.base, ref: preset.baseRef }
       : null;
 
@@ -396,7 +404,14 @@ export function CreatePrDialog({
   const baseItems = presetBase
     ? { ...targetItems, [presetBase.name]: presetBase.name }
     : targetItems;
-  const baseAnnotations = targetIsParent ? undefined : annotations;
+  // The preset's row reads the remote ref, so a same-named local branch's
+  // worktree or archived chip there would describe a different branch.
+  const baseAnnotations = (() => {
+    if (targetIsParent) return undefined;
+    if (presetBase === null) return annotations;
+    const { [presetBase.name]: _local, ...rest } = annotations;
+    return rest;
+  })();
   const baseLoading = targetIsParent && parentBranches.isPending;
 
   const form = useAppForm({

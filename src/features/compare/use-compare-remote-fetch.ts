@@ -1,8 +1,13 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useEffectEvent, useRef, useState } from "react";
+import {
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { gitFetchRemote } from "@/lib/git/api";
 import { remoteBranchesOptions, repoKeys } from "@/lib/git/queries";
-import type { RepoStatus } from "@/lib/git/types";
 import { isOfflineNow } from "@/lib/offline-writes";
 import { useMutation } from "@/lib/started-mutation";
 import { useUiStore } from "@/lib/stores/ui";
@@ -77,11 +82,14 @@ function invalidateAfterFetch(
  * Fetches a remote for the Compare picker, single-flight per repo and remote.
  * Never toasts: the status line is the surface. A fire while offline doesn't
  * run; it parks in the stamp, and reconnect re-fires it once while that pick is
- * still current (`currentPick`) in the same repo.
+ * still current (`currentPick`) in the same repo. `currentPickRemote` is that
+ * pick's canonical remote now, which the reconnect fetches: a pick parked under
+ * a fallback split may resolve to another remote once the remotes list answers.
  */
 export function useCompareRemoteFetch(
   repoPath: string,
   currentPick: string | null,
+  currentPickRemote: string | null,
 ) {
   const queryClient = useQueryClient();
   const [stamp, setStamp] = useState<CompareFetchStamp | null>(null);
@@ -120,7 +128,48 @@ export function useCompareRemoteFetch(
     return tracked;
   }
 
+  // The slot as last written and the committed pick with its canonical remote,
+  // for fire-time and refire-time reads: fire runs from closures an await can
+  // leave renders behind.
+  const slot = useRef(stamp);
+  const pickNow = useRef(currentPick);
+  const pickRemoteNow = useRef(currentPickRemote);
+  useLayoutEffect(() => {
+    slot.current = stamp;
+    pickNow.current = currentPick;
+    pickRemoteNow.current = currentPickRemote;
+  }, [stamp, currentPick, currentPickRemote]);
+
+  /** The CURRENT pick's stamp, still running or parked: a follow-up must not
+   *  take it over, or its hold, its line and its reconnect fetch would go. A
+   *  superseded pick's stamp shows nothing, so the follow-up takes the slot. */
+  function holdsLivePick(repo: string): boolean {
+    const s = slot.current;
+    return (
+      s !== null &&
+      s.repoPath === repo &&
+      s.pickedValue !== null &&
+      s.pickedValue === pickNow.current &&
+      (s.phase === "fetching" || s.parked)
+    );
+  }
+
   async function fire(req: CompareFetchRequest) {
+    // Over the current pick's live fetch the follow-up runs unseen: online at
+    // once, offline parked as the hidden follow-up reconnect fetches.
+    if (req.pickedValue === null && holdsLivePick(req.repo)) {
+      const hide = () =>
+        setHiddenFollowUp({ repoPath: req.repo, remote: req.remote });
+      if (isOfflineNow()) {
+        hide();
+        return;
+      }
+      await run(req.repo, req.remote).catch(() => {
+        if (isOfflineNow() && useUiStore.getState().repoPath === req.repo)
+          hide();
+      });
+      return;
+    }
     epoch.current += 1;
     const next: CompareFetchStamp = {
       repoPath: req.repo,
@@ -131,29 +180,17 @@ export function useCompareRemoteFetch(
       phase: "fetching",
       parked: false,
     };
-    if (isOfflineNow()) {
-      setStamp({ ...next, phase: "offline", parked: true });
-      return;
-    }
-    setStamp(next);
+    const started = isOfflineNow()
+      ? { ...next, phase: "offline" as const, parked: true }
+      : next;
+    slot.current = started;
+    setStamp(started);
+    if (started !== next) return;
     let failed = false;
     try {
       await run(req.repo, req.remote);
     } catch {
       failed = true;
-    }
-    // The pair this pick compares, plus the live pair when the current branch
-    // moved during the fetch: a superseded pick still refreshes its data.
-    if (!failed && req.pickedValue !== null) {
-      const live =
-        queryClient.getQueryData<RepoStatus>(repoKeys.status(req.repo))?.branch
-          ?.name ?? null;
-      for (const current of new Set([req.currentBranch, live])) {
-        if (current === null) continue;
-        void queryClient.invalidateQueries({
-          queryKey: repoKeys.compare(req.repo, req.pickedValue, current),
-        });
-      }
     }
     const liveRepo = useUiStore.getState().repoPath;
     setStamp((s) => {
@@ -177,9 +214,14 @@ export function useCompareRemoteFetch(
   const refireParked = useEffectEvent(() => {
     if (!stamp?.parked || stamp.repoPath !== repoPath) return;
     if (stamp.pickedValue !== null && stamp.pickedValue !== currentPick) return;
+    // A pick refetches its identity as it reads now; a follow-up names its own.
+    const pickRemote = pickRemoteNow.current;
     void fire({
       repo: stamp.repoPath,
-      remote: stamp.remote,
+      remote:
+        stamp.pickedValue !== null && pickRemote !== null
+          ? pickRemote
+          : stamp.remote,
       pickedValue: stamp.pickedValue,
       currentBranch: stamp.currentBranch,
     });

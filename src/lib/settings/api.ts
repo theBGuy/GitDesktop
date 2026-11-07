@@ -451,6 +451,39 @@ async function saveSettings(settings: AppSettings): Promise<void> {
   // Cache-only: the chain's forced save persists it inside the store lock.
   const store = await getStore();
   await store.set("settings", settings);
+  stagedSettings = settings;
+}
+
+/** The snapshot the running chain entry staged; published once its save lands. */
+let stagedSettings: AppSettings | null = null;
+const settingsWrittenListeners = new Set<(saved: AppSettings) => void>();
+
+/** Hears every settings snapshot a write persisted, right after its forced save
+ *  and before the writer's promise resolves (so ahead of any re-read). A no-op
+ *  arm that saves nothing publishes nothing. In-runtime only: another window's
+ *  or process's write never reaches it. Returns the unsubscribe. */
+export function subscribeSettingsWritten(
+  listener: (saved: AppSettings) => void,
+): () => void {
+  settingsWrittenListeners.add(listener);
+  return () => {
+    settingsWrittenListeners.delete(listener);
+  };
+}
+
+function publishSettingsWritten(): void {
+  const saved = stagedSettings;
+  stagedSettings = null;
+  if (saved === null) return;
+  // Inside the write's rollback: a throwing listener must neither skip the
+  // others nor undo a write that already landed.
+  for (const listener of settingsWrittenListeners) {
+    try {
+      listener(saved);
+    } catch (e) {
+      console.error("[settings] settings-written listener failed", e);
+    }
+  }
 }
 
 /**
@@ -477,8 +510,11 @@ function serializedRecentRepoWrite<T>(fn: () => Promise<T>): Promise<T> {
       const store = await getStore();
       await reloadToleratingEmptyStore(store);
       return writeWithRollback(store, async () => {
+        // A failed entry's staged snapshot never reached disk.
+        stagedSettings = null;
         const out = await fn();
         await store.save();
+        publishSettingsWritten();
         return out;
       });
     });

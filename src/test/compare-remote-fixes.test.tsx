@@ -540,7 +540,7 @@ describe("Compare pruned and gone picks", () => {
     expect(screen.getByText("ahead work")).toBeInTheDocument();
   });
 
-  it("says why the comparison failed while a fetch line outranks the pruned one", async () => {
+  it("lets the pruned line outrank a failed fetch's line, naming Create's hold", async () => {
     vi.mocked(gitFetchRemote).mockRejectedValue(new Error("fetch boom"));
     vi.mocked(gitCompareBranches).mockRejectedValue(new Error("compare boom"));
     const user = userEvent.setup();
@@ -558,11 +558,32 @@ describe("Compare pruned and gone picks", () => {
     await act(() =>
       client.refetchQueries({ queryKey: ["repo", REPO, "remote-branches"] }),
     );
-    await act(() => new Promise((r) => setTimeout(r, 50)));
+    // Its "last fetch" is gone, so the line names the cause Create's hold does.
+    const pruned = "upstream/main was deleted on upstream.";
+    expect(await statusLine(pruned)).toBeInTheDocument();
+    expect(screen.queryByText(failedLine)).toBeNull();
     expect(
-      screen.getByText(failedLine, { selector: "p[role=status]" }),
-    ).toBeInTheDocument();
+      await screen.findByRole("button", {
+        name: /Create pull request in parent…/,
+      }),
+    ).toHaveAccessibleDescription(pruned);
+  });
+
+  it("says why the comparison failed while a follow-up line outranks the pruned one", async () => {
+    forkWithoutUpstream();
+    useUiStore.setState({ compareBranch: "refs/remotes/origin/gone" });
+    vi.mocked(gitCompareBranches).mockRejectedValue(new Error("compare boom"));
+    // Settled at the end: the single-flight map is module state.
+    const upstreamFetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockReturnValue(upstreamFetch.promise);
+    const user = userEvent.setup();
+    renderPanel();
+    await statusLine("origin/gone was deleted on origin.");
+    await addUpstreamFromPicker(user);
+    expect(await statusLine("Fetching upstream…")).toBeInTheDocument();
+    // The follow-up line names no cause for the comparison, so its error shows.
     expect(await screen.findByText(/compare boom/)).toBeInTheDocument();
+    await act(async () => upstreamFetch.resolve());
   });
 
   it("names a removed remote", async () => {

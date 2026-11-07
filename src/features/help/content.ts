@@ -739,16 +739,18 @@ the failed part's line when one shows.
   starts, nothing is reset and a toast says so.
 - **Edit history** — open the interactive-rebase editor over your unpushed commits, where
   each commit gets an action: **pick** (keep), **reword** (edit its message),
-  **squash** (combine it into the next older commit you keep, joining the messages),
+  **squash** (combine it into the next older commit kept as its own commit, joining the
+  messages),
   **fixup** (combine it in, keeping that older commit's message), **edit** (pause to amend
   its changes), or **drop** (remove it). The **Newest first** / **Oldest first** toggle in
   the editor's header sets the list's order; it starts with the newest on top and
   remembers your choice. **Oldest first** reads the way git's own rebase todo list does.
-  A squash or fixup always folds into the next older kept commit, so it combines into the
-  row below it with the newest on top, and the row above it with the oldest on top. The
+  A squash or fixup combines into the nearest older commit that stays its own commit (a
+  pick, reword or edit), skipping rows that are dropped or folded in themselves. That
+  commit sits below it with the newest on top, and above it with the oldest on top. The
   action menu names the commit a squash or fixup combines into, and a folding row shows
-  **into** and that commit's subject; when no older commit in the list is kept,
-  **Squash** and **Fixup** are held, and the menu says why.
+  **into** and that commit's subject; when no older commit in the list is kept as its own
+  commit, **Squash** and **Fixup** are held, and the menu says why.
   {{key:up}} and {{key:down}} move between commits, {{key:home}} and {{key:end}} jump to the
   first and last, and {{key:enter}} or {{key:space}} opens the commit's action menu.
   {{key:alt+up}} and {{key:alt+down}} move the commit one place up or down the list, as
@@ -762,11 +764,11 @@ the failed part's line when one shows.
   there. A quick **Squash N commits…** is also on the context menu when you select adjacent
   commits; both it and **Edit history** wait while a merge, rebase, cherry-pick or revert
   is in progress, and the menu says to finish the operation in **Changes** first. When
-  there's nothing to edit (every commit is pushed, or with no upstream there are no
-  commits ahead of the default branch; the latest commit is a merge; its parent isn't
-  in a shallow clone; or there's no older commit to rebase onto), **Edit history** is
-  held and the menu says which. If the editor is open when that happens, its footer
-  says so.
+  there's nothing to edit (every commit is pushed, or in a repository with no remote
+  there are no commits ahead of the default branch; the latest commit is a merge; its
+  parent isn't in a shallow clone; or there's no older commit to rebase onto),
+  **Edit history** is held and the menu says which. If the editor is open when that
+  happens, its footer says so.
 - **Create a branch** or **create a tag** at a commit, **check out** a commit (it asks
   first and explains the detached HEAD you land in), or copy
   its SHA.
@@ -1032,20 +1034,22 @@ straight to opening a pull request.
 Picking a remote branch fetches that remote once, with a status line across the panel
 ("Fetching origin…") while it runs. If the fetch fails, or you're offline, the panel
 compares against that remote's last fetch, says so, and offers **Retry** after a failed
-fetch. A branch that was deleted on the remote says so, with **Pick another branch**.
-Picking your own branch's copy on \`origin\` offers no pull request buttons, and when that
-copy is your branch's upstream, a line explains the counts: ahead is what you haven't
-pushed, behind is what you haven't pulled.
+fetch. A picked branch that's no longer among your remote branches, or whose remote was
+removed, says so, with **Pick another branch**. Picking your own branch's copy on
+\`origin\` offers no pull request buttons, and when that copy is your branch's upstream, a
+line explains the counts: ahead is what you haven't pushed, behind is what you haven't
+pulled.
 
-The pull request button names where the PR goes. On a GitHub fork with an \`upstream\`
-remote, an \`upstream\` branch offers **Create pull request in parent…** and an \`origin\`
-branch **Create pull request in your fork…**; otherwise an \`origin\` branch offers the
-plain create button (a merge request on GitLab), and an \`upstream\` branch outside that
+On a GitHub fork with an \`upstream\` remote, while you're signed in to GitHub, the pull
+request button names where the PR goes: an \`upstream\` branch offers
+**Create pull request in parent…** and an \`origin\` branch
+**Create pull request in your fork…**. Otherwise an \`origin\` branch offers the plain
+create button (a merge request on GitLab), and an \`upstream\` branch outside that
 setup, or a branch on any other remote, offers none. The create buttons wait for the
-fetch and a successful comparison, and stay off while the picked branch is gone from its
-remote. **Create local PR…** is offered only against a local
-branch. On a GitHub fork with no \`upstream\` remote, the **Remote** group starts with an
-**Add upstream remote** row, which adds the remote and fetches it.
+fetch and a successful comparison, and stay off while there's nothing ahead to propose
+or while the picked branch, or its remote, is gone. **Create local PR…** is offered only
+against a local branch. On a GitHub fork with no \`upstream\` remote, the **Remote** group
+starts with an **Add upstream remote** row, which adds the remote and fetches it.
 
 The diff stays on screen if a background refresh fails, with a line saying it couldn't
 refresh and a **Retry**. One that fails to load says why and offers **Retry**.

@@ -213,6 +213,47 @@ test("moveAnnouncement counts the display position oldest-first", () => {
   assert.equal(moveAnnouncement({ ...toTop, to: 14 }), "Moved to 15 of 15");
 });
 
+test("moveAnnouncement speaks the caller's held label and error text", () => {
+  // Newest-first [squash, leader]: the squash moving below its leader holds.
+  const before = [row("s", "squash"), row("l")];
+  const after = [row("l"), row("s", "squash")];
+  const hashes = before.map((r) => r.hash);
+  const prev = compilePlan(before, hashes);
+  const next = compilePlan(after, hashes);
+  const held = { prev, next, action: "squash", hash: "s", from: 0, to: 1 };
+  assert.equal(
+    moveAnnouncement({ ...held, total: 2 }),
+    "Moved to 2 of 2, no older kept commit to combine into",
+    "default unchanged",
+  );
+  assert.equal(
+    moveAnnouncement({
+      ...held,
+      total: 2,
+      reversed: true,
+      heldLabel: "no older kept commit above to combine into",
+    }),
+    "Moved to 1 of 2, no older kept commit above to combine into",
+  );
+
+  // The leader moving instead: another row's new error is appended.
+  const leaderMove = { prev, next, action: "pick", hash: "l", from: 1, to: 0 };
+  assert.equal(
+    moveAnnouncement({ ...leaderMove, total: 2 }),
+    `Moved to 1 of 2. ${next.error}`,
+    "default unchanged",
+  );
+  assert.equal(
+    moveAnnouncement({ ...leaderMove, total: 2, errorText: "Spoken error." }),
+    "Moved to 1 of 2. Spoken error.",
+  );
+  assert.equal(
+    moveAnnouncement({ ...leaderMove, total: 2, errorText: null }),
+    `Moved to 1 of 2. ${next.error}`,
+    "null falls back to the plan's error",
+  );
+});
+
 test("editHistoryOrder heals to newest-first and keeps oldest-first", () => {
   assert.equal(DEFAULT_SETTINGS.editHistoryOrder, "newest-first");
   const full = healLoadedSettings(undefined);
