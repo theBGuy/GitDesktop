@@ -201,7 +201,10 @@ export interface BranchContentMerged {
   headSha: string | null;
   /** The base-history commit that cleared the check, for the branch or its PR
    *  head; null for any clean at the base tip, and whenever not clean. Never the
-   *  base tip itself, so it is never a stand-in for the base sha. */
+   *  base tip itself, so it is never a stand-in for the base sha. The first
+   *  candidate, in search order, whose tree holds the branch's changes: usually
+   *  the commit they landed in, but a later commit that also holds them when the
+   *  landing wasn't a candidate or ranked behind it. */
   landedIn: string | null;
   /** True only when the clean came through the merged pull request's head. */
   viaPrHead: boolean;

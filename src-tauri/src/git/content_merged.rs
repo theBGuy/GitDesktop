@@ -11,21 +11,26 @@
 //! [`ContentCheckOff`] reason the dialog names.
 //!
 //! Three routes, each fully guarded: (1) the tip into the base tip; (2) the landed
-//! search, the tip into the first-parent base commits after the single merge base whose
-//! own change touches every path the branch changed, oldest first; (3) a merged pull
-//! request's head when the tip is a strict ancestor of it, through (1) then (2). The
-//! verdict is `clean` when any run cleared, else route 1's own verdict: routes 2 and 3
-//! only upgrade, since `unknown` pre-checks an idle row through its fallback. The search
-//! caps ([`WINDOW_CAP`], [`CANDIDATE_CAP`]) bound cost, not soundness; a window past the
-//! cap keeps route 1's verdict rather than search a partial one.
+//! search, the tip into first-parent base commits after the single merge base: first
+//! those whose own change touches every path the branch changed, then each commit where
+//! a run of consecutive commits touching the branch's paths first covers them all, then
+//! the rest of each such run, each group oldest first; (3) a merged pull request's head
+//! when the tip is a strict ancestor of it, through (1) then (2). The verdict is
+//! `clean` when any run cleared, else route 1's own verdict: routes 2 and 3 only
+//! upgrade, since `unknown` pre-checks an idle row through its fallback. The search
+//! caps ([`WINDOW_CAP`], [`CANDIDATE_CAP`]) bound cost, not soundness; a window past
+//! the cap keeps route 1's verdict rather than search a partial one.
 //!
-//! Out of reach: bare repositories, `attr.tree`/`--attr-source` setups, and attribute or
-//! config edits that land while a check runs (each git step reads them live; the
+//! Out of reach: bare repositories, `attr.tree`/`--attr-source` setups, and attribute
+//! or config edits that land while a check runs (each git step reads them live; the
 //! per-verdict key read is skipped when a clean run content-merged nothing). Accepted
 //! gaps: a base commit that later reverts landed work still clears the branch through
 //! its landing commit; a later pull-request commit that reverted something the older
 //! tip added still clears the tip through the head; a pair with several merge bases
-//! gets no history search.
+//! gets no history search; a landing that a commit touching none of the branch's paths
+//! splits is no candidate (a later commit that holds the work can still clear the
+//! branch, and is then the one named); a landing ranked behind [`CANDIDATE_CAP`] other
+//! candidates is never tried.
 
 use std::collections::HashSet;
 
@@ -91,9 +96,11 @@ pub struct BranchContentMerged {
     pub verdict: ContentVerdict,
     /// The branch tip the verdict was computed for; None when it didn't resolve.
     pub head_sha: Option<String>,
-    /// The base history commit whose tree held the changes, when a landed-search run
-    /// cleared (for the tip or the pull-request head); None for a clean at the base
-    /// tip, and whenever the verdict isn't clean.
+    /// The base history commit a landed-search run cleared at (for the tip or the
+    /// pull-request head); None for a clean at the base tip, and whenever the verdict
+    /// isn't clean. The first candidate, in search order, whose tree holds the branch's
+    /// changes: usually the commit they landed in, but a later commit that also holds
+    /// them when the landing wasn't a candidate or ranked behind it.
     pub landed_in: Option<String>,
     /// The clean verdict came through the merged pull request's head.
     pub via_pr_head: bool,
@@ -105,8 +112,9 @@ pub struct BranchContentMerged {
 const WINDOW_CAP: usize = 2000;
 
 /// The most candidate runs per searched tip (the branch tip or the PR head). The first
-/// candidate is the landing in practice: 464 of 480 landed branches had exactly one (a
-/// mirror of the owner's repo, measured for PR #663).
+/// candidate is the landing in practice: every branch the history search cleared from
+/// the branch tip, 481, did so at the first candidate, and one more cleared through its
+/// pull request's head (a mirror of the owner's repo, measured for PR #663).
 const CANDIDATE_CAP: usize = 3;
 
 fn parse_git_version(stdout: &str) -> Option<(u32, u32)> {
@@ -133,16 +141,16 @@ fn classify_git_version(exited_ok: bool, version_stdout: &str) -> GitVersionSupp
     }
 }
 
-/// Caches only a parsed answer: an unreadable probe is retried at the next open.
-async fn merge_tree_write_support() -> GitVersionSupport {
-    static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    let parsed = SUPPORTED
-        .get_or_try_init(|| async {
-            let support = match run_git_raw(None, &["version"], DEFAULT_TIMEOUT).await {
-                Ok(out) => classify_git_version(out.code == 0, &out.stdout_lossy()),
-                Err(_) => GitVersionSupport::Unreadable,
-            };
-            match support {
+/// `probe`'s answer through `cell`, which caches only a parsed answer: an unreadable
+/// probe is retried at the next call.
+async fn cached_support<F, Fut>(cell: &tokio::sync::OnceCell<bool>, probe: F) -> GitVersionSupport
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = GitVersionSupport>,
+{
+    let parsed = cell
+        .get_or_try_init(|| async move {
+            match probe().await {
                 GitVersionSupport::Supported => Ok(true),
                 GitVersionSupport::TooOld => Ok(false),
                 GitVersionSupport::Unreadable => Err(()),
@@ -154,6 +162,19 @@ async fn merge_tree_write_support() -> GitVersionSupport {
         Ok(false) => GitVersionSupport::TooOld,
         Err(()) => GitVersionSupport::Unreadable,
     }
+}
+
+/// What the process's git supports, cached once a probe parses; an unreadable probe is
+/// retried at the next open.
+async fn merge_tree_write_support() -> GitVersionSupport {
+    static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+    cached_support(&SUPPORTED, || async {
+        match run_git_raw(None, &["version"], DEFAULT_TIMEOUT).await {
+            Ok(out) => classify_git_version(out.code == 0, &out.stdout_lossy()),
+            Err(_) => GitVersionSupport::Unreadable,
+        }
+    })
+    .await
 }
 
 /// Why the content check is off for a version probe's answer; None when it can run.
@@ -570,12 +591,14 @@ fn parse_window(stdout: &[u8]) -> Option<Vec<WindowCommit<'_>>> {
     Some(commits)
 }
 
-/// Route 2, the landed search: the oldest of the first `candidate_cap` candidates
-/// (oldest first) whose guarded run of `tip` clears. Candidates are first-parent base
-/// commits after the sole merge base of `base_sha` and `tip` that touch every path the
-/// branch changed, excluding `base_sha` (route 1's run). None when none of those
-/// clears, or on several merge bases, an empty or unreadable path set or window, or a
-/// window past `window_cap`.
+/// Route 2, the landed search: the first of the first `candidate_cap` candidates whose
+/// guarded run of `tip` clears. Candidates come from the first-parent base commits
+/// after the sole merge base of `base_sha` and `tip`, excluding `base_sha` (route 1's
+/// run): first those whose own change touches every path the branch changed, then each
+/// commit where a run of consecutive commits touching the branch's paths first covers
+/// them all, then the rest of each such run, each group oldest first, each commit once.
+/// None when none of those clears, or on several merge bases, an empty or unreadable
+/// path set or window, or a window past `window_cap`.
 async fn landed_search(
     repo_path: &str,
     base_sha: &str,
@@ -654,20 +677,52 @@ async fn landed_search(
     if !headers_match(&window, &revs) {
         return None;
     }
-    let candidates = window
+    // Oldest first, each with the branch paths its own change touches.
+    let commits: Vec<(&WindowCommit, HashSet<&[u8]>)> = window
         .iter()
         .rev()
         .filter(|c| c.oid != base_sha)
-        .filter(|c| {
-            let touched: HashSet<&[u8]> = c
+        .map(|c| {
+            let touched = c
                 .paths
                 .iter()
                 .copied()
                 .filter(|p| branch_paths.contains(p))
                 .collect();
-            touched.len() == branch_paths.len()
+            (c, touched)
         })
-        .take(candidate_cap);
+        .collect();
+    let full_cover = commits
+        .iter()
+        .filter(|(_, touched)| touched.len() == branch_paths.len())
+        .map(|(c, _)| *c);
+    // A landing split across commits, per maximal run of consecutive commits that
+    // touch a branch path: the commit where the run's union first covers them all, then
+    // the rest of the run, since unrelated edits may complete the cover early. Every
+    // run's first cover ranks ahead of any run's rest, so only full-cover commits rank
+    // ahead of a run's first cover.
+    let mut first_covers = Vec::new();
+    let mut run_rests = Vec::new();
+    let mut covered: HashSet<&[u8]> = HashSet::new();
+    for (c, touched) in &commits {
+        if touched.is_empty() {
+            covered.clear();
+        } else if covered.len() == branch_paths.len() {
+            run_rests.push(*c);
+        } else {
+            covered.extend(touched.iter().copied());
+            if covered.len() == branch_paths.len() {
+                first_covers.push(*c);
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    let candidates: Vec<&WindowCommit> = full_cover
+        .chain(first_covers)
+        .chain(run_rests)
+        .filter(|c| seen.insert(c.oid))
+        .take(candidate_cap)
+        .collect();
     for c in candidates {
         if guarded_merge(repo_path, c.oid, c.tree, tip).await == ContentVerdict::Clean {
             return Some(c.oid.to_string());
@@ -1871,6 +1926,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn version_support_caches_only_a_parsed_answer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use GitVersionSupport::{Supported, TooOld, Unreadable};
+        for answer in [Supported, TooOld] {
+            let cell = tokio::sync::OnceCell::new();
+            let calls = AtomicUsize::new(0);
+            let probe = |support: GitVersionSupport| {
+                let calls = &calls;
+                move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    support
+                }
+            };
+            assert_eq!(cached_support(&cell, probe(Unreadable)).await, Unreadable);
+            assert_eq!(cached_support(&cell, probe(answer)).await, answer);
+            assert_eq!(cached_support(&cell, probe(Unreadable)).await, answer);
+            assert_eq!(calls.load(Ordering::SeqCst), 2, "{answer:?}");
+        }
+    }
+
     #[test]
     fn wire_shapes_are_camel_case_with_lowercase_verdicts() {
         let base = serde_json::to_value(ContentCheckBase {
@@ -2187,7 +2263,7 @@ mod tests {
 
     /// The squash and a later far edit of the same file both clear; the older wins.
     #[tokio::test]
-    async fn landed_search_names_the_oldest_clearing_commit() {
+    async fn landed_search_names_the_first_clearing_full_cover_commit() {
         let (dir, repo) = setup_repo("oldest").await;
         if skip_for_inherited_merge_keys(&repo).await {
             return;
@@ -2253,6 +2329,278 @@ mod tests {
         let got = check(&repo, "cm-cap").await;
         assert_eq!(got.verdict, ContentVerdict::Changes);
         assert_eq!(got.landed_in, None);
+    }
+
+    /// One base commit for `split_landing_repo`: file, `lines8` edits, message.
+    type BaseEdit<'a> = (&'a str, &'a [(usize, &'a str)], &'a str);
+
+    /// Base history for a branch editing line 2 of `f1.txt` then of `f2.txt`: `before`
+    /// commits, then `f2.txt`'s landing, then an edit of the line beside it that keeps
+    /// the tip run from clearing. Returns (TempDir, repo, tip, b2', base tip).
+    async fn split_landing_repo(
+        marker: &str,
+        before: &[BaseEdit<'_>],
+    ) -> (tempfile::TempDir, String, String, String, String) {
+        let (dir, repo) = setup_repo(marker).await;
+        std::fs::write(dir.path().join("f1.txt"), lines8(&[])).unwrap();
+        commit_file(&repo, dir.path(), "f2.txt", &lines8(&[]), "lines").await;
+        git(&repo, &["checkout", "-b", "cm-split"]).await;
+        commit_file(&repo, dir.path(), "f1.txt", &lines8(&[(2, "F1")]), "b1").await;
+        commit_file(&repo, dir.path(), "f2.txt", &lines8(&[(2, "F2")]), "b2").await;
+        let tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "main"]).await;
+        for (file, edits, msg) in before {
+            commit_file(&repo, dir.path(), file, &lines8(edits), msg).await;
+        }
+        commit_file(&repo, dir.path(), "f2.txt", &lines8(&[(2, "F2")]), "b2'").await;
+        let b2 = rev(&repo, "HEAD").await;
+        let adjacent = lines8(&[(2, "F2"), (3, "ADJ")]);
+        commit_file(&repo, dir.path(), "f2.txt", &adjacent, "edit l3").await;
+        let base = rev(&repo, "HEAD").await;
+        (dir, repo, tip, b2, base)
+    }
+
+    /// No base commit touches both files, so the run's candidates start at `b2'`, where
+    /// it first covers both; the search names `b2'` ahead of the run's later commit.
+    #[tokio::test]
+    async fn split_landing_clears_at_the_commit_completing_it() {
+        let before: &[BaseEdit<'_>] = &[
+            ("f1.txt", &[(6, "other")], "far f1 edit"),
+            ("f1.txt", &[(2, "F1"), (6, "other")], "b1'"),
+        ];
+        let (dir, repo, tip, b2, _) = split_landing_repo("split", before).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+        commit_file(&repo, dir.path(), "g.txt", "g\n", "moves on").await;
+
+        assert_eq!(merge_tree_code(&repo, "cm-split").await, 1);
+        assert_eq!(guarded_at(&repo, &b2, &tip).await, ContentVerdict::Clean);
+        let got = check(&repo, "cm-split").await;
+        assert_eq!(got.verdict, ContentVerdict::Clean);
+        assert_eq!(got.landed_in, Some(b2));
+        assert!(!got.via_pr_head);
+    }
+
+    /// The run first covers both files at `b2'`, but a revert inside it took `f1.txt`'s
+    /// line back out, so the guarded run of `b2'`, the run's only candidate (the
+    /// adjacent edit is the base tip), decides against it.
+    #[tokio::test]
+    async fn split_landing_with_a_reverted_half_reads_changes() {
+        let before: &[BaseEdit<'_>] = &[
+            ("f1.txt", &[(2, "F1")], "b1'"),
+            ("f1.txt", &[], "reverts b1'"),
+        ];
+        let (_dir, repo, tip, b2, base) = split_landing_repo("split-revert", before).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(guarded_at(&repo, &b2, &tip).await, ContentVerdict::Changes);
+        assert_eq!(
+            landed_search(&repo, &base, &tip, WINDOW_CAP, CANDIDATE_CAP).await,
+            None
+        );
+        let got = check(&repo, "cm-split").await;
+        assert_eq!(got.verdict, ContentVerdict::Changes);
+        assert_eq!(got.landed_in, None);
+    }
+
+    /// One commit's files, each with its full [`lines8`] edits.
+    type FileEdits<'a> = &'a [(&'a str, &'a [(usize, &'a str)])];
+
+    /// Branch `cm-run` makes `branch`'s commits and `main` then makes `main`'s, both
+    /// from `f1.txt` and `f2.txt` at their [`lines8`] start. Returns (TempDir, repo,
+    /// tip, each main commit's oid in order).
+    async fn run_repo(
+        marker: &str,
+        branch: &[FileEdits<'_>],
+        main: &[FileEdits<'_>],
+    ) -> (tempfile::TempDir, String, String, Vec<String>) {
+        let (dir, repo) = setup_repo(marker).await;
+        std::fs::write(dir.path().join("f1.txt"), lines8(&[])).unwrap();
+        commit_file(&repo, dir.path(), "f2.txt", &lines8(&[]), "lines").await;
+        let commit = |files: FileEdits<'_>| {
+            for (file, edits) in files {
+                std::fs::write(dir.path().join(file), lines8(edits)).unwrap();
+            }
+        };
+        git(&repo, &["checkout", "-b", "cm-run"]).await;
+        for files in branch {
+            commit(files);
+            git(&repo, &["add", "-A"]).await;
+            git(&repo, &["commit", "-m", "branch"]).await;
+        }
+        let tip = rev(&repo, "HEAD").await;
+        git(&repo, &["checkout", "main"]).await;
+        let mut oids = Vec::new();
+        for files in main {
+            commit(files);
+            git(&repo, &["add", "."]).await;
+            git(&repo, &["commit", "-m", "main"]).await;
+            oids.push(rev(&repo, "HEAD").await);
+        }
+        (dir, repo, tip, oids)
+    }
+
+    /// `k1'` touches both files but lacks `k2'`'s line, so the run's later commit is
+    /// the one that clears.
+    #[tokio::test]
+    async fn rebase_landing_clears_after_a_first_commit_touching_every_path() {
+        let k1: FileEdits = &[("f1.txt", &[(2, "K1")]), ("f2.txt", &[(2, "K1")])];
+        let k2: FileEdits = &[("f1.txt", &[(2, "K1"), (4, "K2")])];
+        let adjacent: FileEdits = &[("f1.txt", &[(2, "K1"), (4, "K2"), (5, "ADJ")])];
+        let unrelated: FileEdits = &[("g.txt", &[])];
+        let main = [unrelated, k1, k2, adjacent];
+        let (_dir, repo, _, oids) = run_repo("rebase-first-covers", &[k1, k2], &main).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(merge_tree_code(&repo, "cm-run").await, 1);
+        let got = check(&repo, "cm-run").await;
+        assert_eq!(got.verdict, ContentVerdict::Clean);
+        assert_eq!(got.landed_in.as_ref(), Some(&oids[2]));
+    }
+
+    /// Unrelated edits of both files open the run and cover it before the landing.
+    #[tokio::test]
+    async fn landing_after_unrelated_edits_in_its_run_clears() {
+        let b1: FileEdits = &[("f1.txt", &[(2, "F1")])];
+        let b2: FileEdits = &[("f2.txt", &[(2, "F2")])];
+        let main: [FileEdits; 5] = [
+            &[("f1.txt", &[(8, "U")])],
+            &[("f2.txt", &[(8, "U")])],
+            &[("f1.txt", &[(2, "F1"), (8, "U")])],
+            &[("f2.txt", &[(2, "F2"), (8, "U")])],
+            &[("f2.txt", &[(2, "F2"), (3, "ADJ"), (8, "U")])],
+        ];
+        let (_dir, repo, _, oids) = run_repo("unrelated-in-run", &[b1, b2], &main).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(merge_tree_code(&repo, "cm-run").await, 1);
+        let got = check(&repo, "cm-run").await;
+        assert_eq!(got.verdict, ContentVerdict::Clean);
+        assert_eq!(got.landed_in.as_ref(), Some(&oids[3]));
+    }
+
+    /// A commit touching neither file splits the landing into two runs, neither of which
+    /// covers both files.
+    #[tokio::test]
+    async fn a_landing_split_by_an_unrelated_commit_gets_no_candidate() {
+        let b1: FileEdits = &[("f1.txt", &[(2, "F1")])];
+        let b2: FileEdits = &[("f2.txt", &[(2, "F2")])];
+        let main: [FileEdits; 4] = [
+            b1,
+            &[("g.txt", &[])],
+            b2,
+            &[("f2.txt", &[(2, "F2"), (3, "ADJ")])],
+        ];
+        let (_dir, repo, tip, oids) = run_repo("split-by-unrelated", &[b1, b2], &main).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(
+            guarded_at(&repo, &oids[2], &tip).await,
+            ContentVerdict::Clean
+        );
+        let got = check(&repo, "cm-run").await;
+        assert_eq!(got.verdict, ContentVerdict::Changes);
+        assert_eq!(got.landed_in, None);
+    }
+
+    /// An older run of far edits covers both files with a tail of its own before the
+    /// branch's split landing; that run's first cover and the landing's both run ahead
+    /// of the older tail.
+    #[tokio::test]
+    async fn a_split_landing_after_an_older_covering_run_still_runs() {
+        let b1: FileEdits = &[("f1.txt", &[(2, "F1")])];
+        let b2: FileEdits = &[("f2.txt", &[(2, "F2")])];
+        let main: [FileEdits; 8] = [
+            &[("f1.txt", &[(8, "U")])],
+            &[("f2.txt", &[(8, "U")])],
+            &[("f1.txt", &[(6, "V"), (8, "U")])],
+            &[("f2.txt", &[(6, "V"), (8, "U")])],
+            &[("g.txt", &[])],
+            &[("f1.txt", &[(2, "F1"), (6, "V"), (8, "U")])],
+            &[("f2.txt", &[(2, "F2"), (6, "V"), (8, "U")])],
+            &[("f2.txt", &[(2, "F2"), (3, "ADJ"), (6, "V"), (8, "U")])],
+        ];
+        let (_dir, repo, _, oids) = run_repo("split-after-old-run", &[b1, b2], &main).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(merge_tree_code(&repo, "cm-run").await, 1);
+        let got = check(&repo, "cm-run").await;
+        assert_eq!(got.verdict, ContentVerdict::Clean);
+        assert_eq!(got.landed_in.as_ref(), Some(&oids[6]));
+    }
+
+    /// A squash touching both files ranks ahead of an older covering run's tail.
+    #[tokio::test]
+    async fn a_squash_landing_outranks_an_older_runs_tail() {
+        let b1: FileEdits = &[("f1.txt", &[(2, "F1")])];
+        let b2: FileEdits = &[("f2.txt", &[(2, "F2")])];
+        let main: [FileEdits; 7] = [
+            &[("f1.txt", &[(8, "U")])],
+            &[("f2.txt", &[(8, "U")])],
+            &[("f1.txt", &[(6, "V"), (8, "U")])],
+            &[("f2.txt", &[(6, "V"), (8, "U")])],
+            &[("g.txt", &[])],
+            &[
+                ("f1.txt", &[(2, "F1"), (6, "V"), (8, "U")]),
+                ("f2.txt", &[(2, "F2"), (6, "V"), (8, "U")]),
+            ],
+            &[("f2.txt", &[(2, "F2"), (3, "ADJ"), (6, "V"), (8, "U")])],
+        ];
+        let (_dir, repo, tip, oids) = run_repo("squash-after-old-run", &[b1, b2], &main).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(merge_tree_code(&repo, "cm-run").await, 1);
+        let got = check(&repo, "cm-run").await;
+        assert_eq!(got.verdict, ContentVerdict::Clean);
+        assert_eq!(got.landed_in.as_ref(), Some(&oids[5]));
+        // The squash is also its own run's first cover; one candidate pins that the
+        // full-cover group comes first.
+        assert_eq!(
+            landed_search(&repo, &oids[6], &tip, WINDOW_CAP, 1).await,
+            Some(oids[5].clone())
+        );
+    }
+
+    /// The two full-cover commits are each also their own run's first cover; each is
+    /// tried once, so the landing's first cover still fits under the cap.
+    #[tokio::test]
+    async fn duplicate_candidates_do_not_use_up_the_cap() {
+        let b1: FileEdits = &[("f1.txt", &[(2, "F1")])];
+        let b2: FileEdits = &[("f2.txt", &[(2, "F2")])];
+        let main: [FileEdits; 7] = [
+            &[("f1.txt", &[(8, "N1")]), ("f2.txt", &[(8, "N1")])],
+            &[("g.txt", &[(1, "g1")])],
+            &[
+                ("f1.txt", &[(6, "N2"), (8, "N1")]),
+                ("f2.txt", &[(6, "N2"), (8, "N1")]),
+            ],
+            &[("g.txt", &[(1, "g2")])],
+            &[("f1.txt", &[(2, "F1"), (6, "N2"), (8, "N1")])],
+            &[("f2.txt", &[(2, "F2"), (6, "N2"), (8, "N1")])],
+            &[("f2.txt", &[(2, "F2"), (3, "ADJ"), (6, "N2"), (8, "N1")])],
+        ];
+        let (_dir, repo, _, oids) = run_repo("duplicate-candidates", &[b1, b2], &main).await;
+        if skip_for_inherited_merge_keys(&repo).await {
+            return;
+        }
+
+        assert_eq!(merge_tree_code(&repo, "cm-run").await, 1);
+        let got = check(&repo, "cm-run").await;
+        assert_eq!(got.verdict, ContentVerdict::Clean);
+        assert_eq!(got.landed_in.as_ref(), Some(&oids[5]));
     }
 
     /// A window one commit past the cap keeps the tip verdict rather than search part

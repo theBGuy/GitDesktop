@@ -761,7 +761,7 @@ describe("useBranchContentCheck's merged-PR heads", () => {
     expect(view.latest().verdicts.size).toBe(branches.length);
   });
 
-  it("a head arriving mid-check never re-keys it; its upgrade waits for a changes verdict", async () => {
+  it("a head arriving mid-check never re-keys it; its upgrade waits for the first verdict to land non-clean", async () => {
     const repo = "C:/repos/cc-late-head";
     const branches = names("late", 6);
     const head = "b".repeat(40);
@@ -885,9 +885,10 @@ describe("useBranchContentCheck's merged-PR heads", () => {
     expect(view.latest().verdicts).toEqual(latched);
   });
 
-  it("clean, unknown and failed rows never upgrade", async () => {
-    const repo = "C:/repos/cc-no-upgrade";
-    const branches = ["nu-clean", "nu-unknown", "nu-failed"];
+  it("unknown and failed rows upgrade once on a late head, and a clean landing replaces them", async () => {
+    const repo = "C:/repos/cc-upgrade-unknown";
+    const branches = ["uk-clean", "uk-unknown", "uk-failed"];
+    const head = "A1".repeat(20);
     const props = { repoPath: repo, defaultBranch: "main", branches };
     vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("e"));
     const view = mount({ ...props, enabled: true });
@@ -900,15 +901,157 @@ describe("useBranchContentCheck's merged-PR heads", () => {
     view.update({
       ...props,
       enabled: true,
-      prHeads: new Map(branches.map((b) => [b, "1".repeat(40)])),
+      prHeads: new Map(branches.map((b) => [b, head])),
+    });
+    await waitFor(() => expect(calls).toHaveLength(5));
+    expect(calls.slice(3).map((c) => [c.branch, c.prHead])).toEqual([
+      ["uk-unknown", head.toLowerCase()],
+      ["uk-failed", head.toLowerCase()],
+    ]);
+    for (const call of calls.slice(3))
+      call.settle("clean", { viaPrHead: true });
+    await waitFor(() =>
+      expect(view.latest().verdicts).toEqual(
+        new Map(branches.map((b) => [b, "clean"])),
+      ),
+    );
+    expect(view.latest().results.get("uk-failed")?.viaPrHead).toBe(true);
+    expect(view.latest().prHeadsUsed).toEqual(
+      new Map([
+        ["uk-unknown", head.toLowerCase()],
+        ["uk-failed", head.toLowerCase()],
+      ]),
+    );
+
+    // The head is spent: neither another head nor a refetch runs it again.
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map(branches.map((b) => [b, "b2".repeat(20)])),
+    });
+    await act(async () => {
+      await view.client.invalidateQueries();
+    });
+    await flush();
+    expect(calls).toHaveLength(5);
+  });
+
+  it("an unknown or failed row takes a measured changes from its upgrade, never an unknown or failed one", async () => {
+    const repo = "C:/repos/cc-upgrade-unknown-keep";
+    // Each name reads <prior><upgrade>: ku = unknown prior, kf = failed prior.
+    const outcomes: Record<
+      string,
+      [ContentVerdict | "fail", ContentVerdict | "fail"]
+    > = {
+      "ku-changes": ["unknown", "changes"],
+      "ku-unknown": ["unknown", "unknown"],
+      "ku-failed": ["unknown", "fail"],
+      "kf-changes": ["fail", "changes"],
+      "kf-unknown": ["fail", "unknown"],
+      "kf-failed": ["fail", "fail"],
+    };
+    const branches = Object.keys(outcomes);
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    /** Answers every check from `from` on as it takes a slot. */
+    async function answer(from: number, phase: 0 | 1) {
+      while (
+        calls.length < from + branches.length ||
+        calls.some((c) => !c.settled)
+      ) {
+        await waitFor(() => expect(calls.some((c) => !c.settled)).toBe(true));
+        for (const call of calls.slice(from)) {
+          if (call.settled) continue;
+          const outcome = outcomes[call.branch][phase];
+          if (outcome === "fail") call.fail();
+          else call.settle(outcome);
+        }
+        await flush();
+      }
+    }
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("f"));
+    const view = mount({ ...props, enabled: true });
+    await answer(0, 0);
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map(branches.map((b) => [b, "c3".repeat(20)])),
+    });
+    await answer(branches.length, 1);
+    expect(calls.slice(branches.length).map((c) => c.prHead)).toEqual(
+      branches.map(() => "c3".repeat(20)),
+    );
+
+    const latched = new Map([
+      ["ku-changes", "changes"],
+      ["ku-unknown", "unknown"],
+      ["ku-failed", "unknown"],
+      ["kf-changes", "changes"],
+      ["kf-unknown", "unknown"],
+      ["kf-failed", "unknown"],
+    ]);
+    expect(view.latest().verdicts).toEqual(latched);
+    expect(view.latest().results.get("ku-changes")?.verdict).toBe("changes");
+    expect(view.latest().results.get("kf-changes")?.verdict).toBe("changes");
+    // An unknown prior keeps its answer over a failed upgrade, and a failed prior
+    // stays failed under an unknown one.
+    expect(view.latest().results.get("ku-failed")?.verdict).toBe("unknown");
+    expect(view.latest().results.has("kf-unknown")).toBe(false);
+    expect(view.latest().results.has("kf-failed")).toBe(false);
+    expect(view.latest().prHeadsUsed.size).toBe(0);
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map(branches.map((b) => [b, "d4".repeat(20)])),
+    });
+    await act(async () => {
+      await view.client.invalidateQueries();
+    });
+    await flush();
+    expect(calls).toHaveLength(2 * branches.length);
+    expect(view.latest().verdicts).toEqual(latched);
+  });
+
+  it("a clean row, or one whose first run carried a head, never upgrades", async () => {
+    const repo = "C:/repos/cc-no-upgrade";
+    const branches = ["nu-clean", "nu-headed-unknown", "nu-headed-failed"];
+    const props = { repoPath: repo, defaultBranch: "main", branches };
+    vi.mocked(gitContentCheckBase).mockResolvedValue(readFor("1"));
+    const view = mount({
+      ...props,
+      enabled: true,
+      prHeads: new Map([
+        ["nu-headed-unknown", "e5".repeat(20)],
+        ["nu-headed-failed", "e5".repeat(20)],
+      ]),
+    });
+    await waitFor(() => expect(calls).toHaveLength(3));
+    expect(calls.map((c) => c.prHead)).toEqual([
+      null,
+      "e5".repeat(20),
+      "e5".repeat(20),
+    ]);
+    calls[0].settle("clean");
+    calls[1].settle("unknown");
+    calls[2].fail();
+    await waitFor(() => expect(view.latest().status).toBe("settled"));
+
+    view.update({
+      ...props,
+      enabled: true,
+      prHeads: new Map(branches.map((b) => [b, "f6".repeat(20)])),
+    });
+    await act(async () => {
+      await view.client.invalidateQueries();
     });
     await flush();
     expect(calls).toHaveLength(3);
     expect(view.latest().verdicts).toEqual(
       new Map([
         ["nu-clean", "clean"],
-        ["nu-unknown", "unknown"],
-        ["nu-failed", "unknown"],
+        ["nu-headed-unknown", "unknown"],
+        ["nu-headed-failed", "unknown"],
       ]),
     );
   });

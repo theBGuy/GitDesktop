@@ -843,25 +843,28 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   work the check can't trace there, and a check that can't decide shows nothing. When the
   check is off, the dialog says why. A squash-merged branch reads as merged even after later
   commits edit the same lines, and the badge's explanation names the commit its changes went
-  into. A branch that is an older version of a merged pull request counts too once the pull
-  request's final version passes the check, even if a later commit on that pull request
-  undid part of it. Branches your own history calls merged start **pre-checked**. While
-  **Idle** is on, idle branches do too unless that check flags them; any other listed branch
-  starts checked only once the check shows its work went into the default branch, directly
-  or through its merged pull request's final version. Turn on **Include
-  branches checked out in a worktree** to list branches held by another linked folder.
-  Acting on one removes that worktree first, never by force; a worktree row never starts
-  checked; and a worktree that is locked, has uncommitted changes, or couldn't be checked
-  is listed but can't be selected. If, when its turn comes, the worktree has switched to
-  another branch or is in the middle of a merge, rebase, cherry-pick, or revert, it's left
-  in place. Review the list, then **archive** the checked branches (reversible) or
-  **delete** them. Deleting asks first, and so does archiving when it removes a worktree;
-  the confirmation names how many worktrees it removes and how many branches it archives
-  or deletes. The current branch, the default branch, branches checked out in the main
-  workspace, and agent session branches are never included (when the default branch can't
-  be read, the list stays empty and says why), and deleting skips protected branches. A
-  branch that couldn't be archived or deleted stays in the list with the reason under its
-  name, ready to retry.
+  into. To find that commit, the check reads a limited stretch of history and tries only a
+  few commits in it, so a branch that split off long ago, or whose files other commits also
+  changed, can still be flagged. A branch also reads as merged if the default branch later
+  reverted its changes; the badge doesn't mention the revert. A branch that is an older
+  version of a merged pull request reads as merged once the pull request's final version
+  passes the check, even if a later commit on that pull request undid part of it. Branches
+  your own history calls merged start **pre-checked**. While **Idle** is on, idle branches
+  do too unless that check flags them; any other listed branch starts checked only once the
+  check shows its work went into the default branch, directly or through its merged pull
+  request's final version. Turn on **Include branches checked out in a worktree** to list
+  branches held by another linked folder. Acting on one removes that worktree first, never
+  by force; a worktree row never starts checked; and a worktree that is locked, has
+  uncommitted changes, or couldn't be checked is listed but can't be selected. If, when its
+  turn comes, the worktree has switched to another branch or is in the middle of a merge,
+  rebase, cherry-pick, or revert, it's left in place. Review the list, then **archive** the
+  checked branches (reversible) or **delete** them. Deleting asks first, and so does
+  archiving when it removes a worktree; the confirmation names how many worktrees it removes
+  and how many branches it archives or deletes. The current branch, the default branch,
+  branches checked out in the main workspace, and agent session branches are never included
+  (when the default branch can't be read, the list stays empty and says why), and deleting
+  skips protected branches. A branch that couldn't be archived or deleted stays in the list
+  with the reason under its name, ready to retry.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that

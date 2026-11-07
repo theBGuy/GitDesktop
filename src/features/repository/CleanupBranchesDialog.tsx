@@ -438,7 +438,7 @@ const VERDICT_BADGE: Record<
 };
 
 /** What a verdict rests on, for its explanation: the check's answer plus the
- *  row's merged pull request label. */
+ *  label of the merged pull request whose head cleared it (null: unnamed). */
 interface VerdictDetail {
   landedIn: string | null;
   viaPrHead: boolean;
@@ -966,6 +966,8 @@ export function CleanupBranchesDialog({
     verdicts: ReadonlyMap<string, RowVerdict>;
     /** What each frozen clean verdict rests on, read from the live check now. */
     results: ReadonlyMap<string, api.BranchContentMerged>;
+    /** The PR head each via-PR clean ran with, read from the live check now. */
+    prHeadsUsed: ReadonlyMap<string, string>;
     actionable: readonly string[];
     /** The ref those verdicts were measured against: a switch or the close's
      *  reset moves the live one. */
@@ -1207,8 +1209,8 @@ export function CleanupBranchesDialog({
   );
   // Content verdicts for every row ancestry doesn't already prove merged; the
   // hook latches each branch's settled verdict for the open, final except a
-  // head-less "changes" that one later pull-request-head run may upgrade to
-  // clean.
+  // head-less non-clean one that one later pull-request-head run may replace
+  // with a more decisive answer.
   const checkNames = useMemo(
     () => candidates.filter((c) => !c.merged).map((c) => c.branch.name),
     [candidates],
@@ -1621,6 +1623,7 @@ export function CleanupBranchesDialog({
       rows: candidates,
       verdicts: new Map(candidates.map((c) => [c.branch.name, rowVerdict(c)])),
       results: new Map(check.results),
+      prHeadsUsed: new Map(check.prHeadsUsed),
       actionable: candidateNames,
       baseRef,
     });
@@ -2182,10 +2185,21 @@ export function CleanupBranchesDialog({
                         const result = (
                           shownFrozen?.results ?? check.results
                         ).get(name);
+                        const headUsed = (
+                          shownFrozen?.prHeadsUsed ?? check.prHeadsUsed
+                        ).get(name);
+                        const viaPrHead = result?.viaPrHead ?? false;
+                        // The label names the pull request whose head the check
+                        // ran only while the row still shows that head.
                         const detail: VerdictDetail = {
                           landedIn: result?.landedIn ?? null,
-                          viaPrHead: result?.viaPrHead ?? false,
-                          prLabel: c.prMerged,
+                          viaPrHead,
+                          prLabel:
+                            viaPrHead &&
+                            headUsed !== undefined &&
+                            headUsed === c.prHead?.toLowerCase()
+                              ? c.prMerged
+                              : null,
                         };
                         // The badges' title-only explanations, for AT; inside
                         // the label they would join the checkbox's name.

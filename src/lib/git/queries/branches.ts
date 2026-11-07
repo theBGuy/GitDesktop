@@ -482,7 +482,7 @@ interface ContentCheckOpen {
    *  {@link BASE_FAILED}); undefined until then. A later refetch never moves it. */
   baseRead: LatchedBaseRead | undefined;
   /** Each branch's first settled check this open. A later refetch never moves
-   *  one; only a clean upgrade replaces it. */
+   *  one; only an upgrade that ranks higher replaces it. */
   answers: ReadonlyMap<string, LatchedCheck>;
   /** Each branch's first valid merged-PR head this open; a later one is
    *  ignored, so a branch upgrades at most once. */
@@ -497,6 +497,26 @@ interface LatchedCheck {
   answer: api.BranchContentMerged | null;
   /** The PR head the landed run sent (null: none). */
   prHeadUsed: string | null;
+}
+
+/** Whether one later PR head may still re-run `record`: it ran without a head and
+ *  didn't land clean (changes, unknown, or a failed check). The trigger and the
+ *  landing both read this, or the landing would never spend the head and the
+ *  trigger would re-arm on every render. */
+function upgradable(record: LatchedCheck): boolean {
+  return record.prHeadUsed === null && record.answer?.verdict !== "clean";
+}
+
+const VERDICT_RANK: Record<api.ContentVerdict, number> = {
+  clean: 2,
+  changes: 1,
+  unknown: 0,
+};
+
+/** A latched answer's rank for an upgrade's landing; a failed check ranks with
+ *  unknown. */
+function verdictRank(answer: api.BranchContentMerged | null): number {
+  return answer === null ? 0 : VERDICT_RANK[answer.verdict];
 }
 
 /** Why an open's check is off: the backend's reason, no resolvable default
@@ -543,6 +563,9 @@ export interface BranchContentCheck {
   /** The landed answers behind `verdicts`, failed checks left out, so a clean
    *  verdict can say what cleared it. */
   results: ReadonlyMap<string, api.BranchContentMerged>;
+  /** The PR head (lowercase) behind each `viaPrHead` result, so a caller names
+   *  the pull request only while that head is still the one it shows. */
+  prHeadsUsed: ReadonlyMap<string, string>;
   /** Requested branches whose verdict hasn't landed yet. */
   pendingCount: number;
 }
@@ -555,8 +578,9 @@ export interface BranchContentCheck {
  * commit of its history, or when its merged pull request's head (`prHeads`,
  * validated here) passes the same check.
  *
- * A "changes" verdict that ran without a head is checked once more when one
- * arrives later; only a clean result replaces it.
+ * A verdict that ran without a head and isn't clean (changes, unknown, or a
+ * failed check) is checked once more when one arrives later; only a result
+ * that ranks higher replaces it (clean > changes > unknown or failed).
  *
  * `defaultBranch` is undefined ONLY while its read loads; pass null once it
  * settled with none or failed ("unsupported", final for the open). Keys sit
@@ -641,8 +665,8 @@ export function useBranchContentCheck(
   const base = landedRead?.base ?? null;
 
   // The head each branch's current attempt sends, which its key carries last.
-  // A first attempt keeps the head it was created with; a latched "changes"
-  // that ran without one takes the latched head for its one upgrade.
+  // A first attempt keeps the head it was created with; an upgradable record
+  // takes the latched head for its one upgrade.
   let sightings: Map<string, string> | null = null;
   let pins: Map<string, string | null> | null = null;
   const headsUsed: (string | null)[] = [];
@@ -662,12 +686,7 @@ export function useBranchContentCheck(
           used = head;
           (pins ??= new Map()).set(branch, head);
         }
-      } else if (
-        record.prHeadUsed === null &&
-        record.answer?.verdict === "changes" &&
-        head !== null
-      )
-        used = head;
+      } else if (upgradable(record) && head !== null) used = head;
       else used = record.prHeadUsed;
       headsUsed.push(used);
     }
@@ -737,9 +756,9 @@ export function useBranchContentCheck(
         : [],
   });
   // Latched like the base (`settledRead`/`landedRead`): a branch's settled answer
-  // is final for the open, except a head-less "changes" that one later
-  // pull-request-head run may upgrade to clean; its queryFn hands the latched
-  // answer back without git, so a filterless refetch never moves a verdict.
+  // is final for the open, except a head-less non-clean one that one later
+  // pull-request-head run may upgrade; its queryFn hands the latched answer
+  // back without git, so a filterless refetch never moves a verdict.
   let freshAnswers: Map<string, LatchedCheck> | null = null;
   if (live !== null && base !== null) {
     for (let i = 0; i < branches.length; i++) {
@@ -767,17 +786,12 @@ export function useBranchContentCheck(
       for (const [branch, landed] of landing) {
         const prior = answers.get(branch);
         if (prior === undefined) answers.set(branch, landed);
-        // An upgrade replaces a measured "changes" only when it lands clean:
-        // an unknown would hand the row to the idle pre-check fallback.
-        // Either way the head is spent, so no third run fires.
-        else if (
-          prior.prHeadUsed === null &&
-          prior.answer?.verdict === "changes" &&
-          landed.prHeadUsed !== null
-        )
+        // An upgrade replaces the prior answer only when it ranks higher (clean
+        // > changes > unknown = failed); either way it spends the head.
+        else if (upgradable(prior) && landed.prHeadUsed !== null)
           answers.set(
             branch,
-            landed.answer?.verdict === "clean"
+            verdictRank(landed.answer) > verdictRank(prior.answer)
               ? landed
               : { answer: prior.answer, prHeadUsed: landed.prHeadUsed },
           );
@@ -841,6 +855,7 @@ export function useBranchContentCheck(
 
   const verdicts = new Map<string, api.ContentVerdict>();
   const results = new Map<string, api.BranchContentMerged>();
+  const prHeadsUsed = new Map<string, string>();
   if (live === null || latched === undefined)
     return {
       status: "pending",
@@ -848,6 +863,7 @@ export function useBranchContentCheck(
       offReason: null,
       verdicts,
       results,
+      prHeadsUsed,
       pendingCount: branches.length,
     };
   if (latched === null || (landedRead !== undefined && base === null))
@@ -862,6 +878,7 @@ export function useBranchContentCheck(
           : (landedRead?.offReason ?? "baseFailed"),
       verdicts,
       results,
+      prHeadsUsed,
       pendingCount: 0,
     };
   if (base === null)
@@ -871,19 +888,22 @@ export function useBranchContentCheck(
       offReason: null,
       verdicts,
       results,
+      prHeadsUsed,
       pendingCount: branches.length,
     };
   let pendingCount = 0;
   for (const branch of branches) {
     // A latched record serves while its upgrade runs, so a row never goes
     // back to pending.
-    const answer = (live.answers.get(branch) ?? freshAnswers?.get(branch))
-      ?.answer;
+    const record = live.answers.get(branch) ?? freshAnswers?.get(branch);
+    const answer = record?.answer;
     if (answer === undefined) pendingCount++;
     else {
       // A failed check fails toward unknown, never toward merged.
       verdicts.set(branch, answer?.verdict ?? "unknown");
       if (answer !== null) results.set(branch, answer);
+      if (answer?.viaPrHead && record?.prHeadUsed)
+        prHeadsUsed.set(branch, record.prHeadUsed);
     }
   }
   return {
@@ -892,6 +912,7 @@ export function useBranchContentCheck(
     offReason: null,
     verdicts,
     results,
+    prHeadsUsed,
     pendingCount,
   };
 }

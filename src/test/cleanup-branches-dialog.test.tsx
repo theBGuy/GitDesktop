@@ -3650,6 +3650,64 @@ describe("what a clean verdict rests on", () => {
     },
   );
 
+  it("names the pull request only while its head is the one the check ran", async () => {
+    const name = "pl-moved";
+    const view = renderDialog({
+      repoPath: "C:/repos/pr-label-moved",
+      branches: [branch(name, OLD)],
+      prMerged: { [name]: "#1" },
+      prHeads: { [name]: "a1".repeat(20) },
+    });
+    await landOne(name, "clean", { viaPrHead: true });
+    const titleOf = () =>
+      within(rowOf(name)).getByText(/^in$/).closest("[title]");
+    await waitFor(() =>
+      expect(titleOf()).toHaveAttribute(
+        "title",
+        "An earlier version of #1. The pull request's final version is all in origin/main",
+      ),
+    );
+    view.rerender({
+      prMergedByBranch: new Map([
+        [name, { label: "#2", headSha: "b2".repeat(20) }],
+      ]),
+    });
+    await waitFor(() =>
+      expect(titleOf()).toHaveAttribute(
+        "title",
+        "An earlier version of its pull request. The pull request's final version is all in origin/main",
+      ),
+    );
+    expect(verdictCalls).toHaveLength(1);
+  });
+
+  it("keeps the pull request's name while its head is unchanged", async () => {
+    const name = "pl-kept";
+    const view = renderDialog({
+      repoPath: "C:/repos/pr-label-kept",
+      branches: [branch(name, OLD)],
+      prMerged: { [name]: "#1" },
+      prHeads: { [name]: "a1".repeat(20) },
+    });
+    await landOne(name, "clean", { viaPrHead: true });
+    const title =
+      "An earlier version of #1. The pull request's final version is all in origin/main";
+    const titleOf = () =>
+      within(rowOf(name)).getByText(/^in$/).closest("[title]");
+    await waitFor(() => expect(titleOf()).toHaveAttribute("title", title));
+    // A re-read map, with the head in another case, names the same head.
+    view.rerender({
+      prMergedByBranch: new Map([
+        [name, { label: "#1", headSha: "A1".repeat(20) }],
+      ]),
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(titleOf()).toHaveAttribute("title", title);
+    expect(verdictCalls).toHaveLength(1);
+  });
+
   it("pre-checks a row cleared through history or its pull request like any clean row", async () => {
     const { user } = renderDialog({
       repoPath: "C:/repos/clean-routes",
@@ -3718,6 +3776,42 @@ describe("what a clean verdict rests on", () => {
       within(rowOf("uu-idle")).getByText(/^changes not in$/),
     ).toBeInTheDocument();
     expect(isChecked("uu-idle")).toBe(false);
+  });
+
+  it("an upgrade that measures changes flags a pre-checked unknown row without unchecking it", async () => {
+    const view = renderDialog({
+      repoPath: "C:/repos/upgrade-unknown-changes",
+      branches: [branch("uc-unknown", OLD), branch("uc-clean", OLD)],
+      prMerged: { "uc-unknown": "#8" },
+    });
+    await view.user.click(screen.getByRole("button", { name: /^delete$/i }));
+    await landVerdicts({ "uc-unknown": "unknown", "uc-clean": "clean" });
+    await waitFor(() => expect(isChecked("uc-unknown")).toBe(true));
+    expect(isChecked("uc-clean")).toBe(true);
+    expect(
+      within(rowOf("uc-unknown")).queryByText(/^changes not in$/),
+    ).toBeNull();
+    view.rerender({
+      prMergedByBranch: new Map([
+        ["uc-unknown", { label: "#8", headSha: "8".repeat(40) }],
+      ]),
+    });
+    await waitFor(() => expect(verdictCalls).toHaveLength(3));
+    expect(verdictCalls[2].prHead).toBe("8".repeat(40));
+    await landVerdicts({ "uc-unknown": "changes" });
+    await waitFor(() =>
+      expect(
+        within(rowOf("uc-unknown")).getByText(/^changes not in$/),
+      ).toBeInTheDocument(),
+    );
+    expect(isChecked("uc-unknown")).toBe(true);
+    await view.user.click(primary());
+    const confirm = await screen.findByRole("dialog", {
+      name: "Delete branches?",
+    });
+    expect(confirm).toHaveTextContent(
+      "1 of the branches has changes not in origin/main.",
+    );
   });
 
   it("a clean upgrade pre-checks an untouched row, never a touched one, and never re-counts", async () => {

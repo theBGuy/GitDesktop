@@ -194,8 +194,9 @@ default's name), and a PR badge.
   merge driver, `merge.default` or `merge.renormalize`, a content check
   shows whether a stale branch's work went into the default branch, directly
   or through its merged pull request's final version, and flags a branch
-  carrying work it can't trace there. A squash-merged branch reads as safe
-  even after later commits edit the same lines, and flagged branches start
+  carrying work it can't trace there. A squash-merged branch usually reads
+  as safe even after later commits edit the same lines, because the check
+  also looks for the commit the squash landed in; flagged branches start
   unchecked. When the check is off, the dialog says why. Branches checked
   out in another linked worktree can join the list; acting on one removes
   its clean worktree first.
