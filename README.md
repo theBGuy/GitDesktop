@@ -191,10 +191,15 @@ default's name), and a PR badge.
   supplies one, so squash and rebase merges count), branches whose pull
   request was closed without merging, branches with no commits in a chosen
   window, or any mix. On Git 2.38+, unless your Git configuration sets a
-  merge driver, a content check shows whether a stale branch still holds
-  work the default branch lacks, and pre-checking leaves those branches out.
-  Branches checked out in another linked worktree can join the list; acting
-  on one removes its clean worktree first.
+  merge driver, `merge.default` or `merge.renormalize`, a content check
+  shows whether a stale branch's work went into the default branch, directly
+  or through its merged pull request's final version, and flags a branch
+  carrying work it can't trace there. A squash-merged branch usually reads
+  as safe even after later commits edit the same lines, because the check
+  also looks for the commit the squash landed in; flagged branches start
+  unchecked. When the check is off, the dialog says why. Branches checked
+  out in another linked worktree can join the list; acting on one removes
+  its clean worktree first.
 - **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
   memory before you commit (fast-forward, already up to date, clean, or
   exactly which files will conflict), with `--no-ff` and a clearly cautioned
@@ -234,7 +239,10 @@ default's name), and a PR badge.
   with are easy to spot. One-click jumps to the main workspace sit right in
   the branch switcher, where selecting a branch that's checked out elsewhere
   opens that folder straight away, that branch's context menu carries the
-  worktree actions, and a *Worktrees* row opens the full manager.
+  worktree actions, and a *Worktrees* row opens the full manager. A GitHub
+  pull request can be checked out into its own worktree straight from its
+  view, so you can review it without touching your current branch or
+  uncommitted files (needs GitHub CLI 2.98 or newer).
 - **Compare**: a tab with a three-dot diff, commits ahead/behind, and
   jump-to-PR, against a local branch or any remote's branch (fetched when
   you pick it, so a fork can compare against its parent through `upstream`

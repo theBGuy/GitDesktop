@@ -45,6 +45,15 @@ pub enum AppError {
         remote: String,
         remote_branch: String,
     },
+    #[error("{}", crate::git::worktree::diverged_message(path, commits.len(), *more, *dirty))]
+    WorktreeDiverged {
+        path: String,
+        head: String,
+        commits: Vec<crate::git::worktree::DivergedCommit>,
+        more: bool,
+        dirty: bool,
+        untracked: u32,
+    },
     #[error("not a git repository: {0}")]
     NotARepo(String),
     #[error("git executable not found")]
@@ -128,6 +137,7 @@ impl Serialize for AppError {
             AppError::Busy { .. } => "busy",
             AppError::BranchHeld { .. } => "branchHeld",
             AppError::PushUpstreamNameMismatch { .. } => "pushUpstreamNameMismatch",
+            AppError::WorktreeDiverged { .. } => "worktreeDiverged",
             AppError::NotARepo(_) => "notARepo",
             AppError::GitNotFound => "gitNotFound",
             AppError::GhNotFound => "ghNotFound",
@@ -175,6 +185,21 @@ impl Serialize for AppError {
                 map.serialize_entry("branch", branch)?;
                 map.serialize_entry("remote", remote)?;
                 map.serialize_entry("remoteBranch", remote_branch)?;
+            }
+            AppError::WorktreeDiverged {
+                path,
+                head,
+                commits,
+                more,
+                dirty,
+                untracked,
+            } => {
+                map.serialize_entry("path", path)?;
+                map.serialize_entry("head", head)?;
+                map.serialize_entry("commits", commits)?;
+                map.serialize_entry("more", more)?;
+                map.serialize_entry("dirty", dirty)?;
+                map.serialize_entry("untracked", untracked)?;
             }
             AppError::Conflict { op, paths, report } => {
                 map.serialize_entry("op", op)?;

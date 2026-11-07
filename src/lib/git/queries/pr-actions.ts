@@ -1017,3 +1017,28 @@ export function useCheckoutPr(repo: string) {
     { identity: prWriteKey("checkout", repo) },
   );
 }
+
+/** Check out a PR's head into its own worktree, or re-sync the PR's existing one.
+ *  Shares the plain checkout's pending kind, so a view holds both flavors while
+ *  either runs; the variables name the PR (`number` + `lens`) as that one's do. */
+export function useCheckoutPrWorktree(repo: string) {
+  return useRepoMutation(
+    repo,
+    (args: {
+      number: number;
+      lens: RemoteLens;
+      path: string;
+      force: boolean;
+      expectedHead?: string;
+    }) =>
+      api.ghPrCheckoutWorktree(
+        repo,
+        args.number,
+        args.lens,
+        args.path,
+        args.force,
+        args.expectedHead,
+      ),
+    { identity: prWriteKey("checkout", repo) },
+  );
+}

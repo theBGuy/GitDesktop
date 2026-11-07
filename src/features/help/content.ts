@@ -843,26 +843,35 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Closed PR** (a pull request closed without merging), and **Idle** for 30, 60, or 90 days.
   Each row names every reason that applies, such as **merged #123**, **closed #45**, or
   **worktree**, and the dialog names pull requests only where it read them. On Git 2.38 or
-  later, unless your Git configuration sets a merge driver, a branch your history doesn't
-  already call merged is also checked against the newer of your local default branch and
-  its remote copy: the row shows whether everything on it is in the default branch or it
-  still carries changes the default branch lacks, and a check that can't decide shows
-  nothing. Branches your own history calls merged start **pre-checked**. While **Idle** is
-  on, idle branches do too unless that check finds changes still to merge; any other listed
-  branch starts checked only once the check shows nothing would be lost. Turn on **Include
-  branches checked out in a worktree** to list branches held by another linked folder.
-  Acting on one removes that worktree first, never by force; a worktree row never starts
-  checked; and a worktree that is locked, has uncommitted changes, or couldn't be checked
-  is listed but can't be selected. If, when its turn comes, the worktree has switched to
-  another branch or is in the middle of a merge, rebase, cherry-pick, or revert, it's left
-  in place. Review the list, then **archive** the checked branches (reversible) or
-  **delete** them. Deleting asks first, and so does archiving when it removes a worktree;
-  the confirmation names how many worktrees it removes and how many branches it archives
-  or deletes. The current branch, the default branch, branches checked out in the main
-  workspace, and agent session branches are never included (when the default branch can't
-  be read, the list stays empty and says why), and deleting skips protected branches. A
-  branch that couldn't be archived or deleted stays in the list with the reason under its
-  name, ready to retry.
+  later, unless your Git configuration sets a merge driver, \`merge.default\` or
+  \`merge.renormalize\`, a branch your history doesn't already call merged is also checked
+  against the newer of your local default branch and its remote copy: the row shows whether
+  its changes went into the default branch, at its tip or in an earlier commit, or flags
+  work the check can't trace there, and a check that can't decide shows nothing. When the
+  check is off, the dialog says why. A squash-merged branch reads as merged even after later
+  commits edit the same lines, and the badge's explanation names the commit its changes went
+  into. To find that commit, the check reads a limited stretch of history and tries only a
+  few commits in it, so a branch that split off long ago, or whose files other commits also
+  changed, can still be flagged. A branch also reads as merged if the default branch later
+  reverted its changes; the badge doesn't mention the revert. A branch that is an older
+  version of a merged pull request reads as merged once the pull request's final version
+  passes the check, even if a later commit on that pull request undid part of it. Branches
+  your own history calls merged start **pre-checked**. While **Idle** is on, idle branches
+  do too unless that check flags them; any other listed branch starts checked only once the
+  check shows its work went into the default branch, directly or through its merged pull
+  request's final version. Turn on **Include branches checked out in a worktree** to list
+  branches held by another linked folder. Acting on one removes that worktree first, never
+  by force; a worktree row never starts checked; and a worktree that is locked, has
+  uncommitted changes, or couldn't be checked is listed but can't be selected. If, when its
+  turn comes, the worktree has switched to another branch or is in the middle of a merge,
+  rebase, cherry-pick, or revert, it's left in place. Review the list, then **archive** the
+  checked branches (reversible) or **delete** them. Deleting asks first, and so does
+  archiving when it removes a worktree; the confirmation names how many worktrees it removes
+  and how many branches it archives or deletes. The current branch, the default branch,
+  branches checked out in the main workspace, and agent session branches are never included
+  (when the default branch can't be read, the list stays empty and says why), and deleting
+  skips protected branches. A branch that couldn't be archived or deleted stays in the list
+  with the reason under its name, ready to retry.
 {{ai}}- **Generate a branch name with AI** from your working-tree changes when creating
   or renaming one. Whenever the working tree can't describe the branch being named —
   it's clean, or you're renaming a branch you aren't on — it names it from that
@@ -1073,7 +1082,9 @@ this list: one on a detached checkout has no branch row at all, one on an archiv
 sits in the collapsed "Archived" section, and filter text can hide the rest.
 
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
-  into its own folder, defaulting to a sibling of the repository.
+  into its own folder, defaulting to a sibling of the repository (the folder button
+  browses for a different parent). A GitHub pull request can also be checked out into a
+  worktree from its own view (see *GitHub PRs*); that worktree is listed here too.
 - **Open** a worktree to make it the active repository — git commands then run in that
   folder and the window title follows. The header keeps the repository's name, with the
   worktree named beneath it, so you always know which repo you're in. Open the main
@@ -1412,6 +1423,33 @@ shape plus the word, never color alone) — so a finished review (including Copi
 visible after the reviewer leaves the pending-request list. A pull request that no longer
 merges cleanly says so under its header, and **Resolve conflicts** settles it without
 leaving the app — see *Conflicts with the base branch* below.
+
+To review a pull request without touching your current branch or uncommitted files, open
+the caret beside **Checkout** and pick **Check out in a worktree…** (or run *Check out
+pull request in a worktree…* from the command palette). The popover suggests a folder
+beside the repository named after the pull request (\`<repo>-pr-<number>\`); edit it, or
+**Browse** for a different parent folder, then **Check out**. Nothing is created until
+you confirm. This needs GitHub CLI 2.98 or newer; with an older one the menu item is
+disabled and says which version you have. When the pull request's branch already has a
+worktree, the popover offers **Open worktree** and **Update to PR** instead, along with
+**Check out into a new folder…**. A pull request from a fork is usually checked out on a
+branch named after the fork's owner (\`<owner>/<branch>\`), or on the plain branch name
+when that owner can no longer be read, so GitDesktop may not recognize that worktree when
+you come back; **Worktrees…** still lists it. The popover matches by branch
+name alone, so it can find a worktree on your own branch of the same name: **Update to
+PR** is refused there, which keeps your work intact. For a pull request from this
+repository or from a fork whose owner is known, **Check out into a new folder…** creates
+a separate worktree whenever the pull request's branch isn't checked out yet (when it is,
+the message names the worktree that already has it). A fork whose owner can no longer be
+read can't be checked out while a local branch has its plain name, and nothing is changed
+when that's refused. A worktree that already
+contains the pull request's tip reports "Worktree already up to date." and is left as
+it is. If the two histories have diverged, updating asks first (**Reset this
+worktree to the PR?**), listing the commits that resetting would discard (the newest 20, with a note when
+there are more), and noting
+when its uncommitted changes would go too. When GitDesktop can locate the worktree's folder, the
+success message offers **Open worktree**, which switches to it right away. The new worktree shows up in **Worktrees…**
+like any other.
 
 Every pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
 **reviewers**, closed and merged ones included (a board keeps its finished items in a Done

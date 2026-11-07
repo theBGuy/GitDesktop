@@ -202,6 +202,9 @@ function isNoiseLine(line: string): boolean {
   if (t === "" || t === "ERROR") return true;
   if (t.startsWith("hint:")) return true;
   if (/^Rebasing \(\d+\/\d+\)/.test(t)) return true;
+  // `git worktree add` (and gh's `--worktree` arm through it) announces itself
+  // before failing; the reason is the line after.
+  if (/^Preparing worktree \(.*\)$/.test(t)) return true;
   if (PUSH_TRANSFER_HEADER.test(t)) return true;
   if (FETCH_TRANSFER_HEADER.test(t)) return true;
   if (TRANSFER_REF_LINE.test(line)) return true;

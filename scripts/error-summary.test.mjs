@@ -1664,3 +1664,55 @@ test("a bare Bitbucket transport failure still reads as unreachable", () => {
     reach("Bitbucket"),
   );
 });
+
+// Measured: `gh pr checkout --worktree` onto a branch another worktree holds.
+const WORKTREE_IN_USE = [
+  "Preparing worktree (checking out 'tw-resolve-head')",
+  "fatal: 'tw-resolve-head' is already used by worktree at 'C:/wt/other'",
+].join("\n");
+
+test("git's Preparing worktree progress line never headlines the failure", () => {
+  for (const err of [
+    appError("gh", WORKTREE_IN_USE),
+    gitError(WORKTREE_IN_USE),
+    gitError(WORKTREE_IN_USE.replaceAll("\n", "\r\n")),
+  ]) {
+    const p = presentError(err);
+    assert.equal(
+      p.summary,
+      "'tw-resolve-head' is already used by worktree at 'C:/wt/other'",
+    );
+    // Details keep the whole report, progress line included.
+    assert.match(p.fullText, /^Preparing worktree \(checking out/);
+    assert.match(p.fullText, /already used by worktree/);
+    assert.equal(p.long, true);
+  }
+});
+
+test("a one-line failure and a lone progress line keep their headline", () => {
+  assert.equal(
+    presentError(gitError("fatal: not a git repository")).summary,
+    "not a git repository",
+  );
+  assert.equal(
+    presentError(appError("gh", "pull request not found")).summary,
+    "pull request not found",
+  );
+  // gh_pr_checkout_worktree's rewrite of gh's non-empty-folder refusal.
+  const notEmpty = presentError(
+    appError(
+      "gh",
+      "C:/wt/pr-7 isn't empty — pick a new or empty folder.\n\n--worktree path must be empty: C:\\wt\\pr-7",
+    ),
+  );
+  assert.equal(
+    notEmpty.summary,
+    "C:/wt/pr-7 isn't empty — pick a new or empty folder.",
+  );
+  assert.match(notEmpty.fullText, /--worktree path must be empty/);
+  // With nothing else to say, the progress line is still better than a blank.
+  assert.equal(
+    presentError(gitError("Preparing worktree (new branch 'x')")).summary,
+    "Preparing worktree (new branch 'x')",
+  );
+});

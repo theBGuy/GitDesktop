@@ -273,6 +273,83 @@ export const ghPrCheckout = (
   lens: RemoteLens,
 ) => invoke<void>("gh_pr_checkout", { repoPath, number, lens });
 
+/** Check out a PR's head into its own worktree at `path`; a re-run on the PR's
+ *  existing worktree fast-forwards it. `force` resets that worktree to the PR and
+ *  carries `expectedHead`, the HEAD the divergence refusal measured, so a
+ *  worktree that moved since refuses again instead of losing the newer work. */
+export const ghPrCheckoutWorktree = (
+  repoPath: string,
+  number: number,
+  lens: RemoteLens,
+  path: string,
+  force: boolean,
+  expectedHead?: string,
+) =>
+  invoke<void>("gh_pr_checkout_worktree", {
+    repoPath,
+    number,
+    lens,
+    path,
+    force,
+    expectedHead: expectedHead ?? null,
+  });
+
+/** One commit a worktree reset would discard. */
+export interface WorktreeDivergedCommit {
+  sha: string;
+  subject: string;
+}
+
+/** `gh_pr_checkout_worktree`'s refusal when the PR's worktree holds commits the
+ *  PR lacks. `head` is the worktree HEAD measured at the refusal; `commits` is
+ *  newest first and capped, `more` marks the cut (there is no total); `dirty`
+ *  means uncommitted changes to tracked files; `untracked` counts the untracked
+ *  files at paths the PR tracks, which the reset overwrites. */
+export interface WorktreeDiverged {
+  kind: "worktreeDiverged";
+  path: string;
+  head: string;
+  commits: WorktreeDivergedCommit[];
+  more: boolean;
+  dirty: boolean;
+  untracked?: number;
+}
+
+/** How many commits a divergence lists before `more`; owned by the Rust
+ *  `DIVERGED_COMMIT_CAP` in src-tauri/src/git/worktree.rs. */
+export const DIVERGED_COMMIT_CAP = 20;
+
+/** A full object id as the backend spells it: lowercase only, since a forced
+ *  retry carrying any other spelling is refused. */
+const LOWERCASE_OID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+function isDivergedCommit(c: unknown): c is WorktreeDivergedCommit {
+  if (typeof c !== "object" || c === null) return false;
+  const r = c as Record<string, unknown>;
+  return typeof r.sha === "string" && typeof r.subject === "string";
+}
+
+/** Whether a thrown value is the worktree-divergence refusal, narrowed to the
+ *  payload the reset confirm reads. `head` goes back to the command as the forced
+ *  retry's `expectedHead`, so it must be a full object id rather than trusted; a
+ *  payload that can't answer reads as `false` and keeps the ordinary error. */
+export function isWorktreeDiverged(e: unknown): e is WorktreeDiverged {
+  if (typeof e !== "object" || e === null) return false;
+  const r = e as Record<string, unknown>;
+  if (r.kind !== "worktreeDiverged") return false;
+  if (typeof r.path !== "string" || !r.path) return false;
+  if (typeof r.head !== "string" || !LOWERCASE_OID_RE.test(r.head))
+    return false;
+  if (typeof r.more !== "boolean" || typeof r.dirty !== "boolean") return false;
+  if (r.untracked !== undefined && typeof r.untracked !== "number")
+    return false;
+  return (
+    Array.isArray(r.commits) &&
+    r.commits.length >= 1 &&
+    r.commits.every(isDivergedCommit)
+  );
+}
+
 // ── Bitbucket PR tasks ───────────────────────────────────────────────────────
 
 /** A PR's task checklist, in list order (Bitbucket-only — `implemented.prTasks`). */

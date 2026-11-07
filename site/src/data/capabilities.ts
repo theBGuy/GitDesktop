@@ -148,7 +148,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "See whether a stale branch still holds work the default branch lacks before you delete it (Git 2.38+)",
+      "See whether a stale branch's work already went into the default branch before you delete it, usually even when later commits edited the same lines (Git 2.38+)",
   },
   {
     group: "Branches & history",
@@ -549,6 +549,11 @@ export const capabilities: Capability[] = [
     group: "Repository & workspace",
     label:
       "Open a branch's worktree from its row in the branch list, with the worktree actions on the branch's context menu",
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Check out a GitHub pull request into its own worktree, so reviewing it never touches your current branch or files",
   },
   {
     group: "Repository & workspace",
