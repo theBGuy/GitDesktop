@@ -38,6 +38,7 @@ import { presentError } from "@/lib/error-summary";
 import * as api from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import {
+  type ContentCheckOffReason,
   refuseWhilePushRuns,
   repoKeys,
   repoStatusOptions,
@@ -102,6 +103,9 @@ interface Candidate {
    *  null. Squash and rebase merges leave no ancestor link, so the PR is the
    *  only evidence they landed. */
   prMerged: string | null;
+  /** That merged pull request's head commit as the forge reported it, or null;
+   *  the content check validates it before use. */
+  prHead: string | null;
   /** Label of the pull request this branch's name maps to that closed without
    *  merging ("#34"), or null. */
   prClosed: string | null;
@@ -304,6 +308,29 @@ const CHECKING_COPY: Record<
 };
 type CheckingWhat = keyof typeof CHECKING_COPY;
 
+/** The visible note when the content check is off: idle rows then fall back
+ *  to the idle pre-check. */
+const CHECK_OFF_NOTE: Record<ContentCheckOffReason, string> = {
+  mergeDriver: "Content check off: your Git config sets a merge driver.",
+  mergeDefault: "Content check off: your Git config sets merge.default.",
+  mergeRenormalize:
+    "Content check off: your Git config sets merge.renormalize.",
+  configUnreadable: "Content check off: your Git config couldn't be read.",
+  gitTooOld: "Content check off: it needs Git 2.38 or later.",
+  gitVersionUnreadable: "Content check off: Git's version couldn't be read.",
+  noBase: "Content check off: the default branch has no local or origin copy.",
+  noDefaultBranch: "Content check off: the default branch couldn't be found.",
+  baseFailed:
+    "Content check off: the default branch couldn't be read. Reopen this dialog to try again.",
+};
+/** A reason this build's Record doesn't name still gets a line. */
+const CHECK_OFF_GENERIC = "Content check off for this repository.";
+function checkOffNoteFor(reason: ContentCheckOffReason): string {
+  return Object.hasOwn(CHECK_OFF_NOTE, reason)
+    ? CHECK_OFF_NOTE[reason]
+    : CHECK_OFF_GENERIC;
+}
+
 /** A parked pull-request read's line, naming the criteria it serves. */
 const WAITING_COPY: Record<PrScope, string> = {
   merged:
@@ -410,8 +437,48 @@ const VERDICT_BADGE: Record<
   },
 };
 
-const verdictDetail = (verdict: "clean" | "changes", baseRef: string) =>
-  `${VERDICT_BADGE[verdict].title} ${baseRef}`;
+/** What a verdict rests on, for its explanation: the check's answer plus the
+ *  row's merged pull request label. */
+interface VerdictDetail {
+  landedIn: string | null;
+  viaPrHead: boolean;
+  prLabel: string | null;
+}
+
+type CleanRoute = "direct" | "pr";
+/** A clean verdict cleared at the base tip. Only the direct arm may say nothing
+ *  is missing: a pull-request clean covers the pull request's final head, and a
+ *  later commit on it may have undone part of this older tip. */
+const CLEAN_AT_TIP: Record<
+  CleanRoute,
+  (baseRef: string, pr: string) => string
+> = {
+  direct: (baseRef) => `${VERDICT_BADGE.clean.title} ${baseRef}`,
+  pr: (baseRef, pr) =>
+    `An earlier version of ${pr}. The pull request's final version is all in ${baseRef}`,
+};
+/** A clean verdict cleared by a base-history commit (`at`, short form). */
+const CLEAN_LANDED: Record<
+  CleanRoute,
+  (baseRef: string, pr: string, at: string) => string
+> = {
+  direct: (baseRef, _pr, at) => `Its changes went into ${baseRef} in ${at}`,
+  pr: (baseRef, pr, at) =>
+    `An earlier version of ${pr}. The pull request's final version went into ${baseRef} in ${at}`,
+};
+
+function verdictDetail(
+  verdict: "clean" | "changes",
+  baseRef: string,
+  detail: VerdictDetail,
+) {
+  if (verdict === "changes") return `${VERDICT_BADGE.changes.title} ${baseRef}`;
+  const route: CleanRoute = detail.viaPrHead ? "pr" : "direct";
+  const pr = detail.prLabel ?? "its pull request";
+  return detail.landedIn === null
+    ? CLEAN_AT_TIP[route](baseRef, pr)
+    : CLEAN_LANDED[route](baseRef, pr, detail.landedIn.slice(0, 7));
+}
 
 const WORKTREE_BADGE: Record<
   "locked" | "free",
@@ -557,11 +624,13 @@ function RowBadges({
   candidate: c,
   error,
   verdict,
+  detail,
   baseRef,
 }: {
   candidate: Candidate;
   error: string | undefined;
   verdict: RowVerdict;
+  detail: VerdictDetail;
   /** The ref the verdicts were measured against, as git names it. */
   baseRef: string;
 }) {
@@ -633,7 +702,7 @@ function RowBadges({
       node: (
         <span
           className={cn("flex items-center gap-0.5", v.tone)}
-          title={verdictDetail(verdict, baseRef)}
+          title={verdictDetail(verdict, baseRef, detail)}
         >
           <v.Icon weight="bold" aria-hidden className="size-3" />
           <span>
@@ -837,10 +906,11 @@ export function CleanupBranchesDialog({
    *  deliberately not held on: it falls open inside that hook, since nothing
    *  would ever arrive to lift the hold. */
   rulesSettling: boolean;
-  /** Branch name → the label of the merged pull request it maps to ("#123").
-   *  Name-keyed and limited to the PRs the app has fetched, so it labels rows,
+  /** Branch name → the merged pull request it maps to: its label ("#123") and
+   *  head commit (null when the forge gave none). Name-keyed and limited to the
+   *  PRs the app has fetched, so it labels rows and feeds the content check,
    *  never selects them without a clean content verdict. */
-  prMergedByBranch: Map<string, string>;
+  prMergedByBranch: Map<string, { label: string; headSha: string | null }>;
   /** Branch name → the label of the pull request it maps to that closed
    *  without merging ("#34"), any base. Name-keyed like
    *  {@link prMergedByBranch}. */
@@ -894,6 +964,8 @@ export function CleanupBranchesDialog({
   const [frozen, setFrozen] = useState<{
     rows: Candidate[];
     verdicts: ReadonlyMap<string, RowVerdict>;
+    /** What each frozen clean verdict rests on, read from the live check now. */
+    results: ReadonlyMap<string, api.BranchContentMerged>;
     actionable: readonly string[];
     /** The ref those verdicts were measured against: a switch or the close's
      *  reset moves the live one. */
@@ -991,7 +1063,8 @@ export function CleanupBranchesDialog({
       const ts = Date.parse(b.lastCommitDate);
       const ageDays = Number.isFinite(ts) ? Math.floor((now - ts) / DAY_MS) : 0;
       const merged = mergedSet.has(b.name);
-      const prMerged = prMergedByBranch.get(b.name) ?? null;
+      const mergedPr = prMergedByBranch.get(b.name);
+      const prMerged = mergedPr?.label ?? null;
       const prClosed = prClosedByBranch.get(b.name) ?? null;
       const old = ageDays >= windowDays;
       if (
@@ -1003,6 +1076,7 @@ export function CleanupBranchesDialog({
           branch: b,
           merged,
           prMerged,
+          prHead: mergedPr?.headSha ?? null,
           prClosed,
           ageDays,
           old,
@@ -1132,12 +1206,20 @@ export function CleanupBranchesDialog({
     [candidates],
   );
   // Content verdicts for every row ancestry doesn't already prove merged; the
-  // hook latches each branch's first settled verdict for the open, so a landed
-  // verdict never changes within it.
+  // hook latches each branch's settled verdict for the open, final except a
+  // head-less "changes" that one later pull-request-head run may upgrade to
+  // clean.
   const checkNames = useMemo(
     () => candidates.filter((c) => !c.merged).map((c) => c.branch.name),
     [candidates],
   );
+  // A merged pull request's head lets the check clear an older version of it.
+  const prHeadByBranch = useMemo(() => {
+    const heads = new Map<string, string>();
+    for (const c of candidates)
+      if (!c.merged && c.prHead !== null) heads.set(c.branch.name, c.prHead);
+    return heads;
+  }, [candidates]);
   // A failed read passes as still loading, so the open latches the name a
   // recovery brings rather than null, which would end the check for the open.
   const check = useBranchContentCheck(
@@ -1145,6 +1227,7 @@ export function CleanupBranchesDialog({
     defaultFailed ? undefined : defaultBranch,
     checkNames,
     open,
+    prHeadByBranch,
   );
   // The selection re-seeds when the repo changes, or when the pre-checked SET
   // (sorted keys, so a new-but-equal array or a reorder on the 30s clock isn't
@@ -1359,6 +1442,18 @@ export function CleanupBranchesDialog({
     checkNames.length > 0
       ? ` Contents compared with ${check.base.refName}.`
       : "";
+  // Drawn in the live region and never repeated in its sr-only resting line.
+  // Only over a settled list: the reads that decide which rows list (ancestry,
+  // worktrees, branch rules) may still be running.
+  const checkOffNote =
+    shownFrozen === null &&
+    !showSkeleton &&
+    !ancestryLoading &&
+    check.status === "unsupported" &&
+    check.offReason !== null &&
+    checkNames.length > 0
+      ? checkOffNoteFor(check.offReason)
+      : null;
   const baseRef = check.base?.refName ?? defaultShort;
   // Frozen rows name the ref their frozen verdicts were measured against.
   const rowsBaseRef = shownFrozen?.baseRef ?? baseRef;
@@ -1525,6 +1620,7 @@ export function CleanupBranchesDialog({
     setFrozen({
       rows: candidates,
       verdicts: new Map(candidates.map((c) => [c.branch.name, rowVerdict(c)])),
+      results: new Map(check.results),
       actionable: candidateNames,
       baseRef,
     });
@@ -1930,6 +2026,7 @@ export function CleanupBranchesDialog({
                 !showCheckLine &&
                   !showPrFailedLine &&
                   !worktreeCheckFailed &&
+                  checkOffNote === null &&
                   "sr-only",
               )}
             >
@@ -2001,6 +2098,11 @@ export function CleanupBranchesDialog({
                 <p className="px-1 py-1 text-[11px] text-muted-foreground">
                   Worktree checkouts couldn't be read, so a branch checked out
                   in another worktree may be listed.
+                </p>
+              ) : null}
+              {checkOffNote !== null ? (
+                <p className="px-1 py-1 text-[11px] text-muted-foreground">
+                  {checkOffNote}
                 </p>
               ) : null}
             </div>
@@ -2077,13 +2179,21 @@ export function CleanupBranchesDialog({
                           shownFrozen === null
                             ? rowVerdict(c)
                             : (shownFrozen.verdicts.get(name) ?? null);
+                        const result = (
+                          shownFrozen?.results ?? check.results
+                        ).get(name);
+                        const detail: VerdictDetail = {
+                          landedIn: result?.landedIn ?? null,
+                          viaPrHead: result?.viaPrHead ?? false,
+                          prLabel: c.prMerged,
+                        };
                         // The badges' title-only explanations, for AT; inside
                         // the label they would join the checkbox's name.
                         const details = [
                           c.prMerged ? prMergedDetail(c.prMerged) : null,
                           c.prClosed ? PR_CLOSED_DETAIL : null,
                           verdict === "clean" || verdict === "changes"
-                            ? verdictDetail(verdict, rowsBaseRef)
+                            ? verdictDetail(verdict, rowsBaseRef, detail)
                             : null,
                         ].filter((d) => d !== null);
                         const describedBy =
@@ -2151,6 +2261,7 @@ export function CleanupBranchesDialog({
                                 candidate={c}
                                 error={err}
                                 verdict={verdict}
+                                detail={detail}
                                 baseRef={rowsBaseRef}
                               />
                             </label>
