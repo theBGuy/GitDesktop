@@ -176,33 +176,54 @@ function landing(cache: QueryCache, query: Query): Promise<boolean> {
  * e.g. Compare hidden) is read now. Those two re-reads call `query.fetch`,
  * since `refetchQueries` skips a query whose observers are all disabled. Only
  * the reads that decide a pick's Create hold and pruned line are passed, so a
- * slow unrelated read (an open file diff) never holds the stamp. Read errors
- * are swallowed; their own arms report them.
+ * slow unrelated read (an open file diff) never holds the stamp. Never
+ * rejects: resolves, per key, null when its read after the fetch succeeded
+ * (or it had none to make), else the `dataUpdatedAt` its failure left cached,
+ * sampled as it failed so a later success elsewhere can't pass as it; the
+ * read's own arms report its error.
  */
 async function settleFreshReads(
   queryClient: QueryClient,
   straddling: ReadonlySet<Query>,
   keys: readonly QueryKey[],
-): Promise<void> {
+): Promise<(number | null)[]> {
   const cache = queryClient.getQueryCache();
-  await Promise.all(
+  const read = (query: Query) =>
+    query.fetch().then(
+      () => null,
+      () => query.state.dataUpdatedAt,
+    );
+  return Promise.all(
     keys.map(async (queryKey) => {
       const query = cache.find({ queryKey, exact: true });
-      if (query === undefined) return;
-      if (straddling.has(query)) {
-        if (await landing(cache, query))
-          await query.fetch().catch(() => undefined);
-      } else if (query.state.fetchStatus === "fetching") {
+      if (query === undefined) return null;
+      if (straddling.has(query))
+        return (await landing(cache, query)) ? read(query) : null;
+      if (query.state.fetchStatus === "fetching") {
         await queryClient.refetchQueries(
           { queryKey, exact: true },
           { cancelRefetch: false },
         );
-      } else if (query.state.isInvalidated) {
-        // No enabled observer: the invalidation only marked it stale.
-        await query.fetch().catch(() => undefined);
+        return query.state.status === "error"
+          ? query.state.dataUpdatedAt
+          : null;
       }
+      // No enabled observer: the invalidation only marked it stale.
+      if (query.state.isInvalidated) return read(query);
+      return null;
     }),
   );
+}
+
+/** A pick's post-fetch comparison read failed: `over` is the `dataUpdatedAt`
+ *  of the answer it left cached (0 for none), which predates the fetch, so
+ *  Create holds until a newer answer lands. Kept apart from the stamp, whose
+ *  slot a follow-up can take over. */
+export interface CompareFailedRead {
+  repoPath: string;
+  pickedValue: string;
+  currentBranch: string;
+  over: number;
 }
 
 /**
@@ -232,6 +253,7 @@ export function useCompareRemoteFetch(
     repoPath: string;
     remote: string;
   } | null>(null);
+  const [failedRead, setFailedRead] = useState<CompareFailedRead | null>(null);
   // A repo change drops whatever stamp the last repo left, a parked one
   // included: its line and its reconnect re-fire belong to that repo.
   const [stampRepo, setStampRepo] = useState(repoPath);
@@ -240,7 +262,11 @@ export function useCompareRemoteFetch(
     setStamp(null);
     setHiddenFollowUp(null);
     setFailedFollowUp(null);
+    setFailedRead(null);
   }
+  // Counts pick fires: a settle a newer pick fire started after records no
+  // failed read.
+  const pickFires = useRef(0);
   const epoch = useRef(0);
   const fetchRemote = useMutation({
     mutationKey: ["compare-fetch-remote", repoPath],
@@ -307,6 +333,8 @@ export function useCompareRemoteFetch(
       );
       return;
     }
+    const pickFire = req.pickedValue === null ? null : ++pickFires.current;
+    if (pickFire !== null) setFailedRead(null);
     epoch.current += 1;
     const next: CompareFetchStamp = {
       repoPath: req.repo,
@@ -340,10 +368,21 @@ export function useCompareRemoteFetch(
             ? { ...s, phase: "comparing" }
             : s,
         );
-        await settleFreshReads(queryClient, straddling, [
+        const [, failedOver] = await settleFreshReads(queryClient, straddling, [
           remoteBranchesOptions(req.repo).queryKey,
           repoKeys.compare(req.repo, req.pickedValue, req.currentBranch),
         ]);
+        if (
+          failedOver !== null &&
+          pickFire === pickFires.current &&
+          useUiStore.getState().repoPath === req.repo
+        )
+          setFailedRead({
+            repoPath: req.repo,
+            pickedValue: req.pickedValue,
+            currentBranch: req.currentBranch,
+            over: failedOver,
+          });
       }
     } catch {
       failed = true;
@@ -431,5 +470,5 @@ export function useCompareRemoteFetch(
     if (slotFree && failedFollowUp !== null) promoteFailure();
   }, [slotFree, failedFollowUp]);
 
-  return { stamp, fire, clearFollowUp };
+  return { stamp, failedRead, fire, clearFollowUp };
 }

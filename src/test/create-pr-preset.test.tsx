@@ -540,6 +540,100 @@ describe("CreatePrDialog reopen over a running create", () => {
     await waitFor(() => expect(aheadBases().at(-1)).toBe("refs/heads/dev"));
   });
 
+  /** Fails a create from `opener`, then reopens the kept draft with no preset
+   *  and `reopenBase` as the default base. */
+  async function failThenReopenLocal(
+    opener: { preset?: CreatePrPreset; defaultBase: string },
+    reopenBase: string | undefined,
+  ) {
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    const dialog = renderDialog(opener);
+    await screen.findByText("1 commit to merge.");
+    await user.type(screen.getByLabelText("Title"), "Kept");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    dialog.close();
+    await act(async () => fail({ message: "No commits between" }));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    dialog.reopenWith(undefined, reopenBase);
+    return user;
+  }
+
+  /** Resubmits the kept draft and returns the base the second create sent. */
+  async function resubmittedBase(user: ReturnType<typeof userEvent.setup>) {
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create pull request" }),
+      ).toBeEnabled(),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(2));
+    return (forgePrCreate.mock.calls[1] as unknown[])[1];
+  }
+
+  it("moves a kept draft's locally named remote base to a local pick's base", async () => {
+    const user = await failThenReopenLocal(
+      {
+        preset: {
+          target: "origin",
+          base: "main",
+          baseRef: "refs/remotes/origin/main",
+        },
+        defaultBase: "main",
+      },
+      "dev",
+    );
+    await waitFor(() => expect(baseField()).toHaveTextContent("dev"));
+    await waitFor(() => expect(aheadBases().at(-1)).toBe("refs/heads/dev"));
+    expect(screen.getByLabelText("Title")).toHaveValue("Kept");
+    expect(await resubmittedBase(user)).toBe("dev");
+  });
+
+  it("moves a kept draft from one local pick's base to the next", async () => {
+    const user = await failThenReopenLocal({ defaultBase: "main" }, "dev");
+    await waitFor(() => expect(baseField()).toHaveTextContent("dev"));
+    await waitFor(() => expect(aheadBases().at(-1)).toBe("refs/heads/dev"));
+    expect(screen.getByLabelText("Title")).toHaveValue("Kept");
+    expect(await resubmittedBase(user)).toBe("dev");
+  });
+
+  it("returns a kept draft to the parent target a local pick opens on", async () => {
+    forkWithUpstream();
+    await failThenReopenLocal(
+      { preset: ORIGIN_PRESET, defaultBase: "feature-x" },
+      "dev",
+    );
+    await waitFor(() =>
+      expect(targetButton("Parent")).toHaveAttribute("aria-pressed", "true"),
+    );
+    // The parent reconcile swaps in the parent's default branch, as on a
+    // fresh open.
+    await waitFor(() =>
+      expect(aheadBases().at(-1)).toBe("refs/remotes/upstream/main"),
+    );
+    expect(screen.getByLabelText("Title")).toHaveValue("Kept");
+  });
+
+  it("keeps a kept draft's base when the pull requests list reopens it", async () => {
+    // The list's opener passes neither a preset nor a default base; a fresh
+    // open there would seed main.
+    const user = await failThenReopenLocal({ defaultBase: "dev" }, undefined);
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(baseField()).toHaveTextContent("dev");
+    expect(screen.getByLabelText("Title")).toHaveValue("Kept");
+    expect(await resubmittedBase(user)).toBe("dev");
+  });
+
   it("keeps a remote-only base through the create and its failure", async () => {
     forkWithUpstream();
     let fail!: (e: unknown) => void;

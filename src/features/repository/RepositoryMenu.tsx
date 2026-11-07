@@ -24,6 +24,7 @@ import {
   TreeStructureIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { lazy, Suspense, useEffect, useEffectEvent, useState } from "react";
 import { toast } from "sonner";
@@ -66,9 +67,11 @@ import {
   effectiveActions,
 } from "@/lib/automations/types";
 import { copyText } from "@/lib/clipboard";
+import { composedErrorPresentation } from "@/lib/error-summary";
 import { isRateLimitError } from "@/lib/forge-backoff";
 import {
   forgeRepoUrl,
+  gitFetchRemote,
   openInTerminal,
   openWithDefault,
   openWithProgram,
@@ -78,6 +81,7 @@ import {
   EMPTY_NAMESPACES,
   forgeFeatureReady,
   forgeSupports,
+  repoKeys,
   useForgeOwnedNamespaces,
   useForgeStatus,
   useForkRepo,
@@ -88,6 +92,7 @@ import {
   useRepoStatus,
   useSetRepoStar,
 } from "@/lib/git/queries";
+import { isLocalRepoQuery } from "@/lib/git/queries/local-query-filter";
 import { knownProvider, providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useJiraLink } from "@/lib/jira/queries";
@@ -106,7 +111,7 @@ import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
 import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
-import { toastError } from "@/lib/toast";
+import { errorToastAction, toastError } from "@/lib/toast";
 import { RemoteUrlDialog } from "./RemoteUrlDialog";
 import { RemoveRepoDialog, RepoAliasDialog } from "./RepoDialogs";
 import { RepoSettingsDialogFallback } from "./RepoSettingsDialogFallback";
@@ -389,13 +394,40 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     await removeUpstream.remove();
   }
   // The palette run has no card or row to vanish on success, so it says so,
-  // naming the repo it landed in once the user has left it; a failure toasts
-  // from the hook.
+  // naming the repo it landed in once the user has left it; a failed add toasts
+  // from the hook. Compare lists only fetched refs and stops offering the add
+  // once the remote exists, so this run fetches the new remote itself.
   const upstreamOffer = useAddUpstreamOffer(repoPath);
+  const queryClient = useQueryClient();
   async function addUpstreamFromPalette() {
     const addIn = repoPath;
     const { ok } = await upstreamOffer.addUpstream();
-    if (ok) toast.success(`Upstream remote added${landedIn(addIn).away}`);
+    if (!ok) return;
+    toast.success(`Upstream remote added${landedIn(addIn).away}`);
+    await fetchAddedUpstream(addIn);
+  }
+  // Nothing else fetches upstream later (a plain fetch, auto-fetch included,
+  // reads only the default remote), so a failure offers its own Retry; Details
+  // rides the cancel slot.
+  async function fetchAddedUpstream(addIn: string) {
+    try {
+      await gitFetchRemote(addIn, "upstream");
+    } catch (e) {
+      const title = `Added the upstream remote${landedIn(addIn).away}, but couldn't fetch it`;
+      toast.error(title, {
+        duration: 8000,
+        action: {
+          label: "Retry",
+          onClick: () => void fetchAddedUpstream(addIn),
+        },
+        cancel: errorToastAction(composedErrorPresentation(title, [e])),
+      });
+    } finally {
+      void queryClient.invalidateQueries({
+        queryKey: repoKeys.all(addIn),
+        predicate: isLocalRepoQuery,
+      });
+    }
   }
 
   // Every route opens through here, so the render path is captured once per

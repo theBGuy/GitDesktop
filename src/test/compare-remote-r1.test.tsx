@@ -43,6 +43,7 @@ import type {
   RemoteBranch,
   RepoStatus,
 } from "@/lib/git/types";
+import { dispatchAction } from "@/lib/hotkeys/hotkeys";
 import { loadSettings } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { usePrCreateStore } from "@/lib/stores/pr-create";
@@ -654,6 +655,189 @@ describe("Compare fetch stamp over the post-fetch comparison", () => {
     expect(featureReads()).toBe(before);
   });
 
+  const COMPARE_FAILED = "Couldn't compare with origin/feature-x";
+  const REFRESH_FAILED =
+    "Couldn't refresh this comparison — showing the last loaded results.";
+
+  /** The pick's comparison: its first read answers `cached`, later reads
+   *  reject until `heal()`, then answer `fresh`. */
+  function failingRereads(cached: CommitSummary[], fresh: CommitSummary[]) {
+    let healed = false;
+    let pickReads = 0;
+    vi.mocked(gitCompareBranches).mockImplementation(
+      async (_repo, base, compare) => {
+        if (base !== FEATURE_REF && compare !== FEATURE_REF)
+          return { ahead: [COMMIT], behind: [] };
+        pickReads += 1;
+        if (pickReads === 1) return { ahead: cached, behind: [] };
+        if (!healed) throw new Error("compare boom");
+        return { ahead: fresh, behind: [] };
+      },
+    );
+    return {
+      reads: () => pickReads,
+      heal: () => {
+        healed = true;
+      },
+    };
+  }
+
+  /** Picks origin/feature-x over {@link failingRereads} and lets its fetch
+   *  settle onto the failed re-read. */
+  async function pickOverFailedReread(
+    cached: CommitSummary[],
+    fresh: CommitSummary[],
+  ) {
+    const fetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockReturnValue(fetch.promise);
+    const compare = failingRereads(cached, fresh);
+    const user = userEvent.setup();
+    renderPanel();
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine("Fetching origin…");
+    await waitFor(() => expect(compare.reads()).toBe(1));
+    await settle();
+    await act(async () => fetch.resolve());
+    await statusLine(REFRESH_FAILED);
+    await settle();
+    return { user, ...compare };
+  }
+
+  it("keeps the failed-read hold when the add-upstream follow-up takes the slot", async () => {
+    forkWithoutUpstream();
+    const run = await pickOverFailedReread([COMMIT], [COMMIT]);
+    expect(createButton()).toHaveAccessibleDescription(COMPARE_FAILED);
+    await pickOption(run.user, /^Add upstream remote/);
+    await waitFor(() => expect(fetchedRemotes()).toContain("upstream"));
+    await settle();
+    expect(screen.getByText(REFRESH_FAILED)).toBeInTheDocument();
+    expect(createButton()).toHaveAttribute("aria-disabled", "true");
+    expect(createButton()).toHaveAccessibleDescription(COMPARE_FAILED);
+    expect(dispatchAction("create-pr")).toBe(false);
+  });
+
+  it("keeps the failed-read hold when a waiting follow-up failure is promoted", async () => {
+    forkWithoutUpstream();
+    // Settled before the end: the single-flight map is module state.
+    const originFetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockImplementation((_repo, r) =>
+      r === "origin"
+        ? originFetch.promise
+        : Promise.reject(new Error("upstream boom")),
+    );
+    const compare = failingRereads([COMMIT], [COMMIT]);
+    const user = userEvent.setup();
+    renderPanel();
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine("Fetching origin…");
+    await waitFor(() => expect(compare.reads()).toBe(1));
+    await pickOption(user, /^Add upstream remote/);
+    await waitFor(() => expect(fetchedRemotes()).toContain("upstream"));
+    await settle();
+    await act(async () => originFetch.resolve());
+    expect(await statusLine("Couldn't fetch upstream.")).toBeInTheDocument();
+    await settle();
+    expect(createButton()).toHaveAttribute("aria-disabled", "true");
+    expect(createButton()).toHaveAccessibleDescription(COMPARE_FAILED);
+  });
+
+  it("follows a successful Retry made while the other settle read still runs", async () => {
+    const fetch = deferred<void>();
+    vi.mocked(gitFetchRemote).mockReturnValue(fetch.promise);
+    const compare = failingRereads([COMMIT], [COMMIT]);
+    const listReread = deferred<RemoteBranch[]>();
+    let holdList = false;
+    vi.mocked(gitRemoteBranches).mockImplementation(async () =>
+      holdList
+        ? listReread.promise
+        : [remote("upstream", "main"), remote("origin", "feature-x")],
+    );
+    const user = userEvent.setup();
+    renderPanel();
+    await pickOption(user, /^origin\/feature-x/);
+    await statusLine("Fetching origin…");
+    await waitFor(() => expect(compare.reads()).toBe(1));
+    await settle();
+    holdList = true;
+    await act(async () => fetch.resolve());
+    await statusLine(REFRESH_FAILED);
+    compare.heal();
+    await user.click(
+      screen.getByRole("button", { name: "Retry loading this comparison" }),
+    );
+    await waitFor(() => expect(screen.queryByText(REFRESH_FAILED)).toBeNull());
+    expect(createButton()).toHaveAccessibleDescription(UPDATING);
+    await act(async () =>
+      listReread.resolve([
+        remote("upstream", "main"),
+        remote("origin", "feature-x"),
+      ]),
+    );
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(createButton()).not.toHaveAccessibleDescription(COMPARE_FAILED);
+  });
+
+  it("holds Create on the failed comparison when the post-fetch re-read fails", async () => {
+    const run = await pickOverFailedReread([COMMIT], [COMMIT]);
+    expect(run.reads()).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText(UPDATING)).toBeNull();
+    expect(createButton()).toHaveAttribute("aria-disabled", "true");
+    expect(createButton()).toHaveAccessibleDescription(
+      "Couldn't compare with origin/feature-x",
+    );
+    expect(dispatchAction("create-pr")).toBe(false);
+    run.heal();
+    await run.user.click(
+      screen.getByRole("button", { name: "Retry loading this comparison" }),
+    );
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    expect(createButton()).not.toHaveAccessibleDescription(
+      "Couldn't compare with origin/feature-x",
+    );
+  });
+
+  it("never reads a cached empty answer as nothing to propose after a failed re-read", async () => {
+    const run = await pickOverFailedReread([], []);
+    expect(createButton()).toHaveAccessibleDescription(
+      "Couldn't compare with origin/feature-x",
+    );
+    run.heal();
+    await run.user.click(
+      screen.getByRole("button", { name: "Retry loading this comparison" }),
+    );
+    await waitFor(() =>
+      expect(createButton()).toHaveAccessibleDescription(
+        "feat has no commits to propose onto origin/feature-x",
+      ),
+    );
+  });
+
+  it("keeps Create over a local pick's failed refresh", async () => {
+    let reads = 0;
+    vi.mocked(gitCompareBranches).mockImplementation(async () => {
+      reads += 1;
+      if (reads === 1) return { ahead: [COMMIT], behind: [] };
+      throw new Error("compare boom");
+    });
+    const client = renderPanel();
+    await waitFor(() =>
+      expect(createButton()).not.toHaveAttribute("aria-disabled", "true"),
+    );
+    await act(() =>
+      client
+        .refetchQueries({ queryKey: repoKeys.compare(REPO, "main", "feat") })
+        .catch(() => undefined),
+    );
+    await statusLine(
+      "Couldn't refresh this comparison — showing the last loaded results.",
+    );
+    expect(createButton()).not.toHaveAttribute("aria-disabled", "true");
+  });
+
   it("reads the comparison after a fetch that settled while Compare was hidden", async () => {
     const fetch = deferred<void>();
     vi.mocked(gitFetchRemote).mockReturnValue(fetch.promise);
@@ -735,6 +919,33 @@ describe("Compare pick corrected to a longer remote", () => {
     );
     await settle();
     vi.mocked(gitRemotes).mockResolvedValue(["origin", "team"]);
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    expect(
+      await statusLine("team/fork is no longer a remote."),
+    ).toBeInTheDocument();
+  });
+
+  it("records a listed remote that arrives for an unrecorded fallback pick", async () => {
+    const VALUE = "refs/remotes/team/fork/main";
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    vi.mocked(gitRemoteBranches).mockResolvedValue([
+      remote("origin", "feature-x"),
+      remote("team", "fork/main"),
+    ]);
+    const user = userEvent.setup();
+    const client = renderPanel();
+    const record = renderHook(() => usePickRemote(REPO, VALUE));
+    await pickOption(user, /^team\/fork\/main/);
+    await settle();
+    expect(record.result.current).toBeNull();
+    vi.mocked(gitRemotes).mockResolvedValue(["origin", "team/fork"]);
+    await act(() =>
+      client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    await waitFor(() => expect(record.result.current).toBe("team/fork"));
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
     await act(() =>
       client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
     );

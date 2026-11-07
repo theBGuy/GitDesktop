@@ -778,15 +778,18 @@ export function CreatePrDialog({
             consumeLastFailed(repoPath, retained)))
       ) {
         // A kept draft still takes the opener's target and base, which its
-        // label promised; everything else stays the draft's. This mount's own
-        // running create keeps its pair: its identity controls are frozen. An
-        // opener without a preset drops the last one, so the reconcile moves
-        // a remote-only base it left to the opener's base.
+        // label promised, as a fresh open seeds them; everything else stays the
+        // draft's. This mount's own running create keeps its pair: its identity
+        // controls are frozen. An opener with neither a preset nor a default
+        // base (the pull requests list) leaves the draft's pair alone.
         if (!form.state.isSubmitting) {
           setAppliedPreset(preset);
           if (preset) {
             setTarget(preset.target);
             form.setFieldValue("base", preset.base);
+          } else if (defaultBase !== undefined) {
+            setTarget("upstream");
+            form.setFieldValue("base", defaultBase);
           }
         }
         focusTitleIfEmpty();

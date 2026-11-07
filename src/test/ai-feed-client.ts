@@ -24,14 +24,17 @@ export function feedingClient(
           wake?.();
         };
         onFeed({ push: enqueue, end: () => enqueue(null) });
+        const aborted = () => new DOMException("Aborted", "AbortError");
         for (;;) {
+          // An abort that already happened fires no event for the wait below.
+          if (signal?.aborted) throw aborted();
           if (queue.length === 0) {
             await new Promise<void>((r) => {
               wake = r;
-              signal?.addEventListener("abort", () => r());
+              signal?.addEventListener("abort", () => r(), { once: true });
             });
           }
-          if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+          if (signal?.aborted) throw aborted();
           const next = queue.shift();
           if (next === null) return;
           if (next !== undefined) yield next;

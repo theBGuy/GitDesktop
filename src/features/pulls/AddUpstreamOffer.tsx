@@ -1,7 +1,13 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useSyncExternalStore } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { failedSinceLastSuccess } from "@/features/conversations/remote-section-state";
-import { useAddRemote, useForgeStatus, useRemotes } from "@/lib/git/queries";
+import {
+  remotesOptions,
+  useAddRemote,
+  useForgeStatus,
+  useRemotes,
+} from "@/lib/git/queries";
 import { useLensGate } from "@/lib/repo-lens/queries";
 import { useSettings } from "@/lib/settings/queries";
 import { originNoteFor } from "@/lib/stores/notifications";
@@ -53,7 +59,10 @@ export function useAddUpstreamOffer(repoPath: string): {
   const lensGate = useLensGate(repoPath);
   const remotes = useRemotes(repoPath);
   const settings = useSettings();
-  const isGithub = forge.data?.provider === "github";
+  const queryClient = useQueryClient();
+  // Only a successful forge read: a failed refresh over cached data may
+  // describe an origin since re-pointed, and the add takes its host from it.
+  const isGithub = forge.isSuccess && forge.data.provider === "github";
   const forkRecord = settings.data?.recentRepos.find(
     (r) => r.path === repoPath,
   );
@@ -100,7 +109,8 @@ export function useAddUpstreamOffer(repoPath: string): {
   // On success the broad invalidation refreshes remotes → `useLensGate` flips
   // true, so fork-target surfaces light up live.
   async function addUpstream(): Promise<{ ok: boolean }> {
-    if (!forkParent || addsInFlight.has(repoPath)) return { ok: false };
+    if (!forkParent || !isGithub || addsInFlight.has(repoPath))
+      return { ok: false };
     const addIn = repoPath;
     setAddInFlight(addIn, true);
     // Derive the host — on GitHub Enterprise `isGithub` still holds, and a
@@ -111,6 +121,15 @@ export function useAddUpstreamOffer(repoPath: string): {
         name: "upstream",
         url: `https://${ghHost}/${forkParent}.git`,
       });
+      // The remotes refetch is still running here, and its old list would
+      // re-arm the offer until it lands, so the cache takes the new remote now.
+      queryClient.setQueryData<string[]>(
+        remotesOptions(addIn).queryKey,
+        (old) =>
+          old === undefined || old.includes("upstream")
+            ? old
+            : [...old, "upstream"],
+      );
       return { ok: true };
     } catch (e) {
       // A failure that lands after the user left names the repo it was for.

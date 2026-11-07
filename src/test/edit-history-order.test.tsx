@@ -433,6 +433,32 @@ describe("Edit history order toggle", () => {
     expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
   });
 
+  it("keeps the latest pick while an earlier write's re-read lands its order", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    const press = (name: string) =>
+      user.click(screen.getByRole("button", { name }));
+    await press("Oldest first");
+    await press("Newest first");
+    await waitFor(() => expect(writes.length).toBe(2));
+    const newestShown = () => {
+      expect(shownSubjects()).toEqual(["Third", "Second", "First"]);
+      expect(
+        screen.getByRole("button", { name: "Newest first" }),
+      ).toHaveAttribute("aria-pressed", "true");
+    };
+    // The first write's re-read answers the order it landed.
+    await act(async () => writes[0].resolve());
+    await waitFor(() => expect(cachedOrder(client)).toBe("oldest-first"));
+    newestShown();
+    await act(async () => writes[1].resolve());
+    await waitFor(() => expect(stored.editHistoryOrder).toBe("newest-first"));
+    await waitFor(() => expect(cachedOrder(client)).toBe("newest-first"));
+    newestShown();
+  });
+
   it("rolls back to a write that landed while its re-read is still running", async () => {
     const user = userEvent.setup();
     const client = newClient("newest-first");

@@ -231,24 +231,25 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const isGitLab = gh.data?.provider === "gitlab";
   const prNoun = isGitLab ? "merge request" : "pull request";
   const lensGate = useLensGate(repoPath);
-  // A remote pick is stored as its full ref; every user-facing string shows it
-  // as `remote/name`.
   // The ONE pick identity every consumer reads (fetch, PR routing and preset,
   // own-copy line, duplicate probe, gone/pruned hold and copy).
   const remotes = useRemotes(repoPath);
   const recordedRemote = usePickRemote(repoPath, compareBranch);
   const pick = resolvePick(compareBranch, remotes.data, recordedRemote);
-  // A longer listed remote outranked a stale record: keep the correction, or the
-  // record wins again once that remote is removed.
+  // A listed remote that names an unrecorded pick, or outranks a shorter
+  // record, gets recorded: else the shorter split wins again once that remote
+  // is removed. recordPickRemote refuses an unlisted (fallback) split.
   const resolvedRemote = pick?.remote ?? null;
   useEffect(() => {
     if (
       compareBranch !== null &&
-      recordedRemote !== null &&
-      resolvedRemote?.startsWith(`${recordedRemote}/`)
+      resolvedRemote !== null &&
+      resolvedRemote !== recordedRemote
     )
       recordPickRemote(repoPath, compareBranch, remotes.data);
   }, [repoPath, compareBranch, recordedRemote, resolvedRemote, remotes.data]);
+  // A remote pick is stored as its full ref; every user-facing string shows it
+  // as `remote/name`.
   const compareDisplay =
     compareBranch === null ? null : displayCompareValue(compareBranch);
   // Agent-session branches (`gd/session/*`) are app-internal — never offer them
@@ -399,12 +400,22 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
       (b) => remoteCompareValue(b.remote, b.name) === compareBranch,
     );
   const goneOrPruned = remoteGone || pruned;
+  // The pick's post-fetch read failed and nothing newer has answered: the
+  // cached comparison predates the fetch, so it can't decide Create.
+  const failedRead = fetcher.failedRead;
+  const staleAfterFetch =
+    failedRead !== null &&
+    failedRead.repoPath === repoPath &&
+    failedRead.pickedValue === compareBranch &&
+    failedRead.currentBranch === currentName &&
+    comparison.dataUpdatedAt <= failedRead.over;
   // A pruned or gone pick holds even while a running fetch's line outranks its
   // line: the ref a PR would target is gone either way.
   const createBlock = ((): CreateBlock | null => {
     if (listsBusy)
       return stamp?.phase === "comparing" ? "updating" : "fetching";
     if (goneOrPruned) return prunedState;
+    if (staleAfterFetch) return "compare-failed";
     if (comparison.data === undefined)
       return comparison.isError ? "compare-failed" : "comparing";
     return comparison.data.ahead.length === 0 ? "empty" : null;

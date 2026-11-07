@@ -1405,7 +1405,7 @@ and **Switch to upstream view** ({{kbd:repo-lens-upstream}}). The same lens scop
 **Issues** tab (see *Issues*). Opening a PR against the parent — and this whole switch —
 needs an \`upstream\` remote; if you cloned your fork without one, the **Create pull
 request** dialog offers an **Add upstream remote** button that wires it up for you, and
-the **command palette** runs the same **Add upstream remote** command.
+the **command palette**'s **Add upstream remote** command adds the remote and fetches it.
 
 ## GitHub PRs
 

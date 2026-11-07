@@ -326,7 +326,11 @@ export function EditHistoryDialog({
   const settings = useSettings();
   const queryClient = useQueryClient();
   const saveOrder = useSaveSettingsPatch();
-  const listOrder = settings.data?.editHistoryOrder ?? "newest-first";
+  // The last pick until its write settles: an earlier write's re-read lands
+  // that write's order in the cache while the later one is still pending.
+  const [pendingOrder, setPendingOrder] = useState<ListOrder | null>(null);
+  const listOrder =
+    pendingOrder ?? settings.data?.editHistoryOrder ?? "newest-first";
   const reversed = listOrder === "oldest-first";
   // Until settings load there is nothing to patch, so the toggle holds.
   let orderHold: OrderHold | null = null;
@@ -341,10 +345,11 @@ export function EditHistoryDialog({
   });
   function applyListOrder(next: ListOrder) {
     const current = settings.data;
-    if (!current || current.editHistoryOrder === next) return;
+    if (!current || listOrder === next) return;
     persistedOrder ??= current.editHistoryOrder;
     const updated = { ...current, editHistoryOrder: next };
     const seq = ++orderChangeSeq;
+    setPendingOrder(next);
     // A settings read already running would land the old order over the patch.
     void queryClient.cancelQueries({
       queryKey: settingsKeys.settings,
@@ -353,19 +358,25 @@ export function EditHistoryDialog({
     // Patched first, so the click's own commit reverses the list.
     queryClient.setQueryData(settingsKeys.settings, updated);
     // Only the field: the cached snapshot's other fields can be older than disk.
-    void saveOrder.mutateAsync({ editHistoryOrder: next }).catch(() => {
-      if (seq !== orderChangeSeq) return;
-      const latest = queryClient.getQueryData<AppSettings>(
-        settingsKeys.settings,
-      );
-      if (latest === undefined || persistedOrder === null) return;
-      // Only this field, and no re-read: a concurrent settings change still
-      // pending must keep its own optimistic value and rollback.
-      queryClient.setQueryData(settingsKeys.settings, {
-        ...latest,
-        editHistoryOrder: persistedOrder,
-      });
-    });
+    void saveOrder.mutateAsync({ editHistoryOrder: next }).then(
+      () => {
+        if (seq === orderChangeSeq) setPendingOrder(null);
+      },
+      () => {
+        if (seq !== orderChangeSeq) return;
+        setPendingOrder(null);
+        const latest = queryClient.getQueryData<AppSettings>(
+          settingsKeys.settings,
+        );
+        if (latest === undefined || persistedOrder === null) return;
+        // Only this field, and no re-read: a concurrent settings change still
+        // pending must keep its own optimistic value and rollback.
+        queryClient.setQueryData(settingsKeys.settings, {
+          ...latest,
+          editHistoryOrder: persistedOrder,
+        });
+      },
+    );
   }
 
   // Reseed when a different set of commits arrives (render-time adjustment).
