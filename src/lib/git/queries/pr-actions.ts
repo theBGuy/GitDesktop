@@ -11,7 +11,13 @@ import { dropDraftsByReviewIds } from "@/lib/pulls/pending-review-threads";
 import { patchRowState } from "@/lib/remote-state-filter";
 import { useMutation } from "@/lib/started-mutation";
 import * as api from "../api";
+import {
+  type CheckoutFlavor,
+  type CheckoutRoute,
+  checkoutRoute,
+} from "../checkout-route";
 import type {
+  ForgeProvider,
   ForgeUserRef,
   IssueDetails,
   PrDetails,
@@ -21,6 +27,7 @@ import type {
   RemoteLens,
   ReviewThreadsOut,
 } from "../types";
+import { ghAccountsOptions } from "./accounts";
 import { invalidateRepoAfterWrite, repoKeys } from "./core";
 import {
   invalidateProjectBoards,
@@ -1010,35 +1017,77 @@ export function useUnminimizeComment(repo: string) {
  *  checkout while any one runs; the variables still name the PR (`number` + `lens`)
  *  it is for, so only that PR's view claims it as its own. */
 export function useCheckoutPr(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
-    (args: { number: number; lens: RemoteLens }) =>
-      api.ghPrCheckout(repo, args.number, args.lens),
+    (args: {
+      number: number;
+      lens: RemoteLens;
+      provider: ForgeProvider | null | undefined;
+      route?: CheckoutRoute;
+    }) =>
+      (args.route ??
+        resolveCheckoutRoute(queryClient, "plain", args.provider)) === "gh"
+        ? api.ghPrCheckout(repo, args.number, args.lens)
+        : api.nativePrCheckout(repo, args.number, args.lens),
     { identity: prWriteKey("checkout", repo) },
   );
 }
 
 /** Check out a PR's head into its own worktree, or re-sync the PR's existing one.
  *  Shares the plain checkout's pending kind, so a view holds both flavors while
- *  either runs; the variables name the PR (`number` + `lens`) as that one's do. */
+ *  either runs; the variables name the PR (`number` + `lens`) as that one's do.
+ *  A run that retries passes the `route` its first attempt took, so a forced
+ *  retry reaches the engine that measured `expectedHead`. */
 export function useCheckoutPrWorktree(repo: string) {
+  const queryClient = useQueryClient();
   return useRepoMutation(
     repo,
     (args: {
       number: number;
       lens: RemoteLens;
+      provider: ForgeProvider | null | undefined;
+      route?: CheckoutRoute;
       path: string;
       force: boolean;
       expectedHead?: string;
-    }) =>
-      api.ghPrCheckoutWorktree(
-        repo,
-        args.number,
-        args.lens,
-        args.path,
-        args.force,
-        args.expectedHead,
-      ),
+    }) => {
+      const route =
+        args.route ??
+        resolveCheckoutRoute(queryClient, "worktree", args.provider);
+      return route === "gh"
+        ? api.ghPrCheckoutWorktree(
+            repo,
+            args.number,
+            args.lens,
+            args.path,
+            args.force,
+            args.expectedHead,
+          )
+        : api.nativePrCheckoutWorktree(
+            repo,
+            args.number,
+            args.lens,
+            args.path,
+            args.force,
+            args.expectedHead,
+          );
+    },
     { identity: prWriteKey("checkout", repo) },
   );
+}
+
+/** The engine a checkout press takes, decided from the cache alone: a fetch
+ *  here could park offline and wedge the press. The worktree flavor reads the gh
+ *  version the popover's opening prefetched; nothing cached routes native. */
+export function resolveCheckoutRoute(
+  queryClient: QueryClient,
+  flavor: CheckoutFlavor,
+  provider: ForgeProvider | null | undefined,
+): CheckoutRoute {
+  const version =
+    flavor === "worktree" && provider === "github"
+      ? queryClient.getQueryData(ghAccountsOptions().queryKey)?.version
+      : undefined;
+  return checkoutRoute(flavor, provider, version);
 }

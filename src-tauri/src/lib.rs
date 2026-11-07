@@ -587,6 +587,8 @@ pub fn run() {
             github::pr::gh_pr_base_divergence,
             github::pr::gh_pr_checkout,
             github::pr::gh_pr_checkout_worktree,
+            git::pr_checkout::native_pr_checkout,
+            git::pr_checkout::native_pr_checkout_worktree,
             github::pr::gh_repo_fork,
             github::issue::gh_issue_types,
             github::issue::gh_issue_set_type,

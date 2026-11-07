@@ -564,6 +564,102 @@ pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
     })
 }
 
+/// The native checkout's fresh read of a merge request: its head branch and whether
+/// the source project is the target's. Fork-ness is proven from both project ids, and
+/// a fork's owner is its source project's full path (only a 404 there reads ownerless).
+pub(crate) async fn mr_checkout_source(
+    repo_path: &str,
+    number: u64,
+) -> AppResult<crate::git::pr_checkout::PrCheckoutSource> {
+    let path = project_path(repo_path).await?;
+    let endpoint = format!("projects/{}/merge_requests/{number}", encode_project(&path));
+    let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
+    let (head, source, target) = mr_checkout_fields(&out.stdout_lossy())?;
+    let fork = source != target;
+    let owner = if fork {
+        let project = format!("projects/{source}");
+        let out = run_glab_raw(Some(repo_path), &["api", &project], GLAB_NETWORK_TIMEOUT).await?;
+        source_project_owner(out.code, &out.stdout_lossy(), &out.stderr)?
+    } else {
+        None
+    };
+    Ok(mr_checkout_source_from(head, fork, owner, number))
+}
+
+/// A GitLab source: the target project's merge-request head ref, from origin. Same-repo
+/// is proven by equal project ids, so it is exactly `!fork`.
+fn mr_checkout_source_from(
+    head: String,
+    fork: bool,
+    owner: Option<String>,
+    number: u64,
+) -> crate::git::pr_checkout::PrCheckoutSource {
+    use crate::git::pr_checkout::{FetchFrom, PrCheckoutSource, SourceRef};
+    PrCheckoutSource {
+        head,
+        fork,
+        same_repo: !fork,
+        owner,
+        from: FetchFrom::Remote("origin"),
+        source_ref: SourceRef::MergeRequestHead(number),
+    }
+}
+
+/// The checkout's fields of a merge request body: the trimmed head branch and the
+/// source and target project ids. Any of them missing or unreadable refuses, so
+/// fork-ness is never defaulted.
+fn mr_checkout_fields(body: &str) -> AppResult<(String, u64, u64)> {
+    let what = "the merge request's branch";
+    let value: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| gl_unreadable(what, format!("could not parse the merge request: {e}")))?;
+    let head = value
+        .get("source_branch")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| gl_unreadable(what, "the merge request has no source branch".into()))?;
+    let id = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| gl_unreadable(what, format!("the merge request has no {key}")))
+    };
+    Ok((
+        head.to_string(),
+        id("source_project_id")?,
+        id("target_project_id")?,
+    ))
+}
+
+/// A fork's owner from its source project read: the project's full path, or None
+/// only when GitLab answered 404. Rate limits, auth and network failures stay errors.
+fn source_project_owner(code: i32, stdout: &str, stderr: &str) -> AppResult<Option<String>> {
+    let what = "the merge request's source project";
+    if code != 0 {
+        if glab_output_is_404(stderr, stdout) {
+            return Ok(None);
+        }
+        let detail = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        return Err(AppError::Glab(gl_error_message(
+            &format!("Couldn't read {what} from GitLab."),
+            mask_host_tokens(detail.trim()),
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_str(stdout)
+        .map_err(|e| gl_unreadable(what, format!("could not parse the project: {e}")))?;
+    value
+        .get("path_with_namespace")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| Some(p.to_string()))
+        .ok_or_else(|| gl_unreadable(what, "the project has no path_with_namespace".into()))
+}
+
 /// The one-shot `git -c` credential entries that let a network op on a private
 /// GitLab repo authenticate via glab's token — glab's token isn't in git's
 /// credential store, so plain `git clone` 401s; one-shot, so no token lands in
@@ -2717,6 +2813,9 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // GitHub's "allow edits by maintainers" has no GitLab equivalent — unknown,
         // not denied.
         maintainer_can_modify: None,
+        // The MR payload names only the source project id; resolving its owner
+        // would cost an extra call per detail read, so it stays unknown.
+        head_repository_owner: None,
         locked: mr.discussion_locked,
         // The lock is a field of the core read, so it is never unknown, and GitLab
         // has no lock reason.
@@ -17163,5 +17262,73 @@ mod tests {
         assert!(
             fork_entry_from_project(&serde_json::json!({ "path_with_namespace": "" })).is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod checkout_source_tests {
+    use super::*;
+    use crate::git::pr_checkout::{FetchFrom, SourceRef};
+
+    /// The source fetches the MR's own head ref from origin, whatever the fork-ness.
+    #[test]
+    fn mr_checkout_source_fetches_the_merge_request_head() {
+        let mr_head = |r: &SourceRef| matches!(r, SourceRef::MergeRequestHead(7));
+        for (fork, owner) in [(false, None), (true, Some("grp/sub/proj".to_string()))] {
+            let src = mr_checkout_source_from("feat".into(), fork, owner.clone(), 7);
+            assert!(mr_head(&src.source_ref), "fork {fork}");
+            assert!(matches!(src.from, FetchFrom::Remote("origin")));
+            assert_eq!((src.fork, src.same_repo, src.owner), (fork, !fork, owner));
+        }
+        // The pin rejects the other namespaces.
+        assert!(!mr_head(&SourceRef::PullHead(7)));
+        assert!(!mr_head(&SourceRef::Branch("feat".into())));
+    }
+
+    #[test]
+    fn mr_checkout_fields_need_branch_and_both_project_ids() {
+        let ok = r#"{"source_branch":" feat ","source_project_id":3,"target_project_id":9}"#;
+        assert_eq!(mr_checkout_fields(ok).unwrap(), ("feat".to_string(), 3, 9));
+        for body in [
+            r#"{"source_branch":"","source_project_id":1,"target_project_id":1}"#,
+            r#"{"source_branch":"   ","source_project_id":1,"target_project_id":1}"#,
+            r#"{"source_project_id":1,"target_project_id":1}"#,
+            r#"{"source_branch":"feat","target_project_id":1}"#,
+            r#"{"source_branch":"feat","source_project_id":null,"target_project_id":1}"#,
+            r#"{"source_branch":"feat","source_project_id":1,"target_project_id":"1"}"#,
+            r#"{"source_branch":"feat","source_project_id":-1,"target_project_id":1}"#,
+            "not json",
+        ] {
+            let err = mr_checkout_fields(body).expect_err(body);
+            assert!(
+                err.to_string()
+                    .starts_with("Couldn't read the merge request's branch from GitLab."),
+                "{body}: {err}"
+            );
+            assert!(matches!(err, AppError::Glab(_)), "{body}");
+        }
+    }
+
+    #[test]
+    fn source_project_owner_reads_only_404_as_ownerless() {
+        assert_eq!(
+            source_project_owner(0, r#"{"path_with_namespace":"grp/sub/p"}"#, "").unwrap(),
+            Some("grp/sub/p".to_string())
+        );
+        for stdout in [
+            r#"{"path_with_namespace":"  "}"#,
+            r#"{"path_with_namespace":null}"#,
+            "{}",
+            "garbage",
+        ] {
+            let err = source_project_owner(0, stdout, "").expect_err(stdout);
+            assert!(matches!(err, AppError::Glab(_)), "{stdout}");
+        }
+        assert_eq!(source_project_owner(1, "", "404 Not Found").unwrap(), None);
+        for stderr in ["429 Too Many Requests", "could not resolve host"] {
+            let err = source_project_owner(1, "", stderr).expect_err(stderr);
+            assert!(matches!(err, AppError::Glab(_)), "{stderr}");
+            assert!(err.to_string().contains(stderr), "{err}");
+        }
     }
 }

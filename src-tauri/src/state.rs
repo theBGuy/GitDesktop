@@ -251,9 +251,11 @@ impl AppState {
     /// unbounded commit holds in a session worktree.
     ///
     /// Lock ordering across domains, which keeps the wait graph acyclic: a task may
-    /// take NETWORK while holding WORKING-TREE (a pull is a transfer plus a merge)
-    /// and never the reverse; the ADMIN domain nests with neither, and no task takes
-    /// two locks of one domain.
+    /// take NETWORK while holding WORKING-TREE (a pull is a transfer plus a merge),
+    /// and WORKING-TREE while holding ADMIN (`pr_checkout::hold_linked` excludes a
+    /// concurrent removal from a linked worktree's mutations) — never either reverse
+    /// as a blocking wait (try-acquires are exempt), and no task takes two locks of
+    /// one domain.
     pub(crate) async fn working_tree_lock(&self, repo_path: &str) -> LockDomain {
         let key = self.resolve_lock_keys(repo_path).await.checkout;
         self.checkout_domains
@@ -267,7 +269,8 @@ impl AppState {
     /// The **worktree-admin** domain: every `git worktree
     /// add/remove/prune/move/lock/unlock/repair` on the repo. Separate from the
     /// working tree because a removal holds it for minutes while staging and
-    /// committing must keep working. Never nested with another domain (see
+    /// committing must keep working. Nests only as the OUTER lock of the
+    /// admin→working-tree pair (see
     /// [`working_tree_lock`](Self::working_tree_lock) for the ordering rule).
     ///
     /// Keyed by the SHARED identity (the common git dir): the `.git/worktrees`

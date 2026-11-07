@@ -203,6 +203,12 @@ const REFSPEC_ALLOWLIST = [
     rationale: "validates the tag name with validate_tag_name at fn entry",
   },
   {
+    file: "git/pr_checkout.rs",
+    fn: "qualified_head_ref",
+    rationale:
+      "validate_ref_name runs on the forge-supplied branch at fn entry, before refs/heads/<name> is built; the same validated name is the only source of the same-repo tracking refspec refs/heads/<name>:refs/remotes/<remote>/<name> (remote = a fixed lens literal); the pull/merge-request refs and the refs/gitdesktop pin are formatted from a u64 PR number (and, for the pin, the process id) only",
+  },
+  {
     file: "git/remote.rs",
     fn: "git_push_with_policy",
     rationale:

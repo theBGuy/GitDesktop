@@ -553,7 +553,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Check out a GitHub pull request into its own worktree, so reviewing it never touches your current branch or files",
+      "Check out a GitHub, GitLab, or Bitbucket pull or merge request in place, or into its own worktree so reviewing it never touches your current branch or files",
   },
   {
     group: "Repository & workspace",

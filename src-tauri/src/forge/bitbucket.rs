@@ -1094,6 +1094,147 @@ fn cross_repo(source: &Option<BbPrEndpoint>, destination: &Option<BbPrEndpoint>)
     !src.is_empty() && !dst.is_empty() && src != dst
 }
 
+/// The source repository's workspace (the `workspace` of `workspace/slug`), or None
+/// when the source repo is absent or its name isn't two non-empty halves.
+fn head_repo_owner(source: &Option<BbPrEndpoint>) -> Option<String> {
+    let full = endpoint_repo(source);
+    let (owner, slug) = full.trim().split_once('/')?;
+    let owner = owner.trim();
+    (!owner.is_empty() && !slug.trim().is_empty()).then(|| owner.to_string())
+}
+
+/// The refusal for a pull request whose source repository is gone.
+fn source_repo_gone() -> AppError {
+    AppError::InvalidArgument(
+        "The pull request's source repository is no longer available on Bitbucket, so its branch can't be checked out."
+            .into(),
+    )
+}
+
+/// The checkout's fields of a pull request: the trimmed source branch and both
+/// endpoint repositories. A missing destination refuses as unreadable, so fork-ness
+/// is never defaulted.
+fn checkout_fields(pr: &BbPr) -> AppResult<(String, String, String)> {
+    let what = "the pull request's branch";
+    let head = branch_name(&pr.source).trim().to_string();
+    if head.is_empty() {
+        return Err(http::bb_unreadable(
+            what,
+            "the pull request has no source branch".into(),
+        ));
+    }
+    let (src, dst) = (endpoint_repo(&pr.source), endpoint_repo(&pr.destination));
+    if src.trim().is_empty() {
+        return Err(source_repo_gone());
+    }
+    if dst.trim().is_empty() {
+        return Err(http::bb_unreadable(
+            what,
+            "the pull request has no destination repository".into(),
+        ));
+    }
+    Ok((head, src, dst))
+}
+
+/// A fork's HTTPS clone URL from its repository body, userinfo stripped; only an
+/// `https://` URL on bitbucket.org is accepted.
+fn fork_clone_url(body: &str) -> AppResult<String> {
+    use serde_json::Value;
+    let what = "the pull request's source repository";
+    let unreadable = |detail: &str| http::bb_unreadable(what, detail.to_string());
+    let value: Value = serde_json::from_str(body).map_err(|e| unreadable(&e.to_string()))?;
+    let href = value
+        .get("links")
+        .and_then(|l| l.get("clone"))
+        .and_then(Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("name").and_then(Value::as_str) == Some("https"))
+                .and_then(|c| c.get("href").and_then(Value::as_str))
+        })
+        .ok_or_else(|| unreadable("the repository has no https clone link"))?;
+    let url = strip_https_userinfo(href.trim());
+    let https = url
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+    if !https || crate::forge::remote_host(&url).as_deref() != Some(BB_HOST) {
+        return Err(unreadable(
+            "the clone link isn't an https bitbucket.org URL",
+        ));
+    }
+    Ok(url)
+}
+
+/// The native checkout's fresh read of a pull request: its source branch, whether the
+/// source repository is the destination, and for a fork the URL to fetch it from.
+pub(crate) async fn pr_checkout_source(
+    repo_path: &str,
+    number: u64,
+) -> AppResult<crate::git::pr_checkout::PrCheckoutSource> {
+    let (ws, slug) = workspace_slug(repo_path).await?;
+    let creds = http::load_credentials().await?;
+    let path = format!(
+        "repositories/{}/{}/pullrequests/{number}",
+        encode_query_value(&ws),
+        encode_query_value(&slug),
+    );
+    let pr: BbPr = http::bb_get_json(&creds, &path, "pull request", BbOpKind::Read).await?;
+    let (head, src, dst) = checkout_fields(&pr)?;
+    let fork = src != dst;
+    if !fork {
+        return Ok(bb_checkout_source(head, None));
+    }
+    let owner = head_repo_owner(&pr.source).ok_or_else(|| {
+        http::bb_unreadable(
+            "the pull request's source repository",
+            format!("unreadable repository name {src}"),
+        )
+    })?;
+    let (src_ws, src_slug) = src.trim().split_once('/').unwrap_or_default();
+    let repo = format!(
+        "repositories/{}/{}",
+        encode_query_value(src_ws.trim()),
+        encode_query_value(src_slug.trim()),
+    );
+    let (status, body) = http::bb_get_text_status(&creds, &repo).await?;
+    if status == 404 {
+        return Err(source_repo_gone());
+    }
+    if !(200..300).contains(&status) {
+        return Err(http::http_error(status, &body));
+    }
+    let url = fork_clone_url(&body)?;
+    Ok(bb_checkout_source(head, Some((owner, url))))
+}
+
+/// A Bitbucket source: the head branch itself, from origin for a same-repo PR or from
+/// the fork's `(owner, clone url)`.
+fn bb_checkout_source(
+    head: String,
+    fork: Option<(String, String)>,
+) -> crate::git::pr_checkout::PrCheckoutSource {
+    use crate::git::pr_checkout::{FetchFrom, PrCheckoutSource, SourceRef};
+    let source_ref = SourceRef::Branch(head.clone());
+    match fork {
+        None => PrCheckoutSource {
+            head,
+            fork: false,
+            same_repo: true,
+            owner: None,
+            from: FetchFrom::Remote("origin"),
+            source_ref,
+        },
+        Some((owner, url)) => PrCheckoutSource {
+            head,
+            fork: true,
+            same_repo: false,
+            owner: Some(owner),
+            from: FetchFrom::BitbucketUrl(url),
+            source_ref,
+        },
+    }
+}
+
 fn branch_name(ep: &Option<BbPrEndpoint>) -> String {
     ep.as_ref()
         .and_then(|e| e.branch.as_ref())
@@ -1820,6 +1961,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
         // GitHub's "allow edits by maintainers" has no Bitbucket equivalent —
         // unknown, not denied.
         maintainer_can_modify: None,
+        head_repository_owner: head_repo_owner(&pr.source),
         // Bitbucket has no conversation lock, so nothing ever holds the composer.
         locked: false,
         lock_unknown: false,
@@ -6380,6 +6522,31 @@ mod tests {
         assert_eq!(m.detail, None);
     }
 
+    /// The head owner is the source workspace for every PR; an absent or malformed
+    /// source name stays unknown.
+    #[test]
+    fn bb_head_repo_owner_is_the_source_workspace() {
+        let owner = |source: &str| {
+            let pr: BbPr =
+                serde_json::from_str(&format!(r#"{{"id":7,"state":"OPEN"{source}}}"#)).unwrap();
+            head_repo_owner(&pr.source)
+        };
+        let named = |name: &str| {
+            owner(&format!(
+                r#","source":{{"repository":{{"full_name":"{name}"}}}}"#
+            ))
+        };
+        assert_eq!(named("someone/fork"), Some("someone".to_string()));
+        assert_eq!(named("acme/tools"), Some("acme".to_string()));
+        assert_eq!(named(""), None);
+        assert_eq!(named("noslash"), None);
+        assert_eq!(named(" /x"), None);
+        assert_eq!(named("ws/"), None);
+        assert_eq!(owner(r#","source":{"repository":null}"#), None);
+        assert_eq!(owner(r#","source":{"branch":{"name":"feat"}}"#), None);
+        assert_eq!(owner(""), None);
+    }
+
     /// A fork PR's source repo differs from its destination; an unfielded payload
     /// (either name absent) must read as same-repo, never as a fork.
     #[test]
@@ -8886,5 +9053,99 @@ definitions:
             serde_json::from_str(r#"{"values":[{"full_name":"team-b/hello"}]}"#).unwrap();
         assert_eq!(sizeless.size, None);
         assert_eq!(sizeless.values.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod checkout_source_tests {
+    use super::*;
+    use crate::git::pr_checkout::{FetchFrom, SourceRef};
+
+    /// Both arms fetch the head branch itself: from origin same-repo, from the fork's URL.
+    #[test]
+    fn bb_checkout_source_fetches_the_head_branch() {
+        let branch = |r: &SourceRef| matches!(r, SourceRef::Branch(b) if b == "feat");
+        let same = bb_checkout_source("feat".into(), None);
+        assert!(branch(&same.source_ref));
+        assert!(matches!(same.from, FetchFrom::Remote("origin")));
+        assert!(!same.fork && same.same_repo && same.owner.is_none());
+        let url = "https://bitbucket.org/alice/repo.git".to_string();
+        let fork = bb_checkout_source("feat".into(), Some(("alice".into(), url.clone())));
+        assert!(branch(&fork.source_ref));
+        assert!(matches!(&fork.from, FetchFrom::BitbucketUrl(u) if *u == url));
+        assert!(fork.fork && !fork.same_repo);
+        assert_eq!(fork.owner.as_deref(), Some("alice"));
+        // The pin rejects the other namespaces.
+        assert!(!branch(&SourceRef::PullHead(7)));
+        assert!(!branch(&SourceRef::MergeRequestHead(7)));
+    }
+
+    fn pr(source_repo: Option<&str>, dest_repo: Option<&str>, branch: &str) -> BbPr {
+        let repo = |r: Option<&str>| match r {
+            Some(name) => serde_json::json!({ "full_name": name }),
+            None => serde_json::Value::Null,
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": 7,
+            "source": { "branch": { "name": branch }, "repository": repo(source_repo) },
+            "destination": { "branch": { "name": "main" }, "repository": repo(dest_repo) },
+        }))
+        .expect("the fixture deserializes")
+    }
+
+    #[test]
+    fn checkout_fields_refuse_a_missing_source_repository() {
+        let fork = checkout_fields(&pr(Some("alice/repo"), Some("ws/repo"), "feat")).unwrap();
+        assert_eq!(fork, ("feat".into(), "alice/repo".into(), "ws/repo".into()));
+        let same = checkout_fields(&pr(Some("ws/repo"), Some("ws/repo"), " feat ")).unwrap();
+        assert_eq!(same, ("feat".into(), "ws/repo".into(), "ws/repo".into()));
+
+        let gone = checkout_fields(&pr(None, Some("ws/repo"), "feat")).unwrap_err();
+        assert!(matches!(gone, AppError::InvalidArgument(_)));
+        assert_eq!(
+            gone.to_string(),
+            "invalid argument: The pull request's source repository is no longer available on Bitbucket, so its branch can't be checked out."
+        );
+        let no_dst = checkout_fields(&pr(Some("ws/repo"), None, "feat")).unwrap_err();
+        assert!(matches!(no_dst, AppError::Bitbucket(_)), "{no_dst:?}");
+        let blank = checkout_fields(&pr(Some("ws/repo"), Some("ws/repo"), "  ")).unwrap_err();
+        assert!(matches!(blank, AppError::Bitbucket(_)), "{blank:?}");
+    }
+
+    #[test]
+    fn fork_clone_url_requires_https_on_bitbucket_org() {
+        let body = |links: serde_json::Value| serde_json::json!({ "links": links }).to_string();
+        let ok = body(serde_json::json!({ "clone": [
+            { "name": "ssh", "href": "git@bitbucket.org:alice/repo.git" },
+            { "name": "https", "href": "https://alice@bitbucket.org/alice/repo.git" },
+        ]}));
+        assert_eq!(
+            fork_clone_url(&ok).unwrap(),
+            "https://bitbucket.org/alice/repo.git"
+        );
+        let upper = body(serde_json::json!({ "clone": [
+            { "name": "https", "href": "HTTPS://bitbucket.org/alice/repo.git" },
+        ]}));
+        assert_eq!(
+            fork_clone_url(&upper).unwrap(),
+            "HTTPS://bitbucket.org/alice/repo.git"
+        );
+        for bad in [
+            body(serde_json::json!({ "clone": [
+                { "name": "ssh", "href": "git@bitbucket.org:alice/repo.git" },
+            ]})),
+            body(serde_json::json!({ "clone": [
+                { "name": "https", "href": "https://evil.example/alice/repo.git" },
+            ]})),
+            body(serde_json::json!({ "clone": [
+                { "name": "https", "href": "-uhttps://bitbucket.org/alice/repo.git" },
+            ]})),
+            body(serde_json::json!({})),
+            "{}".to_string(),
+            "not json".to_string(),
+        ] {
+            let err = fork_clone_url(&bad).expect_err(&bad);
+            assert!(matches!(err, AppError::Bitbucket(_)), "{bad}: {err:?}");
+        }
     }
 }

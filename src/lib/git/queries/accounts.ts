@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useMutation } from "@/lib/started-mutation";
 import { COLD_START_NO_GH } from "@/lib/test-mode";
@@ -10,13 +10,24 @@ import type {
 } from "../types";
 import { MY_WORK_PAGES_KEY, MY_WORK_SOURCES_KEY } from "./forge-repos";
 
-export function useGhAccounts() {
-  return useQuery({
+/** Shared by the hook and imperative reads (the checkout route's cache read and
+ *  its prefetch). gh is a local spawn, so the read runs whatever
+ *  `navigator.onLine` says rather than parking offline. */
+export function ghAccountsOptions() {
+  return queryOptions({
     queryKey: ["gh-accounts"] as const,
-    queryFn: api.ghAccounts,
+    queryFn: () => api.ghAccounts(),
     staleTime: 60_000,
     retry: false,
+    networkMode: "always",
+    // query-core defaults this off under "always"; a reconnect inside the
+    // staleTime still re-reads a sign-in status read while offline.
+    refetchOnReconnect: "always",
   });
+}
+
+export function useGhAccounts() {
+  return useQuery(ghAccountsOptions());
 }
 
 export function useSwitchAccount() {

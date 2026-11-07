@@ -116,6 +116,7 @@ import {
   type RemotePrResolveHandle,
 } from "@/lib/git/api";
 import { displayLogin } from "@/lib/git/bot-login";
+import { checkedOutNames } from "@/lib/git/checkout-route";
 import {
   binaryRowPaths,
   sectionIsBinary,
@@ -278,6 +279,7 @@ import {
   HeldCheckoutCaret,
   PrWorktreeCheckout,
   type PrWorktreeCheckoutHandle,
+  plainCheckoutTarget,
 } from "./PrWorktreeCheckout";
 import { prSectionAnswered } from "./pr-section-answered";
 import {
@@ -680,7 +682,7 @@ export function RemotePrView({
 }) {
   const queryClient = useQueryClient();
   // The read view is provider-neutral; GitHub-only mutations (full reviews,
-  // ready-for-review, checkout) route through `gh_*` and gate on `canWrite`
+  // ready-for-review) route through `gh_*` and gate on `canWrite`
   // ("not a known read-only provider"), NOT `provider === "github"` — so a pending
   // or failed forge-status probe never strips a GitHub PR's write controls.
   const forge = useForgeStatus(repoPath);
@@ -732,6 +734,7 @@ export function RemotePrView({
   // convention: usePrCapabilities).
   const {
     canWrite,
+    canCheckout,
     writeBlocked,
     canComment,
     canChangeState,
@@ -2927,7 +2930,7 @@ export function RemotePrView({
       !detailsStale &&
       loadedViewPainted &&
       pr?.state === "OPEN" &&
-      canWrite,
+      canCheckout,
   );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const reopenButtonRef = useRef<HTMLButtonElement>(null);
@@ -2952,9 +2955,11 @@ export function RemotePrView({
         number={row?.number ?? number}
         actions={
           <>
-            {rowOpen && canWrite && (
+            {rowOpen && canCheckout && (
               <span className={CHECKOUT_SPLIT_CLASS}>
-                {row !== undefined &&
+                {/* The row carries no head owner, so only a known non-fork
+                    may claim the chip here; the loaded header decides forks. */}
+                {row?.crossRepository === false &&
                 repoStatus.data?.branch?.name === row.headRefName ? (
                   <span className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground">
                     <CheckCircleIcon className="size-3" aria-hidden />
@@ -3390,7 +3395,7 @@ export function RemotePrView({
     }
   }
 
-  async function checkoutHead(headRefName: string) {
+  async function checkoutHead(target: string) {
     // Any checkout in flight refuses another, whichever PR it is for: both write
     // the one working tree. Through a switch the head named here is the rendered
     // PR's while the checkout addresses `number`.
@@ -3401,8 +3406,8 @@ export function RemotePrView({
       return;
     }
     try {
-      await checkout.mutateAsync({ number, lens });
-      toast.success(`Checked out ${headRefName}`);
+      await checkout.mutateAsync({ number, lens, provider });
+      toast.success(`Checked out ${target}`);
     } catch (e) {
       onError(e);
     }
@@ -3595,6 +3600,13 @@ export function RemotePrView({
   // Every field prefixes its key: duplicate keys in one children array make React
   // drop the earlier duplicates' unmount, leaking stale rows.
   const metaCells: ReactNode[] = [];
+  const prFacts = {
+    provider,
+    headRefName: pr.headRefName,
+    crossRepository: pr.crossRepository,
+    headRepositoryOwner: pr.headRepositoryOwner,
+  };
+  const checkoutTarget = plainCheckoutTarget(prFacts, pr.number, prNoun);
   if (isOpen && canEditLabels) {
     metaCells.push(
       <LabelsPopover
@@ -3772,7 +3784,7 @@ export function RemotePrView({
               #{pr.number}
             </span>
           </h2>
-          {isOpen && canWrite && (
+          {isOpen && canCheckout && (
             <PrWorktreeCheckout
               ref={worktreeCheckout}
               repoPath={repoPath}
@@ -3780,19 +3792,25 @@ export function RemotePrView({
               lens={lens}
               prNumber={pr.number}
               headRefName={pr.headRefName}
+              provider={provider}
+              crossRepository={pr.crossRepository}
+              headRepositoryOwner={pr.headRepositoryOwner}
+              prNoun={prNoun}
               staleReason={staleReason}
               runningReason={checkoutRunning}
               pending={checkoutPending}
               detailsStale={detailsStale}
             >
-              {repoStatus.data?.branch?.name === pr.headRefName ? (
+              {checkedOutNames(prFacts).has(
+                repoStatus.data?.branch?.name ?? "",
+              ) ? (
                 // A status, not an action — no button role and no tab stop.
                 // role="img" prunes the icon AND the wording, so the label
                 // states the whole thing on its own. The caret stays beside it.
                 <span
                   role="img"
-                  aria-label={`Checked out — ${pr.headRefName} is the current branch`}
-                  title={`${pr.headRefName} is the current branch`}
+                  aria-label={`Checked out — ${repoStatus.data?.branch?.name} is the current branch`}
+                  title={`${repoStatus.data?.branch?.name} is the current branch`}
                   className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground"
                 >
                   <CheckCircleIcon className="size-3" aria-hidden />
@@ -3804,8 +3822,8 @@ export function RemotePrView({
                   size="xs"
                   disabled={runningCheckout !== undefined || detailsPlaceholder}
                   reason={checkoutRunning ?? staleReason}
-                  onClick={() => void checkoutHead(pr.headRefName)}
-                  title={`Check out ${pr.headRefName} locally`}
+                  onClick={() => void checkoutHead(checkoutTarget)}
+                  title={`Check out ${checkoutTarget} locally`}
                 >
                   {checkoutPending ? (
                     <Spinner data-icon="inline-start" />

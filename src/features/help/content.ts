@@ -1046,9 +1046,12 @@ this list: one on a detached checkout has no branch row at all, one on an archiv
 sits in the collapsed "Archived" section, and filter text can hide the rest.
 
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
-  into its own folder, defaulting to a sibling of the repository (the folder button
-  browses for a different parent). A GitHub pull request can also be checked out into a
-  worktree from its own view (see *GitHub PRs*); that worktree is listed here too.
+  into its own folder, by default \`.gitdesktop/worktrees/<branch-name>\` inside the
+  repository (slashes in the name become dashes), which is kept out of \`git status\`
+  for you. The **Full path** line under the folder field shows exactly where it will
+  land, and the folder button browses for a different parent. A pull request (or GitLab
+  merge request) can also be checked out into a worktree from its own view (see *GitHub
+  PRs*); that worktree is listed here too.
 - **Open** a worktree to make it the active repository — git commands then run in that
   folder and the window title follows. The header keeps the repository's name, with the
   worktree named beneath it, so you always know which repo you're in. Open the main
@@ -1388,32 +1391,33 @@ visible after the reviewer leaves the pending-request list. A pull request that 
 merges cleanly says so under its header, and **Resolve conflicts** settles it without
 leaving the app — see *Conflicts with the base branch* below.
 
-To review a pull request without touching your current branch or uncommitted files, open
-the caret beside **Checkout** and pick **Check out in a worktree…** (or run *Check out
-pull request in a worktree…* from the command palette). The popover suggests a folder
-beside the repository named after the pull request (\`<repo>-pr-<number>\`); edit it, or
-**Browse** for a different parent folder, then **Check out**. Nothing is created until
-you confirm. This needs GitHub CLI 2.98 or newer; with an older one the menu item is
-disabled and says which version you have. When the pull request's branch already has a
-worktree, the popover offers **Open worktree** and **Update to PR** instead, along with
-**Check out into a new folder…**. A pull request from a fork is usually checked out on a
-branch named after the fork's owner (\`<owner>/<branch>\`), or on the plain branch name
-when that owner can no longer be read, so GitDesktop may not recognize that worktree when
-you come back; **Worktrees…** still lists it. The popover matches by branch
-name alone, so it can find a worktree on your own branch of the same name: **Update to
-PR** is refused there, which keeps your work intact. For a pull request from this
+**Checkout** switches your current folder to the pull request's branch, on GitHub, GitLab
+(for a merge request) and Bitbucket alike. To review a pull request without touching your
+current branch or uncommitted files, open the caret beside **Checkout** and pick **Check
+out in a worktree…** (or run *Check out pull request in a worktree…* from the command
+palette), which works on all three forges too. The popover suggests a folder inside the
+repository, \`.gitdesktop/worktrees/pr-<number>\`, which is kept out of \`git status\`
+for you; the **Full path** line under the folder field shows exactly where it will land.
+Edit it, or **Browse** for a different parent folder, then **Check out**. Nothing is
+created until you confirm. When the pull request's branch already has a
+worktree, the popover offers **Open worktree** and **Update to PR** (**Update to MR** on
+GitLab) instead, along with **Check out into a new folder…**. A pull request from a fork
+is checked out on a branch named after the fork's owner (\`<owner>/<branch>\`), and the
+popover recognizes the fork's worktree by that name, so it never mistakes your own branch
+of the same name for it. When the fork's owner can no longer be read, the plain branch
+name is used instead and the popover can't recognize that worktree when you come back;
+**Worktrees…** still lists it. For a pull request from this
 repository or from a fork whose owner is known, **Check out into a new folder…** creates
 a separate worktree whenever the pull request's branch isn't checked out yet (when it is,
 the message names the worktree that already has it). A fork whose owner can no longer be
 read can't be checked out while a local branch has its plain name, and nothing is changed
-when that's refused. A worktree that already
-contains the pull request's tip reports "Worktree already up to date." and is left as
-it is. If the two histories have diverged, updating asks first (**Reset this
-worktree to the PR?**), listing the commits that resetting would discard (the newest 20, with a note when
-there are more), and noting
-when its uncommitted changes would go too. When GitDesktop can locate the worktree's folder, the
-success message offers **Open worktree**, which switches to it right away. The new worktree shows up in **Worktrees…**
-like any other.
+when that's refused. A worktree that already contains the pull request's tip reports
+"Worktree already up to date." and is left as it is. If the two histories have diverged,
+updating asks first (**Reset this worktree to the PR?**, or **…the MR?** on GitLab),
+listing the commits that resetting would discard (the newest 20, with a note when there
+are more), and noting when its uncommitted changes would go too. When GitDesktop can
+locate the worktree's folder, the success message offers **Open worktree**, which
+switches to it right away. The new worktree shows up in **Worktrees…** like any other.
 
 Every pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
 **reviewers**, closed and merged ones included (a board keeps its finished items in a Done
