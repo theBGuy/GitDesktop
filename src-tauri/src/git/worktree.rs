@@ -1395,7 +1395,8 @@ fn refuse_main_worktree(entry: Option<&WtEntry>, path: &str) -> AppResult<()> {
 /// A fork PR's worktree is matched by the bare head, so a linked worktree on the user's
 /// same-named branch would be switched or reset to the fork's. Keyed on `fork`, never
 /// `head != local`: an ownerless fork's local name is the bare head too. That also
-/// refuses such a fork's own earlier worktree, deliberately; a new folder is the way in.
+/// refuses such a fork's own earlier worktree, deliberately, and with no remedy: while
+/// its bare-named branch exists, refuse_ownerless_branch_namesake refuses every target.
 pub(crate) fn refuse_own_head_namesake(
     entry: Option<&WtEntry>,
     path: &str,
@@ -1409,7 +1410,7 @@ pub(crate) fn refuse_own_head_namesake(
     }
     Err(AppError::InvalidArgument(if head == local {
         format!(
-            "{path} is on branch {head}, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — pick a new folder."
+            "{path} is on branch {head}, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — nothing was checked out."
         )
     } else {
         format!(
@@ -1422,7 +1423,8 @@ pub(crate) fn refuse_own_head_namesake(
 /// so an ownerless fork (local == bare head) refuses at every target while the branch
 /// exists, and when the probe fails. Not refused: an existing `<owner>/<head>` is the
 /// PR's own earlier branch, and a same-repo PR's branch existing is the normal flow.
-/// Force needs no probe: an entry off `local` is `Changed` there before any reset.
+/// Force needs no probe: an entry off `local` is `Changed` there before any reset, and
+/// one on it (`Moved`/`Proceed`) meets refuse_own_head_namesake first.
 async fn refuse_ownerless_branch_namesake(
     repo_path: &str,
     head: &str,
@@ -3104,7 +3106,7 @@ prunable gitdir file points to non-existent location
         // Ownerless fork: the local name is the bare head, and the identity is unknown.
         assert_eq!(
             invalid_argument(check(on("main"), "main", "main", true)),
-            "C:/wt/x is on branch main, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — pick a new folder."
+            "C:/wt/x is on branch main, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — nothing was checked out."
         );
         // Same-repo PR on its own branch, and an owner-known fork on its prefixed one.
         assert!(check(on("main"), "main", "main", false).is_ok());

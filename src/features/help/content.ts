@@ -1377,9 +1377,12 @@ branch named after the fork's owner (\`<owner>/<branch>\`), or on the plain bran
 when that owner can no longer be read, so GitDesktop may not recognize that worktree when
 you come back; **Worktrees…** still lists it. The popover matches by branch
 name alone, so it can find a worktree on your own branch of the same name: **Update to
-PR** is refused there, which keeps your work intact, and **Check out into a new folder…**
-creates a separate one whenever the pull request's branch isn't checked out yet (when it
-is, the message names the worktree that already has it). A worktree that already
+PR** is refused there, which keeps your work intact. For a pull request from this
+repository or from a fork whose owner is known, **Check out into a new folder…** creates
+a separate worktree whenever the pull request's branch isn't checked out yet (when it is,
+the message names the worktree that already has it). A fork whose owner can no longer be
+read can't be checked out while a local branch has its plain name, and nothing is changed
+when that's refused. A worktree that already
 contains the pull request's tip reports "Worktree already up to date." and is left as
 it is. If the two histories have diverged, updating asks first (**Reset this
 worktree to the PR?**), listing the commits that resetting would discard (the newest 20, with a note when
