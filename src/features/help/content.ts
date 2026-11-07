@@ -1402,12 +1402,17 @@ Edit it, or **Browse** for a different parent folder, then **Check out**. Nothin
 created until you confirm. When the pull request's branch already has a
 worktree, the popover offers **Open worktree** and **Update to PR** (**Update to MR** on
 GitLab) instead, along with **Check out into a new folder…**. A pull request from a fork
-is checked out on a branch named after the fork's owner (\`<owner>/<branch>\`), and the
-popover recognizes the fork's worktree by that name, so it never mistakes your own branch
-of the same name for it. When the fork's owner can no longer be read, the plain branch
-name is used instead and the popover can't recognize that worktree when you come back;
-**Worktrees…** still lists it. For a pull request from this
-repository or from a fork whose owner is known, **Check out into a new folder…** creates
+is checked out on a branch named after the fork's owner (\`<owner>/<branch>\`), so it never
+collides with your own branch of the same name. On GitHub and Bitbucket the popover
+recognizes the fork's worktree by that name when you come back. On GitLab the owner is the
+fork project's full path, and the branch reads \`<group>/<project>/<branch>\`; the merge
+request's details don't carry that path, so for a merge request from a fork the popover
+shows the folder form again, and **Worktrees…** lists the worktree it made. On GitHub and
+GitLab, when the fork's owner can no longer be read, the plain branch name is used instead
+and the popover can't recognize that worktree when you come back (**Worktrees…** still
+lists it); on Bitbucket, a pull request whose source repository is gone can't be checked
+out at all. For a pull request from this repository or from a fork whose owner is known,
+**Check out into a new folder…** creates
 a separate worktree whenever the pull request's branch isn't checked out yet (when it is,
 the message names the worktree that already has it). A fork whose owner can no longer be
 read can't be checked out while a local branch has its plain name, and nothing is changed

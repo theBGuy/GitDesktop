@@ -1119,14 +1119,14 @@ pub(crate) fn resolve_worktree_path(repo_path: &str, path: &str) -> String {
 /// The info/exclude line that keeps in-repo worktrees out of `git status`.
 pub(crate) const GITDESKTOP_WORKTREES_EXCLUDE: &str = "/.gitdesktop/worktrees/";
 
-/// The repo's absolute common dir. Strict, unlike the identity resolver: a failed
-/// read is an Err, never the raw path, which would put `info/exclude` in the tree.
 /// A path git printed on its own line, with only the line terminator removed: on POSIX
 /// a trailing space is part of a folder's name.
 pub(crate) fn stdout_path(stdout: &str) -> &str {
     stdout.trim_end_matches(['\r', '\n'])
 }
 
+/// The repo's absolute common dir. Strict, unlike the identity resolver: a failed
+/// read is an Err, never the raw path, which would put `info/exclude` in the tree.
 pub(crate) async fn git_common_dir(repo_path: &str) -> AppResult<String> {
     let out = run_git(
         Some(repo_path),
@@ -1143,21 +1143,54 @@ pub(crate) async fn git_common_dir(repo_path: &str) -> AppResult<String> {
 
 /// The main worktree root: the common dir's parent when the common dir is named
 /// `.git`, else None (a bare repo, or a separate git dir under another name).
+/// Case is kept: `is_inside_gitdesktop_worktrees` applies the platform's own fold.
 fn main_root_from_common_dir(common: &str) -> Option<String> {
-    let folded = normalize_wt_path(&strip_verbatim(common));
-    let (parent, last) = folded.trim_end_matches('/').rsplit_once('/')?;
-    (last == ".git").then(|| parent.to_string())
+    let unified = strip_verbatim(common).replace('\\', "/");
+    let (parent, last) = unified.trim_end_matches('/').rsplit_once('/')?;
+    last.eq_ignore_ascii_case(".git")
+        .then(|| parent.to_string())
 }
 
 /// Lexical: `resolved_target` (resolve_worktree_path's output) lies strictly
-/// inside `<root>/.gitdesktop/worktrees/`. Pure strings, no Path parsing.
+/// inside `<root>/.gitdesktop/worktrees/`. Pure strings, no Path parsing: `.` and
+/// empty segments (a typed `./` or trailing slash) fold away, a `..` past the prefix
+/// refuses. Case folds on Windows and macOS, where checkouts normally sit on
+/// case-insensitive filesystems (git's init-time `core.ignorecase` probe), since the
+/// exclude line only hides a folder git matches it against.
 pub(crate) fn is_inside_gitdesktop_worktrees(root: &str, resolved_target: &str) -> bool {
-    let root = normalize_wt_path(&strip_verbatim(root));
-    let target = normalize_wt_path(&strip_verbatim(resolved_target));
-    let prefix = format!("{}/.gitdesktop/worktrees/", root.trim_end_matches('/'));
-    target.strip_prefix(&prefix).is_some_and(|rest| {
-        !rest.is_empty() && rest.split('/').all(|s| !matches!(s, "" | "." | ".."))
-    })
+    inside_gitdesktop_worktrees(
+        root,
+        resolved_target,
+        cfg!(any(windows, target_os = "macos")),
+    )
+}
+
+fn inside_gitdesktop_worktrees(root: &str, resolved_target: &str, fold_case: bool) -> bool {
+    let (root_lead, root) = lexical_segments(root, fold_case);
+    let (target_lead, target) = lexical_segments(resolved_target, fold_case);
+    let prefix_len = root.len() + 2;
+    root_lead == target_lead
+        && target.len() > prefix_len
+        && target.starts_with(&root)
+        && target[root.len()..prefix_len] == [".gitdesktop", "worktrees"]
+        && !target[prefix_len..].iter().any(|s| s == "..")
+}
+
+/// A path's leading-separator count (so `//server/share` stays apart from `/server`)
+/// and its segments, with separators normalized and `.`/empty segments dropped.
+fn lexical_segments(p: &str, fold_case: bool) -> (usize, Vec<String>) {
+    let mut s = strip_verbatim(p).replace('\\', "/");
+    if fold_case {
+        s = s.to_lowercase();
+    }
+    let rest = s.trim_start_matches('/');
+    let lead = s.len() - rest.len();
+    let segments = rest
+        .split('/')
+        .filter(|seg| !matches!(*seg, "" | "."))
+        .map(str::to_string)
+        .collect();
+    (lead, segments)
 }
 
 /// The bytes to append so `existing` gains `line`, or None when a line already
@@ -2338,9 +2371,9 @@ prunable gitdir file points to non-existent location
     #[test]
     fn main_root_from_common_dir_gitdesktop_worktrees_anchor() {
         let root = |c: &str| main_root_from_common_dir(c);
-        assert_eq!(root("C:/r/.git").as_deref(), Some("c:/r"));
-        assert_eq!(root(r"C:\r\.git\").as_deref(), Some("c:/r"));
-        assert_eq!(root("C:/.git").as_deref(), Some("c:"));
+        assert_eq!(root("C:/r/.git").as_deref(), Some("C:/r"));
+        assert_eq!(root(r"C:\r\.git\").as_deref(), Some("C:/r"));
+        assert_eq!(root("C:/.git").as_deref(), Some("C:"));
         assert_eq!(
             root(r"\\?\UNC\srv\share\r\.git").as_deref(),
             Some("//srv/share/r")
@@ -2348,11 +2381,16 @@ prunable gitdir file points to non-existent location
         assert_eq!(root("/home/u/r/.git").as_deref(), Some("/home/u/r"));
         assert_eq!(root("/x/repo.git"), None);
         assert_eq!(root("/x/gitdir"), None);
+        // Case survives, so a byte-exact (unfolded) compare still anchors under it.
+        let mixed = root("/repos/MyRepo/.git").unwrap();
+        assert_eq!(mixed, "/repos/MyRepo");
+        let target = "/repos/MyRepo/.gitdesktop/worktrees/pr-7";
+        assert!(inside_gitdesktop_worktrees(&mixed, target, false));
     }
 
     #[test]
     fn is_inside_gitdesktop_worktrees_string_shapes() {
-        let inside = is_inside_gitdesktop_worktrees;
+        let inside = |root: &str, target: &str| inside_gitdesktop_worktrees(root, target, true);
         assert!(inside("C:/r", r"C:\r\.gitdesktop\worktrees\x"));
         assert!(inside("C:/r", r"c:\R\.GitDesktop\Worktrees\x"));
         assert!(inside(
@@ -2368,16 +2406,48 @@ prunable gitdir file points to non-existent location
         assert!(inside("C:/r/", "C:/r/.gitdesktop/worktrees/x"));
         assert!(inside("C:/r", "C:/r/.gitdesktop/worktrees/x/nested"));
         assert!(inside("/home/u/r", "/home/u/r/.gitdesktop/worktrees/x"));
+        assert!(inside("C:/r", "C:/r/.gitdesktop/worktrees/./x"));
+        assert!(inside("C:/r", "C:/r/.gitdesktop/worktrees/x/"));
+        assert!(inside("C:/r", "C:/r/./.gitdesktop//worktrees/x"));
         assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/../../src"));
-        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/./x"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/x/../../y"));
         assert!(!inside("C:/r", "C:/r/../r/.gitdesktop/worktrees/x"));
         assert!(!inside("C:/r", "C:/r/.gitdesktop/worktreesX/y"));
         assert!(!inside("C:/r", "C:/r/.gitdesktop/other/y"));
         assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees"));
         assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/"));
-        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/x/"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/./"));
         assert!(!inside("C:/r", "C:/rx/.gitdesktop/worktrees/x"));
         assert!(!inside("C:/r", "C:/other/.gitdesktop/worktrees/x"));
+        assert!(!inside(
+            "//srv/share/r",
+            "/srv/share/r/.gitdesktop/worktrees/x"
+        ));
+    }
+
+    #[test]
+    fn is_inside_gitdesktop_worktrees_folds_case_only_when_asked() {
+        let typed = "/home/u/r/.GitDesktop/Worktrees/pr-7";
+        assert!(!inside_gitdesktop_worktrees("/home/u/r", typed, false));
+        assert!(inside_gitdesktop_worktrees("/home/u/r", typed, true));
+        let exact = "/home/u/r/.gitdesktop/worktrees/x";
+        assert!(!inside_gitdesktop_worktrees("/home/u/R", exact, false));
+        assert!(inside_gitdesktop_worktrees("/home/u/r", exact, false));
+    }
+
+    /// The typed spellings `resolve_worktree_path` passes through unnormalized.
+    #[test]
+    fn resolved_dot_and_trailing_slash_spellings_are_contained() {
+        for typed in [
+            "./.gitdesktop/worktrees/pr-7",
+            ".gitdesktop/worktrees/pr-7/",
+        ] {
+            let resolved = resolve_worktree_path("/home/u/r", typed);
+            assert!(
+                is_inside_gitdesktop_worktrees("/home/u/r", &resolved),
+                "{resolved}"
+            );
+        }
     }
 
     /// Only these shapes need `Path::join`, which parses drive prefixes on Windows only.
@@ -2483,12 +2553,37 @@ prunable gitdir file points to non-existent location
     async fn worktree_add_user_survives_an_unwritable_exclude() {
         let (_base, repo) = setup_repo("exclude-unwritable").await;
         std::fs::remove_file(exclude_file(&repo)).ok();
+        // POSIX git refuses an exclude path that is a directory, so there a missing file
+        // in a read-only info/ makes only the app's create fail. Restored on drop: a
+        // read-only dir can fail TempDir cleanup.
+        // Root ignores directory permissions, so the read-only trick can't block it.
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        #[cfg(unix)]
+        let _readonly = {
+            use std::os::unix::fs::PermissionsExt;
+            struct Restore(std::path::PathBuf);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    let mode = std::fs::Permissions::from_mode(0o755);
+                    std::fs::set_permissions(&self.0, mode).ok();
+                }
+            }
+            let info = exclude_file(&repo).parent().unwrap().to_path_buf();
+            std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o555)).unwrap();
+            Restore(info)
+        };
+        #[cfg(windows)]
         std::fs::create_dir(exclude_file(&repo)).unwrap();
         let path = ".gitdesktop/worktrees/wt1";
         git_worktree_add_user_core(&AppState::default(), &repo, path, "wt1", true, None)
             .await
             .unwrap();
         assert!(std::path::Path::new(&repo).join(path).is_dir());
+        assert!(!excludes_line(&repo));
     }
 
     #[tokio::test]

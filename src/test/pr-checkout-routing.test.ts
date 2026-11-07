@@ -62,9 +62,12 @@ const facts = (
   provider: Provider,
   crossRepository: boolean | null | undefined,
   headRepositoryOwner: string | null | undefined,
+  headRefName = "feat/x",
+  defaultBranchName: string | null = "main",
 ): PrBranchFacts => ({
   provider,
-  headRefName: "feat/x",
+  headRefName,
+  defaultBranchName,
   crossRepository,
   headRepositoryOwner,
 });
@@ -129,6 +132,41 @@ describe("checkedOutNames", () => {
       false,
     );
   });
+
+  // gh owner-prefixes a fork head named like the default branch, so the bare
+  // name there is the user's own branch.
+  it.each<[Provider]>([["github"], [undefined]])(
+    "a %s fork whose head is the default branch chips only on owner/head",
+    (provider) => {
+      expect(names(facts(provider, true, "alice", "main"))).toEqual([
+        "alice/main",
+      ]);
+    },
+  );
+
+  it("a fork head other than the default branch still chips bare on gh", () => {
+    // A head equal to the PR's base but not the default stays bare.
+    expect(names(facts("github", true, "alice", "release"))).toEqual([
+      "alice/release",
+      "release",
+    ]);
+  });
+
+  it("an unknown default branch never chips on the bare head", () => {
+    expect(names(facts("github", true, "alice", "feat", null))).toEqual([
+      "alice/feat",
+    ]);
+  });
+
+  it.each<[Provider, boolean, string | null, string[]]>([
+    ["bitbucket", true, "ws", ["ws/main"]],
+    ["gitlab", false, null, ["main"]],
+  ])(
+    "the native route is unchanged by a head named like the default (%s)",
+    (provider, cross, owner, want) => {
+      expect(names(facts(provider, cross, owner, "main"))).toEqual(want);
+    },
+  );
 });
 
 describe("plainCheckoutTarget", () => {
@@ -156,6 +194,30 @@ describe("plainCheckoutTarget", () => {
       want,
     );
   });
+
+  it.each<[Provider, boolean, string | null, string, string | null, string]>([
+    // gh may prefix a fork head named like the default branch, or one whose
+    // default is unknown: the PR by number.
+    ["github", true, "alice", "main", "main", "PR #7"],
+    [undefined, true, "alice", "main", "main", "PR #7"],
+    ["github", true, "alice", "feat", null, "PR #7"],
+    // A same-repo head is never prefixed, default branch or not.
+    ["github", false, "base", "main", "main", "main"],
+    ["github", false, "base", "feat", null, "feat"],
+    // The native engine's name doesn't depend on the default branch.
+    ["bitbucket", true, "ws", "main", "main", "ws/main"],
+  ])(
+    "%s cross=%j owner=%j head=%j default=%j → %j",
+    (provider, cross, owner, head, def, want) => {
+      expect(
+        plainCheckoutTarget(
+          facts(provider, cross, owner, head, def),
+          7,
+          "pull request",
+        ),
+      ).toBe(want);
+    },
+  );
 });
 
 function forgeData(

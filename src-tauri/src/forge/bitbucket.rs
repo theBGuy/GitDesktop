@@ -1097,7 +1097,12 @@ fn cross_repo(source: &Option<BbPrEndpoint>, destination: &Option<BbPrEndpoint>)
 /// The source repository's workspace (the `workspace` of `workspace/slug`), or None
 /// when the source repo is absent or its name isn't two non-empty halves.
 fn head_repo_owner(source: &Option<BbPrEndpoint>) -> Option<String> {
-    let full = endpoint_repo(source);
+    repo_owner(&endpoint_repo(source))
+}
+
+/// The workspace of a `workspace/slug` repository name, or None unless both halves
+/// are non-empty.
+fn repo_owner(full: &str) -> Option<String> {
     let (owner, slug) = full.trim().split_once('/')?;
     let owner = owner.trim();
     (!owner.is_empty() && !slug.trim().is_empty()).then(|| owner.to_string())
@@ -1111,19 +1116,60 @@ fn source_repo_gone() -> AppError {
     )
 }
 
+/// The checkout's slice of a pull request: only its endpoints, every level
+/// null-tolerant, so a null in a field the checkout never reads can't fail it.
+#[derive(Deserialize)]
+struct BbCheckoutPr {
+    #[serde(default)]
+    source: Option<BbCheckoutEndpoint>,
+    #[serde(default)]
+    destination: Option<BbCheckoutEndpoint>,
+}
+
+#[derive(Deserialize)]
+struct BbCheckoutEndpoint {
+    #[serde(default)]
+    branch: Option<BbCheckoutBranch>,
+    #[serde(default)]
+    repository: Option<BbRepoRef>,
+}
+
+#[derive(Deserialize)]
+struct BbCheckoutBranch {
+    #[serde(default, deserialize_with = "null_to_default")]
+    name: String,
+}
+
+impl BbCheckoutEndpoint {
+    fn repo(ep: &Option<Self>) -> String {
+        ep.as_ref()
+            .and_then(|e| e.repository.as_ref())
+            .map(|r| r.full_name.clone())
+            .unwrap_or_default()
+    }
+}
+
 /// The checkout's fields of a pull request: the trimmed source branch and both
 /// endpoint repositories. A missing destination refuses as unreadable, so fork-ness
 /// is never defaulted.
-fn checkout_fields(pr: &BbPr) -> AppResult<(String, String, String)> {
+fn checkout_fields(pr: &BbCheckoutPr) -> AppResult<(String, String, String)> {
     let what = "the pull request's branch";
-    let head = branch_name(&pr.source).trim().to_string();
+    let head = pr
+        .source
+        .as_ref()
+        .and_then(|e| e.branch.as_ref())
+        .map(|b| b.name.trim().to_string())
+        .unwrap_or_default();
     if head.is_empty() {
         return Err(http::bb_unreadable(
             what,
             "the pull request has no source branch".into(),
         ));
     }
-    let (src, dst) = (endpoint_repo(&pr.source), endpoint_repo(&pr.destination));
+    let (src, dst) = (
+        BbCheckoutEndpoint::repo(&pr.source),
+        BbCheckoutEndpoint::repo(&pr.destination),
+    );
     if src.trim().is_empty() {
         return Err(source_repo_gone());
     }
@@ -1162,7 +1208,9 @@ fn fork_clone_url(body: &str) -> AppResult<String> {
             "the clone link isn't an https bitbucket.org URL",
         ));
     }
-    Ok(url)
+    // Schemes are case-insensitive (RFC 3986), so it goes out lowercase and no consumer
+    // downstream ever meets an uppercase one.
+    Ok(format!("https://{}", &url[8..]))
 }
 
 /// The native checkout's fresh read of a pull request: its source branch, whether the
@@ -1178,13 +1226,13 @@ pub(crate) async fn pr_checkout_source(
         encode_query_value(&ws),
         encode_query_value(&slug),
     );
-    let pr: BbPr = http::bb_get_json(&creds, &path, "pull request", BbOpKind::Read).await?;
+    let pr: BbCheckoutPr = http::bb_get_json(&creds, &path, "pull request", BbOpKind::Read).await?;
     let (head, src, dst) = checkout_fields(&pr)?;
     let fork = src != dst;
     if !fork {
         return Ok(bb_checkout_source(head, None));
     }
-    let owner = head_repo_owner(&pr.source).ok_or_else(|| {
+    let owner = repo_owner(&src).ok_or_else(|| {
         http::bb_unreadable(
             "the pull request's source repository",
             format!("unreadable repository name {src}"),
@@ -9080,7 +9128,7 @@ mod checkout_source_tests {
         assert!(!branch(&SourceRef::MergeRequestHead(7)));
     }
 
-    fn pr(source_repo: Option<&str>, dest_repo: Option<&str>, branch: &str) -> BbPr {
+    fn pr(source_repo: Option<&str>, dest_repo: Option<&str>, branch: &str) -> BbCheckoutPr {
         let repo = |r: Option<&str>| match r {
             Some(name) => serde_json::json!({ "full_name": name }),
             None => serde_json::Value::Null,
@@ -9113,6 +9161,44 @@ mod checkout_source_tests {
     }
 
     #[test]
+    fn checkout_fields_ignore_nulls_in_fields_the_checkout_never_reads() {
+        let body = serde_json::json!({
+            "id": 7,
+            "reviewers": null,
+            "participants": null,
+            "title": null,
+            "source": {
+                "branch": { "name": "feat" },
+                "commit": null,
+                "repository": { "full_name": "alice/repo" },
+            },
+            "destination": {
+                "branch": null,
+                "commit": { "hash": null },
+                "repository": { "full_name": "ws/repo" },
+            },
+        });
+        // The full PR shape fails on the same body: this control documents a known
+        // limitation of the details read (backlog) — delete it once BbPr tolerates nulls.
+        assert!(serde_json::from_value::<BbPr>(body.clone()).is_err());
+        let pr: BbCheckoutPr =
+            serde_json::from_value(body).expect("nulls outside the checkout's fields deserialize");
+        assert_eq!(
+            checkout_fields(&pr).unwrap(),
+            ("feat".into(), "alice/repo".into(), "ws/repo".into())
+        );
+        let null_name: BbCheckoutPr = serde_json::from_value(serde_json::json!({
+            "source": { "branch": { "name": null }, "repository": null },
+            "destination": null,
+        }))
+        .unwrap();
+        assert!(matches!(
+            checkout_fields(&null_name).unwrap_err(),
+            AppError::Bitbucket(_)
+        ));
+    }
+
+    #[test]
     fn fork_clone_url_requires_https_on_bitbucket_org() {
         let body = |links: serde_json::Value| serde_json::json!({ "links": links }).to_string();
         let ok = body(serde_json::json!({ "clone": [
@@ -9128,7 +9214,14 @@ mod checkout_source_tests {
         ]}));
         assert_eq!(
             fork_clone_url(&upper).unwrap(),
-            "HTTPS://bitbucket.org/alice/repo.git"
+            "https://bitbucket.org/alice/repo.git"
+        );
+        let mixed = body(serde_json::json!({ "clone": [
+            { "name": "https", "href": "HttpS://bitbucket.org/alice/repo.git" },
+        ]}));
+        assert_eq!(
+            fork_clone_url(&mixed).unwrap(),
+            "https://bitbucket.org/alice/repo.git"
         );
         for bad in [
             body(serde_json::json!({ "clone": [

@@ -816,7 +816,10 @@ mod tests {
             .prefix(&format!("gd-prc-{marker}-"))
             .tempdir()
             .expect("create temp dir");
-        let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+        // git's own spelling of the temp dir (macOS `/var` → `/private/var`, a runner's
+        // 8.3 TEMP expanded): the lexical exclude check compares against git's output.
+        let base = dunce::canonicalize(dir.path()).expect("canonicalize temp dir");
+        let p = |n: &str| base.join(n).to_string_lossy().into_owned();
         let (root, seed, forge, fork, clone) =
             (p(""), p("seed"), p("forge.git"), p("fork.git"), p("clone"));
         std::fs::create_dir_all(&seed).unwrap();
@@ -1027,7 +1030,7 @@ mod tests {
         assert_eq!(worktree_forge(None), "GitHub");
     }
 
-    /// T-P1: a fresh checkout lands on the local name at the fetched tip, leaves no
+    /// A fresh checkout lands on the local name at the fetched tip, leaves no
     /// pin and never touches FETCH_HEAD; a fork's prefix keeps the user's own `feat`.
     #[tokio::test]
     async fn plain_fresh_checkout_lands_on_the_pinned_tip() {
@@ -1062,7 +1065,7 @@ mod tests {
         }
     }
 
-    /// T-P2/T-P3: a re-run fast-forwards to the advanced tip, from the branch itself
+    /// A re-run fast-forwards to the advanced tip, from the branch itself
     /// and from another branch (switched first).
     #[tokio::test]
     async fn plain_rerun_fast_forwards_current_and_switched() {
@@ -1085,7 +1088,7 @@ mod tests {
         }
     }
 
-    /// T-P4: a local branch with commits the PR lacks is refused before any write.
+    /// A local branch with commits the PR lacks is refused before any write.
     #[tokio::test]
     async fn plain_diverged_branch_is_refused_unchanged() {
         for a in ALL {
@@ -1115,7 +1118,7 @@ mod tests {
         }
     }
 
-    /// T-P5: an ownerless fork refuses while a bare-named branch exists, any case.
+    /// An ownerless fork refuses while a bare-named branch exists, any case.
     #[tokio::test]
     async fn plain_ownerless_fork_refuses_a_bare_namesake() {
         for existing in ["feat", "Feat"] {
@@ -1135,7 +1138,7 @@ mod tests {
         }
     }
 
-    /// T-P6: a reserved head, or an owner prefix spelling one, is refused before the
+    /// A reserved head, or an owner prefix spelling one, is refused before the
     /// fetch.
     #[tokio::test]
     async fn plain_reserved_names_refuse_before_the_fetch() {
@@ -1181,7 +1184,7 @@ mod tests {
         }
     }
 
-    /// T-P7: a dirty file the switch would overwrite is git's refusal; nothing moves.
+    /// A dirty file the switch would overwrite is git's refusal; nothing moves.
     #[tokio::test]
     async fn plain_dirty_overlap_is_gits_refusal() {
         let fx = forge_fixture("p7").await;
@@ -1197,7 +1200,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&a_txt).unwrap(), "local edit\n");
     }
 
-    /// T-P9: an update holding the local branch refuses before the fetch or switch.
+    /// An update holding the local branch refuses before the fetch or switch.
     // The serializing guard MUST span the awaits: it keeps the process-wide root
     // override installed for the whole body.
     #[allow(clippy::await_holding_lock)]
@@ -1248,7 +1251,7 @@ mod tests {
         (out.code, out.stdout_lossy().trim().to_string())
     }
 
-    /// T-T1 (plain): only a proven same-repo creation gets an upstream, and its
+    /// Only a proven same-repo creation gets an upstream, and its
     /// remote-tracking ref exists so the upstream isn't gone.
     #[tokio::test]
     async fn tracking_is_set_only_for_same_repo_creations() {
@@ -1325,7 +1328,7 @@ mod tests {
         worktree_tracking_rows().await;
     }
 
-    /// T-T1's worktree-flavor rows.
+    /// The same tracking checks over the worktree flavor, per forge arm.
     async fn worktree_tracking_rows() {
         for a in [Arm::Gl, Arm::Bb, Arm::Gh] {
             let fx = forge_fixture("wt1").await;
@@ -1416,7 +1419,7 @@ mod tests {
         assert_eq!(config(&fx.clone, "branch.feat.remote").await.0, 1);
     }
 
-    /// T-PIN: every exit of the fetch block leaves no pin of this process, and a
+    /// Every exit of the fetch block leaves no pin of this process, and a
     /// foreign process's pin is never touched.
     #[tokio::test]
     async fn fetch_block_exits_leave_no_own_pin() {
@@ -1527,7 +1530,7 @@ mod tests {
         assert!(own_pins(&fx.clone).await.is_empty(), "(e) bb");
     }
 
-    /// T-W12 (plain): a deleted head on a same-repo Bitbucket PR names the forge.
+    /// The plain flavor: a deleted head on a same-repo Bitbucket PR names the forge.
     #[tokio::test]
     async fn plain_missing_remote_ref_names_the_forge() {
         let fx = forge_fixture("w12p").await;
@@ -2109,7 +2112,7 @@ mod tests {
         }
     }
 
-    /// T-W1: a fresh worktree lands on the local name at the fetched tip; the open
+    /// A fresh worktree lands on the local name at the fetched tip; the open
     /// checkout, the pins and FETCH_HEAD are untouched.
     #[tokio::test]
     async fn worktree_fresh_checkout_lands_on_the_pinned_tip() {
@@ -2137,7 +2140,7 @@ mod tests {
         }
     }
 
-    /// T-W2: a re-run into the same worktree fast-forwards to the advanced tip.
+    /// A re-run into the same worktree fast-forwards to the advanced tip.
     #[tokio::test]
     async fn worktree_rerun_fast_forwards() {
         for a in WT_ALL {
@@ -2155,7 +2158,7 @@ mod tests {
         }
     }
 
-    /// T-W3: a diverged worktree is refused before any write; a relative target keeps
+    /// A diverged worktree is refused before any write; a relative target keeps
     /// its echo in `path` while the message names git's absolute spelling.
     #[tokio::test]
     async fn worktree_diverged_rerun_is_refused_unchanged() {
@@ -2196,7 +2199,7 @@ mod tests {
         }
     }
 
-    /// T-W4: a forced retry at the confirmed head resets to the fetched tip; a stale
+    /// A forced retry at the confirmed head resets to the fetched tip; a stale
     /// confirm changes nothing.
     #[tokio::test]
     async fn worktree_force_resets_only_at_the_confirmed_head() {
@@ -2223,7 +2226,7 @@ mod tests {
         }
     }
 
-    /// T-W5: dirty tracked changes ride a commit divergence as `dirty`.
+    /// Dirty tracked changes ride a commit divergence as `dirty`.
     #[tokio::test]
     async fn worktree_dirty_divergence_reports_dirty() {
         for a in [Arm::Gl, Arm::Gh] {
@@ -2241,7 +2244,7 @@ mod tests {
         }
     }
 
-    /// T-W6: a reserved head, or an owner prefix spelling one, refuses before the fetch
+    /// A reserved head, or an owner prefix spelling one, refuses before the fetch
     /// on every forge.
     #[tokio::test]
     async fn worktree_reserved_names_refuse_before_the_fetch() {
@@ -2294,7 +2297,7 @@ mod tests {
         }
     }
 
-    /// T-W7: an ownerless fork refuses while a bare-named branch exists, in the forge's
+    /// An ownerless fork refuses while a bare-named branch exists, in the forge's
     /// own words; nothing is created.
     #[tokio::test]
     async fn worktree_ownerless_fork_refuses_a_bare_namesake() {
@@ -2324,7 +2327,7 @@ mod tests {
         }
     }
 
-    /// T-W8: a GitLab cross-project branch carries the source project's full path, and
+    /// A GitLab cross-project branch carries the source project's full path, and
     /// a re-run into the same folder fast-forwards it.
     #[tokio::test]
     async fn worktree_gitlab_cross_project_rerun_syncs() {
@@ -2340,7 +2343,7 @@ mod tests {
         assert_eq!(rev(&path, "HEAD").await, tip);
     }
 
-    /// T-W9: a linked worktree on another branch is switched to the PR's and synced.
+    /// A linked worktree on another branch is switched to the PR's and synced.
     #[tokio::test]
     async fn worktree_on_another_branch_is_switched() {
         let fx = forge_fixture("w9").await;
@@ -2375,7 +2378,7 @@ mod tests {
         assert_eq!(rev(&path, "HEAD").await, fx.tip);
     }
 
-    /// T-W10: an existing diverged branch lands in its new worktree before
+    /// An existing diverged branch lands in its new worktree before
     /// `WorktreeDiverged` returns, so the forced retry can reset it.
     #[tokio::test]
     async fn worktree_existing_diverged_branch_lands_then_resets() {
@@ -2394,7 +2397,7 @@ mod tests {
         assert_eq!(head_ref(&fx.clone).await, "refs/heads/main");
     }
 
-    /// T-W11: a non-empty folder gets the shared not-empty sentence; the main checkout
+    /// A non-empty folder gets the shared not-empty sentence; the main checkout
     /// gets the gate's refusal.
     #[tokio::test]
     async fn worktree_refuses_a_full_folder_and_the_main_checkout() {
@@ -2426,7 +2429,7 @@ mod tests {
         assert!(own_pins(&fx.clone).await.is_empty());
     }
 
-    /// T-W12: a missing remote ref names the forge and its noun; no pin is left.
+    /// A missing remote ref names the forge and its noun; no pin is left.
     #[tokio::test]
     async fn worktree_missing_remote_ref_names_the_forge() {
         for a in [Arm::Gl, Arm::Bbf] {
@@ -2466,8 +2469,8 @@ mod tests {
         (fx, src, path)
     }
 
-    /// T-PAR: per tree state, the native re-run lands on the gh path's outcome (S1-S9,
-    /// F1-F5); S10 is the one deliberate break, below.
+    /// Per tree state, the native re-run lands on the gh path's outcome (each labeled
+    /// case below); the next test's S10 is the one deliberate break.
     #[tokio::test]
     async fn rerun_matches_the_gh_path_per_tree_state() {
         // S1: clean and behind fast-forwards.

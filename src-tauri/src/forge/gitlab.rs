@@ -566,7 +566,8 @@ pub async fn pr_head_ref(repo_path: &str, number: u64) -> AppResult<PrHeadRef> {
 
 /// The native checkout's fresh read of a merge request: its head branch and whether
 /// the source project is the target's. Fork-ness is proven from both project ids, and
-/// a fork's owner is its source project's full path (only a 404 there reads ownerless).
+/// a fork's owner is its source project's full path (only a 404 there, or a source id
+/// GitLab nulled, reads ownerless).
 pub(crate) async fn mr_checkout_source(
     repo_path: &str,
     number: u64,
@@ -575,15 +576,28 @@ pub(crate) async fn mr_checkout_source(
     let endpoint = format!("projects/{}/merge_requests/{number}", encode_project(&path));
     let out = run_glab(Some(repo_path), &["api", &endpoint], GLAB_NETWORK_TIMEOUT).await?;
     let (head, source, target) = mr_checkout_fields(&out.stdout_lossy())?;
-    let fork = source != target;
-    let owner = if fork {
-        let project = format!("projects/{source}");
-        let out = run_glab_raw(Some(repo_path), &["api", &project], GLAB_NETWORK_TIMEOUT).await?;
-        source_project_owner(out.code, &out.stdout_lossy(), &out.stderr)?
-    } else {
-        None
+    let (fork, lookup) = mr_fork_routing(source, target);
+    let owner = match lookup {
+        Some(source) => {
+            let project = format!("projects/{source}");
+            let out =
+                run_glab_raw(Some(repo_path), &["api", &project], GLAB_NETWORK_TIMEOUT).await?;
+            source_project_owner(out.code, &out.stdout_lossy(), &out.stderr)?
+        }
+        None => None,
     };
     Ok(mr_checkout_source_from(head, fork, owner, number))
+}
+
+/// Whether the merge request crosses projects, and the source project whose path
+/// names its owner. GitLab nulls the source id when the fork is deleted: that is a
+/// cross-project MR with no owner to look up, its head ref still on the target.
+fn mr_fork_routing(source: Option<u64>, target: u64) -> (bool, Option<u64>) {
+    match source {
+        Some(s) if s == target => (false, None),
+        Some(s) => (true, Some(s)),
+        None => (true, None),
+    }
 }
 
 /// A GitLab source: the target project's merge-request head ref, from origin. Same-repo
@@ -607,8 +621,8 @@ fn mr_checkout_source_from(
 
 /// The checkout's fields of a merge request body: the trimmed head branch and the
 /// source and target project ids. Any of them missing or unreadable refuses, so
-/// fork-ness is never defaulted.
-fn mr_checkout_fields(body: &str) -> AppResult<(String, u64, u64)> {
+/// fork-ness is never defaulted; only an explicit null source id reads as None.
+fn mr_checkout_fields(body: &str) -> AppResult<(String, Option<u64>, u64)> {
     let what = "the merge request's branch";
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| gl_unreadable(what, format!("could not parse the merge request: {e}")))?;
@@ -624,11 +638,11 @@ fn mr_checkout_fields(body: &str) -> AppResult<(String, u64, u64)> {
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| gl_unreadable(what, format!("the merge request has no {key}")))
     };
-    Ok((
-        head.to_string(),
-        id("source_project_id")?,
-        id("target_project_id")?,
-    ))
+    let source = match value.get("source_project_id") {
+        Some(serde_json::Value::Null) => None,
+        _ => Some(id("source_project_id")?),
+    };
+    Ok((head.to_string(), source, id("target_project_id")?))
 }
 
 /// A fork's owner from its source project read: the project's full path, or None
@@ -811,8 +825,8 @@ struct GlabMr {
     labels: Vec<String>,
     #[serde(default)]
     created_at: String,
-    /// The head/target projects. Differing ids mean a fork MR; `None` on either
-    /// side leaves `cross_repository` false rather than guessing.
+    /// The head/target projects, read through `mr_cross_repository`: differing ids,
+    /// or a nulled source beside a target, mean a fork MR.
     #[serde(default)]
     source_project_id: Option<u64>,
     #[serde(default)]
@@ -842,12 +856,7 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
         // over rows already in hand — it has no probe to fail, so never unknown.
         stack: None,
         stack_unknown: false,
-        // A fork MR lives in a different project; either id missing leaves this
-        // false rather than guessing a fork the resolve flow would then refuse.
-        cross_repository: match (m.source_project_id, m.target_project_id) {
-            (Some(src), Some(tgt)) => src != tgt,
-            _ => false,
-        },
+        cross_repository: mr_cross_repository(m.source_project_id, m.target_project_id),
     }
 }
 
@@ -2226,8 +2235,8 @@ struct GlabMrChanges {
     detailed_merge_status: String,
     #[serde(default, deserialize_with = "null_to_default")]
     merge_error: Option<String>,
-    /// The head/target projects. Differing ids mean a fork MR; `None` on either
-    /// side leaves `cross_repository` false rather than guessing.
+    /// The head/target projects, read through `mr_cross_repository`: differing ids,
+    /// or a nulled source beside a target, mean a fork MR.
     #[serde(default, deserialize_with = "null_to_default")]
     source_project_id: Option<u64>,
     #[serde(default, deserialize_with = "null_to_default")]
@@ -2243,6 +2252,18 @@ struct GlabHeadPipeline {
     id: u64,
     #[serde(default, deserialize_with = "null_to_default")]
     project_id: Option<u64>,
+}
+
+/// An MR's fork verdict, shared by list rows and details. A null source id beside a
+/// target is a deleted fork, which the checkout runs ownerless: read as same-repo, the
+/// frontend would claim a same-named local branch the backend's namesake refusals
+/// refuse. No target id: false.
+fn mr_cross_repository(source: Option<u64>, target: Option<u64>) -> bool {
+    match (source, target) {
+        (Some(src), Some(tgt)) => src != tgt,
+        (None, Some(_)) => true,
+        (_, None) => false,
+    }
 }
 
 impl GlabHeadPipeline {
@@ -2804,12 +2825,7 @@ pub async fn view_pr(repo_path: &str, number: u64) -> AppResult<PrDetails> {
             &mr.detailed_merge_status,
             mr.merge_error.as_deref(),
         ),
-        // A fork MR lives in a different project; either id missing leaves this
-        // false rather than guessing a fork the resolve flow would then refuse.
-        cross_repository: match (mr.source_project_id, mr.target_project_id) {
-            (Some(src), Some(tgt)) => src != tgt,
-            _ => false,
-        },
+        cross_repository: mr_cross_repository(mr.source_project_id, mr.target_project_id),
         // GitHub's "allow edits by maintainers" has no GitLab equivalent — unknown,
         // not denied.
         maintainer_can_modify: None,
@@ -14871,8 +14887,8 @@ mod tests {
         assert!(!p.cross_repository);
     }
 
-    /// A fork MR's source project differs from its target; either id absent (an
-    /// older cached shape) must read as same-repo, never as a fork.
+    /// A fork MR's source project differs from its target, or GitLab nulled it (a
+    /// deleted fork); without a target id the row never reads as a fork.
     #[test]
     fn cross_repository_compares_mr_project_ids() {
         let mr = |ids: &str| -> PrInfo {
@@ -14886,10 +14902,12 @@ mod tests {
         assert!(mr(r#","source_project_id":42,"target_project_id":7"#).cross_repository);
         // Same project → a plain branch MR.
         assert!(!mr(r#","source_project_id":7,"target_project_id":7"#).cross_repository);
-        // Either side missing or null → false rather than a guess.
-        assert!(!mr(r#","target_project_id":7"#).cross_repository);
+        // A null (or absent) source beside a target → a deleted fork.
+        assert!(mr(r#","source_project_id":null,"target_project_id":7"#).cross_repository);
+        assert!(mr(r#","target_project_id":7"#).cross_repository);
+        // No target id → false rather than a guess.
         assert!(!mr(r#","source_project_id":42"#).cross_repository);
-        assert!(!mr(r#","source_project_id":null,"target_project_id":7"#).cross_repository);
+        assert!(!mr(r#","source_project_id":42,"target_project_id":null"#).cross_repository);
     }
 
     #[test]
@@ -15263,6 +15281,21 @@ mod tests {
         .unwrap();
         assert_eq!(absent.source_project_id, None);
         assert_eq!(absent.target_project_id, None);
+
+        // The fork verdict: a null source beside a target is a deleted fork.
+        let cross =
+            |m: &GlabMrChanges| mr_cross_repository(m.source_project_id, m.target_project_id);
+        assert!(cross(&mr));
+        assert!(!cross(&same));
+        assert!(!cross(&absent));
+        let gone: GlabMrChanges = serde_json::from_str(
+            r#"{"iid":6,"web_url":"u","title":"t","target_branch":"main",
+                "source_branch":"feat","state":"opened",
+                "source_project_id":null,"target_project_id":1}"#,
+        )
+        .unwrap();
+        assert!(cross(&gone));
+        assert!(!mr_cross_repository(Some(2), None));
     }
 
     #[test]
@@ -17285,16 +17318,48 @@ mod checkout_source_tests {
         assert!(!mr_head(&SourceRef::Branch("feat".into())));
     }
 
+    /// Equal ids are same-project; a fork looks its owner up; a nulled source id is an
+    /// ownerless fork that still fetches the MR head and lands on the bare name.
+    #[test]
+    fn mr_fork_routing_reads_a_null_source_as_an_ownerless_fork() {
+        assert_eq!(mr_fork_routing(Some(9), 9), (false, None));
+        assert_eq!(mr_fork_routing(Some(3), 9), (true, Some(3)));
+        assert_eq!(mr_fork_routing(None, 9), (true, None));
+        let body = r#"{"source_branch":"feat","source_project_id":null,"target_project_id":9}"#;
+        let (head, source, target) = mr_checkout_fields(body).unwrap();
+        let (fork, lookup) = mr_fork_routing(source, target);
+        assert_eq!(lookup, None);
+        let src = mr_checkout_source_from(head, fork, None, 7);
+        assert!(matches!(src.source_ref, SourceRef::MergeRequestHead(7)));
+        assert!(matches!(src.from, FetchFrom::Remote("origin")));
+        assert_eq!((src.fork, src.same_repo, src.owner), (true, false, None));
+        assert_eq!(
+            crate::git::pr_checkout::pr_local_branch_name(&src.head, src.fork, None),
+            "feat"
+        );
+    }
+
     #[test]
     fn mr_checkout_fields_need_branch_and_both_project_ids() {
         let ok = r#"{"source_branch":" feat ","source_project_id":3,"target_project_id":9}"#;
-        assert_eq!(mr_checkout_fields(ok).unwrap(), ("feat".to_string(), 3, 9));
+        assert_eq!(
+            mr_checkout_fields(ok).unwrap(),
+            ("feat".to_string(), Some(3), 9)
+        );
+        // A deleted fork's nulled source id reads as unknown; the key itself must exist.
+        let gone = r#"{"source_branch":"feat","source_project_id":null,"target_project_id":9}"#;
+        assert_eq!(
+            mr_checkout_fields(gone).unwrap(),
+            ("feat".to_string(), None, 9)
+        );
         for body in [
             r#"{"source_branch":"","source_project_id":1,"target_project_id":1}"#,
             r#"{"source_branch":"   ","source_project_id":1,"target_project_id":1}"#,
             r#"{"source_project_id":1,"target_project_id":1}"#,
             r#"{"source_branch":"feat","target_project_id":1}"#,
-            r#"{"source_branch":"feat","source_project_id":null,"target_project_id":1}"#,
+            r#"{"source_branch":"feat","source_project_id":1}"#,
+            r#"{"source_branch":"feat","source_project_id":1,"target_project_id":null}"#,
+            r#"{"source_branch":"feat","source_project_id":"1","target_project_id":1}"#,
             r#"{"source_branch":"feat","source_project_id":1,"target_project_id":"1"}"#,
             r#"{"source_branch":"feat","source_project_id":-1,"target_project_id":1}"#,
             "not json",

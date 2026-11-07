@@ -2544,12 +2544,13 @@ pub async fn gh_pr_checkout_worktree(
     let resolved = crate::git::worktree::resolve_worktree_path(&repo_path, path);
     let mode = force_mode(force, expected_head.as_deref())?;
     let fork = pr_is_fork(&pr);
+    refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
+    // Before the spawn, since the divergence arm below can create the worktree and still
+    // Err; before the gate too, so no app-side await sits between its head check and gh.
+    crate::git::worktree::exclude_if_inside_gitdesktop(&repo_path, &resolved).await;
     let pre =
         checkout_pre_spawn_gate(&repo_path, path, &resolved, oid, head, local, fork, mode).await?;
 
-    refuse_if_pr_branch_updating(&state, &repo_path, Some(&pr.view)).await?;
-    // Before the spawn: the divergence arm below can create the worktree and still Err.
-    crate::git::worktree::exclude_if_inside_gitdesktop(&repo_path, &resolved).await;
     let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
     let err = match run_gh(Some(&repo_path), &argv, GH_NETWORK_TIMEOUT).await {
         Ok(_) => return Ok(()),
@@ -10896,7 +10897,7 @@ mod tests {
         assert!(head_owner_login(raw.head_repository_owner.as_ref()).is_none());
     }
 
-    /// The wire key P2/P3 read: always present, `null` when unknown.
+    /// The wire key the frontend reads: always present, `null` when unknown.
     #[test]
     fn head_repository_owner_serializes_camel_case() {
         let mut details = details_with_stack(None, Vec::new(), false, false);

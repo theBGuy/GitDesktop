@@ -122,7 +122,8 @@ export function isAbsolutePath(p: string, windows = isWindows): boolean {
 }
 
 /** Where a typed folder lands, resolved lexically as gh and git do: a relative one
- *  against the repository, a root-relative one ("/x") against its drive or share. A
+ *  against the repository, a root-relative one ("/x") against its drive or share,
+ *  and every one with its "." and ".." segments collapsed under a kept root. A
  *  drive-relative one ("C:x") depends on that drive's working directory, so it stays
  *  unresolved and matches no row. Holds, the Full path row and the toast's Open read it.
  *  Off Windows a backslash is an ordinary filename character, never a separator. */
@@ -131,12 +132,12 @@ export function resolveTarget(
   target: string,
   windows = isWindows,
 ): string {
-  if (isAbsolutePath(target, windows)) return target;
   const seps = (p: string) => (windows ? p.replace(/\\/g, "/") : p);
   const typed = seps(target);
-  if (windows && /^[A-Za-z]:/.test(typed)) return target;
   let joined: string;
-  if (windows && typed.startsWith("/")) {
+  if (isAbsolutePath(target, windows)) joined = typed;
+  else if (windows && /^[A-Za-z]:/.test(typed)) return target;
+  else if (windows && typed.startsWith("/")) {
     const drive = /^(?:\/\/[^/]+\/[^/]+|[A-Za-z]:)/.exec(seps(repoPath))?.[0];
     if (drive === undefined) return target;
     joined = drive + typed;
@@ -144,6 +145,9 @@ export function resolveTarget(
   // A drive, a UNC share or a leading "/" is never popped by "..".
   const rootRe = windows ? /^(?:\/\/[^/]+\/[^/]+|[A-Za-z]:)?\/?/ : /^\/?/;
   const root = rootRe.exec(joined)?.[0] ?? "";
+  // A UNC spelling with no share names no root to keep, so it stays as typed.
+  if (windows && joined.startsWith("//") && !root.startsWith("//"))
+    return target;
   const out: string[] = [];
   for (const s of joined.slice(root.length).split("/")) {
     if (s === "" || s === ".") continue;

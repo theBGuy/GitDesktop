@@ -7,6 +7,9 @@
 // added or dropped conjunct fails. The production wiring rides the same rule:
 // the plain checkout's mutation variables and the routing props the loaded
 // header hands PrWorktreeCheckout, since no test drives either from this view.
+// So do the plain checkout's offline guards (the fire-time refusal ahead of its
+// mutation and the button's held state) and the default-branch fact the
+// checked-out chip reads.
 // Not covered: a gate moved behind an intermediate variable.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -31,7 +34,15 @@ const EXPECTED = {
   "prop crossRepository": "pr.crossRepository",
   "prop headRepositoryOwner": "pr.headRepositoryOwner",
   "prop prNoun": "prNoun",
+  checkoutOffline: "refuseWhileOffline()",
+  "checkout disabled":
+    "runningCheckout !== undefined || detailsPlaceholder || !!offlineHold",
+  "checkout reason": "checkoutRunning ?? staleReason ?? offlineHold",
+  defaultBranchName:
+    '(lens === "origin" ? defaultBranch.data : undefined) ?? pr.baseRefName',
 };
+
+const CHECKOUT_BUTTON_PROPS = ["disabled", "reason"];
 
 const ROUTING_PROPS = [
   "provider",
@@ -108,6 +119,52 @@ function gateConditions(raw) {
         );
       }
   }
+  // The refusal must come before the mutation: one after it would let a
+  // checkout pressed offline park and fire on reconnect.
+  for (const m of masked.matchAll(/async function checkoutHead\s*\(/g)) {
+    const open = masked.indexOf("{", m.index + m[0].length);
+    const close = open < 0 ? -1 : matchBrace(masked, open);
+    const body = close < 0 ? "" : masked.slice(open, close);
+    const refuse = body.search(/(?<![\w$.])refuseWhileOffline\s*\(\s*\)/);
+    const mutate = body.search(/(?<![\w$.])checkout\.mutateAsync\s*\(/);
+    found.checkoutOffline.push(
+      refuse >= 0 && mutate >= 0 && refuse < mutate
+        ? "refuseWhileOffline()"
+        : "<no refusal ahead of the mutation>",
+    );
+  }
+  for (const m of masked.matchAll(/<DisabledReasonButton\b/g)) {
+    const end = tagEnd(masked, m.index);
+    if (end < 0) continue;
+    const tag = masked.slice(m.index, end);
+    if (!/onClick=\{[^]*?(?<![\w$.])checkoutHead\s*\(/.test(tag)) continue;
+    for (const prop of CHECKOUT_BUTTON_PROPS)
+      for (const p of tag.matchAll(
+        new RegExp(`(?<![\\w$-])${prop}=\\{`, "g"),
+      )) {
+        const open = m.index + p.index + p[0].length - 1;
+        const close = matchBrace(masked, open);
+        found[`checkout ${prop}`].push(
+          close < 0 ? "<unreadable prop>" : raw.slice(open + 1, close),
+        );
+      }
+  }
+  for (const m of masked.matchAll(/(?<![\w$.])defaultBranchName:\s*/g)) {
+    const start = m.index + m[0].length;
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < masked.length && end < 0; i++) {
+      const c = masked[i];
+      if (c === "(" || c === "[" || c === "{") depth++;
+      else if (c === ")" || c === "]" || c === "}") {
+        if (depth === 0) end = i;
+        else depth--;
+      } else if (c === "," && depth === 0) end = i;
+    }
+    found.defaultBranchName.push(
+      end < 0 ? "<unreadable value>" : raw.slice(start, end),
+    );
+  }
   return found;
 }
 
@@ -169,7 +226,7 @@ test("a gate with a dropped conjunct goes red", () => {
 });
 
 test("the production checkout wiring is exactly its expected expression", () => {
-  // The reviewer's mutation: the handler drops the real provider.
+  // A handler that drops the real provider, or never passes one, goes red.
   assertCaught(
     "checkoutVars",
     /checkout\.mutateAsync\(\{ number, lens, provider \}\)/,
@@ -186,6 +243,33 @@ test("the production checkout wiring is exactly its expected expression", () => 
       new RegExp(`(<PrWorktreeCheckout[^>]*?\\s)${prop}=\\{[^}]*\\}`),
       (_s, lead) => `${lead}${prop}={undefined}`,
     );
+});
+
+test("the plain checkout's offline guards and default-branch fact are pinned", () => {
+  const refusal =
+    /\n\s*if \(refuseWhileOffline\(\)\) return;(?=\s*try \{\s*await checkout\.mutateAsync)/;
+  assertCaught("checkoutOffline", refusal, () => "");
+  // A refusal moved after the mutation no longer guards it.
+  assertCaught(
+    "checkoutOffline",
+    /(\n\s*if \(refuseWhileOffline\(\)\) return;)(\s*try \{\s*await checkout\.mutateAsync\([^)]*\);)/,
+    (_s, guard, call) => `${call}${guard}`,
+  );
+  assertCaught(
+    "checkout disabled",
+    /detailsPlaceholder \|\|\s*!!offlineHold(?=\s*\}\s*reason=\{checkoutRunning)/,
+    () => "detailsPlaceholder",
+  );
+  assertCaught(
+    "checkout reason",
+    /reason=\{checkoutRunning \?\? staleReason \?\? offlineHold\}/,
+    () => "reason={checkoutRunning ?? staleReason}",
+  );
+  assertCaught(
+    "defaultBranchName",
+    /\(lens === "origin" \? defaultBranch\.data : undefined\) \?\? pr\.baseRefName/,
+    () => "pr.baseRefName",
+  );
 });
 
 test("a gate that can't be found fails closed", () => {

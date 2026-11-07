@@ -1557,11 +1557,19 @@ describe("PR split checkout edges", () => {
     ["C:/repos/demo", "..\\..\\..\\..\\x", "C:/x"],
     ["//srv/share/demo", "../x", "//srv/share/x"],
     ["C:/repos/demo", "D:/abs/x", "D:/abs/x"],
-    ["C:/repos/demo", "C:\\abs\\x", "C:\\abs\\x"],
+    ["C:/repos/demo", "C:\\abs\\x", "C:/abs/x"],
+    ["C:/repos/demo", "C:/repos/tmp/../review", "C:/repos/review"],
+    ["C:/repos/demo", "C:\\repos\\tmp\\..\\review", "C:/repos/review"],
+    ["C:/repos/demo", "C:/../x", "C:/x"],
+    ["C:/repos/demo", "C:/a/./b/", "C:/a/b"],
+    ["C:/repos/demo", "//srv/share/../x", "//srv/share/x"],
+    ["C:/repos/demo", "\\\\srv\\share\\a\\..\\x", "//srv/share/x"],
+    ["C:/repos/demo", "\\\\srv", "\\\\srv"],
     ["C:/repos/demo", "\\reviews", "C:/reviews"],
     ["C:/repos/demo", "/reviews", "C:/reviews"],
     ["//srv/share/demo", "/x", "//srv/share/x"],
     ["C:/repos/demo", "C:reviews", "C:reviews"],
+    ["C:/repos/demo", "C:x/../y", "C:x/../y"],
   ])("resolveTarget(%s, %s) is %s", (repo, typed, want) => {
     expect(resolveTarget(repo, typed)).toBe(want);
   });
@@ -1573,6 +1581,8 @@ describe("PR split checkout edges", () => {
     ["/repos/demo", "../a\\b/./c", "/repos/a\\b/c"],
     ["/repos/demo", "C:x", "/repos/demo/C:x"],
     ["/repos/demo", "/abs\\x", "/abs\\x"],
+    ["/repos/demo", "/a/b/../c", "/a/c"],
+    ["/repos/demo", "/../x", "/x"],
   ])("on POSIX resolveTarget(%s, %s) is %s", (repo, typed, want) => {
     expect(resolveTarget(repo, typed, false)).toBe(want);
   });

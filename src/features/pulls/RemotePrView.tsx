@@ -3405,6 +3405,7 @@ export function RemotePrView({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    if (refuseWhileOffline()) return;
     try {
       await checkout.mutateAsync({ number, lens, provider });
       toast.success(`Checked out ${target}`);
@@ -3603,6 +3604,10 @@ export function RemotePrView({
   const prFacts = {
     provider,
     headRefName: pr.headRefName,
+    // gh keys on the PR repository's default branch; `useDefaultBranch` reads
+    // origin's, so another lens, or a read not yet resolved, falls back to the base.
+    defaultBranchName:
+      (lens === "origin" ? defaultBranch.data : undefined) ?? pr.baseRefName,
     crossRepository: pr.crossRepository,
     headRepositoryOwner: pr.headRepositoryOwner,
   };
@@ -3820,8 +3825,12 @@ export function RemotePrView({
                 <DisabledReasonButton
                   variant="outline"
                   size="xs"
-                  disabled={runningCheckout !== undefined || detailsPlaceholder}
-                  reason={checkoutRunning ?? staleReason}
+                  disabled={
+                    runningCheckout !== undefined ||
+                    detailsPlaceholder ||
+                    !!offlineHold
+                  }
+                  reason={checkoutRunning ?? staleReason ?? offlineHold}
                   onClick={() => void checkoutHead(checkoutTarget)}
                   title={`Check out ${checkoutTarget} locally`}
                 >

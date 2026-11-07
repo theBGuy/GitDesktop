@@ -610,7 +610,8 @@ export function RenameWorktreeDialog({
 
   const trimmed = name.trim();
   const newPath = parent ? `${parent}/${trimmed}` : trimmed;
-  // A case-only rename is a real one where the filesystem keeps case apart.
+  // Case folds by platform, not by volume: on Windows and macOS a case-only
+  // rename reads as unchanged, which also blocks one on a case-sensitive volume.
   const unchanged = !!worktree && sameCheckout(newPath, worktree.path);
   // A rename keeps the worktree in place, so block path separators (that'd be a
   // move into another folder) — keep this a simple in-place rename.
