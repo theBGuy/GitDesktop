@@ -36,6 +36,7 @@ import {
 import { clipTitleFromText } from "@/lib/clip-title";
 import { presentError } from "@/lib/error-summary";
 import * as api from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import {
   refuseWhilePushRuns,
   repoKeys,
@@ -51,6 +52,8 @@ import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import {
   type CleanupRemovalOutcome,
+  isBranchPromoting,
+  plainRemovalPaths,
   promotionBlocksCheckout,
   removeWorktreeForCleanup,
 } from "@/lib/stores/worktree-removal";
@@ -360,13 +363,16 @@ const PR_CLOSED_DETAIL = "Closed without merging — matched by branch name";
 const prMergedDetail = (label: string) =>
   `Merged via pull request ${label} — matched by branch name`;
 
+/** What a successful removal did with its branch. */
+type RemovedBranchOutcome = Extract<
+  CleanupRemovalOutcome,
+  { ok: true }
+>["branch"];
+
 /** Each successful removal's branch outcome: null when the branch went the way
  *  the batch asked, else why it stayed, read after the row's "Couldn't <mode>: "
  *  lead and stating both outcomes. Total, so a new outcome is a type error. */
-const KEPT_BRANCH_REASON: Record<
-  Extract<CleanupRemovalOutcome, { ok: true }>["branch"],
-  string | null
-> = {
+const KEPT_BRANCH_REASON: Record<RemovedBranchOutcome, string | null> = {
   archived: null,
   deleted: null,
   keptMoved:
@@ -378,10 +384,7 @@ const KEPT_BRANCH_REASON: Record<
 };
 /** The kept outcomes whose tip the batch saw move or couldn't read, so the
  *  row's verdict no longer describes it. */
-const KEPT_TIP_UNVERIFIED: Record<
-  Extract<CleanupRemovalOutcome, { ok: true }>["branch"],
-  boolean
-> = {
+const KEPT_TIP_UNVERIFIED: Record<RemovedBranchOutcome, boolean> = {
   archived: false,
   deleted: false,
   keptMoved: true,
@@ -1480,15 +1483,23 @@ export function CleanupBranchesDialog({
     // The kept rows whose tip the batch saw move or couldn't read.
     const unverified = new Set<string>();
     // A plain row's archive would hide a branch checked out after the confirm
-    // in any worktree, session folders included (git refuses only a delete of
-    // one). Read per row, since an earlier read goes stale, and fail OPEN like
-    // the removal's archive step: the flag is reversible. A checkout landing
-    // between this read and the write is out of reach.
+    // in any worktree (session folders too; git refuses only a delete), or one
+    // a promote is moving, whose entry outlives its worktree. Read per row and
+    // fail OPEN on the list (the flag is reversible); a checkout after the read
+    // is out of reach. A worktree whose plain removal was in flight at either
+    // edge of the read doesn't count: its row is plain on purpose.
     const checkedOutNow = async (name: string) => {
+      if (isBranchPromoting(name)) return true;
+      const removing = plainRemovalPaths();
       try {
-        return (await listWorktrees(repoPath)).some((w) => w.branch === name);
+        const list = await listWorktrees(repoPath);
+        for (const p of plainRemovalPaths()) removing.add(p);
+        return (
+          isBranchPromoting(name) ||
+          list.some((w) => w.branch === name && !removing.has(normPath(w.path)))
+        );
       } catch {
-        return false;
+        return isBranchPromoting(name);
       }
     };
     // Live for the batch's own repo; after a switch, the rules it started with.

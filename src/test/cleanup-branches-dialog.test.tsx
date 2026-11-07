@@ -40,6 +40,8 @@ import { useUiStore } from "@/lib/stores/ui";
 import {
   type CleanupRemovalOutcome,
   removeWorktreeForCleanup,
+  useWorktreeRemovalStore,
+  type WorktreeRemoval,
 } from "@/lib/stores/worktree-removal";
 import { unmockedCommands } from "./setup";
 
@@ -207,6 +209,7 @@ afterEach(async () => {
     await new Promise((r) => setTimeout(r, 0));
   }
   for (const r of removalCalls) r.resolve({ ok: false, reason: "drained" });
+  useWorktreeRemovalStore.setState({ byRepo: {} });
 });
 
 afterAll(() => {
@@ -2295,6 +2298,158 @@ describe("a confirmed name the list no longer offers", () => {
       ["C:/repos/skip-elsewhere-open", "oo-a", true],
     ]);
     expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  describe("a worktree with a removal in flight", () => {
+    /** Marks `path` as being removed under another viewer's repo key. */
+    const markRemoving = (
+      path: string,
+      promotePhase?: WorktreeRemoval["promotePhase"],
+    ) =>
+      useWorktreeRemovalStore.setState({
+        byRepo: {
+          "C:/repos/another-viewer": {
+            [path]: {
+              path,
+              name: "rf-b",
+              branch: "rf-b",
+              archiveWhenDone: false,
+              startedAt: 0,
+              promotePhase,
+            },
+          },
+        },
+      });
+
+    async function archiveAll(repoPath: string, s: Partial<Setup> = {}) {
+      const view = renderDialog({
+        repoPath,
+        branches: [branch("rf-b", OLD)],
+        ...s,
+      });
+      await landRest(["rf-b"], "clean");
+      await waitFor(() => expect(isChecked("rf-b")).toBe(true));
+      await view.user.click(primary());
+      await waitFor(() => expect(view.props().onClose).toHaveBeenCalled());
+    }
+
+    it("archives a plain row whose only holder is being removed", async () => {
+      // The store keeps git's other spelling of the folder the list reports.
+      markRemoving("C:\\WT\\rf-b");
+      vi.mocked(listWorktrees).mockResolvedValue([
+        { id: "rf-b", path: "C:/wt/rf-b", branch: "rf-b", base: "" },
+      ]);
+      await archiveAll("C:/repos/removing-holder", {
+        worktrees: { "rf-b": { path: "C:/wt/rf-b" } },
+        removing: ["rf-b"],
+      });
+      expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+        ["C:/repos/removing-holder", "rf-b", true],
+      ]);
+      expect(toast.info).not.toHaveBeenCalled();
+      expect(toast.success).toHaveBeenCalledWith("Archived 1 branch");
+    });
+
+    it("still skips one another worktree holds", async () => {
+      markRemoving("C:/wt/rf-b");
+      vi.mocked(listWorktrees).mockResolvedValue([
+        { id: "rf-b", path: "C:/wt/rf-b", branch: "", base: "" },
+        { id: "s3", path: "C:/wt/s3", branch: "rf-b", base: "" },
+      ]);
+      await archiveAll("C:/repos/removing-other-holder", {
+        worktrees: { "rf-b": { path: "C:/wt/rf-b" } },
+        removing: ["rf-b"],
+      });
+      expect(gitSetBranchArchived).not.toHaveBeenCalled();
+      expect(toast.info).toHaveBeenCalledWith(
+        "Skipped rf-b — it's now checked out.",
+      );
+    });
+
+    it.each([
+      ["succeeded", "rf-ok"],
+      ["failed", "rf-failed"],
+    ])(
+      "archives one whose removal %s while the list was read",
+      async (_outcome, id) => {
+        // Either way the entry is gone by the time the list answers, and that
+        // answer still lists the worktree holding the branch.
+        markRemoving("C:/wt/rf-b");
+        vi.mocked(listWorktrees).mockImplementation(async () => {
+          useWorktreeRemovalStore.setState({ byRepo: {} });
+          return [{ id, path: "C:/wt/rf-b", branch: "rf-b", base: "" }];
+        });
+        await archiveAll(`C:/repos/settled-during-read-${id}`, {
+          worktrees: { "rf-b": { path: "C:/wt/rf-b" } },
+          removing: ["rf-b"],
+        });
+        expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+          [`C:/repos/settled-during-read-${id}`, "rf-b", true],
+        ]);
+        expect(toast.info).not.toHaveBeenCalled();
+      },
+    );
+
+    it("archives one whose removal started while the list was read", async () => {
+      vi.mocked(listWorktrees).mockImplementation(async () => {
+        markRemoving("C:/wt/rf-b");
+        return [{ id: "rf-b", path: "C:/wt/rf-b", branch: "rf-b", base: "" }];
+      });
+      await archiveAll("C:/repos/started-during-read");
+      expect(vi.mocked(gitSetBranchArchived).mock.calls).toEqual([
+        ["C:/repos/started-during-read", "rf-b", true],
+      ]);
+      expect(toast.info).not.toHaveBeenCalled();
+    });
+
+    it.each(["stashing", "checking-out"] as const)(
+      "skips one a promote holds while %s, after its worktree is gone",
+      async (phase) => {
+        markRemoving("C:/wt/rf-b", phase);
+        await archiveAll(`C:/repos/promote-tail-${phase}`);
+        expect(gitSetBranchArchived).not.toHaveBeenCalled();
+        expect(toast.info).toHaveBeenCalledWith(
+          "Skipped rf-b — it's now checked out.",
+        );
+      },
+    );
+
+    it("skips one a promote starts holding while the list read answers empty", async () => {
+      vi.mocked(listWorktrees).mockImplementation(async () => {
+        markRemoving("C:/wt/rf-b", "checking-out");
+        return [];
+      });
+      await archiveAll("C:/repos/promote-during-read");
+      expect(gitSetBranchArchived).not.toHaveBeenCalled();
+      expect(toast.info).toHaveBeenCalledWith(
+        "Skipped rf-b — it's now checked out.",
+      );
+    });
+
+    it("skips one a promote starts holding while the list read fails", async () => {
+      vi.mocked(listWorktrees).mockImplementation(async () => {
+        markRemoving("C:/wt/rf-b", "checking-out");
+        throw new Error("list failed");
+      });
+      await archiveAll("C:/repos/promote-during-failed-read");
+      expect(gitSetBranchArchived).not.toHaveBeenCalled();
+      expect(toast.info).toHaveBeenCalledWith(
+        "Skipped rf-b — it's now checked out.",
+      );
+    });
+
+    it("still skips one a promote's removal holds", async () => {
+      // A promote checks the branch out in the main workspace next.
+      markRemoving("C:/wt/rf-b", "removing");
+      vi.mocked(listWorktrees).mockResolvedValue([
+        { id: "rf-b", path: "C:/wt/rf-b", branch: "rf-b", base: "" },
+      ]);
+      await archiveAll("C:/repos/promoting-holder");
+      expect(gitSetBranchArchived).not.toHaveBeenCalled();
+      expect(toast.info).toHaveBeenCalledWith(
+        "Skipped rf-b — it's now checked out.",
+      );
+    });
   });
 
   it("never skips a name for the default or current branch of a repo switched to mid-batch", async () => {

@@ -16,6 +16,7 @@ import {
   gitUpdateBranchFrom,
   validateRepo,
 } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
 import {
   useAbortLocalPrMerge,
   useFinishLocalPrMerge,
@@ -33,11 +34,14 @@ import {
   type WorktreeRemoveOutcome,
 } from "@/lib/git/worktree";
 import {
+  isBranchPromoting,
   isWorktreePromoting,
+  plainRemovalPaths,
   registerRemovalListener,
   removeWorktreeForCleanup,
   useIsRemovingWorktree,
   useWorktreeRemovalStore,
+  type WorktreeRemoval,
 } from "@/lib/stores/worktree-removal";
 import { unmockedCommands } from "./setup";
 
@@ -880,7 +884,7 @@ describe("removeWorktreeForCleanup fire-time re-check", () => {
     );
     expect(await cleanup("C:/repos/wt/unlisted", "archive")).toEqual({
       ok: false,
-      reason: "couldn't check which branch the worktree has checked out",
+      reason: "the worktree list was unreadable",
     });
     expect(removeWorktree).not.toHaveBeenCalled();
     expect(gitOpState).not.toHaveBeenCalled();
@@ -1042,6 +1046,64 @@ describe("a removal marked under another viewer's repo key", () => {
     held.resolve(outcome("deleted"));
     expect(await first).toEqual({ ok: true, branch: "deleted" });
   });
+});
+
+describe("the in-flight readers", () => {
+  const entry = (
+    path: string,
+    promotePhase?: WorktreeRemoval["promotePhase"],
+  ): WorktreeRemoval => ({
+    path,
+    name: BRANCH,
+    branch: BRANCH,
+    archiveWhenDone: false,
+    startedAt: 0,
+    promotePhase,
+  });
+
+  it("lists plain removals under every repo key in normalized spelling, never a promote's", () => {
+    const plain = "C:\\Repos\\WT\\plain-in-flight";
+    const promoted = "C:/repos/wt/promote-in-flight";
+    useWorktreeRemovalStore.setState({
+      byRepo: {
+        "C:/repos/viewer-a": { [plain]: entry(plain) },
+        "C:/repos/viewer-b": { [promoted]: entry(promoted, "removing") },
+      },
+    });
+    try {
+      const paths = plainRemovalPaths();
+      expect(paths.has(normPath("C:/repos/wt/plain-in-flight"))).toBe(true);
+      expect(paths.has(normPath(promoted))).toBe(false);
+      expect(paths.size).toBe(1);
+    } finally {
+      useWorktreeRemovalStore.setState({ byRepo: {} });
+    }
+  });
+
+  it.each(["removing", "stashing", "checking-out"] as const)(
+    "names a branch a promote holds under any repo key while %s",
+    (phase) => {
+      const path = "C:/repos/wt/promote-tail";
+      useWorktreeRemovalStore.setState({
+        byRepo: {
+          "C:/repos/viewer-b": { [path]: entry(path, phase) },
+          "C:/repos/viewer-a": {
+            "C:/repos/wt/plain-other": {
+              ...entry("C:/repos/wt/plain-other"),
+              branch: "plain-branch",
+            },
+          },
+        },
+      });
+      try {
+        expect(isBranchPromoting(BRANCH)).toBe(true);
+        expect(isBranchPromoting("plain-branch")).toBe(false);
+        expect(isBranchPromoting("unmarked")).toBe(false);
+      } finally {
+        useWorktreeRemovalStore.setState({ byRepo: {} });
+      }
+    },
+  );
 });
 
 describe("the archive step leaves a branch checked out again unarchived", () => {

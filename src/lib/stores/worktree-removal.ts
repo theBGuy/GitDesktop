@@ -156,6 +156,32 @@ function isRemovalInFlight(
   );
 }
 
+/** The worktrees with a plain removal (not a promote's) in flight, under any
+ *  repo key, in their {@link normPath} spelling. A FIRE-TIME read of the
+ *  store's state; a promote doesn't count, since it frees the branch to check
+ *  it out elsewhere. */
+export function plainRemovalPaths(): Set<string> {
+  const { byRepo } = useWorktreeRemovalStore.getState();
+  const paths = new Set<string>();
+  for (const entries of Object.values(byRepo))
+    for (const [p, r] of Object.entries(entries))
+      if (!r.promotePhase) paths.add(normPath(p));
+  return paths;
+}
+
+/** True while a promote of this branch is in flight under any repo key, in
+ *  every phase: once its removal ends, the branch sits in no worktree until
+ *  the main workspace checks it out. A FIRE-TIME read, like
+ *  {@link plainRemovalPaths}. */
+export function isBranchPromoting(branch: string): boolean {
+  return Object.values(useWorktreeRemovalStore.getState().byRepo).some(
+    (entries) =>
+      Object.values(entries).some(
+        (r) => r.promotePhase !== undefined && r.branch === branch,
+      ),
+  );
+}
+
 /** Main workspaces with a promote running, keyed by {@link normPath} so the two
  *  spellings can't both pass. Two promotes into the same checkout would fight
  *  over the final `gitCheckoutBranch`, and the dialog that started the first is
@@ -655,7 +681,8 @@ export type CleanupRemovalOutcome =
   | {
       ok: true;
       /** `keptInUse`: the removal succeeded, and the branch stayed unarchived
-       *  because it was checked out again by the archive step. */
+       *  because it had been checked out again by the time the archive step
+       *  ran. */
       branch:
         | "archived"
         | "deleted"
@@ -683,8 +710,7 @@ const CLEANUP_DEFAULT_BRANCH_REASON =
 const CLEANUP_WORKTREE_GONE_REASON = "the worktree was moved or removed";
 const CLEANUP_BRANCH_CHANGED_REASON =
   "the worktree no longer has this branch checked out";
-const CLEANUP_LIST_UNREADABLE_REASON =
-  "couldn't check which branch the worktree has checked out";
+const CLEANUP_LIST_UNREADABLE_REASON = "the worktree list was unreadable";
 const CLEANUP_OP_IN_PROGRESS_REASON: Record<RepoOp, string> = {
   merge: "the worktree is in the middle of a merge",
   rebase: "the worktree is in the middle of a rebase",
