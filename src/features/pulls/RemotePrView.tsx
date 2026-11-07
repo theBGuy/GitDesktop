@@ -272,6 +272,13 @@ import {
 } from "./PrMergeabilityBanner";
 import { PrReviewPanel } from "./PrReviewPanel";
 import { PrTasksChip, PrTasksSection } from "./PrTasksSection";
+import {
+  CHECKOUT_SPLIT_CLASS,
+  checkoutRunningReason,
+  HeldCheckoutCaret,
+  PrWorktreeCheckout,
+  type PrWorktreeCheckoutHandle,
+} from "./PrWorktreeCheckout";
 import { prSectionAnswered } from "./pr-section-answered";
 import {
   MergePrDialog,
@@ -1272,6 +1279,11 @@ export function RemotePrView({
   // resolve worktree whose variables name no PR. Only checkout's own PR spins.
   const runningCheckout = pendingWriteOfKind(pendingWrites, "checkout");
   const checkoutPending = writePending("checkout");
+  // Shared by the plain checkout and its worktree flavor: either holds both.
+  const checkoutRunning = checkoutRunningReason(
+    runningCheckout,
+    checkoutPending,
+  );
   const abortResolvePending =
     pendingWriteOfKind(pendingWrites, "abort-resolve") !== undefined;
   // Every footer/state control and its palette twin holds while a write to THIS PR
@@ -2905,6 +2917,18 @@ export function RemotePrView({
   const reopenFooterRef = useRef<HTMLDivElement>(null);
   useToastClearance(openFooterRef, loadedViewPainted && openFooterShown);
   useToastClearance(reopenFooterRef, loadedViewPainted && reopenFooterShown);
+  // The split Checkout's gate (open PR, write access, loaded header painted),
+  // so the palette opens the worktree popover only where its control stands.
+  const worktreeCheckout = useRef<PrWorktreeCheckoutHandle>(null);
+  useHotkeyAction(
+    "pr-checkout-worktree",
+    () => worktreeCheckout.current?.openFromPalette(),
+    isSelectedPr &&
+      !detailsStale &&
+      loadedViewPainted &&
+      pr?.state === "OPEN" &&
+      canWrite,
+  );
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const reopenButtonRef = useRef<HTMLButtonElement>(null);
   const footerFocus = useFooterFocusSwap({
@@ -2928,25 +2952,31 @@ export function RemotePrView({
         number={row?.number ?? number}
         actions={
           <>
-            {rowOpen &&
-              canWrite &&
-              (row !== undefined &&
-              repoStatus.data?.branch?.name === row.headRefName ? (
-                <span className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground">
-                  <CheckCircleIcon className="size-3" aria-hidden />
-                  Checked out
-                </span>
-              ) : (
-                <DisabledReasonButton
-                  variant="outline"
-                  size="xs"
-                  disabled
+            {rowOpen && canWrite && (
+              <span className={CHECKOUT_SPLIT_CLASS}>
+                {row !== undefined &&
+                repoStatus.data?.branch?.name === row.headRefName ? (
+                  <span className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground">
+                    <CheckCircleIcon className="size-3" aria-hidden />
+                    Checked out
+                  </span>
+                ) : (
+                  <DisabledReasonButton
+                    variant="outline"
+                    size="xs"
+                    disabled
+                    reason={PR_SWITCH_LOADING_REASON}
+                  >
+                    <GitBranchIcon data-icon="inline-start" />
+                    Checkout
+                  </DisabledReasonButton>
+                )}
+                <HeldCheckoutCaret
+                  number={row?.number ?? number}
                   reason={PR_SWITCH_LOADING_REASON}
-                >
-                  <GitBranchIcon data-icon="inline-start" />
-                  Checkout
-                </DisabledReasonButton>
-              ))}
+                />
+              </span>
+            )}
             {rowOpen && canEdit && (
               <DisabledReasonButton
                 variant="outline"
@@ -3742,44 +3772,51 @@ export function RemotePrView({
               #{pr.number}
             </span>
           </h2>
-          {isOpen &&
-            canWrite &&
-            (repoStatus.data?.branch?.name === pr.headRefName ? (
-              // A status, not an action — no button role and no tab stop.
-              // role="img" prunes the icon AND the wording, so the label states
-              // the whole thing on its own.
-              <span
-                role="img"
-                aria-label={`Checked out — ${pr.headRefName} is the current branch`}
-                title={`${pr.headRefName} is the current branch`}
-                className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground"
-              >
-                <CheckCircleIcon className="size-3" aria-hidden />
-                Checked out
-              </span>
-            ) : (
-              <DisabledReasonButton
-                variant="outline"
-                size="xs"
-                disabled={runningCheckout !== undefined || detailsPlaceholder}
-                reason={
-                  runningCheckout === undefined
-                    ? staleReason
-                    : checkoutPending || runningCheckout.target == null
-                      ? "Checking out…"
-                      : `Checking out #${runningCheckout.target}…`
-                }
-                onClick={() => void checkoutHead(pr.headRefName)}
-                title={`Check out ${pr.headRefName} locally`}
-              >
-                {checkoutPending ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <GitBranchIcon data-icon="inline-start" />
-                )}
-                Checkout
-              </DisabledReasonButton>
-            ))}
+          {isOpen && canWrite && (
+            <PrWorktreeCheckout
+              ref={worktreeCheckout}
+              repoPath={repoPath}
+              number={number}
+              lens={lens}
+              prNumber={pr.number}
+              headRefName={pr.headRefName}
+              staleReason={staleReason}
+              runningReason={checkoutRunning}
+              pending={checkoutPending}
+              detailsStale={detailsStale}
+            >
+              {repoStatus.data?.branch?.name === pr.headRefName ? (
+                // A status, not an action — no button role and no tab stop.
+                // role="img" prunes the icon AND the wording, so the label
+                // states the whole thing on its own. The caret stays beside it.
+                <span
+                  role="img"
+                  aria-label={`Checked out — ${pr.headRefName} is the current branch`}
+                  title={`${pr.headRefName} is the current branch`}
+                  className="inline-flex h-6 shrink-0 items-center gap-1 border border-border bg-background pr-2 pl-1.5 text-xs font-medium whitespace-nowrap text-muted-foreground"
+                >
+                  <CheckCircleIcon className="size-3" aria-hidden />
+                  Checked out
+                </span>
+              ) : (
+                <DisabledReasonButton
+                  variant="outline"
+                  size="xs"
+                  disabled={runningCheckout !== undefined || detailsPlaceholder}
+                  reason={checkoutRunning ?? staleReason}
+                  onClick={() => void checkoutHead(pr.headRefName)}
+                  title={`Check out ${pr.headRefName} locally`}
+                >
+                  {checkoutPending ? (
+                    <Spinner data-icon="inline-start" />
+                  ) : (
+                    <GitBranchIcon data-icon="inline-start" />
+                  )}
+                  Checkout
+                </DisabledReasonButton>
+              )}
+            </PrWorktreeCheckout>
+          )}
           {isOpen && canEdit && (
             // A natively-disabled Button swallows its own `title`, so the wait
             // needs the reason prop to reach the viewer at all.

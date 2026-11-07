@@ -45,6 +45,7 @@ export const MEMBERS = [
   "src/features/pulls/LocalPrView.tsx",
   "src/features/pulls/PromoteLocalPrDialog.tsx",
   "src/features/pulls/RemotePrView.tsx",
+  "src/features/pulls/PrWorktreeCheckout.tsx",
   "src/features/pulls/CommitComments.tsx",
   "src/features/pulls/PendingReviewStrip.tsx",
   "src/features/pulls/PendingReviewBar.tsx",

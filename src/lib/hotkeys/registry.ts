@@ -1224,6 +1224,12 @@ export const ACTIONS = [
     category: "Pull requests",
     defaultBinding: null,
   },
+  {
+    id: "pr-checkout-worktree",
+    label: "Check out pull request in a worktree…",
+    category: "Pull requests",
+    defaultBinding: null,
+  },
 
   // Actions
   {

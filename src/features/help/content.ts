@@ -1023,7 +1023,9 @@ this list: one on a detached checkout has no branch row at all, one on an archiv
 sits in the collapsed "Archived" section, and filter text can hide the rest.
 
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
-  into its own folder, defaulting to a sibling of the repository.
+  into its own folder, defaulting to a sibling of the repository (the folder button
+  browses for a different parent). A GitHub pull request can also be checked out into a
+  worktree from its own view (see *GitHub PRs*); that worktree is listed here too.
 - **Open** a worktree to make it the active repository — git commands then run in that
   folder and the window title follows. The header keeps the repository's name, with the
   worktree named beneath it, so you always know which repo you're in. Open the main
@@ -1361,6 +1363,22 @@ shape plus the word, never color alone) — so a finished review (including Copi
 visible after the reviewer leaves the pending-request list. A pull request that no longer
 merges cleanly says so under its header, and **Resolve conflicts** settles it without
 leaving the app — see *Conflicts with the base branch* below.
+
+To review a pull request without touching your current branch or uncommitted files, open
+the caret beside **Checkout** and pick **Check out in a worktree…** (or run *Check out
+pull request in a worktree…* from the command palette). The popover suggests a folder
+beside the repository named after the pull request (\`<repo>-pr-<number>\`); edit it, or
+**Browse** for a different parent folder, then **Check out**. Nothing is created until
+you confirm. This needs GitHub CLI 2.98 or newer; with an older one the menu item is
+disabled and says which version you have. When the pull request's branch already has a
+worktree, the popover offers **Open worktree** and **Update to PR** instead. A worktree that already
+contains the pull request's tip reports "Worktree already up to date." and is left as
+it is. If the two histories have diverged, updating asks first (**Reset this
+worktree to the PR?**), listing the commits that resetting would discard (the newest 20, with a note when
+there are more), and noting
+when its uncommitted changes would go too. When GitDesktop can locate the worktree's folder, the
+success message offers **Open worktree**, which switches to it right away. The new worktree shows up in **Worktrees…**
+like any other.
 
 Every pull request gets a **Projects** picker alongside its **labels**, **assignees**, and
 **reviewers**, closed and merged ones included (a board keeps its finished items in a Done

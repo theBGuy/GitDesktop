@@ -14,8 +14,8 @@ use crate::git::branches::{
 };
 use crate::git::runner::{
     acquire_repo_lock, acquire_repo_lock_unbounded, config_lock_busy, is_config_lock_contention,
-    run_git, run_git_raw, run_git_worktree_admin, try_acquire_repo_lock, with_config_write_lock,
-    DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, WORKTREE_OP_TIMEOUT,
+    run_git, run_git_raw, run_git_raw_input, run_git_worktree_admin, try_acquire_repo_lock,
+    with_config_write_lock, DEFAULT_TIMEOUT, LOCK_WAIT_TIMEOUT, WORKTREE_OP_TIMEOUT,
 };
 use crate::state::AppState;
 
@@ -300,6 +300,7 @@ pub(crate) async fn git_worktree_add_user_core(
             "path and branch must not start with '-'".into(),
         ));
     }
+    refuse_ambiguous_worktree_path(path, cfg!(windows))?;
     crate::git::branches::refuse_session_branch_name(branch)?;
     if std::path::Path::new(repo_path).join(path).exists() {
         return Err(AppError::InvalidArgument(format!(
@@ -418,17 +419,7 @@ pub async fn git_worktree_lock(
     path: String,
     reason: Option<String>,
 ) -> AppResult<()> {
-    let path = path.trim();
-    if path.is_empty() {
-        return Err(AppError::InvalidArgument(
-            "a worktree path is required".into(),
-        ));
-    }
-    if path.starts_with('-') {
-        return Err(AppError::InvalidArgument(
-            "path must not start with '-'".into(),
-        ));
-    }
+    let path = worktree_path_arg(&path)?;
     let reason = reason.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let mut args: Vec<&str> = vec!["worktree", "lock"];
     // `--reason` consumes the next token as its value, so a reason starting with
@@ -449,17 +440,7 @@ pub async fn git_worktree_unlock(
     repo_path: String,
     path: String,
 ) -> AppResult<()> {
-    let path = path.trim();
-    if path.is_empty() {
-        return Err(AppError::InvalidArgument(
-            "a worktree path is required".into(),
-        ));
-    }
-    if path.starts_with('-') {
-        return Err(AppError::InvalidArgument(
-            "path must not start with '-'".into(),
-        ));
-    }
+    let path = worktree_path_arg(&path)?;
     run_git_worktree_admin(
         &state,
         &repo_path,
@@ -1053,6 +1034,455 @@ fn parse_worktree_list(porcelain: &str) -> Vec<WorktreeInfo> {
     }
     flush(&mut path, &mut branch, &mut prunable, &mut out);
     out
+}
+
+/// A worktree path argument trimmed, refused when blank or when a leading '-' would
+/// make git (or gh) read it as an option.
+pub(crate) fn worktree_path_arg(path: &str) -> AppResult<&str> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err(AppError::InvalidArgument(
+            "a worktree path is required".into(),
+        ));
+    }
+    if path.starts_with('-') {
+        return Err(AppError::InvalidArgument(
+            "path must not start with '-'".into(),
+        ));
+    }
+    Ok(path)
+}
+
+/// Lexical refusals for a path a NEW worktree would be created at. Control characters
+/// are refused everywhere; with `windows`, so is any segment Win32 would respell (a
+/// trailing dot or space is dropped, a device name opens the device), since git and
+/// the filesystem would then disagree on which folder the worktree is.
+pub(crate) fn refuse_ambiguous_worktree_path(path: &str, windows: bool) -> AppResult<()> {
+    if let Some(segment) = path
+        .split(['/', '\\'])
+        .find(|s| s.chars().any(char::is_control))
+    {
+        return Err(AppError::InvalidArgument(format!(
+            "\"{}\" contains a control character, so it can't name a worktree folder — choose another folder name.",
+            segment.escape_debug()
+        )));
+    }
+    if !windows {
+        return Ok(());
+    }
+    // A drive prefix without a root (`C:x`, `C:..`) resolves against a per-drive cwd, so
+    // the probe (the app's cwd) and gh (the repo's) would read different folders. Lexical
+    // so non-Windows test hosts, whose `Path` parses no prefixes, see the same verdict.
+    if let [drive, b':', rest @ ..] = path.as_bytes() {
+        if drive.is_ascii_alphabetic() && !matches!(rest.first(), Some(b'/' | b'\\')) {
+            let drive = drive.to_ascii_uppercase() as char;
+            return Err(AppError::InvalidArgument(format!(
+                "\"{path}\" is relative to drive {drive}:'s current folder, so the worktree path is ambiguous — use a full path like {drive}:\\... or a path relative to the repository."
+            )));
+        }
+    }
+    for component in std::path::Path::new(path).components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        if name.ends_with('.') || name.ends_with(' ') {
+            return Err(AppError::InvalidArgument(format!(
+                "\"{name}\" ends in a dot or space, which Windows drops, so the worktree path is ambiguous — choose another folder name."
+            )));
+        }
+        if crate::fsops::path_has_reserved_component(std::path::Path::new(&*name)) {
+            return Err(AppError::InvalidArgument(format!(
+                "\"{name}\" is a reserved Windows device name — choose another folder name."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A user-supplied worktree path as git resolves it: relative paths are joined onto
+/// the repo, which is the cwd gh and git run the checkout from.
+pub(crate) fn resolve_worktree_path(repo_path: &str, path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        path.to_string()
+    } else {
+        std::path::Path::new(repo_path)
+            .join(p)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// The most commits a divergence report lists; `more` says a further one exists.
+const DIVERGED_COMMIT_CAP: usize = 20;
+
+/// A commit a forced re-sync would reset away: full sha and subject line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DivergedCommit {
+    pub sha: String,
+    pub subject: String,
+}
+
+/// `AppError::WorktreeDiverged`'s Display. One plain sentence first, because the
+/// frontend takes line 1 as the toast title.
+pub(crate) fn diverged_message(path: &str, count: usize, more: bool, dirty: bool) -> String {
+    let commits = if more {
+        format!("more than {DIVERGED_COMMIT_CAP} commits that aren't")
+    } else if count == 1 {
+        "1 commit that isn't".to_string()
+    } else {
+        format!("{count} commits that aren't")
+    };
+    let mut message = format!("The worktree at {path} has {commits} on the pull request's branch.");
+    if dirty {
+        message.push_str(" It also has uncommitted changes.");
+    }
+    message
+}
+
+/// The registered worktree at a checkout target, as `git worktree list` reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WtEntry {
+    /// Stanza 0: the repo's main worktree.
+    pub is_main: bool,
+    /// The branch with exactly `refs/heads/` stripped; "" when detached.
+    pub branch: String,
+    /// The full HEAD oid from the porcelain stanza.
+    pub head: String,
+    pub detached: bool,
+    /// git's spelling of the path.
+    pub path: String,
+}
+
+/// What the checkout target looks like locally: whether the PR's head commit is in
+/// the object store, and the worktree registered at the path, if any.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WtProbe {
+    pub tip_local: bool,
+    pub entry: Option<WtEntry>,
+}
+
+/// Whether two spellings name one worktree. Lowercasing follows `normalize_wt_path`'s
+/// identity convention; it over-matches only on case-sensitive filesystems, deliberately.
+fn same_wt_path(a: &str, b: &str) -> bool {
+    let norm = |p: &str| normalize_wt_path(p).trim_end_matches('/').to_string();
+    if norm(a) == norm(b) {
+        return true;
+    }
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(x), Ok(y)) if x == y
+    )
+}
+
+/// `git merge-base --is-ancestor`: exit 0 is true, 1 is false, anything else fails.
+async fn is_ancestor(repo_path: &str, ancestor: &str, descendant: &str) -> AppResult<bool> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    exit_bool(out)
+}
+
+/// A yes/no git probe's exit: 0 is true, 1 is false, anything else is the failure.
+fn exit_bool(out: crate::git::runner::GitOutput) -> AppResult<bool> {
+    match out.code {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => out.exit_verdict().map(|_| false),
+    }
+}
+
+/// Probes the checkout target. `tip_local` needs the `^{commit}` peel: `--verify` on
+/// a bare full hex succeeds even when no such object exists.
+pub(crate) async fn probe_worktree(
+    repo_path: &str,
+    resolved: &str,
+    oid: Option<&str>,
+) -> AppResult<WtProbe> {
+    let tip_local = match oid {
+        Some(oid) => {
+            let peeled = format!("{oid}^{{commit}}");
+            let out = run_git_raw(
+                Some(repo_path),
+                &["rev-parse", "--verify", "--quiet", &peeled],
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+            exit_bool(out)?
+        }
+        None => false,
+    };
+    let porcelain = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy();
+    let entry = parse_worktree_porcelain(&porcelain)
+        .into_iter()
+        .enumerate()
+        .find(|(_, w)| !w.prunable && same_wt_path(&w.path, resolved))
+        .map(|(i, w)| WtEntry {
+            is_main: i == 0,
+            branch: w.branch,
+            head: w.head,
+            detached: w.detached,
+            path: w.path,
+        });
+    Ok(WtProbe { tip_local, entry })
+}
+
+/// Whether a linked worktree has the PR's local branch checked out: the exact name the
+/// checkout passes gh as `--branch`.
+fn on_pr_branch(e: &WtEntry, local: &str) -> bool {
+    !e.is_main && !e.detached && e.branch == local
+}
+
+/// The commits on `wt_head` that `oid` lacks, newest first and capped, when neither
+/// contains the other: a behind-only worktree fast-forwards and an ahead-only one is
+/// "Already up to date", so only true divergence fails gh's `merge --ff-only`.
+async fn diverged_from(
+    repo_path: &str,
+    wt_head: &str,
+    oid: &str,
+) -> AppResult<Option<(Vec<DivergedCommit>, bool)>> {
+    if is_ancestor(repo_path, wt_head, oid).await? || is_ancestor(repo_path, oid, wt_head).await? {
+        return Ok(None);
+    }
+    let range = format!("{oid}..{wt_head}");
+    let limit = (DIVERGED_COMMIT_CAP + 1).to_string();
+    let out = run_git(
+        Some(repo_path),
+        &[
+            "log",
+            "-z",
+            "--no-show-signature",
+            "--format=%H%x1f%s",
+            "-n",
+            &limit,
+            &range,
+        ],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy();
+    let mut commits: Vec<DivergedCommit> = out
+        .split('\0')
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| {
+            let (sha, subject) = r.split_once('\x1f').unwrap_or((r, ""));
+            DivergedCommit {
+                sha: sha.trim().to_string(),
+                subject: subject.to_string(),
+            }
+        })
+        .collect();
+    if commits.is_empty() {
+        return Ok(None);
+    }
+    let more = commits.len() > DIVERGED_COMMIT_CAP;
+    commits.truncate(DIVERGED_COMMIT_CAP);
+    Ok(Some((commits, more)))
+}
+
+/// Uncommitted changes to TRACKED files, which `reset --hard` destroys; untracked
+/// files survive it, so `-uno` leaves them out.
+async fn worktree_dirty(wt_path: &str) -> AppResult<bool> {
+    let out = run_git(
+        Some(wt_path),
+        &["status", "--porcelain", "-uno"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    Ok(!out.stdout_lossy().trim().is_empty())
+}
+
+/// Untracked files in the worktree whose paths `oid`'s tree tracks: `reset --hard`
+/// overwrites those, which `worktree_dirty` deliberately leaves out. Bounded by the
+/// untracked list, and asked over stdin, so no argv grows with it.
+async fn untracked_collisions(repo_path: &str, wt_path: &str, oid: &str) -> AppResult<u32> {
+    let listed = run_git(
+        Some(wt_path),
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .stdout_lossy();
+    // One `<oid>:<path>` query per line, so a path holding a newline can't be asked.
+    let queries: String = listed
+        .split('\0')
+        .filter(|p| !p.is_empty() && !p.contains('\n'))
+        .map(|p| format!("{oid}:{p}\n"))
+        .collect();
+    if queries.is_empty() {
+        return Ok(0);
+    }
+    let out = run_git_raw_input(
+        Some(repo_path),
+        &["cat-file", "--batch-check"],
+        Some(&queries),
+        DEFAULT_TIMEOUT,
+    )
+    .await?
+    .exit_verdict()?;
+    let tracked = out
+        .stdout_lossy()
+        .lines()
+        .filter(|l| !l.trim_end().ends_with(" missing"))
+        .count();
+    Ok(u32::try_from(tracked).unwrap_or(u32::MAX))
+}
+
+/// `WorktreeDiverged` for `e` when every probe answers and the histories diverge;
+/// `None` on no divergence or any failed probe, so the caller keeps its own outcome.
+/// A failed collision count reads 0: the confirm only omits that line.
+/// `echo_path` is the caller's input path, which a forced retry sends back verbatim.
+pub(crate) async fn divergence_error(
+    repo_path: &str,
+    echo_path: &str,
+    e: &WtEntry,
+    oid: &str,
+) -> Option<AppError> {
+    let (commits, more) = diverged_from(repo_path, &e.head, oid).await.ok()??;
+    let dirty = worktree_dirty(&e.path).await.ok()?;
+    let untracked = untracked_collisions(repo_path, &e.path, oid)
+        .await
+        .unwrap_or(0);
+    Some(AppError::WorktreeDiverged {
+        path: echo_path.to_string(),
+        head: e.head.clone(),
+        commits,
+        more,
+        dirty,
+        untracked,
+    })
+}
+
+/// gh's existing-worktree arm checks the PR's branch out in place, so a path naming the
+/// main checkout would switch the user's own branch. A linked worktree on another
+/// branch stays allowed: switching it is gh's documented contract.
+fn refuse_main_worktree(probe: &WtProbe, path: &str) -> AppResult<()> {
+    if probe.entry.as_ref().is_some_and(|e| e.is_main) {
+        return Err(AppError::InvalidArgument(format!(
+            "{path} is this repository's main checkout — pick a new folder, or the pull request's own worktree."
+        )));
+    }
+    Ok(())
+}
+
+/// The pre-spawn candidate: an existing worktree on the PR's branch with the PR's tip
+/// already local, so divergence is provable before gh fetches.
+fn pre_spawn_candidate<'a>(pre: &'a WtProbe, local: &str) -> Option<&'a WtEntry> {
+    pre.entry
+        .as_ref()
+        .filter(|e| pre.tip_local && on_pr_branch(e, local))
+}
+
+/// The post-spawn candidate. It needs PROGRESS evidence that this run's gh got past
+/// its fetch (the tip arrived, or the worktree was created or switched branch), so an
+/// auth, network or path failure is never read as divergence.
+pub(crate) fn post_spawn_candidate<'a>(
+    pre: &WtProbe,
+    post: &'a WtProbe,
+    local: &str,
+) -> Option<&'a WtEntry> {
+    let branch = |p: &WtProbe| p.entry.as_ref().map(|e| e.branch.clone());
+    let progress = (!pre.tip_local && post.tip_local) || branch(pre) != branch(post);
+    post.entry
+        .as_ref()
+        .filter(|e| progress && post.tip_local && on_pr_branch(e, local))
+}
+
+/// The forced re-sync's verdict over a fresh probe. `Moved` and `Proceed` are both
+/// reachable only on the PR's local branch, so no reset or confirm list ever targets
+/// another.
+#[derive(Debug, PartialEq)]
+enum ForceGate<'a> {
+    NotAWorktree,
+    Changed,
+    Moved(&'a WtEntry),
+    Proceed,
+}
+
+fn force_gate<'a>(probe: &'a WtProbe, expected: &str, local: &str) -> ForceGate<'a> {
+    let Some(e) = probe.entry.as_ref().filter(|e| !e.is_main && !e.detached) else {
+        return ForceGate::NotAWorktree;
+    };
+    if !on_pr_branch(e, local) {
+        return ForceGate::Changed;
+    }
+    if e.head != expected {
+        return ForceGate::Moved(e);
+    }
+    ForceGate::Proceed
+}
+
+/// How the checkout treats an existing worktree: a fast-forward re-sync, or the
+/// forced reset the user confirmed at `expected` (an already shape-checked full oid).
+pub(crate) enum CheckoutMode<'a> {
+    Sync,
+    Force { expected: &'a str },
+}
+
+/// The worktree checkout's local refusals, in order, before gh spawns. Sync: a
+/// probe that answered refuses the main checkout, then a provable divergence; a
+/// failed probe proceeds to gh. Force: only an answered probe of a linked worktree
+/// on gh's branch, still at `expected`, proceeds. Returns the sync pre-probe the
+/// post-spawn classification compares against (only when there is an oid).
+pub(crate) async fn checkout_pre_spawn_gate(
+    repo_path: &str,
+    echo_path: &str,
+    resolved: &str,
+    oid: Option<&str>,
+    local: &str,
+    mode: CheckoutMode<'_>,
+) -> AppResult<Option<WtProbe>> {
+    let CheckoutMode::Force { expected } = mode else {
+        let Ok(probe) = probe_worktree(repo_path, resolved, oid).await else {
+            return Ok(None);
+        };
+        refuse_main_worktree(&probe, echo_path)?;
+        let Some(oid) = oid else {
+            return Ok(None);
+        };
+        if let Some(e) = pre_spawn_candidate(&probe, local) {
+            if let Some(diverged) = divergence_error(repo_path, echo_path, e, oid).await {
+                return Err(diverged);
+            }
+        }
+        return Ok(Some(probe));
+    };
+    let probe = probe_worktree(repo_path, resolved, oid)
+        .await
+        .map_err(|_| {
+            AppError::InvalidArgument(format!(
+                "Couldn't check the worktree at {echo_path}, so nothing was reset — try again."
+            ))
+        })?;
+    let changed = || {
+        AppError::InvalidArgument(format!(
+            "The worktree at {echo_path} changed since you confirmed, so nothing was reset — run the checkout again."
+        ))
+    };
+    match force_gate(&probe, expected, local) {
+        ForceGate::NotAWorktree => Err(AppError::InvalidArgument(format!(
+            "Only an existing worktree of this repository can be reset to the pull request — {echo_path} isn't one."
+        ))),
+        ForceGate::Changed => Err(changed()),
+        ForceGate::Moved(e) => {
+            let fresh = match oid {
+                Some(oid) if probe.tip_local => divergence_error(repo_path, echo_path, e, oid).await,
+                _ => None,
+            };
+            Err(fresh.unwrap_or_else(changed))
+        }
+        ForceGate::Proceed => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -2374,5 +2804,482 @@ prunable gitdir file points to non-existent location
             assert_eq!(json, format!(r#"{{"branchCleanup":"{tag}"}}"#));
             assert!(!json.contains("branch_cleanup"), "{json}");
         }
+    }
+
+    fn invalid_argument(result: AppResult<impl std::fmt::Debug>) -> String {
+        match result {
+            Err(AppError::InvalidArgument(message)) => message,
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn worktree_path_arg_trims_and_refuses_blank_and_option_shapes() {
+        assert_eq!(worktree_path_arg("  C:/x/wt \n").unwrap(), "C:/x/wt");
+        assert_eq!(worktree_path_arg("rel/wt").unwrap(), "rel/wt");
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(
+                invalid_argument(worktree_path_arg(blank)),
+                "a worktree path is required"
+            );
+        }
+        for option in ["-x", " -x", "--force"] {
+            assert_eq!(
+                invalid_argument(worktree_path_arg(option)),
+                "path must not start with '-'"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_worktree_path_refusals_are_lexical_and_windows_scoped() {
+        let refused = [
+            ("C:/x/wt.", "\"wt.\" ends in a dot or space"),
+            ("C:/x/wt /y", "\"wt \" ends in a dot or space"),
+            ("C:/x/nul", "\"nul\" is a reserved Windows device name"),
+            (
+                "C:/x/con.txt/y",
+                "\"con.txt\" is a reserved Windows device name",
+            ),
+            ("C:/x/a\nb", "\"a\\nb\" contains a control character"),
+        ];
+        for (path, lead) in refused {
+            let message = invalid_argument(refuse_ambiguous_worktree_path(path, true));
+            assert!(message.starts_with(lead), "{path:?}: {message}");
+            assert!(
+                message.ends_with("choose another folder name."),
+                "{message}"
+            );
+        }
+        for path in ["C:/x/GitDesktop-pr-255", "C:/x/nully", "../wt", "C:/x/./wt"] {
+            assert!(
+                refuse_ambiguous_worktree_path(path, true).is_ok(),
+                "{path:?}"
+            );
+        }
+        for (path, _) in &refused[..4] {
+            assert!(
+                refuse_ambiguous_worktree_path(path, false).is_ok(),
+                "{path:?}"
+            );
+        }
+        assert!(refuse_ambiguous_worktree_path("/x/a\nb", false).is_err());
+        assert!(refuse_ambiguous_worktree_path("/x/a\0b", false).is_err());
+    }
+
+    #[test]
+    fn drive_relative_worktree_paths_are_refused_with_the_full_path_remedy() {
+        for path in ["C:../main", "C:x", "C:", "c:.", "C:..", "C:x\\y"] {
+            let message = invalid_argument(refuse_ambiguous_worktree_path(path, true));
+            assert!(
+                message.starts_with(&format!(
+                    "\"{path}\" is relative to drive C:'s current folder"
+                )),
+                "{path:?}: {message}"
+            );
+            assert!(
+                message.ends_with(
+                    "use a full path like C:\\... or a path relative to the repository."
+                ),
+                "{message}"
+            );
+            assert!(
+                refuse_ambiguous_worktree_path(path, false).is_ok(),
+                "{path:?}"
+            );
+        }
+        for path in ["C:/x", "C:\\x", "../x", "sub/x", "\\x", "/x", "ab:c", "1:x"] {
+            assert!(
+                refuse_ambiguous_worktree_path(path, true).is_ok(),
+                "{path:?}"
+            );
+        }
+    }
+
+    /// The checkout UI reads every key off this error and sends `path` and `head`
+    /// back on the forced retry, so the kind, the key spellings and their order are
+    /// the contract.
+    #[test]
+    fn worktree_diverged_serializes_to_the_pinned_wire_shape() {
+        let one = AppError::WorktreeDiverged {
+            path: "C:/wt/GitDesktop-pr-255".to_string(),
+            head: "1111111111111111111111111111111111111111".to_string(),
+            commits: vec![DivergedCommit {
+                sha: "2222222222222222222222222222222222222222".to_string(),
+                subject: "local work".to_string(),
+            }],
+            more: false,
+            dirty: false,
+            untracked: 0,
+        };
+        let wire = serde_json::to_string(&one).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"kind":"worktreeDiverged","message":"The worktree at C:/wt/GitDesktop-pr-255 has 1 commit that isn't on the pull request's branch.","path":"C:/wt/GitDesktop-pr-255","head":"1111111111111111111111111111111111111111","commits":[{"sha":"2222222222222222222222222222222222222222","subject":"local work"}],"more":false,"dirty":false,"untracked":0}"#
+        );
+        assert!(!wire.contains('_'), "{wire}");
+
+        let many = AppError::WorktreeDiverged {
+            path: "C:/wt/pr".to_string(),
+            head: "1111111111111111111111111111111111111111".to_string(),
+            commits: vec![
+                DivergedCommit {
+                    sha: "3333333333333333333333333333333333333333".to_string(),
+                    subject: "newest".to_string(),
+                },
+                DivergedCommit {
+                    sha: "2222222222222222222222222222222222222222".to_string(),
+                    subject: "older".to_string(),
+                },
+            ],
+            more: true,
+            dirty: true,
+            untracked: 3,
+        };
+        let wire = serde_json::to_string(&many).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"kind":"worktreeDiverged","message":"The worktree at C:/wt/pr has more than 20 commits that aren't on the pull request's branch. It also has uncommitted changes.","path":"C:/wt/pr","head":"1111111111111111111111111111111111111111","commits":[{"sha":"3333333333333333333333333333333333333333","subject":"newest"},{"sha":"2222222222222222222222222222222222222222","subject":"older"}],"more":true,"dirty":true,"untracked":3}"#
+        );
+        assert!(!wire.contains('_'), "{wire}");
+    }
+
+    #[test]
+    fn diverged_message_counts_and_dirty_suffix() {
+        let lead = "The worktree at C:/wt has";
+        let tail = "on the pull request's branch.";
+        let dirty = " It also has uncommitted changes.";
+        for (count, more, n) in [
+            (1, false, "1 commit that isn't"),
+            (3, false, "3 commits that aren't"),
+            (20, true, "more than 20 commits that aren't"),
+        ] {
+            assert_eq!(
+                diverged_message("C:/wt", count, more, false),
+                format!("{lead} {n} {tail}")
+            );
+            assert_eq!(
+                diverged_message("C:/wt", count, more, true),
+                format!("{lead} {n} {tail}{dirty}")
+            );
+        }
+    }
+
+    fn wt_entry(is_main: bool, branch: &str, head: &str, detached: bool) -> WtEntry {
+        WtEntry {
+            is_main,
+            branch: branch.to_string(),
+            head: head.to_string(),
+            detached,
+            path: "C:/wt/pr".to_string(),
+        }
+    }
+
+    fn wt_probe(tip_local: bool, entry: Option<WtEntry>) -> WtProbe {
+        WtProbe { tip_local, entry }
+    }
+
+    #[test]
+    fn force_gate_refuses_non_worktrees_and_moved_heads() {
+        let expected = "1111111111111111111111111111111111111111";
+        let moved = "2222222222222222222222222222222222222222";
+        let gate = |entry: Option<WtEntry>| {
+            let probe = wt_probe(true, entry);
+            match force_gate(&probe, expected, "feat") {
+                ForceGate::NotAWorktree => "not-a-worktree".to_string(),
+                ForceGate::Changed => "changed".to_string(),
+                ForceGate::Moved(e) => format!("moved:{}", e.head),
+                ForceGate::Proceed => "proceed".to_string(),
+            }
+        };
+        assert_eq!(gate(None), "not-a-worktree");
+        assert_eq!(
+            gate(Some(wt_entry(true, "feat", expected, false))),
+            "not-a-worktree"
+        );
+        assert_eq!(
+            gate(Some(wt_entry(false, "", expected, true))),
+            "not-a-worktree"
+        );
+        assert_eq!(
+            gate(Some(wt_entry(false, "other", expected, false))),
+            "changed"
+        );
+        assert_eq!(
+            gate(Some(wt_entry(false, "other", moved, false))),
+            "changed"
+        );
+        assert_eq!(
+            gate(Some(wt_entry(false, "feat", moved, false))),
+            format!("moved:{moved}")
+        );
+        assert_eq!(
+            gate(Some(wt_entry(false, "feat", expected, false))),
+            "proceed"
+        );
+    }
+
+    /// The checkout names the local branch itself (`--branch`), so both spellings can
+    /// exist at once and only the passed name is the PR's branch: a worktree on the
+    /// other one is never offered a reset or a confirm list.
+    #[test]
+    fn on_pr_branch_matches_only_the_passed_local_name() {
+        let e = |branch: &str| wt_entry(false, branch, "h", false);
+        assert!(on_pr_branch(&e("alice/main"), "alice/main"));
+        assert!(!on_pr_branch(&e("main"), "alice/main"));
+        assert!(on_pr_branch(&e("main"), "main"));
+        assert!(!on_pr_branch(&e("alice/main"), "main"));
+        assert!(!on_pr_branch(&wt_entry(true, "feat", "h", false), "feat"));
+        assert!(!on_pr_branch(&wt_entry(false, "feat", "h", true), "feat"));
+
+        let expected = "1111111111111111111111111111111111111111";
+        for (branch, verdict) in [("main", "changed"), ("alice/main", "proceed")] {
+            let probe = wt_probe(true, Some(wt_entry(false, branch, expected, false)));
+            let got = match force_gate(&probe, expected, "alice/main") {
+                ForceGate::Changed => "changed",
+                ForceGate::Proceed => "proceed",
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(got, verdict, "{branch}");
+            assert_eq!(
+                pre_spawn_candidate(&probe, "alice/main").is_some(),
+                verdict == "proceed"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_and_post_spawn_candidates_need_tip_branch_and_progress() {
+        let on_pr = || Some(wt_entry(false, "feat", "h", false));
+        let main = || Some(wt_entry(true, "feat", "h", false));
+        let other = || Some(wt_entry(false, "other", "h", false));
+
+        assert!(pre_spawn_candidate(&wt_probe(true, on_pr()), "feat").is_some());
+        assert!(pre_spawn_candidate(&wt_probe(false, on_pr()), "feat").is_none());
+        assert!(pre_spawn_candidate(&wt_probe(true, None), "feat").is_none());
+        assert!(pre_spawn_candidate(&wt_probe(true, main()), "feat").is_none());
+        assert!(pre_spawn_candidate(&wt_probe(true, other()), "feat").is_none());
+
+        let post =
+            |pre: WtProbe, post: WtProbe| post_spawn_candidate(&pre, &post, "feat").is_some();
+        // No progress: same tip state, same branch.
+        assert!(!post(wt_probe(true, on_pr()), wt_probe(true, on_pr())));
+        // The tip arrived.
+        assert!(post(wt_probe(false, on_pr()), wt_probe(true, on_pr())));
+        // The worktree was created, or switched onto the PR's branch.
+        assert!(post(wt_probe(true, None), wt_probe(true, on_pr())));
+        assert!(post(wt_probe(true, other()), wt_probe(true, on_pr())));
+        // Progress alone is not enough.
+        assert!(!post(wt_probe(false, None), wt_probe(true, main())));
+        assert!(!post(wt_probe(false, None), wt_probe(true, other())));
+        assert!(!post(wt_probe(true, None), wt_probe(false, on_pr())));
+    }
+
+    /// The non-force twin of force_gate's main-entry filter: gh would otherwise check
+    /// the PR's branch out in the user's main checkout.
+    #[test]
+    fn main_worktree_is_refused_before_any_spawn() {
+        assert_eq!(
+            invalid_argument(refuse_main_worktree(
+                &wt_probe(true, Some(wt_entry(true, "main", "h", false))),
+                "C:/repo"
+            )),
+            "C:/repo is this repository's main checkout — pick a new folder, or the pull request's own worktree."
+        );
+        for entry in [
+            None,
+            Some(wt_entry(false, "other", "h", false)),
+            Some(wt_entry(false, "", "h", true)),
+            Some(wt_entry(false, "feat", "h", false)),
+        ] {
+            assert!(refuse_main_worktree(&wt_probe(false, entry), "C:/wt").is_ok());
+        }
+    }
+
+    #[test]
+    fn same_wt_path_ignores_separator_case_and_trailing_slash() {
+        assert!(same_wt_path("C:\\Repos\\WT", "c:/repos/wt"));
+        assert!(same_wt_path("C:/repos/wt/", "C:/repos/wt"));
+        assert!(same_wt_path("C:/repos/wt\\", "c:/Repos/wt"));
+        assert!(!same_wt_path("C:/repos/wt", "C:/repos/wt2"));
+        assert!(!same_wt_path("C:/repos/wt", "C:/repos"));
+    }
+
+    #[tokio::test]
+    async fn add_user_refuses_ambiguous_windows_paths() {
+        let (base, repo) = setup_repo("ambiguous-path").await;
+        let root = base.path().to_string_lossy().into_owned();
+        let mut paths = vec![format!("{root}/a\nb")];
+        if cfg!(windows) {
+            paths.push(format!("{root}/wt."));
+            paths.push(format!("{root}/nul"));
+            paths.push(format!("{root}/con.txt/wt"));
+        }
+        for path in paths {
+            let expected = refuse_ambiguous_worktree_path(&path, cfg!(windows))
+                .unwrap_err()
+                .to_string();
+            let result =
+                git_worktree_add_user_core(&AppState::default(), &repo, &path, "feat", true, None)
+                    .await;
+            assert!(
+                matches!(&result, Err(e @ AppError::InvalidArgument(_)) if e.to_string() == expected),
+                "{path:?}: {result:?}"
+            );
+        }
+        assert!(run(&repo, &["branch", "--list", "feat"])
+            .await
+            .trim()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn divergence_probe_reads_a_real_linked_worktree() {
+        let (base, repo) = setup_repo("divergence").await;
+        std::fs::write(std::path::Path::new(&repo).join("b.txt"), "t\n").unwrap();
+        run(&repo, &["add", "-A"]).await;
+        run(&repo, &["commit", "-qm", "T"]).await;
+        let t = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let parent = run(&repo, &["rev-parse", "HEAD^"]).await.trim().to_string();
+        let wt = base.path().join("wt");
+        let wt_s = wt.to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "-b", "feat", &wt_s, &t]).await;
+
+        // Equal, behind-only and ahead-only all fast-forward or are up to date.
+        assert_eq!(diverged_from(&repo, &t, &t).await.unwrap(), None);
+        run(&wt_s, &["reset", "-q", "--hard", &parent]).await;
+        assert_eq!(diverged_from(&repo, &parent, &t).await.unwrap(), None);
+        run(&wt_s, &["reset", "-q", "--hard", &t]).await;
+        for i in 1..=21 {
+            run(
+                &wt_s,
+                &["commit", "-q", "--allow-empty", "-m", &format!("local {i}")],
+            )
+            .await;
+        }
+        let ahead = run(&wt_s, &["rev-parse", "HEAD"]).await.trim().to_string();
+        assert_eq!(diverged_from(&repo, &ahead, &t).await.unwrap(), None);
+
+        // A sibling of T off its parent that adds c.txt: neither side contains the other.
+        run(&repo, &["checkout", "-q", "-b", "side", &parent]).await;
+        std::fs::write(std::path::Path::new(&repo).join("c.txt"), "s\n").unwrap();
+        run(&repo, &["add", "c.txt"]).await;
+        run(&repo, &["commit", "-qm", "sibling"]).await;
+        let sibling = run(&repo, &["rev-parse", "HEAD"]).await.trim().to_string();
+        let (commits, more) = diverged_from(&repo, &ahead, &sibling)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(more);
+        assert_eq!(commits.len(), 20);
+        assert_eq!(commits[0].sha, ahead);
+        assert_eq!(commits[0].subject, "local 21");
+        assert_eq!(commits[19].subject, "local 2");
+
+        assert!(!worktree_dirty(&wt_s).await.unwrap());
+        std::fs::write(wt.join("untracked.txt"), "u\n").unwrap();
+        assert!(
+            !worktree_dirty(&wt_s).await.unwrap(),
+            "-uno leaves untracked out"
+        );
+        std::fs::write(wt.join("a.txt"), "changed\n").unwrap();
+        assert!(worktree_dirty(&wt_s).await.unwrap());
+
+        // Only an untracked path the target tracks is one reset --hard overwrites.
+        assert_eq!(
+            untracked_collisions(&repo, &wt_s, &sibling).await.unwrap(),
+            0
+        );
+        std::fs::write(wt.join("c.txt"), "mine\n").unwrap();
+        assert_eq!(
+            untracked_collisions(&repo, &wt_s, &sibling).await.unwrap(),
+            1
+        );
+        assert_eq!(untracked_collisions(&repo, &wt_s, &t).await.unwrap(), 0);
+
+        let probe = probe_worktree(&repo, &wt_s, Some(&t)).await.unwrap();
+        assert!(probe.tip_local);
+        let entry = probe.entry.expect("the linked worktree is found");
+        assert!(!entry.is_main && !entry.detached);
+        assert_eq!(entry.branch, "feat");
+        assert_eq!(entry.head, ahead);
+        assert_eq!(
+            std::fs::canonicalize(&entry.path).unwrap(),
+            std::fs::canonicalize(&wt).unwrap()
+        );
+
+        let absent = "0123456789abcdef0123456789abcdef01234567";
+        let probe = probe_worktree(&repo, &repo, Some(absent)).await.unwrap();
+        assert!(!probe.tip_local);
+        assert!(probe.entry.expect("the repo root is listed").is_main);
+        // The main worktree is never a candidate, even with the tip local.
+        let probe = probe_worktree(&repo, &repo, Some(&t)).await.unwrap();
+        assert!(probe.tip_local);
+        assert!(pre_spawn_candidate(&probe, "master").is_none());
+        assert!(pre_spawn_candidate(&probe, "main").is_none());
+        assert!(refuse_main_worktree(&probe, &repo).is_err());
+        let linked = probe_worktree(&repo, &wt_s, None).await.unwrap();
+        assert!(refuse_main_worktree(&linked, &wt_s).is_ok());
+
+        let relative = resolve_worktree_path(&repo, "../wt");
+        let probe = probe_worktree(&repo, &relative, None).await.unwrap();
+        assert!(!probe.tip_local);
+        assert_eq!(probe.entry.map(|e| e.branch).as_deref(), Some("feat"));
+
+        // The command's pre-spawn gate over the same fixture: each refusal it owns.
+        let oid = Some(sibling.as_str());
+        let sync = || CheckoutMode::Sync;
+        assert_eq!(
+            invalid_argument(checkout_pre_spawn_gate(&repo, &repo, &repo, oid, "feat", sync()).await),
+            format!("{repo} is this repository's main checkout — pick a new folder, or the pull request's own worktree.")
+        );
+        match checkout_pre_spawn_gate(&repo, "wt-echo", &wt_s, oid, "feat", sync()).await {
+            Err(AppError::WorktreeDiverged {
+                path,
+                head,
+                commits,
+                more,
+                dirty,
+                untracked,
+            }) => {
+                assert_eq!((path.as_str(), head.as_str()), ("wt-echo", ahead.as_str()));
+                assert_eq!(commits.len(), 20);
+                assert!(more && dirty);
+                assert_eq!(untracked, 1);
+            }
+            other => panic!("{other:?}"),
+        }
+        // A worktree on another name than the PR's local branch: nothing is provable,
+        // so gh decides.
+        let pre = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "alice/feat", sync())
+            .await
+            .unwrap();
+        assert_eq!(
+            pre.and_then(|p| p.entry).map(|e| e.branch).as_deref(),
+            Some("feat")
+        );
+        let fresh = base.path().join("new-wt").to_string_lossy().into_owned();
+        let pre = checkout_pre_spawn_gate(&repo, &fresh, &fresh, oid, "feat", sync())
+            .await
+            .unwrap();
+        assert!(pre.is_some_and(|p| p.tip_local && p.entry.is_none()));
+
+        let proceed = CheckoutMode::Force { expected: &ahead };
+        let gate = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", proceed).await;
+        assert!(matches!(gate, Ok(None)), "{gate:?}");
+        let moved = CheckoutMode::Force { expected: &t };
+        let gate = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "feat", moved).await;
+        assert!(
+            matches!(&gate, Err(AppError::WorktreeDiverged { head, .. }) if *head == ahead),
+            "{gate:?}"
+        );
+        let other = CheckoutMode::Force { expected: &ahead };
+        let gate = checkout_pre_spawn_gate(&repo, "wt", &wt_s, oid, "alice/feat", other).await;
+        assert!(
+            invalid_argument(gate).starts_with("The worktree at wt changed since you confirmed")
+        );
+        let main = CheckoutMode::Force { expected: &ahead };
+        let gate = checkout_pre_spawn_gate(&repo, "root", &repo, oid, "side", main).await;
+        assert!(invalid_argument(gate).starts_with("Only an existing worktree of this repository"));
     }
 }
