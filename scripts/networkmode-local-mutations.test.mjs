@@ -212,10 +212,15 @@ const NETWORK_CALLEES = [
   "gitRemoteDefaultBranch",
   // pre-commit `autoupdate` fetches each hook repo's latest tag.
   "gitUpdateHookManager",
+  // Native PR checkout fetches the PR head from the forge before any local write.
+  "nativePrCheckout",
+  "nativePrCheckoutWorktree",
 ];
 
 /** Calls that do no I/O of their own; they neither make nor break a site's class. */
 const NEUTRAL_CALLEES = [
+  // A cached-only route read: getQueryData, no fetch, no I/O.
+  "resolveCheckoutRoute",
   // A local read beside the writes it gates.
   "gitMergePreview",
   "isDirtyTreeRefusal",

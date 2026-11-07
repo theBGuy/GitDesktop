@@ -12,6 +12,7 @@ pub mod history;
 pub(crate) mod ignored_guard;
 pub mod ops;
 pub mod pathspec;
+pub mod pr_checkout;
 pub mod promote_marker;
 pub mod pull_guard;
 pub mod remote;

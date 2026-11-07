@@ -35,35 +35,53 @@ import { Spinner } from "@/components/ui/spinner";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { useCloseSettled } from "@/features/repository/publish-confirm";
 import { useOpenWorktree } from "@/features/repository/useOpenRepoByPath";
-import { refuseWhileLeaving } from "@/features/repository/WorktreesDialog";
+import {
+  FINDING_MAIN_REASON,
+  FullPathRow,
+  refuseWhileLeaving,
+} from "@/features/repository/WorktreesDialog";
 import {
   composePickedPath,
-  deriveSiblingPath,
-  isAbsolutePath,
-  splitPath,
   underPickedParent,
 } from "@/features/repository/worktree-paths";
+import { clipTitle } from "@/lib/clip-title";
 import {
   DIVERGED_COMMIT_CAP,
   isWorktreeDiverged,
   type WorktreeDiverged,
 } from "@/lib/git/api";
+import {
+  type PrBranchFacts,
+  plainCheckoutBranch,
+  prLocalBranch,
+} from "@/lib/git/checkout-route";
 import { normPath } from "@/lib/git/path";
 import {
+  ghAccountsOptions,
   type PendingPrWrite,
   PR_WRITES_KEY,
   pendingMutationEntries,
   pendingWriteOfKind,
   pendingWritesFor,
   readPendingPrWrite,
+  resolveCheckoutRoute,
   useCheckoutPrWorktree,
-  useGhAccounts,
   useUserWorktrees,
 } from "@/lib/git/queries";
-import type { RemoteLens } from "@/lib/git/types";
+import type { ForgeProvider, RemoteLens } from "@/lib/git/types";
 import { listUserWorktrees, type UserWorktree } from "@/lib/git/worktree";
+import {
+  deriveDefaultWorktreePath,
+  folderKey,
+  isAbsolutePath,
+  resolveTarget,
+  rowAtPath,
+  sameCheckout,
+  worktreeLeaf,
+} from "@/lib/git/worktree-default-path";
 import { hasChordModifier } from "@/lib/hotkeys/binding";
 import { refuseWhileOffline, useOfflineHold } from "@/lib/offline-writes";
+import type { PrNoun } from "@/lib/pulls/pr-state";
 import { useConfirm } from "@/lib/stores/confirm";
 import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
@@ -117,34 +135,20 @@ export function checkoutRunningReason(
     : `Checking out #${running.target}…`;
 }
 
-/** gh grew `pr checkout --worktree` in 2.98.0. Missing parts read as 0, so "2.98"
- *  passes; anything unparseable is unknown and passes too, since the backend
- *  refuses a too-old gh on its own. */
-export function supportsWorktreeCheckout(version: string): boolean {
-  const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-  if (![major, minor, patch].every(Number.isFinite)) return true;
-  if (major !== 2) return major > 2;
-  if (minor !== 98) return minor > 98;
-  // 2.98.x: the floor is 2.98.0, so every patch passes.
-  return true;
-}
+/** The short form of each forge's PR noun. */
+const PR_SHORT: Record<PrNoun, string> = {
+  "pull request": "PR",
+  "merge request": "MR",
+};
 
-/** Why the worktree flavor is held by the installed gh, or undefined while the
- *  version is unknown (unread, or "" when gh isn't found): fail open. */
-function versionReason(version: string | undefined): string | undefined {
-  if (!version || supportsWorktreeCheckout(version)) return undefined;
-  return `Needs GitHub CLI 2.98 or newer (you have ${version})`;
-}
-
-/** Reads gh's version only while mounted, so the PR view itself spawns nothing:
- *  the menu content and the popover body mount only while open. */
-function GhVersionGate({
-  children,
-}: {
-  children: (reason: string | undefined) => ReactNode;
-}) {
-  const gh = useGhAccounts();
-  return children(versionReason(gh.data?.version));
+/** What the plain checkout's title and toast name: its branch when the route
+ *  makes it known, else the PR by number, never a guessed branch. */
+export function plainCheckoutTarget(
+  pr: PrBranchFacts,
+  number: number,
+  noun: PrNoun,
+): string {
+  return plainCheckoutBranch(pr) ?? `${PR_SHORT[noun]} #${number}`;
 }
 
 /** Base UI activates on keydown without a repeat or modifier check, so a key
@@ -163,16 +167,13 @@ function ignoreHeldActivation(
   }
 }
 
-/** A folder's comparison key: separator-, case- and trailing-separator-blind,
- *  since a typed path may differ from git's spelling. */
-function folderKey(p: string): string {
-  return normPath(p).replace(/\/+$/, "");
-}
+export { resolveTarget } from "@/lib/git/worktree-default-path";
 
 /** Point-in-time twin of `useIsRemovingWorktree`, across every repo bucket (a
- *  removal started from another checkout keys under that one). A relative
- *  typed path is out of reach: it is never resolved lexically, so it matches no
- *  removal. */
+ *  removal started from another checkout keys under that one). Callers pass a
+ *  resolved path: a relative one matches no removal. Holds compare by the
+ *  case-folding `folderKey` on purpose (a fold can only over-hold); row
+ *  selection uses the host-exact `sameCheckout`. */
 function removingNow(path: string): boolean {
   const want = folderKey(path);
   return Object.values(useWorktreeRemovalStore.getState().byRepo).some(
@@ -180,58 +181,27 @@ function removingNow(path: string): boolean {
   );
 }
 
-/** The PR branch's own worktree. The repository's own checkout is never it:
- *  opening that is a no-op, and gh refuses to update it as a worktree.
- *  Matching by bare head name is this phase's limit (the head owner isn't read
- *  yet), so a fork PR can match the user's own branch: the backend refuses the
- *  update, and "Check out into a new folder…" leaves that state. */
+/** The PR branch's own worktree, by the local name the checkout gives it (null
+ *  matches nothing). The repository's own checkout is never it: opening that
+ *  is a no-op, and the backend refuses to update it as a worktree. */
 function branchRow(
   rows: UserWorktree[] | undefined,
-  branch: string,
+  branch: string | null,
   repoPath: string,
 ): UserWorktree | undefined {
+  if (branch === null) return undefined;
   return rows?.find(
-    (w) =>
-      !w.isMain &&
-      w.branch === branch &&
-      normPath(w.path) !== normPath(repoPath),
+    (w) => !w.isMain && w.branch === branch && !sameCheckout(w.path, repoPath),
   );
 }
 
+/** Row selection is host-exact: on a case-sensitive filesystem "Review" and
+ *  "review" can both be registered, and the toast must open the one written. */
 function pathRow(
   rows: UserWorktree[] | undefined,
   path: string,
 ): UserWorktree | undefined {
-  const want = folderKey(path);
-  return rows?.find((w) => folderKey(w.path) === want);
-}
-
-/** Where gh writes a typed folder, resolved lexically as gh does: a relative
- *  one against the repository, a root-relative one ("/x") against its drive or
- *  share. A drive-relative one ("C:x") depends on that drive's working
- *  directory, so it stays unresolved and matches no row. Only the toast's Open
- *  reads this; the hold predicates still decline relative paths. */
-export function resolveTarget(repoPath: string, target: string): string {
-  if (isAbsolutePath(target)) return target;
-  const typed = target.replace(/\\/g, "/");
-  if (/^[A-Za-z]:/.test(typed)) return target;
-  let joined: string;
-  if (typed.startsWith("/")) {
-    const drive = /^(?:\/\/[^/]+\/[^/]+|[A-Za-z]:)/.exec(
-      repoPath.replace(/\\/g, "/"),
-    )?.[0];
-    if (drive === undefined) return target;
-    joined = drive + typed;
-  } else joined = `${repoPath}/${typed}`.replace(/\\/g, "/");
-  // A drive, a UNC share or a leading "/" is never popped by "..".
-  const root = /^(?:\/\/[^/]+\/[^/]+|[A-Za-z]:)?\/?/.exec(joined)?.[0] ?? "";
-  const out: string[] = [];
-  for (const s of joined.slice(root.length).split("/")) {
-    if (s === "" || s === ".") continue;
-    if (s === "..") out.pop();
-    else out.push(s);
-  }
-  return root + out.join("/");
+  return rowAtPath(rows, path);
 }
 
 /** The worktree a run wrote, matched by folder only: a branch name can't tell
@@ -257,12 +227,13 @@ function openablePath(
 
 type SuccessKind = "create" | "update" | "current" | "reset";
 
-const SUCCESS_COPY: Record<SuccessKind, (n: number) => string> = {
-  create: (n) => `Checked out #${n} in a worktree`,
-  update: () => "Worktree updated to the PR",
-  current: () => "Worktree already up to date.",
-  reset: () => "Worktree reset to the PR",
-};
+const SUCCESS_COPY: Record<SuccessKind, (n: number, short: string) => string> =
+  {
+    create: (n) => `Checked out #${n} in a worktree`,
+    update: (_n, short) => `Worktree updated to the ${short}`,
+    current: () => "Worktree already up to date.",
+    reset: (_n, short) => `Worktree reset to the ${short}`,
+  };
 
 const DISCARD_LABEL: Record<"listed" | "more", (n: number) => string> = {
   listed: (n) => `Discard ${n} commit${n === 1 ? "" : "s"} and reset`,
@@ -275,6 +246,7 @@ interface Pin {
   repoPath: string;
   number: number;
   lens: RemoteLens;
+  provider: ForgeProvider | null | undefined;
 }
 
 export interface PrWorktreeCheckoutHandle {
@@ -285,10 +257,10 @@ export interface PrWorktreeCheckoutHandle {
 /**
  * The remote PR header's split Checkout: `children` is the plain half (or the
  * "Checked out" chip), and the caret beside it opens "Check out in a worktree…",
- * whose popover names a sibling folder by PR number and runs
- * `gh pr checkout --worktree`. When the PR's head branch already has a worktree
- * the same popover offers Open and Update instead (fork PRs: see `branchRow`).
- * Busy state comes from the view's pending-write cache reads (`runningReason`,
+ * whose popover defaults to an in-repo folder named by PR number and runs the
+ * worktree checkout on the route `resolveCheckoutRoute` picks. When the PR's
+ * local branch already has a worktree the same popover offers Open and Update
+ * instead (see `branchRow`). Busy state comes from the view's pending-write cache reads (`runningReason`,
  * `pending`), never this component's own mutation observer: the view is reused
  * across PRs.
  */
@@ -299,6 +271,10 @@ export function PrWorktreeCheckout({
   lens,
   prNumber,
   headRefName,
+  provider,
+  crossRepository,
+  headRepositoryOwner,
+  prNoun,
   staleReason,
   runningReason,
   pending,
@@ -313,6 +289,11 @@ export function PrWorktreeCheckout({
   /** The rendered PR, which copy names; it lags `number` through a switch. */
   prNumber: number;
   headRefName: string;
+  /** The forge-status probe's answer; undefined while it is pending or failed. */
+  provider: ForgeProvider | null | undefined;
+  crossRepository: boolean | null | undefined;
+  headRepositoryOwner: string | null | undefined;
+  prNoun: PrNoun;
   /** Set while the rendered details are another PR's placeholder. */
   staleReason: string | undefined;
   /** {@link checkoutRunningReason}: set while any checkout runs. */
@@ -375,14 +356,22 @@ export function PrWorktreeCheckout({
   });
 
   // `data` only: a pending or failed read shows the create form, never a claim.
-  const rows = useUserWorktrees(repoPath, menuOpen || popoverOpen).data;
-  const mainPath = rows?.find((w) => w.isMain)?.path ?? repoPath;
-  const derivedPath = deriveSiblingPath(mainPath, `pr-${number}`);
+  const rowsRead = useUserWorktrees(repoPath, menuOpen || popoverOpen);
+  const rows = rowsRead.data;
+  // Null until the rows name the main checkout: a default guessed before then
+  // could nest the new worktree inside a linked one.
+  const derivedPath = deriveDefaultWorktreePath(repoPath, rows, `pr-${number}`);
   const followingPath =
     pickedParent === null
-      ? derivedPath
-      : underPickedParent(pickedParent, splitPath(derivedPath).name);
+      ? (derivedPath ?? "")
+      : underPickedParent(pickedParent, worktreeLeaf(`pr-${number}`));
   const effectivePath = pathEdited ? path : followingPath;
+  // A failed read leaves no default but lets the user type one.
+  const findingMain =
+    !pathEdited &&
+    pickedParent === null &&
+    derivedPath === null &&
+    !rowsRead.isError;
   // Latched when the popover opens, so a list landing while it is open never
   // swaps the body under the focused control; the next open reads afresh.
   const [existing, setExisting] = useState<UserWorktree | undefined>();
@@ -435,18 +424,37 @@ export function PrWorktreeCheckout({
    *  item is named, not Update: the reopened body depends on the branch match. */
   function dismissedBeforeReset(p: Pin): false {
     toast.info(
-      `The worktree for #${p.number} has commits that aren't on the pull request, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.`,
+      `The worktree for #${p.number} has commits that aren't on the ${prNoun}, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.`,
     );
     return false;
   }
 
+  /** The worktree press reads gh's version from the cache alone, so each
+   *  opening warms it; the view itself spawns nothing on mount. */
+  function warmGhVersion() {
+    if (provider === "github")
+      void queryClient.prefetchQuery(ghAccountsOptions());
+  }
+
   function openPopover(from: "menu" | "palette") {
     if (detailsStale) return;
-    pinRef.current = { repoPath, number, lens };
+    warmGhVersion();
+    pinRef.current = { repoPath, number, lens, provider };
     dismissedFor.current = null;
     // `data` only: a pending or failed read opens the create form, never a
     // claim.
-    setExisting(branchRow(rows, headRefName, repoPath));
+    setExisting(
+      branchRow(
+        rows,
+        prLocalBranch({
+          provider,
+          headRefName,
+          crossRepository,
+          headRepositoryOwner,
+        }),
+        repoPath,
+      ),
+    );
     setRoute(from);
     setPopoverOpen(true);
   }
@@ -456,7 +464,7 @@ export function PrWorktreeCheckout({
   }));
 
   async function openFromMenu() {
-    const at = { repoPath, number, lens };
+    const at = { repoPath, number, lens, provider };
     setMenuOpen(false);
     // The popover opens only once the menu's focus return has landed, or that
     // return would steal the folder field's initial focus.
@@ -481,7 +489,14 @@ export function PrWorktreeCheckout({
     // A pick answering an earlier opening (closed, reopened, or another PR's)
     // would land in a field the user never browsed from.
     if (!p || !live.current.popoverOpen || !ownsPopover(p)) return;
-    if (pathEdited) setPath(composePickedPath(picked, path, derivedPath));
+    if (pathEdited)
+      setPath(
+        composePickedPath(
+          picked,
+          path,
+          derivedPath ?? worktreeLeaf(`pr-${number}`),
+        ),
+      );
     else setPickedParent(picked);
   }
 
@@ -505,8 +520,8 @@ export function PrWorktreeCheckout({
     await popoverClose.waitClosed();
     if (!ownsPopover(p)) return leftBeforeReset(p);
     const ok = await useConfirm.getState().ask({
-      title: "Reset this worktree to the PR?",
-      body: <ResetBody diverged={d} />,
+      title: `Reset this worktree to the ${PR_SHORT[prNoun]}?`,
+      body: <ResetBody repoPath={p.repoPath} diverged={d} prNoun={prNoun} />,
       confirmLabel: DISCARD_LABEL[d.more ? "more" : "listed"](d.commits.length),
       confirmVariant: "destructive",
     });
@@ -525,6 +540,9 @@ export function PrWorktreeCheckout({
     const target = typed.trim();
     const p = pinRef.current;
     if (!p || !target || refusedAtFire()) return;
+    // Decided once, before any await: a forced retry must reach the engine
+    // whose refusal measured `expectedHead`.
+    const route = resolveCheckoutRoute(queryClient, "worktree", p.provider);
     const token = {};
     flight.current = token;
     dismissedFor.current = null;
@@ -541,8 +559,8 @@ export function PrWorktreeCheckout({
       // A forced retry that meets a FRESH divergence asks again over the fresh
       // payload; nothing ever retries without an answer.
       for (;;) {
-        // gh fetches, so a write pressed offline would park and fire whenever
-        // the connection returns; checked after every await, the confirm's too.
+        // Either route fetches, so a write pressed offline would park and fire
+        // when the connection returns; checked after every await, the confirm's too.
         if (refuseWhileOffline()) return;
         // The fire-time holds predate the reads and the confirm above: a
         // removal or promotion claimed meanwhile refuses here.
@@ -550,28 +568,32 @@ export function PrWorktreeCheckout({
           toast.info(PROMOTION_BLOCKS_CHECKOUT);
           return;
         }
-        if (refuseWhileLeaving(folderKey(target), removingNow(target))) return;
+        const resolved = resolveTarget(p.repoPath, target);
+        if (refuseWhileLeaving(folderKey(resolved), removingNow(resolved)))
+          return;
         // Silent, as the plain half's own refusal is: its reason is on screen.
         if (checkoutRunsNow(p.repoPath)) return;
         try {
           await checkout.mutateAsync({
             number: p.number,
             lens: p.lens,
+            provider: p.provider,
+            route,
             path: target,
             force,
             expectedHead,
           });
           const written = writtenRow(await readRows(p), p, target);
           let outcome: SuccessKind = force ? "reset" : kind;
-          // gh exits 0 on a fast-forward and on a no-op alike; a failed read
-          // on either side keeps "updated", a fair claim.
+          // Success means a fast-forward or a no-op alike; a failed read on
+          // either side keeps "updated", a fair claim.
           if (
             outcome === "update" &&
             headBefore !== undefined &&
             written?.head === headBefore
           )
             outcome = "current";
-          toast.success(SUCCESS_COPY[outcome](p.number), {
+          toast.success(SUCCESS_COPY[outcome](p.number, PR_SHORT[prNoun]), {
             action: openWorktreeAction(openablePath(written, target)),
           });
           if (ownsPopover(p)) setPopoverOpen(false);
@@ -668,7 +690,10 @@ export function PrWorktreeCheckout({
         {children}
         <DropdownMenu
           open={menuOpen}
-          onOpenChange={setMenuOpen}
+          onOpenChange={(o) => {
+            if (o) warmGhVersion();
+            setMenuOpen(o);
+          }}
           onOpenChangeComplete={menuClose.onOpenChangeComplete}
         >
           <DropdownMenuTrigger
@@ -688,30 +713,23 @@ export function PrWorktreeCheckout({
             <CaretDownIcon />
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-56">
-            <GhVersionGate>
-              {(gate) => {
-                const reason = runningReason ?? gate;
-                return (
-                  <DropdownMenuItem
-                    disabled={reason !== undefined}
-                    onClick={() => void openFromMenu()}
-                    onKeyDown={ignoreHeldActivation}
-                    className={`flex-col items-start gap-0.5 ${MENU_HELD_ROW_CLASS}`}
-                  >
-                    <span className="flex items-center gap-2">
-                      <TreeStructureIcon className="size-4" aria-hidden />
-                      Check out in a worktree…
-                    </span>
-                    {reason !== undefined && (
-                      <span className="pl-6 text-[11px] text-muted-foreground">
-                        {" "}
-                        {reason}
-                      </span>
-                    )}
-                  </DropdownMenuItem>
-                );
-              }}
-            </GhVersionGate>
+            <DropdownMenuItem
+              disabled={runningReason !== undefined}
+              onClick={() => void openFromMenu()}
+              onKeyDown={ignoreHeldActivation}
+              className={`flex-col items-start gap-0.5 ${MENU_HELD_ROW_CLASS}`}
+            >
+              <span className="flex items-center gap-2">
+                <TreeStructureIcon className="size-4" aria-hidden />
+                Check out in a worktree…
+              </span>
+              {runningReason !== undefined && (
+                <span className="pl-6 text-[11px] text-muted-foreground">
+                  {" "}
+                  {runningReason}
+                </span>
+              )}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -746,122 +764,112 @@ export function PrWorktreeCheckout({
               <Popover.Title className="text-xs font-semibold">
                 Check out #{prNumber} in a worktree
               </Popover.Title>
-              <GhVersionGate>
-                {(gate) =>
-                  existing ? (
-                    <>
-                      <Popover.Description className="text-muted-foreground">
-                        This pull request already has a worktree.
-                      </Popover.Description>
-                      <p className="flex min-w-0 items-center gap-1.5">
-                        <CheckCircleIcon
-                          className="size-3.5 shrink-0"
-                          aria-hidden
-                        />
-                        <PathText
-                          path={existing.path}
-                          className="font-mono text-[11px]"
-                        />
-                      </p>
-                      <p className="text-[11px] text-muted-foreground">
-                        On{" "}
-                        <code className="font-mono break-all">
-                          {existing.branch}
-                        </code>
-                      </p>
-                      <div className="mt-1 flex gap-2">
-                        <DisabledReasonButton
-                          size="sm"
-                          disabled={
-                            (staleReason ?? removingReason ?? runningReason) !==
-                            undefined
-                          }
-                          reason={
-                            staleReason ?? removingReason ?? runningReason
-                          }
-                          onClick={() => void openExisting()}
-                          // The fallback initial focus: a key still held from
-                          // the menu item lands here.
-                          onKeyDown={ignoreHeldActivation}
-                        >
-                          Open worktree
-                        </DisabledReasonButton>
-                        <DisabledReasonButton
-                          variant="outline"
-                          size="sm"
-                          disabled={
-                            (staleReason ??
-                              removingReason ??
-                              runningReason ??
-                              offlineHold ??
-                              gate) !== undefined
-                          }
-                          reason={
-                            staleReason ??
-                            removingReason ??
-                            runningReason ??
-                            offlineHold ??
-                            gate
-                          }
-                          onClick={updateExisting}
-                          onKeyDown={ignoreHeldActivation}
-                        >
-                          {pending && <Spinner data-icon="inline-start" />}
-                          Update to PR
-                        </DisabledReasonButton>
-                        <Popover.Close
-                          render={
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="ml-auto"
-                            />
-                          }
-                        >
-                          Close
-                        </Popover.Close>
-                      </div>
-                      {/* A fork PR's bare head name can latch the user's own
-                          branch here, whose update the backend refuses. */}
-                      <Button
-                        variant="ghost"
-                        size="xs"
-                        className="self-start"
-                        onClick={() => {
-                          focusFolder.current = true;
-                          setExisting(undefined);
-                        }}
-                        onKeyDown={ignoreHeldActivation}
-                      >
-                        Check out into a new folder…
-                      </Button>
-                    </>
-                  ) : (
-                    <CreateForm
-                      inputId={inputId}
-                      inputRef={inputRef}
-                      value={effectivePath}
-                      onEdit={(v) => {
-                        setPath(v);
-                        setPathEdited(true);
-                      }}
-                      onBrowse={() => void browse()}
-                      headRefName={headRefName}
+              {existing ? (
+                <>
+                  <Popover.Description className="text-muted-foreground">
+                    {`This ${prNoun} already has a worktree.`}
+                  </Popover.Description>
+                  <p className="flex min-w-0 items-center gap-1.5">
+                    <CheckCircleIcon
+                      className="size-3.5 shrink-0"
+                      aria-hidden
+                    />
+                    <PathText
+                      path={existing.path}
+                      className="font-mono text-[11px]"
+                    />
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    On{" "}
+                    <code className="font-mono break-all">
+                      {existing.branch}
+                    </code>
+                  </p>
+                  <div className="mt-1 flex gap-2">
+                    <DisabledReasonButton
+                      size="sm"
+                      disabled={
+                        (staleReason ?? removingReason ?? runningReason) !==
+                        undefined
+                      }
+                      reason={staleReason ?? removingReason ?? runningReason}
+                      onClick={() => void openExisting()}
+                      // The fallback initial focus: a key still held from
+                      // the menu item lands here.
+                      onKeyDown={ignoreHeldActivation}
+                    >
+                      Open worktree
+                    </DisabledReasonButton>
+                    <DisabledReasonButton
+                      variant="outline"
+                      size="sm"
+                      disabled={
+                        (staleReason ??
+                          removingReason ??
+                          runningReason ??
+                          offlineHold) !== undefined
+                      }
                       reason={
                         staleReason ??
+                        removingReason ??
                         runningReason ??
-                        offlineHold ??
-                        gate ??
-                        (effectivePath.trim()
-                          ? undefined
-                          : "Enter a folder for the worktree.")
+                        offlineHold
                       }
-                      pending={pending}
-                      onSubmit={() => void run(effectivePath, "create")}
-                    />
-                  )
-                }
-              </GhVersionGate>
+                      onClick={updateExisting}
+                      onKeyDown={ignoreHeldActivation}
+                    >
+                      {pending && <Spinner data-icon="inline-start" />}
+                      {`Update to ${PR_SHORT[prNoun]}`}
+                    </DisabledReasonButton>
+                    <Popover.Close
+                      render={
+                        <Button variant="ghost" size="sm" className="ml-auto" />
+                      }
+                    >
+                      Close
+                    </Popover.Close>
+                  </div>
+                  {/* Leaves a matched worktree alone and checks the PR out
+                          into another folder. */}
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="self-start"
+                    onClick={() => {
+                      focusFolder.current = true;
+                      setExisting(undefined);
+                    }}
+                    onKeyDown={ignoreHeldActivation}
+                  >
+                    Check out into a new folder…
+                  </Button>
+                </>
+              ) : (
+                <CreateForm
+                  inputId={inputId}
+                  inputRef={inputRef}
+                  repoPath={repoPath}
+                  findingMain={findingMain}
+                  value={effectivePath}
+                  onEdit={(v) => {
+                    setPath(v);
+                    setPathEdited(true);
+                  }}
+                  onBrowse={() => void browse()}
+                  headRefName={headRefName}
+                  reason={
+                    staleReason ??
+                    runningReason ??
+                    offlineHold ??
+                    (findingMain ? FINDING_MAIN_REASON : undefined) ??
+                    (effectivePath.trim()
+                      ? undefined
+                      : "Enter a folder for the worktree.")
+                  }
+                  pending={pending}
+                  onSubmit={() => void run(effectivePath, "create")}
+                />
+              )}
             </Popover.Popup>
           </Popover.Positioner>
         </Popover.Portal>
@@ -873,6 +881,8 @@ export function PrWorktreeCheckout({
 function CreateForm({
   inputId,
   inputRef,
+  repoPath,
+  findingMain,
   value,
   onEdit,
   onBrowse,
@@ -883,6 +893,9 @@ function CreateForm({
 }: {
   inputId: string;
   inputRef: Ref<HTMLInputElement>;
+  repoPath: string;
+  /** No default yet and none typed: the rows haven't named the main checkout. */
+  findingMain: boolean;
   value: string;
   onEdit: (value: string) => void;
   onBrowse: () => void;
@@ -891,6 +904,7 @@ function CreateForm({
   pending: boolean;
   onSubmit: () => void;
 }) {
+  const fullPathId = `${inputId}-full`;
   return (
     <>
       <Popover.Description className="text-muted-foreground">
@@ -914,7 +928,11 @@ function CreateForm({
             e.preventDefault();
             if (!e.repeat && reason === undefined) onSubmit();
           }}
-          placeholder="Path for the new worktree"
+          onMouseEnter={clipTitle(value)}
+          aria-describedby={fullPathId}
+          placeholder={
+            findingMain ? FINDING_MAIN_REASON : "Path for the new worktree"
+          }
           className="h-7 font-mono text-[11px]"
         />
         <Button
@@ -926,6 +944,7 @@ function CreateForm({
         >
           <FolderOpenIcon />
         </Button>
+        <FullPathRow id={fullPathId} repoPath={repoPath} value={value} />
       </div>
       <p className="text-[11px] text-muted-foreground">
         Checks out{" "}
@@ -955,14 +974,26 @@ function CreateForm({
 /** The reset confirm's body: spans only, since it renders inside the dialog's
  *  description paragraph. Commits wrap rather than truncate, so every subject
  *  reads in full. */
-function ResetBody({ diverged }: { diverged: WorktreeDiverged }) {
+function ResetBody({
+  repoPath,
+  diverged,
+  prNoun,
+}: {
+  repoPath: string;
+  diverged: WorktreeDiverged;
+  prNoun: PrNoun;
+}) {
   const untracked = diverged.untracked ?? 0;
   return (
     <>
       <span className="block">
-        The worktree at <PathText path={diverged.path} className="font-mono" />{" "}
-        has commits that aren't on the pull request, so it can't fast-forward.
-        Resetting it discards them:
+        The worktree at{" "}
+        {/* The payload echoes the typed spelling, which may be relative. */}
+        <PathText
+          path={resolveTarget(repoPath, diverged.path)}
+          className="font-mono"
+        />{" "}
+        {`has commits that aren't on the ${prNoun}, so it can't fast-forward. Resetting it discards them:`}
       </span>
       <span
         role="list"
@@ -985,7 +1016,7 @@ function ResetBody({ diverged }: { diverged: WorktreeDiverged }) {
       )}
       {untracked > 0 && (
         <span className="mt-2 block">
-          {UNTRACKED_LINE[untracked === 1 ? "one" : "many"](untracked)}
+          {UNTRACKED_LINE[untracked === 1 ? "one" : "many"](untracked, prNoun)}
         </span>
       )}
       {/* Unconditional: the lines above were measured before this opened, and
@@ -998,9 +1029,12 @@ function ResetBody({ diverged }: { diverged: WorktreeDiverged }) {
   );
 }
 
-const UNTRACKED_LINE: Record<"one" | "many", (n: number) => string> = {
-  one: () =>
-    "1 untracked file at a path the pull request tracks is overwritten too.",
-  many: (n) =>
-    `${n} untracked files at paths the pull request tracks are overwritten too.`,
+const UNTRACKED_LINE: Record<
+  "one" | "many",
+  (n: number, noun: PrNoun) => string
+> = {
+  one: (_n, noun) =>
+    `1 untracked file at a path the ${noun} tracks is overwritten too.`,
+  many: (n, noun) =>
+    `${n} untracked files at paths the ${noun} tracks are overwritten too.`,
 };

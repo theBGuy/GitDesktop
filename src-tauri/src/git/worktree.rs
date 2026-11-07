@@ -308,6 +308,8 @@ pub(crate) async fn git_worktree_add_user_core(
         )));
     }
     let base = worktree_base_ref(base_ref)?;
+    // Before the add: a line written ahead of a failed add is inert.
+    exclude_if_inside_gitdesktop(repo_path, &resolve_worktree_path(repo_path, path)).await;
     if new_branch {
         return add_worktree_on_new_branch(state, repo_path, path, branch, base).await;
     }
@@ -1114,6 +1116,162 @@ pub(crate) fn resolve_worktree_path(repo_path: &str, path: &str) -> String {
     }
 }
 
+/// The info/exclude line that keeps in-repo worktrees out of `git status`.
+pub(crate) const GITDESKTOP_WORKTREES_EXCLUDE: &str = "/.gitdesktop/worktrees/";
+
+/// A path git printed on its own line, with only the line terminator removed: on POSIX
+/// a trailing space is part of a folder's name.
+pub(crate) fn stdout_path(stdout: &str) -> &str {
+    stdout.trim_end_matches(['\r', '\n'])
+}
+
+/// The repo's absolute common dir. Strict, unlike the identity resolver: a failed
+/// read is an Err, never the raw path, which would put `info/exclude` in the tree.
+pub(crate) async fn git_common_dir(repo_path: &str) -> AppResult<String> {
+    let out = run_git(
+        Some(repo_path),
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let common = stdout_path(&out.stdout_lossy()).to_string();
+    if common.is_empty() {
+        return Err(AppError::Command("git named no common directory".into()));
+    }
+    Ok(common)
+}
+
+/// The main worktree root: the common dir's parent when the common dir is named
+/// `.git`, else None (a bare repo, or a separate git dir under another name).
+/// Case is kept: `is_inside_gitdesktop_worktrees` applies the platform's own fold.
+fn main_root_from_common_dir(common: &str) -> Option<String> {
+    let unified = strip_verbatim(common).replace('\\', "/");
+    let (parent, last) = unified.trim_end_matches('/').rsplit_once('/')?;
+    last.eq_ignore_ascii_case(".git")
+        .then(|| parent.to_string())
+}
+
+/// Lexical: `resolved_target` (resolve_worktree_path's output) lies strictly
+/// inside `<root>/.gitdesktop/worktrees/`. Pure strings, no Path parsing: `.` and
+/// empty segments (a typed `./` or trailing slash) fold away, a `..` past the prefix
+/// refuses. Case folds on Windows and macOS, where checkouts normally sit on
+/// case-insensitive filesystems (git's init-time `core.ignorecase` probe), since the
+/// exclude line only hides a folder git matches it against.
+pub(crate) fn is_inside_gitdesktop_worktrees(root: &str, resolved_target: &str) -> bool {
+    inside_gitdesktop_worktrees(
+        root,
+        resolved_target,
+        cfg!(any(windows, target_os = "macos")),
+    )
+}
+
+fn inside_gitdesktop_worktrees(root: &str, resolved_target: &str, fold_case: bool) -> bool {
+    let (root_lead, root) = lexical_segments(root, fold_case);
+    let (target_lead, target) = lexical_segments(resolved_target, fold_case);
+    let prefix_len = root.len() + 2;
+    root_lead == target_lead
+        && target.len() > prefix_len
+        && target.starts_with(&root)
+        && target[root.len()..prefix_len] == [".gitdesktop", "worktrees"]
+        && !target[prefix_len..].iter().any(|s| s == "..")
+}
+
+/// A path's leading-separator count (so `//server/share` stays apart from `/server`)
+/// and its segments, with separators normalized and `.`/empty segments dropped.
+fn lexical_segments(p: &str, fold_case: bool) -> (usize, Vec<String>) {
+    let mut s = strip_verbatim(p).replace('\\', "/");
+    if fold_case {
+        s = s.to_lowercase();
+    }
+    let rest = s.trim_start_matches('/');
+    let lead = s.len() - rest.len();
+    let segments = rest
+        .split('/')
+        .filter(|seg| !matches!(*seg, "" | "."))
+        .map(str::to_string)
+        .collect();
+    (lead, segments)
+}
+
+/// The bytes to append so `existing` gains `line`, or None when a line already
+/// equals it. Only trailing spaces are trimmed, as git ignores them: a leading space
+/// is part of git's pattern. Append-only and byte-level: nothing is rewritten.
+fn exclude_append_bytes(existing: &[u8], line: &str) -> Option<Vec<u8>> {
+    let present = existing.split(|&b| b == b'\n').any(|l| {
+        let l = l.strip_suffix(b"\r").unwrap_or(l);
+        let end = l.iter().rposition(|&b| b != b' ').map_or(0, |i| i + 1);
+        &l[..end] == line.as_bytes()
+    });
+    if present {
+        return None;
+    }
+    let eol: &[u8] = if existing.windows(2).any(|w| w == b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
+    };
+    let mut out = Vec::new();
+    if !existing.is_empty() && !existing.ends_with(b"\n") {
+        out.extend_from_slice(eol);
+    }
+    out.extend_from_slice(line.as_bytes());
+    out.extend_from_slice(eol);
+    Some(out)
+}
+
+async fn append_exclude(common: &str) -> AppResult<bool> {
+    let info = std::path::Path::new(common).join("info");
+    tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+        use std::io::Write;
+        std::fs::create_dir_all(&info)?;
+        let file = info.join("exclude");
+        let existing = match std::fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        let Some(bytes) = exclude_append_bytes(&existing, GITDESKTOP_WORKTREES_EXCLUDE) else {
+            return Ok(false);
+        };
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file)?
+            .write_all(&bytes)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+    .map_err(AppError::Io)
+}
+
+/// Appends GITDESKTOP_WORKTREES_EXCLUDE to `<git common dir>/info/exclude`
+/// unless a line already equals it. Ok(true) = appended, Ok(false) = present.
+/// For callers that settle anchoring themselves; the checkout paths use the wrapper.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn ensure_gitdesktop_excluded(repo_path: &str) -> AppResult<bool> {
+    append_exclude(&git_common_dir(repo_path).await?).await
+}
+
+/// Call-site wrapper: appends when the target is inside the MAIN worktree
+/// root's or the open checkout's `.gitdesktop/worktrees/`. Never fails.
+pub(crate) async fn exclude_if_inside_gitdesktop(repo_path: &str, resolved_target: &str) {
+    let result = async {
+        let common = git_common_dir(repo_path).await?;
+        let anchored = main_root_from_common_dir(&common)
+            .is_some_and(|m| is_inside_gitdesktop_worktrees(&m, resolved_target))
+            || is_inside_gitdesktop_worktrees(repo_path, resolved_target);
+        if anchored {
+            append_exclude(&common).await?;
+        }
+        AppResult::Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        eprintln!("gitdesktop: couldn't add the worktree exclude (continuing): {e}");
+    }
+}
+
 /// The most commits a divergence report lists; `more` says a further one exists. Its
 /// twins: `DIVERGED_COMMIT_CAP` in src/lib/git/api/pr-actions.ts and the guide's "newest 20".
 const DIVERGED_COMMIT_CAP: usize = 20;
@@ -1164,21 +1322,60 @@ pub(crate) struct WtProbe {
     pub entry: Option<WtEntry>,
 }
 
-/// Whether two spellings name one worktree. Lowercasing follows `normalize_wt_path`'s
-/// identity convention; it over-matches only on case-sensitive filesystems, deliberately.
-fn same_wt_path(a: &str, b: &str) -> bool {
-    let norm = |p: &str| normalize_wt_path(p).trim_end_matches('/').to_string();
-    if norm(a) == norm(b) {
-        return true;
-    }
-    matches!(
+/// Whether two spellings name one worktree; the match picks the checkout's write target.
+/// Spelling folds `\` and case only on Windows. Elsewhere a case-only difference counts
+/// only when the filesystem confirms one directory, so a case-insensitive macOS volume
+/// still matches while a case-sensitive one (APFS can be) never lands on the wrong row.
+pub(crate) fn same_wt_path(a: &str, b: &str) -> bool {
+    wt_paths_match(a, b, cfg!(windows), same_dir_on_disk)
+}
+
+/// [`same_wt_path`] with the filesystem's same-directory answer injected.
+fn wt_paths_match(a: &str, b: &str, windows: bool, same_dir: impl Fn(&str, &str) -> bool) -> bool {
+    same_wt_spelling(a, b, windows, windows) || same_dir(a, b)
+}
+
+/// Whether both paths exist as one directory: equal canonical paths, or on unix one
+/// (device, inode), which holds however a case-insensitive volume spells the name.
+fn same_dir_on_disk(a: &str, b: &str) -> bool {
+    if matches!(
         (std::fs::canonicalize(a), std::fs::canonicalize(b)),
         (Ok(x), Ok(y)) if x == y
-    )
+    ) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(x), Ok(y)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return x.dev() == y.dev() && x.ino() == y.ino();
+        }
+    }
+    false
+}
+
+/// [`same_wt_path`]'s lexical arm, the frontend checkout-path rule: `\` is a separator
+/// only on `windows` (elsewhere it is a filename byte), case folds only when
+/// `fold_case`, and a trailing `/` always trims.
+fn same_wt_spelling(a: &str, b: &str, windows: bool, fold_case: bool) -> bool {
+    let norm = |p: &str| {
+        let p = if windows {
+            p.replace('\\', "/")
+        } else {
+            p.to_string()
+        };
+        let p = if fold_case { p.to_lowercase() } else { p };
+        p.trim_end_matches('/').to_string()
+    };
+    norm(a) == norm(b)
 }
 
 /// `git merge-base --is-ancestor`: exit 0 is true, 1 is false, anything else fails.
-async fn is_ancestor(repo_path: &str, ancestor: &str, descendant: &str) -> AppResult<bool> {
+pub(crate) async fn is_ancestor(
+    repo_path: &str,
+    ancestor: &str,
+    descendant: &str,
+) -> AppResult<bool> {
     let out = run_git_raw(
         Some(repo_path),
         &["merge-base", "--is-ancestor", ancestor, descendant],
@@ -1256,7 +1453,7 @@ async fn registered_worktree(repo_path: &str, resolved: &str) -> AppResult<Optio
 
 /// Whether a linked worktree has the PR's local branch checked out: the exact name the
 /// checkout passes gh as `--branch`.
-fn on_pr_branch(e: &WtEntry, local: &str) -> bool {
+pub(crate) fn on_pr_branch(e: &WtEntry, local: &str) -> bool {
     !e.is_main && !e.detached && e.branch == local
 }
 
@@ -1372,6 +1569,7 @@ pub(crate) async fn divergence_error(
         .unwrap_or(0);
     Some(AppError::WorktreeDiverged {
         path: echo_path.to_string(),
+        shown_path: e.path.clone(),
         head: e.head.clone(),
         commits,
         more,
@@ -1397,7 +1595,21 @@ fn refuse_main_worktree(entry: Option<&WtEntry>, path: &str) -> AppResult<()> {
 /// `head != local`: an ownerless fork's local name is the bare head too. That also
 /// refuses such a fork's own earlier worktree, deliberately, and with no remedy: while
 /// its bare-named branch exists, refuse_ownerless_branch_namesake refuses every target.
+#[cfg(test)]
 pub(crate) fn refuse_own_head_namesake(
+    entry: Option<&WtEntry>,
+    path: &str,
+    head: &str,
+    local: &str,
+    fork: bool,
+) -> AppResult<()> {
+    refuse_own_head_namesake_on("GitHub", entry, path, head, local, fork)
+}
+
+/// The own-head namesake refusal (contract above), its copy naming `forge` and that
+/// forge's noun.
+pub(crate) fn refuse_own_head_namesake_on(
+    forge: &str,
     entry: Option<&WtEntry>,
     path: &str,
     head: &str,
@@ -1408,13 +1620,14 @@ pub(crate) fn refuse_own_head_namesake(
     if !(fork && own) {
         return Ok(());
     }
+    let noun = request_noun(forge);
     Err(AppError::InvalidArgument(if head == local {
         format!(
-            "{path} is on branch {head}, which may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — nothing was checked out."
+            "{path} is on branch {head}, which may be your own: {forge} no longer names this {noun}'s fork, so its branch can't be told apart from yours — nothing was checked out."
         )
     } else {
         format!(
-            "{path} is on your own branch {head}, not the pull request's {local} — pick a new folder."
+            "{path} is on your own branch {head}, not the {noun}'s {local} — pick a new folder."
         )
     }))
 }
@@ -1425,7 +1638,29 @@ pub(crate) fn refuse_own_head_namesake(
 /// PR's own earlier branch, and a same-repo PR's branch existing is the normal flow.
 /// Force needs no probe: an entry off `local` is `Changed` there before any reset, and
 /// one on it (`Moved`/`Proceed`) meets refuse_own_head_namesake first.
+#[cfg(test)]
 async fn refuse_ownerless_branch_namesake(
+    repo_path: &str,
+    head: &str,
+    local: &str,
+    fork: bool,
+) -> AppResult<()> {
+    refuse_ownerless_branch_namesake_on("GitHub", repo_path, head, local, fork).await
+}
+
+/// The forge's word for the reviewed entity, for copy that names it.
+pub(crate) fn request_noun(forge: &str) -> &'static str {
+    if forge == "GitLab" {
+        "merge request"
+    } else {
+        "pull request"
+    }
+}
+
+/// The ownerless-fork namesake refusal (contract above), its copy naming `forge` and
+/// that forge's noun.
+pub(crate) async fn refuse_ownerless_branch_namesake_on(
+    forge: &str,
     repo_path: &str,
     head: &str,
     local: &str,
@@ -1452,7 +1687,8 @@ async fn refuse_ownerless_branch_namesake(
     match exists {
         Ok(false) => Ok(()),
         Ok(true) => Err(AppError::InvalidArgument(format!(
-            "A branch named {local} already exists and may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — nothing was checked out."
+            "A branch named {local} already exists and may be your own: {forge} no longer names this {}'s fork, so its branch can't be told apart from yours — nothing was checked out.",
+            request_noun(forge)
         ))),
         Err(_) => Err(AppError::InvalidArgument(format!(
             "Couldn't check whether a branch named {local} already exists — try again."
@@ -1535,6 +1771,32 @@ pub(crate) async fn checkout_pre_spawn_gate(
     fork: bool,
     mode: CheckoutMode<'_>,
 ) -> AppResult<Option<WtProbe>> {
+    checkout_pre_spawn_gate_on(
+        "GitHub", repo_path, echo_path, resolved, oid, head, local, fork, mode,
+    )
+    .await
+}
+
+/// The force arm's refusal when the worktree moved off what the user confirmed.
+pub(crate) fn changed_since_confirm(echo_path: &str) -> AppError {
+    AppError::InvalidArgument(format!(
+        "The worktree at {echo_path} changed since you confirmed, so nothing was reset — run the checkout again."
+    ))
+}
+
+/// [`checkout_pre_spawn_gate`] with its namesake copy naming `forge`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn checkout_pre_spawn_gate_on(
+    forge: &str,
+    repo_path: &str,
+    echo_path: &str,
+    resolved: &str,
+    oid: Option<&str>,
+    head: &str,
+    local: &str,
+    fork: bool,
+    mode: CheckoutMode<'_>,
+) -> AppResult<Option<WtProbe>> {
     let CheckoutMode::Force { expected } = mode else {
         let entry = registered_worktree(repo_path, resolved)
             .await
@@ -1544,8 +1806,8 @@ pub(crate) async fn checkout_pre_spawn_gate(
                 ))
             })?;
         refuse_main_worktree(entry.as_ref(), echo_path)?;
-        refuse_own_head_namesake(entry.as_ref(), echo_path, head, local, fork)?;
-        refuse_ownerless_branch_namesake(repo_path, head, local, fork).await?;
+        refuse_own_head_namesake_on(forge, entry.as_ref(), echo_path, head, local, fork)?;
+        refuse_ownerless_branch_namesake_on(forge, repo_path, head, local, fork).await?;
         let Some(oid) = oid else {
             return Ok(None);
         };
@@ -1569,14 +1831,10 @@ pub(crate) async fn checkout_pre_spawn_gate(
                 "Couldn't check the worktree at {echo_path}, so nothing was reset — try again."
             ))
         })?;
-    let changed = || {
-        AppError::InvalidArgument(format!(
-            "The worktree at {echo_path} changed since you confirmed, so nothing was reset — run the checkout again."
-        ))
-    };
+    let changed = || changed_since_confirm(echo_path);
     let verdict = force_gate(&probe, expected, local);
     if matches!(verdict, ForceGate::Moved(_) | ForceGate::Proceed) {
-        refuse_own_head_namesake(probe.entry.as_ref(), echo_path, head, local, fork)?;
+        refuse_own_head_namesake_on(forge, probe.entry.as_ref(), echo_path, head, local, fork)?;
     }
     match verdict {
         ForceGate::NotAWorktree => Err(AppError::InvalidArgument(format!(
@@ -2075,6 +2333,297 @@ prunable gitdir file points to non-existent location
         assert!(run(&repo, &["for-each-ref", "refs/heads/fresh"])
             .await
             .is_empty());
+    }
+
+    #[test]
+    fn exclude_append_bytes_appends_once_with_the_file_eol() {
+        let line = GITDESKTOP_WORKTREES_EXCLUDE;
+        let some =
+            |bytes: &[u8]| exclude_append_bytes(bytes, line).map(|b| String::from_utf8(b).unwrap());
+        assert_eq!(some(b"").as_deref(), Some("/.gitdesktop/worktrees/\n"));
+        assert_eq!(
+            some(b"a\nb\n").as_deref(),
+            Some("/.gitdesktop/worktrees/\n")
+        );
+        assert_eq!(
+            some(b"a\r\nb").as_deref(),
+            Some("\r\n/.gitdesktop/worktrees/\r\n")
+        );
+        assert_eq!(
+            some(b"a\nb").as_deref(),
+            Some("\n/.gitdesktop/worktrees/\n")
+        );
+        assert_eq!(some(b"# x\n/.gitdesktop/worktrees/\n"), None);
+        assert_eq!(some(b"/.gitdesktop/worktrees/\r\nz"), None);
+        assert_eq!(some(b"/.gitdesktop/worktrees/  "), None);
+        // git keeps a leading space in the pattern, so that line isn't ours.
+        assert_eq!(
+            some(b"  /.gitdesktop/worktrees/\n").as_deref(),
+            Some("/.gitdesktop/worktrees/\n")
+        );
+        // Containing the line isn't being it.
+        assert!(some(b"/.gitdesktop/worktrees/x\n").is_some());
+        // Non-UTF-8 content is tolerated and left as it is.
+        let bytes = exclude_append_bytes(b"\xff\xfe\n", line).unwrap();
+        assert_eq!(bytes, b"/.gitdesktop/worktrees/\n");
+    }
+
+    #[test]
+    fn main_root_from_common_dir_gitdesktop_worktrees_anchor() {
+        let root = |c: &str| main_root_from_common_dir(c);
+        assert_eq!(root("C:/r/.git").as_deref(), Some("C:/r"));
+        assert_eq!(root(r"C:\r\.git\").as_deref(), Some("C:/r"));
+        assert_eq!(root("C:/.git").as_deref(), Some("C:"));
+        assert_eq!(
+            root(r"\\?\UNC\srv\share\r\.git").as_deref(),
+            Some("//srv/share/r")
+        );
+        assert_eq!(root("/home/u/r/.git").as_deref(), Some("/home/u/r"));
+        assert_eq!(root("/x/repo.git"), None);
+        assert_eq!(root("/x/gitdir"), None);
+        // Case survives, so a byte-exact (unfolded) compare still anchors under it.
+        let mixed = root("/repos/MyRepo/.git").unwrap();
+        assert_eq!(mixed, "/repos/MyRepo");
+        let target = "/repos/MyRepo/.gitdesktop/worktrees/pr-7";
+        assert!(inside_gitdesktop_worktrees(&mixed, target, false));
+    }
+
+    #[test]
+    fn is_inside_gitdesktop_worktrees_string_shapes() {
+        let inside = |root: &str, target: &str| inside_gitdesktop_worktrees(root, target, true);
+        assert!(inside("C:/r", r"C:\r\.gitdesktop\worktrees\x"));
+        assert!(inside("C:/r", r"c:\R\.GitDesktop\Worktrees\x"));
+        assert!(inside(
+            "//srv/share/r",
+            r"\\srv\share\r\.gitdesktop\worktrees\x"
+        ));
+        assert!(inside(
+            "//srv/share/r",
+            r"\\?\UNC\srv\share\r\.gitdesktop\worktrees\x"
+        ));
+        assert!(inside("C:/r", r"\\?\C:\r\.gitdesktop\worktrees\x"));
+        assert!(inside("c:", r"C:\.gitdesktop\worktrees\x"));
+        assert!(inside("C:/r/", "C:/r/.gitdesktop/worktrees/x"));
+        assert!(inside("C:/r", "C:/r/.gitdesktop/worktrees/x/nested"));
+        assert!(inside("/home/u/r", "/home/u/r/.gitdesktop/worktrees/x"));
+        assert!(inside("C:/r", "C:/r/.gitdesktop/worktrees/./x"));
+        assert!(inside("C:/r", "C:/r/.gitdesktop/worktrees/x/"));
+        assert!(inside("C:/r", "C:/r/./.gitdesktop//worktrees/x"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/../../src"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/x/../../y"));
+        assert!(!inside("C:/r", "C:/r/../r/.gitdesktop/worktrees/x"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktreesX/y"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/other/y"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/"));
+        assert!(!inside("C:/r", "C:/r/.gitdesktop/worktrees/./"));
+        assert!(!inside("C:/r", "C:/rx/.gitdesktop/worktrees/x"));
+        assert!(!inside("C:/r", "C:/other/.gitdesktop/worktrees/x"));
+        assert!(!inside(
+            "//srv/share/r",
+            "/srv/share/r/.gitdesktop/worktrees/x"
+        ));
+    }
+
+    #[test]
+    fn is_inside_gitdesktop_worktrees_folds_case_only_when_asked() {
+        let typed = "/home/u/r/.GitDesktop/Worktrees/pr-7";
+        assert!(!inside_gitdesktop_worktrees("/home/u/r", typed, false));
+        assert!(inside_gitdesktop_worktrees("/home/u/r", typed, true));
+        let exact = "/home/u/r/.gitdesktop/worktrees/x";
+        assert!(!inside_gitdesktop_worktrees("/home/u/R", exact, false));
+        assert!(inside_gitdesktop_worktrees("/home/u/r", exact, false));
+    }
+
+    /// The typed spellings `resolve_worktree_path` passes through unnormalized.
+    #[test]
+    fn resolved_dot_and_trailing_slash_spellings_are_contained() {
+        for typed in [
+            "./.gitdesktop/worktrees/pr-7",
+            ".gitdesktop/worktrees/pr-7/",
+        ] {
+            let resolved = resolve_worktree_path("/home/u/r", typed);
+            assert!(
+                is_inside_gitdesktop_worktrees("/home/u/r", &resolved),
+                "{resolved}"
+            );
+        }
+    }
+
+    /// Only these shapes need `Path::join`, which parses drive prefixes on Windows only.
+    #[cfg(windows)]
+    #[test]
+    fn resolved_gitdesktop_worktrees_windows_shapes() {
+        let drive_relative = resolve_worktree_path(r"C:\r", r"C:.gitdesktop\worktrees\x");
+        assert!(!is_inside_gitdesktop_worktrees("C:/r", &drive_relative));
+        let root_relative = resolve_worktree_path(r"C:\r", r"\.gitdesktop\worktrees\x");
+        assert!(!is_inside_gitdesktop_worktrees("C:/r", &root_relative));
+        let drive_root = main_root_from_common_dir("C:/.git").unwrap();
+        assert!(is_inside_gitdesktop_worktrees(&drive_root, &root_relative));
+    }
+
+    fn exclude_file(repo: &str) -> std::path::PathBuf {
+        std::path::Path::new(repo)
+            .join(".git")
+            .join("info")
+            .join("exclude")
+    }
+
+    fn excludes_line(repo: &str) -> bool {
+        let bytes = std::fs::read(exclude_file(repo)).unwrap_or_default();
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .any(|l| l.trim() == GITDESKTOP_WORKTREES_EXCLUDE)
+    }
+
+    async fn untracked_status(repo: &str) -> String {
+        run(repo, &["status", "--porcelain", "--untracked-files=all"]).await
+    }
+
+    /// A linked worktree of `repo` at `<base>/linked`, on its own branch.
+    async fn add_linked(base: &tempfile::TempDir, repo: &str) -> String {
+        let linked = base.path().join("linked").to_string_lossy().into_owned();
+        run(repo, &["worktree", "add", "-q", "-b", "linked-b", &linked]).await;
+        linked
+    }
+
+    #[tokio::test]
+    async fn ensure_gitdesktop_excluded_creates_missing_info_exclude() {
+        let (_base, repo) = setup_repo("exclude-missing").await;
+        std::fs::remove_dir_all(std::path::Path::new(&repo).join(".git").join("info")).ok();
+        assert!(ensure_gitdesktop_excluded(&repo).await.unwrap());
+        assert_eq!(
+            std::fs::read(exclude_file(&repo)).unwrap(),
+            b"/.gitdesktop/worktrees/\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_gitdesktop_excluded_appends_once_and_preserves_content() {
+        let (_base, repo) = setup_repo("exclude-append").await;
+        std::fs::write(exclude_file(&repo), b"# x\r\n*.tmp").unwrap();
+        assert!(ensure_gitdesktop_excluded(&repo).await.unwrap());
+        assert!(!ensure_gitdesktop_excluded(&repo).await.unwrap());
+        assert_eq!(
+            std::fs::read(exclude_file(&repo)).unwrap(),
+            b"# x\r\n*.tmp\r\n/.gitdesktop/worktrees/\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_gitdesktop_excluded_from_linked_worktree_writes_common_dir() {
+        let (base, repo) = setup_repo("exclude-linked").await;
+        let linked = add_linked(&base, &repo).await;
+        assert!(ensure_gitdesktop_excluded(&linked).await.unwrap());
+        assert!(excludes_line(&repo));
+        let own = std::path::Path::new(&repo).join(".git/worktrees/linked/info/exclude");
+        assert!(!own.exists());
+    }
+
+    #[tokio::test]
+    async fn worktree_add_user_into_gitdesktop_worktrees_excludes_it() {
+        let (_base, repo) = setup_repo("exclude-add").await;
+        let state = AppState::default();
+        git_worktree_add_user_core(
+            &state,
+            &repo,
+            ".gitdesktop/worktrees/wt1",
+            "wt1",
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(excludes_line(&repo));
+        assert_eq!(untracked_status(&repo).await, "");
+    }
+
+    #[tokio::test]
+    async fn worktree_add_user_outside_gitdesktop_writes_no_exclude() {
+        let (base, repo) = setup_repo("exclude-outside").await;
+        let before = std::fs::read(exclude_file(&repo)).unwrap();
+        let path = base.path().join("wt-out").to_string_lossy().into_owned();
+        git_worktree_add_user_core(&AppState::default(), &repo, &path, "out", true, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(exclude_file(&repo)).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn worktree_add_user_survives_an_unwritable_exclude() {
+        let (_base, repo) = setup_repo("exclude-unwritable").await;
+        std::fs::remove_file(exclude_file(&repo)).ok();
+        // POSIX git refuses an exclude path that is a directory, so there a missing file
+        // in a read-only info/ makes only the app's create fail.
+        // Root ignores directory permissions, so the read-only trick can't block it.
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        #[cfg(unix)]
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        // Restored on drop: a read-only dir can fail TempDir cleanup.
+        #[cfg(unix)]
+        let _readonly = {
+            use std::os::unix::fs::PermissionsExt;
+            struct Restore(std::path::PathBuf);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    let mode = std::fs::Permissions::from_mode(0o755);
+                    std::fs::set_permissions(&self.0, mode).ok();
+                }
+            }
+            let info = exclude_file(&repo).parent().unwrap().to_path_buf();
+            std::fs::set_permissions(&info, std::fs::Permissions::from_mode(0o555)).unwrap();
+            Restore(info)
+        };
+        #[cfg(windows)]
+        std::fs::create_dir(exclude_file(&repo)).unwrap();
+        let path = ".gitdesktop/worktrees/wt1";
+        git_worktree_add_user_core(&AppState::default(), &repo, path, "wt1", true, None)
+            .await
+            .unwrap();
+        assert!(std::path::Path::new(&repo).join(path).is_dir());
+        assert!(!excludes_line(&repo));
+    }
+
+    #[tokio::test]
+    async fn worktree_add_user_from_linked_checkout_excludes_in_common_dir() {
+        let (base, repo) = setup_repo("exclude-from-linked").await;
+        let linked = add_linked(&base, &repo).await;
+        // git's own spelling of the main root, as the app's default path derives it.
+        let main = run(&repo, &["rev-parse", "--show-toplevel"]).await;
+        let target = format!("{}/.gitdesktop/worktrees/wt2", main.trim());
+        git_worktree_add_user_core(&AppState::default(), &linked, &target, "wt2", true, None)
+            .await
+            .unwrap();
+        assert!(excludes_line(&repo));
+        assert_eq!(untracked_status(&repo).await, "");
+    }
+
+    #[tokio::test]
+    async fn worktree_add_user_typed_under_linked_checkout_excludes_in_common_dir() {
+        let (base, repo) = setup_repo("exclude-typed-linked").await;
+        let linked = add_linked(&base, &repo).await;
+        let path = ".gitdesktop/worktrees/wt4";
+        git_worktree_add_user_core(&AppState::default(), &linked, path, "wt4", true, None)
+            .await
+            .unwrap();
+        assert!(std::path::Path::new(&linked).join(path).is_dir());
+        assert!(excludes_line(&repo));
+        assert_eq!(untracked_status(&linked).await, "");
+    }
+
+    #[tokio::test]
+    async fn worktree_add_user_failed_add_leaves_line_inert() {
+        let (_base, repo) = setup_repo("exclude-failed-add").await;
+        run(&repo, &["branch", "dup"]).await;
+        let before = untracked_status(&repo).await;
+        let path = ".gitdesktop/worktrees/wt3";
+        let result =
+            git_worktree_add_user_core(&AppState::default(), &repo, path, "dup", true, None).await;
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(untracked_status(&repo).await, before);
+        assert!(!std::path::Path::new(&repo).join(path).exists());
     }
 
     /// The worktree registry as git reports it, forward-slashed + lower-cased so a
@@ -3012,6 +3561,7 @@ prunable gitdir file points to non-existent location
     fn worktree_diverged_serializes_to_the_pinned_wire_shape() {
         let one = AppError::WorktreeDiverged {
             path: "C:/wt/GitDesktop-pr-255".to_string(),
+            shown_path: "C:/wt/GitDesktop-pr-255".to_string(),
             head: "1111111111111111111111111111111111111111".to_string(),
             commits: vec![DivergedCommit {
                 sha: "2222222222222222222222222222222222222222".to_string(),
@@ -3030,6 +3580,7 @@ prunable gitdir file points to non-existent location
 
         let many = AppError::WorktreeDiverged {
             path: "C:/wt/pr".to_string(),
+            shown_path: "C:/wt/pr".to_string(),
             head: "1111111111111111111111111111111111111111".to_string(),
             commits: vec![
                 DivergedCommit {
@@ -3238,11 +3789,78 @@ prunable gitdir file points to non-existent location
 
     #[test]
     fn same_wt_path_ignores_separator_case_and_trailing_slash() {
-        assert!(same_wt_path("C:\\Repos\\WT", "c:/repos/wt"));
+        // `\` is a separator only on Windows.
+        let windows = cfg!(windows);
+        assert_eq!(same_wt_path("C:\\Repos\\WT", "c:/repos/wt"), windows);
         assert!(same_wt_path("C:/repos/wt/", "C:/repos/wt"));
-        assert!(same_wt_path("C:/repos/wt\\", "c:/Repos/wt"));
+        assert_eq!(same_wt_path("C:/repos/wt\\", "c:/Repos/wt"), windows);
         assert!(!same_wt_path("C:/repos/wt", "C:/repos/wt2"));
         assert!(!same_wt_path("C:/repos/wt", "C:/repos"));
+    }
+
+    /// Only line terminators come off a printed path; spaces are part of its name.
+    #[test]
+    fn stdout_path_trims_only_the_line_terminator() {
+        assert_eq!(stdout_path("/tmp/project \n"), "/tmp/project ");
+        assert_eq!(stdout_path("C:/repo\r\n"), "C:/repo");
+        assert_eq!(stdout_path(" /lead"), " /lead");
+        assert_eq!(stdout_path("/a/b"), "/a/b");
+    }
+
+    /// Every platform's arm on every platform: (windows, fold_case) for Windows, macOS
+    /// and other POSIX. Backslashes fold only on Windows, case on Windows and macOS.
+    #[test]
+    fn same_wt_spelling_folds_case_only_when_asked() {
+        let (win, mac, posix) = ((true, true), (false, true), (false, false));
+        let rows: [(&str, &str, [bool; 3]); 5] = [
+            ("/tmp/wt/", "/tmp/wt", [true, true, true]),
+            ("/tmp/review", "/tmp/review2", [false, false, false]),
+            ("/tmp/Review", "/tmp/review", [true, true, false]),
+            ("/tmp/review\\one", "/tmp/review/one", [true, false, false]),
+            ("C:\\repos\\wt\\", "C:/repos/wt", [true, false, false]),
+        ];
+        for (a, b, want) in rows {
+            for ((windows, fold), want) in [win, mac, posix].into_iter().zip(want) {
+                assert_eq!(
+                    same_wt_spelling(a, b, windows, fold),
+                    want,
+                    "{a} vs {b}, windows {windows}, fold {fold}"
+                );
+            }
+        }
+    }
+
+    /// A differently-cased target matches the registered worktree exactly when the
+    /// volume makes it the same folder (macOS default APFS), and is a new folder on a
+    /// case-sensitive one (Linux, case-sensitive APFS).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn registry_case_match_follows_the_volume() {
+        let (base, repo) = setup_repo("case-exact").await;
+        let review = base.path().join("review").to_string_lossy().into_owned();
+        let upper = base.path().join("Review").to_string_lossy().into_owned();
+        run(&repo, &["worktree", "add", "-q", "-b", "rv", &review, "HEAD"]).await;
+        assert!(registered_worktree(&repo, &review).await.unwrap().is_some());
+        let folds = std::path::Path::new(&upper).exists();
+        let hit = registered_worktree(&repo, &upper).await.unwrap();
+        assert_eq!(hit.is_some(), folds, "volume folds case: {folds}");
+    }
+
+    /// The match logic over an injected filesystem answer, on every platform: Windows
+    /// folds spelling; elsewhere a case-only difference needs the same directory.
+    #[test]
+    fn case_only_matches_need_the_filesystem_off_windows() {
+        let (yes, no) = (|_: &str, _: &str| true, |_: &str, _: &str| false);
+        assert!(wt_paths_match("C:\\Repos\\WT", "c:/repos/wt", true, no));
+        assert!(wt_paths_match("/r/wt/", "/r/wt", false, no));
+        assert!(!wt_paths_match("/r/Review", "/r/review", false, no));
+        assert!(wt_paths_match("/r/Review", "/r/review", false, yes));
+        assert!(!wt_paths_match(
+            "/r/review\\one",
+            "/r/review/one",
+            false,
+            no
+        ));
     }
 
     #[tokio::test]
@@ -3379,6 +3997,7 @@ prunable gitdir file points to non-existent location
         {
             Err(AppError::WorktreeDiverged {
                 path,
+                shown_path,
                 head,
                 commits,
                 more,
@@ -3386,6 +4005,7 @@ prunable gitdir file points to non-existent location
                 untracked,
             }) => {
                 assert_eq!((path.as_str(), head.as_str()), ("wt-echo", ahead.as_str()));
+                assert_eq!(shown_path, entry.path);
                 assert_eq!(commits.len(), 20);
                 assert!(more && dirty);
                 assert_eq!(untracked, 1);

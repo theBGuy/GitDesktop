@@ -101,6 +101,8 @@ export function usePrCapabilities(
   // providers.
   const canSubmitReview =
     canWrite || forgeFeatureReady(forgeData, "mrReviewSubmit");
+  // Shared: checkout runs on every provider, natively where gh can't serve.
+  const canCheckout = canWrite || forgeFeatureReady(forgeData, "pullRequests");
   // Only an explicit denial blocks: null/undefined (probe pending, failed, or
   // unable to answer) must behave exactly as before.
   const writeBlocked = writeAccess?.canPush === false;
@@ -130,5 +132,6 @@ export function usePrCapabilities(
     canCommentCommits,
     canCreateThread,
     canSubmitReview,
+    canCheckout,
   };
 }
