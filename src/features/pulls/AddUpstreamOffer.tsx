@@ -1,10 +1,11 @@
 import { useSyncExternalStore } from "react";
-import { Button } from "@/components/ui/button";
+import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { failedSinceLastSuccess } from "@/features/conversations/remote-section-state";
 import { useAddRemote, useForgeStatus, useRemotes } from "@/lib/git/queries";
 import { useLensGate } from "@/lib/repo-lens/queries";
 import { useSettings } from "@/lib/settings/queries";
-import { toastError } from "@/lib/toast";
+import { originNoteFor } from "@/lib/stores/notifications";
+import { toastError, toastErrorWithNote } from "@/lib/toast";
 
 // Repos with an add running, shared by every mount: the add observer is
 // unpinned, so neither its isPending nor one per-mount slot can tell which
@@ -61,14 +62,16 @@ export function useAddUpstreamOffer(repoPath: string): {
   // repo is a fork, AND the parent slug is known. A fork whose parent is
   // unreadable renders nothing rather than a broken hint. The remotes check is
   // separate from the gate, which also needs gh auth: a signed-out fork that
-  // already has the remote must not be offered it again.
+  // already has the remote must not be offered it again. Like `answeredNo`, it
+  // reads only a successful remotes read: a failed refresh over a cached list
+  // is no answer.
   const canOffer =
     isGithub &&
     !lensGate &&
     settings.isSuccess &&
     forkRecord?.isFork === true &&
     forkParent !== null &&
-    remotes.data !== undefined &&
+    remotes.isSuccess &&
     !remotes.data.includes("upstream");
   // One successful read that already rules the offer out answers it, whatever
   // the other reads did.
@@ -110,7 +113,10 @@ export function useAddUpstreamOffer(repoPath: string): {
       });
       return { ok: true };
     } catch (e) {
-      toastError(e);
+      // A failure that lands after the user left names the repo it was for.
+      const note = originNoteFor(addIn);
+      if (note === undefined) toastError(e);
+      else toastErrorWithNote(e, note);
       return { ok: false };
     } finally {
       setAddInFlight(addIn, false);
@@ -127,6 +133,8 @@ export function useAddUpstreamOffer(repoPath: string): {
     addUpstream,
   };
 }
+
+const ADDING_REASON = "Adding the upstream remote";
 
 /** The Create PR dialog's offer box: names the parent and adds the remote. */
 export function AddUpstreamOfferCard({
@@ -146,15 +154,16 @@ export function AddUpstreamOfferCard({
         an upstream remote to open pull requests against{" "}
         <span className="font-mono text-foreground/80">{forkParent}</span>.
       </p>
-      <Button
+      <DisabledReasonButton
         type="button"
         variant="outline"
         size="xs"
         disabled={pending}
+        reason={pending ? ADDING_REASON : null}
         onClick={onAdd}
       >
         {pending ? "Adding upstream remote…" : "Add upstream remote"}
-      </Button>
+      </DisabledReasonButton>
     </div>
   );
 }

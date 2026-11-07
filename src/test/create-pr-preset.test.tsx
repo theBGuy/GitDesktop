@@ -54,6 +54,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   gitRemoteDefaultBranch: vi.fn(async () => "main"),
   forgePrsForBranch: vi.fn(async () => []),
   readRepoInstructions: vi.fn(async () => null),
+  // A failed create's notification checks its checkout still exists.
+  pathIsDir: vi.fn(async () => true),
   // Shell reads the dialog makes that these cases never need answered.
   gitStatus: vi.fn(() => new Promise(() => undefined)),
   gitDefaultBranch: vi.fn(() => new Promise(() => undefined)),
@@ -80,6 +82,11 @@ vi.mock("@/lib/review-notes/store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/review-notes/store")>()),
   getReviewNote: vi.fn(async () => null),
   deleteReviewNote: vi.fn(async () => undefined),
+}));
+// A failed create's notification keys its mute on the repo's identity.
+vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
+  repoIdentity: async (repo: string) => repo,
 }));
 vi.mock("@/lib/automations/runner", () => ({
   triggerAutomations: vi.fn(),
@@ -140,13 +147,16 @@ function renderDialog(props: {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  const ui = (open: boolean, preset = props.preset) => (
+  const ui = (
+    open: boolean,
+    opener: { preset?: CreatePrPreset; defaultBase?: string } = props,
+  ) => (
     <QueryClientProvider client={client}>
       <CreatePrDialog
         repoPath={REPO}
         defaultHead={props.defaultHead ?? "feat"}
-        defaultBase={props.defaultBase}
-        preset={preset}
+        defaultBase={opener.defaultBase}
+        preset={opener.preset}
         open={open}
         onOpenChange={() => undefined}
       />
@@ -157,7 +167,10 @@ function renderDialog(props: {
     client,
     close: () => view.rerender(ui(false)),
     reopen: () => view.rerender(ui(true)),
-    reopenWith: (preset: CreatePrPreset) => view.rerender(ui(true, preset)),
+    /** Reopens with the props Compare passes for `preset`: a parent preset
+     *  carries no `defaultBase`. */
+    reopenWith: (preset: CreatePrPreset | undefined, defaultBase?: string) =>
+      view.rerender(ui(true, { preset, defaultBase })),
   };
 }
 
@@ -459,6 +472,112 @@ describe("CreatePrDialog reopen over a running create", () => {
       finish({ number: 7, url: "https://github.com/me/project/pull/7" }),
     );
   });
+
+  it("holds a running create's base while the lens gate drops its target", async () => {
+    forkWithUpstream();
+    let finish!: (v: { number: number; url: string }) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    const dialog = renderDialog({
+      preset: {
+        target: "upstream",
+        base: "release",
+        baseRef: "refs/remotes/upstream/release",
+      },
+    });
+    await waitFor(() =>
+      expect(aheadBases()).toContain("refs/remotes/upstream/release"),
+    );
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    // The gate settles off mid-create: release is no local branch.
+    vi.mocked(gitRemotes).mockResolvedValue(["origin"]);
+    await act(() =>
+      dialog.client.refetchQueries({ queryKey: ["repo", REPO, "remotes"] }),
+    );
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    const route = screen.getByText(
+      (_, el) => el?.tagName === "P" && /^feat →/.test(el.textContent ?? ""),
+    );
+    expect(route).toHaveTextContent("feat → release");
+    await act(async () =>
+      finish({ number: 7, url: "https://github.com/me/project/pull/7" }),
+    );
+  });
+
+  it("drops the last preset when a kept draft reopens without one", async () => {
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    const dialog = renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+    });
+    await waitFor(() => expect(aheadBases()).toContain(ORIGIN_REF));
+    await user.type(screen.getByLabelText("Title"), "Kept");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    dialog.close();
+    await act(async () => fail({ message: "No commits between" }));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    // A local pick's opener: no preset, its branch as the default base.
+    dialog.reopenWith(undefined, "dev");
+    await waitFor(() => expect(baseField()).toHaveTextContent("dev"));
+    expect(screen.getByLabelText("Title")).toHaveValue("Kept");
+    await waitFor(() => expect(aheadBases().at(-1)).toBe("refs/heads/dev"));
+  });
+
+  it("keeps a remote-only base through the create and its failure", async () => {
+    forkWithUpstream();
+    let fail!: (e: unknown) => void;
+    forgePrCreate.mockReturnValueOnce(
+      new Promise((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const user = userEvent.setup();
+    const dialog = renderDialog({
+      preset: ORIGIN_PRESET,
+      defaultBase: "feature-x",
+    });
+    await waitFor(() => expect(aheadBases()).toContain(ORIGIN_REF));
+    await user.type(screen.getByLabelText("Title"), "Running");
+    await user.click(
+      screen.getByRole("button", { name: "Create pull request" }),
+    );
+    await waitFor(() => expect(forgePrCreate).toHaveBeenCalledTimes(1));
+    dialog.close();
+    dialog.reopenWith({
+      target: "upstream",
+      base: "release",
+      baseRef: "refs/remotes/upstream/release",
+    });
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(baseField()).toHaveTextContent("feature-x");
+    expect(aheadBases().at(-1)).toBe(ORIGIN_REF);
+    await act(async () => fail({ message: "No commits between" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Create pull request" }),
+      ).toBeEnabled(),
+    );
+    expect(targetButton("Fork")).toHaveAttribute("aria-pressed", "true");
+    expect(baseField()).toHaveTextContent("feature-x");
+    expect(aheadBases().at(-1)).toBe(ORIGIN_REF);
+  });
 });
 
 describe("Add upstream remote offer", () => {
@@ -491,6 +610,47 @@ describe("Add upstream remote offer", () => {
       REPO,
       "upstream",
       "https://github.com/octo/project.git",
+    );
+  });
+
+  it("keeps the pending add's button focusable with its reason", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(FORK_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    let finish!: () => void;
+    vi.mocked(gitRemoteAdd).mockReturnValue(
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    renderDialog({ defaultBase: "main" });
+    await user.click(
+      await screen.findByRole("button", { name: "Add upstream remote" }),
+    );
+    const busy = await screen.findByRole("button", {
+      name: "Adding upstream remote…",
+    });
+    expect(busy).not.toHaveAttribute("disabled");
+    expect(busy).toHaveAttribute("aria-disabled", "true");
+    expect(busy).toHaveAccessibleDescription("Adding the upstream remote");
+    await act(async () => finish());
+  });
+
+  it("withdraws the card when a remotes refresh fails over the cached list", async () => {
+    vi.mocked(loadSettings).mockResolvedValue(FORK_SETTINGS);
+    vi.mocked(forgeStatus).mockResolvedValue(GITHUB);
+    const dialog = renderDialog({ defaultBase: "main" });
+    await screen.findByRole("button", { name: "Add upstream remote" });
+    vi.mocked(gitRemotes).mockRejectedValue(new Error("remotes boom"));
+    await act(() =>
+      dialog.client
+        .refetchQueries({ queryKey: ["repo", REPO, "remotes"] })
+        .catch(() => undefined),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Add upstream remote" }),
+      ).toBeNull(),
     );
   });
 

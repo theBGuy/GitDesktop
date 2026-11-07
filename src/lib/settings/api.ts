@@ -867,3 +867,25 @@ export function saveSettingsMerged(
     return healLoadedSettings(committed);
   });
 }
+
+/** What {@link saveSettingsPatch} may write. `recentRepos` and
+ *  `bitbucketTokenExpiresAt` belong to the chained writers (saveSettingsMerged
+ *  re-pins them from disk). `mcpServers` is the user's intent there, but a patch
+ *  can't fold `relocateRecentRepo`'s re-home into a caller's copy, so it may
+ *  not carry them. */
+export type SettingsPatch = Partial<
+  Omit<AppSettings, "recentRepos" | "bitbucketTokenExpiresAt" | "mcpServers">
+>;
+
+/**
+ * Writes only `patch`'s fields over the settings read INSIDE the critical section, so
+ * a write another writer landed meanwhile keeps every field the patch doesn't name.
+ * For a single-field toggle whose caller would otherwise send its cached snapshot.
+ */
+export function saveSettingsPatch(patch: SettingsPatch): Promise<AppSettings> {
+  return serializedRecentRepoWrite(async () => {
+    const committed = { ...(await loadSettings()), ...patch };
+    await saveSettings(committed);
+    return healLoadedSettings(committed);
+  });
+}

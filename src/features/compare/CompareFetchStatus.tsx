@@ -3,12 +3,13 @@ import { type RefObject, useCallback, useLayoutEffect, useRef } from "react";
 import { Spinner } from "@/components/ui/spinner";
 import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { cn } from "@/lib/utils";
-import { GONE_PICK_COPY } from "./compare-remote-ref";
+import { GONE_PICK_COPY, UPDATING_COMPARISON_COPY } from "./compare-remote-ref";
 
 /** The `upstream-*` arms are the add-upstream follow-up's: it changes no pick,
  *  so they claim nothing about the comparison on screen. */
 export type CompareFetchStatusState =
   | "fetching"
+  | "updating"
   | "failed"
   | "offline"
   | "pruned"
@@ -23,6 +24,7 @@ const STATUS_COPY: Record<
   (remote: string, name: string) => string
 > = {
   fetching: (remote) => `Fetching ${remote}…`,
+  updating: () => UPDATING_COMPARISON_COPY,
   failed: (remote) =>
     `Couldn't fetch ${remote}, so this compares against its last fetch.`,
   offline: (remote) =>
@@ -39,6 +41,7 @@ const STATUS_COPY: Record<
 /** Warning arms carry an icon beside the words, never the color alone. */
 const STATUS_ICON: Record<CompareFetchStatusState, "spinner" | "warning"> = {
   fetching: "spinner",
+  updating: "spinner",
   failed: "warning",
   offline: "warning",
   pruned: "warning",

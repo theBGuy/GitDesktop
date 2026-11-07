@@ -241,13 +241,17 @@ export function CreatePrDialog({
   // base's reads (`activeBaseRef`). It holds until the gate's reads settle,
   // success or failure; a gate settled off drops it, so the fork reconcile
   // reseeds and the base's reads never describe a target the create won't use.
+  // It reads the preset the dialog last APPLIED, not the prop: a reopen over
+  // this mount's running create skips the opener's preset, which must not
+  // retract the submitted base then or after that create fails.
   const remotes = useRemotes(repoPath);
   const gateAnswered = !forge.isPending && !remotes.isPending;
+  const [appliedPreset, setAppliedPreset] = useState(preset);
   const presetBase =
-    preset?.baseRef !== undefined &&
-    target === preset.target &&
-    (createLens === preset.target || !gateAnswered)
-      ? { name: preset.base, ref: preset.baseRef }
+    appliedPreset?.baseRef !== undefined &&
+    target === appliedPreset.target &&
+    (createLens === appliedPreset.target || !gateAnswered)
+      ? { name: appliedPreset.base, ref: appliedPreset.baseRef }
       : null;
 
   // Fork without an `upstream` remote (plain `git clone`): offer to add it, so the
@@ -775,10 +779,15 @@ export function CreatePrDialog({
       ) {
         // A kept draft still takes the opener's target and base, which its
         // label promised; everything else stays the draft's. This mount's own
-        // running create keeps its pair: its identity controls are frozen.
-        if (preset && !form.state.isSubmitting) {
-          setTarget(preset.target);
-          form.setFieldValue("base", preset.base);
+        // running create keeps its pair: its identity controls are frozen. An
+        // opener without a preset drops the last one, so the reconcile moves
+        // a remote-only base it left to the opener's base.
+        if (!form.state.isSubmitting) {
+          setAppliedPreset(preset);
+          if (preset) {
+            setTarget(preset.target);
+            form.setFieldValue("base", preset.base);
+          }
         }
         focusTitleIfEmpty();
         return;
@@ -809,6 +818,7 @@ export function CreatePrDialog({
     resetJiraChips([]);
     // Reset the target to the default (parent, or the preset's) every open, so a
     // prior fork/parent choice doesn't leak into the next PR.
+    setAppliedPreset(preset);
     setTarget(preset?.target ?? "upstream");
     const fallbackBase =
       defaultBranch.data && defaultBranch.data !== h
@@ -882,9 +892,10 @@ export function CreatePrDialog({
   // Reconcile the base when the target changes (or the parent's branches arrive):
   // re-seed ONLY when the current base isn't a valid option for the active target, so
   // a user-picked base survives a target toggle where it still fits — this never
-  // fights the user's own edit.
+  // fights the user's own edit. Held while submitting: the create already sent
+  // its base, which stays on screen until the submit settles.
   useEffect(() => {
-    if (!open) return;
+    if (!open || isSubmitting) return;
     if (targetIsParent) {
       // Wait for the parent refs before touching the base — otherwise we'd clear
       // it to "" mid-fetch and lose the seed.
@@ -899,6 +910,7 @@ export function CreatePrDialog({
     }
   }, [
     open,
+    isSubmitting,
     targetIsParent,
     parentBranches.isPending,
     parentBase,

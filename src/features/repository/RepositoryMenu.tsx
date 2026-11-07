@@ -52,6 +52,7 @@ import { RepoAutomationsDialog } from "@/features/automations/RepoAutomationsDia
 import { BranchRulesDialog } from "@/features/branch-rules/BranchRulesDialog";
 import { HooksDialog } from "@/features/hooks/HooksDialog";
 import { RepoJiraDialog } from "@/features/issues/RepoJiraDialog";
+import { useAddUpstreamOffer } from "@/features/pulls/AddUpstreamOffer";
 // Type-only, so the chunk stays split; `typeof` queries on these bindings are
 // type-space only and legal — value-position use is what `import type` forbids.
 import type {
@@ -103,7 +104,7 @@ import { useRepoLens } from "@/lib/repo-lens/queries";
 import type { RecentRepo } from "@/lib/settings/api";
 import { useAiEnabled, useSettings } from "@/lib/settings/queries";
 import { useConfirm } from "@/lib/stores/confirm";
-import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { landedIn, refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { RemoteUrlDialog } from "./RemoteUrlDialog";
@@ -387,6 +388,15 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     if (refuseIfSwitched(removeIn, "nothing was removed")) return;
     await removeUpstream.remove();
   }
+  // The palette run has no card or row to vanish on success, so it says so,
+  // naming the repo it landed in once the user has left it; a failure toasts
+  // from the hook.
+  const upstreamOffer = useAddUpstreamOffer(repoPath);
+  async function addUpstreamFromPalette() {
+    const addIn = repoPath;
+    const { ok } = await upstreamOffer.addUpstream();
+    if (ok) toast.success(`Upstream remote added${landedIn(addIn).away}`);
+  }
 
   // Every route opens through here, so the render path is captured once per
   // open and holds for that whole open.
@@ -589,6 +599,11 @@ export function RepositoryMenu({ repoPath }: { repoPath: string }) {
     "remove-upstream-remote",
     () => void confirmRemoveUpstream(),
     hasUpstream,
+  );
+  useHotkeyAction(
+    "add-upstream-remote",
+    () => void addUpstreamFromPalette(),
+    upstreamOffer.canOffer && !upstreamOffer.pending,
   );
   useHotkeyAction("repo-alias", () => setAliasTarget(repoEntry));
   useHotkeyAction("copy-repo-path", () =>

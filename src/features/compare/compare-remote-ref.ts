@@ -47,9 +47,10 @@ function notifyPickRemotes() {
   for (const listener of pickRemoteListeners) listener();
 }
 
-/** Records only against a KNOWN remotes list: a split made without one is a
- *  guess, and a recorded guess would outrank the right split once the list
- *  arrives. Returns the pick as {@link resolvePick} now reads it. */
+/** Records only a remote the KNOWN remotes list names: a split made without
+ *  one, or a first-slash fallback no listed remote matched, is a guess, and a
+ *  recorded guess would outrank the right split once the list catches up.
+ *  Returns the pick as {@link resolvePick} now reads it. */
 export function recordPickRemote(
   repo: string,
   value: string,
@@ -57,7 +58,7 @@ export function recordPickRemote(
 ): { remote: string; name: string; display: string } | null {
   const key = pickRemoteKey(repo, value);
   const split = parseRemoteCompareValue(value, remotes);
-  if (split !== null && remotes !== undefined) {
+  if (split !== null && remotes?.includes(split.remote)) {
     if (pickRemotes.get(key) !== split.remote) {
       pickRemotes.set(key, split.remote);
       notifyPickRemotes();
@@ -91,7 +92,9 @@ export function usePickRemote(
 }
 
 /** The one identity of a stored pick: its recorded remote when that still
- *  prefixes it, else the split against the current remotes list. */
+ *  prefixes it, else the split against the current remotes list. A listed
+ *  remote strictly longer than the record wins: the record came from an older
+ *  list that didn't have it yet. */
 export function resolvePick(
   value: string | null,
   remotes: readonly string[] | undefined,
@@ -102,7 +105,8 @@ export function resolvePick(
     split === null ||
     recorded === null ||
     !split.display.startsWith(`${recorded}/`) ||
-    split.display.length === recorded.length + 1
+    split.display.length === recorded.length + 1 ||
+    (split.remote.startsWith(`${recorded}/`) && remotes?.includes(split.remote))
   )
     return split;
   return {
@@ -140,14 +144,15 @@ function remoteRank(remote: string): number {
 }
 
 /**
- * The picker's Remote rows: exactly the remote-branch list (every remote, each
- * remote's HEAD already dropped by the backend) minus two filters: agent
- * session branches, and a row whose `remote/name` equals an offered local name
- * (a local literally named `origin/x` would make two identical combobox values).
- * A remote branch merely sharing a local's bare name stays offered. Ordered by
- * remote (upstream, origin, then alphabetical), each remote's rows by recency.
- * Each row is re-split against `remotes` first: the backend splits at the
- * first "/", which mis-splits a remote whose name holds one.
+ * The picker's Remote rows: exactly the remote-branch list (every remote) minus
+ * three filters: each remote's HEAD, agent session branches, and a row whose
+ * `remote/name` equals an offered local name (a local literally named
+ * `origin/x` would make two identical combobox values). A remote branch merely
+ * sharing a local's bare name stays offered. Ordered by remote (upstream,
+ * origin, then alphabetical), each remote's rows by recency. Each row is
+ * re-split against `remotes` first: the backend splits at the first "/", which
+ * mis-splits a remote whose name holds one, so its HEAD filter misses that
+ * remote's HEAD and it is dropped here after the re-split.
  */
 export function remoteCompareRows(
   remoteBranches: readonly RemoteBranch[] | undefined,
@@ -159,7 +164,7 @@ export function remoteCompareRows(
       ...(splitRemoteDisplay(`${b.remote}/${b.name}`, remotes) ?? b),
       lastCommitDate: b.lastCommitDate,
     }))
-    .filter((b) => !isSessionBranchName(b.name))
+    .filter((b) => b.name !== "HEAD" && !isSessionBranchName(b.name))
     .map((b) => ({
       remote: b.remote,
       display: `${b.remote}/${b.name}`,
@@ -179,6 +184,10 @@ export function remoteCompareRows(
       lastCommitDate,
     }));
 }
+
+/** A pick's fetch finished and the comparison is re-reading: the status line
+ *  and Create's hold reason, so the two never disagree. */
+export const UPDATING_COMPARISON_COPY = "Updating the comparison…";
 
 /** Why a remote pick can't be compared any more: the status line's words and
  *  the Create PR hold's reason, so the two never disagree. */

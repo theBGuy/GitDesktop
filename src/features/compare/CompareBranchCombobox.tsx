@@ -74,6 +74,7 @@ export function CompareBranchCombobox({
   triggerRef,
   placeholder,
   remoteNotice,
+  remoteSearched,
 }: {
   repoPath: string;
   /** Already filtered: no current, no gd/session/*, no archived. */
@@ -87,18 +88,20 @@ export function CompareBranchCombobox({
   /** The stored pick: a bare local name or a full remote-tracking ref. */
   value: string | null;
   onValueChange: (stored: string) => void;
+  /** Popup state; it also gates the per-branch divergence and worktree reads
+   *  below (BranchSwitcher's `open`-gated queries). */
   open: boolean;
   onOpenChange: (open: boolean) => void;
   triggerRef?: Ref<HTMLButtonElement>;
   /** The trigger's text while nothing is picked. */
   placeholder: string | null;
-  /** The remote read's line while it hasn't succeeded (loading or failed);
-   *  null once remote rows are known. */
+  /** The remote read's footer line while it hasn't succeeded (loading, failed,
+   *  or a failed refresh over cached rows); null once it has. */
   remoteNotice: string | null;
+  /** `remoteRows` came from a remote read, fresh or cached under a failed
+   *  refresh, so the filter searched them. */
+  remoteSearched: boolean;
 }) {
-  // Popup state drives the N-per-branch git calls below: divergence + worktrees
-  // fetch only while open (mirrors BranchSwitcher's `open`-gated queries).
-
   // Ahead/behind vs the CURRENT branch (the compare base), fetched only while
   // open. Keyed under `currentName` so switching branches re-derives.
   const divergence = useBranchDivergence(repoPath, currentName, open);
@@ -213,12 +216,10 @@ export function CompareBranchCombobox({
       </ComboboxTrigger>
       <ComboboxContent>
         <ComboboxInput showTrigger={false} placeholder="Filter branches…" />
-        {/* Until the remote read answers, a miss can only speak for the local
-            branches. */}
+        {/* Until remote rows are known, a miss can only speak for the local
+            branches; cached rows a failed refresh left were searched too. */}
         <ComboboxEmpty>
-          {remoteNotice === null
-            ? "No branches match"
-            : "No local branches match"}
+          {remoteSearched ? "No branches match" : "No local branches match"}
         </ComboboxEmpty>
         <ComboboxList>
           {(group: { value: string; items: string[] }) => (

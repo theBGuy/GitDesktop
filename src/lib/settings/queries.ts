@@ -13,7 +13,9 @@ import {
   persistRepoOwners,
   relocateRecentRepo,
   removeRecentRepo,
+  type SettingsPatch,
   saveSettingsMerged,
+  saveSettingsPatch,
   setRepoAlias,
 } from "./api";
 import { settingsSeedCallbacks } from "./heal";
@@ -120,6 +122,19 @@ export function useSaveSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (settings: AppSettings) => saveSettingsMerged(settings),
+    // Local settings write — never park it offline.
+    networkMode: "always",
+    ...settingsSeedCallbacks(queryClient, settingsKeys.settings),
+  });
+}
+
+/** {@link useSaveSettings} for a patch of fields (see `saveSettingsPatch`): a
+ *  toggle sends only what it changed, so a cached snapshot older than the disk
+ *  can't write its other fields back. Same seed contract. */
+export function useSaveSettingsPatch() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: SettingsPatch) => saveSettingsPatch(patch),
     // Local settings write — never park it offline.
     networkMode: "always",
     ...settingsSeedCallbacks(queryClient, settingsKeys.settings),

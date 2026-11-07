@@ -51,6 +51,7 @@ import {
   remoteCompareRows,
   remoteCompareValue,
   resolvePick,
+  UPDATING_COMPARISON_COPY,
   usePickRemote,
 } from "@/features/compare/compare-remote-ref";
 import {
@@ -133,12 +134,15 @@ const STAMP_STATE: Record<
 > = {
   pick: {
     fetching: "fetching",
+    comparing: "updating",
     failed: "failed",
     offline: "offline",
     done: null,
   },
   "follow-up": {
     fetching: "upstream-fetching",
+    // Only a pick's fetch re-reads its comparison.
+    comparing: null,
     failed: "upstream-failed",
     offline: "upstream-offline",
     done: null,
@@ -149,6 +153,7 @@ const STAMP_STATE: Record<
  *  found nothing ahead may say there is nothing to propose. */
 type CreateBlock =
   | "fetching"
+  | "updating"
   | "pruned"
   | "remote-gone"
   | "missing"
@@ -167,6 +172,7 @@ const CREATE_BLOCK_REASON: Record<
   }) => string
 > = {
   fetching: ({ remote }) => `Fetching ${remote}…`,
+  updating: () => UPDATING_COMPARISON_COPY,
   pruned: ({ pickRemote, pickName }) =>
     GONE_PICK_COPY.pruned(pickRemote, pickName),
   "remote-gone": ({ pickRemote, pickName }) =>
@@ -232,6 +238,17 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   const remotes = useRemotes(repoPath);
   const recordedRemote = usePickRemote(repoPath, compareBranch);
   const pick = resolvePick(compareBranch, remotes.data, recordedRemote);
+  // A longer listed remote outranked a stale record: keep the correction, or the
+  // record wins again once that remote is removed.
+  const resolvedRemote = pick?.remote ?? null;
+  useEffect(() => {
+    if (
+      compareBranch !== null &&
+      recordedRemote !== null &&
+      resolvedRemote?.startsWith(`${recordedRemote}/`)
+    )
+      recordPickRemote(repoPath, compareBranch, remotes.data);
+  }, [repoPath, compareBranch, recordedRemote, resolvedRemote, remotes.data]);
   const compareDisplay =
     compareBranch === null ? null : displayCompareValue(compareBranch);
   // Agent-session branches (`gd/session/*`) are app-internal — never offer them
@@ -356,7 +373,9 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
     stamp.repoPath === repoPath &&
     (stamp.pickedValue === null || stamp.pickedValue === compareBranch);
   const listsBusy =
-    stampShown && stamp.phase === "fetching" && stamp.pickedValue !== null;
+    stampShown &&
+    (stamp.phase === "fetching" || stamp.phase === "comparing") &&
+    stamp.pickedValue !== null;
   // Gone is read from a successful remotes read alone, so it holds while the
   // remote-branch list is failed or refetching; pruned only from a settled
   // successful list, matched on the full ref no split can break.
@@ -383,7 +402,8 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
   // A pruned or gone pick holds even while a running fetch's line outranks its
   // line: the ref a PR would target is gone either way.
   const createBlock = ((): CreateBlock | null => {
-    if (listsBusy) return "fetching";
+    if (listsBusy)
+      return stamp?.phase === "comparing" ? "updating" : "fetching";
     if (goneOrPruned) return prunedState;
     if (comparison.data === undefined)
       return comparison.isError ? "compare-failed" : "comparing";
@@ -881,6 +901,7 @@ export function ComparePanel({ repoPath }: { repoPath: string }) {
             triggerRef={pickerTrigger}
             placeholder={noPick ? NO_PICK_COPY : null}
             remoteNotice={remoteNotice}
+            remoteSearched={remotesKnown && remoteRead.data !== undefined}
           />
           <CompareFetchStatus
             state={fetchState}

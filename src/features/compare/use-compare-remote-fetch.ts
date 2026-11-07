@@ -1,4 +1,10 @@
-import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import {
+  type Query,
+  type QueryCache,
+  type QueryClient,
+  type QueryKey,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   useEffect,
   useEffectEvent,
@@ -8,12 +14,23 @@ import {
 } from "react";
 import { gitFetchRemote } from "@/lib/git/api";
 import { remoteBranchesOptions, repoKeys } from "@/lib/git/queries";
+import {
+  readStraddlesSettle,
+  straddleOutcome,
+} from "@/lib/git/queries/write-settle";
 import { isOfflineNow } from "@/lib/offline-writes";
 import { useMutation } from "@/lib/started-mutation";
 import { useUiStore } from "@/lib/stores/ui";
 import { useOnline } from "@/lib/use-online";
 
-export type CompareFetchPhase = "fetching" | "failed" | "offline" | "done";
+/** `comparing`: a pick's fetch finished and the reads that decide Create are
+ *  re-reading; the stamp still holds Create and dims the lists. */
+export type CompareFetchPhase =
+  | "fetching"
+  | "comparing"
+  | "failed"
+  | "offline"
+  | "done";
 
 /** One remote fetch Compare started, stamped when it started. The panel paints
  *  a stamp only for its own repo and only while its pick is still the current
@@ -40,23 +57,88 @@ export interface CompareFetchRequest {
   currentBranch: string | null;
 }
 
+/** The CURRENT pick's stamp, still running or parked: a follow-up must not
+ *  take it over, or its hold, its line and its reconnect fetch would go. A
+ *  superseded pick's stamp shows nothing, so the follow-up takes the slot. */
+function isLivePick(
+  s: CompareFetchStamp | null,
+  repo: string,
+  pick: string | null,
+): boolean {
+  return (
+    s !== null &&
+    s.repoPath === repo &&
+    s.pickedValue !== null &&
+    s.pickedValue === pick &&
+    (s.phase === "fetching" || s.phase === "comparing" || s.parked)
+  );
+}
+
+/** The current pick's line, live or failed: a waiting follow-up failure never
+ *  replaces it, so the pick keeps its own Retry. */
+function holdsPickLine(
+  s: CompareFetchStamp | null,
+  repo: string,
+  pick: string | null,
+): boolean {
+  return (
+    isLivePick(s, repo, pick) ||
+    (s !== null &&
+      s.repoPath === repo &&
+      s.pickedValue !== null &&
+      s.pickedValue === pick &&
+      s.phase === "failed")
+  );
+}
+
+// Repo changes, counted at the store: a hidden `<Activity>` subtree runs no
+// effects, so a hook-side watch would miss a round trip made while hidden.
+let repoVisits = 0;
+useUiStore.subscribe((state, prev) => {
+  if (state.repoPath !== prev.repoPath) repoVisits += 1;
+});
+
 // In-flight fetches by repo and remote, read only at fire time: a pick on a
 // remote already being fetched joins that fetch instead of starting another.
-const inflight = new Map<string, Promise<void>>();
+// Each resolves to the reads that straddled its settle.
+const inflight = new Map<string, Promise<ReadonlySet<Query>>>();
 
 /** What `fetch --prune --no-prune-tags <remote>` can move, through the exported
  *  key builders: remote refs, upstream tracking state on branches and HEAD,
  *  unpushed counts, history markers, rewrite verdicts (they read upstream tips)
  *  and every comparison spelled against one of this remote's refs. The tags
  *  list has no exported key, so it keeps its own staleTime; working-tree, stash
- *  and divergence reads read local state a fetch doesn't touch. */
+ *  and divergence reads read local state a fetch doesn't touch. Returns the
+ *  remote-list and comparison reads that straddled the settle
+ *  ({@link readStraddlesSettle}), judged before the invalidation restarts the
+ *  rest: their answers can predate the fetch. */
 function invalidateAfterFetch(
   queryClient: QueryClient,
   repo: string,
   remote: string,
-) {
+): ReadonlySet<Query> {
+  const refPrefix = `refs/remotes/${remote}/`;
+  const compareSegment = repoKeys.compare(repo, "", "")[2];
+  const isComparison = (queryKey: QueryKey) =>
+    queryKey[2] === compareSegment &&
+    queryKey.some(
+      (seg) => typeof seg === "string" && seg.startsWith(refPrefix),
+    );
+  const remoteListKey = remoteBranchesOptions(repo).queryKey;
+  const straddling = new Set(
+    queryClient
+      .getQueryCache()
+      .findAll({ queryKey: repoKeys.all(repo) })
+      .filter(
+        (query) =>
+          (isComparison(query.queryKey) ||
+            (query.queryKey.length === remoteListKey.length &&
+              remoteListKey.every((seg, i) => query.queryKey[i] === seg))) &&
+          readStraddlesSettle(query),
+      ),
+  );
   for (const queryKey of [
-    remoteBranchesOptions(repo).queryKey,
+    remoteListKey,
     repoKeys.branches(repo),
     repoKeys.status(repo),
     repoKeys.unpushedCount(repo),
@@ -66,16 +148,61 @@ function invalidateAfterFetch(
     repoKeys.rewriteStatus(repo),
   ])
     void queryClient.invalidateQueries({ queryKey });
-  const refPrefix = `refs/remotes/${remote}/`;
-  const compareSegment = repoKeys.compare(repo, "", "")[2];
   void queryClient.invalidateQueries({
     queryKey: repoKeys.all(repo),
-    predicate: ({ queryKey }) =>
-      queryKey[2] === compareSegment &&
-      queryKey.some(
-        (seg) => typeof seg === "string" && seg.startsWith(refPrefix),
-      ),
+    predicate: ({ queryKey }) => isComparison(queryKey),
   });
+  return straddling;
+}
+
+/** Whether a fetching read landed (true) or left the cache (false). */
+function landing(cache: QueryCache, query: Query): Promise<boolean> {
+  if (query.state.fetchStatus !== "fetching") return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const unsubscribe = cache.subscribe((event) => {
+      if (event.query !== query) return;
+      const outcome = straddleOutcome(event);
+      if (outcome === null) return;
+      unsubscribe();
+      resolve(outcome === "landed");
+    });
+  });
+}
+
+/**
+ * Settles once each cached query of `keys` has been read after the fetch: a
+ * read the invalidation restarted is joined; a straddling one is read again
+ * once it lands; one the invalidation only marked stale (no enabled observer,
+ * e.g. Compare hidden) is read now. Those two re-reads call `query.fetch`,
+ * since `refetchQueries` skips a query whose observers are all disabled. Only
+ * the reads that decide a pick's Create hold and pruned line are passed, so a
+ * slow unrelated read (an open file diff) never holds the stamp. Read errors
+ * are swallowed; their own arms report them.
+ */
+async function settleFreshReads(
+  queryClient: QueryClient,
+  straddling: ReadonlySet<Query>,
+  keys: readonly QueryKey[],
+): Promise<void> {
+  const cache = queryClient.getQueryCache();
+  await Promise.all(
+    keys.map(async (queryKey) => {
+      const query = cache.find({ queryKey, exact: true });
+      if (query === undefined) return;
+      if (straddling.has(query)) {
+        if (await landing(cache, query))
+          await query.fetch().catch(() => undefined);
+      } else if (query.state.fetchStatus === "fetching") {
+        await queryClient.refetchQueries(
+          { queryKey, exact: true },
+          { cancelRefetch: false },
+        );
+      } else if (query.state.isInvalidated) {
+        // No enabled observer: the invalidation only marked it stale.
+        await query.fetch().catch(() => undefined);
+      }
+    }),
+  );
 }
 
 /**
@@ -99,6 +226,12 @@ export function useCompareRemoteFetch(
     repoPath: string;
     remote: string;
   } | null>(null);
+  // An unseen follow-up that failed online: its failed line and Retry wait
+  // for the live pick to free the slot, then take it.
+  const [failedFollowUp, setFailedFollowUp] = useState<{
+    repoPath: string;
+    remote: string;
+  } | null>(null);
   // A repo change drops whatever stamp the last repo left, a parked one
   // included: its line and its reconnect re-fire belong to that repo.
   const [stampRepo, setStampRepo] = useState(repoPath);
@@ -106,6 +239,7 @@ export function useCompareRemoteFetch(
     setStampRepo(repoPath);
     setStamp(null);
     setHiddenFollowUp(null);
+    setFailedFollowUp(null);
   }
   const epoch = useRef(0);
   const fetchRemote = useMutation({
@@ -114,7 +248,7 @@ export function useCompareRemoteFetch(
       gitFetchRemote(vars.repo, vars.remote),
   });
 
-  function run(repo: string, remote: string): Promise<void> {
+  function run(repo: string, remote: string): Promise<ReadonlySet<Query>> {
     const key = `${repo}\0${remote}`;
     const joined = inflight.get(key);
     if (joined) return joined;
@@ -140,34 +274,37 @@ export function useCompareRemoteFetch(
     pickRemoteNow.current = currentPickRemote;
   }, [stamp, currentPick, currentPickRemote]);
 
-  /** The CURRENT pick's stamp, still running or parked: a follow-up must not
-   *  take it over, or its hold, its line and its reconnect fetch would go. A
-   *  superseded pick's stamp shows nothing, so the follow-up takes the slot. */
-  function holdsLivePick(repo: string): boolean {
-    const s = slot.current;
-    return (
-      s !== null &&
-      s.repoPath === repo &&
-      s.pickedValue !== null &&
-      s.pickedValue === pickNow.current &&
-      (s.phase === "fetching" || s.parked)
-    );
+  // Moves with every pick and repo change: an unseen follow-up's failure that
+  // lands after one describes nothing on screen any more, so it is dropped.
+  const picks = useRef(0);
+  const followUpGen = () => picks.current + repoVisits;
+
+  /** An unseen follow-up's failure. Offline it re-parks, keeping its reconnect
+   *  fetch whatever happened since; online it waits for the slot, since nothing
+   *  else fetches that remote again, unless a pick or repo change since its
+   *  start retired it. */
+  function keepFailure(repo: string, remote: string, gen: number) {
+    if (useUiStore.getState().repoPath !== repo) return;
+    if (isOfflineNow()) setHiddenFollowUp({ repoPath: repo, remote });
+    else if (followUpGen() === gen)
+      setFailedFollowUp({ repoPath: repo, remote });
   }
 
   async function fire(req: CompareFetchRequest) {
-    // Over the current pick's live fetch the follow-up runs unseen: online at
-    // once, offline parked as the hidden follow-up reconnect fetches.
-    if (req.pickedValue === null && holdsLivePick(req.repo)) {
-      const hide = () =>
-        setHiddenFollowUp({ repoPath: req.repo, remote: req.remote });
+    // Over the current pick's line, live or failed, the follow-up runs unseen:
+    // online at once, offline parked as the hidden follow-up reconnect fetches.
+    if (
+      req.pickedValue === null &&
+      holdsPickLine(slot.current, req.repo, pickNow.current)
+    ) {
+      const gen = followUpGen();
       if (isOfflineNow()) {
-        hide();
+        setHiddenFollowUp({ repoPath: req.repo, remote: req.remote });
         return;
       }
-      await run(req.repo, req.remote).catch(() => {
-        if (isOfflineNow() && useUiStore.getState().repoPath === req.repo)
-          hide();
-      });
+      await run(req.repo, req.remote).catch(() =>
+        keepFailure(req.repo, req.remote, gen),
+      );
       return;
     }
     epoch.current += 1;
@@ -188,7 +325,26 @@ export function useCompareRemoteFetch(
     if (started !== next) return;
     let failed = false;
     try {
-      await run(req.repo, req.remote);
+      const straddling = await run(req.repo, req.remote);
+      // A pick's stamp holds Create until its comparison and the remote list
+      // answer from after the fetch.
+      // A superseded fire's reads decide nothing on screen.
+      if (
+        req.pickedValue !== null &&
+        req.currentBranch !== null &&
+        epoch.current === next.pickEpoch &&
+        useUiStore.getState().repoPath === req.repo
+      ) {
+        setStamp((s) =>
+          s?.pickEpoch === next.pickEpoch && s.phase === "fetching"
+            ? { ...s, phase: "comparing" }
+            : s,
+        );
+        await settleFreshReads(queryClient, straddling, [
+          remoteBranchesOptions(req.repo).queryKey,
+          repoKeys.compare(req.repo, req.pickedValue, req.currentBranch),
+        ]);
+      }
     } catch {
       failed = true;
     }
@@ -202,11 +358,17 @@ export function useCompareRemoteFetch(
     });
   }
 
-  /** Any pick retires the add-upstream follow-up's line: it described no pick.
-   *  A parked one keeps its reconnect fetch, unseen. */
+  /** Any pick retires the add-upstream follow-up's line, and one still
+   *  waiting for the slot: it described no pick. A parked one keeps its
+   *  reconnect fetch, unseen. */
   function clearFollowUp() {
     if (stamp?.pickedValue === null && stamp.parked)
-      setHiddenFollowUp({ repoPath: stamp.repoPath, remote: stamp.remote });
+      setHiddenFollowUp({
+        repoPath: stamp.repoPath,
+        remote: stamp.remote,
+      });
+    picks.current += 1;
+    setFailedFollowUp(null);
     setStamp((s) => (s?.pickedValue === null ? null : s));
   }
 
@@ -236,14 +398,38 @@ export function useCompareRemoteFetch(
     if (hiddenFollowUp === null || hiddenFollowUp.repoPath !== repoPath) return;
     const { repoPath: repo, remote } = hiddenFollowUp;
     setHiddenFollowUp(null);
-    run(repo, remote).catch(() => {
-      if (isOfflineNow() && useUiStore.getState().repoPath === repo)
-        setHiddenFollowUp({ repoPath: repo, remote });
-    });
+    // A refire is a new attempt: picks before it retired nothing it reports.
+    const gen = followUpGen();
+    run(repo, remote).catch(() => keepFailure(repo, remote, gen));
   });
   useEffect(() => {
     if (online && hiddenFollowUp !== null) refireHidden();
   }, [online, hiddenFollowUp]);
+
+  // A kept failure takes the slot as the follow-up's failed line once the
+  // current pick's line is gone (its fetch done or the pick left); its Retry
+  // re-fires the follow-up.
+  const slotFree = !holdsPickLine(stamp, repoPath, currentPick);
+  const promoteFailure = useEffectEvent(() => {
+    if (failedFollowUp === null || failedFollowUp.repoPath !== repoPath) return;
+    if (holdsPickLine(slot.current, repoPath, pickNow.current)) return;
+    epoch.current += 1;
+    const promoted: CompareFetchStamp = {
+      repoPath,
+      remote: failedFollowUp.remote,
+      pickedValue: null,
+      currentBranch: null,
+      pickEpoch: epoch.current,
+      phase: "failed",
+      parked: false,
+    };
+    slot.current = promoted;
+    setStamp(promoted);
+    setFailedFollowUp(null);
+  });
+  useEffect(() => {
+    if (slotFree && failedFollowUp !== null) promoteFailure();
+  }, [slotFree, failedFollowUp]);
 
   return { stamp, fire, clearFollowUp };
 }

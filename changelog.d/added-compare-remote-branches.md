@@ -4,4 +4,4 @@
   when you're offline, and says so). On a GitHub fork with an `upstream`
   remote, while you're signed in to GitHub, the pull request button names where
   the PR will open, in the parent or in your fork. A fork without an `upstream`
-  remote can add one right from the picker.
+  remote can add one right from the picker or the command palette.

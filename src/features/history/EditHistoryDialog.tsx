@@ -9,6 +9,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   type FocusEvent,
   type KeyboardEvent,
+  useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -57,7 +59,7 @@ import {
 import {
   settingsKeys,
   useAiEnabled,
-  useSaveSettings,
+  useSaveSettingsPatch,
   useSettings,
 } from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
@@ -323,7 +325,7 @@ export function EditHistoryDialog({
   // The display order only: `order` and the plan stay newest-first.
   const settings = useSettings();
   const queryClient = useQueryClient();
-  const saveSettings = useSaveSettings();
+  const saveOrder = useSaveSettingsPatch();
   const listOrder = settings.data?.editHistoryOrder ?? "newest-first";
   const reversed = listOrder === "oldest-first";
   // Until settings load there is nothing to patch, so the toggle holds.
@@ -343,9 +345,15 @@ export function EditHistoryDialog({
     persistedOrder ??= current.editHistoryOrder;
     const updated = { ...current, editHistoryOrder: next };
     const seq = ++orderChangeSeq;
+    // A settings read already running would land the old order over the patch.
+    void queryClient.cancelQueries({
+      queryKey: settingsKeys.settings,
+      exact: true,
+    });
     // Patched first, so the click's own commit reverses the list.
     queryClient.setQueryData(settingsKeys.settings, updated);
-    void saveSettings.mutateAsync(updated).catch(() => {
+    // Only the field: the cached snapshot's other fields can be older than disk.
+    void saveOrder.mutateAsync({ editHistoryOrder: next }).catch(() => {
       if (seq !== orderChangeSeq) return;
       const latest = queryClient.getQueryData<AppSettings>(
         settingsKeys.settings,
@@ -398,10 +406,30 @@ export function EditHistoryDialog({
   const [genHash, setGenHash] = useState<string | null>(null);
   const genHashRef = useLatestRef(genHash);
   const aiEnabled = useAiEnabled();
+  // A reseed retires the reword a run writes into, and its hash may survive
+  // into the new set: text from a run started before a reseed is dropped (a
+  // hidden tab commits reseeds but runs no effects). Keyed on the reseed count,
+  // not the commit set, so a set that changes and changes back still counts.
+  const genKeyRef = useRef<number | null>(null);
+  const liveKeyRef = useLatestRef(reseedNonce);
   const ai = useGenerateSquashMessage(repoPath, (message) => {
     const h = genHashRef.current;
-    if (h) setOverrides((o) => ({ ...o, [h]: message }));
+    if (h && genKeyRef.current === liveKeyRef.current)
+      setOverrides((o) => ({ ...o, [h]: message }));
   });
+  // Any reseed committed since the last run of this effect stops the run, hidden
+  // ones included once the tab shows. The ref keeps an <Activity> show with no
+  // reseed, which replays this effect, from stopping it.
+  const committedKeyRef = useRef(reseedNonce);
+  const stopGeneration = useEffectEvent(() => {
+    ai.cancel();
+    setGenHash(null);
+  });
+  useEffect(() => {
+    if (committedKeyRef.current === reseedNonce) return;
+    committedKeyRef.current = reseedNonce;
+    stopGeneration();
+  }, [reseedNonce]);
 
   const rows: EditRow[] = useMemo(
     () =>
@@ -671,6 +699,9 @@ export function EditHistoryDialog({
         onOpenChange(next);
       }}
     >
+      {/* The Root renders no element, so this sits in the host's own DOM, not
+          the popup's portal: it tells the generator a tab hide from a close. */}
+      <span hidden ref={ai.hostRef} />
       {/* The corner X would be a dead control while the guard above swallows
           every close path, so it goes away for the duration. */}
       <DialogContent
@@ -1004,6 +1035,7 @@ export function EditHistoryDialog({
                           )}
                           onClick={() => {
                             setGenHash(row.hash);
+                            genKeyRef.current = reseedNonce;
                             ai.generate(`${row.hash}^`, row.hash);
                           }}
                         >

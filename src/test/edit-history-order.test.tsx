@@ -18,12 +18,18 @@ import {
   EditHistoryDialog,
   resetOrderBaselineForTests,
 } from "@/features/history/EditHistoryDialog";
-import { gitUnpushedMessages } from "@/lib/git/api";
+import {
+  gitRebaseEdit,
+  gitRewriteCommits,
+  gitUnpushedMessages,
+} from "@/lib/git/api";
 import type { CommitSummary } from "@/lib/git/types";
 import {
   type AppSettings,
   loadSettings,
+  type SettingsPatch,
   saveSettingsMerged,
+  saveSettingsPatch,
 } from "@/lib/settings/api";
 import { DEFAULT_SETTINGS } from "@/lib/settings/heal";
 import { settingsKeys } from "@/lib/settings/queries";
@@ -52,11 +58,20 @@ const realApi = vi.hoisted(() => ({
   saveSettingsMerged: undefined as
     | undefined
     | typeof import("@/lib/settings/api").saveSettingsMerged,
+  saveSettingsPatch: undefined as
+    | undefined
+    | typeof import("@/lib/settings/api").saveSettingsPatch,
 }));
 vi.mock("@/lib/settings/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/settings/api")>();
   realApi.saveSettingsMerged = actual.saveSettingsMerged;
-  return { ...actual, loadSettings: vi.fn(), saveSettingsMerged: vi.fn() };
+  realApi.saveSettingsPatch = actual.saveSettingsPatch;
+  return {
+    ...actual,
+    loadSettings: vi.fn(),
+    saveSettingsMerged: vi.fn(),
+    saveSettingsPatch: vi.fn(),
+  };
 });
 vi.mock("@/lib/plugin-store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/plugin-store")>();
@@ -171,20 +186,30 @@ async function landOnDisk(settings: AppSettings): Promise<AppSettings> {
   return committed;
 }
 
-/** Settings writes a test holds open, settled by hand. */
+/** Runs the order toggle's patch through the real patch writer. */
+async function landPatch(patch: SettingsPatch): Promise<AppSettings> {
+  const save = realApi.saveSettingsPatch;
+  if (save === undefined) throw new Error("real patch writer not captured");
+  disk.state.settings = structuredClone(stored);
+  const committed = await save(patch);
+  stored = structuredClone(disk.state.settings as AppSettings);
+  return committed;
+}
+
+/** Order writes a test holds open, settled by hand. */
 type HeldWrite = {
-  settings: AppSettings;
+  patch: SettingsPatch;
   resolve: () => void;
   reject: (e: Error) => void;
 };
 let heldWrites: HeldWrite[] = [];
 function holdWrites(): HeldWrite[] {
-  vi.mocked(saveSettingsMerged).mockImplementation(
-    (settings) =>
+  vi.mocked(saveSettingsPatch).mockImplementation(
+    (patch) =>
       new Promise((res, rej) => {
         heldWrites.push({
-          settings,
-          resolve: () => res(landOnDisk(settings)),
+          patch,
+          resolve: () => res(landPatch(patch)),
           reject: rej,
         });
       }),
@@ -219,6 +244,12 @@ beforeEach(() => {
   );
   vi.mocked(saveSettingsMerged).mockReset();
   vi.mocked(saveSettingsMerged).mockImplementation(landOnDisk);
+  vi.mocked(saveSettingsPatch).mockReset();
+  vi.mocked(saveSettingsPatch).mockImplementation(landPatch);
+  vi.mocked(gitRewriteCommits).mockReset();
+  vi.mocked(gitRewriteCommits).mockResolvedValue(undefined as never);
+  vi.mocked(gitRebaseEdit).mockReset();
+  vi.mocked(gitRebaseEdit).mockResolvedValue(undefined as never);
 });
 
 describe("Edit history order toggle", () => {
@@ -254,15 +285,60 @@ describe("Edit history order toggle", () => {
     expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
     expect(screen.getByRole("dialog")).toHaveTextContent("Oldest on top;");
     expect(cachedOrder(client)).toBe("oldest-first");
+    // The field alone: the rest of the cached snapshot never reaches disk.
     await waitFor(() =>
-      expect(saveSettingsMerged).toHaveBeenCalledWith(
-        expect.objectContaining({ editHistoryOrder: "oldest-first" }),
-      ),
+      expect(saveSettingsPatch).toHaveBeenCalledWith({
+        editHistoryOrder: "oldest-first",
+      }),
     );
     // Pressing the pressed segment keeps it and writes nothing.
     await user.click(screen.getByRole("button", { name: "Oldest first" }));
     expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
-    expect(saveSettingsMerged).toHaveBeenCalledTimes(1);
+    expect(saveSettingsPatch).toHaveBeenCalledTimes(1);
+    expect(saveSettingsMerged).not.toHaveBeenCalled();
+  });
+
+  it("keeps a field another writer landed while the order write waited", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    await user.click(screen.getByRole("button", { name: "Oldest first" }));
+    await waitFor(() => expect(writes.length).toBe(1));
+    // An opt-out lands on disk without reaching this cache.
+    await act(async () => {
+      await landOnDisk({ ...stored, analyticsEnabled: false });
+    });
+    expect(
+      client.getQueryData<AppSettings>(settingsKeys.settings)?.analyticsEnabled,
+    ).toBe(true);
+    await act(async () => writes[0].resolve());
+    await waitFor(() => expect(stored.editHistoryOrder).toBe("oldest-first"));
+    expect(stored.analyticsEnabled).toBe(false);
+  });
+
+  it("keeps the patch over a settings read already running", async () => {
+    const user = userEvent.setup();
+    const client = newClient("newest-first");
+    const writes = holdWrites();
+    renderDialog(client);
+    await screen.findByRole("dialog");
+    // A re-read starts (another save's reconcile) and will answer the old order.
+    let answerRead: ((s: AppSettings) => void) | undefined;
+    vi.mocked(loadSettings).mockReturnValueOnce(
+      new Promise((res) => {
+        answerRead = res;
+      }),
+    );
+    act(() => {
+      void client.invalidateQueries({ queryKey: settingsKeys.settings });
+    });
+    await waitFor(() => expect(loadSettings).toHaveBeenCalled());
+    await user.click(screen.getByRole("button", { name: "Oldest first" }));
+    await act(async () => answerRead?.(structuredClone(stored)));
+    expect(cachedOrder(client)).toBe("oldest-first");
+    expect(shownSubjects()).toEqual(["First", "Second", "Third"]);
+    expect(writes).toHaveLength(1);
   });
 
   it("restores the order on reopen", async () => {
@@ -270,7 +346,7 @@ describe("Edit history order toggle", () => {
     const client = newClient("newest-first");
     const first = renderDialog(client);
     await user.click(screen.getByRole("button", { name: "Oldest first" }));
-    await waitFor(() => expect(saveSettingsMerged).toHaveBeenCalled());
+    await waitFor(() => expect(saveSettingsPatch).toHaveBeenCalled());
     first.unmount();
     renderDialog(client);
     expect(list()).toHaveAccessibleName("Commits, oldest first");
@@ -622,6 +698,58 @@ describe("Oldest-first moves are spatial", () => {
     await user.click(screen.getByRole("button", { name: "Move Second up" }));
     expect(shownSubjects()).toEqual(["Second", "First", "Third"]);
     expect(status()).toHaveTextContent("Moved to 1 of 3");
+  });
+});
+
+// Negative control: compiling the plan from the displayed rows instead of the
+// newest-first ones reverses the steps both cases send.
+describe("Oldest-first applies the chronological plan", () => {
+  async function setAction(
+    user: ReturnType<typeof userEvent.setup>,
+    c: CommitSummary,
+    name: RegExp,
+  ) {
+    await user.click(
+      screen.getByRole("button", { name: `Action for ${c.subject}` }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name }));
+  }
+  const hashesOf = (steps: { hashes: string[] }[]) =>
+    steps.map((s) => s.hashes);
+
+  it("rewrites with the moved order, oldest first, and the drop", async () => {
+    const user = userEvent.setup();
+    renderDialog(newClient("oldest-first"));
+    await user.click(screen.getByRole("button", { name: "Move Second up" }));
+    await setAction(user, THIRD, /^Drop/);
+    await user.click(screen.getByRole("button", { name: "Rewrite history" }));
+    await waitFor(() => expect(gitRewriteCommits).toHaveBeenCalledTimes(1));
+    const [repo, base, steps, dropped] =
+      vi.mocked(gitRewriteCommits).mock.calls[0];
+    expect([repo, base]).toEqual(["/repo", BASE]);
+    expect(hashesOf(steps)).toEqual([[SECOND.hash], [FIRST.hash]]);
+    expect(dropped).toEqual([THIRD.hash]);
+    expect(gitRebaseEdit).not.toHaveBeenCalled();
+  });
+
+  it("starts the rebase with the moved order, oldest first", async () => {
+    const user = userEvent.setup();
+    renderDialog(newClient("oldest-first"));
+    await user.click(screen.getByRole("button", { name: "Move Second up" }));
+    await setAction(user, SECOND, /^Edit/);
+    await user.click(screen.getByRole("button", { name: "Start rebase" }));
+    await waitFor(() => expect(gitRebaseEdit).toHaveBeenCalledTimes(1));
+    const [repo, base, steps, dropped] = vi.mocked(gitRebaseEdit).mock.calls[0];
+    expect([repo, base]).toEqual(["/repo", BASE]);
+    expect(hashesOf(steps)).toEqual([
+      [SECOND.hash],
+      [FIRST.hash],
+      [THIRD.hash],
+    ]);
+    // The pause rides the Edit row's own step.
+    expect(steps.map((s) => s.edit === true)).toEqual([true, false, false]);
+    expect(dropped).toEqual([]);
+    expect(gitRewriteCommits).not.toHaveBeenCalled();
   });
 });
 
