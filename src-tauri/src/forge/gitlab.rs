@@ -831,6 +831,9 @@ struct GlabMr {
     source_project_id: Option<u64>,
     #[serde(default)]
     target_project_id: Option<u64>,
+    /// The MR's head commit; "" when the payload omits it or sends null.
+    #[serde(default, deserialize_with = "null_to_default")]
+    sha: String,
 }
 
 fn from_glab_mr(m: GlabMr) -> PrInfo {
@@ -849,8 +852,8 @@ fn from_glab_mr(m: GlabMr) -> PrInfo {
             .map(|name| PrListLabel { name })
             .collect(),
         created_at: m.created_at,
-        // GitLab queries CI by MR iid (headPipeline), never by SHA — leave it empty.
-        head_sha: String::new(),
+        // Branch cleanup's merged-MR head hint; CI still queries by MR iid, never this.
+        head_sha: m.sha,
         // GitLab has no stack object; chains are inferred over a whole open list
         // (see `infer_mr_stacks`), which a single MR can't do. That inference is pure
         // over rows already in hand — it has no probe to fail, so never unknown.
@@ -14872,10 +14875,12 @@ mod tests {
             "state": "merged",
             "author": { "username": "alice" },
             "labels": ["enhancement", "ui"],
-            "created_at": "2026-07-01T10:00:00Z"
+            "created_at": "2026-07-01T10:00:00Z",
+            "sha": "0123456789abcdef0123456789abcdef01234567"
         }"#;
         let p = from_glab_mr(serde_json::from_str(json).unwrap());
         assert_eq!(p.number, 7);
+        assert_eq!(p.head_sha, "0123456789abcdef0123456789abcdef01234567");
         assert_eq!(p.base_ref_name, "main");
         assert_eq!(p.head_ref_name, "feature/dark");
         assert_eq!(p.state, "MERGED");
@@ -14908,6 +14913,9 @@ mod tests {
         // No target id → false rather than a guess.
         assert!(!mr(r#","source_project_id":42"#).cross_repository);
         assert!(!mr(r#","source_project_id":42,"target_project_id":null"#).cross_repository);
+        // An absent or null head sha maps to the "" sentinel, never an error.
+        assert_eq!(mr("").head_sha, "");
+        assert_eq!(mr(r#","sha":null"#).head_sha, "");
     }
 
     #[test]

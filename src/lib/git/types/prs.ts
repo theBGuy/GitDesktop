@@ -182,10 +182,11 @@ export interface PrInfo {
   /** ISO-8601 timestamp of when the PR was opened; "" when the source didn't
    *  supply it. Populated by all three providers — drives the list row's age. */
   createdAt: string;
-  /** The PR head commit's SHA. Bitbucket-only (its list arm reads
-   *  `source.commit.hash`); it feeds the per-commit CI-status probe, since
-   *  Bitbucket has no batch pipeline endpoint. "" for GitHub/GitLab (their CI
-   *  fetch keys on PR number / MR iid, not the SHA). */
+  /** The PR head commit's SHA, filled by all three providers' unfiltered list
+   *  reads (Bitbucket's `source.commit.hash` may be a 12-char short hash); ""
+   *  when a read didn't supply one, as GitHub's filtered search doesn't.
+   *  Bitbucket's per-commit CI-status probe keys on it; GitHub/GitLab CI keys on
+   *  PR number / MR iid instead. */
   headSha: string;
   /** Stack membership, driving the row's position badge. Null/absent = unstacked. */
   stack?: PrStackInfo | null;
