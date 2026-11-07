@@ -692,9 +692,10 @@ describe("PR split checkout edges", () => {
     await waitFor(() => expect(ghPrCheckoutWorktree).toHaveBeenCalledTimes(1));
     act(() => useUiStore.setState({ repoPath: "C:/repos/other" }));
     await act(async () => reject(diverged()));
+    // Leaving keeps its own copy, distinct from a dismissal's.
     await waitFor(() =>
       expect(toastInfo).toHaveBeenCalledWith(
-        expect.stringContaining("nothing was discarded"),
+        "You left #7 before its worktree could be reset, so nothing was discarded.",
       ),
     );
     expect(screen.queryByRole("dialog", RESET_DIALOG)).toBeNull();
@@ -1342,7 +1343,7 @@ describe("PR split checkout edges", () => {
       await act(async () => reject(diverged({ path: REVIEW_TREE })));
       await waitFor(() =>
         expect(toastInfo).toHaveBeenCalledWith(
-          "You left #7 before its worktree could be reset, so nothing was discarded.",
+          "The worktree for #7 has commits that aren't on the pull request, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.",
         ),
       );
       expect(screen.queryByRole("dialog", RESET_DIALOG)).toBeNull();

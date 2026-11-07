@@ -13608,43 +13608,22 @@ github.acme.com
                 assert!(!message.contains("you have )"), "{message}");
             }
             // The local name rides every argv, spelled exactly as pr_local_branch makes it.
-            for (json, local, refused) in [
+            for (json, local) in [
                 (
                     r#"{"headRefName":"feat","isCrossRepository":false,"headRepositoryOwner":{"login":"base"}}"#,
                     "feat",
-                    false,
                 ),
                 (
                     r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
                     "alice/main",
-                    true,
                 ),
                 (
                     r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":null}"#,
                     "main",
-                    true,
                 ),
             ] {
                 let pr = pr_head_from(json, "7").unwrap();
                 assert_eq!(pr_local_branch(&pr), local, "{json}");
-                // The gate gets the same derivations: a linked worktree on the bare head
-                // passes only for the same-repo PR, so the null-owner fork's bare `main`
-                // still refuses there.
-                let own = crate::git::worktree::WtEntry {
-                    is_main: false,
-                    branch: pr.head.clone(),
-                    head: "1".repeat(40),
-                    detached: false,
-                    path: "C:/wt".to_string(),
-                };
-                let gate = crate::git::worktree::refuse_own_head_namesake(
-                    Some(&own),
-                    "C:/wt",
-                    &pr.head,
-                    local,
-                    pr_is_fork(&pr),
-                );
-                assert_eq!(gate.is_err(), refused, "{json}");
                 let pinned = [
                     "pr",
                     "checkout",
@@ -13666,6 +13645,48 @@ github.acme.com
                     worktree_checkout_args("2.98.0", "7", "o/r", "C:/wt", local, true).unwrap(),
                     forced
                 );
+            }
+        }
+
+        /// The gate gets the command's own derivations (`pr_local_branch`, `pr_is_fork`):
+        /// a linked worktree on the bare head passes only for a same-repo PR, so a
+        /// null-owner fork, whose local name is that bare head, still refuses.
+        #[test]
+        fn every_fork_refuses_a_worktree_on_its_bare_head() {
+            for (json, local, refused) in [
+                (
+                    r#"{"headRefName":"feat","isCrossRepository":false,"headRepositoryOwner":{"login":"base"}}"#,
+                    "feat",
+                    false,
+                ),
+                (
+                    r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":{"login":"alice"}}"#,
+                    "alice/main",
+                    true,
+                ),
+                (
+                    r#"{"headRefName":"main","isCrossRepository":true,"headRepositoryOwner":null}"#,
+                    "main",
+                    true,
+                ),
+            ] {
+                let pr = pr_head_from(json, "7").unwrap();
+                assert_eq!(pr_local_branch(&pr), local, "{json}");
+                let own = crate::git::worktree::WtEntry {
+                    is_main: false,
+                    branch: pr.head.clone(),
+                    head: "1".repeat(40),
+                    detached: false,
+                    path: "C:/wt".to_string(),
+                };
+                let gate = crate::git::worktree::refuse_own_head_namesake(
+                    Some(&own),
+                    "C:/wt",
+                    &pr.head,
+                    local,
+                    pr_is_fork(&pr),
+                );
+                assert_eq!(gate.is_err(), refused, "{json}");
             }
         }
 

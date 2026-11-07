@@ -431,6 +431,15 @@ export function PrWorktreeCheckout({
     return false;
   }
 
+  /** The user is still on the PR, so this says why the run stopped. The menu
+   *  item is named, not Update: the reopened body depends on the branch match. */
+  function dismissedBeforeReset(p: Pin): false {
+    toast.info(
+      `The worktree for #${p.number} has commits that aren't on the pull request, so nothing was updated or discarded. Choose Check out in a worktree… again to review the reset.`,
+    );
+    return false;
+  }
+
   function openPopover(from: "menu" | "palette") {
     if (detailsStale) return;
     pinRef.current = { repoPath, number, lens };
@@ -488,8 +497,8 @@ export function PrWorktreeCheckout({
   }
 
   async function askReset(p: Pin, d: WorktreeDiverged): Promise<boolean> {
-    if (!ownsPopover(p) || dismissedFor.current === p)
-      return leftBeforeReset(p);
+    if (!ownsPopover(p)) return leftBeforeReset(p);
+    if (dismissedFor.current === p) return dismissedBeforeReset(p);
     // The popover closes first: a dialog opened over its close would lose its
     // initial focus to the popover's focus return.
     setPopoverOpen(false);

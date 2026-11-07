@@ -1114,9 +1114,8 @@ pub(crate) fn resolve_worktree_path(repo_path: &str, path: &str) -> String {
     }
 }
 
-/// The most commits a divergence report lists; `more` says a further one exists.
-/// Frontend prose repeats it: PrWorktreeCheckout.tsx's "more than 20" and the help
-/// guide's "newest 20" change with it.
+/// The most commits a divergence report lists; `more` says a further one exists. Its
+/// twins: `DIVERGED_COMMIT_CAP` in src/lib/git/api/pr-actions.ts and the guide's "newest 20".
 const DIVERGED_COMMIT_CAP: usize = 20;
 
 /// A commit a forced re-sync would reset away: full sha and subject line.
@@ -1419,6 +1418,46 @@ pub(crate) fn refuse_own_head_namesake(
     }))
 }
 
+/// gh checks an existing branch out into a new or reused worktree and fast-forwards it,
+/// so an ownerless fork (local == bare head) refuses at every target while the branch
+/// exists, and when the probe fails. Not refused: an existing `<owner>/<head>` is the
+/// PR's own earlier branch, and a same-repo PR's branch existing is the normal flow.
+/// Force needs no probe: an entry off `local` is `Changed` there before any reset.
+async fn refuse_ownerless_branch_namesake(
+    repo_path: &str,
+    head: &str,
+    local: &str,
+    fork: bool,
+) -> AppResult<()> {
+    if !fork || head != local {
+        return Ok(());
+    }
+    // Case-insensitive, unlike branches::branch_exists_exact: on a case-insensitive
+    // filesystem gh's own lookup of `main` lands on a loose `Main`, so the wider match
+    // fails closed. A failed listing refuses too (run_git errs on a non-zero exit).
+    let listed = run_git(
+        Some(repo_path),
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+        DEFAULT_TIMEOUT,
+    )
+    .await;
+    let exists = listed.map(|out| {
+        out.stdout_lossy().lines().any(|line| {
+            line.strip_prefix("refs/heads/")
+                .is_some_and(|name| name.to_lowercase() == local.to_lowercase())
+        })
+    });
+    match exists {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(AppError::InvalidArgument(format!(
+            "A branch named {local} already exists and may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — nothing was checked out."
+        ))),
+        Err(_) => Err(AppError::InvalidArgument(format!(
+            "Couldn't check whether a branch named {local} already exists — try again."
+        ))),
+    }
+}
+
 /// The pre-spawn candidate: an existing worktree on the PR's branch with the PR's tip
 /// already local, so divergence is provable before gh fetches.
 fn pre_spawn_candidate<'a>(pre: &'a WtProbe, local: &str) -> Option<&'a WtEntry> {
@@ -1474,9 +1513,10 @@ pub(crate) enum CheckoutMode<'a> {
 }
 
 /// The worktree checkout's local refusals, in order, before gh spawns. Sync: the
-/// registry read refuses the main checkout, then a fork PR's bare-head namesake, and
-/// a failed registry read refuses too (gh run from a linked worktree would switch the
-/// main checkout); with the tip probe answered, a provable divergence refuses, while
+/// registry read refuses the main checkout, then a fork PR's bare-head namesake (a
+/// worktree on it, then for any target an ownerless fork's existing branch), and a failed
+/// registry read refuses too (gh run from a linked worktree would switch the main
+/// checkout); with the tip probe answered, a provable divergence refuses, while
 /// a failed tip probe proceeds to gh unclassified. Force: only an answered probe of a
 /// linked worktree on gh's branch, still at `expected` and no fork's namesake,
 /// proceeds. `head` is the PR's bare head branch, `local` the `--branch` name, `fork`
@@ -1503,6 +1543,7 @@ pub(crate) async fn checkout_pre_spawn_gate(
             })?;
         refuse_main_worktree(entry.as_ref(), echo_path)?;
         refuse_own_head_namesake(entry.as_ref(), echo_path, head, local, fork)?;
+        refuse_ownerless_branch_namesake(repo_path, head, local, fork).await?;
         let Some(oid) = oid else {
             return Ok(None);
         };
@@ -3396,9 +3437,10 @@ prunable gitdir file points to non-existent location
             );
         }
         let fresh = base.path().join("new-wt").to_string_lossy().into_owned();
-        let pre = checkout_pre_spawn_gate(&repo, &fresh, &fresh, oid, "feat", "feat", true, sync())
-            .await
-            .unwrap();
+        let pre =
+            checkout_pre_spawn_gate(&repo, &fresh, &fresh, oid, "feat", "feat", false, sync())
+                .await
+                .unwrap();
         assert!(pre.is_some_and(|p| p.tip_local && p.entry.is_none()));
 
         // A failed registry read fails closed: from a linked worktree, gh would
@@ -3475,5 +3517,72 @@ prunable gitdir file points to non-existent location
         let gate =
             checkout_pre_spawn_gate(&repo, "root", &repo, oid, "side", "side", false, main).await;
         assert!(invalid_argument(gate).starts_with("Only an existing worktree of this repository"));
+    }
+
+    /// An ownerless fork refuses every target while a branch of the bare head's name
+    /// exists (gh would fast-forward it), and a failed probe refuses too; owner-prefixed
+    /// and same-repo PRs proceed onto an existing branch.
+    #[tokio::test]
+    async fn ownerless_fork_refuses_every_target_while_its_bare_branch_exists() {
+        let (base, repo) = setup_repo("ownerless-branch").await;
+        run(&repo, &["branch", "mine"]).await;
+        run(&repo, &["branch", "alice/mine"]).await;
+        let path = |name: &str| base.path().join(name).to_string_lossy().into_owned();
+        let (fresh, other, named) = (path("fresh"), path("other-wt"), path("mine-wt"));
+        run(&repo, &["worktree", "add", "-q", "-b", "other", &other]).await;
+        run(&repo, &["worktree", "add", "-q", &named, "mine"]).await;
+        let gate = |target: &str, head: &'static str, local: &'static str, fork: bool| {
+            let (repo, target) = (repo.clone(), target.to_string());
+            async move {
+                checkout_pre_spawn_gate(
+                    &repo,
+                    "wt",
+                    &target,
+                    None,
+                    head,
+                    local,
+                    fork,
+                    CheckoutMode::Sync,
+                )
+                .await
+            }
+        };
+        let exists = "A branch named mine already exists and may be your own: GitHub no longer names this pull request's fork, so its branch can't be told apart from yours — nothing was checked out.";
+        // A new folder, and a linked worktree on another branch (gh would check the
+        // branch out there and fast-forward it).
+        for target in [&fresh, &other] {
+            assert_eq!(
+                invalid_argument(gate(target, "mine", "mine", true).await),
+                exists,
+                "{target}"
+            );
+        }
+        // A case variant counts: a case-insensitive filesystem aliases the two.
+        run(&repo, &["branch", "Upper"]).await;
+        assert!(invalid_argument(gate(&fresh, "upper", "upper", true).await)
+            .starts_with("A branch named upper already exists"));
+        // A worktree on the bare head: its own refusal, which names the folder, speaks first.
+        assert!(invalid_argument(gate(&named, "mine", "mine", true).await)
+            .starts_with("wt is on branch mine, which may be your own"));
+        for (target, head, local, fork) in [
+            (&fresh, "ghost", "ghost", true),
+            (&other, "ghost", "ghost", true),
+            (&fresh, "mine", "alice/mine", true),
+            (&other, "mine", "alice/mine", true),
+            (&fresh, "mine", "mine", false),
+        ] {
+            let result = gate(target, head, local, fork).await;
+            assert!(
+                matches!(result, Ok(None)),
+                "{target} {head} {local} {fork}: {result:?}"
+            );
+        }
+        let missing = path("missing");
+        assert_eq!(
+            invalid_argument(
+                refuse_ownerless_branch_namesake(&missing, "mine", "mine", true).await
+            ),
+            "Couldn't check whether a branch named mine already exists — try again."
+        );
     }
 }
