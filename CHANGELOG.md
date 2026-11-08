@@ -12,6 +12,218 @@ under `changelog.d/` (see its README); those are assembled here at release time 
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-08
+
+### Added
+
+- **Open a binary file from its diff.** A binary file other than an image, with
+  unstaged changes in your working copy (or changed in an agent session's
+  worktree), offers **Open with default program** and **Show in Explorer**
+  under its diff. For a deleted file, **Show in Explorer** opens the nearest
+  folder that still exists.
+- **See how much a binary file changed.** A binary file's diff shows its old
+  and new size and how much it grew or shrank, without opening the file. GitHub
+  and Bitbucket pull requests show it too; on GitHub.com that includes files
+  your clone doesn't have. Image diffs show each side's size next to its
+  dimensions, and an image too big to preview says how big it is.
+- **Folder actions in the Changes tree view.** A folder's context menu stages,
+  unstages, discards or stashes the files shown under it, copies the folder's
+  path, or shows it in Explorer, and says how many of its files the filter is
+  hiding. Discard and Stash confirm first and say how many files they leave
+  alone, and Discard leaves conflicted files for the conflict editor.
+  *Stage folder*, *Unstage folder*, *Discard changes in folder* and
+  *Stash changes in folder* in the command palette act on the folder you've
+  arrowed to.
+- **Collapse a Changes section.** Collapse the Staged or Changes section of
+  the Changes list to focus on the other: click its heading, or press Enter or
+  Space on it. The file count and the Stage all / Unstage all button stay in
+  place, and both sections open again when you switch repositories.
+- **Unmerged-work check in Clean up branches.** The dialog checks whether a
+  stale branch's work went into the default branch, directly or through its
+  merged pull request's final version. A squash-merged branch usually reads
+  as safe to delete even after later commits edit the same lines, and then
+  starts checked (unless a linked worktree holds it); a branch carrying work
+  the check can't trace there starts unchecked. The check needs Git 2.38 or
+  later and stays off when your Git configuration sets a merge driver,
+  `merge.default` or `merge.renormalize`; the dialog says why.
+- **Clean up branches filters.** Narrow the list to branches merged into the
+  default branch, branches whose pull request was closed without merging, idle
+  branches, or any mix, with every reason that applies shown on each row.
+  Branches checked out in another linked worktree can join the list too: acting
+  on one removes its worktree first, and the confirmation names how many
+  worktrees it removes and how many branches it archives or deletes. The dialog
+  opens on Archive with every filter on and a 60-day window.
+- **Compare against any remote's branches.** The Compare picker now lists every
+  remote's branches under your local ones, `upstream` first, and fetches a
+  remote when you pick one of its branches (or compares against its last fetch
+  when you're offline, and says so). On a GitHub fork with an `upstream`
+  remote, while you're signed in to GitHub, the pull request button names where
+  the PR will open, in the parent or in your fork. A fork without an `upstream`
+  remote can add one right from the picker or the command palette.
+- **Move through a conflicted file one conflict at a time.** The conflict
+  editor shows how many conflicts are left, and Next and Previous (F7 and
+  Shift+F7, also in the command palette) take you straight to each one.
+- **Edit history in the order you think in.** A **Newest first** / **Oldest
+  first** toggle in the editor's header flips the commit list, and the app
+  remembers your pick. Moves follow the screen in both orders, and a squash or
+  fixup still combines into the next older commit you keep as its own,
+  wherever it sits.
+- **Find a commit by its SHA.** **Search all history** in History also
+  matches commit hashes: type 4 or more characters of a short or full SHA
+  (SHA-256 included) to reach a commit beyond the loaded ones. A match that
+  isn't on the current branch shows a notice with **Open commit**, and an
+  empty result says what the search checked.
+- **Merged and Closed pull request tabs.** The pull request list now has
+  separate Merged and Closed tabs beside Open, so finished work and pull
+  requests closed without merging each have their own list, on GitHub,
+  GitLab, Bitbucket and local pull requests alike. A notification or a `#N`
+  link in a description or comment opens its pull request on the tab that
+  matches its state, and the command palette can switch tabs. The MCP
+  `list_pull_requests` tool takes `merged` and `unmerged` states too.
+- **Check out a pull or merge request into its own worktree.** Checkout now
+  works on GitLab merge requests and Bitbucket pull requests as well as
+  GitHub, and the caret beside it offers "Check out in a worktree…", so you
+  can review a request without touching your current branch or uncommitted
+  files, and switch to it in one step from the success message. The
+  suggested folder sits inside the repository and is kept out of
+  `git status`, an existing worktree can be updated to the request's latest
+  changes, and a reset that would discard commits lists them and asks first.
+- **Post any past AI review.** Each row under Previous reviews can post its
+  review as a pull request comment, including a review that finished while
+  another waited in the queue and the partial output kept from a run that
+  stopped early (posting that asks first). Posted rows show when they were
+  posted, and posting one again asks before adding a second comment.
+
+### Changed
+
+- A binary file that was only renamed, or only had its file mode changed, now
+  reads **renamed** or **mode** in the Changes list, the commit dialog,
+  History's commit details, branch comparisons and stashes when Git can
+  confirm its content is unchanged, so it stands apart from a real content
+  change.
+- In the Changes list, Tab stops on the row you're on, the arrow keys move
+  between files, and that row's stage button is the next Tab stop after it.
+- Adding a worktree from **Worktrees…** now suggests
+  `.gitdesktop/worktrees/<branch>` inside the repository, kept out of
+  `git status` (a bare repository still suggests a folder beside it). The
+  folder button next to the path picks a different parent folder, and a
+  **Full path** line shows exactly where the worktree will land.
+
+### Fixed
+
+- Switching repositories closes an open amend force-push confirmation, so an
+  amend you confirm always applies to the repository you asked it in.
+- Archiving a branch after deleting its worktree leaves the branch unarchived
+  when you've checked it out again while the worktree was being removed, so
+  the branch you're on stays in the switcher's main list.
+- A review automation whose local pull request is deleted while it runs
+  now records that run as failed in the automation history.
+- With several files selected in the Changes list, Stash, Ignore and Untrack
+  count each file once, Untrack skips staged deletions so the rest of the
+  selection still untracks, and the Stash confirmation says when a stash also
+  takes changes you didn't select. Discard leaves selected conflicted files
+  out and discards the rest, showing "N of M", and Stash waits, marked
+  "resolve conflicts first", until no file is conflicted.
+- Bulk actions in the Changes list act on exactly the rows you selected: each
+  menu item shows how many of them it applies to and one that applies to none
+  is left out (Stage instead stays in view, unavailable, when every selected
+  unstaged file has a Windows-reserved name), Discard reaches a staged
+  deletion's untracked copy only when you select that copy's row, and a file
+  with both staged and unstaged edits changes only on the side you picked.
+- The Changes list keeps track of where you are: the arrow keys keep working
+  when you press one with no file selected while the list is scrolled away,
+  or after switching between tree and list view from the command palette; in
+  the tree view, clicking a file selects it even when the cursor was on a
+  folder you've since scrolled away from; and resolving a file with AI from
+  the list, or moving through conflicts, highlights the file you're on.
+- Clean up branches never lists your default branch: if the app can't tell
+  which branch that is, the list stays empty and says why until it can, so
+  the default branch can't end up selected for archiving or deleting.
+- **Keyboard focus follows conflict resolution.** After you accept a conflict
+  region, focus moves to the region that took its place (scrolled into view
+  when it was off-screen), and Accept all, Mark resolved and the AI proposal's
+  Accept keep focus where you can carry on from the keyboard.
+- **Resolve with AI explains files it can't touch.** When a conflicted file's
+  path isn't safe for the app to write, such as a symbolic link or a file
+  inside a linked folder, the AI resolve screen says why and where you can
+  finish the resolution instead.
+- When the first diff you open in a session in History, Compare, file
+  history, stashes or a pull request is still loading, its loading view
+  shows the file's path.
+- When there's nothing to edit, **Edit history…** says why: no unpushed
+  commits, no commits ahead of the default branch, a merge on top, a latest
+  commit whose parent is missing from a shallow clone, or no older commit to
+  rebase onto. An open Edit history dialog whose commits get pushed in the
+  meantime says there's nothing left to edit.
+- On GitLab, Load 100 more keeps adding open merge requests and issues past
+  the first 100, up to 500, and long Closed merge request lists stay in
+  newest-first order. The MCP `list_pull_requests` tool reads up to 500 open
+  merge requests on GitLab too, and `list_issues` up to 500 issues.
+- **Clearer rules for what Edit history and squash can rewrite.** The guide now
+  says which commits count as unpushed: those ahead of your upstream, those on
+  no remote when there's no upstream, and the commits past `main` or `master`
+  when the repository has no remote.
+- The pull request and issue tabs and CI run views name your repository's
+  host as soon as they open. While GitDesktop is still identifying a host it
+  hasn't seen before, its buttons read Open in browser.
+- The new local pull request dialog checks whether the head branch has
+  anything to merge: when it's already in the base, the dialog says so and
+  holds Create, and the MCP `create_local_pr` tool refuses the same case.
+- Closing or reopening a pull request from its footer hands keyboard focus to
+  the control that takes its place.
+- When GitHub or GitLab won't take your comment on a locked pull request, the
+  comment box and reactions turn read-only and say why, posting an AI review
+  is held the same way, and the conversation shows a locked badge. On an
+  archived GitHub pull request, the first refused comment or AI review post
+  explains the archive, keeps your draft, and holds all three read-only
+  until you leave that pull request.
+- **Resolve all with AI** now checks the conflicted files up front and walks
+  only the ones a model can take. Files that are already resolved are always
+  set aside; with more than one file, so are binary and non-UTF-8 files, files
+  too large for AI, symbolic links and files reached through one, and files
+  excluded from AI. One notice sums up what was skipped.
+- In a narrow pull request pane, Previous reviews rows wrap their model and
+  time onto a second line, so the time stays readable beside the delete
+  button.
+- Posting an AI review from the review panel keeps keyboard focus in the panel,
+  and the success message names whether a review or a security audit was
+  posted.
+- In repositories that use the SHA-256 object format, the blame dialog's title
+  shows a short commit id.
+- Diffs keep your place: switching a diff between **Unified** and **Split**
+  keeps the line you were reading at the top of the pane, and
+  **Show full diff** in History, branch comparison, stash and pull request
+  diffs and in an agent session's worktree changes stays on the lines you
+  were reading, with keyboard focus in the diff.
+- Sizes in Insights and on a tag's release assets round cleanly at unit
+  boundaries: a size just under 1 MB reads "1.0 MB", and one just under
+  100 KB reads "100 KB".
+- Closing the Squash dialog or Edit history stops any AI commit message it was
+  still generating.
+- Conflict actions notice files you've already resolved outside the app:
+  **Resolve with AI** re-checks before it starts and again before accepting
+  its proposal, and an **Accept all** confirmation left open re-checks
+  before it overwrites the file.
+- Stashing selected files works when they include a new file with a
+  Windows-reserved name (like `nul`): everything else is stashed in one
+  entry, the confirmation says those files stay behind, and they remain in
+  your working tree.
+- When a binary file other than an image becomes a symbolic link, or a link
+  becomes one, its diff now shows both sides: the binary file's size, when
+  known, and the link's text. This covers the Changes list, History, branch
+  comparisons, stashes and agent sessions, plus pull requests where a link
+  became a binary file.
+- **Undo commit** shows why it's unavailable while a merge, cherry-pick or
+  revert is stopped, right in the History menu, and the shortcut and command
+  palette say so at once, before any other prompt.
+- The **Block pushing WIP commits** hook template lets a new branch through
+  when every WIP commit on it is already on the remote you're pushing to, as
+  far as this clone last fetched it. It also catches WIP commits when the
+  branch tip on the remote hasn't been fetched yet and on new branches in
+  SHA-256 repositories, and it stops a push whose commits it can't read. If
+  you installed the hook earlier, re-apply it: **Git hooks…** → pre-push →
+  **Templates** → **Block pushing WIP commits**, then save.
+
 ## [0.13.8] - 2026-11-03
 
 ### Changed
@@ -5572,7 +5784,8 @@ built on Tauri 2; every GitHub feature runs through the GitHub CLI (`gh`).
 - Diff-renderer exceptions are caught by an error boundary instead of taking
   down the whole app.
 
-[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.13.8...HEAD
+[Unreleased]: https://github.com/theBGuy/GitDesktop/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/theBGuy/GitDesktop/compare/v0.13.8...v0.14.0
 [0.13.8]: https://github.com/theBGuy/GitDesktop/compare/v0.13.7...v0.13.8
 [0.13.7]: https://github.com/theBGuy/GitDesktop/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/theBGuy/GitDesktop/compare/v0.13.5...v0.13.6
