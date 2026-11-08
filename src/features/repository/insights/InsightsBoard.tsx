@@ -334,6 +334,7 @@ export function InsightsBoard({
       hasNextPage: starHistory.hasNextPage,
       isError: starHistory.isError,
       isPaused: starHistory.isPaused,
+      isFetching: starHistory.isFetching,
     },
     allTime,
     starSpanHere,

@@ -253,6 +253,13 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   on a new 40-only width in `src/` (a `{40}` quantifier with no `{64}` beside it,
   a 40-zero literal, a length compared to 40); slices, named constants and split
   lines are out of its reach.
+- Insights regions take their accessible name from visible text
+  (`src/features/repository/insights/primitives.tsx`): a card is `InsightCard`
+  (its section is labelled by its h3), a non-card block is `TitledSection`, and
+  a figure inside a card carries the bare title via `useCardTitle()`. Its chart
+  svg is `aria-label` "<title> chart" via `useChartLabel()` and a `DataTable`
+  defaults to "<title> data", so the nested names stay distinct. Never a
+  recharts `title` prop, which also renders a hover tooltip.
 - Icon-only copy buttons are `CopyIconButton`
   (`src/components/CopyIconButton.tsx`), never a raw button around `CopyIcon`;
   it always stops click propagation, and the `raw-copy-icon-button` guard in
@@ -376,10 +383,12 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   `CommentComposer` passes its `toastClearance` prop instead and measures its
   own root: a call-site wrapper would break its scroll-pin lookup over its
   preceding siblings (`scripts/toast-clearance-adopters.test.mjs`). Beyond
-  `position` and `closeButton`, only the offset props ride along on the app
-  Toaster (`AppToaster` in `src/main.tsx`): the vendored wrapper spreads caller
-  props last, so `toastOptions` would drop its `cn-toast` class, `className`
-  its `toaster group` class, and `style` its CSS variables.
+  `position` and `closeButton`, only `theme` and the offset props ride along on
+  the app Toaster (`AppToaster` in `src/main.tsx`): the vendored wrapper spreads
+  caller props last, so `toastOptions` would drop its `cn-toast` class,
+  `className` its `toaster group` class, and `style` its CSS variables. `theme`
+  comes from `useIsDark`, since the wrapper's next-themes read has no provider
+  and would follow the OS scheme instead of the app's.
 - Caught errors surface via `toastError` (`src/lib/toast.ts`), or `errorMessage`
   (`src/lib/tauri/invoke.ts`) where a toast is wrong (a terminal buffer) — never
   `String(e)`: `invoke` rejects a PLAIN AppError, stringified "[object Object]".

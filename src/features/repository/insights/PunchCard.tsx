@@ -2,7 +2,7 @@ import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { PunchCard as PunchCardData } from "@/lib/git/types";
 import { cn } from "@/lib/utils";
-import { fmt } from "./primitives";
+import { fmt, useCardTitle } from "./primitives";
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const HOUR_TICKS = [0, 6, 12, 18];
@@ -71,6 +71,7 @@ export function PunchCard({ grid }: { grid: PunchCardData }) {
 
   const [active, setActive] = useState<[number, number] | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const card = useCardTitle();
   const [day0, hour0] = active ?? [0, 0];
 
   // Move DOM focus to the active cell so the focus ring tracks arrow nav.
@@ -112,7 +113,8 @@ export function PunchCard({ grid }: { grid: PunchCardData }) {
   }
 
   return (
-    <figure className="space-y-2">
+    // Named by the card: the live caption below would rename it per cell.
+    <figure aria-labelledby={card?.id} className="space-y-2">
       <div
         ref={gridRef}
         role="grid"

@@ -79,8 +79,35 @@ export function Stat({
   );
 }
 
-export function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className="mb-1 text-xs font-semibold">{children}</h3>;
+export function SectionTitle({
+  id,
+  children,
+}: {
+  id?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <h3 id={id} className="mb-1 text-xs font-semibold">
+      {children}
+    </h3>
+  );
+}
+
+/** A sidebar section, a region named by its heading. */
+export function TitledSection({
+  title,
+  children,
+}: {
+  title: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const titleId = useId();
+  return (
+    <section aria-labelledby={titleId}>
+      <SectionTitle id={titleId}>{title}</SectionTitle>
+      {children}
+    </section>
+  );
 }
 
 /** An insight card's "nothing to show" line — shared so a card that decides its own
@@ -94,8 +121,23 @@ export function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** The enclosing card's title id, which names the card's chart figures. */
-const CardTitleContext = createContext<string | undefined>(undefined);
+/** The enclosing card's title and its id, which name the card's figures,
+ *  chart surfaces and data tables. */
+const CardTitleContext = createContext<
+  { id: string; title: string } | undefined
+>(undefined);
+
+/** The enclosing card's title, or undefined outside a card. */
+export function useCardTitle(): { id: string; title: string } | undefined {
+  return use(CardTitleContext);
+}
+
+/** A chart surface's name inside a card, "<card title> chart": the region and
+ *  figure already carry the bare title. Undefined outside a card. */
+export function useChartLabel(): string | undefined {
+  const card = use(CardTitleContext);
+  return card && `${card.title} chart`;
+}
 
 /** A bordered card for an Insights board panel, a region named by its title.
  *  The body is a flex column, so a `bodyClassName` height holds the card at
@@ -143,7 +185,9 @@ export function InsightCard({
           bodyClassName,
         )}
       >
-        <CardTitleContext value={titleId}>{children}</CardTitleContext>
+        <CardTitleContext value={{ id: titleId, title }}>
+          {children}
+        </CardTitleContext>
       </div>
     </section>
   );
@@ -165,7 +209,7 @@ export function ChartFigure({
   children: React.ReactNode;
 }) {
   const id = useId();
-  const titleId = use(CardTitleContext);
+  const titleId = use(CardTitleContext)?.id;
   return (
     <figure
       // In a card the title names it and the caption describes it; outside

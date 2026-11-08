@@ -452,31 +452,37 @@ function problems(mod) {
       assert.equal(short.awaitingWindow, false);
       assert.equal(short.stale, true);
     },
-    "header: nothing without an answer, unavailable, or at 0 stars": () => {
-      assert.deepEqual(mod.starHeaderSlot(summary(mod, [])), { kind: "none" });
-      const unavailable = [
-        {
-          available: false,
-          weeks: [],
-          nextPage: null,
-          lastPage: null,
-          stargazersCount: null,
-        },
-      ];
-      assert.deepEqual(mod.starHeaderSlot(summary(mod, unavailable)), {
-        kind: "none",
-      });
-      const zero = pagesOf(fill(930, 0), 0);
-      for (const over of [
-        {},
-        { view: "all" },
-        { driving: true, hasMore: true },
-      ])
-        assert.deepEqual(
-          mod.starHeaderSlot(summary(mod, zero.slice(0, 3), over)),
-          { kind: "none" },
+    "header: nothing without an answer, unavailable, or at rest at 0 stars":
+      () => {
+        assert.deepEqual(mod.starHeaderSlot(summary(mod, [])), {
+          kind: "none",
+        });
+        const unavailable = [
+          {
+            available: false,
+            weeks: [],
+            nextPage: null,
+            lastPage: null,
+            stargazersCount: null,
+          },
+        ];
+        assert.deepEqual(mod.starHeaderSlot(summary(mod, unavailable)), {
+          kind: "none",
+        });
+        const zero = pagesOf(fill(930, 0), 0);
+        for (const over of [{}, { view: "all" }])
+          assert.deepEqual(
+            mod.starHeaderSlot(summary(mod, zero.slice(0, 3), over)),
+            { kind: "none" },
+          );
+        // All time still counts its pages over a starless history.
+        assert.equal(
+          mod.starHeaderSlot(
+            summary(mod, zero.slice(0, 3), { driving: true, hasMore: true }),
+          ).text,
+          "Loading older weeks · 3 of 31",
         );
-    },
+      },
     "header: the page counter reads page 1's total": () => {
       const pages = pagesOf(OLD_930, 246).slice(0, 9);
       const driving = { driving: true, hasMore: true };
@@ -548,10 +554,9 @@ function problems(mod) {
     },
     "header: no count until every page is in": () => {
       const all = pagesOf(OLD_930, null);
-      assert.equal(
-        mod.starHeaderSlot(summary(mod, all.slice(0, 2), { hasMore: true }))
-          .text,
-        "+34 in 52 weeks",
+      assert.deepEqual(
+        mod.starHeaderSlot(summary(mod, all.slice(0, 2), { hasMore: true })),
+        { kind: "stats", count: null, gain: 34, text: "+34 in 52 weeks" },
       );
       assert.deepEqual(
         mod.starHeaderSlot(summary(mod, all.slice(0, 1), { hasMore: true })),
@@ -583,20 +588,30 @@ function problems(mod) {
       const noCount = pagesOf(OLD_930, null).slice(0, 1);
       assert.equal(
         mod.starFigcaption(summary(mod, noCount, { hasMore: true })),
-        `${lead}.`,
+        `${lead}, as new stars per week.`,
       );
       const oldest = NEWEST - 929 * WEEK;
       assert.equal(
         mod.starFigcaption(summary(mod, all, { view: "all" })),
         `${lead}. 246 stars since ${mod.monthYearLabel(oldest)}.`,
       );
-      // A partial All-time span with the count unknown: no count, still dated.
+      // A partial All-time span with the count unknown reads as gains.
       const partial = pagesOf(OLD_930, null).slice(0, 5);
       assert.equal(
         mod.starFigcaption(
           summary(mod, partial, { view: "all", hasMore: true }),
         ),
-        `${lead}; showing weeks since ${mod.monthYearLabel(NEWEST - 149 * WEEK)}.`,
+        `${lead}, as new stars per week; showing weeks since ${mod.monthYearLabel(NEWEST - 149 * WEEK)}.`,
+      );
+      // The gains window dates nothing: the axis does.
+      assert.equal(
+        mod.starFigcaption(summary(mod, partial, { hasMore: true })),
+        `${lead}, as new stars per week.`,
+      );
+      // The cap owes weeks too.
+      assert.match(
+        mod.starFigcaption(summary(mod, partial.slice(0, 2), { view: "all" })),
+        /, as new stars per week; showing weeks since /,
       );
       // Pages owed date the weeks, never the stars.
       const owed = all.slice(0, 2);
@@ -668,6 +683,118 @@ function problems(mod) {
         80,
       );
     },
+    "mode: gains while the count is unknown and weeks are owed": () => {
+      const all = pagesOf(OLD_930, null);
+      const owed = summary(mod, all.slice(0, 2), { hasMore: true });
+      assert.equal(mod.starMode(owed), "gains");
+      assert.equal(mod.starDisplayCount(owed), null);
+      // The cap: no page follows, yet the last one names a next.
+      const capped = summary(mod, all.slice(0, 2));
+      assert.equal(mod.starMode(capped), "gains");
+      assert.equal(mod.starDisplayCount(capped), null);
+      // A gain of 0 says nothing in gains mode; the quiet-tail note covers
+      // it. The running total keeps its "+0".
+      const still = [...fill(52, 0), ...fill(8, 1)];
+      assert.deepEqual(
+        mod.starHeaderSlot(
+          summary(mod, pagesOf(still, null).slice(0, 2), { hasMore: true }),
+        ),
+        { kind: "none" },
+      );
+      assert.equal(
+        mod.starHeaderSlot(
+          summary(mod, pagesOf(still, 8).slice(0, 2), { hasMore: true }),
+        ).text,
+        "8 stars · +0 in 52 weeks",
+      );
+      // Gains keep the window's gain, never a count.
+      assert.equal(mod.starHeaderSlot(capped).text, "+34 in 52 weeks");
+      assert.deepEqual(
+        mod.starHeaderSlot(summary(mod, all.slice(0, 1), { hasMore: true })),
+        { kind: "none" },
+      );
+      // Every page in: the running total returns, the count its sum.
+      const done = summary(mod, all, { view: "all" });
+      assert.equal(mod.starMode(done), "cumulative");
+      assert.equal(mod.starDisplayCount(done), 246);
+      // A live count anchors the total whatever is owed.
+      const counted = pagesOf(OLD_930, 246).slice(0, 2);
+      assert.equal(
+        mod.starMode(summary(mod, counted, { hasMore: true })),
+        "cumulative",
+      );
+      // Gains plot from 0, in the window too.
+      assert.equal(mod.starYAxis("window", [5, 6, 7], "gains").domain[0], 0);
+      assert.notEqual(
+        mod.starYAxis("window", [5, 6, 7], "cumulative").domain[0],
+        0,
+      );
+    },
+    "note: offline while a wanted page is parked": () => {
+      const offline =
+        "You're offline — older weeks will load once you're back online.";
+      const parked = { pageParked: true, hasMore: true };
+      const page1 = pagesOf(MATURE_60, 50).slice(0, 1);
+      assert.deepEqual(mod.starNote(summary(mod, page1, parked)), {
+        kind: "offline",
+        text: offline,
+      });
+      // It outranks a quiet tail.
+      const quiet = pagesOf([...fill(10, 0), ...fill(50, 1)], 50).slice(0, 1);
+      assert.equal(
+        mod.starNote(summary(mod, quiet, { hasMore: true })).kind,
+        "flatTail",
+      );
+      assert.equal(mod.starNote(summary(mod, quiet, parked)).kind, "offline");
+      // No stars yet still says so.
+      const zero = pagesOf(fill(60, 0), 0).slice(0, 1);
+      assert.equal(mod.starNote(summary(mod, zero, parked)).kind, "noStars");
+      // The card state parks a page only while one is wanted: All time, or a
+      // window short of 52 weeks, with pages owed.
+      const note = (pages, over, allTime) =>
+        mod.starNote(
+          mod.starCardState(
+            readOf(pages, { isPaused: true, ...over }),
+            allTime,
+            false,
+            false,
+          ).summary,
+        ).kind;
+      const full = pagesOf(MATURE_60, 50);
+      assert.equal(note(page1, { hasNextPage: true }, false), "offline");
+      assert.equal(
+        note(full.slice(0, 2), { hasNextPage: true }, true),
+        "offline",
+      );
+      assert.equal(
+        note(full.slice(0, 2), { hasNextPage: true }, false),
+        "none",
+      );
+      assert.equal(note(full, { hasNextPage: false }, true), "none");
+      assert.equal(
+        note(full.slice(0, 2), { hasNextPage: true, isPaused: false }, true),
+        "none",
+      );
+    },
+    "card state: the partial line's Retry holds while the read fetches": () => {
+      const failed = { hasNextPage: true, isError: true };
+      const state = (pages, over) =>
+        mod.starCardState(
+          readOf(pages, { ...failed, ...over }),
+          false,
+          false,
+          false,
+        );
+      const page1 = pagesOf(MATURE_60, 50).slice(0, 1);
+      assert.equal(state(page1, { isFetching: true }).retryHeld, true);
+      assert.equal(state(page1, { isFetching: false }).retryHeld, false);
+      // No partial line, nothing to hold.
+      const full = state(pagesOf(MATURE_60, 50).slice(0, 2), {
+        isFetching: true,
+      });
+      assert.equal(full.partialLine, null);
+      assert.equal(full.retryHeld, false);
+    },
     "the partial line names the oldest loaded week": () => {
       const s = mod.buildStarSeries(pagesOf(OLD_930, 246).slice(0, 3));
       assert.equal(
@@ -729,16 +856,85 @@ test("a deriver that drops a guard fails the checks", async () => {
       "const last = input.pages[0].lastPage;",
       "const last = input.pages[input.pages.length - 1].lastPage;",
     ),
-    "counter at 0 stars": swap(
-      'if (count === 0) return { kind: "none" };\n  if (input.driving)',
-      "if (input.driving)",
+    "no counter at 0 stars": swap(
+      'return { kind: "none" };\n  if (input.driving) {',
+      'return { kind: "none" };\n  if (starDisplayCount(input) === 0) return { kind: "none" };\n  if (input.driving) {',
+    ),
+    "gains mode off": swap(
+      "liveStarCount(input.pages) === null && spanOwed(input)",
+      "false",
+    ),
+    "gains only while pages remain": swap(
+      "liveStarCount(input.pages) === null && spanOwed(input)",
+      "liveStarCount(input.pages) === null && input.hasMore",
+    ),
+    "no gain in gains mode": swap(
+      'if (input.view !== "window") return null;',
+      'if (input.view !== "window" || starMode(input) === "gains") return null;',
+    ),
+    "gains header drops the gain": swap(
+      "gains: (_count, gain) => [gain === 0 ? null : gainText(gain)],",
+      "gains: () => [],",
+    ),
+    "gains header counts": swap(
+      "gains: (_count, gain) => [gain === 0 ? null : gainText(gain)],",
+      "gains: (count, gain) => [String(count), gainText(gain)],",
+    ),
+    "gains axis zoomed": swap(
+      'view === "window" && mode === "cumulative"',
+      'view === "window"',
+    ),
+    "gains caption dropped": swap(
+      'if (starMode(input) === "gains") return gainsCaption(input);',
+      "",
+    ),
+    "gains span undated": swap('input.view === "all" && oldest', "false"),
+    "gains window dated": swap('input.view === "all" && oldest', "oldest"),
+    "gains header says +0": swap(
+      "gain === 0 ? null : gainText(gain)",
+      "gainText(gain)",
+    ),
+    "offline note dropped": swap(
+      "if (input.pageParked) return",
+      "if (false) return",
+    ),
+    "offline over a full window's refresh": swap(
+      "read.isPaused && hasMore && (short || allTime)",
+      "read.isPaused && hasMore",
+    ),
+    "offline with nothing owed": swap(
+      "read.isPaused && hasMore && (short || allTime)",
+      "read.isPaused && (short || allTime)",
+    ),
+    "offline only short of the window": swap(
+      "read.isPaused && hasMore && (short || allTime)",
+      "read.isPaused && hasMore && short",
+    ),
+    "offline over no stars": swap(
+      'if (noStarsYet(input)) return { kind: "noStars", text: NOTE_TEXT.noStars };\n  if (input.pageParked) return { kind: "offline", text: NOTE_TEXT.offline };',
+      'if (input.pageParked) return { kind: "offline", text: NOTE_TEXT.offline };\n  if (noStarsYet(input)) return { kind: "noStars", text: NOTE_TEXT.noStars };',
+    ),
+    "park not carried": swap(
+      "pageParked: read.isPaused && hasMore && (short || allTime)",
+      "pageParked: false",
+    ),
+    "retry never held": swap(
+      "retryHeld: partialLine !== null && read.isFetching",
+      "retryHeld: false",
+    ),
+    "retry held off the line": swap(
+      "retryHeld: partialLine !== null && read.isFetching",
+      "retryHeld: read.isFetching",
     ),
     "gain over a short window": swap(
       "points.length >= STAR_WINDOW_WEEKS ? windowGain(points) : null",
       "windowGain(points)",
     ),
     "gain on All time": swap('if (input.view !== "window") return null;', ""),
-    "count before every page": swap("if (input.hasMore) return null;", ""),
+    "count before every page": swap(
+      'if (starMode(input) === "gains") return null;',
+      "",
+    ),
     "flat tail from 3": swap(
       "STAR_FLAT_TAIL_MIN = 4",
       "STAR_FLAT_TAIL_MIN = 3",
@@ -794,8 +990,8 @@ test("a deriver that drops a guard fails the checks", async () => {
       "input.hasMore",
     ),
     "0 stars said twice": swap(
-      "return noStarsYet(input)\n    ?",
-      "return false\n    ?",
+      "if (noStarsYet(input)) return `",
+      "if (false) return `",
     ),
     "a tick every week": swap(
       "if (label !== previous) ticks.push(week);",

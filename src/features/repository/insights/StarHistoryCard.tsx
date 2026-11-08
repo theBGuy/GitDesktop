@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import type { ReactNode, Ref } from "react";
 import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import {
   type ChartConfig,
@@ -8,13 +8,21 @@ import {
 } from "@/components/ui/chart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DEGRADED_ACTION_CLASS } from "@/features/conversations/remote-section-state";
-import { DataTable } from "./charts";
-import { ChartFigure, Empty, fmt } from "./primitives";
 import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
+import { cn } from "@/lib/utils";
+import { DataTable } from "./charts";
+import { ChartFigure, Empty, fmt, useChartLabel } from "./primitives";
+import {
+  STAR_LOADING_TEXT,
   type StarCardState,
+  type StarMode,
   type StarPoint,
   type StarView,
   starFigcaption,
+  starMode,
   starNote,
   starXAxis,
   starYAxis,
@@ -24,7 +32,52 @@ import {
 
 const starConfig = {
   stars: { label: "Stars", color: "var(--primary)" },
+  total: { label: "New stars", color: "var(--primary)" },
 } satisfies ChartConfig;
+
+/** What each mode plots, tabulates and says on hover. */
+const SERIES: Record<
+  StarMode,
+  {
+    dataKey: "stars" | "total";
+    headers: string[];
+    row: (p: StarPoint) => string[];
+    tooltip: (p: StarPoint) => ReactNode;
+  }
+> = {
+  cumulative: {
+    dataKey: "stars",
+    headers: ["Week", "New stars", "Total"],
+    row: (p) => [weekLabel(p.week), fmt(p.total), fmt(p.stars)],
+    tooltip: (p) => (
+      <>
+        <span className="text-muted-foreground">Stars</span>
+        <span className="font-mono font-medium tabular-nums">
+          {fmt(p.stars)}
+          <span className="font-sans text-muted-foreground">
+            {` · +${fmt(p.total)} that week`}
+          </span>
+        </span>
+      </>
+    ),
+  },
+  gains: {
+    dataKey: "total",
+    headers: ["Week", "New stars"],
+    row: (p) => [weekLabel(p.week), fmt(p.total)],
+    tooltip: (p) => (
+      <>
+        <span className="text-muted-foreground">New stars</span>
+        <span className="font-mono font-medium tabular-nums">
+          +{fmt(p.total)}
+          <span className="font-sans text-muted-foreground">
+            {" that week"}
+          </span>
+        </span>
+      </>
+    ),
+  },
+};
 
 /** The Star history card's body over a loaded first page; the board drives
  *  the pages. `retryRef` is the board's focus rescue for the partial line's
@@ -46,20 +99,17 @@ export function StarHistoryCard({
       <StarChart
         points={visibleStarPoints(state.summary)}
         view={state.summary.view}
+        mode={starMode(state.summary)}
         caption={starFigcaption(state.summary)}
       />
       {state.partialLine !== null && (
         <p className="text-[11px] text-muted-foreground">
           {state.partialLine}{" "}
-          <button
-            ref={retryRef}
-            type="button"
-            aria-label="Retry loading older weeks"
-            onClick={onRetry}
-            className={DEGRADED_ACTION_CLASS}
-          >
-            Retry
-          </button>
+          <StarRetry
+            held={state.retryHeld}
+            onRetry={onRetry}
+            retryRef={retryRef}
+          />
         </p>
       )}
       {note.kind !== "none" && (
@@ -69,39 +119,96 @@ export function StarHistoryCard({
   );
 }
 
-/** The cumulative curve; one point still paints, as a dot. */
+/** The partial line's Retry. Held while its read fetches: it stays focusable
+ *  and mounted (the focus rescue keys on the line), and a press does nothing. */
+function StarRetry({
+  held,
+  onRetry,
+  retryRef,
+}: {
+  held: boolean;
+  onRetry: () => void;
+  retryRef: Ref<HTMLButtonElement>;
+}) {
+  const { blockedReason, reasonId, wrapperTitle, describedBy, nativeProps } =
+    useDisabledReason({
+      disabled: held,
+      reason: STAR_LOADING_TEXT,
+      onClick: onRetry,
+    });
+  return (
+    <span
+      className={cn(blockedReason && "cursor-not-allowed")}
+      title={wrapperTitle}
+    >
+      <button
+        ref={retryRef}
+        type="button"
+        aria-label="Retry loading older weeks"
+        aria-describedby={describedBy}
+        {...nativeProps}
+        className={cn(DEGRADED_ACTION_CLASS, ARIA_DISABLED_CLASS)}
+      >
+        Retry
+      </button>
+      {blockedReason ? (
+        <span id={reasonId} className="sr-only">
+          {blockedReason}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** One tooltip row for a week. The spaces are text, not margins, so the
+ *  row reads as words to assistive tech and in copied text. */
+export function StarTooltipRow({
+  mode,
+  point,
+}: {
+  mode: StarMode;
+  point: StarPoint;
+}) {
+  return (
+    <span className="flex w-full justify-between gap-3">
+      {SERIES[mode].tooltip(point)}
+    </span>
+  );
+}
+
+/** The cumulative curve, or each week's new stars while the count is unknown
+ *  with weeks owed; one point still paints, as a dot. */
 function StarChart({
   points,
   view,
+  mode,
   caption,
 }: {
   points: StarPoint[];
   view: StarView;
+  mode: StarMode;
   caption: string;
 }) {
+  const series = SERIES[mode];
+  const chartLabel = useChartLabel();
   const y = starYAxis(
     view,
-    points.map((p) => p.stars),
+    points.map((p) => p[series.dataKey]),
+    mode,
   );
   const x = starXAxis(points.map((p) => p.week));
   return (
     <ChartFigure
       caption={caption}
       table={
-        <DataTable
-          headers={["Week", "New stars", "Total"]}
-          rows={points.map((p) => [
-            weekLabel(p.week),
-            fmt(p.total),
-            fmt(p.stars),
-          ])}
-        />
+        <DataTable headers={series.headers} rows={points.map(series.row)} />
       }
     >
       <ChartContainer config={starConfig} className="aspect-auto h-40 w-full">
         <AreaChart
           data={points}
           accessibilityLayer
+          aria-label={chartLabel}
           margin={{ left: 4, right: 8 }}
         >
           <CartesianGrid vertical={false} />
@@ -130,31 +237,21 @@ function StarChart({
                   const point = payload?.[0]?.payload as StarPoint | undefined;
                   return point ? weekLabel(point.week) : null;
                 }}
-                formatter={(value, _name, item) => {
+                formatter={(_value, _name, item) => {
                   const point = item?.payload as StarPoint | undefined;
-                  return (
-                    <span className="flex w-full justify-between gap-3">
-                      <span className="text-muted-foreground">Stars</span>
-                      <span className="font-mono font-medium tabular-nums">
-                        {fmt(Number(value))}
-                        {typeof point?.total === "number" && (
-                          <span className="ml-1 font-sans text-muted-foreground">
-                            · +{fmt(point.total)} that week
-                          </span>
-                        )}
-                      </span>
-                    </span>
-                  );
+                  return point ? (
+                    <StarTooltipRow mode={mode} point={point} />
+                  ) : null;
                 }}
               />
             }
           />
           <Area
-            dataKey="stars"
+            dataKey={series.dataKey}
             type="monotone"
-            fill="var(--color-stars)"
+            fill={`var(--color-${series.dataKey})`}
             fillOpacity={0.2}
-            stroke="var(--color-stars)"
+            stroke={`var(--color-${series.dataKey})`}
             dot={points.length === 1}
           />
         </AreaChart>

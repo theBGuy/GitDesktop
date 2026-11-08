@@ -248,6 +248,25 @@
   overflow-wrap: anywhere;
 }
 
+/* The close button's hover and focus in app tokens: sonner's own rules paint
+   its neutral grays in both themes. The toaster and theme attributes outrank
+   sonner's hover selectors, whichever stylesheet loads last. */
+[data-sonner-toaster][data-sonner-theme]
+  .cn-toast[data-sonner-toast][data-styled="true"]
+  [data-close-button]:hover {
+  background: var(--accent);
+  border-color: var(--border);
+  color: var(--accent-foreground);
+}
+
+[data-sonner-toaster][data-sonner-theme]
+  .cn-toast[data-sonner-toast][data-styled="true"]
+  [data-close-button]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+  box-shadow: none;
+}
+
 /* Toasts lift above a docked action bar (src/lib/toast-clearance.ts) by moving
    the toaster's bottom offset; easing it moves every toast together. The
    shorthand restates sonner's own toaster transform transition, which it would

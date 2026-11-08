@@ -176,13 +176,15 @@ function labelledAxis(domain: [number, number], ticks: number[]): StarYAxis {
   return { domain, ticks, format, width: Math.max(44, 8 + 7 * longest) };
 }
 
-/** The window spans its values' own range; All time starts at 0, and a
- *  history with no stars pads to [0, 1] as the window's flat guard does. */
+/** The window's running total spans its values' own range; All time and the
+ *  weekly gains start at 0, and a series with no stars pads to [0, 1] as the
+ *  window's flat guard does. */
 export function starYAxis(
   view: StarView,
   values: readonly number[],
+  mode: StarMode = "cumulative",
 ): StarYAxis {
-  if (view === "window") {
+  if (view === "window" && mode === "cumulative") {
     const { domain, ticks } = windowAxis(values);
     return labelledAxis(domain, ticks);
   }
@@ -231,6 +233,22 @@ export interface StarSummaryInput {
   view: StarView;
   /** All time is loading older weeks right now. */
   driving: boolean;
+  /** A page is wanted (All time, or a window short of 52 weeks) and the
+   *  read is parked offline. */
+  pageParked: boolean;
+}
+
+/** How the series reads: a running total, or each week's new stars. */
+export type StarMode = "cumulative" | "gains";
+
+/** Without page 1's count, a span with older weeks owed has no baseline, so a
+ *  running total from 0 would understate every week: it shows gains instead. */
+export function starMode(
+  input: Pick<StarSummaryInput, "pages" | "hasMore">,
+): StarMode {
+  return liveStarCount(input.pages) === null && spanOwed(input)
+    ? "gains"
+    : "cumulative";
 }
 
 /** The points the card draws for `input.view`. */
@@ -245,14 +263,15 @@ export function visibleStarPoints(input: StarSummaryInput): StarPoint[] {
 export function starDisplayCount(input: StarSummaryInput): number | null {
   const live = liveStarCount(input.pages);
   if (live !== null) return live;
-  if (input.hasMore) return null;
+  if (starMode(input) === "gains") return null;
   const { points, baseline } = input.series;
   return points.length > 0 ? points[points.length - 1].stars : baseline;
 }
 
 /** The window's gain, only while the window is drawn and holds a full 52 loaded
  *  weeks: a partial window would understate it, and a history shorter than the
- *  window gained everything in it, which the count already says. */
+ *  window gained everything in it, which the count already says. A sum of
+ *  weekly gains, so it holds without a count. */
 function shownWindowGain(input: StarSummaryInput): number | null {
   if (input.view !== "window") return null;
   const { points } = input.series;
@@ -266,7 +285,7 @@ function answered(input: StarSummaryInput): boolean {
 /** Older weeks exist that aren't loaded: pages remain, or (defense in depth,
  *  since the backend refuses such a page) the last page names a next page
  *  the read won't follow. */
-function spanOwed(input: StarSummaryInput): boolean {
+function spanOwed(input: Pick<StarSummaryInput, "pages" | "hasMore">): boolean {
   const tail = input.pages[input.pages.length - 1];
   return input.hasMore || (tail !== undefined && tail.nextPage !== null);
 }
@@ -289,32 +308,51 @@ export type StarHeaderSlot =
   | { kind: "counter"; loaded: number; of: number | null; text: string }
   | { kind: "stats"; count: number | null; gain: number | null; text: string };
 
-/** The card's header slot. Nothing before an answer, for an unavailable
- *  history, or at 0 stars; the page counter while All time loads (page 1's
+/** The header counter's copy while the page total is unknown; also the
+ *  in-card Retry's hold reason while its read is fetching. */
+export const STAR_LOADING_TEXT = "Loading older weeks…";
+
+/** The card's header slot. Nothing before an answer or for an unavailable
+ *  history; the page counter while All time loads, at 0 stars too (page 1's
  *  `lastPage` is the only page total, so a later page's never stands in);
  *  otherwise the count, plus the window's gain while the window is drawn. */
 export function starHeaderSlot(input: StarSummaryInput): StarHeaderSlot {
   if (!answered(input)) return { kind: "none" };
-  const count = starDisplayCount(input);
-  if (count === 0) return { kind: "none" };
   if (input.driving) {
     const loaded = input.pages.length;
     const last = input.pages[0].lastPage;
     const of = isCount(last) && last > loaded ? last : null;
     const text =
       of === null
-        ? "Loading older weeks…"
+        ? STAR_LOADING_TEXT
         : `Loading older weeks · ${loaded.toLocaleString()} of ${of.toLocaleString()}`;
     return { kind: "counter", loaded, of, text };
   }
+  const count = starDisplayCount(input);
+  if (count === 0) return { kind: "none" };
   const gain = shownWindowGain(input);
-  const parts = [
-    count === null ? null : starsText(count),
-    gain === null ? null : `+${gain.toLocaleString()} in 52 weeks`,
-  ].filter((p) => p !== null);
+  const parts = HEADER_STATS[starMode(input)](count, gain).filter(
+    (p) => p !== null,
+  );
   if (parts.length === 0) return { kind: "none" };
   return { kind: "stats", count, gain, text: parts.join(" · ") };
 }
+
+const gainText = (gain: number | null) =>
+  gain === null ? null : `+${gain.toLocaleString()} in 52 weeks`;
+
+/** The header's stats per mode: gains carry no count, only the window's
+ *  gain, and none at 0, which the quiet-tail note covers. */
+const HEADER_STATS: Record<
+  StarMode,
+  (count: number | null, gain: number | null) => (string | null)[]
+> = {
+  cumulative: (count, gain) => [
+    count === null ? null : starsText(count),
+    gainText(gain),
+  ],
+  gains: (_count, gain) => [gain === 0 ? null : gainText(gain)],
+};
 
 const FIGCAPTION_LEAD = "Today's stargazers by the week they starred";
 
@@ -349,29 +387,47 @@ const FIGCAPTION: Record<StarView, (input: StarSummaryInput) => string> = {
 /** The figure's caption for what it draws; the count and gain follow the
  *  header's rules. With no stars yet it is the lead alone. */
 export function starFigcaption(input: StarSummaryInput): string {
-  return noStarsYet(input)
-    ? `${FIGCAPTION_LEAD}.`
-    : FIGCAPTION[input.view](input);
+  if (noStarsYet(input)) return `${FIGCAPTION_LEAD}.`;
+  if (starMode(input) === "gains") return gainsCaption(input);
+  return FIGCAPTION[input.view](input);
+}
+
+/** Gains carry no count. Gains mode always owes weeks, so its All-time span
+ *  dates them, as the running total's owed caption does. */
+function gainsCaption(input: StarSummaryInput): string {
+  const lead = `${FIGCAPTION_LEAD}, as new stars per week`;
+  const oldest = input.series.points[0];
+  return input.view === "all" && oldest
+    ? `${lead}; showing weeks since ${monthYearLabel(oldest.week)}.`
+    : `${lead}.`;
 }
 
 export type StarNote =
   | { kind: "none" }
   | { kind: "unavailable"; text: string }
   | { kind: "noStars"; text: string }
+  | { kind: "offline"; text: string }
   | { kind: "flatTail"; weeks: number; text: string };
 
 const NOTE_TEXT = {
   unavailable: "Star history isn't available for this repository.",
   noStars: "No stars yet.",
-} as const;
+  offline: "You're offline — older weeks will load once you're back online.",
+} as const satisfies Record<
+  Exclude<StarNote["kind"], "none" | "flatTail">,
+  string
+>;
 
-/** The note line under the figure, from a read that answered so. A trailing
- *  zero run counts the newest week, which is still in progress. */
+/** The note line under the figure, from a read that answered so; one line,
+ *  in precedence unavailable, no stars, offline, quiet tail. The partial line
+ *  never meets the offline one: a parked read isn't partial. A trailing zero
+ *  run counts the newest week, which is still in progress. */
 export function starNote(input: StarSummaryInput): StarNote {
   if (input.pages.length === 0) return { kind: "none" };
   if (!answered(input))
     return { kind: "unavailable", text: NOTE_TEXT.unavailable };
   if (noStarsYet(input)) return { kind: "noStars", text: NOTE_TEXT.noStars };
+  if (input.pageParked) return { kind: "offline", text: NOTE_TEXT.offline };
   const weeks = trailingZeroWeeks(visibleStarPoints(input));
   return weeks >= STAR_FLAT_TAIL_MIN
     ? {
@@ -397,6 +453,7 @@ export interface StarReadInput {
   hasNextPage: boolean;
   isError: boolean;
   isPaused: boolean;
+  isFetching: boolean;
 }
 
 export interface StarCardState {
@@ -408,6 +465,9 @@ export interface StarCardState {
   /** The partial line, while the failure leaves out weeks the view would draw:
    *  All time's span, or a window short of 52 weeks. Its Retry shows with it. */
   partialLine: string | null;
+  /** The partial line's Retry holds while the read fetches: a press already
+   *  started the walk it would join. */
+  retryHeld: boolean;
   /** The window's first draw still waits on pages, so the card holds a
    *  skeleton rather than drawing a page and then reflowing. */
   awaitingWindow: boolean;
@@ -438,13 +498,24 @@ export function starCardState(
   const driving = allTime && hasMore && settled;
   const awaitingWindow =
     view === "window" && short && hasMore && settled && !windowDrawn;
+  const partialLine =
+    partial && (view === "all" || short)
+      ? starPartialLine(series.points)
+      : null;
   return {
-    summary: { pages, series, hasMore, view, driving },
+    summary: {
+      pages,
+      series,
+      hasMore,
+      view,
+      driving,
+      // The page the driver would ask for waits on the connection; a parked
+      // refresh of a full window owes nothing it would draw.
+      pageParked: read.isPaused && hasMore && (short || allTime),
+    },
     partial,
-    partialLine:
-      partial && (view === "all" || short)
-        ? starPartialLine(series.points)
-        : null,
+    partialLine,
+    retryHeld: partialLine !== null && read.isFetching,
     awaitingWindow,
     stale: driving && !awaitingWindow,
     wantsPage: hasMore && settled && (allTime || short),

@@ -228,6 +228,11 @@ const cardRetry = () =>
 const button = (name: string) => screen.getByRole("button", { name });
 
 const LEAD = "Today's stargazers by the week they starred";
+const GAINS = `${LEAD}, as new stars per week.`;
+const headers = () =>
+  [...card().querySelectorAll("thead th")].map((h) => h.textContent);
+const OFFLINE =
+  "You're offline — older weeks will load once you're back online.";
 const partialLine = (oldestIndex: number) =>
   `Showing since ${monthYearLabel(NEWEST - oldestIndex * WEEK)} — couldn't load older weeks.`;
 
@@ -548,7 +553,32 @@ describe("Star history: a failed older page", () => {
     renderBoard();
     await waitFor(() => expect(cardRetry()).not.toBeNull());
     expect(slot().textContent).toBe("");
-    expect(caption()).toBe(`${LEAD}.`);
+    expect(caption()).toBe(GAINS);
+  });
+});
+
+describe("Star history: an unknown count", () => {
+  it("draws weekly gains while pages are owed, then the running total", async () => {
+    // 13 pages; GitHub sent no count on page 1.
+    fixtures[REPO] = pagesOf(fill(390, 1), null);
+    const user = userEvent.setup();
+    renderBoard();
+    await waitFor(() => expect(tableRows()).toBe(52));
+    expect(pagesCalled()).toEqual([1, 2]);
+    expect(headers()).toEqual(["Week", "New stars"]);
+    expect(caption()).toBe(GAINS);
+    // The window's gain is exact without a count; the count stays out.
+    expect(slot().textContent).toBe("+52 in 52 weeks");
+    expect(card().querySelector("tbody tr")?.textContent).toBe(
+      `${weekLabel(NEWEST - 51 * WEEK)}1`,
+    );
+    await user.click(button("All time"));
+    await waitFor(() => expect(slot().textContent).toBe("390 stars"));
+    expect(headers()).toEqual(["Week", "New stars", "Total"]);
+    expect(tableRows()).toBe(390);
+    expect(caption()).toBe(
+      `${LEAD}. 390 stars since ${monthYearLabel(NEWEST - 389 * WEEK)}.`,
+    );
   });
 });
 
@@ -661,6 +691,58 @@ describe("Star history: copy and gates", () => {
     expect(described && document.getElementById(described)?.textContent).toBe(
       caption(),
     );
+    expect(
+      within(region).getByRole("table", {
+        name: "Star history data",
+        hidden: true,
+      }),
+    ).toBeTruthy();
+  });
+
+  it("names the chart surface by the card title", async () => {
+    // jsdom lays nothing out, and Recharts draws no surface at a zero size.
+    const size = { x: 0, y: 0, top: 0, left: 0, width: 320, height: 160 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      ...size,
+      right: 320,
+      bottom: 160,
+      toJSON: () => size,
+    });
+    try {
+      renderBoard();
+      await waitFor(() => expect(caption()).not.toBeNull());
+      expect(
+        within(card()).getByRole("application", {
+          name: "Star history chart",
+        }),
+      ).toBeTruthy();
+    } finally {
+      vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockRestore();
+    }
+  });
+
+  it("an old 0-star repo counts its pages while All time loads", async () => {
+    fixtures[REPO] = pagesOf(fill(150, 0), 0);
+    holdFor.add(REPO);
+    const user = userEvent.setup();
+    renderBoard();
+    await waitFor(() => expect(pagesCalled()).toEqual([1]));
+    await release(1);
+    await waitFor(() => expect(pagesCalled()).toEqual([1, 2]));
+    await release(2);
+    await waitFor(() => expect(tableRows()).toBe(52));
+    expect(slot().textContent).toBe("");
+    await user.click(button("All time"));
+    await waitFor(() =>
+      expect(slot().textContent).toBe("Loading older weeks · 2 of 5"),
+    );
+    for (const page of [3, 4, 5]) {
+      await waitFor(() => expect(pagesCalled()).toContain(page));
+      await release(page);
+    }
+    await waitFor(() => expect(tableRows()).toBe(150));
+    expect(slot().textContent).toBe("");
+    expect(within(card()).getByText("No stars yet.")).toBeTruthy();
   });
 
   it("names a quiet tail of 4 weeks or more", async () => {
@@ -841,12 +923,43 @@ describe("Star history: across refreshes, switches and reconnects", () => {
     await release(1);
     await waitFor(() => expect(tableRows()).toBe(30));
     expect(pagesCalled()).toEqual([1]);
+    expect(within(card()).getByText(OFFLINE)).toBeTruthy();
     act(() => onlineManager.setOnline(true));
     await waitFor(() => expect(pagesCalled()).toEqual([1, 2]));
     expect(cardBodyEl().querySelector('[data-slot="skeleton"]')).toBeNull();
     expect(tableRows()).toBe(30);
+    expect(within(card()).queryByText(OFFLINE)).toBeNull();
     await release(2);
     await waitFor(() => expect(tableRows()).toBe(52));
+  });
+
+  it("All time parked over a full window says it waits for the connection", async () => {
+    const user = userEvent.setup();
+    renderBoard();
+    await waitFor(() => expect(tableRows()).toBe(52));
+    act(() => onlineManager.setOnline(false));
+    await user.click(button("All time"));
+    await flush();
+    expect(pagesCalled()).toEqual([1, 2]);
+    expect(tableRows()).toBe(52);
+    expect(within(card()).getByText(OFFLINE)).toBeTruthy();
+    act(() => onlineManager.setOnline(true));
+    await waitFor(() => expect(tableRows()).toBe(150));
+    expect(within(card()).queryByText(OFFLINE)).toBeNull();
+  });
+
+  it("a refresh parked over a full window says nothing of the connection", async () => {
+    const { client } = renderBoard();
+    await waitFor(() => expect(tableRows()).toBe(52));
+    act(() => onlineManager.setOnline(false));
+    act(() => {
+      void client.refetchQueries({ queryKey: KEY });
+    });
+    await flush();
+    expect(
+      client.getQueryCache().find({ queryKey: KEY })?.state.fetchStatus,
+    ).toBe("paused");
+    expect(within(card()).queryByText(OFFLINE)).toBeNull();
   });
 
   it("a read that lost its data waits for 52 weeks again", async () => {
@@ -865,7 +978,9 @@ describe("Star history: across refreshes, switches and reconnects", () => {
     await waitFor(() => expect(tableRows()).toBe(52));
   });
 
-  it("a second Retry press joins the refresh in flight", async () => {
+  // The second press lands on the held Retry (star-history-card.test.tsx pins
+  // that it calls nothing); this pins the board end: no second walk starts.
+  it("a second Retry press starts no second walk", async () => {
     const user = userEvent.setup();
     const { client } = renderBoard();
     await waitFor(() => expect(caption()).not.toBeNull());
@@ -883,6 +998,41 @@ describe("Star history: across refreshes, switches and reconnects", () => {
     expect(pagesCalled()).toEqual([1, 2, 1, 1]);
     await release(1);
     await waitFor(() => expect(pagesCalled()).toEqual([1, 2, 1, 1, 2]));
+  });
+
+  it("holds the in-card Retry while its walk runs, focusable and inert to presses", async () => {
+    const user = userEvent.setup();
+    const { client } = renderBoard();
+    await waitFor(() => expect(caption()).not.toBeNull());
+    failures = [{ repo: REPO, page: 1, attempt: 2, error: TRANSPORT }];
+    await act(() => client.refetchQueries({ queryKey: KEY }));
+    await user.click(button("All time"));
+    await waitFor(() => expect(cardRetry()).not.toBeNull());
+    const retry = cardRetry();
+    if (!retry) throw new Error("no in-card Retry");
+    expect(retry.hasAttribute("aria-disabled")).toBe(false);
+    holdFor.add(REPO);
+    await user.click(retry);
+    await waitFor(() =>
+      expect(retry.getAttribute("aria-disabled")).toBe("true"),
+    );
+    expect(cardRetry()).toBe(retry);
+    expect(document.activeElement).toBe(retry);
+    const reason = retry.getAttribute("aria-describedby");
+    expect(reason && document.getElementById(reason)?.textContent).toBe(
+      "Loading older weeks…",
+    );
+    // A held press calls nothing (pinned in star-history-card.test.tsx);
+    // here only that no page call follows.
+    await user.keyboard("{Enter}");
+    retry.click();
+    await flush();
+    expect(pagesCalled()).toEqual([1, 2, 1, 1]);
+    await release(1);
+    await waitFor(() => expect(pagesCalled()).toEqual([1, 2, 1, 1, 2]));
+    await release(2);
+    await waitFor(() => expect(cardRetry()).toBeNull());
+    expect(document.activeElement).toBe(slot());
   });
 
   it("names the empty header host for the focus it may take", async () => {
