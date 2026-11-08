@@ -51,6 +51,7 @@ const ADOPTED = new Set([
   "src/lib/conversation-filters/store.ts",
   "src/lib/issues/local.ts",
   "src/lib/jira/store.ts",
+  "src/lib/last-checkout/store.ts",
   "src/lib/notifications/overrides.ts",
   "src/lib/pulls/local.ts",
   "src/lib/pulls/review-drafts.ts",

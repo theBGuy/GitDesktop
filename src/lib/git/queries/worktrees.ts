@@ -50,6 +50,30 @@ export function useUserWorktrees(repo: string, enabled = true) {
   });
 }
 
+/** The same list read WITHOUT the backend's prune-first, for surfaces that only
+ *  paint (a recents row hint): rendering must never unlink an unlocked worktree
+ *  on a disconnected drive. Keyed under {@link worktreeKey} so every invalidation
+ *  of the pruned list reaches it too; git still flags a deleted worktree
+ *  prunable, and the backend filters it out of this read as well. */
+export function userWorktreesPeekOptions(repo: string) {
+  return {
+    queryKey: [...worktreeKey(repo), "no-prune"] as const,
+    queryFn: () => listUserWorktrees(repo, { prune: false }),
+    networkMode: "always" as const,
+    gcTime: REPO_SHELL_GC_TIME,
+  };
+}
+
+/** {@link userWorktreesPeekOptions} as a hook, under the same staleTime as
+ *  {@link useUserWorktrees}. */
+export function useUserWorktreesPeek(repo: string, enabled = true) {
+  return useQuery({
+    ...userWorktreesPeekOptions(repo),
+    enabled: enabled && Boolean(repo),
+    staleTime: USER_WORKTREES_STALE_TIME,
+  });
+}
+
 /** Creates a user worktree. Invalidates the worktree list, branches and their
  *  divergence (a new branch may have been created). */
 export function useAddUserWorktree(repo: string) {

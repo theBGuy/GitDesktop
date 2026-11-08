@@ -1133,6 +1133,21 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
 - **Repair links** (footer) re-connects worktrees if you moved or renamed the repository
   folder in your file manager, which otherwise breaks the path each worktree records.
 
+A repository you leave from one of its linked worktrees reopens in that worktree:
+pick it from the welcome screen's **Repositories** list, the header's repository
+switcher, or *File → Open Recent* on macOS and you land back where you were.
+Leaving from the main workspace is remembered the same way, and GitDesktop keeps
+track across restarts. A row that will reopen a worktree shows that worktree's
+folder name with a tree icon under its path; hover it for the way back to main.
+{{key:shift}}-click the row or press {{key:shift+enter}} to open the main
+workspace instead, or {{secondaryclick}} it for **Open in main workspace**, which
+heads the menu; {{key:shift+f10}} or the Menu key opens that menu on the
+highlighted row. If the worktree has been removed or can't be opened, the main
+workspace opens. The row of the repository you're already in still opens its
+main workspace, and opening a repository any other way (the folder picker,
+dropping a folder on the window, a submodule, cloning, My work, picking a
+worktree) goes where you chose.
+
 A branch can only be checked out in one worktree at a time, so the list excludes branches
 already in use. The **branch switcher** knows this too, and every branch appears there
 exactly once: a branch that's checked out in another folder is badged with where it lives

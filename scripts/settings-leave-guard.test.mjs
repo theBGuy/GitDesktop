@@ -1616,7 +1616,7 @@ test("repo_opened is tracked when the open lands", () => {
     repoOpenedProblems,
     source(OPEN_BY_PATH),
     once(
-      '    ) =>\n      openRecorded(info, stillCurrent, {\n        onApplied: () => track({ name: "repo_opened", properties: { source } }),\n      }),\n',
+      '    ) =>\n      openRecorded(info, stillCurrent, {\n        ...opts,\n        onApplied: () => track({ name: "repo_opened", properties: { source } }),\n      }),\n',
       '    ) => {\n      const opened = await openRecorded(info, stillCurrent);\n      if (opened) track({ name: "repo_opened", properties: { source } });\n      return opened;\n    },\n',
     ),
     once("      openRepo(info, opts);\n", "      openRepo(info);\n"),

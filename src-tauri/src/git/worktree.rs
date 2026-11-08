@@ -206,21 +206,17 @@ pub(crate) async fn prune_worktrees_if_free(state: &AppState, repo_path: &str) -
 /// clear it otherwise. Git never prunes a *locked* worktree, so one on a
 /// temporarily-disconnected drive is safe if the user locked it. The list read
 /// itself is lock-free, so it still answers while a removal runs.
+///
+/// `prune: Some(false)` skips the prune and its orphan sweep for a passive read (a
+/// row hint painting), so rendering never unlinks an unlocked worktree on a
+/// disconnected drive; absent or `true` keeps the prune-first read.
 #[tauri::command]
 pub async fn git_worktree_list_user(
     app: AppHandle,
     state: State<'_, AppState>,
     repo_path: String,
+    prune: Option<bool>,
 ) -> AppResult<Vec<UserWorktree>> {
-    prune_worktrees_if_free(&state, &repo_path).await;
-    let out = run_git(
-        Some(&repo_path),
-        &["worktree", "list", "--porcelain"],
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
-    let raw = parse_worktree_porcelain(&out.stdout_lossy());
-
     // Authoritative exclusion: the sessions registry's owned worktree paths.
     let session_paths = crate::sessions::session_worktree_paths(&app);
     // Defense-in-depth: anything under the app-data worktrees root.
@@ -229,6 +225,36 @@ pub async fn git_worktree_list_user(
         .app_data_dir()
         .ok()
         .map(|d| normalize_wt_path(&d.join("worktrees").to_string_lossy()));
+    list_user_worktrees_impl(
+        &state,
+        &repo_path,
+        &session_paths,
+        app_data_root.as_deref(),
+        prune.unwrap_or(true),
+    )
+    .await
+}
+
+/// The body of `git_worktree_list_user` with the app-derived exclusions already
+/// resolved. `prune` false never calls `prune_worktrees_if_free`, so neither the
+/// prune nor the orphan sweep it fires runs; the list and filters are shared.
+pub(crate) async fn list_user_worktrees_impl(
+    state: &AppState,
+    repo_path: &str,
+    session_paths: &std::collections::HashSet<String>,
+    app_data_root: Option<&str>,
+    prune: bool,
+) -> AppResult<Vec<UserWorktree>> {
+    if prune {
+        prune_worktrees_if_free(state, repo_path).await;
+    }
+    let out = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let raw = parse_worktree_porcelain(&out.stdout_lossy());
 
     let user = raw
         .into_iter()
@@ -236,9 +262,7 @@ pub async fn git_worktree_list_user(
         .filter(|(_, w)| !w.prunable)
         // The main worktree (index 0) is never a session worktree; keep it
         // unconditionally so the user can always switch back to it.
-        .filter(|(i, w)| {
-            *i == 0 || !is_session_worktree(w, &session_paths, app_data_root.as_deref())
-        })
+        .filter(|(i, w)| *i == 0 || !is_session_worktree(w, session_paths, app_data_root))
         .map(|(i, w)| UserWorktree {
             is_main: i == 0,
             is_detached: w.detached,
@@ -3066,6 +3090,86 @@ prunable gitdir file points to non-existent location
         assert!(
             !registry(&repo_s).await.contains("/stale-wt"),
             "and the stale entry is gone"
+        );
+    }
+
+    /// A passive read (`prune` false) answers what the pruning read answers, with
+    /// the same filters, but leaves a deleted worktree's admin entry in place; the
+    /// default read prunes it. A locked worktree on a missing drive survives both.
+    #[tokio::test]
+    async fn the_user_list_without_prune_keeps_a_stale_admin_entry() {
+        let (base, repo_s) = setup_repo("list-no-prune").await;
+        let add = |dir: &str, branch: &str| {
+            let path = base.path().join(dir).to_string_lossy().into_owned();
+            let repo = repo_s.clone();
+            let branch = branch.to_string();
+            async move {
+                run(&repo, &["worktree", "add", "-b", &branch, &path, "HEAD"]).await;
+                path
+            }
+        };
+        let healthy = add("healthy-wt", "feat-healthy").await;
+        let locked = add("locked-wt", "feat-locked").await;
+        run(
+            &repo_s,
+            &["worktree", "lock", "--reason", "offline", &locked],
+        )
+        .await;
+        // Every compare is canonical, since git records resolved spellings (macOS
+        // `/private/var`, Windows long names); this one resolves before the removal.
+        let locked_key = canonical_wt_path(&locked);
+        std::fs::remove_dir_all(&locked).expect("the drive went away");
+        let stale = add("stale-wt", "feat-stale").await;
+        std::fs::remove_dir_all(&stale).expect("drop the checkout behind git's back");
+        let session = add("session-wt", "feat-session").await;
+        let app_data = base.path().join("app-data").join("worktrees");
+        std::fs::create_dir_all(&app_data).unwrap();
+        let internal = app_data.join("x").to_string_lossy().into_owned();
+        run(
+            &repo_s,
+            &["worktree", "add", "-b", "feat-internal", &internal, "HEAD"],
+        )
+        .await;
+
+        let session_paths: std::collections::HashSet<String> =
+            [canonical_wt_path(&session)].into_iter().collect();
+        let root = canonical_wt_path(&app_data.to_string_lossy());
+        let state = AppState::default();
+        let admin_entry = std::path::Path::new(&repo_s)
+            .join(".git")
+            .join("worktrees")
+            .join("stale-wt");
+
+        let peek = list_user_worktrees_impl(&state, &repo_s, &session_paths, Some(&root), false)
+            .await
+            .expect("the passive read answers");
+        let shown: Vec<(String, bool, bool)> = peek
+            .iter()
+            .map(|w| (canonical_wt_path(&w.path), w.is_main, w.is_locked))
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                (canonical_wt_path(&repo_s), true, false),
+                (canonical_wt_path(&healthy), false, false),
+                (locked_key, false, true),
+            ],
+            "main first; session, app-data and prunable entries filtered"
+        );
+        assert!(admin_entry.exists(), "a passive read prunes nothing");
+        assert!(registry(&repo_s).await.contains("/stale-wt"));
+
+        let pruned = list_user_worktrees_impl(&state, &repo_s, &session_paths, Some(&root), true)
+            .await
+            .expect("the pruning read answers");
+        assert_eq!(pruned, peek, "both reads list the same worktrees");
+        assert!(
+            !admin_entry.exists(),
+            "the default read prunes the stale entry"
+        );
+        assert!(
+            registry(&repo_s).await.contains("/locked-wt"),
+            "git never prunes a locked one"
         );
     }
 

@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback } from "react";
 import { toast } from "sonner";
@@ -7,7 +7,19 @@ import { useResearchStore } from "@/features/research/store";
 import { track } from "@/lib/analytics";
 import { presentError } from "@/lib/error-summary";
 import { validateRepo } from "@/lib/git/api";
+import { normPath } from "@/lib/git/path";
+import { userWorktreesOptions } from "@/lib/git/queries";
+import { repoIdentityStrict } from "@/lib/git/repo-identity";
 import type { RepoInfo } from "@/lib/git/types";
+import {
+  findReopenRecord,
+  type ReopenRecordView,
+  resolveReopenTarget,
+} from "@/lib/last-checkout/resolve";
+import {
+  getLastCheckoutSnapshot,
+  lastCheckoutReady,
+} from "@/lib/last-checkout/store";
 import { queryClient as appQueryClient } from "@/lib/query-client";
 import { migrateRepoData } from "@/lib/repo-data-migration";
 import { scriptsKeys } from "@/lib/scripts/queries";
@@ -63,12 +75,14 @@ registerRepoShellWarmup((root) => {
  *
  * The recents write finishes BEFORE the switch, so the row exists when
  * RepositoryView mounts and its open-time visibility probe persists onto it; a
- * superseded open still records its repo. The write is best-effort, since a
- * settings-write failure must never block opening. Resolves true once the switch
- * was REQUESTED: a dirty Settings may still hold it behind its Unsaved changes
- * prompt, whose Keep editing cancels it, and one with nothing unsaved but a save
- * still writing holds it until the save lands (a failed save, a later move or a
- * newer open drops it).
+ * superseded open still records its repo. A recents redirect records the
+ * clicked main row (`recordAs`) but opens a worktree, whose probe never
+ * refreshes that row's metadata.
+ * The write is best-effort, since a settings-write failure must never block
+ * opening. Resolves true once the switch was REQUESTED: a dirty Settings may
+ * still hold it behind its Unsaved changes prompt, whose Keep editing cancels
+ * it, and one with nothing unsaved but a save still writing holds it until the
+ * save lands (a failed save, a later move or a newer open drops it).
  * Callers whose own awaits are part of the open request (drop, Recents, the
  * folder picker, a submodule opened as a repo) claim before those awaits and
  * pass `stillCurrent`, as {@link useOpenWorktree} claims before its own; a caller
@@ -86,10 +100,15 @@ export function useOpenRecordedRepo() {
       info: RepoInfo,
       stillCurrent: () => boolean = claimRepoOpen(),
       // `onApplied` rides to `openRepo`, firing only when the switch lands.
-      opts?: { onApplied?: () => void },
+      // `recordAs` is the row recents records when it isn't the one opened.
+      {
+        recordAs,
+        ...opts
+      }: { onApplied?: () => void; recordAs?: RepoInfo } = {},
     ): Promise<boolean> => {
       const warmed = warmRepoShell(queryClient, info.root);
-      await addRecent({ path: info.root, name: info.name }).catch(
+      const recorded = recordAs ?? info;
+      await addRecent({ path: recorded.root, name: recorded.name }).catch(
         () => undefined,
       );
       await warmed;
@@ -113,6 +132,9 @@ export function useOpenRecordedRepo() {
  * Keep editing cancels it, and one with nothing unsaved but a save still
  * writing holds it until the save lands (a failed save, a later move or a newer
  * open drops it).
+ * A `source: "recent"` click on a main row reopens the worktree its repo was
+ * last left in, unless `opts.preferMain`, that repo is the open one, or the
+ * worktree no longer checks out; every miss opens main silently.
  * Callers: the shared recents list, macOS File → Open Recent, the folder
  * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
  * repository from the Submodules dialog.
@@ -132,8 +154,10 @@ export function useOpenRepoByPath() {
       info: RepoInfo,
       source: "recent" | "picker" | "relocate",
       stillCurrent: () => boolean,
+      opts?: { recordAs?: RepoInfo },
     ) =>
       openRecorded(info, stillCurrent, {
+        ...opts,
         onApplied: () => track({ name: "repo_opened", properties: { source } }),
       }),
     [openRecorded],
@@ -215,9 +239,42 @@ export function useOpenRepoByPath() {
       // open then fails. A caller with awaits of its own ahead of this call
       // claims before them and passes the claim.
       stillCurrent: () => boolean = claimRepoOpen(),
+      // true = the Shift escape / "Open in main workspace": never redirect.
+      opts?: { preferMain?: boolean },
     ): Promise<boolean> => {
+      // Pinned at the request: every later step compares against the repo that
+      // was open when the user clicked, never wherever the app has moved since.
+      const openPathPinned = useUiStore.getState().repoPath;
       try {
         const info = await validateRepo(path);
+        if (source === "recent" && !opts?.preferMain && stillCurrent()) {
+          // A click before the startup load settles would otherwise miss its
+          // record, open main, and overwrite the record with that landing.
+          await lastCheckoutReady();
+          const record = stillCurrent()
+            ? findReopenRecord(
+                getLastCheckoutSnapshot(),
+                info.root,
+                openPathPinned,
+                Date.now(),
+              )
+            : null;
+          if (record) {
+            const target = await resolveRedirectTarget(
+              queryClient,
+              record,
+              info.root,
+              openPathPinned,
+              stillCurrent,
+            );
+            // A failed redirect falls through and opens the clicked main row;
+            // a superseded one records that row while the claim refuses it.
+            if (target && stillCurrent())
+              return await recordOpenAndTrack(target, source, stillCurrent, {
+                recordAs: info,
+              });
+          }
+        }
         return await recordOpenAndTrack(info, source, stillCurrent);
       } catch (e) {
         if (isAppError(e) && e.kind === "notARepo") {
@@ -253,8 +310,55 @@ export function useOpenRepoByPath() {
         return false;
       }
     },
-    [recordOpenAndTrack, locateAndReopen, removeRecent, recentRepos],
+    [
+      recordOpenAndTrack,
+      locateAndReopen,
+      removeRecent,
+      recentRepos,
+      queryClient,
+    ],
   );
+}
+
+/**
+ * The validated worktree a recents click on `clickedRoot`'s row reopens, or
+ * null for main. Reads the open repo's identity beside a FRESH list (no
+ * staleTime: a removed worktree must show), then requires the candidate to
+ * validate as its own root under the record's identity, since another repo
+ * may live at the remembered path now. Null once `stillCurrent` fails.
+ */
+async function resolveRedirectTarget(
+  queryClient: QueryClient,
+  record: ReopenRecordView,
+  clickedRoot: string,
+  openPathPinned: string | null,
+  stillCurrent: () => boolean,
+): Promise<RepoInfo | null> {
+  const [openIdentity, worktrees] = await Promise.all([
+    openPathPinned === null
+      ? null
+      : repoIdentityStrict(openPathPinned).catch(() => "unresolved" as const),
+    queryClient
+      .fetchQuery({ ...userWorktreesOptions(clickedRoot), retry: false })
+      .catch(() => null),
+  ]);
+  if (!stillCurrent()) return null;
+  const candidate = resolveReopenTarget({
+    clickedRoot,
+    record,
+    preferMain: false,
+    openIdentity,
+    worktrees,
+  });
+  if (candidate === null) return null;
+  const info = await validateRepo(candidate).catch(() => null);
+  if (!stillCurrent() || info === null) return null;
+  if (normPath(info.root) !== normPath(candidate)) return null;
+  // Only a validated root is resolved: a dead folder's raw-path fallback would
+  // settle the session's identity memo for that path.
+  const landed = await repoIdentityStrict(candidate).catch(() => null);
+  if (!stillCurrent() || landed === null) return null;
+  return normPath(landed) === normPath(record.identity) ? info : null;
 }
 
 /**
