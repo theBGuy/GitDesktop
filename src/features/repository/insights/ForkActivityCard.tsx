@@ -86,16 +86,22 @@ function CompareCell({
         pendingFocusRef.current = true;
     }
     if (!pendingFocusRef.current) return;
+    // Every settle spends the pending focus, landed or not, and it lands only on
+    // unclaimed focus: the user may have moved elsewhere during the fetch.
+    const focused = document.activeElement;
+    const unclaimed = focused === null || focused === document.body;
     if (divergence.data) {
       pendingFocusRef.current = false;
-      resultRef.current?.focus();
+      if (unclaimed) resultRef.current?.focus();
     } else if (failed && divergence.errorUpdatedAt) {
       pendingFocusRef.current = false;
-      retryRef.current?.focus();
+      if (unclaimed) retryRef.current?.focus();
     } else if (divergence.isPaused) {
       pendingFocusRef.current = false;
-      offlineHeldRef.current = true;
-      offlineRef.current?.focus();
+      if (unclaimed) {
+        offlineHeldRef.current = true;
+        offlineRef.current?.focus();
+      }
     }
     // errorUpdatedAt: a repeated failure changes neither `data` nor `isError`,
     // and a still-armed flag would let a much-later background success steal focus.

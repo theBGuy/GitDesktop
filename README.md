@@ -877,15 +877,16 @@ repos, with no token or rate limit, and without GitHub's 10k-commit chart
 degradation. Plus the at-a-glance overview (languages, contributors, sizes,
 branch-vs-default), a GitHub Actions success-rate / duration trend, a
 community-health card, 14-day **traffic** (views/clones/referrers/paths,
-with push access), a **dependencies** card, and quick links to the web-only
-GitHub insights (Pulse, network, dependents, Actions metrics, stars over
-time). A **Fork activity** card lists the repo's recently active direct
-forks on **GitHub, GitLab & Bitbucket** (up to ten, most recent first,
-each with its latest activity and stars where it has any), plus the total
-fork count and a link to the full list; on GitHub, a per-fork **Compare**
-fetches ahead/behind counts, so you can see which forks carry commits
-yours doesn't. Charts ship one-line captions, data-table fallbacks, and
-keyboard navigation.
+with push access), a **dependencies** card, a **star history** card
+(the repo's stars week by week, over the last 52 weeks or its whole life),
+quick links to the web-only GitHub insights (Pulse, network, dependents,
+Actions metrics), and a link to star-history.com. A **Fork activity**
+card lists the repo's recently active direct forks on **GitHub, GitLab &
+Bitbucket** (up to ten, most recent first, each with its latest activity
+and stars where it has any), plus the total fork count and a link to the
+full list; on GitHub, a per-fork **Compare** fetches ahead/behind counts,
+so you can see which forks carry commits yours doesn't. Charts ship
+one-line captions, data-table fallbacks, and keyboard navigation.
 
 ### Explore repositories
 

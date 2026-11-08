@@ -29,30 +29,46 @@ const compact = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 });
 
-function DataTable({
+/** Each row's key: `${first cell}` for its first occurrence, then
+ *  `${first cell}#${n}` for the nth. */
+function rowKeys(rows: (string | number)[][]): string[] {
+  const seen = new Map<string, number>();
+  return rows.map((r) => {
+    const first = String(r[0]);
+    const n = (seen.get(first) ?? 0) + 1;
+    seen.set(first, n);
+    return n === 1 ? first : `${first}#${n}`;
+  });
+}
+
+export function DataTable({
   headers,
   rows,
 }: {
   headers: string[];
   rows: (string | number)[][];
 }) {
+  const keys = rowKeys(rows);
   return (
     <table className="w-full border-collapse text-left tabular-nums">
       <thead>
         <tr className="text-muted-foreground">
-          {headers.map((h) => (
-            <th key={h} className="border-b py-1 pr-3 font-medium">
+          {headers.map((h, i) => (
+            <th key={`${h}-${i}`} className="border-b py-1 pr-3 font-medium">
               {h}
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
-          <tr key={String(r[0])}>
+        {rows.map((r, rowIndex) => (
+          // A first cell can repeat (two workflows' run numbers), so a repeat
+          // carries its occurrence; a unique cell keeps its key when rows
+          // prepend (older star pages), so React keeps its row.
+          <tr key={keys[rowIndex]}>
             {r.map((cell, i) => (
               <td
-                key={headers[i] ?? i}
+                key={`${headers[i]}-${i}`}
                 className="border-b border-border/50 py-1 pr-3"
               >
                 {cell}

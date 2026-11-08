@@ -3234,7 +3234,8 @@ Once connected:
   and success-rate chart, a **Fork activity** card listing the repo's recently active
   forks, and a **More on Bitbucket** card that links out to the
   **Commits**, **Branches**, **Pipelines**, and **Deployments** pages (these only render on
-  the web). GitHub-only cards (community, traffic, dependencies) stay hidden.
+  the web). GitHub-only cards (community, traffic, dependencies, star history) stay
+  hidden.
 - **Code Insights** — the **Findings** tab lists the reports published against your
   branch's tip commit, a section each, with their metrics and annotations (see
   *Findings*).
@@ -3276,6 +3277,13 @@ Bitbucket).
 - On GitHub: **community health** (stars, forks, watchers, a health percentage),
   **traffic** (14-day views, clones, and top referrers — needs push access), and
   **dependencies**.
+- **Star history** (GitHub) — a cumulative curve of the repository's stars by the week
+  each current stargazer starred, following the board's **52 weeks** / **All time**
+  toggle. Hover or arrow through the chart for a week's new stars and running total, or
+  open **Show data table**. All time loads the full history page by page, with a counter
+  in the card header while it loads; if a page fails, the card keeps the weeks it loaded,
+  says from when, and offers **Retry**. The tooltip and table label each week by the
+  date it starts ("Week of Nov 1, 2026"), never a time of day.
 - **Fork activity** — the repo's recently active direct forks on GitHub, GitLab, and
   Bitbucket: up to ten, most recent first. Each row links to the fork on its forge and
   shows how recently it has been active and its stars where it has any (Bitbucket has no
@@ -3283,7 +3291,8 @@ Bitbucket).
   the forge. On GitHub, a row's **Compare** fetches that fork's ahead/behind counts on
   demand, so you can see which forks carry commits this repo doesn't.
 - Quick links jump to the pages best viewed on the web — GitHub's Pulse, Network,
-  Dependents, and Actions (the Network graph is where forks of forks live); GitLab's
+  Dependents, and Actions (the Network graph is where forks of forks live), plus
+  star-history.com's chart on github.com; GitLab's
   Activity, CI/CD analytics, and value stream analytics; or Bitbucket's Commits,
   Branches, Pipelines, and Deployments.
 

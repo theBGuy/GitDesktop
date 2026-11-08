@@ -1,4 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import type { StarHistoryPage } from "../api";
 import * as api from "../api";
 import { keepPreviousDataForRepo } from "./core";
 
@@ -162,6 +163,36 @@ export function useRepoDependencies(repo: string, enabled: boolean) {
     queryFn: () => api.ghRepoDependencies(repo),
     enabled,
     staleTime: 30 * 60_000,
+    retry: false,
+  });
+}
+
+/** The repo's star history, one GitHub page (≤30 weeks) per fetch; the card
+ *  drives how many pages load. No window axis in the key: the 52-week view is
+ *  the newest pages of the same series. The long staleTime matches the other
+ *  expensive read, since a refetch re-requests every loaded page in sequence. */
+export function useStarHistory(repo: string, enabled: boolean) {
+  return useInfiniteQuery({
+    queryKey: ["repo", repo, "insights", "starHistory"] as const,
+    queryFn: ({ pageParam }) => api.ghStarHistoryPage(repo, pageParam),
+    initialPageParam: 1,
+    // Only the page after the one just fetched, within the API's 100 pages,
+    // drives another fetch: the backend already refuses any other "next", so
+    // this is defense in depth.
+    getNextPageParam: (last: StarHistoryPage, _pages, lastPageParam) =>
+      last.nextPage !== null &&
+      last.nextPage === lastPageParam + 1 &&
+      last.nextPage <= 100
+        ? last.nextPage
+        : undefined,
+    enabled,
+    // Never stale while in error over loaded pages: the window-focus pass
+    // retries errored reads with a finite staleTime, and each try re-walks
+    // every loaded page to fail at the same one. The Retries recover it.
+    staleTime: (query) =>
+      query.state.status === "error" && query.state.data !== undefined
+        ? Number.POSITIVE_INFINITY
+        : 30 * 60_000,
     retry: false,
   });
 }

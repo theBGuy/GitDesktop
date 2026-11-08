@@ -108,9 +108,9 @@ export function BitbucketLinkOutsCard({ repoPath }: { repoPath: string }) {
 export function LinkOutsSkeleton() {
   return (
     <div aria-hidden className="space-y-2">
-      <p className="text-xs">
+      <div className="text-xs">
         <Skeleton className="inline-block h-[1em] w-48 align-middle" />
-      </p>
+      </div>
       <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
         {[...LINKS.map((l) => l.label), "Stars over time"].map((label) => (
           <Skeleton key={label} className="h-7" />

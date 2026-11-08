@@ -42,9 +42,9 @@ export function PunchCardSkeleton() {
         ))}
         <div className="pt-0.5">&nbsp;</div>
       </div>
-      <p className="text-[11px]">
+      <div className="text-[11px]">
         <Skeleton className="inline-block h-[1em] w-48 align-middle" />
-      </p>
+      </div>
     </div>
   );
 }

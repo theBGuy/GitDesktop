@@ -498,6 +498,11 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
+      "Star history — a GitHub repo's stars week by week, over a year or all time",
+  },
+  {
+    group: "CI, tags & releases",
+    label:
       "Findings tab — GitHub Dependabot/scanning alerts & advisories; GitLab SAST, secrets & code quality; Bitbucket Code Insights",
     highlight: true,
   },

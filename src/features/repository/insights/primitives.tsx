@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { createContext, use, useId } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import type { LanguageStat } from "@/lib/git/types";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -94,15 +94,19 @@ export function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** A bordered card for an Insights board panel. The body is a flex column, so
- *  a `bodyClassName` height holds the card at one size across its loading,
- *  empty and loaded arms; `stale` dims it while a placeholder (another
- *  window's data) stands in. */
+/** The enclosing card's title id, which names the card's chart figures. */
+const CardTitleContext = createContext<string | undefined>(undefined);
+
+/** A bordered card for an Insights board panel, a region named by its title.
+ *  The body is a flex column, so a `bodyClassName` height holds the card at
+ *  one size across its loading, empty and loaded arms; `stale` dims it while a
+ *  placeholder (another window's data) stands in. */
 export function InsightCard({
   title,
   action,
   className,
   bodyClassName,
+  bodyRef,
   stale = false,
   children,
 }: {
@@ -110,19 +114,25 @@ export function InsightCard({
   action?: React.ReactNode;
   className?: string;
   bodyClassName?: string;
+  bodyRef?: React.Ref<HTMLDivElement>;
   stale?: boolean;
   children: React.ReactNode;
 }) {
+  const titleId = useId();
   return (
     <section
+      aria-labelledby={titleId}
       aria-busy={stale || undefined}
       className={cn("space-y-2 border bg-card p-3", className)}
     >
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold">{title}</h3>
+        <h3 id={titleId} className="text-xs font-semibold">
+          {title}
+        </h3>
         {action}
       </div>
       <div
+        ref={bodyRef}
         // A placeholder drives rendering only: the other window's grid, tables
         // and announcements stay out of reach until the data is current.
         inert={stale}
@@ -133,15 +143,16 @@ export function InsightCard({
           bodyClassName,
         )}
       >
-        {children}
+        <CardTitleContext value={titleId}>{children}</CardTitleContext>
       </div>
     </section>
   );
 }
 
 /**
- * Wraps a chart as an accessible `<figure>`: a one-line caption summary and a
- * native `<details>` data-table fallback (the screen-reader path; the Recharts
+ * Wraps a chart as an accessible `<figure>`: named by its card's title (by
+ * its caption outside a card), a one-line caption summary, and a native
+ * `<details>` data-table fallback (the screen-reader path; the Recharts
  * charts also enable `accessibilityLayer` for keyboard point traversal).
  */
 export function ChartFigure({
@@ -154,8 +165,15 @@ export function ChartFigure({
   children: React.ReactNode;
 }) {
   const id = useId();
+  const titleId = use(CardTitleContext);
   return (
-    <figure aria-describedby={id} className="space-y-2">
+    <figure
+      // In a card the title names it and the caption describes it; outside
+      // one the caption names it, so it describes nothing more.
+      aria-labelledby={titleId ?? id}
+      aria-describedby={titleId === undefined ? undefined : id}
+      className="space-y-2"
+    >
       {children}
       <figcaption id={id} className="text-[11px] text-muted-foreground">
         {caption}

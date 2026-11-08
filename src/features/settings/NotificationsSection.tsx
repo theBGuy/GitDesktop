@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelector } from "@tanstack/react-store";
 import { Fragment, useId, useLayoutEffect, useRef, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
@@ -33,6 +33,7 @@ import {
 } from "@/lib/notifications/matrix";
 import type { RepoNotificationOverride } from "@/lib/notifications/overrides";
 import {
+  notificationOverridesKey,
   useClearNotificationOverride,
   useNotificationOverrides,
   useRepoNotificationOverride,
@@ -286,6 +287,11 @@ interface OverrideRow {
   muted: boolean;
 }
 
+interface PendingFocus {
+  target: string;
+  armedFrom: Element | null;
+}
+
 /**
  * The per-repo layer of the same settings: what the open repository does with
  * these defaults, plus every other repository that has been customized. Both
@@ -297,6 +303,7 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   const settings = useSettings();
   const overrides = useNotificationOverrides();
   const clear = useClearNotificationOverride();
+  const queryClient = useQueryClient();
   // No repo open reads as "nothing to claim" all the way down: the identity query
   // is disabled and the override lookup misses, so no branch needs a guard.
   const { data: identity, isError: identityFailed } = useRepoIdentity(repoPath);
@@ -305,10 +312,10 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
   const listRef = useRef<HTMLDivElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
   // Where focus goes once the cleared row is gone: a row key, or "" for the
-  // Customize control when the list emptied. Consumed by the layout effect
-  // below — the rows only exist after the invalidation re-render, which a
-  // handler-side rAF can land ahead of.
-  const pendingFocus = useRef<string | null>(null);
+  // Customize control when the list emptied, plus the element focused when it
+  // was aimed. Consumed by the layout effect below — the rows only exist after
+  // the invalidation re-render, which a handler-side rAF can land ahead of.
+  const pendingFocus = useRef<PendingFocus | null>(null);
 
   const recents = settings.data?.recentRepos ?? [];
   const recentPaths = recents.map((r) => r.path);
@@ -396,12 +403,24 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     otherKeys.length === 0 || !recentIdentities.isPending;
   // biome-ignore lint/correctness/useExhaustiveDependencies: rowSignature is the commit trigger, not a value the body reads
   useLayoutEffect(() => {
-    const target = pendingFocus.current;
+    const aim = pendingFocus.current;
     // RETAINED, never consumed, while the list is between renders: focusing a
     // DOM that isn't there drops focus to body, and this effect gets no second
     // chance once the aim is spent.
-    if (target === null || !focusTargetReachable) return;
+    if (aim === null || !focusTargetReachable) return;
     pendingFocus.current = null;
+    const { target, armedFrom } = aim;
+    // Lands only on unclaimed focus, i.e. focus that hasn't moved since the aim:
+    // a fast write lands while the closing confirm dialog still holds focus, and
+    // its exit then drops focus to body unless focus has left it by then.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active !== armedFrom) {
+      // The user moved during the write: the arrows' cursor follows them.
+      const focusedRow = active.closest("[data-row]");
+      if (focusedRow !== null && listRef.current?.contains(focusedRow))
+        setActiveKey(focusedRow.getAttribute("data-row"));
+      return;
+    }
     const row =
       target === ""
         ? null
@@ -426,10 +445,25 @@ function RepoOverridesBlock({ reason }: { reason: string | null }) {
     // Customize control, so clearing the last row never drops focus to body.
     const index = rows.findIndex((r) => r.key === row.key);
     const next = rows[index + 1] ?? rows[index - 1];
-    pendingFocus.current = next?.key ?? "";
+    const aim: PendingFocus = {
+      target: next?.key ?? "",
+      armedFrom: document.activeElement,
+    };
+    pendingFocus.current = aim;
     setActiveKey(next?.key ?? null);
     try {
       await clear.mutateAsync(row.key);
+      // The settle awaits the re-read, so a key it still holds (a failed
+      // re-read, another window's re-add) means no row commit will spend the
+      // aim, which a later re-render or Activity re-show would otherwise fire.
+      const fresh = queryClient.getQueryData<
+        Record<string, RepoNotificationOverride>
+      >(notificationOverridesKey);
+      if (
+        pendingFocus.current === aim &&
+        (fresh === undefined || Object.hasOwn(fresh, row.key))
+      )
+        pendingFocus.current = null;
     } catch (e) {
       // The row survives a failed clear, so the aimed focus would land on a
       // neighbour the user never asked for.

@@ -1,8 +1,18 @@
-import { type ReactNode, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { presentError } from "@/lib/error-summary";
 import {
@@ -16,6 +26,7 @@ import {
   usePunchCard,
   useRepoDependencies,
   useRepoTraffic,
+  useStarHistory,
 } from "@/lib/git/queries";
 import type { ContributorChurn } from "@/lib/git/types";
 import { useWorkflowRuns } from "@/lib/github/actions";
@@ -45,6 +56,8 @@ import {
 } from "./LinkOutsCard";
 import { PunchCard, PunchCardSkeleton } from "./PunchCard";
 import { Empty, fmt, InsightCard } from "./primitives";
+import { StarHistoryCard } from "./StarHistoryCard";
+import { starCardState, starHeaderSlot, starSpanHeld } from "./star-history";
 import { TrafficCard } from "./TrafficCard";
 
 const WINDOW_WEEKS = 52;
@@ -140,6 +153,7 @@ type CardId =
   | "runs"
   | "forkActivity"
   | "community"
+  | "starHistory"
   | "traffic"
   | "dependencies";
 
@@ -153,6 +167,7 @@ const CARD_NOUN: Record<CardId, string> = {
   runs: "workflow runs",
   forkActivity: "fork activity",
   community: "community insights",
+  starHistory: "star history",
   traffic: "traffic",
   dependencies: "dependencies",
 };
@@ -215,6 +230,13 @@ export function InsightsBoard({
   const [lastErrors, setLastErrors] = useState<CardErrorMemory>({});
   const [retryRepo, setRetryRepo] = useState(repoPath);
   const [previousRepo, setPreviousRepo] = useState<string | null>(null);
+  // The repo whose All-time star span stays drawn while a Retry resumes it
+  // (starSpanHeld); any other repo, or the window, holds none.
+  const [starSpanRepo, setStarSpanRepo] = useState<string | null>(null);
+  // The repo whose star window has drawn, so a resumed page keeps it drawn.
+  const [starWindowRepo, setStarWindowRepo] = useState<string | null>(null);
+  const starBodyRef = useRef<HTMLDivElement>(null);
+  const starHost = useRef<HTMLElement | null>(null);
   const repoChanged = retryRepo !== repoPath;
   if (repoChanged) {
     setRetryRepo(repoPath);
@@ -259,6 +281,7 @@ export function InsightsBoard({
   const community = useCommunityInsights(repoPath, canGhOnly);
   const traffic = useRepoTraffic(repoPath, canGhOnly);
   const dependencies = useRepoDependencies(repoPath, canGhOnly);
+  const starHistory = useStarHistory(repoPath, canGhOnly);
   const forkActivity = useForkActivity(repoPath, canForks);
   const runs = useWorkflowRuns(repoPath, canGh, active);
 
@@ -283,6 +306,95 @@ export function InsightsBoard({
     ...CARD_NOUN,
     runs: isGitLab || isBitbucket ? "pipelines" : CARD_NOUN.runs,
   };
+
+  const starRead: CardRead = {
+    data: starHistory.data,
+    error: starHistory.error,
+    isError: starHistory.isError,
+    isPaused: starHistory.isPaused,
+    isFetching: starHistory.isFetching,
+    isPlaceholderData: starHistory.isPlaceholderData,
+    errorUpdatedAt: starHistory.errorUpdatedAt,
+    dataUpdatedAt: starHistory.dataUpdatedAt,
+    // Both Retries: a failed older page resumes where it failed; only a failed
+    // first page or refresh re-requests every loaded page. Both join a fetch
+    // in flight, so a repeat press never restarts the walk.
+    refetch: () =>
+      starHistory.isFetchNextPageError
+        ? starHistory.fetchNextPage({ cancelRefetch: false })
+        : starHistory.refetch({ cancelRefetch: false }),
+  };
+  // The star slot's gate, which its Retry rescue reads too.
+  const starSlotGate = canGhOnly || forgeDetecting;
+  const starShown = starSlotGate && cardBody(starRead, isRetrying) === "data";
+  const starSpanHere = starSpanRepo === repoPath;
+  const star = starCardState(
+    {
+      data: starHistory.data,
+      hasNextPage: starHistory.hasNextPage,
+      isError: starHistory.isError,
+      isPaused: starHistory.isPaused,
+    },
+    allTime,
+    starSpanHere,
+    starWindowRepo === repoPath,
+  );
+  const starSpanNext = starSpanHeld(
+    allTime,
+    starHistory.hasNextPage,
+    star.partial,
+    starSpanHere,
+  )
+    ? repoPath
+    : null;
+  if (starSpanNext !== starSpanRepo) setStarSpanRepo(starSpanNext);
+  if (
+    starShown &&
+    star.summary.view === "window" &&
+    !star.awaitingWindow &&
+    starWindowRepo !== repoPath
+  )
+    setStarWindowRepo(repoPath);
+  // A read that lost its data (collected, or a cold reload) loads afresh, so
+  // its first window waits for 52 weeks again.
+  if (starHistory.data === undefined && starWindowRepo === repoPath)
+    setStarWindowRepo(null);
+  // The page driver lives here, declared after useStarHistory: the hook moves
+  // its observer to a switched repo in an effect, which must run first, or a
+  // returning repo's page goes to the old one. Hidden tabs defer it; it never
+  // awaits, and `cancelRefetch: false` joins a page already in flight. Keyed
+  // on the repo and the pages loaded, so each landed page asks for the next
+  // even when a batched render never showed the fetch in flight.
+  const starDriveFor =
+    starShown && star.wantsPage && !starHistory.isFetching
+      ? `${repoPath}#${star.summary.pages.length}`
+      : null;
+  const { fetchNextPage: fetchStarPage } = starHistory;
+  useEffect(() => {
+    if (starDriveFor !== null) void fetchStarPage({ cancelRefetch: false });
+  }, [starDriveFor, fetchStarPage]);
+  const starRescue = useRetryFocusRescue(
+    starShown && star.partialLine !== null,
+  );
+  const { hostRef: rescueHostRef } = starRescue;
+  const starHostRef = useCallback(
+    (node: HTMLElement | null) => {
+      rescueHostRef(node);
+      starHost.current = node;
+    },
+    [rescueHostRef],
+  );
+  // A drive that starts with no press (a reconnect, a background refresh)
+  // turns the body inert under focus: move it to the header host while it is
+  // still inside the body, before the browser drops it to <body>.
+  const starInert = starShown && star.stale;
+  useLayoutEffect(() => {
+    if (!starInert) return;
+    const active = document.activeElement;
+    if (active !== null && starBodyRef.current?.contains(active))
+      starHost.current?.focus({ preventScroll: true });
+  }, [starInert]);
+  const starSlot = starHeaderSlot(star.summary);
   // The cards on screen with a read of their own, in board order: the notice
   // quotes the first failure in this order.
   const cardReads: (readonly [CardId, CardRead])[] = [
@@ -297,6 +409,7 @@ export function InsightsBoard({
     ...(canGhOnly
       ? ([
           ["community", community],
+          ["starHistory", starRead],
           ["traffic", traffic],
           ["dependencies", dependencies],
         ] as const)
@@ -531,6 +644,46 @@ export function InsightsBoard({
                 )
               ) : (
                 <CommunityCard data={community.data} />
+              )}
+            </InsightCard>
+          )}
+
+          {starSlotGate && (
+            <InsightCard
+              title="Star history"
+              bodyClassName={CARD_BODY.chart}
+              stale={starInert}
+              bodyRef={starBodyRef}
+              action={
+                // Always mounted, outside the dimmed body: where focus lands
+                // when the partial line's Retry leaves, or the body goes inert.
+                <span
+                  ref={starHostRef}
+                  tabIndex={-1}
+                  // Named while empty, so focus rescued here announces the card.
+                  aria-label={
+                    starSlot.kind === "none" ? "Star history" : undefined
+                  }
+                  className="text-[11px] text-muted-foreground tabular-nums outline-none"
+                >
+                  {starSlot.kind === "none" ? null : starSlot.text}
+                </span>
+              }
+            >
+              {starHistory.data === undefined || !starShown ? (
+                unloadedCard(
+                  starRead,
+                  isRetrying,
+                  noun.starHistory,
+                  <ChartSkeleton />,
+                )
+              ) : (
+                <StarHistoryCard
+                  key={repoPath}
+                  state={star}
+                  onRetry={() => void starRead.refetch()}
+                  retryRef={starRescue.retryRef}
+                />
               )}
             </InsightCard>
           )}
