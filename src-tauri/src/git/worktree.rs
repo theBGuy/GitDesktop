@@ -238,7 +238,7 @@ pub async fn git_worktree_list_user(
 /// The body of `git_worktree_list_user` with the app-derived exclusions already
 /// resolved. `prune` false never calls `prune_worktrees_if_free`, so neither the
 /// prune nor the orphan sweep it fires runs; the list and filters are shared.
-pub(crate) async fn list_user_worktrees_impl(
+async fn list_user_worktrees_impl(
     state: &AppState,
     repo_path: &str,
     session_paths: &std::collections::HashSet<String>,

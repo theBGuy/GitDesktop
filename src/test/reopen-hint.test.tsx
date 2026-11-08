@@ -1,7 +1,8 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IDENTITY_TTL_MS } from "@/lib/git/repo-identity";
 import type { UserWorktree } from "@/lib/git/worktree";
 import { useReopenHint } from "@/lib/last-checkout/hint";
 import type { LastCheckoutEntry } from "@/lib/last-checkout/store";
@@ -15,6 +16,9 @@ const h = vi.hoisted(() => ({
   list: vi.fn<
     (repo: string, opts?: { prune?: boolean }) => Promise<UserWorktree[]>
   >(),
+  hung: [] as ((e: Error) => void)[],
+  // The identity memo per EXACT key, with each answer's age.
+  memo: new Map<string, { identity: string; ageMs: number }>(),
 }));
 
 vi.mock("@/lib/last-checkout/store", () => ({
@@ -26,6 +30,17 @@ vi.mock("@/lib/last-checkout/store", () => ({
       h.listeners.delete(listener);
     };
   },
+}));
+vi.mock("@/lib/git/identity-memo", () => ({
+  ttlMemo: () => ({
+    get: () =>
+      Promise.reject(new Error("the memo's resolve is not under test")),
+    peek: (key: string) => h.memo.get(key)?.identity,
+    within: (key: string, maxAgeMs: number) => {
+      const hit = h.memo.get(key);
+      return hit && hit.ageMs < maxAgeMs ? hit.identity : undefined;
+    },
+  }),
 }));
 vi.mock("@/lib/git/worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/worktree")>()),
@@ -87,10 +102,22 @@ const idle: Props = { rowPath: MAIN, currentPath: null, hold: false };
 beforeEach(() => {
   h.records = [entry()];
   h.listeners.clear();
+  h.memo.clear();
   h.ready.mockReset();
   h.ready.mockResolvedValue(undefined);
   h.list.mockReset();
-  h.list.mockImplementation(() => new Promise(() => undefined));
+  // Unanswered by default. The peek read's concurrency limiter is module state,
+  // so afterEach fails every read still out, or its slot would outlive the test.
+  h.list.mockImplementation(
+    () => new Promise((_resolve, reject) => h.hung.push(reject)),
+  );
+});
+
+afterEach(async () => {
+  while (h.hung.length > 0) {
+    for (const fail of h.hung.splice(0)) fail(new Error("test over"));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  }
 });
 
 describe("useReopenHint", () => {
@@ -214,7 +241,7 @@ describe("useReopenHint", () => {
   });
 });
 
-describe("useReopenHint fix-round arms", () => {
+describe("useReopenHint latching and list edges", () => {
   it("re-latches on a hold edge after the record changed while idle", () => {
     const { result, rerender } = render(idle);
     setRecords([entry({ path: WT2, at: 2 })]);
@@ -245,5 +272,49 @@ describe("useReopenHint fix-round arms", () => {
     await act(async () => undefined);
     expect(result.current).toBeNull();
     expect(h.list).not.toHaveBeenCalled();
+  });
+});
+
+describe("useReopenHint memo agreement", () => {
+  const FOREIGN = "C:/elsewhere/foreign/.git";
+
+  it("is null, with no list read, when the memo names another repo for the path", () => {
+    h.memo.set(WT, { identity: FOREIGN, ageMs: 0 });
+    const { result } = render(idle);
+    expect(result.current).toBeNull();
+    expect(h.list).not.toHaveBeenCalled();
+  });
+
+  it("keeps the hint when the memo agrees up to case and slashes", () => {
+    h.memo.set(WT, { identity: "c:\\REPOS\\demo\\.git", ageMs: 0 });
+    const { result } = render(idle);
+    expect(result.current).toEqual({ path: WT, name: "demo-wt" });
+  });
+
+  it("is null when the contradiction is one ms inside the TTL", () => {
+    h.memo.set(WT, { identity: FOREIGN, ageMs: IDENTITY_TTL_MS - 1 });
+    const { result } = render(idle);
+    expect(result.current).toBeNull();
+  });
+
+  it("hides within one tick of the memo turning against it", () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    try {
+      const { result } = render(idle);
+      expect(result.current).toEqual({ path: WT, name: "demo-wt" });
+      h.memo.set(WT, { identity: FOREIGN, ageMs: 0 });
+      act(() => {
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(result.current).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the hint when the contradiction is older than the TTL", () => {
+    h.memo.set(WT, { identity: FOREIGN, ageMs: IDENTITY_TTL_MS });
+    const { result } = render(idle);
+    expect(result.current).toEqual({ path: WT, name: "demo-wt" });
   });
 });

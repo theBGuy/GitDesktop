@@ -54,7 +54,8 @@ const LONG_NAME =
   "a-very-long-worktree-folder-name-that-cannot-fit-in-the-row-width";
 
 /** The remembered worktree per row; BRAVO has no record. CHARLIE has one, but
- *  the hook answers null for the current repo's row (P1's contract). */
+ *  the hook answers null for the current repo's row (the hook's current-repo
+ *  contract). */
 const HINTS: Record<string, ReopenHint> = {
   [ALPHA]: { path: "C:\\wt\\fix-auth", name: "fix-auth-timeout" },
   [CHARLIE]: { path: "C:\\wt\\charlie-wt", name: "charlie-wt" },
@@ -190,7 +191,7 @@ async function rightClick(
 }
 
 describe("reopen hint rows", () => {
-  it("renders the subtitle line under the path on a hinted row, in both sections (1)", () => {
+  it("renders the subtitle line under the path on a hinted row, in both sections", () => {
     renderList();
     for (const path of [ALPHA, GOLF]) {
       const line = hintLineOf(path);
@@ -222,7 +223,7 @@ describe("reopen hint rows", () => {
     );
   });
 
-  it("keeps an aliased row's name first and truncates a long worktree name (1)", () => {
+  it("keeps an aliased row's name first and truncates a long worktree name", () => {
     renderList();
     const line = hintLineOf(OLD);
     const column = line?.parentElement;
@@ -235,7 +236,7 @@ describe("reopen hint rows", () => {
     );
   });
 
-  it("renders no subtitle, describedby or escape item on a null-hint row, and passes currentPath through (2)", async () => {
+  it("renders no subtitle, describedby or escape item on a null-hint row, and passes currentPath through", async () => {
     const { user } = renderList(CHARLIE);
     for (const path of [BRAVO, CHARLIE]) {
       expect(hintLineOf(path), path).toBeNull();
@@ -253,7 +254,7 @@ describe("reopen hint rows", () => {
     ).toBeNull();
   });
 
-  it("passes a null currentPath through from the Welcome host's shape (2)", () => {
+  it("passes a null currentPath through from the Welcome host's shape", () => {
     renderList(null);
     for (const r of RECENTS)
       expect(callsFor(r.path), r.path).toContainEqual([r.path, null, false]);
@@ -261,11 +262,12 @@ describe("reopen hint rows", () => {
     expect(hintLineOf(CHARLIE)).not.toBeNull();
   });
 
-  it("names the worktree in the option and keeps the escape in its description (3)", () => {
+  it("names the worktree in the option and keeps the escape in its description", () => {
     renderList();
     const option = optionOf(ALPHA);
     // jsdom's accname trims each inline child, dropping the sr-only lead-in's
-    // trailing space (test 1 pins that space on the node itself).
+    // trailing space (the subtitle-line test pins that space on the node
+    // itself).
     expect(option).toHaveAccessibleName(/opens in worktree\s*fix-auth-timeout/);
     expect(option).not.toHaveAccessibleName(/main workspace/);
     const descId = option.getAttribute("aria-describedby");
@@ -279,7 +281,7 @@ describe("reopen hint rows", () => {
     expect(optionOf(BRAVO)).not.toHaveAccessibleName(/opens in worktree/);
   });
 
-  it("titles the hint line with the teaching copy (4)", () => {
+  it("titles the hint line with the teaching copy", () => {
     renderList();
     expect(hintLineOf(ALPHA)).toHaveAttribute(
       "title",
@@ -288,7 +290,7 @@ describe("reopen hint rows", () => {
     expect(hintLineOf(GOLF)).toHaveAttribute("title", titleFor("zz-unique-wt"));
   });
 
-  it("leaves a clipped worktree name to the line's teaching title on hover (4)", async () => {
+  it("leaves a clipped worktree name to the line's teaching title on hover", async () => {
     const { user } = renderList();
     const line = hintLineOf(OLD) as HTMLElement;
     const name = within(line).getByText(LONG_NAME);
@@ -306,7 +308,7 @@ describe("main-workspace escapes", () => {
   it.each([
     ["hinted", ALPHA],
     ["non-hinted", BRAVO],
-  ])("click threads preferMain from Shift on a %s row (5)", async (_, path) => {
+  ])("click threads preferMain from Shift on a %s row", async (_, path) => {
     const { user } = renderList();
     await user.click(optionOf(path));
     expect(openMock).toHaveBeenLastCalledWith(path, "recent", undefined, {
@@ -326,7 +328,7 @@ describe("main-workspace escapes", () => {
     ["hinted", ALPHA, 1],
     ["non-hinted", BRAVO, 2],
   ])(
-    "Enter threads preferMain from Shift on a %s row (5)",
+    "Enter threads preferMain from Shift on a %s row",
     async (_, path, downs) => {
       const { user } = renderList();
       const input = filterInput();
@@ -345,7 +347,7 @@ describe("main-workspace escapes", () => {
     },
   );
 
-  it("prevents text selection on Shift+mousedown only (6)", () => {
+  it("prevents text selection on Shift+mousedown only", () => {
     renderList();
     const option = optionOf(ALPHA);
     // fireEvent returns false exactly when the event was default-prevented.
@@ -353,7 +355,7 @@ describe("main-workspace escapes", () => {
     expect(fireEvent.mouseDown(option)).toBe(true);
   });
 
-  it("offers Open in main workspace first on a hinted row's menu, acting on the right-clicked row (7)", async () => {
+  it("offers Open in main workspace first on a hinted row's menu, acting on the right-clicked row", async () => {
     let resolveOpen: (v: boolean) => void = () => undefined;
     openMock.mockImplementation(
       () =>
@@ -370,7 +372,8 @@ describe("main-workspace escapes", () => {
     expect(items[0].textContent).toBe("Open in main workspace");
     expect(items[0].nextElementSibling).toHaveAttribute("role", "separator");
     expect(items[1].textContent).toBe("Create alias…");
-    // Control for test 9's held item: with no open in flight it is enabled.
+    // Control for the in-flight-open test's held item: with no open in flight
+    // it is enabled.
     expect(items[0]).not.toHaveAttribute("aria-disabled", "true");
 
     await user.click(items[0]);
@@ -389,7 +392,7 @@ describe("main-workspace escapes", () => {
   it.each([
     ["non-hinted", BRAVO],
     ["current", CHARLIE],
-  ])("leaves the escape item off a %s row's menu (7)", async (_, path) => {
+  ])("leaves the escape item off a %s row's menu", async (_, path) => {
     const { user } = renderList(CHARLIE);
     const menu = await rightClick(user, optionOf(path));
     const labels = within(menu)
@@ -528,7 +531,7 @@ describe("keyboard row menu", () => {
   it.each([
     ["ContextMenu", { key: "ContextMenu" }],
     ["Shift+F10", { key: "F10", shiftKey: true }],
-  ])("%s opens the highlighted row's menu (8)", async (_, init) => {
+  ])("%s opens the highlighted row's menu", async (_, init) => {
     const { user } = renderList();
     // Down x5 marks MY_UNDERSCORE, the SECOND row of a pair sharing one option
     // id, so an id lookup would land on MY_SPACE instead.
@@ -551,7 +554,7 @@ describe("keyboard row menu", () => {
   it.each([
     ["ContextMenu with no highlighted row", { key: "ContextMenu" }],
     ["Shift+F10 with no highlighted row", { key: "F10", shiftKey: true }],
-  ])("%s is left to the input (8)", async (_, init) => {
+  ])("%s is left to the input", async (_, init) => {
     renderList();
     expect(document.querySelector('[data-highlighted="true"]')).toBeNull();
     expect(fireEvent.keyDown(filterInput(), init)).toBe(true);
@@ -559,7 +562,7 @@ describe("keyboard row menu", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("plain F10 does nothing new even with a highlighted row (8)", async () => {
+  it("plain F10 does nothing new even with a highlighted row", async () => {
     const { user } = renderList();
     await user.keyboard("{ArrowDown}");
     expect(fireEvent.keyDown(filterInput(), { key: "F10" })).toBe(true);
@@ -664,7 +667,7 @@ describe("Menu key follow-up contextmenu", () => {
 });
 
 describe("in-flight open", () => {
-  it("holds the row hints, releases the closed menu's hint, and holds the escape item with its reason (9)", async () => {
+  it("holds the row hints, releases the closed menu's hint, and holds the escape item with its reason", async () => {
     let resolveOpen: (v: boolean) => void = () => undefined;
     openMock.mockImplementation(
       () =>
@@ -732,7 +735,7 @@ describe("in-flight open", () => {
     expect(order).toEqual(RECENTS.map((r) => r.path));
   });
 
-  it("keeps the clicked label on the closing menu while its open starts (9)", async () => {
+  it("keeps the clicked label on the closing menu while its open starts", async () => {
     openMock.mockImplementation(() => new Promise<boolean>(() => undefined));
     const { user } = renderList();
     const menu = await rightClick(user, optionOf(MY_SPACE));
@@ -752,7 +755,7 @@ describe("in-flight open", () => {
 });
 
 describe("filter and navigation", () => {
-  it("never matches a worktree hint name (10)", async () => {
+  it("never matches a worktree hint name", async () => {
     const { user } = renderList();
     await user.type(filterInput(), "zz-unique-wt");
     expect(screen.getByText("No repositories match.")).toBeInTheDocument();
@@ -763,7 +766,7 @@ describe("filter and navigation", () => {
     expect(rowOf(GOLF)).toBeInTheDocument();
   });
 
-  it("arrows and Enter traverse a hinted list as before (11)", async () => {
+  it("arrows and Enter traverse a hinted list", async () => {
     const { user } = renderList();
     await user.keyboard("{ArrowDown}{ArrowDown}{ArrowDown}{ArrowUp}");
     expect(rowOf(BRAVO)).toHaveAttribute("data-highlighted", "true");
@@ -777,7 +780,7 @@ describe("filter and navigation", () => {
     });
   });
 
-  it("adds no focusable nodes (12)", () => {
+  it("adds no focusable nodes", () => {
     renderList();
     const listbox = screen.getByRole("listbox", { name: "Repositories" });
     const focusable = [
@@ -791,7 +794,7 @@ describe("filter and navigation", () => {
     for (const el of focusable) expect(el).toHaveAttribute("role", "option");
   });
 
-  it("gives same-sanitized paths distinct description ids (13)", () => {
+  it("gives same-sanitized paths distinct description ids", () => {
     renderList();
     const a = optionOf(MY_SPACE);
     const b = optionOf(MY_UNDERSCORE);

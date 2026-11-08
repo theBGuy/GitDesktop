@@ -22,6 +22,7 @@ import {
   FUTURE_AT_SLACK_MS,
   findReopenRecord,
   foldPath,
+  hintOf,
   listedMainIs,
   rememberedIsListed,
   reopenHint,
@@ -204,6 +205,15 @@ test("L1: a record stamped past the slack ahead of now loses to any trusted one"
   const edge = record({ ...future, at: NOW + FUTURE_AT_SLACK_MS });
   assert.equal(findReopenRecord([edge, real], MAIN, null, NOW), edge);
   assert.equal(findReopenRecord([future], MAIN, null, NOW), future);
+});
+
+test("hintOf maps a record to its path and folder name, and no record to null", () => {
+  assert.equal(hintOf(null), null);
+  assert.deepEqual(hintOf(record()), { path: WT, name: "demo-wt" });
+  assert.deepEqual(hintOf(record({ path: "C:\\repos\\feat-x\\" })), {
+    path: "C:\\repos\\feat-x\\",
+    name: "feat-x",
+  });
 });
 
 test("reopenHint names the remembered folder", () => {

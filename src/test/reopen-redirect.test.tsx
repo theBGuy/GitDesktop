@@ -2,9 +2,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useOpenRepoByPath } from "@/features/repository/useOpenRepoByPath";
 import { track } from "@/lib/analytics";
+import { IDENTITY_TTL_MS } from "@/lib/git/repo-identity";
 import type { RepoInfo } from "@/lib/git/types";
 import type { UserWorktree } from "@/lib/git/worktree";
 import type { LastCheckoutEntry } from "@/lib/last-checkout/store";
@@ -26,6 +27,16 @@ const h = vi.hoisted(() => ({
   validate: vi.fn<(path: string) => Promise<RepoInfo>>(),
   list: vi.fn<(repo: string) => Promise<UserWorktree[]>>(),
   identity: vi.fn<(repo: string) => Promise<string>>(),
+  // The memoized and the unmemoized resolver both answer through `identity`
+  // by default; a test splits them by overriding one. `memo` is what the memo
+  // remembers per EXACT key, with each answer's age; the fake memo below keeps
+  // the real readers' semantics (peek at any age, within only under its bound).
+  strict: vi.fn<(repo: string) => Promise<string>>(),
+  unmemoized: vi.fn<(repo: string) => Promise<string>>(),
+  memo: new Map<string, { identity: string; ageMs: number }>(),
+  // The fake memo's resolve: every resolve here goes through the mocked
+  // resolvers, so a call means some path fell back on the memo unseen.
+  memoGet: vi.fn<(key: string) => Promise<string>>(),
   addRecent: vi.fn<(row: { path: string; name: string }) => Promise<void>>(),
   warm: vi.fn<(client: unknown, root: string) => Promise<void>>(),
   openRepo:
@@ -50,7 +61,18 @@ vi.mock("@/lib/git/worktree", async (importOriginal) => ({
 }));
 vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/repo-identity")>()),
-  repoIdentityStrict: (repo: string) => h.identity(repo),
+  repoIdentityStrict: (repo: string) => h.strict(repo),
+  repoIdentityUnmemoized: (repo: string) => h.unmemoized(repo),
+}));
+vi.mock("@/lib/git/identity-memo", () => ({
+  ttlMemo: () => ({
+    get: (key: string) => h.memoGet(key),
+    peek: (key: string) => h.memo.get(key)?.identity,
+    within: (key: string, maxAgeMs: number) => {
+      const hit = h.memo.get(key);
+      return hit && hit.ageMs < maxAgeMs ? hit.identity : undefined;
+    },
+  }),
 }));
 vi.mock("@/lib/last-checkout/store", () => ({
   getLastCheckoutSnapshot: () => h.records,
@@ -145,6 +167,15 @@ beforeEach(() => {
   h.identity.mockImplementation(async (repo) =>
     fold(repo).startsWith("c:/repos/demo") ? ID : OTHER_ID,
   );
+  h.strict.mockReset();
+  h.strict.mockImplementation((repo) => h.identity(repo));
+  h.unmemoized.mockReset();
+  h.unmemoized.mockImplementation((repo) => h.identity(repo));
+  h.memo.clear();
+  h.memoGet.mockReset();
+  h.memoGet.mockRejectedValue(
+    new Error("the memo's resolve is not under test"),
+  );
   h.addRecent.mockReset();
   h.addRecent.mockResolvedValue(undefined);
   h.warm.mockReset();
@@ -153,6 +184,10 @@ beforeEach(() => {
   vi.mocked(track).mockClear();
   vi.mocked(toast.error).mockClear();
   useUiStore.setState({ repoPath: null, openRepo: h.openRepo });
+});
+
+afterEach(() => {
+  expect(h.memoGet).not.toHaveBeenCalled();
 });
 
 describe("recents redirect", () => {
@@ -365,7 +400,7 @@ describe("recents redirect", () => {
   });
 });
 
-describe("recents redirect fix-round arms", () => {
+describe("recents redirect target checks and read order", () => {
   it("opens main when an ancestor repo answers for the remembered path", async () => {
     const ancestor: RepoInfo = { root: "C:/repos", name: "repos" };
     h.validate.mockImplementation(async (path) => {
@@ -388,6 +423,92 @@ describe("recents redirect fix-round arms", () => {
     await open(MAIN.root);
     expect(opened()).toEqual([MAIN.root]);
     expect(h.identity.mock.calls.map(([p]) => p)).toEqual([WT_RECORDED]);
+  });
+
+  it("opens main when git sees another repo at the remembered path than the memo remembered", async () => {
+    // The memo still remembers the record's identity for the path; git, asked
+    // directly, answers the repo that has taken the folder over since.
+    h.memo.set(WT_RECORDED, { identity: ID, ageMs: 0 });
+    h.unmemoized.mockImplementation(async () => "C:/elsewhere/foreign/.git");
+    const open = renderOpen();
+    await expect(open(MAIN.root)).resolves.toBe(true);
+    expect(opened()).toEqual([MAIN.root]);
+    expect(h.addRecent).toHaveBeenCalledExactlyOnceWith({
+      path: MAIN.root,
+      name: "demo",
+    });
+  });
+
+  it.each([
+    ["the record's spelling", WT_RECORDED],
+    ["the validated root's spelling only", WT.root],
+  ])(
+    "opens main when git agrees with the record but the memo still remembers another repo there, under %s",
+    async (_name, key) => {
+      // The landing's stores key on the memo, so a navigation the memo
+      // contradicts would file them under the other repo.
+      h.memo.set(key, { identity: "C:/elsewhere/foreign/.git", ageMs: 0 });
+      const open = renderOpen();
+      await expect(open(MAIN.root)).resolves.toBe(true);
+      expect(opened()).toEqual([MAIN.root]);
+      expect(h.addRecent).toHaveBeenCalledExactlyOnceWith({
+        path: MAIN.root,
+        name: "demo",
+      });
+    },
+  );
+
+  it("opens main when the contradicting memo answer is one ms inside the TTL", async () => {
+    h.memo.set(WT_RECORDED, {
+      identity: "C:/elsewhere/foreign/.git",
+      ageMs: IDENTITY_TTL_MS - 1,
+    });
+    const open = renderOpen();
+    await open(MAIN.root);
+    expect(opened()).toEqual([MAIN.root]);
+  });
+
+  it("reopens it when a contradicting memo answer is older than the TTL", async () => {
+    // The landing's resolve re-asks git past the TTL whenever git answers, so
+    // it can't mis-key.
+    for (const key of [WT_RECORDED, WT.root])
+      h.memo.set(key, {
+        identity: "C:/elsewhere/foreign/.git",
+        ageMs: IDENTITY_TTL_MS,
+      });
+    const open = renderOpen();
+    await open(MAIN.root);
+    expect(opened()).toEqual([WT.root]);
+  });
+
+  it("reopens it when the memo agrees with git and the record", async () => {
+    for (const key of [WT_RECORDED, WT.root])
+      h.memo.set(key, { identity: "c:\\REPOS\\demo\\.git", ageMs: 0 });
+    const open = renderOpen();
+    await open(MAIN.root);
+    expect(opened()).toEqual([WT.root]);
+  });
+
+  it("opens main silently when asking git past the memo fails", async () => {
+    h.unmemoized.mockRejectedValue(new Error("ipc down"));
+    const open = renderOpen();
+    await expect(open(MAIN.root)).resolves.toBe(true);
+    expect(opened()).toEqual([MAIN.root]);
+    expect(h.addRecent).toHaveBeenCalledExactlyOnceWith({
+      path: MAIN.root,
+      name: "demo",
+    });
+    expect(toast.error).not.toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("checks the remembered worktree unmemoized, the open repo through the memo", async () => {
+    useUiStore.setState({ repoPath: OTHER.root });
+    const open = renderOpen();
+    await open(MAIN.root);
+    expect(opened()).toEqual([WT.root]);
+    expect(h.unmemoized.mock.calls.map(([p]) => p)).toEqual([WT_RECORDED]);
+    expect(h.strict.mock.calls.map(([p]) => p)).toEqual([OTHER.root]);
   });
 
   it("reopens it when the landed identity differs only in case and slashes", async () => {

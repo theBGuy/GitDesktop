@@ -294,7 +294,7 @@ describe("prewarmLastCheckout", () => {
   });
 });
 
-describe("fix-round arms", () => {
+describe("landing writes, readiness and re-reads", () => {
   it("skips a write when another instance recorded a newer landing", async () => {
     const store = await fresh();
     const newer = {

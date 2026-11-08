@@ -50,15 +50,60 @@ export function useUserWorktrees(repo: string, enabled = true) {
   });
 }
 
+/** How many no-prune reads may run at once: a recents list paints a hint per
+ *  remembered row and each read spawns `git worktree list`, so many such rows
+ *  must not burst. */
+const PEEK_READ_CONCURRENCY = 3;
+let peekReadsRunning = 0;
+const peekReadQueue: (() => void)[] = [];
+
+/** Runs `read` in a free peek slot, first come first served. A finished read
+ *  hands its slot straight to the oldest waiter, so the count never dips. Only a
+ *  read that WAITED calls `signal`, once its slot arrives, and passes the slot on
+ *  unrun if it aborted; a read started at once never touches it. */
+async function withPeekReadSlot<T>(
+  read: () => Promise<T>,
+  signal?: () => AbortSignal | undefined,
+): Promise<T> {
+  let waited = false;
+  if (peekReadsRunning < PEEK_READ_CONCURRENCY) peekReadsRunning++;
+  else {
+    waited = true;
+    await new Promise<void>((resolve) => peekReadQueue.push(resolve));
+  }
+  try {
+    const aborted = waited ? signal?.() : undefined;
+    if (aborted?.aborted) {
+      throw aborted.reason ?? new DOMException("Aborted", "AbortError");
+    }
+    return await read();
+  } finally {
+    const next = peekReadQueue.shift();
+    if (next) next();
+    else peekReadsRunning--;
+  }
+}
+
 /** The same list read WITHOUT the backend's prune-first, for surfaces that only
  *  paint (a recents row hint): rendering must never unlink an unlocked worktree
  *  on a disconnected drive. Keyed under {@link worktreeKey} so every invalidation
  *  of the pruned list reaches it too; git still flags a deleted worktree
- *  prunable, and the backend filters it out of this read as well. */
+ *  prunable, and the backend filters it out of this read as well. While a read
+ *  is queued for a slot: an explicit `cancelQueries`, or an invalidate's
+ *  `cancelRefetch` over a query that already has data (a data-less fetch is
+ *  deduped instead), skips its spawn when the slot arrives, while its observers
+ *  merely unmounting fires no abort, so that alone never skips it. A read that
+ *  waited reads the signal at slot arrival, so if its observers leave while it
+ *  runs, react-query reverts the fetch and discards the result. A read started
+ *  at once never reads the signal, so an unmount never discards its spawn. */
 export function userWorktreesPeekOptions(repo: string) {
   return {
     queryKey: [...worktreeKey(repo), "no-prune"] as const,
-    queryFn: () => listUserWorktrees(repo, { prune: false }),
+    queryFn: (context?: { signal?: AbortSignal }) =>
+      withPeekReadSlot(
+        () => listUserWorktrees(repo, { prune: false }),
+        () => context?.signal,
+      ),
     networkMode: "always" as const,
     gcTime: REPO_SHELL_GC_TIME,
   };

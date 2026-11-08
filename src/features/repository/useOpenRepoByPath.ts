@@ -9,7 +9,11 @@ import { presentError } from "@/lib/error-summary";
 import { validateRepo } from "@/lib/git/api";
 import { normPath } from "@/lib/git/path";
 import { userWorktreesOptions } from "@/lib/git/queries";
-import { repoIdentityStrict } from "@/lib/git/repo-identity";
+import {
+  identityContradictsWithin,
+  repoIdentityStrict,
+  repoIdentityUnmemoized,
+} from "@/lib/git/repo-identity";
 import type { RepoInfo } from "@/lib/git/types";
 import {
   findReopenRecord,
@@ -345,7 +349,10 @@ export function useOpenRepoByPath() {
  * null for main. Reads the open repo's identity beside a FRESH list (no
  * staleTime: a removed worktree must show), then requires the candidate to
  * validate as its own root under the record's identity, since another repo
- * may live at the remembered path now. Null once `stillCurrent` fails.
+ * may live at the remembered path now. That identity is asked of git past the
+ * memo, and an in-window memo answer contradicting it (under either the
+ * record's spelling or the validated root's) opens main instead. Null once
+ * `stillCurrent` fails.
  */
 async function resolveRedirectTarget(
   queryClient: QueryClient,
@@ -374,11 +381,20 @@ async function resolveRedirectTarget(
   const info = await validateRepo(candidate).catch(() => null);
   if (!stillCurrent() || info === null) return null;
   if (normPath(info.root) !== normPath(candidate)) return null;
-  // Only a validated root is resolved: a dead folder's raw-path fallback would
-  // settle the session's identity memo for that path.
-  const landed = await repoIdentityStrict(candidate).catch(() => null);
+  // Git is asked past the memo to catch a replaced folder, and the memo must
+  // agree too: the landing's stores key on it, so a contradicted memo opens main.
+  const landed = await repoIdentityUnmemoized(candidate).catch(() => null);
   if (!stillCurrent() || landed === null) return null;
-  return normPath(landed) === normPath(record.identity) ? info : null;
+  const want = normPath(record.identity);
+  if (normPath(landed) !== want) return null;
+  // The memo keys raw spellings and the landing opens `info.root`, so both are
+  // checked. An in-window answer naming another repo (or the raw-path
+  // no-identity fallback) vetoes, since the landing would key on it; one older
+  // than the TTL re-resolves at landing whenever git answers, and can't.
+  const contradicted = [candidate, info.root].some((key) =>
+    identityContradictsWithin(key, record.identity),
+  );
+  return contradicted ? null : info;
 }
 
 /**

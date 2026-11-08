@@ -1,7 +1,13 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { useRelativeNow } from "@/components/relative-time";
 import { useUserWorktreesPeek } from "@/lib/git/queries";
-import { listedMainIs, rememberedIsListed, reopenHint } from "./resolve";
+import { identityContradictsWithin } from "@/lib/git/repo-identity";
+import {
+  findReopenRecord,
+  hintOf,
+  listedMainIs,
+  rememberedIsListed,
+} from "./resolve";
 import {
   getLastCheckoutSnapshot,
   lastCheckoutReady,
@@ -18,9 +24,11 @@ export interface ReopenHint {
 /** The worktree a click on this row would reopen; null when the row's newest
  *  landing is main (or there is none), on the open repo's row, or when it
  *  remembers the open checkout. An answered list hides it unless it names
- *  rowPath as main and still lists the worktree. While `hold` is true (an open
- *  in flight, or the row's menu open) it keeps its value from when the hold
- *  began, so a late write can't reflow it. Recordless rows spawn no git. */
+ *  rowPath as main and still lists the worktree, and so does an in-window memo
+ *  naming another repo (or the raw-path no-identity fallback) for the remembered
+ *  path. While `hold` is true (an open in flight, or the row's menu open) it
+ *  keeps its value from when the hold began, so a late write can't reflow it.
+ *  Recordless rows spawn no git. */
 export function useReopenHint(
   rowPath: string,
   currentPath: string | null,
@@ -37,17 +45,25 @@ export function useReopenHint(
   }, []);
   // The shared ticker's clock, so render never reads Date.now().
   const now = useRelativeNow();
-  const hint = reopenHint(records, rowPath, currentPath, now);
+  const record = findReopenRecord(records, rowPath, currentPath, now);
+  const hint = hintOf(record);
+  // The click's memo veto, read from memory on every render: the memo isn't
+  // reactive, and the ticker's state update is what brings a change in within a
+  // tick. The record's spelling only: no validation runs here, so the click's
+  // veto on the validated root's spelling stays click-only.
+  const vetoed =
+    record !== null && identityContradictsWithin(record.path, record.identity);
   // Optimistic: the click also refuses the open repo's identity and validates
   // the folder, which a read without IPC can't see. A failed or pending list
   // keeps the hint; an answered one hides it when it lacks the worktree or
   // names a different main, the same list checks the click makes.
-  const listed = useUserWorktreesPeek(rowPath, hint !== null);
+  const listed = useUserWorktreesPeek(rowPath, hint !== null && !vetoed);
   const live =
-    hint !== null &&
-    listed.data !== undefined &&
-    (!listedMainIs(listed.data, rowPath) ||
-      !rememberedIsListed(listed.data, hint.path))
+    hint === null ||
+    vetoed ||
+    (listed.data !== undefined &&
+      (!listedMainIs(listed.data, rowPath) ||
+        !rememberedIsListed(listed.data, hint.path)))
       ? null
       : hint;
   // Latched during render on each hold edge, and re-latched for a re-targeted

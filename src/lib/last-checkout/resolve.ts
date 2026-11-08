@@ -94,17 +94,24 @@ export function listedMainIs(
   return main !== undefined && foldPath(main.path) === foldPath(root);
 }
 
-/** {@link findReopenRecord} plus the display basename (split on / and \). */
+/** A found record's path plus its display basename (split on / and \); null
+ *  for no record. */
+export function hintOf(
+  record: ReopenRecordView | null,
+): { path: string; name: string } | null {
+  if (record === null) return null;
+  const name = record.path.split(/[\\/]/).filter(Boolean).pop() ?? record.path;
+  return { path: record.path, name };
+}
+
+/** {@link findReopenRecord} mapped through {@link hintOf}. */
 export function reopenHint(
   records: readonly ReopenRecordView[],
   rowPath: string,
   currentPath: string | null,
   now: number,
 ): { path: string; name: string } | null {
-  const record = findReopenRecord(records, rowPath, currentPath, now);
-  if (record === null) return null;
-  const name = record.path.split(/[\\/]/).filter(Boolean).pop() ?? record.path;
-  return { path: record.path, name };
+  return hintOf(findReopenRecord(records, rowPath, currentPath, now));
 }
 
 /**
