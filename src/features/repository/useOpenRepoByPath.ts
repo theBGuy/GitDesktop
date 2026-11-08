@@ -19,6 +19,7 @@ import {
 import {
   getLastCheckoutSnapshot,
   lastCheckoutReady,
+  refreshLastCheckout,
 } from "@/lib/last-checkout/store";
 import { queryClient as appQueryClient } from "@/lib/query-client";
 import { migrateRepoData } from "@/lib/repo-data-migration";
@@ -36,7 +37,14 @@ import { registerRepoShellWarmup, useUiStore } from "@/lib/stores/ui";
 import { isAppError } from "@/lib/tauri/invoke";
 import { toastComposedError, toastError } from "@/lib/toast";
 import { createOpenClaims } from "./open-claims";
+import { settleWithin } from "./repo-shell-budget";
 import { warmRepoShell } from "./repo-shell-prefetch";
+
+/** How long a recents redirect waits for the record re-read, so a landing write
+ *  queued behind a slow git read holds the click for no longer; the re-read
+ *  itself still runs and lands late. The readiness wait before it is unbounded
+ *  until a load lands. */
+const RECORD_REFRESH_BOUND_MS = 1500;
 
 /** Every open this module makes, recorded or worktree, and every held repo
  *  switch the store makes through the warm-up registered below, numbered against
@@ -76,8 +84,8 @@ registerRepoShellWarmup((root) => {
  * The recents write finishes BEFORE the switch, so the row exists when
  * RepositoryView mounts and its open-time visibility probe persists onto it; a
  * superseded open still records its repo. A recents redirect records the
- * clicked main row (`recordAs`) but opens a worktree, whose probe never
- * refreshes that row's metadata.
+ * clicked main row (`recordAs`) and opens a worktree, whose probe still
+ * reaches that row: the probe writes match rows by repo identity.
  * The write is best-effort, since a settings-write failure must never block
  * opening. Resolves true once the switch was REQUESTED: a dirty Settings may
  * still hold it behind its Unsaved changes prompt, whose Keep editing cancels
@@ -134,7 +142,11 @@ export function useOpenRecordedRepo() {
  * open drops it).
  * A `source: "recent"` click on a main row reopens the worktree its repo was
  * last left in, unless `opts.preferMain`, that repo is the open one, or the
- * worktree no longer checks out; every miss opens main silently.
+ * worktree no longer checks out; every miss opens main silently. A recents
+ * click retired by a newer open or a navigation before it starts opening
+ * resolves false without recording its row, which would otherwise jump to the
+ * top of recents after the user moved on; a superseded picker, submodule or
+ * relocate open still records its repo.
  * Callers: the shared recents list, macOS File → Open Recent, the folder
  * picker in {@link usePickAndOpenRepo}, and a submodule opened as its own
  * repository from the Submodules dialog.
@@ -247,18 +259,25 @@ export function useOpenRepoByPath() {
       const openPathPinned = useUiStore.getState().repoPath;
       try {
         const info = await validateRepo(path);
-        if (source === "recent" && !opts?.preferMain && stillCurrent()) {
-          // A click before the startup load settles would otherwise miss its
-          // record, open main, and overwrite the record with that landing.
+        // A retired recents click records nothing: its row would jump to the
+        // top of recents after the user moved on (a newer open or navigation).
+        if (source === "recent" && !stillCurrent()) return false;
+        if (source === "recent" && !opts?.preferMain) {
+          // Unbounded: a click over a cold, empty snapshot would open main,
+          // whose landing then overwrites the remembered worktree.
           await lastCheckoutReady();
-          const record = stillCurrent()
-            ? findReopenRecord(
-                getLastCheckoutSnapshot(),
-                info.root,
-                openPathPinned,
-                Date.now(),
-              )
-            : null;
+          if (!stillCurrent()) return false;
+          // Re-read on the write chain so an earlier landing still queued, or
+          // another instance's newer record, is seen. Past the bound the click
+          // goes on, so a queued write slower than that can still read stale.
+          await settleWithin([refreshLastCheckout()], RECORD_REFRESH_BOUND_MS);
+          if (!stillCurrent()) return false;
+          const record = findReopenRecord(
+            getLastCheckoutSnapshot(),
+            info.root,
+            openPathPinned,
+            Date.now(),
+          );
           if (record) {
             const target = await resolveRedirectTarget(
               queryClient,
@@ -267,9 +286,10 @@ export function useOpenRepoByPath() {
               openPathPinned,
               stillCurrent,
             );
-            // A failed redirect falls through and opens the clicked main row;
-            // a superseded one records that row while the claim refuses it.
-            if (target && stillCurrent())
+            // Retired: record nothing, as above. A failed redirect opens the
+            // clicked main row.
+            if (!stillCurrent()) return false;
+            if (target)
               return await recordOpenAndTrack(target, source, stillCurrent, {
                 recordAs: info,
               });

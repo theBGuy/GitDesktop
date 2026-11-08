@@ -3,8 +3,9 @@
 // main checkout. Every compare folds both producers (git prints forward slashes,
 // validate_repo hands back backslashes on Windows, and paths compare
 // case-insensitively there), so the local fold is pinned equal to normPath.
-// Also pins the store's place in the relocate migration's identity roster, since
-// an unregistered per-repo store orphans its records on relocate.
+// Also pins the store's place in the relocate migration's identity roster: every
+// per-repo identity store is re-homed on relocate so no orphan keys accumulate
+// (the re-keyed record keeps its old paths, so it won't redirect afterwards).
 //
 // The imports below reach straight into `src/` and rely on Node's default type
 // stripping (>= 23.6), which resolves no bundler aliases, so both modules must

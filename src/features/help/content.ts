@@ -1144,9 +1144,9 @@ workspace instead, or {{secondaryclick}} it for **Open in main workspace**, whic
 heads the menu; {{key:shift+f10}} or the Menu key opens that menu on the
 highlighted row. If the worktree has been removed or can't be opened, the main
 workspace opens. The row of the repository you're already in still opens its
-main workspace, and opening a repository any other way (the folder picker,
-dropping a folder on the window, a submodule, cloning, My work, picking a
-worktree) goes where you chose.
+main workspace, and opening a repository any other way (such as the folder
+picker, dropping a folder on the window, a submodule, cloning, My work, or
+picking a worktree) goes where you chose.
 
 A branch can only be checked out in one worktree at a time, so the list excludes branches
 already in use. The **branch switcher** knows this too, and every branch appears there

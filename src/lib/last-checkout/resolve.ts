@@ -71,8 +71,9 @@ export function findReopenRecord(
   return best;
 }
 
-/** The ONE worktree-membership predicate: some NON-main entry's path folds
- *  equal to `remembered`. */
+/** The read side's ONE worktree-membership predicate: some NON-main entry's
+ *  path folds equal to `remembered`. The store's write-side check is separate
+ *  on purpose: it accepts main too, since a main landing is recorded. */
 export function rememberedIsListed(
   worktrees: readonly { path: string; isMain: boolean }[],
   remembered: string,
@@ -109,8 +110,8 @@ export function reopenHint(
 /**
  * The remembered path to validate and open, or null to open the clicked main.
  * `openIdentity`: null = no repo open; "unresolved" = the strict resolve
- * rejected, which fails toward today's behavior. `worktrees` null = the fresh
- * list read failed.
+ * rejected, which fails toward opening the clicked main row. `worktrees` null
+ * = the fresh list read failed.
  */
 export function resolveReopenTarget(args: {
   clickedRoot: string;
@@ -122,8 +123,8 @@ export function resolveReopenTarget(args: {
   const { clickedRoot, record, preferMain, openIdentity, worktrees } = args;
   if (preferMain || record === null || worktrees === null) return null;
   if (openIdentity === "unresolved") return null;
-  // Clicking the open repo's own row from inside one of its worktrees goes to
-  // main, as it always has.
+  // Clicking the open repo's own row from inside one of its worktrees opens
+  // main: the user is already in this repo, so the row means its main checkout.
   if (
     openIdentity !== null &&
     foldPath(openIdentity) === foldPath(record.identity)

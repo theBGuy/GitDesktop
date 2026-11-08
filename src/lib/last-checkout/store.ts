@@ -15,8 +15,9 @@ import { FUTURE_AT_SLACK_MS } from "./resolve";
 
 // The checkout each repo was last left in, one record per repo identity
 // (git-common-dir). Paths keep git's and validateRepo's spelling, folded only
-// to compare. Writes resolve identity strictly and drop on rejection: a
-// raw-path record would sit where no healed read looks.
+// to compare. Writes resolve identity strictly and drop on rejection: readers
+// find records by mainPath, but a raw-path key would break the identity
+// compares (the in-lock newer-record check and the open-repo guard).
 
 /** One record, as the in-memory snapshot holds it. */
 export interface LastCheckoutEntry {
@@ -44,6 +45,10 @@ function serialize<T>(op: () => Promise<T>): Promise<T> {
 // reference between writes.
 let snapshot: readonly LastCheckoutEntry[] = [];
 const listeners = new Set<() => void>();
+// Set by the first rebuild, settling readiness for good. The plugin's load
+// answers an unreadable file as an empty store, so that rebuild may hold
+// nothing.
+let loaded = false;
 
 /** Per field: one hand-edited or truncated record never blanks the rest. */
 function parseEntry(
@@ -58,14 +63,41 @@ function parseEntry(
   return { identity, path, mainPath, at };
 }
 
+function sameEntries(
+  a: readonly LastCheckoutEntry[],
+  b: readonly LastCheckoutEntry[],
+): boolean {
+  return (
+    a.length === b.length &&
+    a.every(
+      (e, i) =>
+        e.identity === b[i].identity &&
+        e.path === b[i].path &&
+        e.mainPath === b[i].mainPath &&
+        e.at === b[i].at,
+    )
+  );
+}
+
 /** Rebuilds the snapshot from what the store holds (another instance's records
- *  included), never from the values just written, then notifies. */
-async function rebuildSnapshot(store: LastCheckoutStore): Promise<void> {
+ *  included), never from the values just written, then notifies. Sorted by
+ *  identity, since the plugin store answers in no stable order. With
+ *  `onlyIfChanged`, records equal to the current ones keep its reference and
+ *  notify nobody, so a re-read re-renders no hinted row. */
+async function rebuildSnapshot(
+  store: LastCheckoutStore,
+  onlyIfChanged = false,
+): Promise<void> {
   const next: LastCheckoutEntry[] = [];
   for (const [identity, value] of await store.entries<unknown>()) {
     const entry = parseEntry(identity, value);
     if (entry) next.push(entry);
   }
+  next.sort(
+    (a, b) => Number(a.identity > b.identity) - Number(a.identity < b.identity),
+  );
+  loaded = true;
+  if (onlyIfChanged && sameEntries(snapshot, next)) return;
   snapshot = next;
   for (const listener of listeners) listener();
 }
@@ -82,9 +114,9 @@ export function subscribeLastCheckout(listener: () => void): () => void {
   };
 }
 
-/** Loads the store into the snapshot, so recents rows can hint from memory on
- *  their first paint. Never writes and never rejects: it resolves whether the
- *  load succeeded, and a failed one leaves the snapshot as it was. */
+/** Loads the store into the snapshot, started at app start so recents rows can
+ *  hint from memory once it lands. Never writes and never rejects: it resolves
+ *  whether the load succeeded, and a failed one leaves the snapshot as it was. */
 export function prewarmLastCheckout(): Promise<boolean> {
   return serialize(async () => {
     try {
@@ -97,18 +129,42 @@ export function prewarmLastCheckout(): Promise<boolean> {
 }
 
 let ready: Promise<void> | null = null;
+const LOADED: Promise<void> = Promise.resolve();
 
-/** A prewarm shared by every caller while it runs; it settles found or failed,
- *  so a cold-start click can wait for it. A successful load is kept for good,
- *  while a failed one is forgotten so the next caller loads afresh. */
+/** Settled once any store read has landed in the snapshot (the startup load, a
+ *  refresh or a write's rebuild), so a cold-start click can wait for it. Until
+ *  then, a prewarm shared by every caller while it runs, settling found or
+ *  failed; a failed one is forgotten so the next caller loads afresh. Started
+ *  at app start, retried by a hint mounting over an empty snapshot, and awaited
+ *  unbounded by a recents redirect before its record lookup. */
 export function lastCheckoutReady(): Promise<void> {
+  if (loaded) return LOADED;
   if (ready === null) {
-    const attempt: Promise<void> = prewarmLastCheckout().then((loaded) => {
+    const attempt: Promise<void> = prewarmLastCheckout().then(() => {
       if (!loaded && ready === attempt) ready = null;
     });
     ready = attempt;
   }
   return ready;
+}
+
+/** Re-reads the store into the snapshot behind every write already queued, so
+ *  a redirect sees an earlier landing still writing and another instance's
+ *  newer records. Never rejects: a failed read leaves the snapshot as it was. */
+export function refreshLastCheckout(): Promise<void> {
+  return serialize(async () => {
+    try {
+      const store = await getStore();
+      // A reader under the writers' lock: a reload replaces the shared cache,
+      // which an in-lock writer (the relocate migration) may have staged.
+      await withAppStoreLock(STORE_FILE, async () => {
+        await reloadToleratingEmptyStore(store);
+        await rebuildSnapshot(store, true);
+      });
+    } catch {
+      // Kept: a read that failed says nothing about what is on disk.
+    }
+  });
 }
 
 // Strictly increasing per process, so two landings in one millisecond still

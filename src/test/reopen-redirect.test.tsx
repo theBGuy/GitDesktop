@@ -21,7 +21,8 @@ import { useUiStore } from "@/lib/stores/ui";
 // and the validate is the validate-fail arm below.
 const h = vi.hoisted(() => ({
   records: [] as readonly LastCheckoutEntry[],
-  ready: Promise.resolve() as Promise<void>,
+  ready: vi.fn<() => Promise<void>>(),
+  refresh: vi.fn<() => Promise<void>>(),
   validate: vi.fn<(path: string) => Promise<RepoInfo>>(),
   list: vi.fn<(repo: string) => Promise<UserWorktree[]>>(),
   identity: vi.fn<(repo: string) => Promise<string>>(),
@@ -53,7 +54,8 @@ vi.mock("@/lib/git/repo-identity", async (importOriginal) => ({
 }));
 vi.mock("@/lib/last-checkout/store", () => ({
   getLastCheckoutSnapshot: () => h.records,
-  lastCheckoutReady: () => h.ready,
+  lastCheckoutReady: () => h.ready(),
+  refreshLastCheckout: () => h.refresh(),
   subscribeLastCheckout: () => () => undefined,
 }));
 vi.mock("@/lib/settings/queries", async (importOriginal) => ({
@@ -127,7 +129,10 @@ beforeEach(() => {
       at: 1,
     },
   ];
-  h.ready = Promise.resolve();
+  h.ready.mockReset();
+  h.ready.mockResolvedValue(undefined);
+  h.refresh.mockReset();
+  h.refresh.mockResolvedValue(undefined);
   h.validate.mockReset();
   h.validate.mockImplementation(async (path) => {
     const hit = REPOS.find((r) => fold(r.root) === fold(path));
@@ -204,14 +209,32 @@ describe("recents redirect", () => {
     expect(opened()).toEqual([MAIN.root]);
   });
 
-  it("pays nothing beyond the validate for a row without a record", async () => {
+  it("reads no worktree list or identity for a row without a record", async () => {
     h.records = [];
     const open = renderOpen();
     await open(MAIN.root);
     expect(opened()).toEqual([MAIN.root]);
     expect(h.validate).toHaveBeenCalledOnce();
+    expect(h.refresh).toHaveBeenCalledOnce();
     expect(h.identity).not.toHaveBeenCalled();
     expect(h.list).not.toHaveBeenCalled();
+  });
+
+  it("a newer click retires a redirect still waiting on readiness, which records and re-reads nothing", async () => {
+    const loaded = deferred<void>();
+    h.ready.mockImplementationOnce(() => loaded.promise);
+    const open = renderOpen();
+    const first = open(MAIN.root);
+    await vi.waitFor(() => expect(h.ready).toHaveBeenCalledOnce());
+    await expect(open(OTHER.root)).resolves.toBe(true);
+    const refreshesBefore = h.refresh.mock.calls.length;
+    loaded.resolve();
+    await expect(first).resolves.toBe(false);
+    expect(h.refresh).toHaveBeenCalledTimes(refreshesBefore);
+    expect(opened()).toEqual([OTHER.root]);
+    expect(h.addRecent.mock.calls.map(([row]) => row.path)).toEqual([
+      OTHER.root,
+    ]);
   });
 
   it("never redirects a preferMain click or a picked folder", async () => {
@@ -220,6 +243,13 @@ describe("recents redirect", () => {
     await open(MAIN.root, "picker");
     expect(opened()).toEqual([MAIN.root, MAIN.root]);
     expect(h.list).not.toHaveBeenCalled();
+    // Neither waits on the record store, which only a redirect reads.
+    expect(h.ready).not.toHaveBeenCalled();
+    expect(h.refresh).not.toHaveBeenCalled();
+    // Control: a plain recents click does wait on both.
+    await open(MAIN.root);
+    expect(h.ready).toHaveBeenCalledOnce();
+    expect(h.refresh).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -264,7 +294,7 @@ describe("recents redirect", () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
-  it("a newer click retires a redirect still reading, which still records its row", async () => {
+  it("a newer click retires a redirect still reading the worktree, which records nothing", async () => {
     const listed = deferred<UserWorktree[]>();
     h.list.mockImplementationOnce(() => listed.promise);
     const open = renderOpen();
@@ -278,9 +308,59 @@ describe("recents redirect", () => {
       MAIN.root,
       OTHER.root,
     ]);
-    expect(h.addRecent.mock.calls.map(([row]) => row.path).sort()).toEqual([
-      MAIN.root,
+    expect(h.addRecent.mock.calls.map(([row]) => row.path)).toEqual([
       OTHER.root,
+    ]);
+  });
+
+  it("a newer click retires a redirect still re-reading the record, which records nothing", async () => {
+    const refreshed = deferred<void>();
+    let refreshes = 0;
+    h.refresh.mockImplementation(() =>
+      refreshes++ === 0 ? refreshed.promise : Promise.resolve(),
+    );
+    const open = renderOpen();
+    const first = open(MAIN.root);
+    await vi.waitFor(() => expect(refreshes).toBe(1));
+    await expect(open(OTHER.root)).resolves.toBe(true);
+    refreshed.resolve();
+    await expect(first).resolves.toBe(false);
+    expect(opened()).toEqual([OTHER.root]);
+    expect(h.list).not.toHaveBeenCalled();
+    expect(h.addRecent.mock.calls.map(([row]) => row.path)).toEqual([
+      OTHER.root,
+    ]);
+  });
+
+  it.each([
+    ["a redirecting click", undefined],
+    ["a Shift-escape click", { preferMain: true }],
+  ])("%s retired while it validates records nothing", async (_name, opts) => {
+    const validated = deferred<RepoInfo>();
+    h.validate.mockImplementationOnce(() => validated.promise);
+    const open = renderOpen();
+    const first = open(MAIN.root, "recent", undefined, opts);
+    await expect(open(OTHER.root)).resolves.toBe(true);
+    validated.resolve(MAIN);
+    await expect(first).resolves.toBe(false);
+    expect(opened()).toEqual([OTHER.root]);
+    expect(h.addRecent.mock.calls.map(([row]) => row.path)).toEqual([
+      OTHER.root,
+    ]);
+  });
+
+  it("a superseded plain open still records its repo, after the newer one", async () => {
+    const validated = deferred<RepoInfo>();
+    h.validate.mockImplementationOnce(() => validated.promise);
+    const open = renderOpen();
+    const first = open(MAIN.root, "picker");
+    await expect(open(OTHER.root, "picker")).resolves.toBe(true);
+    validated.resolve(MAIN);
+    await expect(first).resolves.toBe(false);
+    expect(opened()).toEqual([OTHER.root]);
+    expect(h.addRecent.mock.calls.map(([row]) => row.path)).toEqual([
+      OTHER.root,
+      MAIN.root,
     ]);
   });
 });
@@ -347,10 +427,10 @@ describe("recents redirect fix-round arms", () => {
     expect(h.identity).not.toHaveBeenCalled();
   });
 
-  it("waits for the startup load before looking up the row's record", async () => {
+  it("waits for the record re-read before looking up the row's record", async () => {
     h.records = [];
     const loaded = deferred<void>();
-    h.ready = loaded.promise;
+    h.refresh.mockImplementation(() => loaded.promise);
     const open = renderOpen();
     const pending = open(MAIN.root);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -378,5 +458,78 @@ describe("recents redirect fix-round arms", () => {
     identity.resolve(OTHER_ID);
     await pending;
     expect(opened()).toEqual([WT.root]);
+  });
+
+  it("starts the open repo's identity read while the fresh list is still reading", async () => {
+    useUiStore.setState({ repoPath: OTHER.root });
+    const listed = deferred<UserWorktree[]>();
+    h.list.mockImplementationOnce(() => listed.promise);
+    const open = renderOpen();
+    const pending = open(MAIN.root);
+    await vi.waitFor(() =>
+      expect(h.identity.mock.calls.map(([p]) => p)).toEqual([OTHER.root]),
+    );
+    listed.resolve([wt("C:/repos/demo", true), wt("C:/repos/demo-wt")]);
+    await pending;
+    expect(opened()).toEqual([WT.root]);
+  });
+
+  it("waits out a startup load slower than the re-read's bound", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      h.records = [];
+      const loaded = deferred<void>();
+      // The re-read queues behind the startup load on the store's chain.
+      h.ready.mockImplementation(() => loaded.promise);
+      h.refresh.mockImplementation(() => loaded.promise);
+      const open = renderOpen();
+      let settled = false;
+      const pending = open(MAIN.root).then((ok) => {
+        settled = true;
+        return ok;
+      });
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(settled).toBe(false);
+      expect(h.openRepo).not.toHaveBeenCalled();
+      h.records = [
+        {
+          identity: ID,
+          path: "C:/repos/demo-wt",
+          mainPath: "C:/repos/demo",
+          at: 1,
+        },
+      ];
+      loaded.resolve();
+      for (let i = 0; i < 20 && !settled; i++)
+        await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toBe(true);
+      expect(opened()).toEqual([WT.root]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("goes on with the snapshot it has once the re-read outlasts its bound", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      h.refresh.mockImplementation(() => new Promise<void>(() => undefined));
+      const open = renderOpen();
+      let settled = false;
+      const pending = open(MAIN.root).then((ok) => {
+        settled = true;
+        return ok;
+      });
+      await vi.advanceTimersByTimeAsync(1499);
+      expect(h.list).not.toHaveBeenCalled();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      for (let i = 0; i < 20 && !settled; i++)
+        await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(true);
+      await expect(pending).resolves.toBe(true);
+      expect(opened()).toEqual([WT.root]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

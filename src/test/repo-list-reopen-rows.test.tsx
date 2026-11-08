@@ -172,8 +172,9 @@ const hintLineOf = (path: string) =>
   optionOf(path).querySelector<HTMLElement>(HINT_SELECTOR);
 
 /** The calls' args for `path`. The menu's call shares a row's path while its
- *  menu is on that row and passes hold=menuOpen, so a hold=true call there can
- *  come from either; the row calls hold only while an open is in flight. */
+ *  menu is on that row and passes hold=menuShown (true through the close
+ *  animation), so a hold=true call there can come from either; the row calls
+ *  hold only while an open is in flight. */
 const callsFor = (path: string, from = 0) =>
   vi
     .mocked(useReopenHint)
@@ -285,6 +286,19 @@ describe("reopen hint rows", () => {
       titleFor("fix-auth-timeout"),
     );
     expect(hintLineOf(GOLF)).toHaveAttribute("title", titleFor("zz-unique-wt"));
+  });
+
+  it("leaves a clipped worktree name to the line's teaching title on hover (4)", async () => {
+    const { user } = renderList();
+    const line = hintLineOf(OLD) as HTMLElement;
+    const name = within(line).getByText(LONG_NAME);
+    // jsdom lays nothing out, so the name is made to measure as clipped.
+    Object.defineProperty(name, "scrollWidth", { value: 500 });
+    Object.defineProperty(name, "clientWidth", { value: 100 });
+    await user.hover(name);
+    expect(name).not.toHaveAttribute("title");
+    expect(name.closest("[title]")).toBe(line);
+    expect(line).toHaveAttribute("title", titleFor(LONG_NAME));
   });
 });
 

@@ -27,7 +27,6 @@ import {
   clampHighlight,
   stepHighlight,
 } from "@/features/shortcuts/palette-highlight";
-import { clipTitle } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { suppressContextMenu } from "@/lib/context-menu";
 import { applyFrozenOrder, frozenPathKey } from "@/lib/frozen-order";
@@ -444,8 +443,9 @@ export function RepoList({
 
   function handleKeyDown(e: React.KeyboardEvent) {
     if (hasChordModifier(e)) return;
-    // Focus never leaves the filter, so the menu keys would otherwise open the
-    // input's own edit menu; with no highlighted row that menu stays reachable.
+    // The menu keys land here while focus is in the filter, where they would
+    // open the input's edit menu, which stays reachable with no highlighted
+    // row. A Tab-focused row gets the native contextmenu Base UI handles.
     if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
       if (highlightedPath !== null) {
         e.preventDefault();
@@ -721,12 +721,7 @@ function RepoRow({
                 aria-hidden
               />
               <span className="sr-only">opens in worktree </span>
-              <span
-                className="min-w-0 truncate"
-                onMouseEnter={clipTitle(hint.name)}
-              >
-                {hint.name}
-              </span>
+              <span className="min-w-0 truncate">{hint.name}</span>
             </span>
           )}
         </span>
