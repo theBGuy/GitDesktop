@@ -778,12 +778,40 @@ describe("CreatePrDialog frozen target", () => {
     );
     await act(() => new Promise((r) => setTimeout(r, 50)));
     expect(routeLine()).toHaveTextContent("feat → main");
+    // How long the closing popup stays mounted is timing, not contract, so
+    // every committed change is checked as it lands: none may paint the
+    // parent target, whenever the popup unmounts.
+    const painted: string[] = [];
+    const paintsParent = (node: Node) =>
+      /upstream\//.test(node.textContent ?? "") ||
+      (node instanceof Element &&
+        [
+          ...(node.matches("button") ? [node] : []),
+          ...node.querySelectorAll("button"),
+        ].some((b) => b.textContent?.includes("Parent")));
+    const scan = (records: MutationRecord[]) => {
+      for (const record of records) {
+        const nodes =
+          record.type === "characterData"
+            ? [record.target]
+            : [...record.addedNodes];
+        for (const node of nodes)
+          if (paintsParent(node)) painted.push(node.textContent ?? "");
+      }
+    };
+    const observer = new MutationObserver(scan);
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
     await act(async () =>
       finish({ number: 7, url: "https://github.com/me/project/pull/7" }),
     );
-    // The closing popup still paints the fork the create used.
-    expect(routeLine()).toHaveTextContent("feat → main");
-    expect(screen.queryByRole("button", { name: "Parent" })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    scan(observer.takeRecords());
+    observer.disconnect();
+    expect(painted).toEqual([]);
   });
 
   it("shows another repo its own gate while a create runs in the first", async () => {
