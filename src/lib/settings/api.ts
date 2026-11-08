@@ -376,6 +376,10 @@ export interface AppSettings {
    *  softer dark variant that lifts surfaces off pure black to reduce eye strain. Applied
    *  outside the bulk settings form (apply-on-change), like diffViewMode. */
   theme: ThemeSetting;
+  /** GUI zoom level, one of ZOOM_STEPS (Settings → Appearance, the zoom actions,
+   *  Ctrl/Cmd+wheel). Applied outside the bulk settings form (apply-on-change),
+   *  like theme; the window may apply a lower level when the monitor cannot fit it. */
+  zoom: number;
   diffViewMode: (typeof DIFF_VIEW_MODES)[number];
   /** Changes panel layout: flat list or compacted directory tree. Applied outside
    *  the bulk settings form (apply-on-change), like diffViewMode. */

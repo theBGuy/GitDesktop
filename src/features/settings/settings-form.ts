@@ -14,13 +14,14 @@ export type SettingsDraft = Omit<
   | "editHistoryOrder"
   | "defaultBranch"
   | "theme"
+  | "zoom"
   | "diffFileListCollapsed"
   | "sidebarCollapsed"
 >;
 
 export function toDraft(settings: AppSettings): SettingsDraft {
   // defaultBranch is dropped: it now lives in global git config, edited by its
-  // own form in GitSection, not the bulk Save bar. theme, diffViewMode,
+  // own form in GitSection, not the bulk Save bar. theme, zoom, diffViewMode,
   // changesViewMode, editHistoryOrder, and the two collapse prefs are
   // apply-on-change, owned by their own controls.
   const {
@@ -30,6 +31,7 @@ export function toDraft(settings: AppSettings): SettingsDraft {
     editHistoryOrder,
     defaultBranch,
     theme,
+    zoom,
     diffFileListCollapsed,
     sidebarCollapsed,
     ...draft

@@ -1264,6 +1264,26 @@ export const ACTIONS = [
     category: "Actions",
     defaultBinding: null,
   },
+  // App-wide GUI zoom, registered module-level by src/lib/zoom/zoom.ts so they
+  // answer on every screen. Distinct from the roadmap-zoom-* rows above.
+  {
+    id: "app-zoom-in",
+    label: "Zoom in",
+    category: "Application",
+    defaultBinding: "mod+=",
+  },
+  {
+    id: "app-zoom-out",
+    label: "Zoom out",
+    category: "Application",
+    defaultBinding: "mod+-",
+  },
+  {
+    id: "app-zoom-reset",
+    label: "Reset zoom",
+    category: "Application",
+    defaultBinding: "mod+0",
+  },
 ] as const satisfies readonly ActionDef[];
 
 export type ActionId = (typeof ACTIONS)[number]["id"];
@@ -1302,5 +1322,12 @@ export const BUILT_IN_KEYS: {
     keys: "Ctrl+Enter",
     what: "Submit a comment from its text box, or a PR or issue create/edit dialog from any field",
     binding: "mod+enter",
+  },
+  // Display-only: "scroll" is no event key, and formatBinding passes it through
+  // as spelled, matching the Settings hint and the guide.
+  {
+    keys: "Ctrl+scroll",
+    what: "Zoom the app in or out",
+    binding: "mod+scroll",
   },
 ];

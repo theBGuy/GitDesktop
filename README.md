@@ -1247,6 +1247,10 @@ review via its subscription login. The full list is under
 - **Themes**: System, Light, Dark, and a softer **Slate** (a cool, lifted
   blue-gray) that eases eye strain; switch in **Settings → Appearance** or
   cycle from the command palette.
+- **Interface zoom**: scale the whole app, diffs included, from 80% up to
+  200% (capped to what your display fits) with `Ctrl`/`⌘`+`=`/`-`,
+  `Ctrl`/`⌘`+scroll, or the stepper in **Settings → Appearance**;
+  `Ctrl`/`⌘`+`0` or **Reset** puts you back at 100%.
 - **Privacy-first**: API keys live in the OS keychain (never in app files),
   local models keep code on your machine, AI-ignore patterns keep sensitive
   files out of context unless you opt into repo-aware review, and a single
@@ -1318,8 +1322,9 @@ review via its subscription login. The full list is under
   needs it (git, or the GitHub CLI) gets a warning naming the feature and
   the version it wants, with an Update link. It also shows a live readout
   of the window's current position, size, and display (with copy-coords).
-- **Narrow windows and split-screen**: the window goes down to 640px wide,
-  so GitDesktop can sit beside your editor in a tiled layout. The
+- **Narrow windows and split-screen**: the window goes down to 640px wide
+  at 100% zoom (the minimum grows with your interface zoom), so
+  GitDesktop can sit beside your editor in a tiled layout. The
   sidebar narrows with the window and collapses to an icon rail
   (`Ctrl`/`⌘`+`Shift`+`B`), the file list beside a diff collapses on
   demand or when its pane is tight, and the commit box pops out into a

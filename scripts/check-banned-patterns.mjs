@@ -5376,6 +5376,9 @@ export const CHECKS = [
       // Enter/Space press?" — every modifier excluded symmetrically, not a
       // platform-modifier read the registry could own.
       "src/lib/use-disabled-reason.ts",
+      // Synthetic wheel/keyboard events whose modifier flags are the input
+      // under test, not a platform-modifier read the registry could own.
+      "src/test/zoom-controller.test.ts",
     ],
     message:
       "derive the platform modifier via the hotkeys helpers (formatBinding/isMac) — new hand-rolled ctrl/meta checks need an allowlist entry with rationale",
