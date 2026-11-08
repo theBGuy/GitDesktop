@@ -243,16 +243,19 @@ default's name), and a PR badge.
   with are easy to spot. One-click jumps to the main workspace sit right in
   the branch switcher, where selecting a branch that's checked out elsewhere
   opens that folder straight away, that branch's context menu carries the
-  worktree actions, and a *Worktrees* row opens the full manager. A pull
-  request (GitHub, Bitbucket) or merge request (GitLab) can be checked out
-  in place or into its own worktree straight from its view; the worktree
-  route lets you review it without touching your current branch or
-  uncommitted files. The suggested folder,
-  `.gitdesktop/worktrees/pr-<number>`, sits inside the repository and is
-  kept out of `git status`. When the request already has a worktree, the
-  same menu offers **Open worktree** and an update to the request's latest
-  changes; a reset that would discard commits lists them and asks first, and
-  the success message opens the new worktree in one step.
+  worktree actions, and a *Worktrees* row opens the full manager. A
+  repository you left from a linked worktree reopens there from your recent
+  repositories, its row naming the worktree under the path; Shift-click or
+  Shift+Enter opens the main workspace instead. A pull request (GitHub,
+  Bitbucket) or merge request (GitLab) can be checked out in place or
+  into its own worktree straight from its view; the worktree route lets
+  you review it without touching your current branch or uncommitted
+  files. The suggested folder, `.gitdesktop/worktrees/pr-<number>`, sits
+  inside the repository and is kept out of `git status`. When the request
+  already has a worktree, the same menu offers **Open worktree** and an
+  update to the request's latest changes; a reset that would discard
+  commits lists them and asks first, and the success message opens the
+  new worktree in one step.
 - **Compare**: a tab with a three-dot diff, commits ahead/behind,
   merge/rebase, and jump-to-PR, against a local branch or any remote's
   branch (`upstream` listed first; fetched when you pick it, or compared at

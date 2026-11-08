@@ -4,7 +4,8 @@ import { COLD_START } from "@/lib/test-mode";
 /**
  * Runs `fn` holding the cross-process advisory lock on app-data store `file`
  * (its bare name, e.g. `"local-prs.json"`), the lock the Rust-side writers and
- * the MCP server take too. It serializes WRITERS across app instances; readers
+ * the MCP server take too. It serializes WRITERS across app instances, plus any
+ * reader whose reload could discard a writer's staged values; other readers
  * never take it. Fail-open: an acquire that errors or answers null runs `fn`
  * unlocked, so the lock can never block a write. Keep the hold ms-scale: resolve
  * identity keys and spawn git BEFORE calling this, since contenders stop waiting

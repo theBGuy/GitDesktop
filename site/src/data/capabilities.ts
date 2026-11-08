@@ -556,6 +556,11 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
+      "Reopen a repository in the worktree you left it from, with the worktree named on its row and Shift-click to open the main workspace",
+  },
+  {
+    group: "Repository & workspace",
+    label:
       "Check out a GitHub, GitLab, or Bitbucket pull or merge request in place, or into its own worktree so reviewing it never touches your current branch or files",
   },
   {

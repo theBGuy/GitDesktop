@@ -49,9 +49,17 @@ export interface UserWorktree {
 }
 
 /** Lists the repo's *user* worktrees for the worktree manager — every checkout
- *  except the agent-session ones, which are app-internal and protected. */
-export const listUserWorktrees = (repoPath: string) =>
-  invoke<UserWorktree[]>("git_worktree_list_user", { repoPath });
+ *  except the agent-session ones, which are app-internal and protected. The
+ *  backend prunes stale entries first; `prune: false` skips that for a passive
+ *  read. Only that case sends the key: every other call sends `{ repoPath }`. */
+export const listUserWorktrees = (
+  repoPath: string,
+  opts?: { prune?: boolean },
+) =>
+  invoke<UserWorktree[]>(
+    "git_worktree_list_user",
+    opts?.prune === false ? { repoPath, prune: false } : { repoPath },
+  );
 
 /** Creates a user worktree at `path`. `newBranch` branches a fresh `branch` off
  *  `baseRef` (default HEAD); otherwise it checks out the existing `branch`.

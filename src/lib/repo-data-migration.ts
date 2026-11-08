@@ -90,6 +90,7 @@ const IDENTITY_STORES: IdentityStore[] = [
   { file: "jira-links.json", merge: "keep-new" },
   { file: "repo-lens.json", merge: "keep-new" },
   { file: "conversation-filters.json", merge: "keep-new" },
+  { file: "last-checkout.json", merge: "keep-new" },
   { file: "branch-rules.json", merge: "keep-new" },
   {
     // The whole repo map lives under one store key, so the nested walk addresses
