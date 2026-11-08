@@ -104,16 +104,6 @@ export function hintOf(
   return { path: record.path, name };
 }
 
-/** {@link findReopenRecord} mapped through {@link hintOf}. */
-export function reopenHint(
-  records: readonly ReopenRecordView[],
-  rowPath: string,
-  currentPath: string | null,
-  now: number,
-): { path: string; name: string } | null {
-  return hintOf(findReopenRecord(records, rowPath, currentPath, now));
-}
-
 /**
  * The remembered path to validate and open, or null to open the clicked main.
  * `openIdentity`: null = no repo open; "unresolved" = the strict resolve

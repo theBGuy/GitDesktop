@@ -390,7 +390,8 @@ async function resolveRedirectTarget(
   // The memo keys raw spellings and the landing opens `info.root`, so both are
   // checked. An in-window answer naming another repo (or the raw-path
   // no-identity fallback) vetoes, since the landing would key on it; one older
-  // than the TTL re-resolves at landing whenever git answers, and can't.
+  // than the TTL re-resolves at landing whenever git answers, and can't
+  // mis-key the landing.
   const contradicted = [candidate, info.root].some((key) =>
     identityContradictsWithin(key, record.identity),
   );

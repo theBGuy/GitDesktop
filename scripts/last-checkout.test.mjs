@@ -25,7 +25,6 @@ import {
   hintOf,
   listedMainIs,
   rememberedIsListed,
-  reopenHint,
   resolveReopenTarget,
 } from "../src/lib/last-checkout/resolve.ts";
 
@@ -60,27 +59,26 @@ const target = (extra = {}) =>
     ...extra,
   });
 
-test("A1: a main row with a listed non-main record redirects to it", () => {
+test("a main row with a listed non-main record redirects to it", () => {
   assert.equal(findReopenRecord([record()], MAIN, null, NOW)?.path, WT);
   assert.equal(target(), WT);
   assert.equal(target({ openIdentity: null }), WT);
 });
 
-test("A2: the open repo's own identity goes to main", () => {
+test("the open repo's own identity goes to main", () => {
   assert.equal(target({ openIdentity: ID }), null);
   assert.equal(target({ openIdentity: "c:\\REPOS\\demo\\.git" }), null);
 });
 
-test("A2b: the remembered worktree being the open checkout finds no record", () => {
+test("the remembered worktree being the open checkout finds no record", () => {
   assert.equal(findReopenRecord([record()], MAIN, WT, NOW), null);
   assert.equal(
     findReopenRecord([record()], MAIN, "c:\\Repos\\Demo-WT", NOW),
     null,
   );
-  assert.equal(reopenHint([record()], MAIN, WT, NOW), null);
 });
 
-test("A3: a worktree row opens itself", () => {
+test("a worktree row opens itself", () => {
   assert.equal(findReopenRecord([record()], WT, null, NOW), null);
   assert.equal(
     findReopenRecord([record({ mainPath: WT, path: WT })], WT, null, NOW),
@@ -88,7 +86,7 @@ test("A3: a worktree row opens itself", () => {
   );
 });
 
-test("A4: every miss falls back to main", () => {
+test("every miss falls back to main", () => {
   assert.equal(findReopenRecord([], MAIN, null, NOW), null);
   // Another repo's record never answers for this row.
   const foreign = record({ path: "C:/repos/b-wt", mainPath: "C:/repos/b" });
@@ -108,7 +106,7 @@ test("A4: every miss falls back to main", () => {
   assert.equal(rememberedIsListed(list(main(WT)), WT), false);
 });
 
-test("A4b: a fresh list whose main lives elsewhere goes to main", () => {
+test("a fresh list whose main lives elsewhere goes to main", () => {
   assert.equal(
     target({ worktrees: list(main("C:/elsewhere"), linked()) }),
     null,
@@ -116,7 +114,7 @@ test("A4b: a fresh list whose main lives elsewhere goes to main", () => {
   assert.equal(target({ worktrees: list(linked()) }), null);
 });
 
-test("A5: every compare folds case and separators on both sides", () => {
+test("every compare folds case and separators on both sides", () => {
   // record.mainPath <-> clickedRoot / rowPath
   assert.equal(
     findReopenRecord([record()], "c:/REPOS/demo", null, NOW)?.path,
@@ -160,7 +158,7 @@ test("foldPath mirrors normPath over the variant corpus", () => {
     assert.equal(foldPath(p), normPath(p), p);
 });
 
-test("A5b: degenerate inputs never match", () => {
+test("degenerate inputs never match", () => {
   assert.equal(findReopenRecord([record()], "", null, NOW), null);
   assert.equal(findReopenRecord([record({ path: "" })], MAIN, null, NOW), null);
   assert.equal(
@@ -174,7 +172,7 @@ test("A5b: degenerate inputs never match", () => {
   assert.equal(rememberedIsListed(list(linked("")), ""), false);
 });
 
-test("L1: the most recent record matching a row wins", () => {
+test("the most recent record matching a row wins", () => {
   const older = record({ identity: OTHER_ID, path: "C:/repos/old-wt", at: 5 });
   const newer = record({ at: 9 });
   assert.equal(findReopenRecord([older, newer], MAIN, null, NOW), newer);
@@ -185,7 +183,7 @@ test("L1: the most recent record matching a row wins", () => {
   assert.equal(findReopenRecord([older, mainLanding], MAIN, null, NOW), null);
 });
 
-test("L1: a record stamped past the slack ahead of now loses to any trusted one", () => {
+test("a record stamped past the slack ahead of now loses to any trusted one", () => {
   const real = record({ at: 9 });
   const future = record({
     identity: OTHER_ID,
@@ -214,17 +212,6 @@ test("hintOf maps a record to its path and folder name, and no record to null", 
     path: "C:\\repos\\feat-x\\",
     name: "feat-x",
   });
-});
-
-test("reopenHint names the remembered folder", () => {
-  assert.deepEqual(reopenHint([record()], MAIN, null, NOW), {
-    path: WT,
-    name: "demo-wt",
-  });
-  assert.deepEqual(
-    reopenHint([record({ path: "C:\\repos\\feat-x\\" })], MAIN, null, NOW),
-    { path: "C:\\repos\\feat-x\\", name: "feat-x" },
-  );
 });
 
 /** Problems with the store's migration entry, `[]` when pinned: one live,
@@ -260,7 +247,7 @@ test("the store is in the relocate migration's identity roster", () => {
     assert.notDeepEqual(identityStoreProblems(mutant), []);
 });
 
-test("L1: an equal at prefers the worktree record, in either store order", () => {
+test("an equal at prefers the worktree record, in either store order", () => {
   // Its identity sorts first, so only the kind rule can pick the worktree.
   const mainLanding = record({
     identity: "C:/a/.git",
