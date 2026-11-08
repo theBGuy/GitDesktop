@@ -30,14 +30,22 @@ const compact = new Intl.NumberFormat(undefined, {
 });
 
 /** Each row's key: `${first cell}` for its first occurrence, then
- *  `${first cell}#${n}` for the nth. */
+ *  `${first cell}#${n}` for the nth, the suffix bumped past any key already
+ *  taken (a first cell can itself read "a#2"). */
 function rowKeys(rows: (string | number)[][]): string[] {
   const seen = new Map<string, number>();
+  const used = new Set<string>();
   return rows.map((r) => {
     const first = String(r[0]);
-    const n = (seen.get(first) ?? 0) + 1;
+    let n = seen.get(first) ?? 0;
+    let key: string;
+    do {
+      n++;
+      key = n === 1 ? first : `${first}#${n}`;
+    } while (used.has(key));
     seen.set(first, n);
-    return n === 1 ? first : `${first}#${n}`;
+    used.add(key);
+    return key;
   });
 }
 

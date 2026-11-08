@@ -19,6 +19,22 @@ export interface StarPageInput {
   stargazersCount: number | null;
 }
 
+/** A failed older page in the read's pages (useStarHistory's marker): the
+ *  read stays a success over the pages before it, and that page is still owed. */
+export interface StarMarkerInput {
+  failed: true;
+  page: number;
+  reason: unknown;
+}
+
+export function isStarMarker(page: unknown): page is StarMarkerInput {
+  return (
+    typeof page === "object" &&
+    page !== null &&
+    (page as { failed?: unknown }).failed === true
+  );
+}
+
 /** One week of the curve: that week's gain and the running total after it. */
 export interface StarPoint {
   week: number;
@@ -44,10 +60,14 @@ function isCount(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0;
 }
 
+/** A wire week, or null. The week must name a date JS can hold (its ms within
+ *  ±8.64e15), since every label formats it and an invalid Date throws there. */
 function readWeek(w: unknown): StarWeekInput | null {
   if (typeof w !== "object" || w === null) return null;
   const { week, total } = w as Record<string, unknown>;
-  return typeof week === "number" && Number.isFinite(week) && isCount(total)
+  return typeof week === "number" &&
+    !Number.isNaN(new Date(week * 1000).getTime()) &&
+    isCount(total)
     ? { week, total }
     : null;
 }
@@ -65,7 +85,8 @@ export function liveStarCount(
  * week no older than the last one kept is dropped: a Sunday rollover between
  * page fetches shifts every page boundary, repeating a week. The baseline is
  * the live count minus the loaded weeks (0 without a count, clamped at 0), so
- * the curve ends at the live count and the window is the all-time tail.
+ * with a known count the curve ends at it unless the clamp engages, and the
+ * window is the all-time tail. Gains mode plots `total`: no running total.
  */
 export function buildStarSeries(
   pages: readonly Pick<StarPageInput, "weeks" | "stargazersCount">[],
@@ -194,13 +215,14 @@ export function starYAxis(
     : labelledAxis([0, 1], [0, 1]);
 }
 
-/** What the card draws: the window, or every loaded week. All time draws the
- *  loaded weeks once nothing more will load (no page remains, or the read
- *  failed), and keeps them while a Retry resumes (`spanHeld`), so the curve
- *  never steps back to the window between the span and the whole. A first
- *  load of older weeks, or one parked offline, keeps the window up. */
+/** What the card draws: the 52-week window, or every loaded week. */
 export type StarView = "window" | "all";
 
+/** All time draws the loaded weeks once nothing more will load (no page
+ *  remains, or the read failed), and keeps them while a Retry resumes
+ *  (`spanHeld`), so the curve never steps back to the window between the
+ *  span and the whole. A first load of older weeks, or one parked offline,
+ *  keeps the window up. */
 export function starView(
   allTime: boolean,
   hasMore: boolean,
@@ -228,7 +250,7 @@ export interface StarSummaryInput {
   pages: readonly StarPageInput[];
   /** `buildStarSeries(pages)`. */
   series: StarSeries;
-  /** More pages remain (the read's `hasNextPage`). */
+  /** More pages remain (the read's `hasNextPage`, or a failed page's marker). */
   hasMore: boolean;
   view: StarView;
   /** All time is loading older weeks right now. */
@@ -315,7 +337,8 @@ export const STAR_LOADING_TEXT = "Loading older weeks…";
 /** The card's header slot. Nothing before an answer or for an unavailable
  *  history; the page counter while All time loads, at 0 stars too (page 1's
  *  `lastPage` is the only page total, so a later page's never stands in);
- *  otherwise the count, plus the window's gain while the window is drawn. */
+ *  otherwise the count (none in gains mode), plus the window's gain while the
+ *  window is drawn. */
 export function starHeaderSlot(input: StarSummaryInput): StarHeaderSlot {
   if (!answered(input)) return { kind: "none" };
   if (input.driving) {
@@ -342,7 +365,8 @@ const gainText = (gain: number | null) =>
   gain === null ? null : `+${gain.toLocaleString()} in 52 weeks`;
 
 /** The header's stats per mode: gains carry no count, only the window's
- *  gain, and none at 0, which the quiet-tail note covers. */
+ *  gain, and none at 0, which the quiet-tail note covers unless the offline
+ *  note outranks it. */
 const HEADER_STATS: Record<
   StarMode,
   (count: number | null, gain: number | null) => (string | null)[]
@@ -409,8 +433,12 @@ export type StarNote =
   | { kind: "offline"; text: string }
   | { kind: "flatTail"; weeks: number; text: string };
 
+/** The card's line for a repository with no star history to read. */
+export const STAR_UNAVAILABLE_TEXT =
+  "Star history isn't available for this repository.";
+
 const NOTE_TEXT = {
-  unavailable: "Star history isn't available for this repository.",
+  unavailable: STAR_UNAVAILABLE_TEXT,
   noStars: "No stars yet.",
   offline: "You're offline — older weeks will load once you're back online.",
 } as const satisfies Record<
@@ -449,24 +477,28 @@ export function starPartialLine(points: readonly StarPoint[]): string | null {
 /** The slice of the infinite read the card decides on: the structurally
  *  shared data plus primitives, so an unchanged read derives nothing anew. */
 export interface StarReadInput {
-  data: { pages: readonly StarPageInput[] } | undefined;
+  data: { pages: readonly (StarPageInput | StarMarkerInput)[] } | undefined;
   hasNextPage: boolean;
   isError: boolean;
   isPaused: boolean;
   isFetching: boolean;
+  /** The page a marker's Retry asked for again, while that Retry runs. */
+  retryingPage?: number | null;
 }
 
 export interface StarCardState {
   summary: StarSummaryInput;
-  /** Pages are owed and the read is in error (not parked): All time draws the
-   *  loaded span. Read off the state, not the failed fetch's direction, which
-   *  a later refetch's failure overwrites. */
+  /** The failed older page the loaded pages end on, or null. */
+  marker: StarMarkerInput | null;
+  /** Pages are owed and one failed (not parked): a marker, its Retry still
+   *  asking that page again, or a failed refresh. All time draws the loaded
+   *  span. */
   partial: boolean;
   /** The partial line, while the failure leaves out weeks the view would draw:
    *  All time's span, or a window short of 52 weeks. Its Retry shows with it. */
   partialLine: string | null;
-  /** The partial line's Retry holds while the read fetches: a press already
-   *  started the walk it would join. */
+  /** The partial line's Retry holds while the read fetches: a fetch in flight
+   *  is the walk a press would join. */
   retryHeld: boolean;
   /** The window's first draw still waits on pages, so the card holds a
    *  skeleton rather than drawing a page and then reflowing. */
@@ -476,6 +508,10 @@ export interface StarCardState {
   /** Another page is owed once no fetch is in flight. A failed page, a failed
    *  refresh, or a park stops it until a Retry or the reconnect. */
   wantsPage: boolean;
+  /** The view needs the next page, whatever the read is doing: All time, or a
+   *  window short of 52 weeks, with pages left. Its end retires a parked page,
+   *  and a failed page reaches the board's notice only while it holds. */
+  pageDemand: boolean;
 }
 
 /** What the card and its header draw for a read, in one place. `windowDrawn`:
@@ -487,13 +523,24 @@ export function starCardState(
   spanHeld: boolean,
   windowDrawn: boolean,
 ): StarCardState {
-  const pages = read.data?.pages ?? [];
+  const entries = read.data?.pages ?? [];
+  const tail = entries[entries.length - 1];
+  const marker = isStarMarker(tail) ? tail : null;
+  // The derivations read the loaded pages alone; a marker counts as weeks owed.
+  const pages = entries.filter((p): p is StarPageInput => !isStarMarker(p));
   const series = buildStarSeries(pages);
-  const hasMore = read.hasNextPage;
-  const partial =
-    read.data !== undefined && hasMore && read.isError && !read.isPaused;
+  const hasMore = read.hasNextPage || marker !== null;
+  // A marker's Retry drops it before it asks, so the line holds on the page
+  // asked for until that page answers.
+  const retrying =
+    read.isFetching &&
+    read.retryingPage != null &&
+    read.retryingPage === pages[pages.length - 1]?.nextPage;
+  const failing =
+    !read.isPaused && (read.isError || marker !== null || retrying);
+  const partial = read.data !== undefined && hasMore && failing;
   const view = starView(allTime, hasMore, partial, spanHeld);
-  const settled = !read.isError && !read.isPaused;
+  const settled = !read.isPaused && !failing;
   const short = series.points.length < STAR_WINDOW_WEEKS;
   const driving = allTime && hasMore && settled;
   const awaitingWindow =
@@ -513,12 +560,14 @@ export function starCardState(
       // refresh of a full window owes nothing it would draw.
       pageParked: read.isPaused && hasMore && (short || allTime),
     },
+    marker,
     partial,
     partialLine,
     retryHeld: partialLine !== null && read.isFetching,
     awaitingWindow,
     stale: driving && !awaitingWindow,
     wantsPage: hasMore && settled && (allTime || short),
+    pageDemand: hasMore && (short || allTime),
   };
 }
 

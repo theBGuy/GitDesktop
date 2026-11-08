@@ -78,6 +78,25 @@ describe("Insights renders without React console errors", () => {
     expect(errorTexts().filter((t) => /same key/.test(t))).toEqual([]);
   });
 
+  it("a data table's row keys stay unique when a first cell reads like a repeat's key", () => {
+    // "a", "a", "a#2": the second "a" takes a#2, so the third must not.
+    const rows = [
+      ["a", "1"],
+      ["a", "2"],
+      ["a#2", "3"],
+    ];
+    const view = render(<DataTable headers={["Label", "N"]} rows={rows} />);
+    view.rerender(
+      <DataTable headers={["Label", "N"]} rows={[["z", "0"], ...rows]} />,
+    );
+    const cells = screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((r) => r.textContent);
+    expect(cells).toEqual(["z0", "a1", "a2", "a#23"]);
+    expect(errorTexts().filter((t) => /same key/.test(t))).toEqual([]);
+  });
+
   it("the punch card skeleton nests no block inside a paragraph", () => {
     const { container } = render(<PunchCardSkeleton />);
     expect(container.querySelector("p div")).toBeNull();

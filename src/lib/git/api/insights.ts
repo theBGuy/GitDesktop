@@ -65,8 +65,21 @@ export interface StarHistoryPage {
   stargazersCount: number | null;
 }
 
-export const ghStarHistoryPage = (repoPath: string, page: number) =>
-  invoke<StarHistoryPage>("gh_star_history_page", { repoPath, page });
+/** `slug` (`owner/repo`) and `host` name the repository the page is read from
+ *  (the backend never resolves origin itself), so every page of one series
+ *  reads one repository on one host. */
+export const ghStarHistoryPage = (
+  repoPath: string,
+  page: number,
+  slug: string,
+  host: string,
+) =>
+  invoke<StarHistoryPage>("gh_star_history_page", {
+    repoPath,
+    page,
+    slug,
+    host,
+  });
 
 export const forgeForkActivity = (repoPath: string) =>
   invoke<ForgeForkActivity>("forge_fork_activity", { repoPath });

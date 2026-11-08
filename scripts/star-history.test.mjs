@@ -238,6 +238,43 @@ function problems(mod) {
       assert.equal(mod.starSpanHeld(false, true, true, true), false);
       assert.equal(mod.starSpanHeld(true, false, false, true), false);
     },
+    "card: a marker is weeks owed, never drawn, and stops the drive": () => {
+      const old = pagesOf(OLD_930, 246);
+      const marker = { failed: true, page: 3, reason: new Error("x") };
+      const pages = [...old.slice(0, 2), marker];
+      assert.deepEqual(mod.buildStarSeries(pages), mod.buildStarSeries(old.slice(0, 2)));
+      const read = readOf(pages, { hasNextPage: false, isFetching: false });
+      const all = mod.starCardState(read, true, false);
+      assert.equal(all.marker, marker);
+      assert.equal(all.partial, true);
+      assert.equal(all.summary.view, "all");
+      assert.equal(all.summary.hasMore, true);
+      assert.equal(all.summary.pages.length, 2);
+      assert.equal(all.wantsPage, false);
+      assert.equal(all.pageDemand, true);
+      assert.notEqual(all.partialLine, null);
+      // A full window owes nothing it draws, so neither the line nor demand.
+      const window = mod.starCardState(read, false, false);
+      assert.equal(window.partialLine, null);
+      assert.equal(window.pageDemand, false);
+      // Without a count the owed span reads as gains.
+      const uncounted = [...pagesOf(OLD_930, null).slice(0, 2), marker];
+      const gains = mod.starCardState(readOf(uncounted, { hasNextPage: false }), true, false);
+      assert.equal(mod.starMode(gains.summary), "gains");
+    },
+    "card: a marker's Retry holds the line only on the page it asked for": () => {
+      const old = pagesOf(OLD_930, 246);
+      const asked = readOf(old.slice(0, 2), { isFetching: true, retryingPage: 3 });
+      const held = mod.starCardState(asked, true, true);
+      assert.equal(held.partial, true);
+      assert.equal(held.retryHeld, true);
+      assert.equal(held.wantsPage, false);
+      // Landed: the next page is owed, so the same Retry no longer holds it.
+      const landed = readOf(old.slice(0, 3), { isFetching: true, retryingPage: 3 });
+      assert.equal(mod.starCardState(landed, true, true).partial, false);
+      const idle = readOf(old.slice(0, 2), { isFetching: false, retryingPage: 3 });
+      assert.equal(mod.starCardState(idle, true, true).partial, false);
+    },
     "card: the window waits for 52 weeks, then draws once": () => {
       const old = pagesOf(OLD_930, 246);
       const one = mod.starCardState(readOf(old.slice(0, 1)), false, false);
@@ -309,6 +346,42 @@ function problems(mod) {
       );
       assert.equal(parked.partial, false);
       assert.equal(parked.partialLine, null);
+    },
+    "weeks past JS Date's range are skipped, so no label throws": () => {
+      const pages = pagesOf([1, 2, 3], 6);
+      pages[0].weeks = [
+        pages[0].weeks[0],
+        { week: 8640000000001, total: 1 },
+        { week: -8640000000001, total: 1 },
+        { week: Number.POSITIVE_INFINITY, total: 1 },
+        pages[0].weeks[2],
+      ];
+      const s = mod.buildStarSeries(pages);
+      assert.deepEqual(
+        s.points.map((p) => p.total),
+        [3, 1],
+      );
+      for (const p of s.points) {
+        assert.doesNotThrow(() => mod.weekLabel(p.week));
+        assert.doesNotThrow(() => mod.monthYearLabel(p.week));
+      }
+      // The range's own edge (±8.64e15 ms) is a date.
+      const edge = pagesOf([1], 1);
+      edge[0].weeks = [{ week: 8640000000000, total: 1 }];
+      assert.equal(mod.buildStarSeries(edge).points.length, 1);
+    },
+    "card: the page demand ignores what the read is doing": () => {
+      const old = pagesOf(OLD_930, 246);
+      const demand = (pages, allTime, over = {}) =>
+        mod.starCardState(readOf(pages, over), allTime, false, false)
+          .pageDemand;
+      for (const over of [{}, { isPaused: true }, { isError: true }]) {
+        const tag = JSON.stringify(over);
+        assert.equal(demand(old.slice(0, 3), true, over), true, tag);
+        assert.equal(demand(old.slice(0, 1), false, over), true, tag);
+        assert.equal(demand(old.slice(0, 3), false, over), false, tag);
+        assert.equal(demand(old, true, over), false, tag);
+      }
     },
     "card: a failed refresh or a park stops the drive": () => {
       const pages = pagesOf(OLD_930, 246).slice(0, 2);
@@ -717,6 +790,15 @@ function problems(mod) {
       const done = summary(mod, all, { view: "all" });
       assert.equal(mod.starMode(done), "cumulative");
       assert.equal(mod.starDisplayCount(done), 246);
+      // A young history the window loads whole draws the total at once; one
+      // whose next page is owed plots gains.
+      const young = pagesOf(fill(40, 1), null);
+      assert.equal(young.length, 2);
+      assert.equal(mod.starMode(summary(mod, young)), "cumulative");
+      assert.equal(
+        mod.starMode(summary(mod, young.slice(0, 1), { hasMore: true })),
+        "gains",
+      );
       // A live count anchors the total whatever is owed.
       const counted = pagesOf(OLD_930, 246).slice(0, 2);
       assert.equal(
@@ -834,6 +916,18 @@ test("a deriver that drops a guard fails the checks", async () => {
     "no residual": swap(
       "count === null ? 0 : Math.max(0, count - sum)",
       "count === null ? 0 : 0",
+    ),
+    "weeks past Date's range kept": swap(
+      "!Number.isNaN(new Date(week * 1000).getTime())",
+      "Number.isFinite(week)",
+    ),
+    "page demand while parked only": swap(
+      "pageDemand: hasMore && (short || allTime)",
+      "pageDemand: hasMore && (short || allTime) && settled",
+    ),
+    "page demand on a full window": swap(
+      "pageDemand: hasMore && (short || allTime)",
+      "pageDemand: hasMore",
     ),
     "unguarded weeks": swap(
       "const week = readWeek(raw);",
@@ -956,20 +1050,20 @@ test("a deriver that drops a guard fails the checks", async () => {
       "return allTime && (partial || held);",
     ),
     "drive past a failed refresh": swap(
-      "const settled = !read.isError && !read.isPaused;",
+      "const settled = !read.isPaused && !failing;",
       "const settled = !read.isPaused;",
     ),
     "drive while parked": swap(
-      "const settled = !read.isError && !read.isPaused;",
-      "const settled = !read.isError;",
+      "const settled = !read.isPaused && !failing;",
+      "const settled = !failing;",
     ),
     "partial while parked": swap(
-      "hasMore && read.isError && !read.isPaused",
-      "hasMore && read.isError",
+      "!read.isPaused && (read.isError || marker !== null || retrying)",
+      "(read.isError || marker !== null || retrying)",
     ),
     "partial with nothing owed": swap(
-      "hasMore && read.isError && !read.isPaused",
-      "read.isError && !read.isPaused",
+      "read.data !== undefined && hasMore && failing",
+      "read.data !== undefined && failing",
     ),
     "drawn window steps back": swap("settled && !windowDrawn", "settled"),
     "repeated week kept": swap(

@@ -93,7 +93,8 @@ export function SectionTitle({
   );
 }
 
-/** A sidebar section, a region named by its heading. */
+/** A titled block (a sidebar section, a card's sub-list), a group named by
+ *  its heading: a group, not a region, so the panel adds no landmarks. */
 export function TitledSection({
   title,
   children,
@@ -103,7 +104,7 @@ export function TitledSection({
 }) {
   const titleId = useId();
   return (
-    <section aria-labelledby={titleId}>
+    <section role="group" aria-labelledby={titleId}>
       <SectionTitle id={titleId}>{title}</SectionTitle>
       {children}
     </section>
@@ -132,17 +133,19 @@ export function useCardTitle(): { id: string; title: string } | undefined {
   return use(CardTitleContext);
 }
 
-/** A chart surface's name inside a card, "<card title> chart": the region and
- *  figure already carry the bare title. Undefined outside a card. */
+/** A chart surface's name inside a card, "<card title> chart": the card's group
+ *  and figure already carry the bare title. Undefined outside a card. */
 export function useChartLabel(): string | undefined {
   const card = use(CardTitleContext);
   return card && `${card.title} chart`;
 }
 
-/** A bordered card for an Insights board panel, a region named by its title.
+/** A bordered card for an Insights board panel, a group named by its title
+ *  (a group, not a region: a board of cards would be a long landmark list).
  *  The body is a flex column, so a `bodyClassName` height holds the card at
- *  one size across its loading, empty and loaded arms; `stale` dims it while a
- *  placeholder (another window's data) stands in. */
+ *  one size across its loading, empty and loaded arms; `stale` dims it and
+ *  puts it out of reach while its content is being replaced (another window's
+ *  placeholder, or older weeks loading under the drawn curve). */
 export function InsightCard({
   title,
   action,
@@ -163,6 +166,7 @@ export function InsightCard({
   const titleId = useId();
   return (
     <section
+      role="group"
       aria-labelledby={titleId}
       aria-busy={stale || undefined}
       className={cn("space-y-2 border bg-card p-3", className)}
@@ -175,8 +179,8 @@ export function InsightCard({
       </div>
       <div
         ref={bodyRef}
-        // A placeholder drives rendering only: the other window's grid, tables
-        // and announcements stay out of reach until the data is current.
+        // Content being replaced drives rendering only: its grid, tables and
+        // announcements stay out of reach until what replaces it lands.
         inert={stale}
         className={cn(
           "flex flex-col",

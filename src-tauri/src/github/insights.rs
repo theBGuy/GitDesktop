@@ -6,7 +6,10 @@ use crate::error::{AppError, AppResult};
 use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::gh_failure_reason;
 use crate::github::repo_meta::repo_object;
-use crate::github::runner::{run_gh_raw, split_response, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::runner::{
+    gh_host_for_repo, run_gh_cached_get_raw, run_gh_raw, split_response, GhOutput,
+    GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+};
 
 /// Community-health profile + social counts for the Insights tab. Read-only and
 /// tolerant: a repo without a GitHub remote (or with the dependency/community
@@ -530,10 +533,11 @@ fn repo_dependencies_outcome(result: AppResult<GhOutput>) -> AppResult<RepoDepen
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StarHistoryPage {
-    /// false when GitHub answered not-found / denied (e.g. an Enterprise server without
-    /// the endpoint, or a repo the token can't see); weeks is then empty.
+    /// On page 1 only: false for not-found or any answered failure (a denial, a 401,
+    /// an un-worded exit, a 5xx outside 500/502/503/504); weeks is empty. Rate limits
+    /// and transport-worded failures (incl. 500/502/503/504) are errors.
     pub available: bool,
-    /// As GitHub returned them: newest first, dense. `days` is dropped.
+    /// newest first; unreadable entries dropped; days dropped
     pub weeks: Vec<StarWeek>,
     /// Page number from Link rel="next"; None on the last page.
     pub next_page: Option<u32>,
@@ -550,18 +554,29 @@ pub struct StarWeek {
     pub total: i64,
 }
 
+/// `host` and `slug` are the series the frontend's read is keyed by: one series reads
+/// one repository on one host, pages and count alike, and origin's gh host is checked
+/// against it on every page rather than trusted to it.
 #[tauri::command]
-pub async fn gh_star_history_page(repo_path: String, page: u32) -> AppResult<StarHistoryPage> {
+pub async fn gh_star_history_page(
+    repo_path: String,
+    page: u32,
+    slug: String,
+    host: String,
+) -> AppResult<StarHistoryPage> {
     validate_star_page(page)?;
-    // Pin the origin slug so forks read their own history (see `gh_community_insights`).
-    let slug = crate::github::gh_origin_slug(&repo_path).await?;
-    let path = format!("repos/{slug}/stargazers/history?per_page=30&page={page}");
-    // Page manually with -i: slurp closes a valid-looking array over a later-page failure.
-    let args = ["api", "-i", &path];
-    if page == 1 {
+    validate_star_slug(&slug)?;
+    validate_star_host(&host)?;
+    let pin = gh_host_for_repo(&repo_path).await;
+    let (history_args, count_args) = star_reads(pin.as_deref(), &host, &slug, page)?;
+    let args: Vec<&str> = history_args.iter().map(String::as_str).collect();
+    if let Some(count_args) = count_args {
+        let count_args: Vec<&str> = count_args.iter().map(String::as_str).collect();
+        // The conditional layer, never the repos/{slug} memo: that memo keys on
+        // origin's host, and its writers evict origin's spelling of the slug.
         let (history, count) = tokio::join!(
             run_gh_raw(Some(&repo_path), &args, GH_TIMEOUT),
-            repo_object(&repo_path, &slug, GH_TIMEOUT),
+            run_gh_cached_get_raw(Some(&repo_path), &count_args, GH_TIMEOUT),
         );
         star_history_outcome(history, Some(count), page)
     } else {
@@ -577,6 +592,83 @@ fn validate_star_page(page: u32) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+/// An IPC-supplied slug reaches a `repos/{slug}` endpoint, so it passes the same
+/// owner/repo grammar origin slugs do (exactly one `/`), refused otherwise.
+fn validate_star_slug(slug: &str) -> AppResult<()> {
+    if slug.matches('/').count() != 1 || !crate::github::valid_github_slug(slug) {
+        return Err(AppError::InvalidArgument(format!(
+            "star history slug {slug:?} isn't a GitHub owner/repo"
+        )));
+    }
+    Ok(())
+}
+
+/// The series' host is compared against origin's gh host, so it passes the gate written
+/// for `--hostname` argv, plus the leading-`-` refusal that keeps it from reading as a flag.
+fn validate_star_host(host: &str) -> AppResult<()> {
+    if host.starts_with('-') || !crate::forge::is_safe_authority(host) {
+        return Err(AppError::InvalidArgument(format!(
+            "star history host {host:?} isn't a host name"
+        )));
+    }
+    Ok(())
+}
+
+/// The reads for one page of a series. Both run against origin's pinned gh host spelled
+/// in full, port included (gh keys its logins by port), and only while that pin's bare
+/// host IS the series host, so an origin moved to another host never reads into the
+/// series. No pin admits only github.com: no ambient enterprise token goes to a host the
+/// user holds no stored login for. The count rides page 1 only.
+fn star_reads(
+    pin: Option<&str>,
+    host: &str,
+    slug: &str,
+    page: u32,
+) -> AppResult<([String; 5], Option<[String; 4]>)> {
+    let authority = match pin {
+        Some(pin) if star_bare_host(pin).eq_ignore_ascii_case(host) => pin,
+        None if host.eq_ignore_ascii_case("github.com") => "github.com",
+        _ => {
+            return Err(crate::github::gh_unreadable(
+                "the star history",
+                format!("gh holds no login on {host} for this repository's origin."),
+            ))
+        }
+    };
+    let count = (page == 1).then(|| star_count_args(authority, slug));
+    Ok((star_history_args(authority, slug, page), count))
+}
+
+/// An authority's host without its port, split the way `forge::remote_host` splits one:
+/// a bracketed IPv6 literal keeps its span, otherwise the first `:` opens the port.
+fn star_bare_host(authority: &str) -> &str {
+    crate::forge::bracketed_split(authority).map_or_else(
+        || authority.split(':').next().unwrap_or(authority),
+        |(span, _)| span,
+    )
+}
+
+/// An explicit `--hostname` outranks run_gh's `GH_HOST` pin to origin's login host.
+/// Paged manually with -i: slurp closes a valid-looking array over a later-page failure.
+fn star_history_args(host: &str, slug: &str, page: u32) -> [String; 5] {
+    [
+        "api".into(),
+        "-i".into(),
+        "--hostname".into(),
+        host.into(),
+        format!("repos/{slug}/stargazers/history?per_page=30&page={page}"),
+    ]
+}
+
+fn star_count_args(host: &str, slug: &str) -> [String; 4] {
+    [
+        "api".into(),
+        "--hostname".into(),
+        host.into(),
+        format!("repos/{slug}"),
+    ]
 }
 
 // Mirror security_findings::parse_link_next locally; next pages must be consecutive and addressable.
@@ -664,7 +756,7 @@ fn star_history_outcome(
         .filter_map(|item| {
             Some(StarWeek {
                 week: item["week"].as_i64()?,
-                total: item["total"].as_i64().unwrap_or(0),
+                total: item["total"].as_i64().filter(|&total| total >= 0)?,
             })
         })
         .collect();
@@ -1262,6 +1354,114 @@ mod tests {
     }
 
     #[test]
+    fn star_history_slug_must_be_one_owner_repo_pair() {
+        for slug in [
+            "",
+            "owner",
+            "owner/",
+            "/repo",
+            "a/b/c",
+            "../repo",
+            "owner/..",
+            "-owner/repo",
+            "owner/{branch}",
+            "owner/repo?page=2",
+            "owner/repo#x",
+            "own er/repo",
+        ] {
+            assert!(
+                matches!(validate_star_slug(slug), Err(AppError::InvalidArgument(_))),
+                "{slug:?}"
+            );
+        }
+        for slug in ["owner/repo", "Owner-1/repo.js", "o/_r"] {
+            assert!(validate_star_slug(slug).is_ok(), "{slug:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn star_history_refuses_a_bad_slug_before_any_read() {
+        for (slug, host) in [("a/b/c", "github.com"), ("a/b", "-x"), ("a/b", "h/x")] {
+            let error = gh_star_history_page("C:/no-such-repo".into(), 1, slug.into(), host.into())
+                .await
+                .expect_err("a bad series must be refused");
+            assert!(matches!(error, AppError::InvalidArgument(_)), "{error}");
+        }
+    }
+
+    #[test]
+    fn star_history_host_must_be_one_host_name() {
+        for host in [
+            "", "-x", "-x:1", ":1", "h:", "a:b:c", "h:abc", "h/x", "h x", "h\tx", "h?x", "h@x",
+            "h{x}", "[]", "[zz]",
+        ] {
+            assert!(
+                matches!(validate_star_host(host), Err(AppError::InvalidArgument(_))),
+                "{host:?}"
+            );
+        }
+        for host in [
+            "github.com",
+            "ghe.acme.co:8443",
+            "GHE-1.acme.io",
+            "[2001:db8::1]",
+            "[::1]:8443",
+        ] {
+            assert!(validate_star_host(host).is_ok(), "{host:?}");
+        }
+    }
+
+    #[test]
+    fn star_history_reads_pin_the_full_login_authority() {
+        let (history, count) =
+            star_reads(Some("ghes.example.com:8443"), "ghes.example.com", "o/r", 1).unwrap();
+        assert_eq!(
+            history,
+            [
+                "api",
+                "-i",
+                "--hostname",
+                "ghes.example.com:8443",
+                "repos/o/r/stargazers/history?per_page=30&page=1",
+            ]
+        );
+        let count = count.expect("page 1 reads the count");
+        assert_eq!(
+            count,
+            ["api", "--hostname", "ghes.example.com:8443", "repos/o/r"]
+        );
+        // The count stays a conditional GET: revalidated, never served stale.
+        let count: Vec<&str> = count.iter().map(String::as_str).collect();
+        assert!(!crate::github::runner::bypasses(&count));
+
+        let (history, count) = star_reads(Some("[::1]:8443"), "[::1]", "o/r", 2).unwrap();
+        assert_eq!(history[3], "[::1]:8443");
+        assert!(count.is_none());
+        for pin in [None, Some("github.com")] {
+            let (history, count) = star_reads(pin, "github.com", "o/r", 1).unwrap();
+            assert_eq!(history[3], "github.com");
+            assert_eq!(count.unwrap()[2], "github.com");
+        }
+    }
+
+    #[test]
+    fn star_history_refuses_a_series_off_origins_login_host() {
+        for (pin, host) in [
+            (Some("ghe.other.io"), "ghe.acme.io"),
+            (Some("ghe.acme.io:8443"), "ghe.other.io"),
+            (Some("github.com"), "ghe.acme.io"),
+            (Some("ghe.acme.io"), "github.com"),
+            (None, "ghe.acme.io"),
+        ] {
+            let error = star_reads(pin, host, "o/r", 1).expect_err("a host flip must refuse");
+            assert!(
+                matches!(&error, AppError::Gh(message) if message.starts_with("Couldn't read the star history")),
+                "{pin:?} {host}: {error}"
+            );
+        }
+    }
+
+    #[test]
     fn star_history_held_reason_is_verbatim() {
         let error = star_history_outcome(gh_output(1, "", HELD_REST_STDERR), None, 1)
             .expect_err("held reads must reject without headers");
@@ -1315,6 +1515,21 @@ mod tests {
         let error = star_history_outcome(gh_output(1, "", ANSWERED_STDERR), None, 2)
             .expect_err("a later denial must reject");
         assert!(matches!(error, AppError::Gh(message) if message == ANSWERED_STDERR));
+    }
+
+    #[test]
+    fn star_history_unworded_5xx_is_unavailable_only_on_first_page() {
+        let stderr = "HTTP 501: Not Implemented";
+        assert_eq!(
+            star_history_outcome(gh_output(1, "", stderr), None, 1).unwrap(),
+            StarHistoryPage::default()
+        );
+        let error = star_history_outcome(gh_output(1, "", stderr), None, 2)
+            .expect_err("a later HTTP 501 must reject");
+        assert!(matches!(error, AppError::Gh(message) if message == stderr));
+        // A transport-worded 5xx is an error on page 1 too.
+        star_history_outcome(gh_output(1, "", "HTTP 503: Service Unavailable"), None, 1)
+            .expect_err("an HTTP 503 must reject");
     }
 
     #[test]
@@ -1449,7 +1664,7 @@ mod tests {
                 ..Default::default()
             }
         );
-        let body = r#"[{"total":3,"days":[]},{"week":1761436800},7,{"week":1760832000,"total":2,"days":"ignored"},{"week":"bad"}]"#;
+        let body = r#"[{"total":3,"days":[]},{"week":1761436800,"total":0},7,{"week":1760832000,"total":2,"days":"ignored"},{"week":"bad"}]"#;
         let result = star_history_outcome(gh_output(0, body, ""), None, 1).unwrap();
         assert_eq!(
             result.weeks,
@@ -1464,6 +1679,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn star_history_drops_bad_totals_and_keeps_measured_entries_in_order() {
+        for bad in [
+            r#"{"week":2}"#,
+            r#"{"week":2,"total":-1}"#,
+            r#"{"week":2,"total":1.5}"#,
+            r#"{"week":2,"total":"2"}"#,
+            r#"{"week":2,"total":null}"#,
+        ] {
+            let body = format!(r#"[{{"week":3,"total":0}},{bad},{{"week":1,"total":2}}]"#);
+            let result = star_history_outcome(gh_output(0, &body, ""), None, 1).unwrap();
+            assert!(result.available);
+            assert_eq!(
+                result.weeks,
+                vec![
+                    StarWeek { week: 3, total: 0 },
+                    StarWeek { week: 1, total: 2 }
+                ],
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn star_history_rejects_all_bad_totals() {
+        let body = r#"[{"week":3},{"week":2,"total":-1},{"week":1,"total":1.5}]"#;
+        let error = star_history_outcome(gh_output(0, body, ""), None, 1).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Gh(message)
+                if message == "Couldn't read the star history from GitHub.\nno readable weeks"
+        ));
     }
 
     #[test]

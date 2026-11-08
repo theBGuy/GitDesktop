@@ -253,12 +253,14 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   on a new 40-only width in `src/` (a `{40}` quantifier with no `{64}` beside it,
   a 40-zero literal, a length compared to 40); slices, named constants and split
   lines are out of its reach.
-- Insights regions take their accessible name from visible text
+- Insights blocks take their accessible name from visible text
   (`src/features/repository/insights/primitives.tsx`): a card is `InsightCard`
-  (its section is labelled by its h3), a non-card block is `TitledSection`, and
-  a figure inside a card carries the bare title via `useCardTitle()`. Its chart
-  svg is `aria-label` "<title> chart" via `useChartLabel()` and a `DataTable`
-  defaults to "<title> data", so the nested names stay distinct. Never a
+  and a titled block (in a card or the sidebar) is `TitledSection`, each a named
+  `role="group"` (not a region, which would flood the landmark list). A figure in
+  a card is labelled by the card title through the card title context
+  (`ChartFigure` does this itself; a hand-built figure takes `useCardTitle()`),
+  its chart svg is `aria-label` "<title> chart" via `useChartLabel()`, and a
+  `DataTable` defaults to "<title> data", so nested names stay distinct. Never a
   recharts `title` prop, which also renders a hover tooltip.
 - Icon-only copy buttons are `CopyIconButton`
   (`src/components/CopyIconButton.tsx`), never a raw button around `CopyIcon`;
@@ -918,6 +920,29 @@ one grep away on the named symbol. Grows via Conventions-sync.
   and hot working-tree ops keep their narrow `invalidate`. The window-focus
   pass refetches only active queries that are stale by their own staleTime
   or errored, never a blanket invalidation.
+- **Whole-repo settles skip star history** — every whole-repo write settle
+  (the `useRepoMutation` default via `filtersOf`, `invalidateRepoAfterWrite`,
+  the update-from holder release in `queries/branches.ts`) carries
+  `settlesOnRepoWrite` (`queries/repo-mutation-options.ts`), which leaves
+  `repoKeys.starHistory` alone, since an infinite-query refetch re-walks every
+  loaded page. Its key ends in the series it reads, host and slug
+  (`starHistorySeries`, from the forge status), and the backend reads only
+  that series (`--hostname` pinned to origin's gh login spelling, refused
+  while that login's host isn't the series host), so a write that re-points
+  origin (fork, an `origin` set-url) moves the writing checkout to a fresh
+  series through the forge status its settle refreshes; a sibling checkout
+  moves when its own forge status refreshes. The writes that move its stars
+  settle every cached series of it themselves: Star/Unstar through
+  `invalidateStarHistory`, delete and visibility through `resetStarHistory`
+  (`queries/insights.ts`); a new write of that kind joins them. An
+  out-of-band origin edit (terminal, MCP) moves the read once the forge status
+  next refreshes; until then it reads the old series, never a mix. A failed
+  older page is a marker page in the series, so the read stays a success that
+  ages normally.
+  A new bare `["repo", repo]` invalidation outside `filtersOf` takes the same
+  predicate. A read that must not be re-walked by
+  the offline park sets `meta: { [OFFLINE_PARK_META]: false }`
+  (`src/lib/offline-park.ts`).
 - **Push-like run recheck** — writes whose own default trigger starts CI for
   the code they touch arm `recheckRunsAfterPush` (`queries/push-writes.ts`) on
   success, because the run can appear, or flip status, after the settle-time

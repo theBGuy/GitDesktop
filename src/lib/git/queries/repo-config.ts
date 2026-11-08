@@ -7,7 +7,8 @@ import type {
   SecretApp,
   SecurityFeature,
 } from "../types";
-import { invalidateRepoAfterWrite } from "./core";
+import { invalidateRepoAfterWrite, repoKeys } from "./core";
+import { resetStarHistory } from "./insights";
 import { repoSettingsKey } from "./internal";
 
 // Secrets & variables. `env: null` = repository scope; a string = that
@@ -271,12 +272,24 @@ export function useSetVisibility(repo: string) {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: repoSettingsKey(repo) });
       queryClient.invalidateQueries({ queryKey: securityKey(repo) });
+      // GitHub erases a repo's stars and watchers when its visibility changes.
+      void resetStarHistory(queryClient, repo);
+      queryClient.invalidateQueries({
+        queryKey: repoKeys.communityInsights(repo),
+      });
     },
   });
 }
 
 export function useDeleteRepo(repo: string) {
-  return useMutation({ mutationFn: () => api.forgeRepoDelete(repo) });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.forgeRepoDelete(repo),
+    // The caller's whole-repo settle skips star history, which named the repo
+    // just deleted. No refetch: page 1 would fail against the removed origin.
+    onSuccess: () =>
+      void resetStarHistory(queryClient, repo, { refetch: false }),
+  });
 }
 
 // Archive, transfer and rename settle on the hook's `repo` unpinned: that is the

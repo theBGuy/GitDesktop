@@ -3283,9 +3283,10 @@ Bitbucket).
   open **Show data table**. All time loads the full history page by page, with a counter
   in the card header while it loads; if a page fails, the card keeps the weeks it loaded,
   says from when, and offers **Retry**. While you're offline, it says the older weeks will
-  load once you're back online. If GitHub doesn't report the star total, the card plots
-  new stars per week until every page is in. The tooltip and table label each week by
-  the date it starts ("Week of Nov 1, 2026"), never a time of day.
+  load once you're back online. If GitHub doesn't report the star total and the history
+  runs past what the 52-week view loads, the card plots new stars per week instead; the
+  running total returns once **All time** has loaded every page. The tooltip and table
+  label each week by the date it starts ("Week of Nov 1, 2026"), never a time of day.
 - **Fork activity** — the repo's recently active direct forks on GitHub, GitLab, and
   Bitbucket: up to ten, most recent first. Each row links to the fork on its forge and
   shows how recently it has been active and its stars where it has any (Bitbucket has no
@@ -3294,7 +3295,7 @@ Bitbucket).
   demand, so you can see which forks carry commits this repo doesn't.
 - Quick links jump to the pages best viewed on the web — GitHub's Pulse, Network,
   Dependents, and Actions (the Network graph is where forks of forks live), plus
-  star-history.com's chart on github.com; GitLab's
+  **Stars over time** on star-history.com for github.com repositories; GitLab's
   Activity, CI/CD analytics, and value stream analytics; or Bitbucket's Commits,
   Branches, Pipelines, and Deployments.
 

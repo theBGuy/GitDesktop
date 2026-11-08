@@ -216,7 +216,9 @@ export function useSetRemoteUrl(repo: string) {
     (args: { name: string; url: string }) =>
       api.gitRemoteSetUrl(repo, args.name, args.url),
     {
-      // Local git-config write — never park it offline.
+      // Local git-config write — never park it offline. Its whole-repo settle
+      // refreshes the forge status, which moves star history to a new origin's
+      // slug.
       networkMode: "always",
     },
   );

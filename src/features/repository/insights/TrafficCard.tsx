@@ -1,6 +1,6 @@
 import type { RepoTraffic, TrafficItem } from "@/lib/git/types";
 import { TrafficChart } from "./charts";
-import { Empty, fmt, SectionTitle, Stat } from "./primitives";
+import { Empty, fmt, Stat, TitledSection } from "./primitives";
 
 function ItemList({
   items,
@@ -54,17 +54,17 @@ export function TrafficCard({ data }: { data: RepoTraffic }) {
         <TrafficChart views={data.views} clones={data.clones} />
       )}
       <div className="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2">
+        {/* h3s under the card's h3: SectionTitle is an h3 everywhere, and
+            each block is a named group inside the card's own group. */}
         {data.referrers.length > 0 && (
-          <div>
-            <SectionTitle>Top referrers</SectionTitle>
+          <TitledSection title="Top referrers">
             <ItemList items={data.referrers} />
-          </div>
+          </TitledSection>
         )}
         {data.paths.length > 0 && (
-          <div>
-            <SectionTitle>Popular paths</SectionTitle>
+          <TitledSection title="Popular paths">
             <ItemList items={data.paths} showTitle />
-          </div>
+          </TitledSection>
         )}
       </div>
     </div>

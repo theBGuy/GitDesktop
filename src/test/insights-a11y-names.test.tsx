@@ -18,6 +18,7 @@ import {
 import { InsightsPanel } from "@/features/repository/insights/InsightsPanel";
 import { PunchCard } from "@/features/repository/insights/PunchCard";
 import { InsightCard } from "@/features/repository/insights/primitives";
+import { TrafficCard } from "@/features/repository/insights/TrafficCard";
 import { unmockedCommands } from "./setup";
 
 vi.mock("@/lib/git/queries", async (importOriginal) => {
@@ -82,7 +83,7 @@ const WEEKS = [
   { week: "2026-41", commits: 5 },
 ];
 
-/** Each chart in its card: the card's region, its figure, its chart surface
+/** Each chart in its card: the card's group, its figure, its chart surface
  *  and its data table all carry the card's title. */
 const CARDS = [
   ["Commit activity", <CommitActivityChart key="c" data={WEEKS} />],
@@ -119,7 +120,9 @@ const CARDS = [
 describe("Insights accessible names", () => {
   it.each(CARDS)("names the %s chart and table by the card", (title, chart) => {
     render(<InsightCard title={title}>{chart}</InsightCard>);
-    const region = screen.getByRole("region", { name: title });
+    const region = screen.getByRole("group", { name: title });
+    // A group, not a region: the board adds no landmarks.
+    expect(screen.queryAllByRole("region")).toEqual([]);
     expect(within(region).getByRole("figure", { name: title })).toBeTruthy();
     expect(
       within(region).getByRole("application", { name: `${title} chart` }),
@@ -164,8 +167,9 @@ describe("Insights accessible names", () => {
 
   it("names the sidebar's sections by their headings, each distinct", () => {
     render(<InsightsPanel repoPath="C:/repo" active />);
+    expect(screen.queryAllByRole("region")).toEqual([]);
     const names = screen
-      .getAllByRole("region")
+      .getAllByRole("group")
       .map((r) => r.getAttribute("aria-labelledby"))
       .map((id) => (id ? document.getElementById(id)?.textContent : null));
     expect(names).toEqual([
@@ -175,9 +179,39 @@ describe("Insights accessible names", () => {
       "feat/x vs master",
     ]);
     for (const name of ["Overview", "Code makeup", "Top contributors"])
-      expect(screen.getByRole("region", { name })).toBeTruthy();
+      expect(screen.getByRole("group", { name })).toBeTruthy();
     expect(
-      screen.getByRole("region", { name: "feat/x vs master" }),
+      screen.getByRole("group", { name: "feat/x vs master" }),
     ).toBeTruthy();
+  });
+
+  it("names the traffic card's lists by their headings, inside the card", () => {
+    const item = (name: string) => ({
+      name,
+      title: name,
+      count: 3,
+      uniques: 1,
+    });
+    render(
+      <InsightCard title="Traffic">
+        <TrafficCard
+          data={{
+            available: true,
+            viewsCount: 3,
+            viewsUniques: 1,
+            views: [],
+            clonesCount: 0,
+            clonesUniques: 0,
+            clones: [],
+            referrers: [item("github.com")],
+            paths: [item("/owner/repo")],
+          }}
+        />
+      </InsightCard>,
+    );
+    const card = screen.getByRole("group", { name: "Traffic" });
+    for (const name of ["Top referrers", "Popular paths"])
+      expect(within(card).getByRole("group", { name })).toBeTruthy();
+    expect(screen.queryAllByRole("region")).toEqual([]);
   });
 });

@@ -2619,6 +2619,11 @@ pub async fn gh_repo_fork(repo_path: String, contribute_to_parent: bool) -> AppR
     )
     .await;
     invalidate_all_repo_meta_after(&result);
+    // `--remote` re-points origin at the fork and renames the parent's remote to
+    // upstream, so neither cached URL holds; dropped even on a failure, which may
+    // have rewritten them part-way.
+    crate::git::remote::invalidate_remote_url_cache(&repo_path, "origin");
+    crate::git::remote::invalidate_remote_url_cache(&repo_path, "upstream");
     let out = result?;
     // gh prints progress to stderr; stdout carries the fork's URL when
     // creation succeeds (empty if the fork already existed).
