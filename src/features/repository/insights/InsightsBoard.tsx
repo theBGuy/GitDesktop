@@ -241,11 +241,12 @@ export function InsightsBoard({
   const [lastErrors, setLastErrors] = useState<CardErrorMemory>({});
   const [retryRepo, setRetryRepo] = useState(repoPath);
   const [previousRepo, setPreviousRepo] = useState<string | null>(null);
-  // The repo whose All-time star span stays drawn while a Retry resumes it
-  // (starSpanHeld); any other repo, or the window, holds none.
-  const [starSpanRepo, setStarSpanRepo] = useState<string | null>(null);
-  // The repo whose star window has drawn, so a resumed page keeps it drawn.
-  const [starWindowRepo, setStarWindowRepo] = useState<string | null>(null);
+  // The star read (`starReadId`: repo and series) whose All-time span stays
+  // drawn while a Retry resumes it (starSpanHeld); any other read, or the
+  // window, holds none.
+  const [starSpanRead, setStarSpanRead] = useState<string | null>(null);
+  // The star read whose window has drawn, so a resumed page keeps it drawn.
+  const [starWindowRead, setStarWindowRead] = useState<string | null>(null);
   // A failed older page's Retry while it runs: the read (repo and series) and
   // the page it asks.
   const [starRetry, setStarRetry] = useState<{
@@ -301,6 +302,7 @@ export function InsightsBoard({
   const dependencies = useRepoDependencies(repoPath, canGhOnly);
   const starSeries = starHistorySeries(gh.data);
   const starHistory = useStarHistory(repoPath, starSeries, canGhOnly);
+  const starReadId = JSON.stringify([repoPath, starSeries]);
   const forkActivity = useForkActivity(repoPath, canForks);
   const runs = useWorkflowRuns(repoPath, canGh, active);
 
@@ -326,7 +328,7 @@ export function InsightsBoard({
     runs: isGitLab || isBitbucket ? "pipelines" : CARD_NOUN.runs,
   };
 
-  const starSpanHere = starSpanRepo === repoPath;
+  const starSpanHere = starSpanRead === starReadId;
   const star = starCardState(
     {
       data: starHistory.data,
@@ -341,7 +343,7 @@ export function InsightsBoard({
     },
     allTime,
     starSpanHere,
-    starWindowRepo === repoPath,
+    starWindowRead === starReadId,
   );
   const queryClient = useQueryClient();
   const { fetchNextPage: fetchStarPage } = starHistory;
@@ -387,31 +389,32 @@ export function InsightsBoard({
     star.partial,
     starSpanHere,
   )
-    ? repoPath
+    ? starReadId
     : null;
-  if (starSpanNext !== starSpanRepo) setStarSpanRepo(starSpanNext);
+  if (starSpanNext !== starSpanRead) setStarSpanRead(starSpanNext);
   if (
     starShown &&
     star.summary.view === "window" &&
     !star.awaitingWindow &&
-    starWindowRepo !== repoPath
+    starWindowRead !== starReadId
   )
-    setStarWindowRepo(repoPath);
+    setStarWindowRead(starReadId);
   // A read that lost its data (collected, or a cold reload) loads afresh, so
   // its first window waits for 52 weeks again.
-  if (starHistory.data === undefined && starWindowRepo === repoPath)
-    setStarWindowRepo(null);
+  if (starHistory.data === undefined && starWindowRead === starReadId)
+    setStarWindowRead(null);
   // The page driver lives here, declared after useStarHistory: the hook moves
   // its observer to a switched repo in an effect, which must run first, or a
   // returning repo's page goes to the old one. Hidden tabs defer it; it never
   // awaits, and `cancelRefetch: false` joins a page already in flight. Keyed
-  // on the repo and the pages loaded, so each landed page asks for the next
-  // even when a batched render never showed the fetch in flight.
+  // on the repo, the series and the pages loaded, so each landed page (or a
+  // series flip at the same count) asks for the next even when a batched render
+  // never showed the fetch in flight.
   // Gated on `canGhOnly` too: the slot also shows while the forge is being
   // detected, when the read is disabled but fetchNextPage would still run.
   const starDriveFor =
     canGhOnly && starShown && star.wantsPage && !starHistory.isFetching
-      ? `${repoPath}#${star.summary.pages.length}`
+      ? `${repoPath}#${starSeries}#${star.summary.pages.length}`
       : null;
   useEffect(() => {
     if (starDriveFor !== null) void fetchStarPage({ cancelRefetch: false });

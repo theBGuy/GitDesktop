@@ -49,21 +49,19 @@ function rowKeys(rows: (string | number)[][]): string[] {
   });
 }
 
-/** Named `label`, else "<card title> data" inside a card. */
+/** Named "<card title> data" inside a card; unnamed outside one. */
 export function DataTable({
   headers,
   rows,
-  label,
 }: {
   headers: string[];
   rows: (string | number)[][];
-  label?: string;
 }) {
   const keys = rowKeys(rows);
   const card = useCardTitle();
   return (
     <table
-      aria-label={label ?? (card && `${card.title} data`)}
+      aria-label={card && `${card.title} data`}
       className="w-full border-collapse text-left tabular-nums"
     >
       <thead>

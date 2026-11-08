@@ -148,13 +148,19 @@ function niceStep(range: number): number {
 }
 
 /** The window's Y axis: labelled ticks spanning the values' own range. A flat
- *  series pads one star either side (never below 0), so it still draws. */
+ *  series pads one star either side (never below 0), so it still draws. Values
+ *  past 2^53 get the empty axis: there a float's spacing can outgrow the step,
+ *  and `t += step` would stop advancing. */
 export function windowAxis(values: readonly number[]): {
   domain: [number, number];
   ticks: number[];
 } {
   const finite = values.filter((v) => Number.isFinite(v));
-  if (finite.length === 0) return { domain: [0, 1], ticks: [0, 1] };
+  if (
+    finite.length === 0 ||
+    finite.some((v) => Math.abs(v) > Number.MAX_SAFE_INTEGER)
+  )
+    return { domain: [0, 1], ticks: [0, 1] };
   let min = finite[0];
   let max = finite[0];
   for (const v of finite) {
@@ -431,6 +437,7 @@ export type StarNote =
   | { kind: "unavailable"; text: string }
   | { kind: "noStars"; text: string }
   | { kind: "offline"; text: string }
+  | { kind: "aboveCount"; text: string }
   | { kind: "flatTail"; weeks: number; text: string };
 
 /** The card's line for a repository with no star history to read. */
@@ -441,21 +448,34 @@ const NOTE_TEXT = {
   unavailable: STAR_UNAVAILABLE_TEXT,
   noStars: "No stars yet.",
   offline: "You're offline — older weeks will load once you're back online.",
+  aboveCount:
+    "The star count and the chart come from separate reads, so the curve can end above the count.",
 } as const satisfies Record<
   Exclude<StarNote["kind"], "none" | "flatTail">,
   string
 >;
 
+/** The loaded weeks gained more stars than the live count holds, so the
+ *  baseline clamped at 0 and the curve ends past the count. */
+function curveAboveCount(input: StarSummaryInput): boolean {
+  const count = liveStarCount(input.pages);
+  const last = input.series.points[input.series.points.length - 1];
+  return count !== null && last !== undefined && last.stars > count;
+}
+
 /** The note line under the figure, from a read that answered so; one line,
- *  in precedence unavailable, no stars, offline, quiet tail. The partial line
- *  never meets the offline one: a parked read isn't partial. A trailing zero
- *  run counts the newest week, which is still in progress. */
+ *  in precedence unavailable, no stars, offline, curve above the count, quiet
+ *  tail. The partial line never meets the offline one: a parked read isn't
+ *  partial. A trailing zero run counts the newest week, which is still in
+ *  progress. */
 export function starNote(input: StarSummaryInput): StarNote {
   if (input.pages.length === 0) return { kind: "none" };
   if (!answered(input))
     return { kind: "unavailable", text: NOTE_TEXT.unavailable };
   if (noStarsYet(input)) return { kind: "noStars", text: NOTE_TEXT.noStars };
   if (input.pageParked) return { kind: "offline", text: NOTE_TEXT.offline };
+  if (curveAboveCount(input))
+    return { kind: "aboveCount", text: NOTE_TEXT.aboveCount };
   const weeks = trailingZeroWeeks(visibleStarPoints(input));
   return weeks >= STAR_FLAT_TAIL_MIN
     ? {

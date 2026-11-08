@@ -1,5 +1,6 @@
 import {
   focusManager,
+  notifyManager,
   onlineManager,
   QueryClient,
   QueryClientProvider,
@@ -36,6 +37,7 @@ import {
   forgeRepoDelete,
   forgeRepoSetStar,
   forgeRepoSetVisibility,
+  forgeStarRepo,
   forgeStatus,
   ghCommunityInsights,
   ghRepoFork,
@@ -56,6 +58,7 @@ import {
   useSetRepoStar,
   useSetVisibility,
   useStarHistory,
+  useStarRepo,
   useUpdateBranchFrom,
   useUpdateHookManager,
 } from "@/lib/git/queries";
@@ -87,6 +90,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => {
     gitRemoteSetUrl: vi.fn(),
     forgeRepoDelete: vi.fn(),
     forgeRepoSetVisibility: vi.fn(),
+    forgeStarRepo: vi.fn(),
   };
 });
 
@@ -2240,5 +2244,200 @@ describe("Star history: one series per slug", () => {
     await flush();
     expect(cardRetry()).toBeNull();
     expect(slot().textContent).toBe("Loading older weeks · 2 of 5");
+  });
+});
+
+describe("Star history: keyed by repo and series", () => {
+  afterEach(() => {
+    focusManager.setFocused(undefined);
+    notifyManager.setScheduler((cb) => setTimeout(cb, 0));
+  });
+  const hookOn = <T,>(client: QueryClient, hook: () => T) =>
+    renderHook(hook, {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    }).result;
+  /** A focus pass once the forge status is stale (`ahead` past its last
+   *  read), which re-reads it. */
+  async function refocusLater(until: () => void, ahead = 61_000) {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + ahead);
+    try {
+      act(() => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      await waitFor(until);
+    } finally {
+      clock.mockRestore();
+    }
+  }
+  const starStatus = (repo: string) => ["repo", repo, "star-status"];
+
+  it("All time held over one series never holds a cached series origin moves to", async () => {
+    slugs[REPO] = FORK;
+    fixtures[FORK] = pagesOf(OLD_150, 150);
+    failures = [{ repo: REPO, page: 3, attempt: 1, error: TRANSPORT }];
+    const user = userEvent.setup();
+    renderBoard();
+    await waitFor(() => expect(tableRows()).toBe(52));
+    slugs[REPO] = SLUG;
+    await refocusLater(() => expect(pagesCalled()).toEqual([1, 2, 1, 2]));
+    await waitFor(() => expect(caption()).toContain("140 stars"));
+    await user.click(button("All time"));
+    await waitFor(() =>
+      expect(within(card()).getByText(partialLine(59))).toBeTruthy(),
+    );
+    holdFor.add(REPO);
+    slugs[REPO] = FORK;
+    await refocusLater(
+      () => expect(pagesCalled()).toEqual([1, 2, 1, 2, 3, 3]),
+      122_000,
+    );
+    expect(tableRows()).toBe(52);
+    expect(within(card()).queryByText(partialLine(59))).toBeNull();
+  });
+
+  it("an origin flip at the same page count still drives the new series", async () => {
+    fixtures[FORK] = pagesOf(OLD_150, 150);
+    const { client } = renderBoard();
+    await waitFor(() => expect(tableRows()).toBe(52));
+    client.setQueryData(FORK_KEY, {
+      pages: pagesOf(OLD_150, 150).slice(0, 3),
+      pageParams: [1, 2, 3],
+    });
+    const user = userEvent.setup();
+    holdFor.add(REPO);
+    await user.click(button("All time"));
+    await waitFor(() => expect(pagesCalled()).toEqual([1, 2, 3]));
+    const queued: (() => void)[] = [];
+    notifyManager.setScheduler((cb) => {
+      queued.push(cb);
+    });
+    await release(3);
+    // The landed page's render commits; its driver asks page 4.
+    await act(async () => {
+      for (const cb of queued.splice(0)) cb();
+    });
+    await waitFor(() => expect(pagesCalled()).toEqual([1, 2, 3, 4]));
+    // The flip lands in the same batch as page 4's fetch start.
+    slugs[REPO] = FORK;
+    client.setQueryData(["repo", REPO, "forge-status"], {
+      ...GITHUB,
+      repo: FORK,
+    });
+    await act(async () => {
+      for (const cb of queued.splice(0)) cb();
+    });
+    notifyManager.setScheduler((cb) => setTimeout(cb, 0));
+    await waitFor(() =>
+      expect(vi.mocked(ghStarHistoryPage).mock.calls.at(-1)).toEqual([
+        REPO,
+        4,
+        FORK,
+        HOST,
+      ]),
+    );
+  });
+
+  it("a toggle refreshes a sibling checkout whose status spells the slug in another case", async () => {
+    const SIBLING = "C:/sibling";
+    slugs[SIBLING] = "Owner/Repo";
+    fixtures[SIBLING] = pagesOf(OLD_150, 140);
+    vi.mocked(forgeRepoSetStar).mockResolvedValue(undefined);
+    const { client, rerender } = renderBoard(SIBLING);
+    await waitFor(() => expect(tableRows()).toBe(52));
+    rerender(REPO);
+    await waitFor(() => expect(caption()).toContain("140 stars"));
+    const toggle = hookOn(client, () => useSetRepoStar(REPO));
+    await act(() => toggle.current.mutateAsync(true));
+    await flush();
+    const sibling = [
+      "repo",
+      SIBLING,
+      "insights",
+      "starHistory",
+      `${HOST}/Owner/Repo`,
+    ];
+    expect(client.getQueryState(sibling)?.isInvalidated).toBe(true);
+  });
+
+  it("a visibility change re-reads Community still loading once it lands", async () => {
+    vi.mocked(forgeRepoSetVisibility).mockResolvedValue(undefined as never);
+    let failCommunity: (e: unknown) => void = () => undefined;
+    vi.mocked(ghCommunityInsights).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failCommunity = reject;
+        }),
+    );
+    const { client } = renderBoard();
+    await waitFor(() => expect(ghCommunityInsights).toHaveBeenCalledTimes(1));
+    const vis = hookOn(client, () => useSetVisibility(REPO));
+    await act(() => vis.current.mutateAsync("private"));
+    await act(async () => failCommunity(TRANSPORT));
+    await waitFor(() => expect(ghCommunityInsights).toHaveBeenCalledTimes(2));
+  });
+
+  it("a visibility change settling after origin moved resets the series it changed", async () => {
+    fixtures[FORK] = pagesOf(FORK_90, 150);
+    let land: () => void = () => undefined;
+    vi.mocked(forgeRepoSetVisibility).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = () => resolve(undefined as never);
+        }),
+    );
+    const { client } = renderBoard();
+    await waitFor(() => expect(caption()).toContain("140 stars"));
+    const vis = hookOn(client, () => useSetVisibility(REPO));
+    let done: Promise<unknown> = Promise.resolve();
+    act(() => {
+      done = vis.current.mutateAsync("private");
+    });
+    await waitFor(() => expect(forgeRepoSetVisibility).toHaveBeenCalled());
+    slugs[REPO] = FORK;
+    await refocusLater(() => expect(pagesCalled()).toEqual([1, 2, 1, 2]));
+    await waitFor(() => expect(caption()).toContain("150 stars"));
+    await act(async () => {
+      land();
+      await done;
+    });
+    await flush();
+    expect(client.getQueryData(STAR_KEY)).toBeUndefined();
+    expect(client.getQueryData(FORK_KEY)).toBeDefined();
+    expect(pagesCalled()).toEqual([1, 2, 1, 2]);
+  });
+
+  it("an Explore star of a checkout's repo refreshes its star history, Community and star status", async () => {
+    vi.mocked(forgeStarRepo).mockResolvedValue(undefined as never);
+    fixtures[OTHER] = pagesOf(OLD_150, 140);
+    const { client } = renderBoard();
+    renderBoard(OTHER, client);
+    await waitFor(() => {
+      expect(pagesCalled()).toEqual([1, 2]);
+      expect(pagesCalled(OTHER)).toEqual([1, 2]);
+    });
+    for (const path of [REPO, OTHER])
+      client.setQueryData(starStatus(path), false);
+    const star = hookOn(client, () => useStarRepo());
+    await act(() =>
+      star.current.mutateAsync({
+        provider: "github",
+        owner: "Owner",
+        name: "REPO",
+        star: true,
+      }),
+    );
+    await waitFor(() => expect(pagesCalled()).toEqual([1, 2, 1, 2]));
+    expect(client.getQueryState(COMMUNITY_KEY)?.isInvalidated).toBe(true);
+    expect(client.getQueryState(starStatus(REPO))?.isInvalidated).toBe(true);
+    await flush();
+    expect(pagesCalled(OTHER)).toEqual([1, 2]);
+    expect(client.getQueryState(starStatus(OTHER))?.isInvalidated).toBe(false);
+    expect(
+      client.getQueryState(["repo", OTHER, "insights", "community"])
+        ?.isInvalidated,
+    ).toBe(false);
   });
 });

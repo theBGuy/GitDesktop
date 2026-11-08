@@ -50,6 +50,22 @@ function pagesOf(totals, count) {
 }
 
 const fill = (n, v) => Array.from({ length: n }, () => v);
+
+/** Runs `fn` with Array pushes capped, so a runaway tick loop throws instead
+ *  of hanging the suite. */
+function withPushBudget(fn, budget = 1000) {
+  const push = Array.prototype.push;
+  let left = budget;
+  Array.prototype.push = function (...items) {
+    if (--left < 0) throw new Error("push budget spent");
+    return push.apply(this, items);
+  };
+  try {
+    return fn();
+  } finally {
+    Array.prototype.push = push;
+  }
+}
 /** The card's compact count format, for the axis controls. */
 const compact = new Intl.NumberFormat(undefined, {
   notation: "compact",
@@ -221,6 +237,17 @@ function problems(mod) {
       assert.deepEqual(mod.windowAxis([7]).domain, [6, 8]);
       assert.deepEqual(mod.windowAxis([]).domain, [0, 1]);
       assert.deepEqual(mod.windowAxis([Number.NaN, 4]).domain, [3, 5]);
+    },
+    "the window axis ends past float precision": () => {
+      for (const values of [
+        [2 ** 53, 2 ** 53],
+        [2 ** 60, 2 ** 60 + 256],
+        [Number.MAX_SAFE_INTEGER - 3, Number.MAX_SAFE_INTEGER],
+      ]) {
+        const { ticks } = withPushBudget(() => mod.windowAxis(values));
+        assert.ok(ticks.length <= 7, String(values));
+        assert.equal(new Set(ticks).size, ticks.length, String(values));
+      }
     },
     "the view: All time draws every week only once nothing more loads": () => {
       assert.equal(mod.starView(false, false, false, false), "window");
@@ -489,19 +516,23 @@ function problems(mod) {
         weeksOf(fill(n, 0))
           .map((w) => w.week)
           .reverse();
+      // References through the module's own Intl path, so any locale passes.
+      const utc = (o) =>
+        new Intl.DateTimeFormat(undefined, { ...o, timeZone: "UTC" });
       const grains = {
-        10: /^[A-Z][a-z]+ [0-9]{1,2}$/,
-        14: /^[A-Z][a-z]+ [0-9]{4}$/,
-        52: /^[A-Z][a-z]+ [0-9]{4}$/,
-        370: /^[0-9]{4}$/,
+        10: utc({ month: "short", day: "numeric" }),
+        14: utc({ month: "short", year: "numeric" }),
+        52: utc({ month: "short", year: "numeric" }),
+        370: utc({ year: "numeric" }),
       };
-      for (const [n, shape] of Object.entries(grains)) {
+      for (const [n, grain] of Object.entries(grains)) {
         const weeks = series(Number(n));
         const { ticks, format } = mod.starXAxis(weeks);
         const labels = ticks.map(format);
         assert.equal(new Set(labels).size, labels.length, `${n}: ${labels}`);
-        assert.ok(
-          labels.every((l) => shape.test(l)),
+        assert.deepEqual(
+          labels,
+          ticks.map((t) => grain.format(t * 1000)),
           `${n}: ${labels}`,
         );
         assert.equal(ticks[0], weeks[0], n);
@@ -756,6 +787,37 @@ function problems(mod) {
         80,
       );
     },
+    "note: a curve past the count says why": () => {
+      const above = {
+        kind: "aboveCount",
+        text: "The star count and the chart come from separate reads, so the curve can end above the count.",
+      };
+      // 51 loaded stars against a count of 50: the baseline clamps.
+      const past = summary(mod, pagesOf(fill(51, 1), 50));
+      assert.equal(past.series.baseline, 0);
+      assert.deepEqual(mod.starNote(past), above);
+      assert.deepEqual(mod.starNote({ ...past, view: "all" }), above);
+      // A curve ending at the count, a residual, or no count says nothing.
+      for (const [totals, count] of [
+        [fill(50, 1), 50],
+        [fill(50, 1), 51],
+        [fill(51, 1), null],
+      ])
+        assert.deepEqual(
+          mod.starNote(summary(mod, pagesOf(totals, count))),
+          { kind: "none" },
+          String(count),
+        );
+      // Offline outranks it; it outranks a quiet tail.
+      const parked = { pageParked: true, hasMore: true };
+      assert.equal(mod.starNote({ ...past, ...parked }).kind, "offline");
+      const quiet = summary(mod, pagesOf([...fill(8, 0), ...fill(51, 1)], 50));
+      assert.equal(mod.starNote(quiet).kind, "aboveCount");
+      assert.equal(
+        mod.starNote(summary(mod, pagesOf([...fill(8, 0), 1], 1))).kind,
+        "flatTail",
+      );
+    },
     "mode: gains while the count is unknown and weeks are owed": () => {
       const all = pagesOf(OLD_930, null);
       const owed = summary(mod, all.slice(0, 2), { hasMore: true });
@@ -946,6 +1008,11 @@ test("a deriver that drops a guard fails the checks", async () => {
       "const flat = false;",
     ),
     "axis below 0": swap("Math.max(0, min - 1)", "min - 1"),
+    "unsafe axis values kept": swap(
+      "finite.some((v) => Math.abs(v) > Number.MAX_SAFE_INTEGER)",
+      "false",
+    ),
+    "no note over the count": swap("if (curveAboveCount(input))", "if (false)"),
     "counter reads the newest loaded page": swap(
       "const last = input.pages[0].lastPage;",
       "const last = input.pages[input.pages.length - 1].lastPage;",

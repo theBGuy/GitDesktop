@@ -324,7 +324,8 @@ export function cachedStarSeries(
 
 /** Every cached star history of `series`, sibling checkouts' included: one
  *  repository on one host, by construction of the key. With no series, `repo`'s
- *  own reads. */
+ *  own reads. The match ignores case, as GitHub's slugs do: a checkout whose
+ *  status still spells a renamed repo's old casing is the same series. */
 function cachedStarHistories(
   queryClient: QueryClient,
   repo: string,
@@ -335,23 +336,26 @@ function cachedStarHistories(
     predicate: ({ queryKey }) =>
       queryKey.length === 5 &&
       !settlesOnRepoWrite({ queryKey }) &&
-      (series === null ? queryKey[1] === repo : queryKey[4] === series),
+      (series === null
+        ? queryKey[1] === repo
+        : typeof queryKey[4] === "string" &&
+          queryKey[4].toLowerCase() === series.toLowerCase()),
   });
 }
 
-/** Drops the star histories of `repo`'s GitHub repository, for the writes that
- *  erase its stars (delete, visibility). A reset cancels a page in flight
- *  silently and clears the pages; an active observer refetches at once, unless
- *  `refetch` is false (a deleted repo has nothing to read: the card waits on
- *  its skeleton until the forge status drops it). */
+/** Drops every cached star history of `series` (null: `repo`'s own reads), for
+ *  the writes that erase its stars (delete, visibility), which pass the series
+ *  they read when the write started. A reset cancels a page in flight silently
+ *  and clears the pages; an active observer refetches at once, unless `refetch`
+ *  is false (a deleted repo has nothing to read: the card waits on its skeleton
+ *  until the forge status drops it). */
 export function resetStarHistory(
   queryClient: QueryClient,
   repo: string,
+  series: string | null,
   { refetch = true }: { refetch?: boolean } = {},
 ): Promise<void> {
-  const reads = new Set(
-    cachedStarHistories(queryClient, repo, cachedStarSeries(queryClient, repo)),
-  );
+  const reads = new Set(cachedStarHistories(queryClient, repo, series));
   if (!refetch) {
     for (const query of reads) query.reset();
     return Promise.resolve();
@@ -375,6 +379,41 @@ export async function invalidateStarHistory(
       invalidateKeyHealingStraddles(queryClient, query.queryKey),
     ),
   );
+}
+
+/** Explore's Star/Unstar of `slug` (`owner/repo`): every cached star history
+ *  whose series names it, on any host (Explore doesn't know which one gh
+ *  starred on) and in any case, healed as the local toggle heals its own, plus
+ *  each matched checkout's Community and star status. */
+export async function invalidateStarHistoryForSlug(
+  queryClient: QueryClient,
+  slug: string,
+): Promise<void> {
+  const wanted = slug.toLowerCase();
+  const reads = queryClient.getQueryCache().findAll({
+    queryKey: ["repo"],
+    predicate: ({ queryKey }) =>
+      queryKey.length === 5 &&
+      !settlesOnRepoWrite({ queryKey }) &&
+      typeof queryKey[4] === "string" &&
+      starSeriesParts(queryKey[4]).slug.toLowerCase() === wanted,
+  });
+  const repos = new Set(reads.map((query) => query.queryKey[1] as string));
+  await Promise.all([
+    ...reads.map((query) =>
+      invalidateKeyHealingStraddles(queryClient, query.queryKey),
+    ),
+    ...[...repos].flatMap((repo) => [
+      invalidateKeyHealingStraddles(
+        queryClient,
+        repoKeys.communityInsights(repo),
+      ),
+      // useRepoStarStatus's key (repo-access.ts).
+      queryClient.invalidateQueries({
+        queryKey: ["repo", repo, "star-status"],
+      }),
+    ]),
+  ]);
 }
 
 /** A refresh failed over pages the read keeps. */

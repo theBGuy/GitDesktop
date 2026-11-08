@@ -551,7 +551,7 @@ pub struct StarHistoryPage {
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct StarWeek {
     pub week: i64,
-    pub total: i64,
+    pub total: u32,
 }
 
 /// `host` and `slug` are the series the frontend's read is keyed by: one series reads
@@ -756,7 +756,7 @@ fn star_history_outcome(
         .filter_map(|item| {
             Some(StarWeek {
                 week: item["week"].as_i64()?,
-                total: item["total"].as_i64().filter(|&total| total >= 0)?,
+                total: u32::try_from(item["total"].as_u64()?).ok()?,
             })
         })
         .collect();
@@ -1702,6 +1702,23 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn star_history_drops_a_total_past_u32() {
+        let body = format!(
+            r#"[{{"week":3,"total":{}}},{{"week":2,"total":{}}}]"#,
+            u32::MAX,
+            u64::from(u32::MAX) + 1
+        );
+        let result = star_history_outcome(gh_output(0, &body, ""), None, 1).unwrap();
+        assert_eq!(
+            result.weeks,
+            vec![StarWeek {
+                week: 3,
+                total: u32::MAX
+            }]
+        );
     }
 
     #[test]

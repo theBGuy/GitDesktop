@@ -86,8 +86,8 @@ describe("StarTooltipRow", () => {
     const { container, rerender } = render(
       <StarTooltipRow mode="gains" point={point} />,
     );
-    expect(container.textContent).toBe("New stars+160 that week");
+    expect(container.textContent).toBe("New stars: +160 that week");
     rerender(<StarTooltipRow mode="cumulative" point={point} />);
-    expect(container.textContent).toBe(`Stars${fmt(1234)} · +160 that week`);
+    expect(container.textContent).toBe(`Stars: ${fmt(1234)} · +160 that week`);
   });
 });

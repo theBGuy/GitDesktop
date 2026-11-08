@@ -51,7 +51,9 @@ const SERIES: Record<
     row: (p) => [weekLabel(p.week), fmt(p.total), fmt(p.stars)],
     tooltip: (p) => (
       <>
-        <span className="text-muted-foreground">Stars</span>
+        <span className="text-muted-foreground">
+          Stars<span className="sr-only">: </span>
+        </span>
         <span className="font-mono font-medium tabular-nums">
           {fmt(p.stars)}
           <span className="font-sans text-muted-foreground">
@@ -67,7 +69,9 @@ const SERIES: Record<
     row: (p) => [weekLabel(p.week), fmt(p.total)],
     tooltip: (p) => (
       <>
-        <span className="text-muted-foreground">New stars</span>
+        <span className="text-muted-foreground">
+          New stars<span className="sr-only">: </span>
+        </span>
         <span className="font-mono font-medium tabular-nums">
           +{fmt(p.total)}
           <span className="font-sans text-muted-foreground">
@@ -160,8 +164,9 @@ function StarRetry({
   );
 }
 
-/** One tooltip row for a week. The spaces are text, not margins, so the
- *  row reads as words to assistive tech and in copied text. */
+/** One tooltip row for a week. The separators are text, not margins, so the
+ *  row reads as words to assistive tech and in copied text; the label's colon
+ *  is sr-only, as the flex gap already parts label and value on screen. */
 export function StarTooltipRow({
   mode,
   point,

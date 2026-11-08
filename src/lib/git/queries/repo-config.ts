@@ -7,8 +7,12 @@ import type {
   SecretApp,
   SecurityFeature,
 } from "../types";
-import { invalidateRepoAfterWrite, repoKeys } from "./core";
-import { resetStarHistory } from "./insights";
+import {
+  invalidateKeyHealingStraddles,
+  invalidateRepoAfterWrite,
+  repoKeys,
+} from "./core";
+import { cachedStarSeries, resetStarHistory } from "./insights";
 import { repoSettingsKey } from "./internal";
 
 // Secrets & variables. `env: null` = repository scope; a string = that
@@ -269,14 +273,18 @@ export function useSetVisibility(repo: string) {
   return useMutation({
     mutationFn: (visibility: string) =>
       api.forgeRepoSetVisibility(repo, visibility),
-    onSettled: () => {
+    // The star series is read at mutate time, so the reset names the
+    // repository the write went to, whatever origin it settles under.
+    onMutate: () => ({ series: cachedStarSeries(queryClient, repo) }),
+    onSettled: (_d, _e, _visibility, ctx) => {
       queryClient.invalidateQueries({ queryKey: repoSettingsKey(repo) });
       queryClient.invalidateQueries({ queryKey: securityKey(repo) });
       // GitHub erases a repo's stars and watchers when its visibility changes.
-      void resetStarHistory(queryClient, repo);
-      queryClient.invalidateQueries({
-        queryKey: repoKeys.communityInsights(repo),
-      });
+      void resetStarHistory(queryClient, repo, ctx?.series ?? null);
+      void invalidateKeyHealingStraddles(
+        queryClient,
+        repoKeys.communityInsights(repo),
+      );
     },
   });
 }
@@ -286,9 +294,11 @@ export function useDeleteRepo(repo: string) {
   return useMutation({
     mutationFn: () => api.forgeRepoDelete(repo),
     // The caller's whole-repo settle skips star history, which named the repo
-    // just deleted. No refetch: page 1 would fail against the removed origin.
-    onSuccess: () =>
-      void resetStarHistory(queryClient, repo, { refetch: false }),
+    // just deleted; its series is read at mutate time, as visibility's is. No
+    // refetch: page 1 would fail against the removed origin.
+    onMutate: () => ({ series: cachedStarSeries(queryClient, repo) }),
+    onSuccess: (_d, _v, ctx) =>
+      void resetStarHistory(queryClient, repo, ctx.series, { refetch: false }),
   });
 }
 

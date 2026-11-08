@@ -153,16 +153,9 @@ describe("Insights accessible names", () => {
     ).toBeTruthy();
   });
 
-  it("a table outside a card takes its own label, or none", () => {
-    render(
-      <>
-        <DataTable headers={["A"]} rows={[["1"]]} label="Standalone" />
-        <DataTable headers={["B"]} rows={[["2"]]} />
-      </>,
-    );
-    const [named, bare] = screen.getAllByRole("table");
-    expect(named.getAttribute("aria-label")).toBe("Standalone");
-    expect(bare.hasAttribute("aria-label")).toBe(false);
+  it("a table outside a card takes no name", () => {
+    render(<DataTable headers={["B"]} rows={[["2"]]} />);
+    expect(screen.getByRole("table").hasAttribute("aria-label")).toBe(false);
   });
 
   it("names the sidebar's sections by their headings, each distinct", () => {

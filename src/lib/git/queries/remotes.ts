@@ -218,7 +218,7 @@ export function useSetRemoteUrl(repo: string) {
     {
       // Local git-config write — never park it offline. Its whole-repo settle
       // refreshes the forge status, which moves star history to a new origin's
-      // slug.
+      // series.
       networkMode: "always",
     },
   );

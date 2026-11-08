@@ -21,12 +21,12 @@ export interface RepoMutationKeys {
 }
 
 /** The segments after `["repo", repo]` that key a repo's star history, ahead
- *  of the slug it reads; `repoKeys.starHistory` (core.ts) builds its key. */
+ *  of the series it reads; `repoKeys.starHistory` (core.ts) builds its key. */
 export const STAR_HISTORY_SEGMENTS = ["insights", "starHistory"] as const;
 
 /** Whether a whole-repo write settle refreshes this read: all but star
  *  history, whose refetch re-walks every loaded page. Its key follows the
- *  forge status's slug, and the writes that move its stars (Star/Unstar,
+ *  forge status's series, and the writes that move its stars (Star/Unstar,
  *  delete, visibility) settle it themselves. Repo-agnostic, since the settle's
  *  key already names the repo: one stable function, so `union` dedupes it by
  *  identity. */
