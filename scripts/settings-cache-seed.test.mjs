@@ -469,9 +469,9 @@ function queriesPinFailures(src) {
   const seeds =
     src.split("...settingsSeedCallbacks(queryClient, settingsKeys.settings)")
       .length - 1;
-  if (mutations < 6) failures.push(`only ${mutations} useMutation( sites`);
-  if (src.split("settingsSeedCallbacks(").length - 1 < 6)
-    failures.push("fewer than six settingsSeedCallbacks( calls");
+  if (mutations < 7) failures.push(`only ${mutations} useMutation( sites`);
+  if (src.split("settingsSeedCallbacks(").length - 1 < 7)
+    failures.push("fewer than seven settingsSeedCallbacks( calls");
   if (seeds !== mutations)
     failures.push(`${seeds} seed spreads for ${mutations} mutations`);
   if (/invalidateQueries\(\s*\{\s*queryKey:\s*settingsKeys\.settings/.test(src))
@@ -479,7 +479,7 @@ function queriesPinFailures(src) {
   return failures;
 }
 
-test("queries.ts wires all six settings mutations through the seed", () => {
+test("queries.ts wires all seven settings mutations through the seed", () => {
   const src = readFileSync(QUERIES_SOURCE, "utf8");
   assert.deepEqual(queriesPinFailures(src), []);
 });
@@ -496,8 +496,8 @@ test("the queries.ts pin fails on a dropped spread or a literal invalidate", () 
     "    onSuccess: () =>\n      queryClient.invalidateQueries({ queryKey: settingsKeys.settings }),",
   );
   assert.deepEqual(queriesPinFailures(reverted), [
-    "fewer than six settingsSeedCallbacks( calls",
-    "5 seed spreads for 6 mutations",
+    "fewer than seven settingsSeedCallbacks( calls",
+    "6 seed spreads for 7 mutations",
     "a literal settings invalidate remains",
   ]);
   const literal = `${src}\nqueryClient.invalidateQueries({ queryKey: settingsKeys.settings });\n`;

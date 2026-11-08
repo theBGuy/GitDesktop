@@ -18,6 +18,7 @@ import {
   type CHANGES_VIEW_MODES,
   type DEFAULT_AGENT_IDS,
   type DIFF_VIEW_MODES,
+  type EDIT_HISTORY_ORDERS,
   healLoadedSettings,
   type MCP_REPO_STATES,
   type MCP_TRANSPORTS,
@@ -38,6 +39,7 @@ export {
   DEFAULT_AGENT_IDS,
   DEFAULT_SETTINGS,
   DIFF_VIEW_MODES,
+  EDIT_HISTORY_ORDERS,
   healNotifications,
   isOutcomeSource,
   MCP_REPO_STATES,
@@ -378,6 +380,9 @@ export interface AppSettings {
   /** Changes panel layout: flat list or compacted directory tree. Applied outside
    *  the bulk settings form (apply-on-change), like diffViewMode. */
   changesViewMode: (typeof CHANGES_VIEW_MODES)[number];
+  /** Edit history dialog's commit order. Applied outside the bulk settings
+   *  form (apply-on-change), like changesViewMode. */
+  editHistoryOrder: (typeof EDIT_HISTORY_ORDERS)[number];
   /** Which conversation-list sections the user collapsed, keyed `"<feature>:<kind>"`
    *  (`pulls:local`, `issues:remote`, …); a missing key = expanded. Global and
    *  feature-scoped, so the remote key collapses that section across every repo. */
@@ -446,6 +451,39 @@ async function saveSettings(settings: AppSettings): Promise<void> {
   // Cache-only: the chain's forced save persists it inside the store lock.
   const store = await getStore();
   await store.set("settings", settings);
+  stagedSettings = settings;
+}
+
+/** The snapshot the running chain entry staged; published once its save lands. */
+let stagedSettings: AppSettings | null = null;
+const settingsWrittenListeners = new Set<(saved: AppSettings) => void>();
+
+/** Hears every settings snapshot a write persisted, right after its forced save
+ *  and before the writer's promise resolves (so ahead of any re-read). A no-op
+ *  arm that saves nothing publishes nothing. In-runtime only: another window's
+ *  or process's write never reaches it. Returns the unsubscribe. */
+export function subscribeSettingsWritten(
+  listener: (saved: AppSettings) => void,
+): () => void {
+  settingsWrittenListeners.add(listener);
+  return () => {
+    settingsWrittenListeners.delete(listener);
+  };
+}
+
+function publishSettingsWritten(): void {
+  const saved = stagedSettings;
+  stagedSettings = null;
+  if (saved === null) return;
+  // Inside the write's rollback: a throwing listener must neither skip the
+  // others nor undo a write that already landed.
+  for (const listener of settingsWrittenListeners) {
+    try {
+      listener(saved);
+    } catch (e) {
+      console.error("[settings] settings-written listener failed", e);
+    }
+  }
 }
 
 /**
@@ -472,8 +510,11 @@ function serializedRecentRepoWrite<T>(fn: () => Promise<T>): Promise<T> {
       const store = await getStore();
       await reloadToleratingEmptyStore(store);
       return writeWithRollback(store, async () => {
+        // A failed entry's staged snapshot never reached disk.
+        stagedSettings = null;
         const out = await fn();
         await store.save();
+        publishSettingsWritten();
         return out;
       });
     });
@@ -822,6 +863,28 @@ export function saveSettingsMerged(
       recentRepos: fresh.recentRepos,
       bitbucketTokenExpiresAt: fresh.bitbucketTokenExpiresAt,
     };
+    await saveSettings(committed);
+    return healLoadedSettings(committed);
+  });
+}
+
+/** What {@link saveSettingsPatch} may write. `recentRepos` and
+ *  `bitbucketTokenExpiresAt` belong to the chained writers (saveSettingsMerged
+ *  re-pins them from disk). `mcpServers` is the user's intent there, but a patch
+ *  can't fold `relocateRecentRepo`'s re-home into a caller's copy, so it may
+ *  not carry them. */
+export type SettingsPatch = Partial<
+  Omit<AppSettings, "recentRepos" | "bitbucketTokenExpiresAt" | "mcpServers">
+>;
+
+/**
+ * Writes only `patch`'s fields over the settings read INSIDE the critical section, so
+ * a write another writer landed meanwhile keeps every field the patch doesn't name.
+ * For a single-field toggle whose caller would otherwise send its cached snapshot.
+ */
+export function saveSettingsPatch(patch: SettingsPatch): Promise<AppSettings> {
+  return serializedRecentRepoWrite(async () => {
+    const committed = { ...(await loadSettings()), ...patch };
     await saveSettings(committed);
     return healLoadedSettings(committed);
   });

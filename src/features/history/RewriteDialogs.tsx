@@ -1,6 +1,6 @@
 import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 import { useSelector } from "@tanstack/react-store";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
@@ -61,11 +61,34 @@ export async function leftRebaseInProgress(repoPath: string): Promise<boolean> {
   }
 }
 
+/** A hide keeps a host's nodes connected (display: none); a real unmount has
+ *  removed them by the time passive cleanups run. */
+function removedFromDocument(node: Element | null): boolean {
+  return node !== null && !node.isConnected;
+}
+
+/** Calls `onRemoved` once `node` leaves the document, until the returned stop
+ *  runs. A host removed while hidden runs no cleanup (the hide already did), so
+ *  only the DOM says it is gone. No node, nothing to watch. */
+function watchRemoval(node: Element | null, onRemoved: () => void) {
+  if (node === null) return () => undefined;
+  const observer = new MutationObserver(() => {
+    if (node.isConnected) return;
+    observer.disconnect();
+    onRemoved();
+  });
+  observer.observe(node.ownerDocument, { childList: true, subtree: true });
+  return () => observer.disconnect();
+}
+
 /**
  * Streams an AI commit message from a `base..head` diff — the commit-box
  * generator pipeline, fed by an arbitrary commit range instead of the staged
  * diff. Used for a squashed run and, in the Edit-history editor, a reworded
  * commit (`<hash>^..<hash>`).
+ *
+ * `repoPath` must be the ui store's `repoPath`, spelled the same: a run stops
+ * once the live repo differs, so any other spelling stops it at its first check.
  */
 export function useGenerateSquashMessage(
   repoPath: string,
@@ -73,13 +96,38 @@ export function useGenerateSquashMessage(
 ) {
   const [generating, setGenerating] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-
+  // An inline node of the host (`hostRef`). Detaches are ignored, since an
+  // <Activity> hide detaches refs while the node stays in the document.
+  const hostNodeRef = useRef<Element | null>(null);
+  const hostRef = (node: Element | null) => {
+    if (node) hostNodeRef.current = node;
+  };
   const cancel = () => abortRef.current?.abort();
+
+  // Every close of both hosts unmounts this hook, as does a repo switch, so the
+  // paid stream stops with the dialog. A tab switch's <Activity> hide runs this
+  // cleanup too, and the generation runs on through it. Without a host node
+  // there is no telling the two apart, so any cleanup stops it.
+  useEffect(
+    () => () => {
+      const host = hostNodeRef.current;
+      if (host === null || removedFromDocument(host)) abortRef.current?.abort();
+    },
+    [],
+  );
 
   async function generate(base: string, head: string) {
     const abort = new AbortController();
     abortRef.current = abort;
     setGenerating(true);
+    const stopWatch = watchRemoval(hostNodeRef.current, () => abort.abort());
+    // The observer reports a removal a microtask late; these reads are exact.
+    // A repo switch while History is hidden defers the dialog's unmount, so the
+    // live repo is read too.
+    const stopped = () =>
+      abort.signal.aborted ||
+      removedFromDocument(hostNodeRef.current) ||
+      useUiStore.getState().repoPath !== repoPath;
     try {
       const settings = await loadSettings();
       // Only the diff depends on the ignore patterns — chain those two and let
@@ -91,6 +139,8 @@ export function useGenerateSquashMessage(
         gitRecentCommits(repoPath, 10),
         readRepoInstructions(repoPath),
       ]);
+      // Stopped while the context loaded: no prompt, no client, no toast.
+      if (stopped()) return;
       if (!diff.text.trim()) {
         const cause = hiddenCause(diff.excludedFiles, diff.unreadableFiles);
         toast.error(
@@ -111,6 +161,8 @@ export function useGenerateSquashMessage(
         globalInstructions: settings.globalInstructions,
       });
       const client = await createAiClient(settings.ai);
+      // Stopped while the client was built: the paid request never opens.
+      if (stopped()) return;
       let buffer = "";
       for await (const chunk of client.stream({
         system,
@@ -118,18 +170,23 @@ export function useGenerateSquashMessage(
         abortSignal: abort.signal,
         repoPath,
       })) {
+        if (stopped()) {
+          abort.abort();
+          break;
+        }
         buffer += chunk;
         onText(buffer);
       }
     } catch (e) {
-      if (!abort.signal.aborted) toastError(e);
+      if (!stopped()) toastError(e);
     } finally {
+      stopWatch();
       setGenerating(false);
       abortRef.current = null;
     }
   }
 
-  return { generate, cancel, generating };
+  return { generate, cancel, generating, hostRef };
 }
 
 /**
@@ -234,6 +291,9 @@ export function SquashDialog({
 
   return (
     <Dialog open={open} onOpenChange={onDialogOpenChange}>
+      {/* The Root renders no element, so this sits in the host's own DOM, not
+          the popup's portal: it tells the generator a tab hide from a close. */}
+      <span hidden ref={ai.hostRef} />
       <DialogContent onKeyDown={generateChord.onKeyDown}>
         <form
           className="space-y-4"

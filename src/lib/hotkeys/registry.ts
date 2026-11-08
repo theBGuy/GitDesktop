@@ -674,6 +674,12 @@ export const ACTIONS = [
     defaultBinding: null,
   },
   {
+    id: "add-upstream-remote",
+    label: "Add upstream remote",
+    category: "Repository",
+    defaultBinding: null,
+  },
+  {
     id: "reconnect-forge-session",
     label: "Reconnect forge session",
     category: "Repository",

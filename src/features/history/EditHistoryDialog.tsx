@@ -5,9 +5,12 @@ import {
   SparkleIcon,
   XIcon,
 } from "@phosphor-icons/react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   type FocusEvent,
   type KeyboardEvent,
+  useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -33,6 +36,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitle, clipTitleFromText } from "@/lib/clip-title";
 import {
@@ -47,18 +51,35 @@ import {
   formatBinding,
 } from "@/lib/hotkeys/binding";
 import { useRovingRows } from "@/lib/list-keyboard-nav";
-import { useAiEnabled } from "@/lib/settings/queries";
+import {
+  type AppSettings,
+  EDIT_HISTORY_ORDERS,
+  subscribeSettingsWritten,
+} from "@/lib/settings/api";
+import {
+  settingsKeys,
+  useAiEnabled,
+  useSaveSettingsPatch,
+  useSettings,
+} from "@/lib/settings/queries";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
+import {
+  ARIA_DISABLED_CLASS,
+  useDisabledReason,
+} from "@/lib/use-disabled-reason";
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 import {
+  type ChronoEnd,
+  type CompiledPlan,
   compilePlan,
+  displayIndex,
   type EditRow,
-  FOLD_HELD_LABEL,
   moveAnnouncement,
   type RowAction,
+  visualMoveTarget,
 } from "./edit-history-plan";
 import {
   leftRebaseInProgress,
@@ -93,10 +114,91 @@ const FOLD_HINT_TAIL: Record<FoldAction, string> = {
   squash: "joining the messages",
   fixup: "keeping that commit's message",
 };
-const FOLD_HELD_HINT = "No older kept commit in this list to combine into";
+const FOLD_VERB: Record<FoldAction, string> = {
+  squash: "squashed",
+  fixup: "fixed up",
+};
 const BUSY_REASON = "The rewrite is still running.";
 const AT_NEWEST = "Already the newest commit";
 const AT_OLDEST = "Already the oldest commit";
+/** Refusals name the chronological end, whichever end of the list it shows at. */
+const END_REASON: Record<ChronoEnd, string> = {
+  newest: AT_NEWEST,
+  oldest: AT_OLDEST,
+};
+
+type ListOrder = AppSettings["editHistoryOrder"];
+/** Direction-dependent copy. Folds still name their target and "older"; the
+ *  position word says where that older commit sits in the displayed list. */
+const ORDER_COPY: Record<
+  ListOrder,
+  {
+    onTop: string;
+    listLabel: string;
+    foldPosition: string;
+    heldHint: string;
+    heldLabel: string;
+  }
+> = {
+  "newest-first": {
+    onTop: "Newest on top;",
+    listLabel: "Commits, newest first",
+    foldPosition: "below",
+    heldHint: "No older kept commit below in this list to combine into",
+    heldLabel: "no older kept commit below to combine into",
+  },
+  "oldest-first": {
+    onTop: "Oldest on top;",
+    listLabel: "Commits, oldest first",
+    foldPosition: "above",
+    heldHint: "No older kept commit above in this list to combine into",
+    heldLabel: "no older kept commit above to combine into",
+  },
+};
+
+/** Segmented secondary-vs-ghost, as ConversationListPanel's state filter. The
+ *  secondary and muted fills are one token, so an unpressed hover stays at
+ *  half strength with muted text, the pressed segment holds under hover, and
+ *  weight marks it beyond color. h-6 keeps the title row at its usual height. */
+const ORDER_SEGMENT_CLASS =
+  "h-6 font-normal text-muted-foreground hover:bg-muted/50 hover:text-muted-foreground aria-pressed:bg-secondary aria-pressed:font-medium aria-pressed:text-secondary-foreground aria-pressed:hover:bg-secondary aria-pressed:hover:text-secondary-foreground";
+
+// Counts order changes across every mount, so only the latest one's failure
+// rolls back: a value compare can't tell a stale failure from a later change
+// back to its value, and a closed dialog's late failure must not undo a
+// reopened one's change.
+let orderChangeSeq = 0;
+// The order a failed latest change rolls back to: the last one on disk. Every
+// settings write that lands moves it, whoever made it (other writers save whole
+// snapshots, which carry the cached order too); the cache seeds it only while
+// it is still unknown, since a landed write can be ahead of the cache.
+let persistedOrder: AppSettings["editHistoryOrder"] | null = null;
+subscribeSettingsWritten((saved) => {
+  persistedOrder = saved.editHistoryOrder;
+});
+
+/** Test-only: module state would otherwise carry the baseline between cases. */
+export function resetOrderBaselineForTests() {
+  persistedOrder = null;
+}
+
+type OrderHold = "loading" | "failed";
+/** Why the order toggle is held while there are no settings to patch. */
+const ORDER_HOLD_REASON: Record<OrderHold, string> = {
+  loading: "Loading settings…",
+  failed: "Couldn't load settings",
+};
+
+/** Why a reword row's Generate is held. `otherGenerating` means ANOTHER row
+ *  is generating: this row's own run renders Cancel instead. */
+function generateHeldReason(
+  otherGenerating: boolean,
+  messagesFailed: boolean,
+): string {
+  if (otherGenerating) return "Another commit message is generating";
+  if (messagesFailed) return "Couldn't load commit messages";
+  return "Loading commit messages…";
+}
 
 /** The dialog's move chords, as canonical bindings (`eventToBinding`'s own
  *  spelling). Feature-local rather than registry bindings: they act on the
@@ -138,17 +240,21 @@ function ActionHint({
   action,
   hint,
   target,
+  listOrder,
 }: {
   action: RowAction;
   hint?: string;
   target: string | null;
+  listOrder: ListOrder;
 }) {
   if (!isFold(action))
     return <span className="text-[11px] text-muted-foreground">{hint}</span>;
   // Foreground, so it reads muted under the held item's disabled opacity.
   if (target === null)
     return (
-      <span className="text-[11px] text-foreground">{FOLD_HELD_HINT}</span>
+      <span className="text-[11px] text-foreground">
+        {ORDER_COPY[listOrder].heldHint}
+      </span>
     );
   // The subject truncates to what the first line leaves after its quotes, so
   // it always starts right after the opening one. The text still reads as one
@@ -160,7 +266,9 @@ function ActionHint({
         <span className="min-w-0 truncate" onMouseEnter={clipTitle(target)}>
           {target}
         </span>
-        <span className="shrink-0">",</span>
+        <span className="shrink-0 whitespace-pre">
+          {`" ${ORDER_COPY[listOrder].foldPosition},`}
+        </span>
       </span>
       <span> {FOLD_HINT_TAIL[action]}</span>
     </span>
@@ -214,6 +322,63 @@ export function EditHistoryDialog({
   const announce = (text: string) =>
     setAnnouncement((prev) => ({ text, seq: prev.seq + 1 }));
 
+  // The display order only: `order` and the plan stay newest-first.
+  const settings = useSettings();
+  const queryClient = useQueryClient();
+  const saveOrder = useSaveSettingsPatch();
+  // The last pick until its write settles: an earlier write's re-read lands
+  // that write's order in the cache while the later one is still pending.
+  const [pendingOrder, setPendingOrder] = useState<ListOrder | null>(null);
+  const listOrder =
+    pendingOrder ?? settings.data?.editHistoryOrder ?? "newest-first";
+  const reversed = listOrder === "oldest-first";
+  // Until settings load there is nothing to patch, so the toggle holds.
+  let orderHold: OrderHold | null = null;
+  if (settings.data === undefined) {
+    orderHold = settings.isError ? "failed" : "loading";
+  }
+  // Held by aria-disabled, not native disabled, so the segments keep their tab
+  // stop and the reason reaches keyboard and AT.
+  const orderToggleHold = useDisabledReason({
+    disabled: orderHold !== null,
+    reason: orderHold === null ? null : ORDER_HOLD_REASON[orderHold],
+  });
+  function applyListOrder(next: ListOrder) {
+    const current = settings.data;
+    if (!current || listOrder === next) return;
+    persistedOrder ??= current.editHistoryOrder;
+    const updated = { ...current, editHistoryOrder: next };
+    const seq = ++orderChangeSeq;
+    setPendingOrder(next);
+    // A settings read already running would land the old order over the patch.
+    void queryClient.cancelQueries({
+      queryKey: settingsKeys.settings,
+      exact: true,
+    });
+    // Patched first, so the click's own commit reverses the list.
+    queryClient.setQueryData(settingsKeys.settings, updated);
+    // Only the field: the cached snapshot's other fields can be older than disk.
+    void saveOrder.mutateAsync({ editHistoryOrder: next }).then(
+      () => {
+        if (seq === orderChangeSeq) setPendingOrder(null);
+      },
+      () => {
+        if (seq !== orderChangeSeq) return;
+        setPendingOrder(null);
+        const latest = queryClient.getQueryData<AppSettings>(
+          settingsKeys.settings,
+        );
+        if (latest === undefined || persistedOrder === null) return;
+        // Only this field, and no re-read: a concurrent settings change still
+        // pending must keep its own optimistic value and rollback.
+        queryClient.setQueryData(settingsKeys.settings, {
+          ...latest,
+          editHistoryOrder: persistedOrder,
+        });
+      },
+    );
+  }
+
   // Reseed when a different set of commits arrives (render-time adjustment).
   const key = commits.map((c) => c.hash).join();
   const [lastKey, setLastKey] = useState(key);
@@ -252,10 +417,30 @@ export function EditHistoryDialog({
   const [genHash, setGenHash] = useState<string | null>(null);
   const genHashRef = useLatestRef(genHash);
   const aiEnabled = useAiEnabled();
+  // A reseed retires the reword a run writes into, and its hash may survive
+  // into the new set: text from a run started before a reseed is dropped (a
+  // hidden tab commits reseeds but runs no effects). Keyed on the reseed count,
+  // not the commit set, so a set that changes and changes back still counts.
+  const genKeyRef = useRef<number | null>(null);
+  const liveKeyRef = useLatestRef(reseedNonce);
   const ai = useGenerateSquashMessage(repoPath, (message) => {
     const h = genHashRef.current;
-    if (h) setOverrides((o) => ({ ...o, [h]: message }));
+    if (h && genKeyRef.current === liveKeyRef.current)
+      setOverrides((o) => ({ ...o, [h]: message }));
   });
+  // Any reseed committed since the last run of this effect stops the run, hidden
+  // ones included once the tab shows. The ref keeps an <Activity> show with no
+  // reseed, which replays this effect, from stopping it.
+  const committedKeyRef = useRef(reseedNonce);
+  const stopGeneration = useEffectEvent(() => {
+    ai.cancel();
+    setGenHash(null);
+  });
+  useEffect(() => {
+    if (committedKeyRef.current === reseedNonce) return;
+    committedKeyRef.current = reseedNonce;
+    stopGeneration();
+  }, [reseedNonce]);
 
   const rows: EditRow[] = useMemo(
     () =>
@@ -281,11 +466,27 @@ export function EditHistoryDialog({
   const needsMessages = rows.some(
     (r) => r.action === "reword" || r.action === "squash",
   );
+  // A held fold's error says where the missing older commit would sit in the
+  // displayed list; every other plan error reads verbatim. Shared by the footer
+  // and the move announcement, so both say the same thing.
+  function heldFoldErrorOf(p: CompiledPlan, r: EditRow[]): string | null {
+    if (p.error === null || p.errorHash === null) return null;
+    const i = r.findIndex((x) => x.hash === p.errorHash);
+    const row = r[i];
+    if (row === undefined || !isFold(row.action)) return null;
+    if (p.views[i].foldTarget !== null) return null;
+    return `"${row.subject}" can't be ${FOLD_VERB[row.action]} — no older commit ${ORDER_COPY[listOrder].foldPosition} in this list is kept to combine it into.`;
+  }
+  const heldFoldError = heldFoldErrorOf(plan, rows);
+
+  // Display order; each displayed row maps back to its data index through
+  // `displayIndex`, which `plan.views` and the moves index by.
+  const shownRows = reversed ? [...rows].reverse() : rows;
 
   // The rows are one Tab stop (message fields and Generate keep their own); the
   // trigger and arrow buttons are tabIndex -1, as Enter or Space opens the menu
   // from the row.
-  const nav = useRovingRows({ items: rows, rowKey: (r) => r.hash });
+  const nav = useRovingRows({ items: shownRows, rowKey: (r) => r.hash });
   const listRef = useRef<HTMLDivElement>(null);
   const lastFocusedRow = useRef<string | null>(null);
   // The row whose menu `onOpenChange(true)` opened during a key-driven click.
@@ -352,12 +553,11 @@ export function EditHistoryDialog({
         from: index,
         to,
         total: order.length,
+        reversed,
+        heldLabel: ORDER_COPY[listOrder].heldLabel,
+        errorText: heldFoldErrorOf(nextPlan, nextRows),
       }),
     );
-  }
-
-  function move(index: number, delta: -1 | 1) {
-    moveTo(index, index + delta);
   }
 
   function onListKeyDown(e: KeyboardEvent<HTMLDivElement>) {
@@ -388,22 +588,11 @@ export function EditHistoryDialog({
     if (direction !== undefined) {
       e.preventDefault();
       const index = order.indexOf(hash);
-      const last = order.length - 1;
-      switch (direction) {
-        case "up":
-        case "top":
-          if (index === 0) {
-            // Once per press: a held chord at the end would spam the region.
-            if (!e.repeat) announce(AT_NEWEST);
-          } else moveTo(index, direction === "up" ? index - 1 : 0);
-          return;
-        case "down":
-        case "bottom":
-          if (index === last) {
-            if (!e.repeat) announce(AT_OLDEST);
-          } else moveTo(index, direction === "down" ? index + 1 : last);
-          return;
-      }
+      const target = visualMoveTarget(index, order.length, direction, reversed);
+      if ("to" in target) moveTo(index, target.to);
+      // Once per press: a held chord at the end would spam the region.
+      else if (!e.repeat) announce(END_REASON[target.at]);
+      return;
     }
     if (swallowed) {
       e.preventDefault();
@@ -521,6 +710,9 @@ export function EditHistoryDialog({
         onOpenChange(next);
       }}
     >
+      {/* The Root renders no element, so this sits in the host's own DOM, not
+          the popup's portal: it tells the generator a tab hide from a close. */}
+      <span hidden ref={ai.hostRef} />
       {/* The corner X would be a dead control while the guard above swallows
           every close path, so it goes away for the duration. */}
       <DialogContent
@@ -531,10 +723,57 @@ export function EditHistoryDialog({
         }
       >
         <DialogHeader>
-          <DialogTitle>Edit history</DialogTitle>
+          {/* pr-8 keeps the order control clear of the corner X. */}
+          <div className="flex items-center gap-3 pr-8">
+            <DialogTitle>Edit history</DialogTitle>
+            {/* Enabled while busy: it changes the rendering, never the plan. */}
+            <span
+              className={cn(
+                "ml-auto inline-flex",
+                orderToggleHold.blockedReason !== null && "cursor-not-allowed",
+              )}
+              title={orderToggleHold.wrapperTitle}
+            >
+              <ToggleGroup
+                aria-label="Commit order"
+                variant="outline"
+                size="sm"
+                spacing={0}
+                value={[listOrder]}
+                onValueChange={(next) => {
+                  // Pressing the pressed segment reports [], which keeps it.
+                  const picked = EDIT_HISTORY_ORDERS.find((o) => o === next[0]);
+                  if (picked === undefined || picked === listOrder) return;
+                  applyListOrder(picked);
+                }}
+              >
+                <ToggleGroupItem
+                  value="newest-first"
+                  aria-disabled={orderHold !== null || undefined}
+                  aria-describedby={orderToggleHold.describedBy}
+                  className={cn(ARIA_DISABLED_CLASS, ORDER_SEGMENT_CLASS)}
+                >
+                  Newest first
+                </ToggleGroupItem>
+                <ToggleGroupItem
+                  value="oldest-first"
+                  aria-disabled={orderHold !== null || undefined}
+                  aria-describedby={orderToggleHold.describedBy}
+                  className={cn(ARIA_DISABLED_CLASS, ORDER_SEGMENT_CLASS)}
+                >
+                  Oldest first
+                </ToggleGroupItem>
+              </ToggleGroup>
+              {orderToggleHold.blockedReason !== null && (
+                <span id={orderToggleHold.reasonId} className="sr-only">
+                  {orderToggleHold.blockedReason}
+                </span>
+              )}
+            </span>
+          </div>
           <DialogDescription>
             Reshape your unpushed commits — reword, squash, fixup, drop, or
-            reorder. Newest on top; {formatBinding("alt+up")} and{" "}
+            reorder. {ORDER_COPY[listOrder].onTop} {formatBinding("alt+up")} and{" "}
             {formatBinding("alt+down")} move the focused commit. This rewrites
             local history; a conflict rolls it back.
           </DialogDescription>
@@ -543,12 +782,13 @@ export function EditHistoryDialog({
         <div
           ref={listRef}
           role="list"
-          aria-label="Commits, newest first"
+          aria-label={ORDER_COPY[listOrder].listLabel}
           className="min-h-0 flex-1 space-y-px overflow-y-auto border"
           onKeyDown={onListKeyDown}
           onFocusCapture={onListFocusCapture}
         >
-          {rows.map((row, index) => {
+          {shownRows.map((row, shown) => {
+            const index = displayIndex(shown, rows.length, reversed);
             const view = plan.views[index];
             const dropped = row.action === "drop";
             const target = view.foldTarget;
@@ -560,17 +800,19 @@ export function EditHistoryDialog({
                 case folding:
                   return `, into "${target}"`;
                 case held:
-                  return `, ${FOLD_HELD_LABEL}`;
+                  return `, ${ORDER_COPY[listOrder].heldLabel}`;
                 default:
                   return "";
               }
             })();
+            const up = visualMoveTarget(index, rows.length, "up", reversed);
+            const down = visualMoveTarget(index, rows.length, "down", reversed);
             const upReason = (() => {
               switch (true) {
                 case busy:
                   return BUSY_REASON;
-                case index === 0:
-                  return AT_NEWEST;
+                case "at" in up:
+                  return END_REASON[up.at];
                 default:
                   return null;
               }
@@ -579,8 +821,8 @@ export function EditHistoryDialog({
               switch (true) {
                 case busy:
                   return BUSY_REASON;
-                case index === order.length - 1:
-                  return AT_OLDEST;
+                case "at" in down:
+                  return END_REASON[down.at];
                 default:
                   return null;
               }
@@ -645,7 +887,7 @@ export function EditHistoryDialog({
                             // spaces inside the quotes.
                             aria-label={
                               isFold(a.value) && target !== null
-                                ? `${a.label} Combine into "${target}", ${FOLD_HINT_TAIL[a.value]}`
+                                ? `${a.label} Combine into "${target}" ${ORDER_COPY[listOrder].foldPosition}, ${FOLD_HINT_TAIL[a.value]}`
                                 : undefined
                             }
                             onClick={() => setAction(row.hash, a.value)}
@@ -673,6 +915,7 @@ export function EditHistoryDialog({
                               action={a.value}
                               hint={a.hint}
                               target={target}
+                              listOrder={listOrder}
                             />
                           </DropdownMenuItem>
                         );
@@ -712,7 +955,7 @@ export function EditHistoryDialog({
                       className="max-w-[40%] truncate text-[11px] text-warning"
                       onMouseEnter={clipTitleFromText}
                     >
-                      {FOLD_HELD_LABEL}
+                      {ORDER_COPY[listOrder].heldLabel}
                     </span>
                   )}
                   {row.action === "edit" && (
@@ -733,7 +976,9 @@ export function EditHistoryDialog({
                     title={`Move up (${formatBinding("alt+up")})`}
                     disabled={upReason !== null}
                     reason={upReason}
-                    onClick={() => move(index, -1)}
+                    onClick={() => {
+                      if ("to" in up) moveTo(index, up.to);
+                    }}
                   >
                     <ArrowUpIcon />
                   </DisabledReasonButton>
@@ -745,7 +990,9 @@ export function EditHistoryDialog({
                     title={`Move down (${formatBinding("alt+down")})`}
                     disabled={downReason !== null}
                     reason={downReason}
-                    onClick={() => move(index, 1)}
+                    onClick={() => {
+                      if ("to" in down) moveTo(index, down.to);
+                    }}
                   >
                     <ArrowDownIcon />
                   </DisabledReasonButton>
@@ -793,17 +1040,13 @@ export function EditHistoryDialog({
                           size="xs"
                           disabled={ai.generating || !messages.isSuccess}
                           title="Generate this commit's message with AI"
-                          // `ai.generating` here means ANOTHER row is
-                          // generating — this row's own run renders Cancel.
-                          reason={
-                            ai.generating
-                              ? "Another commit message is generating"
-                              : messages.isError
-                                ? "Couldn't load commit messages"
-                                : "Loading commit messages…"
-                          }
+                          reason={generateHeldReason(
+                            ai.generating,
+                            messages.isError,
+                          )}
                           onClick={() => {
                             setGenHash(row.hash);
+                            genKeyRef.current = reseedNonce;
                             ai.generate(`${row.hash}^`, row.hash);
                           }}
                         >
@@ -847,7 +1090,11 @@ export function EditHistoryDialog({
                     </span>
                   );
                 case Boolean(plan.error):
-                  return <span className="text-warning">{plan.error}</span>;
+                  return (
+                    <span className="text-warning">
+                      {heldFoldError ?? plan.error}
+                    </span>
+                  );
                 default:
                   return (
                     <>
