@@ -1,4 +1,3 @@
-- Clean up branches never lists your default branch, even when reading which
-  branch that is fails: the list stays empty and says why until the read
-  succeeds, so the default branch can't end up selected for archiving or
-  deleting.
+- Clean up branches never lists your default branch: if the app can't tell
+  which branch that is, the list stays empty and says why until it can, so
+  the default branch can't end up selected for archiving or deleting.

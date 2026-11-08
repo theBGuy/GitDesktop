@@ -57,8 +57,11 @@ export const capabilities: Capability[] = [
   },
   {
     group: "Diffs & staging",
-    label:
-      "Image diffing with dimensions and file sizes & collapsible surrounding context",
+    label: "Image diffs with dimensions and file sizes",
+  },
+  {
+    group: "Diffs & staging",
+    label: "Collapsible surrounding context",
   },
   {
     group: "Diffs & staging",
@@ -68,7 +71,7 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
-      "Open a non-image binary file with unstaged changes in its default program, or show it in Explorer, right from its diff",
+      "Open a non-image binary file with unstaged changes, or one an agent session changed, in its default program, or show it in Explorer, right from its diff",
   },
   {
     group: "Diffs & staging",
@@ -153,7 +156,7 @@ export const capabilities: Capability[] = [
   {
     group: "Branches & history",
     label:
-      "Include worktree-held branches in a cleanup, removing each clean worktree first",
+      "Include worktree-held branches in a cleanup, removing each clean, unlocked worktree first",
   },
   {
     group: "Branches & history",

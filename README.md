@@ -72,8 +72,8 @@ instead, see [Development](#development).
   sessions, or expose any repo, read-only by default, to Claude Desktop,
   Cursor, or Claude Code.
 - **Deep git tooling**: [interactive rebase](#history),
-  [merge prediction](#branches), lost-stash recovery, a worktree manager, and
-  bulk branch cleanup.
+  [merge prediction](#branches), lost-stash recovery, a worktree manager
+  (pull requests check out into their own), and bulk branch cleanup.
 - **[Markdown, previewed in the diff](#changes-and-commits)**: a
   Raw / Preview toggle renders markdown and MDX changes anywhere the app
   can read the file locally, with the repository's own images read from
@@ -134,8 +134,9 @@ A unified or split diff with syntax highlighting, collapsible surrounding
 context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
 GitHub and Bitbucket pull requests included. A non-image binary file with
-unstaged changes opens in its default program, or shows in Explorer, right
-from its diff.
+unstaged changes (in your working copy or an agent session's) opens in its
+default program, or shows in Explorer, right from its diff; for a deleted
+file, Explorer opens the nearest folder that still exists.
 Filter the changes list by path or category, and read a file's `+added -deleted`
 line counts without opening it; a binary file that was only renamed or had its
 mode changed says so when Git can confirm its content is unchanged.
@@ -156,8 +157,9 @@ drag-made selection with `Ctrl`/`⌘`+`Shift`+`Enter`, without reaching for the
 button. Press `Space` on a focused file to stage or unstage it. Once the file
 you're viewing has nothing left to stage, whole or line by line, the next
 file in the list opens (the one above it, at the end of a section), and
-unstaging works the same way in Staged. Stage, unstage, or discard single
-files or a multi-selection from the context menu (staging and unstaging a
+unstaging works the same way in Staged. Stage, unstage, discard, stash,
+ignore, or untrack single files or a multi-selection from the context menu,
+each item counting the selected files it applies to (staging and unstaging a
 selection sit in the command palette too); discarding a whole untracked file
 goes to the recycle bin. Commit with title + body, co-authors suggested from
 history, amend, undo, reset, and revert.
@@ -199,7 +201,9 @@ default's name), and a PR badge.
   also looks for the commit the squash landed in; flagged branches start
   unchecked. When the check is off, the dialog says why. Branches checked
   out in another linked worktree can join the list; acting on one removes
-  its clean worktree first.
+  its clean worktree first, and the confirmation counts the worktrees and
+  branches it touches. Each row shows every reason it's listed; the dialog
+  opens on Archive with every filter on and a 60-day window.
 - **Advanced merge tooling** ⭐: on Git 2.38+, predicts a merge's result in
   memory before you commit (fast-forward, already up to date, clean, or
   exactly which files will conflict), with `--no-ff` and a clearly cautioned
@@ -245,12 +249,17 @@ default's name), and a PR badge.
   route lets you review it without touching your current branch or
   uncommitted files. The suggested folder,
   `.gitdesktop/worktrees/pr-<number>`, sits inside the repository and is
-  kept out of `git status`.
+  kept out of `git status`. When the request already has a worktree, the
+  same menu offers **Open worktree** and an update to the request's latest
+  changes; a reset that would discard commits lists them and asks first, and
+  the success message opens the new worktree in one step.
 - **Compare**: a tab with a three-dot diff, commits ahead/behind,
   merge/rebase, and jump-to-PR, against a local branch or any remote's
-  branch (fetched when you pick it, so a GitHub fork can compare against its
-  parent through `upstream` and, while you're signed in to GitHub, open the
-  PR there). Each ahead/behind commit shows its tag chips and carries a
+  branch (`upstream` listed first; fetched when you pick it, or compared at
+  its last fetch when you're offline, which the tab says). A GitHub fork can
+  compare against its parent through `upstream`, and while you're signed in
+  to GitHub the pull request button names whether the PR opens in the parent
+  or in your fork. Each ahead/behind commit shows its tag chips and carries a
   context menu — checkout, cherry-pick, create a branch or tag, copy the SHA,
   plus revert for commits on your branch.
 - **Local branch-protection rules**: naming, merge methods, require-PR, and
@@ -378,7 +387,13 @@ in one click.
   PR and offers the link instead of opening a duplicate. A new PR is visible
   in the list it's headed for from the moment you start creating it: a **pending entry** holds its place with
   the title, branches and draft state, picks up the number as the PR opens,
-  and hands over to the real row once the list catches up.
+  and hands over to the real row once the list catches up. A locked
+  conversation shows a **locked** badge, and when GitHub or GitLab refuses a
+  comment, the comment box, reactions, and AI-review posting turn read-only
+  and say why (on an archived GitHub pull request, your draft is kept).
+- **Check out to review**: Checkout switches to the request's branch, and
+  **Check out in a worktree…** opens it in its own folder without touching
+  your branch or uncommitted files (see [Worktree manager](#branches)).
 - **Linked issues**: link related issues when you open *or* edit a PR, as
   chips **auto-detected** from your branch name and commits (a `fix/123-…`
   branch seeds `#123`) or picked by hand. Each chip toggles between
@@ -520,7 +535,10 @@ in one click.
   choice is remembered per repo (defaulting to your fork) and also sits in
   the palette as the **Switch to fork / upstream view** commands.
   Opening a PR targets a repository explicitly, offering your fork or the
-  upstream repo on a fork. When you're done with a fork, the repository menu
+  upstream repo on a fork. A GitHub fork cloned without an `upstream` remote
+  can add one (**Add upstream remote**) from the Compare picker, the Create
+  pull request dialog, or the command palette; Compare and the palette fetch
+  it right away. When you're done with a fork, the repository menu
   and command palette can **remove the upstream remote** (a local detach;
   reversible; no admin needed — the admin-gated settings **Danger zone**
   offers it too), or the Danger zone can **leave the fork network**

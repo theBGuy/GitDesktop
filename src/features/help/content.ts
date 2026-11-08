@@ -486,6 +486,8 @@ the last list up, with a line above it saying it couldn't refresh.
 - Click a file to see its diff. Toggle **unified / split** at the top of the diff.
 - Stage or unstage a file with the **+ / −** button on its row, or press
   {{key:space}} on the focused row; {{key:enter}} on a row opens its diff.
+  In the list, {{key:tab}} stops on the file you're on, {{key:up}} and {{key:down}}
+  move between files, and the next {{key:tab}} reaches that row's stage button.
   **Stage all** and **Unstage all** do the whole list.
 - When the file you're viewing has nothing left to stage, the next file in
   **Changes** opens in its place (the one above it, at the end of a section),
@@ -550,10 +552,10 @@ the last list up, with a line above it saying it couldn't refresh.
 - The **Directory tree view** button in the filter row swaps the flat list for a
   compacted directory tree: single-child folder chains merge into one row, and shared
   prefixes roll up. Click a folder to collapse or expand it ({{key:enter}} or
-  {{key:space}} does the same); from the keyboard ↑ and ↓ walk folders and files
-  alike, ← folds the folder you're on or jumps to its parent, and → unfolds a
-  folder or steps inside it. Collapsing a folder drops its hidden files from a
-  multi-selection, and the diff you have open stays open. Selection, staging,
+  {{key:space}} does the same); from the keyboard {{key:up}} and {{key:down}} walk
+  folders and files alike, {{key:left}} folds the folder you're on or jumps to its
+  parent, and {{key:right}} unfolds a folder or steps inside it. Collapsing a folder
+  drops its hidden files from a multi-selection, and the diff you have open stays open. Selection, staging,
   and filtering behave the same in both views, and file rows keep their
   {{secondaryclick}} menu. A folder row's {{secondaryclick}} menu stages, discards
   or stashes the files shown under it (in Staged: unstages or stashes them), and can
@@ -660,7 +662,8 @@ Write a **summary** (there's a 72-character budget indicator) and an optional
   process commits or switches branches after History last showed it, or while the
   undo runs, Undo stops without undoing anything and says so. While a merge,
   cherry-pick or revert is in progress, Undo is held: its menu item says to finish
-  or abort that first, and the shortcut says the same. Undo also asks you to
+  or abort that first, and the shortcut and command palette say the same before any
+  other prompt. Undo also asks you to
   resolve any conflicts first. On a detached first commit, or when the latest commit's
   parent was never fetched (the oldest commit of a shallow clone), there is nothing
   to undo onto, and Undo says so instead. Fetching more history from a terminal
@@ -843,6 +846,7 @@ The branch name in the header opens the **branch switcher** ({{kbd:show-branches
   **Merged** (into the default branch directly, or through a recent pull request where the
   repository's forge connection can supply one, so squash and rebase merges count),
   **Closed PR** (a pull request closed without merging), and **Idle** for 30, 60, or 90 days.
+  The dialog opens on **Archive** with all three toggles on and a 60-day idle window.
   Each row names every reason that applies, such as **merged #123**, **closed #45**, or
   **worktree**, and the dialog names pull requests only where it read them. On Git 2.38 or
   later, unless your Git configuration sets a merge driver, \`merge.default\` or
@@ -1088,10 +1092,12 @@ sits in the collapsed "Archived" section, and filter text can hide the rest.
 - **Add** a worktree on a new branch (from any base) or an existing one; it's checked out
   into its own folder, by default \`.gitdesktop/worktrees/<branch-name>\` inside the
   repository (slashes in the name become dashes), which is kept out of \`git status\`
-  for you. The **Full path** line under the folder field shows exactly where it will
-  land, and the folder button browses for a different parent. A pull request (or GitLab
-  merge request) can also be checked out into a worktree from its own view (see *GitHub
-  PRs*); that worktree is listed here too.
+  for you (when the main repository is bare, the suggestion is a folder beside it
+  instead). The **Full path** line under the folder field shows exactly where it will
+  land, and the folder button browses for a different parent. A pull request (a merge
+  request on GitLab) can also be checked out into a worktree from its own view, on
+  GitHub, GitLab and Bitbucket (see *GitHub PRs*, under *Pull requests*); that worktree
+  is listed here too.
 - **Open** a worktree to make it the active repository — git commands then run in that
   folder and the window title follows. The header keeps the repository's name, with the
   worktree named beneath it, so you always know which repo you're in. Open the main
@@ -1313,8 +1319,9 @@ editor**: each conflict region shows **Current (ours)** over **Incoming (theirs)
 **Accept current**, **Accept incoming**, or **Both**, and the header adds whole-file
 **Accept all current** / **Accept all incoming** and **Open in editor**. Those whole-file
 accepts ask first, since taking a side replaces the file wholesale, conflict regions you
-already settled by hand included. A strip above the regions counts the conflicts left, and
-its **Previous** and **Next** buttons ({{kbd:previous-conflict}} / {{kbd:next-conflict}},
+already settled by hand included. A confirmation left open checks the file again before
+it overwrites it, so a file you resolved elsewhere meanwhile is left alone. A strip above
+the regions counts the conflicts left, and its **Previous** and **Next** buttons ({{kbd:previous-conflict}} / {{kbd:next-conflict}},
 also in the command palette as **Previous conflict** and **Next conflict**) take you from
 one region to the next, wrapping around at either end; each region's header names its
 place ("Conflict 2 of 3"). When the first conflict starts below the visible part of the
@@ -1373,9 +1380,10 @@ model; resolve it with the whole-file accepts or your editor.{{/ai}}`,
     body: `# Pull requests
 
 The **Pull Requests** tab ({{kbd:tab-pulls}}) manages GitHub PRs, GitLab merge requests,
-and local PRs. (Hosted PRs/MRs need the matching CLI — \`gh\` or \`glab\` — installed and
-authenticated; when you're not signed in the tab shows a **Sign in** button that runs the
-sign-in in-app, and if a session **expired or was revoked** it becomes **Reconnect**
+Bitbucket pull requests, and local PRs. (GitHub and GitLab need the matching CLI, \`gh\` or
+\`glab\`, installed and authenticated, and Bitbucket an Atlassian API token in
+**Settings → Accounts**; when you're not signed in the tab shows a **Sign in** button
+that runs the sign-in in-app, and if a session **expired or was revoked** it becomes **Reconnect**
 instead of a dead end. When GitHub's **API rate limit** is in effect, the tab says so,
 with the time access resumes when GitHub reports it; your sign-in is untouched, so
 there's nothing to reconnect. GitLab does the same when its CLI names the limit.) While a
@@ -1438,7 +1446,8 @@ current branch or uncommitted files, open the caret beside **Checkout** and pick
 out in a worktree…** (or run *Check out pull request in a worktree…* from the command
 palette), which works on all three forges too. The popover suggests a folder inside the
 repository, \`.gitdesktop/worktrees/pr-<number>\`, which is kept out of \`git status\`
-for you; the **Full path** line under the folder field shows exactly where it will land.
+for you (when the main repository is bare, it suggests a folder beside it instead); the
+**Full path** line under the folder field shows exactly where it will land.
 Edit it, or **Browse** for a different parent folder, then **Check out**. Nothing is
 created until you confirm. When the pull request's branch already has a
 worktree, the popover offers **Open worktree** and **Update to PR** (**Update to MR** on
@@ -2013,7 +2022,8 @@ order they'll go in, whenever it has the list.
 ## Bitbucket PRs
 
 Point the app at a **Bitbucket Cloud** repo (connect with an Atlassian API token in
-**Settings → Accounts**) and the same tab lists its **pull requests**. A Bitbucket PR's
+**Settings → Accounts**) and the same tab lists its **pull requests**, with merged and
+closed ones on their own **Merged** and **Closed** tabs. A Bitbucket PR's
 Conversation is the same **date-sorted activity feed**: pushed commits, merge/close, and
 verdicts (approved / changes-requested), interleaved with reviews and comments. Bitbucket
 has no labels or review-request events, so those don't appear. Its **CI checks** roll up
@@ -2038,7 +2048,8 @@ On a GitHub or GitLab repo the description and comment box complete **@** mentio
 them as links you can click through. Rename a branch in GitDesktop (in the app or through
 its MCP server) and open local PRs whose head or base used the old name follow it.
 The create dialog counts the commits the merge would bring in. When the head branch is
-already in the base it says **Nothing to merge** and holds **Create**.
+already in the base it says **Nothing to merge** and holds **Create**. Merged and closed
+local PRs move to the **Merged** and **Closed** tabs.
 
 Its Conversation is the same **date-sorted activity feed** as the hosted PRs: it opens with
 a **created** marker, interleaves the branch's **pushed commits** (grouped, each short SHA
@@ -2062,7 +2073,7 @@ are also in the command palette ({{kbd:command-palette}}) as **Archive pull requ
 {{ai}}
 ## AI review
 
-On any PR — GitHub or a GitLab MR — run a streamed **code review** or a focused
+On any PR (GitHub, or a GitLab MR), run a streamed **code review** or a focused
 **security audit** of its changes
 using your chosen review model, and optionally post the result as a comment. A general
 review builds on **soft context** where it exists: your prior review of the PR, findings
@@ -2275,8 +2286,8 @@ reads **Create in \<parent\>**.
 ## GitLab issues
 
 Point the app at a **GitLab** repo and the same tab lists its **issues** (open and closed)
-next to any local issues. Open one to read the description and comments — and the GitLab
-issue **writes**: **comment** on the issue (and **edit** or **delete** your own comments),
+next to any local issues; **Load 100 more** keeps adding issues up to 500. Open one to
+read the description and comments — and the GitLab issue **writes**: **comment** on the issue (and **edit** or **delete** your own comments),
 **close / reopen** it (closing asks first; either way your drafted comment posts
 alongside), **edit** its title and
 description, **react** with emoji on the description and comments (GitLab's award emoji),
@@ -3796,7 +3807,10 @@ the small programs Git runs at points like *before commit* or *before push*.
   arrow-navigable — and **edit** it in a built-in editor.
 - **Enable or disable** a hook without deleting it, or delete it outright.
 - **Templates** give you a one-click starting script for any of the standard hooks
-  (pre-commit, commit-msg, pre-push, …).
+  (pre-commit, commit-msg, pre-push, …). The pre-push **Block pushing WIP commits**
+  template stops a push carrying WIP, \`fixup!\` or \`squash!\` commits, checking only the
+  commits not already on the destination remote as this clone last fetched it, and
+  refuses a push whose commits it can't list.
 - If your repo uses a hook manager — **husky**, **pre-commit**, or **lefthook** —
   GitDesktop detects it, opens its config, and can run the right install/update command
   for you.`,
@@ -3898,7 +3912,8 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
   {{kbd:stash-all}} stash all.
 - **Changes:** {{kbd:commit}} commit{{ai}} · {{kbd:generate-commit-message}} generate
   with AI (the open dialog's Generate when one is up){{/ai}} · {{kbd:stage-selected-lines}}
-  stage/unstage the selected diff lines · {{kbd:undo-commit}} undo last commit.
+  stage/unstage the selected diff lines · {{kbd:undo-commit}} undo last commit ·
+  {{kbd:next-conflict}} / {{kbd:previous-conflict}} next / previous conflict.
 - **Pull requests:** {{kbd:create-pr}} create pull request.
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}

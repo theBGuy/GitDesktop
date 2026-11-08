@@ -484,6 +484,11 @@ const forges = [
       Promote a local PR to a real GitHub, GitLab, or Bitbucket PR, comments and all,
       in one click.
     </p>
+    <p class="text-muted">
+      Check out any pull or merge request into its own worktree to review it without
+      touching your branch or uncommitted files, and keep merged work apart from closed
+      with Open, Merged, and Closed tabs.
+    </p>
   </FeatureRow>
 
   <!-- CI / Actions (shared) -->
@@ -617,7 +622,8 @@ const forges = [
       full list of changed files, and every commit that isn't on the base yet. The
       base can be a local branch or any remote's branch, fetched when you pick it,
       so a GitHub fork compares against its parent through its upstream remote and,
-      while you're signed in to GitHub, opens the pull request there.
+      while you're signed in to GitHub, opens the pull request there. A fork without an
+      upstream remote can add one from the picker.
     </p>
     <p class="text-muted">
       Merging shows an advanced tooling panel that predicts the result in memory
