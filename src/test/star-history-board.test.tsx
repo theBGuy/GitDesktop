@@ -2440,4 +2440,32 @@ describe("Star history: keyed by repo and series", () => {
         ?.isInvalidated,
     ).toBe(false);
   });
+  it("an Explore star refreshes the star status of a checkout that never opened Insights", async () => {
+    vi.mocked(forgeStarRepo).mockResolvedValue(undefined as never);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const MENU = "C:/menu";
+    client.setQueryData(["repo", MENU, "forge-status"], {
+      ...GITHUB,
+      repo: "Owner/Repo",
+    });
+    client.setQueryData(["repo", OTHER, "forge-status"], {
+      ...GITHUB,
+      repo: "owner/other",
+    });
+    for (const path of [MENU, OTHER])
+      client.setQueryData(starStatus(path), false);
+    const star = hookOn(client, () => useStarRepo());
+    await act(() =>
+      star.current.mutateAsync({
+        provider: "github",
+        owner: "owner",
+        name: "repo",
+        star: true,
+      }),
+    );
+    expect(client.getQueryState(starStatus(MENU))?.isInvalidated).toBe(true);
+    expect(client.getQueryState(starStatus(OTHER))?.isInvalidated).toBe(false);
+  });
 });

@@ -260,8 +260,9 @@ dialog (those sites stay unguarded under an `OWNS_CHORD` entry); the
   a card is labelled by the card title through the card title context
   (`ChartFigure` does this itself; a hand-built figure takes `useCardTitle()`),
   its chart svg is `aria-label` "<title> chart" via `useChartLabel()`, and a
-  `DataTable` defaults to "<title> data", so nested names stay distinct. Never a
-  recharts `title` prop, which also renders a hover tooltip.
+  `DataTable` is named "<title> data" (unnamed outside a card), so nested names
+  stay distinct. Never a recharts `title` prop, which also renders a hover
+  tooltip.
 - Icon-only copy buttons are `CopyIconButton`
   (`src/components/CopyIconButton.tsx`), never a raw button around `CopyIcon`;
   it always stops click propagation, and the `raw-copy-icon-button` guard in
@@ -933,8 +934,10 @@ one grep away on the named symbol. Grows via Conventions-sync.
   series through the forge status its settle refreshes; a sibling checkout
   moves when its own forge status refreshes. The writes that move its stars
   settle every cached series of it themselves: Star/Unstar through
-  `invalidateStarHistory`, delete and visibility through `resetStarHistory`
-  (`queries/insights.ts`); a new write of that kind joins them. An
+  `invalidateStarHistory`, Explore's Star/Unstar through
+  `invalidateStarHistoryForSlug`, delete and visibility through
+  `resetStarHistory` (`queries/insights.ts`); a new write of that kind joins
+  them. An
   out-of-band origin edit (terminal, MCP) moves the read once the forge status
   next refreshes; until then it reads the old series, never a mix. A failed
   older page is a marker page in the series, so the read stays a success that

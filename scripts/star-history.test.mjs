@@ -243,6 +243,7 @@ function problems(mod) {
         [2 ** 53, 2 ** 53],
         [2 ** 60, 2 ** 60 + 256],
         [Number.MAX_SAFE_INTEGER - 3, Number.MAX_SAFE_INTEGER],
+        [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
       ]) {
         const { ticks } = withPushBudget(() => mod.windowAxis(values));
         assert.ok(ticks.length <= 7, String(values));
@@ -1009,7 +1010,7 @@ test("a deriver that drops a guard fails the checks", async () => {
     ),
     "axis below 0": swap("Math.max(0, min - 1)", "min - 1"),
     "unsafe axis values kept": swap(
-      "finite.some((v) => Math.abs(v) > Number.MAX_SAFE_INTEGER)",
+      "finite.some((v) => Math.abs(v) >= Number.MAX_SAFE_INTEGER)",
       "false",
     ),
     "no note over the count": swap("if (curveAboveCount(input))", "if (false)"),

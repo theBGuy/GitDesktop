@@ -149,8 +149,8 @@ function niceStep(range: number): number {
 
 /** The window's Y axis: labelled ticks spanning the values' own range. A flat
  *  series pads one star either side (never below 0), so it still draws. Values
- *  past 2^53 get the empty axis: there a float's spacing can outgrow the step,
- *  and `t += step` would stop advancing. */
+ *  at or past MAX_SAFE_INTEGER get the empty axis: from there a float's spacing
+ *  can outgrow the step, and `t += step` would stop advancing. */
 export function windowAxis(values: readonly number[]): {
   domain: [number, number];
   ticks: number[];
@@ -158,7 +158,7 @@ export function windowAxis(values: readonly number[]): {
   const finite = values.filter((v) => Number.isFinite(v));
   if (
     finite.length === 0 ||
-    finite.some((v) => Math.abs(v) > Number.MAX_SAFE_INTEGER)
+    finite.some((v) => Math.abs(v) >= Number.MAX_SAFE_INTEGER)
   )
     return { domain: [0, 1], ticks: [0, 1] };
   let min = finite[0];

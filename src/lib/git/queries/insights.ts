@@ -384,7 +384,9 @@ export async function invalidateStarHistory(
 /** Explore's Star/Unstar of `slug` (`owner/repo`): every cached star history
  *  whose series names it, on any host (Explore doesn't know which one gh
  *  starred on) and in any case, healed as the local toggle heals its own, plus
- *  each matched checkout's Community and star status. */
+ *  the Community and star status of every checkout of that repository: those
+ *  reads' checkouts, and those whose cached GitHub forge status names it (a
+ *  checkout with star status cached may never have opened Insights). */
 export async function invalidateStarHistoryForSlug(
   queryClient: QueryClient,
   slug: string,
@@ -398,7 +400,23 @@ export async function invalidateStarHistoryForSlug(
       typeof queryKey[4] === "string" &&
       starSeriesParts(queryKey[4]).slug.toLowerCase() === wanted,
   });
-  const repos = new Set(reads.map((query) => query.queryKey[1] as string));
+  // useForgeStatus's key (accounts.ts).
+  const statuses = queryClient.getQueryCache().findAll({
+    queryKey: ["repo"],
+    predicate: ({ queryKey, state }) => {
+      const status = state.data as ForgeStatus | undefined;
+      return (
+        queryKey.length === 3 &&
+        queryKey[2] === "forge-status" &&
+        status?.provider === "github" &&
+        typeof status.repo === "string" &&
+        status.repo.toLowerCase() === wanted
+      );
+    },
+  });
+  const repos = new Set(
+    [...reads, ...statuses].map((query) => query.queryKey[1] as string),
+  );
   await Promise.all([
     ...reads.map((query) =>
       invalidateKeyHealingStraddles(queryClient, query.queryKey),
