@@ -1,22 +1,20 @@
 import { Popover } from "@base-ui/react/popover";
 import {
-  ArrowClockwiseIcon,
   ArrowCounterClockwiseIcon,
   CaretDownIcon,
   CheckCircleIcon,
-  CheckIcon,
   DotsThreeIcon,
   GitMergeIcon,
   InfoIcon,
   PencilSimpleIcon,
   SparkleIcon,
   TagIcon,
-  WarningIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import type { ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { DetailTitleRow } from "@/components/detail-title-row";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -46,6 +44,7 @@ import { useLocalConversation } from "@/features/conversations/useLocalConversat
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
 import { useThreadJumpHotkeys } from "@/features/conversations/useThreadJumpHotkeys";
 import { DiffPlaceholder } from "@/features/diff/DiffPlaceholder";
+import { useFocusOnControlsSwap } from "@/features/diff/use-hidden-trigger-focus";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
 import { JiraRefRow } from "@/features/issues/JiraRefRow";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
@@ -61,37 +60,58 @@ import {
 import { copyText } from "@/lib/clipboard";
 import { gitBranchDiff, type MergeStrategy } from "@/lib/git/api";
 import {
+  conflictPreviewKey,
   forgeFeatureReady,
+  LOCAL_PR_WRITES_KEY,
+  type LocalPrUpdateDiscardVars,
+  type LocalPrUpdateFinishVars,
+  type LocalPrUpdateStartVars,
   pendingWriteMatching,
   pendingWriteOfKind,
+  repoKeys,
   useBranchDiffFiles,
   useCompareBranches,
   useConflictPreview,
   useDefaultBranch,
+  useDiscardLocalPrUpdate,
   useForgeStatus,
   useMergeLocalPr,
   usePendingLocalPrWrites,
   usePendingRepoWrites,
   useRepoStatus,
+  useStartLocalPrUpdate,
   useUpdateBranchFrom,
 } from "@/lib/git/queries";
 import { providerLabel } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
 import { useGenerateChordHint } from "@/lib/hotkeys/useGenerateChord";
+import { openPendingUpdate } from "@/lib/pulls/local";
 import type { PrSection } from "@/lib/pulls/pr-section";
 import {
   LOCAL_PR_RECORD_WRITES_FAMILY,
+  localPrKey,
   useLocalPrs,
   useUpdateLocalPr,
 } from "@/lib/pulls/queries";
 import { useAiEnabled } from "@/lib/settings/queries";
+import { useConfirm } from "@/lib/stores/confirm";
+import { useConflictResolve } from "@/lib/stores/conflict-resolve";
+import { landedIn } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
 import { toastError } from "@/lib/toast";
 import { useToastClearance } from "@/lib/use-toast-clearance";
 import { LinkedIssuesField } from "./LinkedIssuesField";
 import { LocalPrLifecycleRow } from "./LocalPrTimeline";
-import { PROMOTION_REASON, type PromotionKind } from "./PrMergeabilityBanner";
+import { localMergeStripArm } from "./merge-strip-arm";
+import {
+  AWAITING_DEFAULT_BRANCH_REASON,
+  AWAITING_PROMOTION_RULES_REASON,
+  LocalPrMergeStrip,
+  type LocalStripResolve,
+  type PromotionKind,
+  updateOperation,
+} from "./PrMergeabilityBanner";
 import { PromoteLocalPrDialog } from "./PromoteLocalPrDialog";
 import { PrReviewPanel } from "./PrReviewPanel";
 import {
@@ -100,7 +120,15 @@ import {
   sortTimeline,
   type TimelineEntry,
 } from "./PrTimeline";
-import { ResolveConflictsView } from "./ResolveConflictsView";
+// The copy below is read only inside handlers, never at render (a test that stubs
+// this module supplies the component alone).
+import {
+  DISCARD_UPDATE_CONFIRM,
+  discardSettledToast,
+  ResolveConflictsView,
+  updateConflictsToast,
+  updatedToast,
+} from "./ResolveConflictsView";
 import { useGeneratePrDescription } from "./useGeneratePrDescription";
 import {
   composeBodyWithRefs,
@@ -131,6 +159,46 @@ const SECTION_LABEL: Record<
   files: (c) => `Files${c.files === undefined ? "" : ` (${c.files})`}`,
   review: () => "Review",
 };
+
+/** Merge's reasons, spelled once: the button's tooltip and the footer's visible
+ *  line read the same string. */
+const MERGE_NEEDS_APPROVAL = "Approve the PR before merging";
+const MERGE_DIRTY_TREE =
+  "Commit or stash your changes before merging into the current branch";
+/** A resolve's reasons. The dirty-head sentence is the Rust start's refusal
+ *  (DIRTY_HEAD_UPDATE) spelled for the strip and Finish; the preparing one names the
+ *  action because it shows on controls that are not that action. */
+const RESOLVE_DIRTY_HEAD =
+  "Commit or stash your changes to update the current branch";
+const UPDATE_PREPARING_REASON = "Preparing to resolve conflicts…";
+const UPDATE_UNFINISHED_REASON =
+  "Finish or discard the unfinished conflict resolution first";
+
+/** The one approval toggle, rendered in the composer and the footer so the two
+ *  mounts cannot drift. */
+function ApproveToggle({
+  approved,
+  held,
+  onToggle,
+}: {
+  approved: boolean;
+  held: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <DisabledReasonButton
+      variant={approved ? "secondary" : "outline"}
+      size="sm"
+      aria-pressed={approved}
+      disabled={held}
+      reason="Saving…"
+      onClick={onToggle}
+    >
+      <CheckCircleIcon data-icon="inline-start" />
+      {approved ? "Approved" : "Approve"}
+    </DisabledReasonButton>
+  );
+}
 
 export function LocalPrView({
   repoPath,
@@ -246,6 +314,34 @@ export function LocalPrView({
     repo: string;
     id: string;
   } | null>(null);
+  // Approve's click slot, the same shape: `updateHold` matches every record
+  // write of this PR, so a posted comment would flash Approve held.
+  const [approveSavingFor, setApproveSavingFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
+  // Update branch's click slot, held until the strip's reads answer for the moved
+  // head: the write settles before its invalidation's refetch lands, so the
+  // retained "behind" answer would offer Update branch again in between.
+  const [updateSettlingFor, setUpdateSettlingFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
+  // The same hold after a conflict resolution moved the head (a clean start, a
+  // finish, a discard that had landed): set as the write answers, cleared once the
+  // strip's reads answer for the new tip.
+  const [resolveSettlingFor, setResolveSettlingFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
+  // Resolve conflicts' click slot: the start holds from the press, before the
+  // batched cache notification that feeds `preparing` lands, so a second press in
+  // that window starts nothing.
+  const [startingFor, setStartingFor] = useState<{
+    repo: string;
+    id: string;
+  } | null>(null);
+  const queryClient = useQueryClient();
   const ghStatus = useForgeStatus(repoPath);
   const provider = ghStatus.data?.provider;
   // A local PR's body and comments autolink the forge's references like any other
@@ -334,10 +430,67 @@ export function LocalPrView({
   );
   const dirtyBlocks = baseIsCurrent && hasTrackedChanges;
   const canMerge = pr?.status === "open" && pr.approved;
-  // Predict whether the merge will conflict, shown as a calm line by the Merge
-  // button. `git_conflict_preview` is a read-only merge-tree prediction, so run
-  // it whenever the PR is open — even when merging is currently blocked (not
-  // approved / dirty tree), the user still wants to see the prediction.
+
+  // A conflict-resolving update (base merged INTO head). Its writes are read from the
+  // cache by PR id: this view outlives a PR switch.
+  const recordKey = localPrKey(repoPath);
+  const startUpdate = useStartLocalPrUpdate(repoPath, recordKey);
+  const discardUpdate = useDiscardLocalPrUpdate(repoPath, recordKey);
+  const gitWrites = usePendingRepoWrites(LOCAL_PR_WRITES_KEY[0], repoPath);
+  const activeUpdate = openPendingUpdate(pr);
+  const preparing =
+    (startingFor?.repo === repoPath && startingFor.id === id) ||
+    pendingWriteMatching(
+      gitWrites,
+      "update-resolve",
+      (v: LocalPrUpdateStartVars) => v.id === id,
+    ) !== undefined;
+  const finishingUpdate =
+    pendingWriteMatching(
+      gitWrites,
+      "finish-update",
+      (v: LocalPrUpdateFinishVars) => v.id === id,
+    ) !== undefined;
+  const discardingUpdate =
+    pendingWriteMatching(
+      gitWrites,
+      "discard-update",
+      (v: LocalPrUpdateDiscardVars) => v.id === id,
+    ) !== undefined;
+  const otherStart =
+    pendingWriteOfKind(localWrites, "update-resolve") !== undefined &&
+    !preparing;
+  // Whether the editor shows, per repo and PR. Decided on the first render that has
+  // the record of a PR this view just came to, so an update that already exists
+  // opens (restart included) and one that arrives later leaves the strip's resume arm.
+  const [updateEditor, setUpdateEditor] = useState<{
+    repo: string;
+    id: string;
+    open: string | null;
+  } | null>(null);
+  if (
+    pr !== undefined &&
+    !(updateEditor?.repo === repoPath && updateEditor.id === pr.id)
+  ) {
+    setUpdateEditor({
+      repo: repoPath,
+      id: pr.id,
+      open: activeUpdate?.worktreeId ?? null,
+    });
+  }
+  const updateTakeover =
+    activeUpdate !== undefined &&
+    updateEditor?.repo === repoPath &&
+    updateEditor.id === pr?.id &&
+    updateEditor.open === activeUpdate.worktreeId;
+  const mergeTakeover = !!pr?.pendingMerge?.worktreePath;
+  // Either paused merge takes the whole view over, footer and strip included.
+  const takeover = mergeTakeover || updateTakeover;
+  const headIsCurrent =
+    pr !== undefined && status.data?.branch?.name === pr.head;
+  const headDirty = headIsCurrent && hasTrackedChanges;
+  // The merge strip's conflict prediction. A read-only merge-tree run, so it runs
+  // for every open PR, approved or not, and whatever blocks Merge.
   const conflictPreview = useConflictPreview(
     repoPath,
     pr?.base ?? "",
@@ -346,12 +499,153 @@ export function LocalPrView({
   );
   const defaultBranch = useDefaultBranch(repoPath);
 
+  // Everything from here to the early return feeds a hook argument, so it is
+  // declared above that return (a const below it would be in its dead zone).
+  const isSelectedPr = selectedPr?.kind === "local" && selectedPr.id === id;
+  // A promotion pull request (main → staging) stays permanently behind its base,
+  // and "Update branch" would merge the base back INTO the head, inverting the
+  // flow. The head IS the default branch (a name comparison: a topology probe
+  // false-positives on stacked PRs), or the repo's rules name it a promotion
+  // branch. The kind decides the strip's promotion line and withholds the update.
+  const promotionKind: PromotionKind = (() => {
+    switch (true) {
+      case pr !== undefined &&
+        !!defaultBranch.data &&
+        pr.head === defaultBranch.data:
+        return "default";
+      case pr !== undefined && isPromotionBranch(rulesConfig, pr.head):
+        return "configured";
+      default:
+        return null;
+    }
+  })();
+  const behindBy = comparison.data?.behind.length;
+  // From the pending writes, not `runningUpdate`: that is only the FIRST pending
+  // update-from, and the branch switcher runs the same write.
+  const thisUpdateSettling =
+    updateSettlingFor?.repo === repoPath && updateSettlingFor.id === pr?.id;
+  // A finish moves this head too, and its reads settle after the record clears.
+  const resolveSettling =
+    resolveSettlingFor?.repo === repoPath && resolveSettlingFor.id === pr?.id;
+  const thisUpdateRunning =
+    pr !== undefined &&
+    (thisUpdateSettling ||
+      resolveSettling ||
+      finishingUpdate ||
+      localWrites.some(
+        (w) =>
+          w.kind === "update-from" && w.head === pr.head && w.base === pr.base,
+      ));
+  // One reason holds Resolve, Continue and Discard together; while an update is
+  // unfinished it carries only holds that block all three, so Discard stays
+  // reachable on a dirty tree.
+  const resolveHeldReason = (() => {
+    switch (true) {
+      // While its start runs the start button says "Preparing…" itself, never a
+      // later reason; a record that lands meanwhile holds Discard and Continue.
+      case preparing:
+        return activeUpdate !== undefined ? UPDATE_PREPARING_REASON : undefined;
+      case discardingUpdate:
+        return "Discarding this update…";
+      case finishingUpdate:
+        return "Finishing this update…";
+      case activeUpdate !== undefined:
+        return undefined;
+      case runningMerge?.head != null && runningMerge.base != null:
+        return `Merging ${runningMerge.head} into ${runningMerge.base}…`;
+      case runningMerge !== undefined:
+        return "Merging…";
+      case thisUpdateRunning:
+        return "Updating this branch…";
+      case runningUpdate?.head != null && runningUpdate.base != null:
+        return `Updating ${runningUpdate.head} from ${runningUpdate.base}…`;
+      case runningUpdate !== undefined:
+        return "Updating a branch…";
+      case otherStart:
+        return "Another conflict resolution is being prepared…";
+      case recovery.pending:
+        return "Another git operation is running.";
+      case headDirty:
+        return RESOLVE_DIRTY_HEAD;
+      default:
+        return undefined;
+    }
+  })();
+  const resolveNote = pr?.approved
+    ? `${updateOperation(pr.base, pr.head)}. Finishing clears the approval.`
+    : undefined;
+  const resolveSlot: LocalStripResolve | null =
+    pr === undefined
+      ? null
+      : {
+          unfinished: activeUpdate !== undefined,
+          preparing,
+          heldReason: resolveHeldReason,
+          note: resolveNote,
+          onResolve: () =>
+            activeUpdate ? openUpdateEditor() : void doStartResolve(),
+          onDiscard: () => void doDiscardUpdate(),
+        };
+  const strip = localMergeStripArm({
+    isOpen: pr?.status === "open",
+    preview: {
+      enabled: pr !== undefined && pr.base !== "" && pr.head !== "",
+      isPending: conflictPreview.isPending,
+      isError: conflictPreview.isError,
+      data: conflictPreview.data,
+    },
+    comparison: {
+      enabled: pr !== undefined && pr.base !== pr.head,
+      isPending: comparison.isPending,
+      behindBy,
+    },
+    promotionKind,
+    promotionSettling: defaultBranch.isPending || rulesSettling,
+    updating: thisUpdateRunning,
+    resolve: resolveSlot,
+  });
+  // PENDING only (neither read is ever disabled): a FAILED read falls open to an
+  // ordinary PR instead of holding forever behind a stale "checking…".
+  const promotionSettlingReason = (() => {
+    switch (true) {
+      case !strip.awaitingPromotion:
+        return undefined;
+      case defaultBranch.isPending:
+        return AWAITING_DEFAULT_BRANCH_REASON;
+      default:
+        return AWAITING_PROMOTION_RULES_REASON;
+    }
+  })();
+  const canStartResolve =
+    strip.offerResolve &&
+    !preparing &&
+    resolveHeldReason === undefined &&
+    promotionSettlingReason === undefined &&
+    !pr?.pendingMerge?.worktreePath;
+  const updateHeldReason = (() => {
+    switch (true) {
+      case thisUpdateRunning:
+        return "Updating this branch…";
+      case preparing:
+        return UPDATE_PREPARING_REASON;
+      case discardingUpdate:
+        return "Discarding this update…";
+      case activeUpdate !== undefined:
+        return UPDATE_UNFINISHED_REASON;
+      case runningUpdate?.head != null && runningUpdate.base != null:
+        return `Updating ${runningUpdate.head} from ${runningUpdate.base}…`;
+      case runningUpdate !== undefined:
+        return "Updating a branch…";
+      case recovery.pending:
+        return "Another git operation is running.";
+      default:
+        return promotionSettlingReason;
+    }
+  })();
+  const canUpdateBranch = strip.offerUpdate && updateHeldReason === undefined;
+
   const threadActive =
-    selectedPr?.kind === "local" &&
-    selectedPr.id === id &&
-    section === "conversation" &&
-    !!pr &&
-    !pr.pendingMerge?.worktreePath;
+    isSelectedPr && section === "conversation" && !!pr && !takeover;
   const jumpRef = useThreadJumpHotkeys(threadActive);
   // The palette's route to the comment box. Every term the composer itself is
   // gated on rides here too: a paused merge takes the whole view over, and the
@@ -361,11 +655,32 @@ export function LocalPrView({
     () => composerRef.current?.focus(),
     threadActive,
   );
+  // The strip's Update branch, from the palette: the same refusal as the button.
+  useHotkeyAction(
+    "pr-update-branch",
+    () => void doUpdateBranch(),
+    isSelectedPr && pr !== undefined && !takeover && canUpdateBranch,
+  );
+  // The strip's Resolve conflicts / Continue resolving, from the palette: the same
+  // refusals as the buttons.
+  useHotkeyAction(
+    "pr-resolve-conflicts",
+    () => resolveSlot?.onResolve(),
+    isSelectedPr &&
+      pr !== undefined &&
+      !takeover &&
+      (canStartResolve ||
+        (strip.arm === "resume" && resolveHeldReason === undefined)),
+  );
+  // Where focus lands when an update's takeover swaps in or out under it: the
+  // control that held it unmounts with the view it sat in.
+  const viewSinkRef = useRef<HTMLSpanElement>(null);
+  useFocusOnControlsSwap(updateTakeover, viewSinkRef);
 
-  // Off while an early return paints instead: no PR, or a paused merge's
-  // takeover, which renders its own view in place of this bar.
+  // Off while an early return paints instead: no PR, or a takeover, which renders
+  // its own view in place of this bar.
   const actionBarRef = useRef<HTMLDivElement>(null);
-  useToastClearance(actionBarRef, !!pr && !pr.pendingMerge?.worktreePath);
+  useToastClearance(actionBarRef, !!pr && !takeover);
 
   if (!pr) {
     return (
@@ -382,29 +697,9 @@ export function LocalPrView({
     slot?.repo === repoPath && slot.id === pr.id;
   const statusHeld = updateHold !== undefined || ownsSlot(statusSavingFor);
   const reviewPosting = updateHold !== undefined || ownsSlot(postingReviewFor);
+  const approveHeld = ownsSlot(approveSavingFor);
 
   const ahead = comparison.data?.ahead ?? [];
-  // Commits on `base` that `head` lacks — i.e. how far the PR's head branch has
-  // fallen behind base. Non-empty ⇒ offer GitHub's "Update branch".
-  const behind = comparison.data?.behind ?? [];
-  // A promotion pull request (main → staging): the head carries work onward, so it
-  // stays permanently behind its base and "Update branch" would merge the base back
-  // INTO it, inverting the flow. Either the head IS this repository's default branch
-  // — a topology probe would false-positive on stacked pull requests, so that name
-  // comparison is the whole test — or the repo's rules name it a promotion branch,
-  // which is what covers staging → production. Which kind it is decides only the
-  // words the note uses; a configured head is no claim about the default branch.
-  const promotionKind: PromotionKind = (() => {
-    switch (true) {
-      case !!defaultBranch.data && pr.head === defaultBranch.data:
-        return "default";
-      case isPromotionBranch(rulesConfig, pr.head):
-        return "configured";
-      default:
-        return null;
-    }
-  })();
-  const promotionLike = promotionKind !== null;
 
   // AI title+description generation — shared by the Edit dialog's Generate button
   // and its mod+g chord. Verbatim the button's prior onClick body. `pr` is aliased
@@ -442,18 +737,23 @@ export function LocalPrView({
     { label: "branch name", text: pr.head },
   ];
 
-  function toggleApprove() {
-    if (!pr) return;
-    // An absolute value read at click, not a flip of whatever is stored: two
-    // clicks before the record refreshes both write what the button offered
-    // instead of cancelling out.
+  async function toggleApprove() {
+    if (!pr || approveHeld) return;
+    // An absolute value read at click, not a flip of whatever is stored, and not
+    // optimistic: Merge's gate must rest on the stored record.
     const next = !pr.approved;
-    void update
-      .mutateAsync({
+    const mine = { repo: repoPath, id: pr.id };
+    setApproveSavingFor(mine);
+    try {
+      await update.mutateAsync({
         id: pr.id,
         mutate: (cur) => ({ ...cur, approved: next }),
-      })
-      .catch(toastError);
+      });
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setApproveSavingFor((cur) => (cur === mine ? null : cur));
+    }
   }
 
   // A typed note rides Close/Reopen rather than being discarded by them.
@@ -466,7 +766,8 @@ export function LocalPrView({
     // Appending the note makes this non-idempotent, and the mutate callback
     // re-reads the record from disk — so a second click lands after the first
     // note is already stored and would post it twice.
-    if (!pr || statusHeld) return;
+    if (!pr || statusHeld || (next === "closed" && (preparing || activeUpdate)))
+      return;
     const note = comment.trim();
     const mine = { repo: repoPath, id: pr.id };
     setStatusSavingFor(mine);
@@ -521,7 +822,7 @@ export function LocalPrView({
   // to reach its resolver by.
   async function doMerge(strategy: MergeStrategy) {
     // Any local merge in flight refuses another: they share the refs it advances.
-    if (!pr || runningMerge) return;
+    if (!pr || runningMerge || preparing || activeUpdate) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
@@ -583,18 +884,22 @@ export function LocalPrView({
     }
   }
 
-  /** The "Update branch" button's action. Awaited because the dirty-tree refusal
-   *  reaches the stash-and-reapply prompt only through this rejection; dropping
-   *  it on teardown would withdraw the offer entirely. */
+  /** The strip's "Update branch" action, also the palette's. Awaited because the
+   *  dirty-tree refusal reaches the stash-and-reapply prompt only through this
+   *  rejection; dropping it on teardown would withdraw the offer entirely. */
   async function doUpdateBranch() {
-    if (!pr || runningUpdate) return;
+    if (!pr || !canUpdateBranch) return;
     if (promotionBlocksCheckout(repoPath)) {
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
+    const mine = { repo: repoPath, id: pr.id };
+    const moved = { repo: repoPath, base: pr.base, head: pr.head };
+    setUpdateSettlingFor(mine);
     try {
       await updateBranchFrom.mutateAsync({ branch: pr.head, base: pr.base });
       toast.success(`Updated ${pr.head} from ${pr.base}`);
+      await refetchStripReads(moved);
     } catch (e) {
       // Only an in-place update (head IS the current branch) can be refused
       // over uncommitted changes — the throwaway worktree path is always
@@ -612,112 +917,190 @@ export function LocalPrView({
         return;
       }
       toastError(e);
+    } finally {
+      setUpdateSettlingFor((cur) => (cur === mine ? null : cur));
     }
   }
 
-  // A calm status block above the Merge button: up to three INDEPENDENT lines —
-  // the in-memory conflict prediction, the promotion note that stands in for the
-  // Update branch button this shape hides, and (when merging is currently
-  // blocked) the visible reason it's disabled. The reason is shown here because a
-  // disabled <Button>'s `title` never surfaces a tooltip (the repo's
-  // explain-disabled-actions gotcha).
-  function renderMergeStatus() {
-    if (!pr) return null;
-    const p = conflictPreview.data;
-    const blocked = !canMerge || dirtyBlocks;
+  /** Re-reads the strip's prediction and comparison for the PR a write moved, by
+   *  that PR's keys: the view's observers follow a PR or repo switch, and an
+   *  inactive query is only marked stale by the write's invalidation. Joins a
+   *  refetch already running rather than cancelling it; a failed read resolves too
+   *  and shows as failed. */
+  function refetchStripReads(moved: {
+    repo: string;
+    base: string;
+    head: string;
+  }) {
+    return Promise.all([
+      queryClient.refetchQueries(
+        { queryKey: conflictPreviewKey(moved.repo), type: "all" },
+        { cancelRefetch: false },
+      ),
+      queryClient.refetchQueries(
+        {
+          queryKey: repoKeys.compare(moved.repo, moved.base, moved.head),
+          exact: true,
+          type: "all",
+        },
+        { cancelRefetch: false },
+      ),
+    ]);
+  }
 
-    // Prediction line — nothing for up-to-date / fast-forward / unknown.
-    let prediction: ReactNode = null;
-    if (p?.status === "conflict") {
-      const files = p.conflicts;
-      const shown = files.slice(0, 3);
-      const list =
-        files.length <= 3
-          ? shown.join(", ")
-          : `${shown.join(", ")} and ${files.length - 3} more`;
-      prediction = (
-        <>
-          <div className="flex items-start gap-1.5 text-warning">
-            <WarningIcon className="mt-px size-3.5 shrink-0" />
-            <span className="min-w-0">
-              This merge will conflict in{" "}
-              <span className="font-mono">{list}</span>
-            </span>
-          </div>
-          <div className="pl-5 text-muted-foreground">
-            You'll resolve the conflicts in an editor — your working tree stays
-            untouched.
-          </div>
-        </>
-      );
-    } else if (p?.status === "clean") {
-      prediction = (
-        <div className="flex items-center gap-1.5 text-muted-foreground">
-          <CheckIcon className="size-3.5 shrink-0" />
-          Merges cleanly
-        </div>
-      );
-    }
-
-    // Blocked-reason line — independent of the prediction.
-    const reason = blocked ? (
-      <div className="flex items-center gap-1.5 text-muted-foreground">
-        <InfoIcon className="size-3.5 shrink-0" />
-        {!canMerge
-          ? "Approve this PR to merge"
-          : "Commit or stash your changes to merge into the current branch"}
-      </div>
-    ) : null;
-
-    // Names the direction the work travels, in place of the Update branch button
-    // this arm hides. The count is true and stays visible; only the implied
-    // catch-up goes away. The gap does NOT close on merge — merging the head into
-    // the base ADDS a commit the head lacks — so the copy says it needs no closing.
-    const promotion =
-      promotionKind !== null && behind.length > 0 ? (
-        <div className="flex items-start gap-1.5 text-muted-foreground">
-          <InfoIcon className="mt-px size-3.5 shrink-0" />
-          <span className="min-w-0">
-            <span className="font-mono">{pr.base}</span> has {behind.length}{" "}
-            commit{behind.length === 1 ? "" : "s"}{" "}
-            <span className="font-mono">{pr.head}</span> doesn't.{" "}
-            <span className="font-mono">{pr.head}</span>
-            {PROMOTION_REASON[promotionKind]}, so this gap is expected and
-            doesn't need closing. Updating the branch would merge{" "}
-            <span className="font-mono">{pr.base}</span> back into{" "}
-            <span className="font-mono">{pr.head}</span>.
-          </span>
-        </div>
-      ) : null;
-
-    if (!prediction && !reason && !promotion) return null;
-    return (
-      <div className="space-y-1 border-t px-3 py-1.5 text-xs">
-        {prediction}
-        {promotion}
-        {reason}
-      </div>
+  /** Holds the strip as `updating` from the moment a resolve moved this head until
+   *  its reads answer for the new tip. */
+  function settleMovedHead(target: {
+    repo: string;
+    id: string;
+    base: string;
+    head: string;
+  }) {
+    const mine = { repo: target.repo, id: target.id };
+    setResolveSettlingFor(mine);
+    void refetchStripReads(target).finally(() =>
+      setResolveSettlingFor((cur) => (cur === mine ? null : cur)),
     );
   }
 
-  // A merge paused on conflicts takes over the whole PR view: the merge lives in
-  // an isolated worktree, and ResolveConflictsView drives its file list + editor +
-  // Finish/Abort in place of the PR's normal sections and footer actions.
-  if (pr.pendingMerge?.worktreePath) {
+  /** Resolve conflicts, from the strip or the palette. The record write and the
+   *  list re-read run inside the mutation; the editor opens only for the PR and repo
+   *  it started on, and only when the user did nothing else meanwhile. */
+  async function doStartResolve() {
+    if (!pr || !canStartResolve) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
+    useUiStore.getState().noteUserInteraction();
+    const started = { repo: repoPath, id: pr.id, base: pr.base, head: pr.head };
+    const epoch = useUiStore.getState().interactionEpoch;
+    const slot = { repo: started.repo, id: started.id };
+    setStartingFor(slot);
+    try {
+      const result = await startUpdate.mutateAsync({
+        id: started.id,
+        base: started.base,
+        head: started.head,
+      });
+      const away = landedIn(started.repo).away;
+      if (result.status === "updated") {
+        settleMovedHead(started);
+        toast.success(
+          updatedToast(
+            started.head,
+            started.base,
+            result.approvalCleared,
+            away,
+          ),
+        );
+        if (result.recordError)
+          toastError(
+            new Error(
+              `Updated ${started.head} from ${started.base}, but couldn't update the pull request record: ${result.recordError}`,
+            ),
+          );
+        return;
+      }
+      toast.warning(updateConflictsToast(started.head, started.base, away));
+      if (useUiStore.getState().interactionEpoch === epoch)
+        setUpdateEditor((cur) =>
+          cur?.repo === started.repo && cur.id === started.id
+            ? { ...cur, open: result.worktreeId }
+            : cur,
+        );
+    } catch (e) {
+      toastError(e);
+    } finally {
+      setStartingFor((cur) => (cur === slot ? null : cur));
+    }
+  }
+
+  /** Continue resolving: reopens the editor over the unfinished update. */
+  function openUpdateEditor() {
+    if (!pr || !activeUpdate) return;
+    useUiStore.getState().noteUserInteraction();
+    setUpdateEditor({
+      repo: repoPath,
+      id: pr.id,
+      open: activeUpdate.worktreeId,
+    });
+  }
+
+  /** Back to PR: leaves the editor; the update and its worktree stay. */
+  function closeUpdateEditor() {
+    useUiStore.getState().noteUserInteraction();
+    setUpdateEditor((cur) => (cur ? { ...cur, open: null } : cur));
+  }
+
+  /** The strip's Discard, confirmed. The confirm is repo-scoped: a repository
+   *  switch while it is open answers no. */
+  async function doDiscardUpdate() {
+    if (!pr || !activeUpdate) return;
+    const target = {
+      ...activeUpdate,
+      repo: repoPath,
+      id: pr.id,
+      head: pr.head,
+    };
+    const moved = { repo: repoPath, id: pr.id, base: pr.base, head: pr.head };
+    if (!(await useConfirm.getState().ask(DISCARD_UPDATE_CONFIRM))) return;
+    useConflictResolve.getState().retire(target.worktreePath);
+    try {
+      const result = await discardUpdate.mutateAsync({
+        id: target.id,
+        head: target.head,
+        worktreePath: target.worktreePath,
+        worktreeId: target.worktreeId,
+        opId: target.opId,
+        journalRepo: target.journalRepo,
+      });
+      if (result.status === "updated") settleMovedHead(moved);
+      toast.success(
+        discardSettledToast(
+          result,
+          target.head,
+          target.base,
+          landedIn(target.repo).away,
+        ),
+      );
+    } catch (e) {
+      toastError(e);
+    }
+  }
+
+  /** The strip's Retry: the comparison too when its read failed, so the behind
+   *  clause can return without waiting for an invalidation. */
+  function onRetry() {
+    void conflictPreview.refetch();
+    if (comparison.isError) void comparison.refetch();
+  }
+
+  // Focus's landing on either side of an update takeover, named for where it is.
+  const viewSink = (
+    <span
+      ref={viewSinkRef}
+      tabIndex={-1}
+      role="group"
+      aria-label={updateTakeover ? "Conflict editor" : "Pull request"}
+      className="sr-only"
+    />
+  );
+
+  // A paused merge (into the base) or a paused update (base into head) takes over
+  // the whole PR view: the work lives in an isolated worktree, and
+  // ResolveConflictsView drives its file list, editor and Finish in place of the
+  // PR's sections, strip and footer actions. One header serves both.
+  if (takeover) {
     return (
       <div className="flex h-full flex-col">
+        {viewSink}
         <header className="space-y-2 border-b px-4 py-3">
-          {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap,
-              so the badge would stay put and the title collapse instead. Growing
-              also replaces the spacer that used to right-align it. */}
-          <div className="flex flex-wrap items-start gap-2">
-            <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-              {pr.title}
-            </h2>
+          <DetailTitleRow heading={pr.title}>
             <Badge variant="secondary" className="capitalize">
               {pr.status}
             </Badge>
-          </div>
+          </DetailTitleRow>
           <JiraRefRow repoPath={repoPath} sources={jiraRefSources} />
           <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{pr.head}</span>
@@ -729,7 +1112,16 @@ export function LocalPrView({
             </span>
           </div>
         </header>
-        <ResolveConflictsView repoPath={repoPath} pr={pr} />
+        <ResolveConflictsView
+          repoPath={repoPath}
+          pr={pr}
+          mode={mergeTakeover ? "merge" : "update"}
+          finishHeldReason={
+            !mergeTakeover && headDirty ? RESOLVE_DIRTY_HEAD : undefined
+          }
+          onBack={mergeTakeover ? undefined : closeUpdateEditor}
+          onHeadMoved={settleMovedHead}
+        />
       </div>
     );
   }
@@ -740,15 +1132,28 @@ export function LocalPrView({
   // A local merge advances refs every local PR shares (and touches the working tree
   // when its base is the current branch), so any running local merge holds this
   // PR's Merge too — only the wording is scoped, naming that merge.
-  const mergeBlocked = !canMerge || runningMerge !== undefined || dirtyBlocks;
+  // `canMerge` reads the stored record, so an approval change still saving holds
+  // Merge too: a withdrawal in flight must not leave the PR mergeable.
+  const mergeBlocked =
+    !canMerge ||
+    runningMerge !== undefined ||
+    dirtyBlocks ||
+    approveHeld ||
+    preparing ||
+    activeUpdate !== undefined;
   // This same string doubles as the hover title while nothing blocks. The
   // active merge outranks `dirtyBlocks`: a merge already in flight can't be
   // unblocked by committing or stashing, so a dirty tree that shows up mid-merge
   // must not override "Merging…" with a remedy that doesn't apply.
+  // A resolve preparing or unfinished outranks approval: approving wouldn't unblock it.
   const mergeReason = (() => {
     switch (true) {
+      case preparing:
+        return UPDATE_PREPARING_REASON;
+      case activeUpdate !== undefined:
+        return UPDATE_UNFINISHED_REASON;
       case !canMerge:
-        return "Approve the PR before merging";
+        return MERGE_NEEDS_APPROVAL;
       case runningMerge?.head === pr.head && runningMerge.base === pr.base:
         return "Merging…";
       case runningMerge?.head != null && runningMerge.base != null:
@@ -756,22 +1161,33 @@ export function LocalPrView({
       case runningMerge !== undefined:
         return "Merging…";
       case dirtyBlocks:
-        return "Commit or stash your changes before merging into the current branch";
+        return MERGE_DIRTY_TREE;
+      case approveHeld:
+        return "Saving…";
       default:
         return `Merge ${pr.head} into ${pr.base}`;
     }
   })();
 
+  // Close and Publish both end the open PR, so an update preparing or unfinished
+  // holds them; its Discard sits in the strip above.
+  const resolveBlocksClose = preparing || activeUpdate !== undefined;
+  const closeReason = (() => {
+    switch (true) {
+      case statusHeld:
+        return "Saving…";
+      case preparing:
+        return UPDATE_PREPARING_REASON;
+      default:
+        return UPDATE_UNFINISHED_REASON;
+    }
+  })();
+
   return (
     <div className="flex h-full flex-col">
+      {viewSink}
       <header className="space-y-2 border-b px-4 py-3">
-        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
-            the actions would stay put and the title collapse instead. Growing also
-            replaces the spacer that used to right-align them. */}
-        <div className="flex flex-wrap items-start gap-2">
-          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-            {pr.title}
-          </h2>
+        <DetailTitleRow heading={pr.title}>
           {pr.status === "open" && (
             <Button
               variant="outline"
@@ -793,7 +1209,7 @@ export function LocalPrView({
             <Badge variant="secondary">approved</Badge>
           )}
           {pr.archived && <Badge variant="secondary">archived</Badge>}
-        </div>
+        </DetailTitleRow>
         <JiraRefRow repoPath={repoPath} sources={jiraRefSources} />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="font-mono">{pr.head}</span>
@@ -893,6 +1309,28 @@ export function LocalPrView({
           ))}
         </div>
       </header>
+
+      <LocalPrMergeStrip
+        arm={strip.arm}
+        base={pr.base}
+        head={pr.head}
+        promotionKind={promotionKind}
+        behindBy={behindBy ?? 0}
+        conflictFiles={
+          conflictPreview.data?.status === "conflict"
+            ? conflictPreview.data.conflicts
+            : []
+        }
+        approved={pr.approved}
+        offerUpdate={strip.offerUpdate}
+        offerResolve={strip.offerResolve}
+        updateHeldReason={updateHeldReason}
+        promotionSettlingReason={promotionSettlingReason}
+        onUpdateBranch={() => void doUpdateBranch()}
+        onRetry={onRetry}
+        retryBusy={conflictPreview.isFetching}
+        resolve={resolveSlot}
+      />
 
       {aiEnabled && section === "review" && (
         <PrReviewPanel
@@ -1115,15 +1553,11 @@ export function LocalPrView({
             mentions={mentions}
             actions={
               pr.status === "open" && (
-                <Button
-                  variant={pr.approved ? "secondary" : "outline"}
-                  size="sm"
-                  aria-pressed={pr.approved}
-                  onClick={toggleApprove}
-                >
-                  <CheckCircleIcon data-icon="inline-start" />
-                  {pr.approved ? "Approved" : "Approve"}
-                </Button>
+                <ApproveToggle
+                  approved={pr.approved}
+                  held={approveHeld}
+                  onToggle={() => void toggleApprove()}
+                />
               )
             }
           />
@@ -1175,18 +1609,29 @@ export function LocalPrView({
         </div>
       )}
 
-      {pr.status === "open" && renderMergeStatus()}
-
       <div
         ref={actionBarRef}
         className="flex flex-wrap items-center gap-2 border-t p-3"
       >
         {pr.status === "open" && (
           <>
+            {/* Its own full-width line above the buttons: the reason is too long
+                for the button row at narrow widths, and the docked footer grows
+                upward, so Approve and Merge stay under the pointer. */}
+            {mergeReason === MERGE_DIRTY_TREE && (
+              <p className="flex basis-full items-start justify-end gap-1.5 text-xs text-muted-foreground">
+                <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0" />
+                <span className="min-w-0">{MERGE_DIRTY_TREE}</span>
+              </p>
+            )}
             {forgeFeatureReady(ghStatus.data, "mrCreate") && (
-              <Button
+              <DisabledReasonButton
                 variant="outline"
                 size="sm"
+                disabled={resolveBlocksClose}
+                reason={
+                  preparing ? UPDATE_PREPARING_REASON : UPDATE_UNFINISHED_REASON
+                }
                 onClick={() => setPromoteOpen(true)}
                 title={`Push the branch and open this ${promoteNoun} on ${promoteLabel}`}
               >
@@ -1197,15 +1642,15 @@ export function LocalPrView({
                   <ProviderIcon provider={provider ?? "github"} />
                 </span>
                 Publish to {promoteLabel}
-              </Button>
+              </DisabledReasonButton>
             )}
             {/* The label swaps while a note rides along: the action changed
                 meaning, and only the label reaches a viewer before the click. */}
             <DisabledReasonButton
               variant="outline"
               size="sm"
-              disabled={statusHeld}
-              reason="Saving…"
+              disabled={statusHeld || resolveBlocksClose}
+              reason={closeReason}
               onClick={() => void setStatus("closed")}
               title={
                 draftRidesStateChange
@@ -1215,97 +1660,57 @@ export function LocalPrView({
             >
               {draftRidesStateChange ? "Close with comment" : "Close"}
             </DisabledReasonButton>
-            <span className="flex-1" />
-            {/* GitHub-style "Update branch": only when head has fallen behind
-                base. Merges base into head (in a throwaway worktree, so it
-                doesn't touch your working tree unless head IS your current
-                branch) so the branch catches up; the repo-scoped invalidation
-                then refreshes the comparison (behind → 0, this button hides)
-                and the conflict preview. */}
-            {behind.length > 0 && !promotionLike && (
-              <DisabledReasonButton
-                variant="outline"
-                size="sm"
-                // `promotionLike` reads false until BOTH its inputs land — the
-                // default branch and the repo's promotion-branch rules — so the
-                // button holds rather than deciding early. PENDING only (neither
-                // query is ever disabled): a FAILED read falls open to the ordinary
-                // button instead of disabling forever behind a stale "checking…".
-                disabled={
-                  runningUpdate !== undefined ||
-                  recovery.pending ||
-                  defaultBranch.isPending ||
-                  rulesSettling
-                }
-                reason={(() => {
-                  switch (true) {
-                    case runningUpdate?.head === pr.head &&
-                      runningUpdate.base === pr.base:
-                      return "Updating this branch…";
-                    case runningUpdate?.head != null &&
-                      runningUpdate.base != null:
-                      return `Updating ${runningUpdate.head} from ${runningUpdate.base}…`;
-                    case runningUpdate !== undefined:
-                      return "Updating a branch…";
-                    case recovery.pending:
-                      return "Another git operation is running.";
-                    case defaultBranch.isPending:
-                      return "Checking which branch is the default…";
-                    case rulesSettling:
-                      return "Checking this repository's promotion branches…";
-                    default:
-                      return undefined;
+            {/* One right-aligned group, so at a narrow pane Approve and Merge wrap
+                together and stay under the reason line. */}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              <ApproveToggle
+                approved={pr.approved}
+                held={approveHeld}
+                onToggle={() => void toggleApprove()}
+              />
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <DisabledReasonButton
+                      size="sm"
+                      disabled={mergeBlocked}
+                      reason={mergeReason}
+                      title={mergeReason}
+                    />
                   }
-                })()}
-                title={`Merge ${pr.base} into ${pr.head} to catch it up`}
-                onClick={() => void doUpdateBranch()}
-              >
-                <ArrowClockwiseIcon data-icon="inline-start" />
-                Update branch
-              </DisabledReasonButton>
-            )}
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                render={
-                  <DisabledReasonButton
-                    size="sm"
-                    disabled={mergeBlocked}
-                    reason={mergeReason}
-                    title={mergeReason}
-                  />
-                }
-              >
-                <GitMergeIcon data-icon="inline-start" />
-                Merge
-                <CaretDownIcon data-icon="inline-end" />
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-56">
-                <DropdownMenuItem
-                  disabled={
-                    !isMergeMethodAllowed(rulesConfig, pr.base, "merge")
-                  }
-                  onClick={() => void doMerge("merge")}
                 >
-                  Create a merge commit
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={
-                    !isMergeMethodAllowed(rulesConfig, pr.base, "squash")
-                  }
-                  onClick={() => void doMerge("squash")}
-                >
-                  Squash and merge
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={
-                    !isMergeMethodAllowed(rulesConfig, pr.base, "rebase")
-                  }
-                  onClick={() => void doMerge("rebase")}
-                >
-                  Rebase and merge
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <GitMergeIcon data-icon="inline-start" />
+                  Merge
+                  <CaretDownIcon data-icon="inline-end" />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuItem
+                    disabled={
+                      !isMergeMethodAllowed(rulesConfig, pr.base, "merge")
+                    }
+                    onClick={() => void doMerge("merge")}
+                  >
+                    Create a merge commit
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={
+                      !isMergeMethodAllowed(rulesConfig, pr.base, "squash")
+                    }
+                    onClick={() => void doMerge("squash")}
+                  >
+                    Squash and merge
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={
+                      !isMergeMethodAllowed(rulesConfig, pr.base, "rebase")
+                    }
+                    onClick={() => void doMerge("rebase")}
+                  >
+                    Rebase and merge
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </>
         )}
         {pr.status === "closed" && (

@@ -64,6 +64,7 @@ import {
   useFinishAndSurface,
 } from "@/features/conversations/useAiStream";
 import { useMentionCandidates } from "@/features/conversations/useMentionCandidates";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useAppForm } from "@/lib/form";
 import { normPath } from "@/lib/git/path";
 import {
@@ -620,7 +621,12 @@ export function CreateReleaseDialog({
                       <ComboboxList>
                         {(t: { name: string }) => (
                           <ComboboxItem key={t.name} value={t}>
-                            <span className="truncate font-mono">{t.name}</span>
+                            <span
+                              className="truncate font-mono"
+                              onMouseEnter={clipTitleFromText}
+                            >
+                              {t.name}
+                            </span>
                           </ComboboxItem>
                         )}
                       </ComboboxList>
@@ -707,7 +713,10 @@ export function CreateReleaseDialog({
                         <ComboboxList>
                           {(t: { name: string }) => (
                             <ComboboxItem key={t.name} value={t}>
-                              <span className="truncate font-mono">
+                              <span
+                                className="truncate font-mono"
+                                onMouseEnter={clipTitleFromText}
+                              >
                                 {t.name}
                               </span>
                             </ComboboxItem>
@@ -904,7 +913,12 @@ function TargetPicker({
             node: (
               <>
                 <GitBranchIcon className="shrink-0 text-muted-foreground" />
-                <span className="truncate font-mono">{b}</span>
+                <span
+                  className="truncate font-mono"
+                  onMouseEnter={clipTitleFromText}
+                >
+                  {b}
+                </span>
               </>
             ),
           }))
@@ -918,7 +932,12 @@ function TargetPicker({
               <>
                 <GitCommitIcon className="mt-0.5 shrink-0 self-start text-muted-foreground" />
                 <span className="min-w-0 flex-1">
-                  <span className="block truncate">{c.subject}</span>
+                  <span
+                    className="block truncate"
+                    onMouseEnter={clipTitleFromText}
+                  >
+                    {c.subject}
+                  </span>
                   <span className="text-muted-foreground">
                     <span className="font-mono">{c.hash.slice(0, 7)}</span> ·{" "}
                     <RelativeTime date={c.date} />
@@ -965,7 +984,7 @@ function TargetPicker({
         ) : (
           <GitCommitIcon className="shrink-0 text-muted-foreground" />
         )}
-        <span className="truncate font-mono">
+        <span className="truncate font-mono" onMouseEnter={clipTitleFromText}>
           {value
             ? isBranch
               ? value

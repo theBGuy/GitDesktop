@@ -1,7 +1,7 @@
 import { invoke } from "@/lib/tauri/invoke";
 import type {
   ForgeTimelineEvent,
-  ForgeUserRef,
+  ForgeUserList,
   GitLabLinkedIssue,
   IssueDependencies,
   IssueDetails,
@@ -83,7 +83,7 @@ export const forgeIssueCreate = (
   });
 
 export const forgeAssignableUsers = (repoPath: string, lens: RemoteLens) =>
-  invoke<ForgeUserRef[]>("forge_assignable_users", { repoPath, lens });
+  invoke<ForgeUserList>("forge_assignable_users", { repoPath, lens });
 
 /** Open/active milestones for the milestone picker. `number` is whatever key the
  *  provider's milestone write takes (GitHub milestone number, GitLab global id). */

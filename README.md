@@ -297,10 +297,10 @@ click to jump to it in History.
   operation), and restores any of them non-destructively to the working
   tree.
 - **Operation journal** ⭐: records the risky compound operations GitDesktop
-  runs (local PR merges, cherry-picks, history edits, rebases). If one is
-  interrupted by a crash or restart, a calm recovery notice names what was
-  interrupted and the exact branch + commit it started from, browsable any
-  time via the *Operation history* command.
+  runs (local PR merges and branch updates, cherry-picks, history edits,
+  rebases). If one is interrupted by a crash or restart, a calm recovery
+  notice names what was interrupted and the exact branch + commit it
+  started from, browsable any time via the *Operation history* command.
 
 Plus tag management and releases: publish, edit, and delete them with asset
 uploads. When a **GitHub** release carries a `latest.json` updater manifest,
@@ -417,14 +417,16 @@ in one click.
   as such. A GitHub or GitLab answer that can't be read names the forge it
   couldn't reach, offers **Retry**, and falls back to that same prediction
   meanwhile. Open GitHub and GitLab rows in the list carry a **Conflicts**
-  chip too. **Resolve conflicts** merges the base into the PR's head in a
-  **hidden, isolated worktree** (your branch and working tree untouched),
-  hands you the conflicted files in the in-app conflict editor, and **Finish &
-  push** updates the PR's head branch, **never force-pushed**: a head that
-  moved meanwhile refuses the push and keeps your work. **Discard** drops the
-  worktree and nothing else, and an unfinished resolution is offered back from
-  any checkout of the repository as **Continue resolving**. Fork PRs are
-  excluded, since their head lives in another repository.
+  chip too. On a hosted PR, **Resolve conflicts** merges the base into the
+  PR's head in a **hidden, isolated worktree** (your branch and working tree
+  untouched), hands you the conflicted files in the in-app conflict editor,
+  and **Finish & push** updates the PR's head branch, **never force-pushed**:
+  a head that moved meanwhile refuses the push and keeps your work.
+  **Discard** drops the worktree and nothing else, and an unfinished
+  resolution is offered back from any checkout of the repository as
+  **Continue resolving**. Fork PRs are excluded, since their head lives in
+  another repository. A local PR resolves the same way without a push:
+  finishing moves the PR's local branch.
 - **Blocked by branch protection**: a PR that merges cleanly but whose rules
   refuse it gets its own strip line naming the reason. On **GitHub** that's
   the required checks still outstanding (four, then *and N more*) plus the
@@ -433,9 +435,16 @@ in one click.
   its detailed merge statuses. **Merge** stays available (whoever holds bypass
   permission can merge anyway), and a refused merge repeats the same line
   beside the forge's own message.
-- **Local PR merges**: a merge **pre-shows conflicts** and lets you resolve
-  them in the in-app editor, in an isolated worktree that never touches your
-  working tree, then **Finish** or **Abort**.
+- **Local PR merges**: an open local PR keeps the same one-line merge strip as
+  hosted PRs: whether merging will **conflict** (with the files that clash),
+  how far the branch is **behind its base** (with **Update branch** beside it
+  unless a conflict is predicted), or that there are no conflicts. **Approve**
+  sits beside **Merge** on every tab. A merge that does conflict is resolved
+  in the in-app editor, in an isolated worktree that never touches your
+  working tree, then **Finish** or **Abort**. A predicted conflict can be
+  resolved before the PR is approved: **Resolve conflicts** merges the base
+  into the PR's branch in an isolated worktree, and **Finish update** moves
+  the branch while the PR stays open.
 - **Activity feed**: a PR's Conversation is a **date-sorted timeline** of
   reviews, comments, grouped **pushed commits** (each SHA clickable), and
   events, every entry carrying a relative **timestamp** (hover for the exact

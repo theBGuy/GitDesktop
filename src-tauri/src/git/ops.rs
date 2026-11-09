@@ -3975,19 +3975,14 @@ fn new_resolve_worktree_id() -> String {
 }
 
 /// Pure decision for [`git_cleanup_orphaned_resolve_worktrees`]: from all
-/// worktree paths, pick the resolve worktrees (basename `gd-resolve-*`) whose
-/// normalized path is NOT among `keep`. Normalization matches how the app
-/// compares worktree paths elsewhere (`normalize_wt_path`: forward-slashed +
-/// lower-cased), so a kept path git prints with slashes still matches a kept
-/// path the frontend stored with back-slashes.
+/// worktree paths, pick the resolve worktrees (basename `gd-resolve-*`) that are NOT
+/// among `keep`, compared under both spellings ([`is_listed_worktree`]): git prints
+/// the resolved path, which a kept path the frontend stored need not match textually.
 fn orphaned_resolve_worktrees(all_paths: &[String], keep: &[String]) -> Vec<String> {
-    use crate::git::worktree::normalize_wt_path;
-    let keep_norm: std::collections::HashSet<String> =
-        keep.iter().map(|p| normalize_wt_path(p)).collect();
     all_paths
         .iter()
         .filter(|p| is_resolve_worktree_path(p))
-        .filter(|p| !keep_norm.contains(&normalize_wt_path(p)))
+        .filter(|p| !is_listed_worktree(keep, p))
         .cloned()
         .collect()
 }
@@ -4058,34 +4053,61 @@ async fn finalize_base(
     current: &str,
     expected_tip: Option<&str>,
 ) -> AppResult<()> {
-    let moved = || {
-        format!(
-            "{base} moved while this merge was being prepared, so advancing it would discard \
-             that change. {base} is unchanged — re-run the merge from its current tip."
-        )
-    };
-    let _current_guard = if base == current {
+    finalize_branch(
+        state,
+        repo_path,
+        base,
+        new_sha,
+        current,
+        expected_tip,
+        merge_target_moved,
+    )
+    .await
+}
+
+/// [`finalize_base`]'s refusal for a base that moved: its remedy is a re-run of the merge.
+fn merge_target_moved(base: &str) -> String {
+    format!(
+        "{base} moved while this merge was being prepared, so advancing it would discard \
+         that change. {base} is unchanged — re-run the merge from its current tip."
+    )
+}
+
+/// [`finalize_base`]'s mechanics for any target: a local PR's merge advances its base,
+/// its branch update advances its head. `moved` words the refusal for a target that
+/// moved, or whose checkout switched away, so each flow names its own remedy. Takes the
+/// working-tree locks it needs itself, so a caller must hold none of them.
+async fn finalize_branch(
+    state: &AppState,
+    repo_path: &str,
+    branch: &str,
+    new_sha: &str,
+    current: &str,
+    expected_tip: Option<&str>,
+    moved: fn(&str) -> String,
+) -> AppResult<()> {
+    let _current_guard = if branch == current {
         let domain = state.working_tree_lock(repo_path).await;
         Some(acquire_repo_lock(&domain, LOCK_WAIT_TIMEOUT, "a merge").await?)
     } else {
         None
     };
     // The main checkout's hold spans the branch/pin reads through the fast-forward.
-    if base == current
+    if branch == current
         && crate::git::branches::current_branch_name(repo_path)
             .await?
             .as_deref()
-            != Some(base)
+            != Some(branch)
     {
-        return Err(AppError::Command(moved()));
+        return Err(AppError::Command(moved(branch)));
     }
-    let tip_now = branch_tip(repo_path, base).await?;
+    let tip_now = branch_tip(repo_path, branch).await?;
     if let Some(expected) = expected_tip {
         if tip_now != expected {
-            return Err(AppError::Command(moved()));
+            return Err(AppError::Command(moved(branch)));
         }
     } else {
-        // Anchor unknown: fall back to containment, which catches a base that
+        // Anchor unknown: fall back to containment, which catches a target that
         // gained commits but not one deliberately moved back.
         let contains = run_git_raw(
             Some(repo_path),
@@ -4094,19 +4116,19 @@ async fn finalize_base(
         )
         .await?;
         if contains.code != 0 {
-            return Err(AppError::Command(moved()));
+            return Err(AppError::Command(moved(branch)));
         }
     }
 
-    if base == current {
-        // `base` is the main repo's current branch — fast-forward its working
+    if branch == current {
+        // `branch` is the main repo's current branch — fast-forward its working
         // tree to the merged commit. (Guaranteed a fast-forward: `new_sha` was
-        // built from base's tip in the resolve worktree.)
+        // built from its tip in the resolve worktree.)
         let paths = ignored_files_in_the_way(repo_path, new_sha, DEFAULT_TIMEOUT)
             .await
             .map_err(|e| ignored_guard::check_failed("Fast-forward", e))?;
         if !paths.is_empty() {
-            return Err(ignored_guard::finalize_refusal(base, None, &paths));
+            return Err(ignored_guard::finalize_refusal(branch, None, &paths));
         }
         let out = run_git_raw_index_retry(
             repo_path,
@@ -4137,20 +4159,20 @@ async fn finalize_base(
     // window and the arm below covers it once registered. Heal-free: this call's own
     // continuation takes the admin domain to tear the resolve worktree down.
     if let Some(roots) = marker_roots.as_ref() {
-        marker::refuse_if_branch_updating_in(roots, base)?;
+        marker::refuse_if_branch_updating_in(roots, branch)?;
     }
 
-    // Is `base` checked out in some OTHER worktree? Our resolve worktree is detached,
-    // so it never carries `base` as a branch and is safely excluded.
+    // Is `branch` checked out in some OTHER worktree? Our resolve worktree is detached,
+    // so it never carries `branch` and is safely excluded.
     let listed = run_git(
         Some(repo_path),
         &["worktree", "list", "--porcelain"],
         DEFAULT_TIMEOUT,
     )
     .await?;
-    let mut owning_worktree = worktree_holding(&listed.stdout_lossy(), base);
+    let mut owning_worktree = worktree_holding(&listed.stdout_lossy(), branch);
 
-    // An update's hidden checkout is never a fast-forward target: advancing `base`
+    // An update's hidden checkout is never a fast-forward target: advancing `branch`
     // under a running update moves the branch it pinned and kills it at its pin verify.
     // Only a HELD lock refuses and only a RELEASED one authorizes the age-free removal;
     // a marker that proves neither — and any `gd-update-*` worktree outside our own
@@ -4163,10 +4185,10 @@ async fn finalize_base(
     };
     if let Some(holder) = owning_worktree.as_deref().filter(managed).map(str::to_string) {
         match marker::update_worktree_probe(&holder) {
-            LockProbe::Live => return Err(marker::branch_update_refusal(base)),
+            LockProbe::Live => return Err(marker::branch_update_refusal(branch)),
             LockProbe::Released => {
                 if !marker::claim_dead_update_worktree(state, repo_path, &holder).await {
-                    return Err(marker::interrupted_update_refusal(base));
+                    return Err(marker::interrupted_update_refusal(branch));
                 }
                 let relisted = run_git(
                     Some(repo_path),
@@ -4174,15 +4196,15 @@ async fn finalize_base(
                     DEFAULT_TIMEOUT,
                 )
                 .await?;
-                owning_worktree = worktree_holding(&relisted.stdout_lossy(), base);
-                // Another update may hold `base` by now. Same rule as above, so each
+                owning_worktree = worktree_holding(&relisted.stdout_lossy(), branch);
+                // Another update may hold `branch` by now. Same rule as above, so each
                 // message stays true: a held lock says running, a released one says
                 // interrupted, and an unprovable one routes as it always did.
                 if let Some(next) = owning_worktree.as_deref().filter(managed) {
                     match marker::update_worktree_probe(next) {
-                        LockProbe::Live => return Err(marker::branch_update_refusal(base)),
+                        LockProbe::Live => return Err(marker::branch_update_refusal(branch)),
                         LockProbe::Released => {
-                            return Err(marker::interrupted_update_refusal(base))
+                            return Err(marker::interrupted_update_refusal(branch))
                         }
                         LockProbe::Missing | LockProbe::Unknown => {}
                     }
@@ -4199,17 +4221,17 @@ async fn finalize_base(
         if crate::git::branches::current_branch_name(&worktree)
             .await?
             .as_deref()
-            != Some(base)
-            || branch_tip(&worktree, base).await? != tip_now
+            != Some(branch)
+            || branch_tip(&worktree, branch).await? != tip_now
         {
-            return Err(AppError::Command(moved()));
+            return Err(AppError::Command(moved(branch)));
         }
         let paths = ignored_files_in_the_way(&worktree, new_sha, DEFAULT_TIMEOUT)
             .await
             .map_err(|e| ignored_guard::check_failed("Fast-forward", e))?;
         if !paths.is_empty() {
             return Err(ignored_guard::finalize_refusal(
-                base,
+                branch,
                 Some(&worktree),
                 &paths,
             ));
@@ -4222,8 +4244,8 @@ async fn finalize_base(
         .await?;
         if out.code != 0 {
             return Err(AppError::Command(format!(
-                "{base} is checked out at {worktree}; couldn't fast-forward it there \
-                 (its working tree may be dirty, or its history has diverged). {base} is unchanged.\n{}",
+                "{branch} is checked out at {worktree}; couldn't fast-forward it there \
+                 (its working tree may be dirty, or its history has diverged). {branch} is unchanged.\n{}",
                 out.full_failure_text()
             )));
         }
@@ -4236,17 +4258,17 @@ async fn finalize_base(
     run_git_mutating(
         state,
         repo_path,
-        &["update-ref", &format!("refs/heads/{base}"), new_sha, &tip_now],
+        &["update-ref", &format!("refs/heads/{branch}"), new_sha, &tip_now],
         DEFAULT_TIMEOUT,
     )
     .await
     .map_err(|e| match e {
-        // Only a CAS mismatch means `base` moved — git says `is at <sha> but
+        // Only a CAS mismatch means `branch` moved — git says `is at <sha> but
         // expected <sha>` (measured, 2.51.1). "cannot lock ref" alone does NOT
         // discriminate: a stale .lock file and a permissions failure say it too,
         // and must keep git's own message rather than a wrong explanation.
         AppError::Git { stderr, .. } if stderr.contains("but expected") => {
-            AppError::Command(format!("{}\n{stderr}", moved()))
+            AppError::Command(format!("{}\n{stderr}", moved(branch)))
         }
         other => other,
     })?;
@@ -4577,50 +4599,7 @@ pub(crate) async fn finish_local_pr_merge(
                 });
             }
         }
-        _ => {
-            // squash / merge → conclude with a commit in the worktree. If the user
-            // committed the resolution by hand there is nothing staged; tolerate
-            // git's "nothing to commit" instead of erroring.
-            //
-            // An unfinished MERGE always commits, even with nothing staged: an
-            // all-"ours" resolution stages a diff identical to HEAD, and skipping
-            // would leave `base` at its old tip while the flow reports "merged".
-            // Squash writes no MERGE_HEAD (measured), so an all-ours squash still
-            // nets an empty diff and is skipped — a known degenerate case, left
-            // unchanged here and pinned by a test.
-            let merging = git_path_exists(worktree_path, "MERGE_HEAD").await;
-            let staged = run_git_raw(
-                Some(worktree_path),
-                &["diff", "--no-ext-diff", "--cached", "--quiet"],
-                DEFAULT_TIMEOUT,
-            )
-            .await?;
-            // exit 0 ⇒ nothing staged ⇒ already committed (or empty) ⇒ skip commit.
-            if merging || staged.code != 0 {
-                let commit = run_git_raw(
-                    Some(worktree_path),
-                    &["commit", "-m", message],
-                    DEFAULT_TIMEOUT,
-                )
-                .await?;
-                if commit.code != 0 {
-                    // Both streams, for the tolerance test as well as the error: a
-                    // refusing `commit` reports on stdout with stderr EMPTY
-                    // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), so
-                    // reading stderr alone can never see the sentence it looks for.
-                    let report = commit.full_failure_text();
-                    let lower = report.to_lowercase();
-                    let already = lower.contains("nothing to commit")
-                        || lower.contains("no changes added");
-                    if !already {
-                        return Err(AppError::Git {
-                            code: commit.code,
-                            stderr: report,
-                        });
-                    }
-                }
-            }
-        }
+        _ => commit_resolved_merge(worktree_path, message).await?,
     }
 
     // Completed with no remaining conflicts: advance base, tear down, close oplog.
@@ -4670,13 +4649,851 @@ pub async fn git_abort_local_pr_merge(
     Ok(())
 }
 
+/// Concludes a resolved merge (or squash) in a resolve worktree with a commit of the
+/// INDEX only (`commit -m`, never `-a`), so an edit left unstaged there never rides it.
+async fn commit_resolved_merge(worktree_path: &str, message: &str) -> AppResult<()> {
+    // If the user committed the resolution by hand there is nothing staged;
+    // tolerate git's "nothing to commit" instead of erroring.
+    //
+    // An unfinished MERGE always commits, even with nothing staged: an
+    // all-"ours" resolution stages a diff identical to HEAD, and skipping
+    // would leave the target at its old tip while the flow reports "merged".
+    // Squash writes no MERGE_HEAD (measured), so an all-ours squash still
+    // nets an empty diff and is skipped — a known degenerate case, left
+    // unchanged here and pinned by a test.
+    let merging = git_path_exists(worktree_path, "MERGE_HEAD").await;
+    let staged = run_git_raw(
+        Some(worktree_path),
+        &["diff", "--no-ext-diff", "--cached", "--quiet"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    // exit 0 ⇒ nothing staged ⇒ already committed (or empty) ⇒ skip commit.
+    if merging || staged.code != 0 {
+        let commit = run_git_raw(
+            Some(worktree_path),
+            &["commit", "-m", message],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        if commit.code != 0 {
+            // Both streams, for the tolerance test as well as the error: a
+            // refusing `commit` reports on stdout with stderr EMPTY
+            // (`a_refusing_commit_reports_on_stdout_with_stderr_empty`), so
+            // reading stderr alone can never see the sentence it looks for.
+            let report = commit.full_failure_text();
+            let lower = report.to_lowercase();
+            let already = lower.contains("nothing to commit") || lower.contains("no changes added");
+            if !already {
+                return Err(AppError::Git {
+                    code: commit.code,
+                    stderr: report,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The journal op kind of a local PR's conflict-resolving branch update.
+pub(crate) const UPDATE_LOCAL_PR_HEAD_OP: &str = "update_local_pr_head";
+
+/// Outcome of starting or finishing a local PR's branch update (base merged INTO head).
+/// The frontend consumes this verbatim: the camelCase shape is a frozen contract.
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPrUpdateOutcome {
+    /// "updated" (head moved, worktree gone) or "conflicts" (paused in the worktree).
+    pub status: String,
+    /// Unmerged paths in the resolve worktree; empty when updated.
+    pub conflicts: Vec<String>,
+    /// Head's tip: the new one when updated, the one the update started from on conflicts.
+    pub head_tip: String,
+    pub worktree_id: Option<String>,
+    pub worktree_path: Option<String>,
+    /// Always present: the start refuses to run unjournaled.
+    pub op_id: String,
+    /// The checkout path the journal entry is filed under: the `repo_path` the start ran with.
+    pub journal_repo: String,
+}
+
+/// Outcome of discarding an update: "discarded", or "updated" when the journal shows it
+/// had already landed (the frontend then clears the approval as a finish would).
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalPrDiscardOutcome {
+    pub status: String,
+}
+
+const SAME_BRANCH_UPDATE: &str = "a branch can't be updated from itself";
+/// The frontend holds Resolve conflicts with the same sentence.
+const DIRTY_HEAD_UPDATE: &str = "Commit or stash your changes to update the current branch";
+const UNJOURNALED_UPDATE: &str =
+    "Couldn't record this update in the operation journal, so it wasn't started. Try again.";
+/// The remedy of every finish refusal that a retry cannot clear.
+const UPDATE_RESTART: &str = "Discard this update, then choose Resolve conflicts to start again.";
+const ABANDONED_UPDATE: &str = "this update was left unfinished and its worktree was cleaned up";
+
+fn update_moved_at_start(head: &str) -> String {
+    format!(
+        "{head} moved, or its checkout switched to another branch, while this update was \
+         being prepared, so finishing it would discard that change. {head} is unchanged. \
+         Choose Resolve conflicts to try again."
+    )
+}
+
+/// The finalize step also answers "moved" when head's checkout switched away, which a
+/// retry can clear, so the retry comes first.
+fn update_moved_at_finish(head: &str) -> String {
+    format!(
+        "{head} moved, or its checkout switched to another branch, since this update \
+         started, so it can't be finished as it stands. {head} is unchanged. Try Finish \
+         update again; if it is still refused, discard this update, then choose Resolve \
+         conflicts to start again."
+    )
+}
+
+/// The subject Update branch gives the same merge.
+fn update_merge_subject(base: &str, head: &str) -> String {
+    format!("Merge branch '{base}' into {head}")
+}
+
+/// The clean-tree gate for an update of the checked-out head, in R32's words. Only the
+/// gate's own refusal is reworded: a failed git run passes through unchanged.
+async fn ensure_clean_head_checkout(repo_path: &str) -> AppResult<()> {
+    ensure_clean_tree(repo_path).await.map_err(|e| match e {
+        AppError::InvalidArgument(_) => AppError::Command(DIRTY_HEAD_UPDATE.to_string()),
+        other => other,
+    })
+}
+
+/// Whether `ancestor` is an ancestor of `descendant` (a commit is its own). Only exit 0
+/// and exit 1 are answers; any other exit is an error, never a verdict.
+async fn is_ancestor(repo_path: &str, ancestor: &str, descendant: &str) -> AppResult<bool> {
+    let out = run_git_raw(
+        Some(repo_path),
+        &["merge-base", "--is-ancestor", ancestor, descendant],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    match out.code {
+        0 => Ok(true),
+        1 => Ok(false),
+        code => Err(AppError::Git {
+            code,
+            stderr: out.full_failure_text(),
+        }),
+    }
+}
+
+/// Whether two paths name one place, under either spelling (see [`is_listed_worktree`]).
+fn same_wt_path(a: &str, b: &str) -> bool {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    canonical_wt_path(a) == canonical_wt_path(b) || normalize_wt_path(a) == normalize_wt_path(b)
+}
+
+/// Whether `path` lies inside `base`, under either spelling (see [`is_in_a_worktree_root`]).
+fn is_under(base: &Path, path: &str) -> bool {
+    use crate::git::worktree::{canonical_wt_path, normalize_wt_path};
+    let base = base.to_string_lossy();
+    let inside = |p: String, b: String| p.starts_with(&format!("{b}/"));
+    inside(canonical_wt_path(path), canonical_wt_path(&base))
+        || inside(normalize_wt_path(path), normalize_wt_path(&base))
+}
+
+/// The commit a `gd-resolve-*` worktree's HEAD is at, read lock-free.
+async fn worktree_head(worktree_path: &str) -> AppResult<String> {
+    let out = run_git(Some(worktree_path), &["rev-parse", "HEAD"], DEFAULT_TIMEOUT).await?;
+    Ok(out.stdout_lossy().trim().to_string())
+}
+
+/// [`branch_tip`], with a branch that no longer exists refused in words rather than
+/// git's. Any other failure, the existence probe's included, passes through unchanged.
+async fn existing_branch_tip(repo_path: &str, name: &str) -> AppResult<String> {
+    let err = match branch_tip(repo_path, name).await {
+        Ok(tip) => return Ok(tip),
+        Err(err) => err,
+    };
+    match crate::git::branches::branch_exists_exact(repo_path, name).await {
+        Ok(false) => Err(AppError::Command(format!(
+            "{name} no longer exists; nothing was changed."
+        ))),
+        _ => Err(err),
+    }
+}
+
+/// Where an update worktree's HEAD stands against its entry's start tip and head's tip.
+#[derive(Debug, PartialEq)]
+enum WorktreeStanding {
+    /// HEAD does not build on the start tip: the worktree is not this update's.
+    NotThisUpdates,
+    /// HEAD builds on the start tip and head does not contain it yet.
+    Unlanded,
+    /// HEAD moved past the start tip and head contains it: the update landed.
+    Landed,
+}
+
+/// The one comparison of the start tip, the worktree's HEAD and head's tip that binds a
+/// worktree to its entry and proves a landing while the worktree is still there. A
+/// failed read is an Err, never a verdict.
+async fn worktree_standing(
+    repo_path: &str,
+    head: &str,
+    worktree_path: &str,
+    pre_op_tip: &str,
+) -> AppResult<WorktreeStanding> {
+    crate::git::branches::validate_branch_name(head)?;
+    let at = worktree_head(worktree_path).await?;
+    if !is_ancestor(repo_path, pre_op_tip, &at).await? {
+        return Ok(WorktreeStanding::NotThisUpdates);
+    }
+    if at == pre_op_tip {
+        return Ok(WorktreeStanding::Unlanded);
+    }
+    let tip = branch_tip(repo_path, head).await?;
+    Ok(if is_ancestor(repo_path, &at, &tip).await? {
+        WorktreeStanding::Landed
+    } else {
+        WorktreeStanding::Unlanded
+    })
+}
+
+/// The entry's status as the journal reads it right now; None when unreadable or gone.
+async fn entry_status(key: &str, op_id: &str) -> Option<String> {
+    let entries = crate::oplog::git_oplog_list(key.to_string()).await.ok()?;
+    entries
+        .into_iter()
+        .find(|e| e.id == op_id)
+        .map(|e| e.status)
+}
+
+/// Closes the entry only while it is still pending or paused, read again right before
+/// the write, so a finish that landed meanwhile keeps its `done`. True when it closed.
+async fn close_if_unfinished(key: &str, op_id: &str, error: Option<String>) -> bool {
+    let status = entry_status(key, op_id).await;
+    if !matches!(status.as_deref(), Some("pending" | "paused")) {
+        return false;
+    }
+    crate::oplog::finish(key, &Some(op_id.to_string()), error).await;
+    true
+}
+
+/// Refuses an update of a head that an agent session's checkout holds, on the three
+/// tests Update branch applies and in its words. A `gd-update-*` holder under the base
+/// is left to the finalize step, whose update-marker refusals answer for it.
+async fn refuse_session_holder(
+    repo_path: &str,
+    head: &str,
+    managed_base: &Path,
+    session_paths: &std::collections::HashSet<String>,
+) -> AppResult<()> {
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let Some(holder) = worktree_holding(&listed.stdout_lossy(), head) else {
+        return Ok(());
+    };
+    let update_checkout = Path::new(&holder)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|name| name.starts_with("gd-update-"));
+    let session = crate::git::branches::is_session_branch_name(head)
+        || session_paths.iter().any(|p| same_wt_path(p, &holder))
+        || (is_under(managed_base, &holder) && !update_checkout);
+    if session {
+        return Err(AppError::Command(format!(
+            "{head} is checked out in a worktree GitDesktop manages at {holder}, so \
+             it is not updated from here. {head} is unchanged."
+        )));
+    }
+    Ok(())
+}
+
+/// How an IPC-supplied update worktree stands against this repository.
+#[derive(Debug, PartialEq)]
+enum UpdateWorktree {
+    /// This repository's `<root>/gd-resolve-<id>`, and its registry lists it.
+    Registered,
+    /// The right shape, but no longer registered (removed, or the finish already ran).
+    Unregistered,
+    /// Not a path this repository's updates mint: nothing may be removed at it.
+    Foreign,
+}
+
+/// Classifies `worktree_path`: `Foreign` unless `worktree_id` is 12 lower-case hex and
+/// the path is `<root>/gd-resolve-<id>` under either spelling. Err only when the
+/// registry read fails.
+async fn check_update_worktree(
+    repo_path: &str,
+    root: &Path,
+    worktree_path: &str,
+    worktree_id: &str,
+) -> AppResult<UpdateWorktree> {
+    let id_shaped = worktree_id.len() == 12
+        && worktree_id
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let minted = root.join(format!("gd-resolve-{worktree_id}"));
+    if !id_shaped || !same_wt_path(&minted.to_string_lossy(), worktree_path) {
+        return Ok(UpdateWorktree::Foreign);
+    }
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    let paths = parse_worktree_paths(&listed.stdout_lossy());
+    Ok(if is_listed_worktree(&paths, worktree_path) {
+        UpdateWorktree::Registered
+    } else {
+        UpdateWorktree::Unregistered
+    })
+}
+
+/// An update's journal entry. `key` is the checkout path it is filed under, which
+/// every later write to it uses.
+struct UpdateJournal {
+    key: String,
+    pre_op_tip: String,
+    status: String,
+    error: Option<String>,
+}
+
+fn is_unfinished(journal: &UpdateJournal) -> bool {
+    matches!(journal.status.as_str(), "pending" | "paused")
+}
+
+/// The update's entry under whichever checkout filed it: `journal_repo` (what the start
+/// returned), then `repo_path`, then every checkout git lists. Records are shared by
+/// every checkout while the journal is keyed per checkout path, and its key tolerance
+/// cannot match a porcelain spelling (8.3, `/private/var`) to the one it was filed under.
+async fn update_journal(repo_path: &str, journal_repo: &str, op_id: &str) -> Option<UpdateJournal> {
+    let mut tried: Vec<String> = Vec::new();
+    for candidate in [journal_repo, repo_path] {
+        if let Some(found) = update_journal_in(candidate, op_id, &mut tried).await {
+            return Some(found);
+        }
+    }
+    let listed = run_git(
+        Some(repo_path),
+        &["worktree", "list", "--porcelain"],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    for candidate in parse_worktree_paths(&listed.stdout_lossy()) {
+        if let Some(found) = update_journal_in(&candidate, op_id, &mut tried).await {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// One checkout's probe for [`update_journal`]; skips an empty key and one that already
+/// resolves to a tried key. Only an entry of this op kind with an anchor qualifies.
+async fn update_journal_in(
+    candidate: &str,
+    op_id: &str,
+    tried: &mut Vec<String>,
+) -> Option<UpdateJournal> {
+    if candidate.is_empty() || tried.iter().any(|t| crate::oplog::same_repo(t, candidate)) {
+        return None;
+    }
+    tried.push(candidate.to_string());
+    let entries = crate::oplog::git_oplog_list(candidate.to_string())
+        .await
+        .ok()?;
+    let entry = entries
+        .into_iter()
+        .find(|e| e.id == op_id && e.op == UPDATE_LOCAL_PR_HEAD_OP && e.pre_op_tip.is_some())?;
+    Some(UpdateJournal {
+        key: candidate.to_string(),
+        pre_op_tip: entry.pre_op_tip?,
+        status: entry.status,
+        error: entry.error,
+    })
+}
+
+/// Head's tip when the journal shows this update finished without error and head has
+/// moved on from where the update started: the finish landed even if no record says
+/// so. Every other case, a failed read included, is None.
+async fn update_already_landed(
+    repo_path: &str,
+    head: &str,
+    journal: &UpdateJournal,
+) -> Option<String> {
+    if journal.status != "done" || journal.error.is_some() {
+        return None;
+    }
+    crate::git::branches::validate_branch_name(head).ok()?;
+    let tip = branch_tip(repo_path, head).await.ok()?;
+    if tip == journal.pre_op_tip {
+        return None;
+    }
+    let builds_on = is_ancestor(repo_path, &journal.pre_op_tip, &tip).await;
+    matches!(builds_on, Ok(true)).then_some(tip)
+}
+
+/// An `updated` outcome: head is at `head_tip` and no worktree is left.
+fn update_landed(head_tip: String, op_id: &str, journal_repo: &str) -> LocalPrUpdateOutcome {
+    LocalPrUpdateOutcome {
+        status: "updated".to_string(),
+        conflicts: Vec::new(),
+        head_tip,
+        worktree_id: None,
+        worktree_path: None,
+        op_id: op_id.to_string(),
+        journal_repo: journal_repo.to_string(),
+    }
+}
+
+/// Starts a local PR's branch update: merges `base` INTO `head` in a fresh detached
+/// resolve worktree at head's tip, so the user's checkout is never touched. A clean
+/// merge finishes at once (`updated`); conflicts keep the worktree and pause the journal
+/// entry (`conflicts`) for [`git_finish_local_pr_update`] or
+/// [`git_discard_local_pr_update`]. Never runs unjournaled: the entry's anchor is the
+/// only way its finish can tell a head someone moved, a rewind included.
+#[tauri::command]
+pub async fn git_update_local_pr_head(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_path: String,
+    base: String,
+    head: String,
+) -> AppResult<LocalPrUpdateOutcome> {
+    let identity = state.repo_identity_cached(&repo_path).await?;
+    let root = identity_worktree_root_dir(&identity)?;
+    let managed_base = worktrees_base_dir()?;
+    let session_paths = crate::sessions::session_worktree_paths(&app);
+    update_local_pr_head(
+        &state,
+        &repo_path,
+        &base,
+        &head,
+        &root,
+        &managed_base,
+        &session_paths,
+    )
+    .await
+}
+
+/// Testable core of [`git_update_local_pr_head`]. `root` is where the worktree is
+/// minted; `managed_base` (the app-data worktrees base) and `session_paths` (the agent
+/// session registry) name the checkouts a head is never updated in. Holds no
+/// working-tree lock: [`finalize_branch`] takes the ones it needs, and the worktree add
+/// and removal take the admin domain per call.
+pub(crate) async fn update_local_pr_head(
+    state: &AppState,
+    repo_path: &str,
+    base: &str,
+    head: &str,
+    root: &Path,
+    managed_base: &Path,
+    session_paths: &std::collections::HashSet<String>,
+) -> AppResult<LocalPrUpdateOutcome> {
+    crate::git::branches::validate_branch_name(base)?;
+    crate::git::branches::validate_branch_name(head)?;
+    if base == head {
+        return Err(AppError::InvalidArgument(SAME_BRANCH_UPDATE.to_string()));
+    }
+    let current = current_branch_for_merge(repo_path).await?;
+    let head_tip = existing_branch_tip(repo_path, head).await?;
+    let base_tip = existing_branch_tip(repo_path, base).await?;
+    if is_ancestor(repo_path, &base_tip, &head_tip).await? {
+        return Err(AppError::Command(format!(
+            "{head} already contains {base} — nothing to update."
+        )));
+    }
+    // Nothing exists yet, so every refusal up to the journal entry leaves no trace.
+    if head == current {
+        ensure_clean_head_checkout(repo_path).await?;
+    } else {
+        refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+    }
+
+    let op_id = crate::oplog::begin(
+        repo_path,
+        UPDATE_LOCAL_PR_HEAD_OP,
+        &format!("Update {head} from {base}"),
+        Some(head.to_string()),
+        &head_tip,
+        Some(&head_tip),
+    )
+    .await;
+    let Some(op_id) = op_id else {
+        return Err(AppError::Command(UNJOURNALED_UPDATE.to_string()));
+    };
+    let journal_id = Some(op_id.clone());
+
+    let worktree_id = new_resolve_worktree_id();
+    let worktree_path = root.join(format!("gd-resolve-{worktree_id}"));
+    let worktree_path = worktree_path.to_string_lossy().into_owned();
+    if let Err(e) = std::fs::create_dir_all(root) {
+        crate::oplog::finish(repo_path, &journal_id, Some(e.to_string())).await;
+        return Err(AppError::Io(e));
+    }
+    let add = run_git_worktree_admin(
+        state,
+        repo_path,
+        &["worktree", "add", "--detach", &worktree_path, &head_tip],
+        WORKTREE_OP_TIMEOUT,
+    )
+    .await;
+    if let Err(err) = add {
+        crate::oplog::finish(repo_path, &journal_id, Some(err.to_string())).await;
+        return Err(err);
+    }
+
+    // The base as the SHA read above, never its name: a same-named tag resolves first.
+    let subject = update_merge_subject(base, head);
+    let merged = run_git_raw(
+        Some(&worktree_path),
+        &["merge", "--no-edit", "-m", &subject, &base_tip],
+        DEFAULT_TIMEOUT,
+    )
+    .await
+    .and_then(check_code);
+
+    let Err(err) = merged else {
+        let landed = async {
+            let new_sha = worktree_head(&worktree_path).await?;
+            // A session may have taken head while the merge ran.
+            if head != current {
+                refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+            }
+            finalize_branch(
+                state,
+                repo_path,
+                head,
+                &new_sha,
+                &current,
+                Some(&head_tip),
+                update_moved_at_start,
+            )
+            .await?;
+            Ok::<_, AppError>(new_sha)
+        }
+        .await;
+        // The journal first: a crash before the removal leaves an entry that tells the truth.
+        let error = landed.as_ref().err().map(ToString::to_string);
+        crate::oplog::finish(repo_path, &journal_id, error).await;
+        remove_resolve_worktree(state, repo_path, &worktree_path).await;
+        return landed.map(|new_sha| update_landed(new_sha, &op_id, repo_path));
+    };
+
+    let conflicts = unmerged_paths(&worktree_path).await;
+    if !conflicts.is_empty() {
+        // Handed to the user: paused, so it is never reported interrupted or evicted.
+        crate::oplog::pause(repo_path, &journal_id).await;
+        // `pause` is best-effort, and a pending entry can later be reconciled to `done`,
+        // which reads as landed: a resolution is handed out only under a paused entry.
+        if entry_status(repo_path, &op_id).await.as_deref() != Some("paused") {
+            let error = Some(UNJOURNALED_UPDATE.to_string());
+            crate::oplog::finish(repo_path, &journal_id, error).await;
+            remove_resolve_worktree(state, repo_path, &worktree_path).await;
+            return Err(AppError::Command(UNJOURNALED_UPDATE.to_string()));
+        }
+        return Ok(LocalPrUpdateOutcome {
+            status: "conflicts".to_string(),
+            conflicts,
+            head_tip,
+            worktree_id: Some(worktree_id),
+            worktree_path: Some(worktree_path),
+            op_id,
+            journal_repo: repo_path.to_string(),
+        });
+    }
+    remove_resolve_worktree(state, repo_path, &worktree_path).await;
+    crate::oplog::finish(repo_path, &journal_id, Some(err.to_string())).await;
+    Err(match err {
+        AppError::Git { code, stderr } => AppError::Git {
+            code,
+            stderr: format!("Updating {head} from {base} failed; {head} is unchanged.\n{stderr}"),
+        },
+        other => other,
+    })
+}
+
+/// Completes an update [`git_update_local_pr_head`] paused on conflicts, once they are
+/// resolved and STAGED in its worktree: commits the index there and moves `head` to the
+/// result through the finalize step, anchored on the tip the journal recorded at the
+/// start. Every refusal keeps the worktree and the unfinished entry, so a retry is
+/// always possible; a finish found to have landed already reports `updated`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
+pub async fn git_finish_local_pr_update(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo_path: String,
+    base: String,
+    head: String,
+    worktree_path: String,
+    worktree_id: String,
+    op_id: String,
+    journal_repo: String,
+) -> AppResult<LocalPrUpdateOutcome> {
+    let identity = state.repo_identity_cached(&repo_path).await?;
+    let root = identity_worktree_root_dir(&identity)?;
+    let managed_base = worktrees_base_dir()?;
+    let session_paths = crate::sessions::session_worktree_paths(&app);
+    finish_local_pr_update(
+        &state,
+        &repo_path,
+        &base,
+        &head,
+        &worktree_path,
+        &worktree_id,
+        &op_id,
+        &journal_repo,
+        &root,
+        &managed_base,
+        &session_paths,
+    )
+    .await
+}
+
+/// Testable core of [`git_finish_local_pr_update`]. Holds no working-tree lock, on the
+/// resolve worktree either: a conflict write still in flight there leaves an unmerged
+/// entry, which the gate or `git commit` refuses.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finish_local_pr_update(
+    state: &AppState,
+    repo_path: &str,
+    base: &str,
+    head: &str,
+    worktree_path: &str,
+    worktree_id: &str,
+    op_id: &str,
+    journal_repo: &str,
+    root: &Path,
+    managed_base: &Path,
+    session_paths: &std::collections::HashSet<String>,
+) -> AppResult<LocalPrUpdateOutcome> {
+    crate::git::branches::validate_branch_name(base)?;
+    crate::git::branches::validate_branch_name(head)?;
+    let place = check_update_worktree(repo_path, root, worktree_path, worktree_id).await?;
+    if place == UpdateWorktree::Foreign {
+        return Err(AppError::InvalidArgument(format!(
+            "not a conflict-resolution worktree of this repository: {worktree_path}"
+        )));
+    }
+    let journal = update_journal(repo_path, journal_repo, op_id).await;
+    let landed = match journal.as_ref() {
+        Some(j) => update_already_landed(repo_path, head, j).await,
+        None => None,
+    };
+    let landed_key = journal.as_ref().map_or(journal_repo, |j| j.key.as_str());
+    if place == UpdateWorktree::Unregistered {
+        return match landed {
+            Some(tip) => Ok(update_landed(tip, op_id, landed_key)),
+            None => Err(AppError::Command(format!(
+                "This update's worktree no longer exists. {UPDATE_RESTART}"
+            ))),
+        };
+    }
+    // Without the start's own anchor a rewound head is indistinguishable from one
+    // that never moved, so a missing or closed entry refuses.
+    let Some(journal) = journal.as_ref().filter(|j| is_unfinished(j)) else {
+        // With the worktree still there the journal alone is no proof: its HEAD must be on
+        // head, or an uncommitted resolution would be deleted as landed.
+        if let (Some(tip), Some(j)) = (landed, journal.as_ref()) {
+            let standing = worktree_standing(repo_path, head, worktree_path, &j.pre_op_tip);
+            if matches!(standing.await, Ok(WorktreeStanding::Landed)) {
+                let outcome = update_landed(tip, op_id, landed_key);
+                remove_resolve_worktree(state, repo_path, worktree_path).await;
+                return Ok(outcome);
+            }
+        }
+        return Err(AppError::Command(format!(
+            "This update is no longer on record as unfinished, so GitDesktop can't confirm \
+             {head} hasn't moved. {UPDATE_RESTART}"
+        )));
+    };
+
+    existing_branch_tip(repo_path, head).await?;
+    let current = current_branch_for_merge(repo_path).await?;
+    if head == current {
+        ensure_clean_head_checkout(repo_path).await?;
+    } else {
+        refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+    }
+    if !unmerged_paths(worktree_path).await.is_empty() {
+        return Err(AppError::Command(
+            "Resolve every conflict first".to_string(),
+        ));
+    }
+    // Never commit in a worktree that does not build on this update's start tip.
+    let standing = worktree_standing(repo_path, head, worktree_path, &journal.pre_op_tip);
+    if standing.await? == WorktreeStanding::NotThisUpdates {
+        return Err(AppError::Command(format!(
+            "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
+        )));
+    }
+    commit_resolved_merge(worktree_path, &update_merge_subject(base, head)).await?;
+    let new_sha = worktree_head(worktree_path).await?;
+    if new_sha == journal.pre_op_tip {
+        return Err(AppError::Command(format!(
+            "Nothing was merged in this update's worktree. {UPDATE_RESTART}"
+        )));
+    }
+    if !is_ancestor(repo_path, &journal.pre_op_tip, &new_sha).await? {
+        return Err(AppError::Command(format!(
+            "The resolved commit no longer builds on {head}. {UPDATE_RESTART}"
+        )));
+    }
+    // Head already at the result is a finish that moved it and then lost its reply.
+    if existing_branch_tip(repo_path, head).await? != new_sha {
+        // A session may have taken head since the check above.
+        if head != current {
+            refuse_session_holder(repo_path, head, managed_base, session_paths).await?;
+        }
+        finalize_branch(
+            state,
+            repo_path,
+            head,
+            &new_sha,
+            &current,
+            Some(&journal.pre_op_tip),
+            update_moved_at_finish,
+        )
+        .await?;
+    }
+    // The journal first: a crash before the removal leaves `done` beside a registered
+    // worktree, which the landed arm above cleans up.
+    crate::oplog::finish(&journal.key, &Some(op_id.to_string()), None).await;
+    remove_resolve_worktree(state, repo_path, worktree_path).await;
+    Ok(update_landed(new_sha, op_id, &journal.key))
+}
+
+/// Discards an unfinished update. Always succeeds once the journal is read, so a record
+/// is always clearable: the worktree is removed only when it is this repository's own
+/// `<root>/gd-resolve-<id>` (a relocated repository's stored path no longer is) and
+/// builds on the entry's start tip, and the entry is closed only while unfinished. An
+/// update that landed, by the journal or by the worktree's own commit, reports
+/// `updated`, so the caller clears the approval as a finish would.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)] // one flat arg per field, IPC-shaped
+pub async fn git_discard_local_pr_update(
+    state: State<'_, AppState>,
+    repo_path: String,
+    head: String,
+    worktree_path: String,
+    worktree_id: String,
+    op_id: String,
+    journal_repo: String,
+) -> AppResult<LocalPrDiscardOutcome> {
+    let identity = state.repo_identity_cached(&repo_path).await?;
+    let root = identity_worktree_root_dir(&identity)?;
+    discard_local_pr_update(
+        &state,
+        &repo_path,
+        &head,
+        &worktree_path,
+        &worktree_id,
+        &op_id,
+        &journal_repo,
+        &root,
+    )
+    .await
+}
+
+/// Testable core of [`git_discard_local_pr_update`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn discard_local_pr_update(
+    state: &AppState,
+    repo_path: &str,
+    head: &str,
+    worktree_path: &str,
+    worktree_id: &str,
+    op_id: &str,
+    journal_repo: &str,
+    root: &Path,
+) -> AppResult<LocalPrDiscardOutcome> {
+    let journal = update_journal(repo_path, journal_repo, op_id).await;
+    let by_journal = match journal.as_ref() {
+        Some(j) => update_already_landed(repo_path, head, j).await.is_some(),
+        None => false,
+    };
+    let place = check_update_worktree(repo_path, root, worktree_path, worktree_id).await;
+    let (remove, landed) = match (place, journal.as_ref()) {
+        // A registered worktree is removed only once bound to the entry, and proves (or
+        // disproves) a landing itself: an unfinished entry's update may have landed before
+        // a crash, and a closed one's worktree may still hold an uncommitted resolution.
+        (Ok(UpdateWorktree::Registered), Some(j)) => {
+            let standing = worktree_standing(repo_path, head, worktree_path, &j.pre_op_tip);
+            match standing.await {
+                Ok(WorktreeStanding::NotThisUpdates) => (false, false),
+                Ok(WorktreeStanding::Unlanded) => (true, false),
+                Ok(WorktreeStanding::Landed) => (true, is_unfinished(j) || by_journal),
+                // A worktree deleted outside the app holds nothing left to lose.
+                Err(_) => {
+                    let gone = !Path::new(worktree_path).exists();
+                    (gone, gone && by_journal)
+                }
+            }
+        }
+        (Ok(UpdateWorktree::Registered), None) => (false, false),
+        // Best-effort, so a worktree deleted outside the app still discards.
+        (Ok(UpdateWorktree::Unregistered), _) => (true, by_journal),
+        (Ok(UpdateWorktree::Foreign) | Err(_), _) => (false, by_journal),
+    };
+    // The journal first, as the finish does; closed only while still unfinished.
+    let error = (!landed).then(|| "aborted by user".to_string());
+    if let Some(j) = journal.as_ref().filter(|j| is_unfinished(j)) {
+        close_if_unfinished(&j.key, op_id, error).await;
+    }
+    if remove {
+        remove_resolve_worktree(state, repo_path, worktree_path).await;
+    }
+    let status = if landed { "updated" } else { "discarded" };
+    Ok(LocalPrDiscardOutcome {
+        status: status.to_string(),
+    })
+}
+
+/// Closes this checkout's unfinished update entries whose op id is not in
+/// `keep_op_ids` (every open local PR's unfinished update), returning how many it
+/// closed. The frontend calls it after the resolve-worktree sweep removed those
+/// updates' worktrees. Reads only `repo_path`'s own journal: an entry another checkout
+/// filed is closed when that checkout is opened.
+#[tauri::command]
+pub async fn git_close_abandoned_local_pr_updates(
+    repo_path: String,
+    keep_op_ids: Vec<String>,
+) -> AppResult<u32> {
+    close_abandoned_local_pr_updates(&repo_path, &keep_op_ids).await
+}
+
+pub(crate) async fn close_abandoned_local_pr_updates(
+    repo_path: &str,
+    keep_op_ids: &[String],
+) -> AppResult<u32> {
+    let mut closed = 0;
+    for entry in crate::oplog::git_oplog_list(repo_path.to_string()).await? {
+        let unfinished = matches!(entry.status.as_str(), "pending" | "paused");
+        if entry.op != UPDATE_LOCAL_PR_HEAD_OP || !unfinished || keep_op_ids.contains(&entry.id) {
+            continue;
+        }
+        let error = Some(ABANDONED_UPDATE.to_string());
+        if close_if_unfinished(repo_path, &entry.id, error).await {
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
 /// Sweeps orphaned resolve worktrees (`gd-resolve-<id>`) left under the app-data
-/// root by a paused local-PR merge. The only live handle to one is a local PR's
-/// `pendingMerge`, so a crash mid-resolve (or a lost PR) orphans it with no UI path
-/// to remove it — being detached, the user-facing worktree manager excludes it. The
-/// frontend calls this on repo open with every STILL-ACTIVE `pendingMerge` path as
-/// `keep_paths`; every other `gd-resolve-*` worktree is torn down. Best-effort per
-/// worktree; always returns `Ok(())`.
+/// root by a paused local-PR merge or branch update. The only live handle to one is
+/// its local PR's record, so a crash mid-resolve (or a lost PR) orphans it with no UI
+/// path to remove it — being detached, the user-facing worktree manager excludes it.
+/// The frontend calls this on repo open with every paused merge's worktree and every
+/// OPEN local PR's unfinished update worktree as `keep_paths`; every other
+/// `gd-resolve-*` worktree is torn down. Best-effort per worktree; always returns
+/// `Ok(())`.
 #[tauri::command]
 pub async fn git_cleanup_orphaned_resolve_worktrees(
     state: State<'_, AppState>,
@@ -17105,6 +17922,1264 @@ detached
             base_before,
             "a failed continue never advances base"
         );
+    }
+
+    /// A local-PR update fixture. `feature` and the default branch (`base`) fork from a
+    /// commit carrying `a.txt` and `c.txt`; `feature` edits `a.txt`, and base edits
+    /// `a.txt` too (a conflict) or only `c.txt` (a clean update). The main checkout ends
+    /// on `work`, so neither branch is checked out. `managed` stands in for the app-data
+    /// worktrees base and `root`, inside it, for the identity root.
+    struct UpdateFixture {
+        dir: tempfile::TempDir,
+        repo: String,
+        base: String,
+        fork: String,
+        roots: tempfile::TempDir,
+    }
+
+    impl UpdateFixture {
+        async fn new(marker: &str, conflict: bool) -> Self {
+            let (dir, repo) = setup_repo(marker).await;
+            commit_file(&repo, dir.path(), "c.txt", "c0\n", "add c").await;
+            let base = head_branch(&repo).await;
+            let fork = rev(&repo, "HEAD").await;
+            git(&repo, &["switch", "-c", "feature"]).await;
+            commit_file(&repo, dir.path(), "a.txt", "feature-side\n", "feat edit").await;
+            git(&repo, &["switch", &base]).await;
+            if conflict {
+                commit_file(&repo, dir.path(), "a.txt", "base-side\n", "base edit").await;
+            } else {
+                commit_file(&repo, dir.path(), "c.txt", "base-c\n", "base edit").await;
+            }
+            git(&repo, &["switch", "-c", "work"]).await;
+            let roots = tempfile::tempdir().expect("create temp dir");
+            std::fs::create_dir_all(roots.path().join("managed")).unwrap();
+            Self {
+                dir,
+                repo,
+                base,
+                fork,
+                roots,
+            }
+        }
+
+        fn managed(&self) -> std::path::PathBuf {
+            self.roots.path().join("managed")
+        }
+
+        fn root(&self) -> std::path::PathBuf {
+            self.managed().join("root")
+        }
+
+        /// A path outside the managed base: where a user's own checkout lives.
+        fn outside(&self, name: &str) -> String {
+            self.roots.path().join(name).to_string_lossy().into_owned()
+        }
+
+        async fn start(
+            &self,
+            state: &AppState,
+            repo: &str,
+            head: &str,
+        ) -> AppResult<LocalPrUpdateOutcome> {
+            let sessions = std::collections::HashSet::new();
+            let (root, managed) = (self.root(), self.managed());
+            update_local_pr_head(state, repo, &self.base, head, &root, &managed, &sessions).await
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        async fn finish_raw(
+            &self,
+            state: &AppState,
+            repo: &str,
+            head: &str,
+            worktree_path: &str,
+            worktree_id: &str,
+            op_id: &str,
+            journal_repo: &str,
+        ) -> AppResult<LocalPrUpdateOutcome> {
+            let sessions = std::collections::HashSet::new();
+            finish_local_pr_update(
+                state,
+                repo,
+                &self.base,
+                head,
+                worktree_path,
+                worktree_id,
+                op_id,
+                journal_repo,
+                &self.root(),
+                &self.managed(),
+                &sessions,
+            )
+            .await
+        }
+
+        /// Finishes `out` on `feature` from the main checkout, with the start's handles.
+        async fn finish(
+            &self,
+            state: &AppState,
+            out: &LocalPrUpdateOutcome,
+        ) -> AppResult<LocalPrUpdateOutcome> {
+            let (path, id) = handles(out);
+            self.finish_raw(
+                state,
+                &self.repo,
+                "feature",
+                path,
+                id,
+                &out.op_id,
+                &out.journal_repo,
+            )
+            .await
+        }
+
+        async fn discard_raw(
+            &self,
+            state: &AppState,
+            worktree_path: &str,
+            worktree_id: &str,
+            out: &LocalPrUpdateOutcome,
+        ) -> String {
+            discard_local_pr_update(
+                state,
+                &self.repo,
+                "feature",
+                worktree_path,
+                worktree_id,
+                &out.op_id,
+                &out.journal_repo,
+                &self.root(),
+            )
+            .await
+            .expect("a discard always succeeds")
+            .status
+        }
+
+        async fn discard(&self, state: &AppState, out: &LocalPrUpdateOutcome) -> String {
+            let (path, id) = handles(out);
+            self.discard_raw(state, path, id, out).await
+        }
+    }
+
+    fn handles(out: &LocalPrUpdateOutcome) -> (&str, &str) {
+        (
+            out.worktree_path.as_deref().expect("worktree path set"),
+            out.worktree_id.as_deref().expect("worktree id set"),
+        )
+    }
+
+    /// Resolves the fixture's conflict in the update's worktree and stages it.
+    async fn resolve_update(out: &LocalPrUpdateOutcome) {
+        let (wt, _) = handles(out);
+        std::fs::write(Path::new(wt).join("a.txt"), "resolved\n").unwrap();
+        git(wt, &["add", "a.txt"]).await;
+    }
+
+    async fn resolve_worktree_count(repo: &str) -> usize {
+        git(repo, &["worktree", "list", "--porcelain"])
+            .await
+            .lines()
+            .filter(|l| l.starts_with("worktree ") && l.contains("gd-resolve-"))
+            .count()
+    }
+
+    async fn update_entries(repo: &str) -> Vec<crate::oplog::OpLogEntry> {
+        crate::oplog::git_oplog_list(repo.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.op == UPDATE_LOCAL_PR_HEAD_OP)
+            .collect()
+    }
+
+    async fn journal_entry(repo: &str, id: &str) -> crate::oplog::OpLogEntry {
+        crate::oplog::git_oplog_list(repo.to_string())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .expect("the journal entry exists")
+    }
+
+    /// git's porcelain spelling of `path`, which is what callers hand the cores.
+    async fn listed_spelling(repo: &str, path: &str) -> String {
+        use crate::git::worktree::canonical_wt_path;
+        let listed = git(repo, &["worktree", "list", "--porcelain"]).await;
+        parse_worktree_paths(&listed)
+            .into_iter()
+            .find(|p| canonical_wt_path(p) == canonical_wt_path(path))
+            .expect("the worktree is listed")
+    }
+
+    fn assert_session_refusal(err: &AppError, head: &str, holder: &str) {
+        use crate::git::worktree::canonical_wt_path;
+        let AppError::Command(message) = err else {
+            panic!("expected the session refusal, got {err:?}");
+        };
+        let lead = format!("{head} is checked out in a worktree GitDesktop manages at ");
+        let tail = format!(", so it is not updated from here. {head} is unchanged.");
+        let named = message
+            .strip_prefix(&lead)
+            .and_then(|rest| rest.strip_suffix(&tail))
+            .unwrap_or_else(|| panic!("not the session refusal: {message}"));
+        assert_eq!(
+            canonical_wt_path(named),
+            canonical_wt_path(holder),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn local_pr_update_outcome_serializes_exact_camel_case_keys() {
+        let outcome = LocalPrUpdateOutcome {
+            status: "conflicts".to_string(),
+            conflicts: vec!["a.txt".to_string()],
+            head_tip: "abc".to_string(),
+            worktree_id: Some("0123456789ab".to_string()),
+            worktree_path: Some("/w/gd-resolve-0123456789ab".to_string()),
+            op_id: "op".to_string(),
+            journal_repo: "/repo".to_string(),
+        };
+        let value = serde_json::to_value(&outcome).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "conflicts",
+                "headTip",
+                "journalRepo",
+                "opId",
+                "status",
+                "worktreeId",
+                "worktreePath"
+            ]
+        );
+        for snake in [
+            "head_tip",
+            "worktree_id",
+            "worktree_path",
+            "op_id",
+            "journal_repo",
+        ] {
+            assert!(value.get(snake).is_none(), "{snake} leaked onto the wire");
+        }
+        let discard = serde_json::to_value(LocalPrDiscardOutcome {
+            status: "discarded".to_string(),
+        })
+        .unwrap();
+        assert_eq!(discard, serde_json::json!({ "status": "discarded" }));
+    }
+
+    #[test]
+    fn local_pr_update_moved_sentences_are_pinned() {
+        assert_eq!(
+            merge_target_moved("main"),
+            "main moved while this merge was being prepared, so advancing it would discard \
+             that change. main is unchanged — re-run the merge from its current tip."
+        );
+        assert_eq!(
+            update_moved_at_start("feat"),
+            "feat moved, or its checkout switched to another branch, while this update was \
+             being prepared, so finishing it would discard that change. feat is unchanged. \
+             Choose Resolve conflicts to try again."
+        );
+        assert_eq!(
+            update_moved_at_finish("feat"),
+            "feat moved, or its checkout switched to another branch, since this update \
+             started, so it can't be finished as it stands. feat is unchanged. Try Finish \
+             update again; if it is still refused, discard this update, then choose Resolve \
+             conflicts to start again."
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_conflict_keeps_a_detached_worktree_at_heads_tip() {
+        let f = UpdateFixture::new("lpu-conflict", true).await;
+        let head_before = rev(&f.repo, "feature").await;
+        let base_before = rev(&f.repo, &f.base).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+
+        assert_eq!(out.status, "conflicts");
+        assert!(out.conflicts.iter().any(|p| p == "a.txt"), "{out:?}");
+        assert_eq!(out.head_tip, head_before);
+        assert_eq!(
+            out.journal_repo, f.repo,
+            "filed under the repo_path passed in"
+        );
+        let (wt, id) = handles(&out);
+        let name = Path::new(wt)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let hex = name
+            .strip_prefix("gd-resolve-")
+            .expect("a resolve worktree name");
+        assert_eq!(hex, id);
+        assert!(
+            hex.len() == 12 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{name}"
+        );
+        assert_eq!(
+            rev(wt, "HEAD").await,
+            head_before,
+            "the worktree starts at head's tip"
+        );
+        let symbolic = run_git_raw(Some(wt), &["symbolic-ref", "-q", "HEAD"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(symbolic.code, 0, "the worktree is detached");
+        assert_eq!(rev(&f.repo, "feature").await, head_before);
+        assert_eq!(rev(&f.repo, &f.base).await, base_before);
+
+        let entries = update_entries(&f.repo).await;
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].id, out.op_id);
+        assert_eq!(entries[0].status, "paused");
+        assert_eq!(entries[0].pre_op_tip.as_deref(), Some(head_before.as_str()));
+        assert_eq!(entries[0].label, format!("Update feature from {}", f.base));
+        assert_eq!(entries[0].original_ref.as_deref(), Some("feature"));
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_moves_head_not_base_and_the_pr_then_merges_cleanly() {
+        let f = UpdateFixture::new("lpu-finish", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let base_tip = rev(&f.repo, &f.base).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        let new_tip = rev(&f.repo, "feature").await;
+        assert_eq!(done.head_tip, new_tip);
+        assert_eq!(rev(&f.repo, "feature^1").await, start_tip);
+        assert_eq!(rev(&f.repo, "feature^2").await, base_tip);
+        let subject = git(&f.repo, &["log", "-1", "--format=%s", "feature"]).await;
+        assert_eq!(
+            subject.trim(),
+            format!("Merge branch '{}' into feature", f.base)
+        );
+        assert!(!subject.contains("into HEAD"), "{subject}");
+        assert_eq!(rev(&f.repo, &f.base).await, base_tip, "base never moves");
+        let contained = run_git_raw(
+            Some(&f.repo),
+            &["merge-base", "--is-ancestor", &f.base, "feature"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(contained.code, 0, "feature now contains base");
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+
+        let merged = merge_local_pr(&state, &f.repo, &f.base, "feature", "m", "merge", &f.root())
+            .await
+            .unwrap();
+        assert_eq!(
+            merged.status, "merged",
+            "the PR now merges without conflicts"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_commits_only_the_index() {
+        let f = UpdateFixture::new("lpu-index", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, _) = handles(&out);
+        std::fs::write(Path::new(wt).join("c.txt"), "unstaged\n").unwrap();
+
+        f.finish(&state, &out).await.unwrap();
+        assert_eq!(
+            nlf(git(&f.repo, &["show", "feature:c.txt"]).await),
+            "c0\n",
+            "an unstaged edit never rides the commit"
+        );
+        assert_eq!(
+            nlf(git(&f.repo, &["show", "feature:a.txt"]).await),
+            "resolved\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_clean_merge_finishes_at_once() {
+        let f = UpdateFixture::new("lpu-clean", false).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        std::fs::write(f.dir.path().join("a.txt"), "dirty on work\n").unwrap();
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+
+        assert_eq!(out.status, "updated");
+        assert!(out.worktree_path.is_none() && out.worktree_id.is_none());
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        let new_tip = rev(&f.repo, "feature").await;
+        assert_eq!(out.head_tip, new_tip);
+        assert_eq!(rev(&f.repo, "feature^1").await, start_tip);
+        assert_eq!(
+            head_branch(&f.repo).await,
+            "work",
+            "the main tree stays put"
+        );
+        assert_eq!(
+            nlf(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap()),
+            "dirty on work\n"
+        );
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_start_refuses_a_dirty_checked_out_head() {
+        let f = UpdateFixture::new("lpu-dirty-start", true).await;
+        git(&f.repo, &["switch", "feature"]).await;
+        std::fs::write(f.dir.path().join("a.txt"), "dirty\n").unwrap();
+        let state = AppState::default();
+        let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
+        assert_eq!(err.to_string(), DIRTY_HEAD_UPDATE);
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        assert!(
+            update_entries(&f.repo).await.is_empty(),
+            "nothing journaled"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_a_dirty_checked_out_head_then_succeeds_once_clean() {
+        let f = UpdateFixture::new("lpu-dirty-finish", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        git(&f.repo, &["switch", "feature"]).await;
+        std::fs::write(f.dir.path().join("a.txt"), "dirty\n").unwrap();
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(err.to_string(), DIRTY_HEAD_UPDATE);
+        assert!(Path::new(handles(&out).0).exists(), "the worktree is kept");
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+
+        git(&f.repo, &["checkout", "--", "a.txt"]).await;
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(
+            rev(&f.repo, "HEAD").await,
+            done.head_tip,
+            "fast-forwarded in place"
+        );
+        assert_eq!(
+            nlf(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap()),
+            "resolved\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_a_rewound_head_and_keeps_the_worktree() {
+        let f = UpdateFixture::new("lpu-rewound", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        // An ancestor of the start tip: containment alone would accept it.
+        git(&f.repo, &["branch", "-f", "feature", &f.fork]).await;
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(err.to_string(), update_moved_at_finish("feature"));
+        assert_eq!(rev(&f.repo, "feature").await, f.fork, "the rewind stands");
+        assert!(Path::new(handles(&out).0).exists());
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "paused");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_fast_forwards_head_inside_the_worktree_holding_it() {
+        let f = UpdateFixture::new("lpu-holder", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let holder = f.outside("holder");
+        git(&f.repo, &["worktree", "add", &holder, "feature"]).await;
+
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(rev(&holder, "HEAD").await, done.head_tip);
+        assert_eq!(
+            nlf(std::fs::read_to_string(Path::new(&holder).join("a.txt")).unwrap()),
+            "resolved\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_a_holder_with_overlapping_changes() {
+        let f = UpdateFixture::new("lpu-holder-dirty", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let holder = f.outside("holder");
+        git(&f.repo, &["worktree", "add", &holder, "feature"]).await;
+        std::fs::write(Path::new(&holder).join("a.txt"), "holder edit\n").unwrap();
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert!(
+            err.to_string().contains("couldn't fast-forward it there"),
+            "{err}"
+        );
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+        assert!(Path::new(handles(&out).0).exists());
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_refuses_a_head_held_by_a_session_checkout() {
+        let f = UpdateFixture::new("lpu-session", true).await;
+        let state = AppState::default();
+        let no_sessions = std::collections::HashSet::new();
+
+        // Under the app-data base, at the start and at the finish.
+        let managed_holder = f.managed().join("sess-a").to_string_lossy().into_owned();
+        git(&f.repo, &["worktree", "add", &managed_holder, "feature"]).await;
+        let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
+        assert_session_refusal(&err, "feature", &managed_holder);
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        assert!(
+            update_entries(&f.repo).await.is_empty(),
+            "nothing journaled"
+        );
+        git(&f.repo, &["worktree", "remove", "--force", &managed_holder]).await;
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        git(&f.repo, &["worktree", "add", &managed_holder, "feature"]).await;
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_session_refusal(&err, "feature", &managed_holder);
+        assert!(Path::new(handles(&out).0).exists(), "the worktree is kept");
+        git(&f.repo, &["worktree", "remove", "--force", &managed_holder]).await;
+
+        // Outside it, but a registered session's checkout.
+        let session_holder = f.outside("sess-b");
+        git(&f.repo, &["worktree", "add", &session_holder, "feature"]).await;
+        let sessions: std::collections::HashSet<String> =
+            [crate::git::worktree::normalize_wt_path(&session_holder)].into();
+        let (root, managed) = (f.root(), f.managed());
+        let err = update_local_pr_head(
+            &state, &f.repo, &f.base, "feature", &root, &managed, &sessions,
+        )
+        .await
+        .unwrap_err();
+        assert_session_refusal(&err, "feature", &session_holder);
+        git(&f.repo, &["worktree", "remove", "--force", &session_holder]).await;
+
+        // A session branch held by an ordinary checkout.
+        git(&f.repo, &["branch", "gd/session/x", "feature"]).await;
+        let plain = f.outside("plain");
+        git(&f.repo, &["worktree", "add", &plain, "gd/session/x"]).await;
+        let err = f.start(&state, &f.repo, "gd/session/x").await.unwrap_err();
+        assert_session_refusal(&err, "gd/session/x", &plain);
+
+        // An update's hidden checkout under the base is left to the finalize step.
+        let update_holder = f
+            .managed()
+            .join("gd-update-x")
+            .to_string_lossy()
+            .into_owned();
+        git(&f.repo, &["worktree", "add", &update_holder, "feature"]).await;
+        refuse_session_holder(&f.repo, "feature", &managed, &no_sessions)
+            .await
+            .expect("a gd-update holder is not a session's");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_start_refuses_what_cannot_be_updated() {
+        let f = UpdateFixture::new("lpu-refusals", true).await;
+        let state = AppState::default();
+        let same = f.start(&state, &f.repo, &f.base).await.unwrap_err();
+        assert_eq!(
+            same.to_string(),
+            format!("invalid argument: {SAME_BRANCH_UPDATE}")
+        );
+        let rev_expr = f.start(&state, &f.repo, "feature~1").await.unwrap_err();
+        assert!(
+            matches!(&rev_expr, AppError::InvalidArgument(m) if m.contains("feature~1")),
+            "{rev_expr:?}"
+        );
+        git(&f.repo, &["switch", "-c", "ahead", &f.base]).await;
+        commit_file(&f.repo, f.dir.path(), "d.txt", "d\n", "ahead").await;
+        git(&f.repo, &["switch", "work"]).await;
+        let contains = f.start(&state, &f.repo, "ahead").await.unwrap_err();
+        assert_eq!(
+            contains.to_string(),
+            format!("ahead already contains {} — nothing to update.", f.base)
+        );
+        assert!(
+            update_entries(&f.repo).await.is_empty(),
+            "nothing journaled"
+        );
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_validates_the_worktree_it_is_handed() {
+        let f = UpdateFixture::new("lpu-validate", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, id) = handles(&out);
+        let elsewhere = f.outside(&format!("gd-resolve-{id}"));
+        let malformed = f.root().join("gd-resolve-zzzzzzzzzzzz");
+        let malformed = malformed.to_string_lossy();
+        for (path, id) in [
+            (wt, "000000000000"),
+            (elsewhere.as_str(), id),
+            (f.repo.as_str(), id),
+            (&*malformed, "zzzzzzzzzzzz"),
+        ] {
+            let err = f
+                .finish_raw(&state, &f.repo, "feature", path, id, &out.op_id, &f.repo)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("invalid argument: not a conflict-resolution worktree of this repository: {path}")
+            );
+            assert!(Path::new(wt).exists(), "nothing was removed");
+        }
+        let other = f.root().join("gd-resolve-abcdefabcdef");
+        let err = f
+            .finish_raw(
+                &state,
+                &f.repo,
+                "feature",
+                &other.to_string_lossy(),
+                "abcdefabcdef",
+                &out.op_id,
+                &f.repo,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("This update's worktree no longer exists. {UPDATE_RESTART}")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_without_an_unfinished_journal_entry() {
+        let f = UpdateFixture::new("lpu-journal", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, id) = handles(&out);
+        let refusal = format!(
+            "This update is no longer on record as unfinished, so GitDesktop can't confirm \
+             feature hasn't moved. {UPDATE_RESTART}"
+        );
+        let unknown = f
+            .finish_raw(&state, &f.repo, "feature", wt, id, "no-such-op", &f.repo)
+            .await
+            .unwrap_err();
+        assert_eq!(unknown.to_string(), refusal);
+
+        crate::oplog::finish(&f.repo, &Some(out.op_id.clone()), Some("x".to_string())).await;
+        let closed = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(closed.to_string(), refusal);
+        assert!(Path::new(wt).exists());
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_reads_its_anchor_from_another_checkouts_journal() {
+        let f = UpdateFixture::new("lpu-cross", true).await;
+        git(&f.repo, &["switch", "-c", "feature2", &f.fork]).await;
+        commit_file(&f.repo, f.dir.path(), "a.txt", "f2-side\n", "f2 edit").await;
+        git(&f.repo, &["switch", "work"]).await;
+        let created = f.outside("linked");
+        git(
+            &f.repo,
+            &["worktree", "add", "-b", "side", &created, &f.base],
+        )
+        .await;
+        let linked = listed_spelling(&f.repo, &created).await;
+        let state = AppState::default();
+
+        let out = f.start(&state, &linked, "feature").await.unwrap();
+        assert_eq!(out.journal_repo, linked);
+        resolve_update(&out).await;
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(journal_entry(&linked, &out.op_id).await.status, "done");
+        assert!(
+            update_entries(&f.repo).await.is_empty(),
+            "filed under the linked checkout"
+        );
+
+        // No journal key at all: the porcelain fallback still finds it.
+        let out = f.start(&state, &linked, "feature2").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, id) = handles(&out);
+        let done = f
+            .finish_raw(&state, &f.repo, "feature2", wt, id, &out.op_id, "")
+            .await
+            .unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(journal_entry(&linked, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_discard_closes_only_an_unfinished_entry() {
+        let f = UpdateFixture::new("lpu-discard", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        assert!(
+            !Path::new(handles(&out).0).exists(),
+            "the worktree is removed"
+        );
+        let closed = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!(closed.status, "failed");
+        assert_eq!(closed.error.as_deref(), Some("aborted by user"));
+
+        assert_eq!(f.discard(&state, &out).await, "discarded", "idempotent");
+        let again = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!(
+            (again.status, again.error, again.finished_at),
+            (closed.status, closed.error, closed.finished_at),
+            "a second discard changes nothing"
+        );
+
+        // A relocated repository's stored path: nothing removed, the entry still closed.
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let (wt, id) = handles(&out);
+        let elsewhere = f.outside(&format!("gd-resolve-{id}"));
+        assert_eq!(
+            f.discard_raw(&state, &elsewhere, id, &out).await,
+            "discarded"
+        );
+        assert!(Path::new(wt).exists(), "a foreign path removes nothing");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "failed");
+
+        // A registered checkout of this repository that is not the update's stays put.
+        let user_wt = f.outside("user-wt");
+        git(
+            &f.repo,
+            &["worktree", "add", "--detach", &user_wt, "feature"],
+        )
+        .await;
+        assert_eq!(f.discard_raw(&state, &user_wt, id, &out).await, "discarded");
+        assert!(Path::new(&user_wt).join("a.txt").exists(), "left on disk");
+        let listed = git(&f.repo, &["worktree", "list", "--porcelain"]).await;
+        assert!(
+            is_listed_worktree(&parse_worktree_paths(&listed), &user_wt),
+            "and still registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_close_abandoned_spares_kept_and_foreign_entries() {
+        let f = UpdateFixture::new("lpu-closer", true).await;
+        let begin = |op: &'static str| {
+            let (repo, fork) = (f.repo.clone(), f.fork.clone());
+            async move {
+                crate::oplog::begin(&repo, op, "label", None, &fork, Some(&fork))
+                    .await
+                    .expect("journaled")
+            }
+        };
+        let pending = begin(UPDATE_LOCAL_PR_HEAD_OP).await;
+        let paused = begin(UPDATE_LOCAL_PR_HEAD_OP).await;
+        crate::oplog::pause(&f.repo, &Some(paused.clone())).await;
+        let merge = begin("merge_local_pr").await;
+
+        let closed = close_abandoned_local_pr_updates(&f.repo, std::slice::from_ref(&paused))
+            .await
+            .unwrap();
+        assert_eq!(closed, 1);
+        let abandoned = journal_entry(&f.repo, &pending).await;
+        assert_eq!(abandoned.status, "failed");
+        assert_eq!(abandoned.error.as_deref(), Some(ABANDONED_UPDATE));
+        assert_eq!(journal_entry(&f.repo, &paused).await.status, "paused");
+        assert_eq!(journal_entry(&f.repo, &merge).await.status, "pending");
+
+        let closed = close_abandoned_local_pr_updates(&f.repo, &[])
+            .await
+            .unwrap();
+        assert_eq!(closed, 1, "a paused entry closes once it is no longer kept");
+        assert_eq!(journal_entry(&f.repo, &paused).await.status, "failed");
+        assert_eq!(journal_entry(&f.repo, &merge).await.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_unresolved_conflicts() {
+        let f = UpdateFixture::new("lpu-unresolved", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(err.to_string(), "Resolve every conflict first");
+        assert!(Path::new(handles(&out).0).exists());
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "paused");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_when_nothing_was_merged() {
+        let f = UpdateFixture::new("lpu-nothing", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        git(handles(&out).0, &["merge", "--abort"]).await;
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("Nothing was merged in this update's worktree. {UPDATE_RESTART}")
+        );
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_a_commit_that_does_not_build_on_head() {
+        let f = UpdateFixture::new("lpu-not-built", true).await;
+        let base_tip = rev(&f.repo, &f.base).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        let (wt, _) = handles(&out);
+        git(wt, &["merge", "--abort"]).await;
+        git(wt, &["checkout", "--detach", &base_tip]).await;
+        std::fs::write(Path::new(wt).join("a.txt"), "staged elsewhere\n").unwrap();
+        git(wt, &["add", "a.txt"]).await;
+
+        // Refused before the commit: the worktree is not bound to this update's entry.
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("The resolved commit no longer builds on feature. {UPDATE_RESTART}")
+        );
+        assert_eq!(
+            rev(wt, "HEAD").await,
+            base_tip,
+            "nothing was committed there"
+        );
+
+        // Discard removes nothing it cannot bind, and still closes the entry.
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        assert!(Path::new(wt).exists(), "the unbound worktree is kept");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_clean_start_cleans_up_when_the_finalize_step_refuses() {
+        let f = UpdateFixture::new("lpu-clean-refused", false).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let holder = f.outside("holder");
+        git(&f.repo, &["worktree", "add", &holder, "feature"]).await;
+        std::fs::write(Path::new(&holder).join("c.txt"), "holder edit\n").unwrap();
+        let state = AppState::default();
+
+        let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
+        assert!(
+            err.to_string().contains("couldn't fast-forward it there"),
+            "{err}"
+        );
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        let entries = update_entries(&f.repo).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, "failed");
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_is_a_no_op_when_head_already_has_the_resolved_commit() {
+        let f = UpdateFixture::new("lpu-landed-head", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let (wt, _) = handles(&out);
+        git(wt, &["commit", "-m", "resolved by hand"]).await;
+        let resolved = rev(wt, "HEAD").await;
+        git(&f.repo, &["branch", "-f", "feature", &resolved]).await;
+
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(done.head_tip, resolved);
+        assert!(!Path::new(wt).exists());
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_start_cleans_up_a_non_conflict_failure() {
+        let f = UpdateFixture::new("lpu-unrelated", true).await;
+        git(&f.repo, &["switch", "--orphan", "unrelated"]).await;
+        commit_file(&f.repo, f.dir.path(), "z.txt", "z\n", "unrelated root").await;
+        git(&f.repo, &["switch", "work"]).await;
+        let state = AppState::default();
+        let (root, managed) = (f.root(), f.managed());
+        let sessions = std::collections::HashSet::new();
+
+        let err = update_local_pr_head(
+            &state,
+            &f.repo,
+            "unrelated",
+            "feature",
+            &root,
+            &managed,
+            &sessions,
+        )
+        .await
+        .unwrap_err();
+        let AppError::Git { stderr, .. } = &err else {
+            panic!("expected a git error, got {err:?}");
+        };
+        assert!(
+            stderr.starts_with("Updating feature from unrelated failed; feature is unchanged.\n"),
+            "{stderr}"
+        );
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        let entries = update_entries(&f.repo).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_clean_start_fast_forwards_a_checked_out_head() {
+        let f = UpdateFixture::new("lpu-clean-current", false).await;
+        git(&f.repo, &["switch", "feature"]).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        assert_eq!(out.status, "updated");
+        assert_eq!(rev(&f.repo, "HEAD").await, out.head_tip);
+        assert_eq!(
+            nlf(std::fs::read_to_string(f.dir.path().join("c.txt")).unwrap()),
+            "base-c\n",
+            "the main tree holds base's file"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_recognises_an_update_that_already_landed() {
+        let f = UpdateFixture::new("lpu-already", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let done = f.finish(&state, &out).await.unwrap();
+
+        let again = f.finish(&state, &out).await.unwrap();
+        assert_eq!(again.status, "updated");
+        assert_eq!(again.head_tip, rev(&f.repo, "feature").await);
+        assert_eq!(again.head_tip, done.head_tip);
+        assert_eq!(f.discard(&state, &out).await, "updated");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+
+        git(&f.repo, &["branch", "-f", "feature", &start_tip]).await;
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("This update's worktree no longer exists. {UPDATE_RESTART}")
+        );
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+    }
+
+    /// Installs `body` as the fixture's `name` hook, which every checkout of it runs,
+    /// clearing git's hook environment so the body's git calls address the path named.
+    fn install_update_hook(f: &UpdateFixture, name: &str, body: &str) {
+        let hook = Path::new(&f.repo).join(".git").join("hooks").join(name);
+        std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        let script = format!(
+            "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n{body}\nexit 0\n"
+        );
+        std::fs::write(&hook, script).unwrap();
+        // git ignores a hook without the executable bit on POSIX.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    /// A path as a `sh` hook spells it: a Windows backslash is an escape character there.
+    fn sh_path(path: &str) -> String {
+        path.replace('\\', "/")
+    }
+
+    /// A hook body that checks `feature` out in a new checkout at `holder`, once.
+    fn take_feature_at(f: &UpdateFixture, holder: &str) -> String {
+        let (holder, repo) = (sh_path(holder), sh_path(&f.repo));
+        format!("[ -d \"{holder}\" ] || git -C \"{repo}\" worktree add \"{holder}\" feature")
+    }
+
+    /// Commits the staged resolution in the update's worktree and points `feature` at it,
+    /// as a finish that died after moving head leaves them. Returns that commit.
+    async fn land_by_hand(f: &UpdateFixture, out: &LocalPrUpdateOutcome) -> String {
+        let (wt, _) = handles(out);
+        git(wt, &["commit", "-m", "resolved by hand"]).await;
+        let resolved = rev(wt, "HEAD").await;
+        git(&f.repo, &["branch", "-f", "feature", &resolved]).await;
+        resolved
+    }
+
+    /// A directory link: a junction on Windows (no privilege needed), a symlink elsewhere.
+    fn update_directory_link(link: &str, target: &str) {
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J", link, target])
+                .output()
+                .expect("run mklink");
+            assert!(
+                made.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_clean_start_refuses_a_session_that_took_head_during_the_merge() {
+        let f = UpdateFixture::new("lpu-late-session", false).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let holder = f.managed().join("sess-late").to_string_lossy().into_owned();
+        install_update_hook(&f, "post-merge", &take_feature_at(&f, &holder));
+        let state = AppState::default();
+
+        let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
+        assert_session_refusal(&err, "feature", &holder);
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+        assert_eq!(
+            rev(&holder, "HEAD").await,
+            start_tip,
+            "the session is untouched"
+        );
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        assert_eq!(update_entries(&f.repo).await[0].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_refuses_a_session_that_took_head_during_the_commit() {
+        let f = UpdateFixture::new("lpu-late-session-finish", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let holder = f.managed().join("sess-late").to_string_lossy().into_owned();
+        install_update_hook(&f, "post-commit", &take_feature_at(&f, &holder));
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_session_refusal(&err, "feature", &holder);
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+        assert_eq!(
+            rev(&holder, "HEAD").await,
+            start_tip,
+            "the session is untouched"
+        );
+        assert!(Path::new(handles(&out).0).exists(), "the worktree is kept");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "paused");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_clean_start_refuses_a_head_moved_mid_merge_in_its_own_words() {
+        let f = UpdateFixture::new("lpu-moved-start", false).await;
+        let rewind = format!(
+            "git -C \"{}\" branch -f feature {}",
+            sh_path(&f.repo),
+            f.fork
+        );
+        install_update_hook(&f, "post-merge", &rewind);
+        let state = AppState::default();
+
+        let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
+        assert_eq!(err.to_string(), update_moved_at_start("feature"));
+        assert_eq!(rev(&f.repo, "feature").await, f.fork, "the rewind stands");
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        assert_eq!(update_entries(&f.repo).await[0].status, "failed");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_start_hands_out_no_resolution_it_could_not_mark_paused() {
+        let f = UpdateFixture::new("lpu-unpaused", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        // Spoils the journal once the entry exists, so marking it paused fails.
+        let store = crate::oplog::store_path(&f.repo).unwrap();
+        let spoil = format!("printf 'x' > \"{}\"", sh_path(&store.to_string_lossy()));
+        install_update_hook(&f, "post-checkout", &spoil);
+        let state = AppState::default();
+
+        let err = f.start(&state, &f.repo, "feature").await.unwrap_err();
+        assert_eq!(err.to_string(), UNJOURNALED_UPDATE);
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+        assert_eq!(rev(&f.repo, "feature").await, start_tip);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_removes_a_registered_worktree_it_proves_landed() {
+        let f = UpdateFixture::new("lpu-landed-registered", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        let resolved = land_by_hand(&f, &out).await;
+        crate::oplog::finish(&f.repo, &Some(out.op_id.clone()), None).await;
+
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(done.head_tip, resolved);
+        assert!(!Path::new(handles(&out).0).exists());
+        assert_eq!(resolve_worktree_count(&f.repo).await, 0);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_discard_removes_a_registered_worktree_it_proves_landed() {
+        let f = UpdateFixture::new("lpu-discard-landed", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+        crate::oplog::finish(&f.repo, &Some(out.op_id.clone()), None).await;
+
+        assert_eq!(f.discard(&state, &out).await, "updated");
+        assert!(!Path::new(handles(&out).0).exists());
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_a_closed_entry_never_proves_an_uncommitted_resolution_landed() {
+        let f = UpdateFixture::new("lpu-closed-unlanded", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        crate::oplog::finish(&f.repo, &Some(out.op_id.clone()), None).await;
+        // Head gains an ordinary commit on top of the start tip.
+        let ordinary = git(
+            &f.repo,
+            &[
+                "commit-tree",
+                "feature^{tree}",
+                "-p",
+                "feature",
+                "-m",
+                "ordinary",
+            ],
+        )
+        .await;
+        git(&f.repo, &["branch", "-f", "feature", ordinary.trim()]).await;
+
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "This update is no longer on record as unfinished, so GitDesktop can't \
+                 confirm feature hasn't moved. {UPDATE_RESTART}"
+            )
+        );
+        let (wt, _) = handles(&out);
+        assert!(Path::new(wt).exists(), "the resolution is kept");
+        assert_eq!(rev(&f.repo, "feature").await, ordinary.trim());
+
+        assert_eq!(f.discard(&state, &out).await, "discarded");
+        assert!(!Path::new(wt).exists());
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_discard_recognises_an_update_that_landed_before_a_crash() {
+        let f = UpdateFixture::new("lpu-crashed", true).await;
+        let state = AppState::default();
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        land_by_hand(&f, &out).await;
+
+        assert_eq!(f.discard(&state, &out).await, "updated");
+        assert!(!Path::new(handles(&out).0).exists());
+        let entry = journal_entry(&f.repo, &out.op_id).await;
+        assert_eq!((entry.status.as_str(), entry.error), ("done", None));
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_refuses_a_branch_that_no_longer_exists() {
+        let f = UpdateFixture::new("lpu-gone", true).await;
+        let start_tip = rev(&f.repo, "feature").await;
+        let gone = |name: &str| format!("{name} no longer exists; nothing was changed.");
+        let state = AppState::default();
+        let err = f.start(&state, &f.repo, "ghost").await.unwrap_err();
+        assert_eq!(err.to_string(), gone("ghost"));
+        let (root, managed) = (f.root(), f.managed());
+        let sessions = std::collections::HashSet::new();
+        let err = update_local_pr_head(
+            &state, &f.repo, "ghost", "feature", &root, &managed, &sessions,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.to_string(), gone("ghost"));
+        assert!(update_entries(&f.repo).await.is_empty());
+
+        let out = f.start(&state, &f.repo, "feature").await.unwrap();
+        resolve_update(&out).await;
+        git(&f.repo, &["branch", "-D", "feature"]).await;
+        let err = f.finish(&state, &out).await.unwrap_err();
+        assert_eq!(err.to_string(), gone("feature"));
+        let (wt, _) = handles(&out);
+        assert_eq!(rev(wt, "HEAD").await, start_tip, "nothing was committed");
+        assert_eq!(journal_entry(&f.repo, &out.op_id).await.status, "paused");
+    }
+
+    #[test]
+    fn local_pr_update_sweep_keeps_a_worktree_kept_under_another_spelling() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let wt = dir.path().join("gd-resolve-0123456789ab");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        // The same directory through a detour: equal only once resolved.
+        let detour = dir
+            .path()
+            .join("sub")
+            .join("..")
+            .join("gd-resolve-0123456789ab");
+        let listed = vec![wt.to_string_lossy().into_owned()];
+        let kept = [detour.to_string_lossy().into_owned()];
+        assert!(
+            orphaned_resolve_worktrees(&listed, &kept).is_empty(),
+            "{kept:?}"
+        );
+        assert_eq!(orphaned_resolve_worktrees(&listed, &[]), listed);
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_finish_finds_an_entry_filed_under_a_spelling_git_never_prints() {
+        let f = UpdateFixture::new("lpu-link", true).await;
+        let created = f.outside("linked");
+        git(
+            &f.repo,
+            &["worktree", "add", "-b", "side", &created, &f.base],
+        )
+        .await;
+        let link = f.outside("linked-link");
+        update_directory_link(&link, &created);
+        let state = AppState::default();
+
+        let out = f.start(&state, &link, "feature").await.unwrap();
+        assert_eq!(out.journal_repo, link);
+        resolve_update(&out).await;
+        // From the main checkout: git lists the linked checkout only by its real path.
+        let done = f.finish(&state, &out).await.unwrap();
+        assert_eq!(done.status, "updated");
+        assert_eq!(journal_entry(&link, &out.op_id).await.status, "done");
+    }
+
+    #[tokio::test]
+    async fn local_pr_update_is_ancestor_errs_on_a_failed_probe() {
+        let f = UpdateFixture::new("lpu-ancestor", false).await;
+        let feature_tip = rev(&f.repo, "feature").await;
+        let err = is_ancestor(&f.repo, &"1".repeat(40), &feature_tip)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Git { .. }), "{err:?}");
+        assert!(is_ancestor(&f.repo, &f.fork, &feature_tip).await.unwrap());
+        assert!(!is_ancestor(&f.repo, &feature_tip, &f.fork).await.unwrap());
     }
 
     /// The PR head moving while the user resolves must FAIL honestly (the push is

@@ -318,3 +318,12 @@ export interface ForgeUserRef {
    *  managed set, and the reviewer setters never add or remove them. */
   isBot: boolean;
 }
+
+/** A page-walked user list plus the backend walk's own verdict that it stopped at its
+ *  ceiling. Read "the list is cut" from `truncated`, never from `users.length`; `ceiling`
+ *  is the provider's limit and is always present. */
+export interface ForgeUserList {
+  users: ForgeUserRef[];
+  truncated: boolean;
+  ceiling: number;
+}

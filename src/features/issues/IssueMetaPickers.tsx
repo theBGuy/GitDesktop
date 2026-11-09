@@ -7,26 +7,36 @@ import {
 } from "@phosphor-icons/react";
 import { type ComponentProps, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
-import { ForgeUserAvatar } from "@/components/forge-user-avatar";
 import { MetaValueCell, UserChip } from "@/components/meta-field-cells";
 import { usePanelPortalContainer } from "@/components/panel-portal";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  redirectPopupFocus,
+  toUserPickerRead,
+  USER_PICKER_POPUP_CLASS,
+  UserPickerBody,
+} from "@/components/user-picker-body";
+import { sortedSnapshot } from "@/components/user-picker-model";
 import { emptyPickerCopy } from "@/features/conversations/remote-section-state";
 import { useForgeGhHost } from "@/lib/git/host";
 import {
-  useAssignableUsers,
+  useAssignableUserList,
   useIssueTypes,
   useMilestones,
 } from "@/lib/git/queries";
 import type { ForgeUserRef, IssueType, RemoteLens } from "@/lib/git/types";
-import { useRovingRows } from "@/lib/list-keyboard-nav";
 import { cn } from "@/lib/utils";
+
+const ASSIGNEE_COPY = {
+  noun: "assignable users",
+  loadFailed: "Couldn't load assignable users.",
+  empty: "No assignable users.",
+};
 
 /** GitHub issue-type color NAMES → a swatch hex (matches GitHub's palette). */
 const ISSUE_TYPE_COLORS: Record<string, string> = {
@@ -92,16 +102,30 @@ export function AssigneesPopover({
    *  column. Default renders the inline row. */
   cells?: boolean;
 }) {
-  const users = useAssignableUsers(repoPath, enabled, lens);
-  const ghHost = useForgeGhHost(repoPath);
   const [open, setOpen] = useState(false);
+  // Latched by the trigger's first hover or focus, so the list starts loading a
+  // beat before the click while a picker nobody approaches costs no read.
+  const [intent, setIntent] = useState(false);
+  const users = useAssignableUserList(
+    repoPath,
+    enabled && (open || intent),
+    lens,
+  );
+  const ghHost = useForgeGhHost(repoPath);
   const [draft, setDraft] = useState<Map<string, ForgeUserRef>>(new Map());
+  // Per open: the body's key (fresh filter, cursor and scroll) and the users
+  // selected at open, which keep their rows at the top until it closes.
+  const [session, setSession] = useState<{
+    key: number;
+    snapshot: ForgeUserRef[];
+  }>({ key: 0, snapshot: [] });
   const portalContainer = usePanelPortalContainer();
   // Per-toggle mode reads `value`; commit-on-close mode reads the local draft
-  // (seeded from `value` on open). Compare by the provider's stable id.
-  const checkedIds = commitOnClose
-    ? new Set(draft.keys())
-    : new Set(value.map((u) => u.id));
+  // (seeded from `value` on open). Keyed by the provider's stable id.
+  const checked = commitOnClose ? draft : new Map(value.map((u) => [u.id, u]));
+  const latchIntent = () => {
+    if (!disabledReason) setIntent(true);
+  };
 
   function toggle(user: ForgeUserRef, on: boolean) {
     if (commitOnClose) {
@@ -122,6 +146,10 @@ export function AssigneesPopover({
   function handleOpenChange(o: boolean) {
     if (o) {
       setDraft(new Map(value.map((u) => [u.id, u])));
+      setSession((prev) => ({
+        key: prev.key + 1,
+        snapshot: sortedSnapshot(value),
+      }));
       setOpen(true);
       return;
     }
@@ -139,18 +167,11 @@ export function AssigneesPopover({
     }
   }
 
-  const loaded = users.data ?? [];
-  // Tab cycles the rows: nothing else in this popup is focusable, so one-handed
-  // Tab+Space multi-select is worth its native Tab exit (Esc still closes).
-  const nav = useRovingRows({
-    items: loaded,
-    rowKey: (user) => user.id,
-    tabAdvances: true,
-  });
-
   const trigger = (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
       <Popover.Trigger
+        onPointerEnter={latchIntent}
+        onFocus={latchIntent}
         render={
           <DisabledReasonButton
             variant="ghost"
@@ -170,57 +191,21 @@ export function AssigneesPopover({
           sideOffset={4}
           className="isolate z-50"
         >
-          <Popover.Popup className="w-60 rounded-none bg-popover p-2 text-popover-foreground shadow-md ring-1 ring-foreground/10">
-            {/* Title names the popup via aria-labelledby — a bare caption leaves the
-                dialog unnamed; render keeps the <p> off Title's default <h2>. */}
-            <Popover.Title
-              render={<p />}
-              className="px-1 pb-1.5 text-xs font-medium"
-            >
-              Assignees
-            </Popover.Title>
-            {loaded.length === 0 && (
-              <p className="px-1 py-1 text-xs text-muted-foreground">
-                {emptyPickerCopy(users, {
-                  noun: "assignable users",
-                  loadFailed: "Couldn't load assignable users.",
-                  empty: "No assignable users.",
-                })}
-              </p>
-            )}
-            {/* Unstyled but NOT removable — see `useRovingRows`. */}
-            <div onKeyDown={nav.onRowKeyDown}>
-              {loaded.map((user) => (
-                <label
-                  key={user.id}
-                  className={cn(
-                    "flex cursor-pointer items-center gap-2 px-1 py-1.5 text-xs hover:bg-muted/60",
-                    nav.isActive(user) && "bg-muted/60",
-                  )}
-                >
-                  <Checkbox
-                    {...nav.rowProps(user)}
-                    checked={checkedIds.has(user.id)}
-                    onCheckedChange={(v) => toggle(user, v === true)}
-                  />
-                  <ForgeUserAvatar user={user} ghHost={ghHost} />
-                  <span className="flex-1 truncate" title={user.label}>
-                    {user.label}
-                  </span>
-                </label>
-              ))}
-            </div>
-            {/* Tab is trapped in both directions while rows exist, so the
-                remaining keyboard exit has to be on screen AND announced —
-                Description wires it as the popup's aria-describedby. */}
-            {loaded.length > 0 && (
-              <Popover.Description
-                render={<p />}
-                className="mt-1 border-t px-1 pt-1.5 text-[11px] text-muted-foreground"
-              >
-                Tab cycles the rows; Esc closes.
-              </Popover.Description>
-            )}
+          <Popover.Popup
+            className={USER_PICKER_POPUP_CLASS}
+            onFocus={redirectPopupFocus}
+          >
+            <UserPickerBody
+              key={session.key}
+              title="Assignees"
+              read={toUserPickerRead(users)}
+              copy={ASSIGNEE_COPY}
+              snapshot={session.snapshot}
+              checked={checked}
+              onToggle={toggle}
+              commitsOnClose={commitOnClose}
+              ghHost={ghHost}
+            />
           </Popover.Popup>
         </Popover.Positioner>
       </Popover.Portal>

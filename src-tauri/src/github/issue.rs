@@ -573,21 +573,60 @@ pub async fn gh_issue_create(
     })
 }
 
-/// Logins that can be assigned to issues/PRs in this repo (collaborators).
+/// Logins that can be assigned to issues/PRs in this repo (collaborators), walked up to
+/// `USER_LIST_CEILING`, with the walk's "stopped at the bound" flag.
 pub async fn gh_assignable_users(
     repo_path: String,
     lens: Option<String>,
-) -> AppResult<Vec<String>> {
+) -> AppResult<(Vec<String>, bool)> {
     // Resolve the lens slug so a fork lists the chosen repo's assignees.
     let slug = crate::github::gh_lens_slug(&repo_path, lens.as_deref()).await?;
-    let endpoint = format!("repos/{slug}/assignees");
-    let out = run_gh(
-        Some(&repo_path),
-        &["api", &endpoint, "--jq", "[.[].login]"],
+    walk_assignee_logins(|page| {
+        let endpoint = assignees_page_endpoint(&slug, page);
+        let repo_path = &repo_path;
+        async move {
+            let out = run_gh(
+                Some(repo_path),
+                &["api", &endpoint, "--jq", "[.[].login]"],
+                GH_TIMEOUT,
+            )
+            .await?;
+            Ok(out.stdout_lossy())
+        }
+    })
+    .await
+}
+
+/// The assignees walk over `fetch_stdout` (one page's `--jq` output per call), with one
+/// call's `GH_TIMEOUT` as the whole walk's budget. Logins flatten only after the walk,
+/// so a null login still counts toward its page's fullness.
+async fn walk_assignee_logins<F, Fut>(mut fetch_stdout: F) -> AppResult<(Vec<String>, bool)>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = AppResult<String>>,
+{
+    let (rows, truncated) = crate::forge::walk_numbered_pages(
+        crate::forge::USER_LIST_PAGE_SIZE,
+        crate::forge::USER_LIST_MAX_PAGES,
         GH_TIMEOUT,
+        |page| {
+            let stdout = fetch_stdout(page);
+            async move { parse_assignee_logins(&stdout.await?) }
+        },
     )
     .await?;
-    serde_json::from_str(&out.stdout_lossy()).map_err(|e| {
+    Ok((rows.into_iter().flatten().collect(), truncated))
+}
+
+fn assignees_page_endpoint(slug: &str, page: usize) -> String {
+    let per_page = crate::forge::USER_LIST_PAGE_SIZE;
+    format!("repos/{slug}/assignees?per_page={per_page}&page={page}")
+}
+
+/// One assignees page. A null login keeps its slot so the walk counts raw rows: a full
+/// page with one bad row must not read as the last page.
+fn parse_assignee_logins(stdout: &str) -> AppResult<Vec<Option<String>>> {
+    serde_json::from_str(stdout).map_err(|e| {
         gh_unreadable(
             "the assignable users",
             format!("could not parse assignable users: {e}"),
@@ -1624,6 +1663,49 @@ mod tests {
     };
     use crate::error::AppError;
     use crate::github::test_support::{gh_output, HELD_REST_STDERR};
+
+    #[test]
+    fn forge_user_list_assignees_endpoint_carries_page_size_and_page() {
+        let endpoint = super::assignees_page_endpoint("o/r", 3);
+        assert_eq!(endpoint, "repos/o/r/assignees?per_page=100&page=3");
+        assert!(endpoint.ends_with(&format!(
+            "/assignees?per_page={}&page=3",
+            crate::forge::USER_LIST_PAGE_SIZE
+        )));
+    }
+
+    #[test]
+    fn forge_user_list_assignee_page_keeps_null_logins_in_the_row_count() {
+        let rows = super::parse_assignee_logins(r#"["a",null,"b"]"#).expect("parses");
+        assert_eq!(rows, [Some("a".to_string()), None, Some("b".to_string())]);
+        let empty = super::parse_assignee_logins("[]").expect("parses");
+        assert!(empty.is_empty());
+        assert!(super::parse_assignee_logins("not json").is_err());
+    }
+
+    /// Walks canned `--jq` pages of `sizes[n]` logins, the first row of each a null.
+    async fn walk_canned_logins(sizes: &[usize]) -> (Vec<String>, bool) {
+        super::walk_assignee_logins(|page| {
+            let rows = sizes.get(page - 1).copied().unwrap_or(0);
+            let logins: Vec<Option<String>> = (0..rows)
+                .map(|i| (i > 0).then(|| format!("p{page}u{i}")))
+                .collect();
+            async move { Ok(serde_json::to_string(&logins).expect("serializes")) }
+        })
+        .await
+        .expect("walks")
+    }
+
+    #[tokio::test]
+    async fn forge_user_list_github_walk_carries_its_flag_to_the_logins() {
+        let (logins, truncated) = walk_canned_logins(&[100; 12]).await;
+        assert_eq!((logins.len(), truncated), (990, true));
+
+        // A null login keeps its page full, so the walk reads on to the short page.
+        let (logins, truncated) = walk_canned_logins(&[100, 3]).await;
+        assert_eq!((logins.len(), truncated), (101, false));
+    }
+
     #[test]
     fn issue_lock_missing_locked_field_leaves_state_unknown() {
         for body in ["{}", r#"{"message":"x"}"#] {

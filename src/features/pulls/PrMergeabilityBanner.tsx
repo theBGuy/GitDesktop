@@ -1,4 +1,5 @@
 import {
+  ArrowClockwiseIcon,
   CaretDownIcon,
   CheckCircleIcon,
   ClockIcon,
@@ -7,7 +8,7 @@ import {
   SparkleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import type { ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { PathText } from "@/components/path-text";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Spinner } from "@/components/ui/spinner";
+import { useRetryFocusRescue } from "@/features/conversations/ConversationListPanel";
 import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { clipTitleFromText } from "@/lib/clip-title";
 import {
@@ -163,18 +165,147 @@ export type PrMergeabilityArm =
   | "blocked"
   | null;
 
+/** Which line a LOCAL pull request's strip shows; `null` (no line) for a closed or merged one.
+ *  `failed` is a prediction read that errored (a retry can help); `unchecked` is a settled
+ *  answer that cannot be a prediction (asking again returns the same). */
+export type LocalMergeStripArm =
+  | "checking"
+  | "clean"
+  | "behind"
+  | "promotion-gap"
+  | "conflicted"
+  | "resume"
+  | "updating"
+  | "failed"
+  | "unchecked"
+  | null;
+
 /** What makes a pull request a promotion — its head is this repository's default
  *  branch, or a branch the repo's rules name as a promotion branch. `null` for an
  *  ordinary pull request. */
 export type PromotionKind = "default" | "configured" | null;
 
 /** The clause naming why the head is a promotion — the only words that differ
- *  between the two kinds, so the rest of the sentence can't drift apart. Shared
- *  with LocalPrView's inline note for the same reason. */
-export const PROMOTION_REASON: Record<Exclude<PromotionKind, null>, string> = {
+ *  between the two kinds, so the rest of the sentence can't drift apart. The remote
+ *  banner and the local strip both read it through the one behind sentence. */
+const PROMOTION_REASON: Record<Exclude<PromotionKind, null>, string> = {
   default: " is the repository's default branch",
   configured: " is a promotion branch for this repository",
 };
+
+/** Why an update holds while the default-branch read the promotion check needs
+ *  is still loading. Shared by the remote banner and LocalPrView. */
+export const AWAITING_DEFAULT_BRANCH_REASON =
+  "Checking which branch is the default…";
+
+/** The same hold while the branch rules that name promotion branches load. */
+export const AWAITING_PROMOTION_RULES_REASON =
+  "Checking this repository's promotion branches…";
+
+/** The pending line, and the reason a busy Retry holds with: one wording. */
+const CHECKING_MESSAGE = "Checking for conflicts…";
+
+/** Both strips' root, line and action-box classes, so the local strip can't
+ *  drift from the remote one. */
+const STRIP_ROOT_CLASS =
+  "flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs";
+const STRIP_LINE_CLASS =
+  "flex min-h-6 min-w-0 flex-1 basis-0 items-center gap-1.5";
+const STRIP_ACTIONS_CLASS = "flex shrink-0 items-center gap-1.5";
+
+/** "Update branch" doesn't say which way the commits travel; its tooltip does, and
+ *  so does a local resolve's advance notice. */
+export function updateOperation(base: string, head: string): string {
+  return `Merges ${base} into ${head}`;
+}
+
+function cleanSentence(base: string): ReactNode {
+  return (
+    <>
+      {"No conflicts with "}
+      <span className="font-mono">{base}</span>
+      {"."}
+    </>
+  );
+}
+
+/** A promotion pull request (main → staging) is permanently behind its base by
+ *  design, and "update the branch" would merge the base back into the head, so
+ *  its line says which way the work goes instead. The gap does NOT close on merge
+ *  (merging the head into the base ADDS a commit the head lacks), so the copy
+ *  says it needs no closing. A configured head is no claim about the default
+ *  branch: only the reason clause differs between the two kinds. */
+function behindSentence({
+  base,
+  head,
+  behindBy,
+  promotionKind,
+}: {
+  base: string;
+  head: string;
+  behindBy: number;
+  promotionKind: PromotionKind;
+}): ReactNode {
+  return promotionKind !== null ? (
+    <>
+      <span className="font-mono">{base}</span>
+      {` has ${behindBy} commit${behindBy === 1 ? "" : "s"} that `}
+      <span className="font-mono">{head}</span>
+      {" doesn't. "}
+      <span className="font-mono">{head}</span>
+      {PROMOTION_REASON[promotionKind]}
+      {
+        ", so this gap is expected and doesn't need closing. Updating the branch would merge "
+      }
+      <span className="font-mono">{base}</span>
+      {" back into "}
+      <span className="font-mono">{head}</span>
+      {"."}
+    </>
+  ) : (
+    <>
+      {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
+      <span className="font-mono">{base}</span>
+      {"."}
+    </>
+  );
+}
+
+/** One path per row under the sentence, capped so a wide conflict can't run the
+ *  strip down the pane. `basis-full` puts the list on its own line without pushing
+ *  the actions out of the first row; `pl-5` clears the sentence's icon (size-3.5 +
+ *  gap-1.5). Renders nothing for an empty list. `nameCount` names the count row
+ *  by its visible text, since a listitem's name otherwise falls back to the
+ *  tooltip's whole path list (the local strip sets it). */
+function ConflictFileList({
+  files,
+  nameCount = false,
+}: {
+  files: string[];
+  nameCount?: boolean;
+}) {
+  if (files.length === 0) return null;
+  const shown = files.slice(0, MAX_FILE_ROWS);
+  const extra = files.length - shown.length;
+  const countText = `and ${extra} more`;
+  return (
+    <ul className="basis-full pl-5 text-muted-foreground">
+      {shown.map((path) => (
+        <li key={path}>
+          <PathText path={path} className="font-mono" />
+        </li>
+      ))}
+      {extra > 0 && (
+        <li
+          title={files.join("\n")}
+          aria-label={nameCount ? countText : undefined}
+        >
+          {countText}
+        </li>
+      )}
+    </ul>
+  );
+}
 
 /** The host at a sentence's start when nothing names it yet. */
 const UNKNOWN_HOST_LEAD = "The host";
@@ -224,14 +355,8 @@ const ARM_MESSAGE: Record<
   pending: ({ pendingOffline }) =>
     pendingOffline
       ? offlinePendingMessage("the conflict check")
-      : "Checking for conflicts…",
-  clean: ({ base }) => (
-    <>
-      {"No conflicts with "}
-      <span className="font-mono">{base}</span>
-      {"."}
-    </>
-  ),
+      : CHECKING_MESSAGE,
+  clean: ({ base }) => cleanSentence(base),
   // Neither the forge nor the local prediction has an answer to give: a fork's head
   // can't be predicted from our remote, and Bitbucket reports no mergeability.
   unchecked: ({ base, provider }) => (
@@ -315,36 +440,7 @@ const ARM_MESSAGE: Record<
       ) : null}
     </>
   ),
-  // A promotion pull request (main → staging) is permanently behind its base by
-  // design, and "update the branch" would merge the base back into the head. Say
-  // which direction the work is going instead of implying a catch-up. The gap does
-  // NOT close on merge — merging the head into the base ADDS a commit the head
-  // lacks — so the copy says it needs no closing. Only the reason clause differs
-  // between the two kinds; a configured head is no claim about the default branch.
-  behind: ({ base, head, behindBy, promotionKind }) =>
-    promotionKind !== null ? (
-      <>
-        <span className="font-mono">{base}</span>
-        {` has ${behindBy} commit${behindBy === 1 ? "" : "s"} that `}
-        <span className="font-mono">{head}</span>
-        {" doesn't. "}
-        <span className="font-mono">{head}</span>
-        {PROMOTION_REASON[promotionKind]}
-        {
-          ", so this gap is expected and doesn't need closing. Updating the branch would merge "
-        }
-        <span className="font-mono">{base}</span>
-        {" back into "}
-        <span className="font-mono">{head}</span>
-        {"."}
-      </>
-    ) : (
-      <>
-        {`This branch is ${behindBy} commit${behindBy === 1 ? "" : "s"} behind `}
-        <span className="font-mono">{base}</span>
-        {"."}
-      </>
-    ),
+  behind: (ctx) => behindSentence(ctx),
 };
 
 /**
@@ -470,23 +566,6 @@ export function PrMergeabilityBanner({
   // The AI walk gets its file list from the merge outcome, not this prediction, so it
   // stays offered even when the preview couldn't name the files.
   const canResolveWithAi = aiEnabled && reviewConfigured;
-  // One path per row under the sentence, capped so a wide conflict can't run the strip
-  // down the pane. `basis-full` puts the list on its own line without pushing the
-  // actions out of the first row; `pl-5` clears the sentence's icon (size-3.5 + gap-1.5).
-  const shownFiles = conflictFiles.slice(0, MAX_FILE_ROWS);
-  const extraFiles = conflictFiles.length - shownFiles.length;
-  const fileList = conflictFiles.length > 0 && (
-    <ul className="basis-full pl-5 text-muted-foreground">
-      {shownFiles.map((path) => (
-        <li key={path}>
-          <PathText path={path} className="font-mono" />
-        </li>
-      ))}
-      {extraFiles > 0 && (
-        <li title={conflictFiles.join("\n")}>and {extraFiles} more</li>
-      )}
-    </ul>
-  );
   const Icon = ARM_ICON[arm];
   const updateDisabled =
     updateBusy ||
@@ -503,31 +582,29 @@ export function PrMergeabilityBanner({
       case updateSubmitting:
         return "Submitting the update…";
       case updateAwaitingDefault:
-        return "Checking which branch is the default…";
+        return AWAITING_DEFAULT_BRANCH_REASON;
       case updateAwaitingRules:
-        return "Checking this repository's promotion branches…";
+        return AWAITING_PROMOTION_RULES_REASON;
       default:
         return PR_SWITCH_LOADING_REASON;
     }
   })();
   const updateDisabledReason =
     updateBlockedReason ?? (updateBusy ? updateBusyReason : updateHeldReason);
-  // "Update branch" doesn't say which way the commits travel; the tooltip does.
-  // The caret gets its own wording rather than this one — its menu holds the
-  // REBASE variant, which rewrites rather than merges (and names that in its own
+  // The caret gets its own wording rather than the button's tooltip: its menu holds
+  // the REBASE variant, which rewrites rather than merges (and names that in its own
   // confirm), so borrowing the button's label there would misdescribe it.
-  const updateOperation = `Merges ${base} into ${head}`;
   const updateOptionsLabel = "Other ways to update this branch";
 
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b px-3 py-1.5 text-xs">
+    <div className={STRIP_ROOT_CLASS}>
       {/* Every arm's first line is ONE line of one height (`min-h-6` matches a row
           of xs buttons): the sentence takes the room left by its actions
           (`basis-0`, so they never wrap under it) and truncates, titled only
           when clipped. Swapping arms never moves what sits below the strip. */}
       <span
         className={cn(
-          "flex min-h-6 min-w-0 flex-1 basis-0 items-center gap-1.5",
+          STRIP_LINE_CLASS,
           conflicting ? "text-warning" : "text-muted-foreground",
         )}
       >
@@ -552,7 +629,7 @@ export function PrMergeabilityBanner({
       </span>
 
       {(conflicting || arm === "resume") && (
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className={STRIP_ACTIONS_CLASS}>
           {/* Only where a read FAILED — a forge with no mergeability to give (Bitbucket)
               answers without an HTTP call, so a Retry there would be a dead button.
               First in the row: the real answer outranks acting on a prediction. */}
@@ -610,13 +687,13 @@ export function PrMergeabilityBanner({
         arm === "updating" ||
         (arm === "blocked" && behindBy > 0)) &&
         promotionKind === null && (
-          <div className="flex shrink-0 items-center gap-1.5">
+          <div className={STRIP_ACTIONS_CLASS}>
             <DisabledReasonButton
               variant="ghost"
               size="xs"
               disabled={updateDisabled}
               reason={updateDisabledReason}
-              title={updateOperation}
+              title={updateOperation(base, head)}
               onClick={onUpdateBranch}
             >
               {/* The `updating` arm already spins in the sentence — one progress mark
@@ -654,7 +731,7 @@ export function PrMergeabilityBanner({
         )}
 
       {(arm === "unknown" || arm === "unreachable") && (
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className={STRIP_ACTIONS_CLASS}>
           <Button
             variant="ghost"
             size="xs"
@@ -668,7 +745,376 @@ export function PrMergeabilityBanner({
 
       {/* Last child so it wraps onto its own full-width row beneath the sentence and
           actions, rather than competing with them for the first row. */}
-      {conflicting && fileList}
+      {conflicting && <ConflictFileList files={conflictFiles} />}
+    </div>
+  );
+}
+
+/** What a caller supplies to offer resolving a local PR's conflicts from the strip.
+ *  `null` means nothing offers it: the conflicted state then names the
+ *  Approve-then-Merge route and renders no action. */
+export interface LocalStripResolve {
+  /** An unfinished resolve exists for this PR: the strip shows that state, with
+   *  Discard and Continue resolving acting on it. */
+  unfinished: boolean;
+  /** The start call is in flight: the action reads "Preparing…" with a spinner. */
+  preparing: boolean;
+  /** Why Resolve conflicts, Continue resolving and Discard hold; undefined = enabled.
+   *  While `unfinished` it never carries a reason that only blocks a START (a dirty
+   *  tree on the checked-out branch): that would hold Discard and Continue too. */
+  heldReason: string | undefined;
+  /** Start a resolve (conflicted state) or reopen the unfinished one (resume state). */
+  onResolve: () => void;
+  /** Discard the unfinished resolve; only called from the resume state. */
+  onDiscard: () => void;
+  /** Advance notice for the START action only: the Resolve button's `title`, and its
+   *  description for assistive tech, while that button is enabled. Undefined = none.
+   *  Never shown on the resume arm. */
+  note?: string;
+}
+
+/** The local strip's icons, picked from the remote banner's so the two can't drift. */
+const LOCAL_ARM_ICON: Record<
+  Exclude<LocalMergeStripArm, null>,
+  PhosphorIcon | typeof Spinner
+> = {
+  checking: ARM_ICON.pending,
+  clean: ARM_ICON.clean,
+  behind: ARM_ICON.behind,
+  "promotion-gap": ARM_ICON.behind,
+  conflicted: ARM_ICON.predicted,
+  resume: ARM_ICON.resume,
+  updating: ARM_ICON.updating,
+  failed: ARM_ICON.unchecked,
+  unchecked: ARM_ICON.unchecked,
+};
+
+/** A starting resolve's label and its hold reason: one wording. */
+const PREPARING_LABEL = "Preparing…";
+
+/** The arms whose line carries an Update branch when the caller offers one. */
+const LOCAL_UPDATE_ARMS: ReadonlySet<LocalMergeStripArm> = new Set([
+  "behind",
+  "updating",
+  "failed",
+  "unchecked",
+]);
+
+type LocalArmContext = {
+  base: string;
+  head: string;
+  behindBy: number;
+  promotionKind: PromotionKind;
+  approved: boolean;
+  offerUpdate: boolean;
+  offerResolve: boolean;
+};
+
+/** The behind clause a failed or impossible check appends, so the Update branch
+ *  beside it is explained. */
+function trailingBehind({
+  base,
+  head,
+  behindBy,
+  offerUpdate,
+}: LocalArmContext): ReactNode {
+  if (!offerUpdate) return null;
+  return <> {behindSentence({ base, head, behindBy, promotionKind: null })}</>;
+}
+
+/** The check lines' subject; a record naming no base names no branch. */
+function conflictsWith(base: string): ReactNode {
+  if (base === "") return "Conflicts";
+  return (
+    <>
+      {"Conflicts with "}
+      <span className="font-mono">{base}</span>
+    </>
+  );
+}
+
+/** The line each local arm says. Local copy names no host and no fetch: both reads
+ *  are local git, and every step it names is reachable from the state it shows. */
+const LOCAL_ARM_MESSAGE: Record<
+  Exclude<LocalMergeStripArm, null>,
+  (ctx: LocalArmContext) => ReactNode
+> = {
+  checking: () => CHECKING_MESSAGE,
+  clean: ({ base }) => cleanSentence(base),
+  behind: ({ base, head, behindBy }) =>
+    behindSentence({ base, head, behindBy, promotionKind: null }),
+  "promotion-gap": ({ base, head, behindBy, promotionKind }) =>
+    behindSentence({ base, head, behindBy, promotionKind }),
+  // Without an offered resolve, a merge is what lands the conflicts in the editor,
+  // and Merge needs an approval first; an approved PR's line drops that step, since
+  // its Approve control would WITHDRAW the approval.
+  conflicted: ({ base, approved, offerResolve }) => (
+    <>
+      {"Merging into "}
+      <span className="font-mono">{base}</span>
+      {" will conflict."}
+      {(() => {
+        switch (true) {
+          case offerResolve:
+            return null;
+          case approved:
+            return " Merge to resolve the conflicts.";
+          default:
+            return " Approve, then Merge to resolve the conflicts.";
+        }
+      })()}
+    </>
+  ),
+  resume: () => "An unfinished conflict resolution exists for this PR.",
+  updating: ({ base, head }) => (
+    <>
+      {"Updating "}
+      <span className="font-mono">{head}</span>
+      {" from "}
+      <span className="font-mono">{base}</span>
+      {"…"}
+    </>
+  ),
+  failed: (ctx) => (
+    <>
+      {conflictsWith(ctx.base)}
+      {" can't be checked right now."}
+      {trailingBehind(ctx)}
+    </>
+  ),
+  // "unknown" has three producers, so no Retry: git older than 2.38 (no
+  // `merge-tree --write-tree`), a base or head that no longer resolves, and an
+  // empty merge-tree answer; a record naming no base or head never runs a check.
+  unchecked: (ctx) => (
+    <>
+      {conflictsWith(ctx.base)}
+      {" can't be checked."}
+      {trailingBehind(ctx)}
+    </>
+  ),
+};
+
+/**
+ * The LOCAL pull request's merge strip, the sibling of `PrMergeabilityBanner`: the
+ * same root, line, icons and sentences, one state at a time, under the header.
+ * Props only; `localMergeStripArm` picks the arm. Its children are FIXED-POSITION
+ * conditional siblings (line, Retry box, actions box, file list), so a button that
+ * stays across an arm change keeps its DOM node and focus; a box that leaves under
+ * focus hands it to the root. No live region: one instance is reused across PRs, so
+ * a polite region would announce every switch.
+ */
+export function LocalPrMergeStrip({
+  arm,
+  base,
+  head,
+  promotionKind,
+  behindBy,
+  conflictFiles,
+  approved,
+  offerUpdate,
+  offerResolve,
+  updateHeldReason,
+  promotionSettlingReason,
+  onUpdateBranch,
+  onRetry,
+  retryBusy,
+  resolve,
+}: {
+  arm: LocalMergeStripArm;
+  base: string;
+  head: string;
+  promotionKind: PromotionKind;
+  /** Commits the base is ahead of the head; 0 when unknown. */
+  behindBy: number;
+  /** Predicted conflicting paths; may be empty on a conflict. */
+  conflictFiles: string[];
+  /** The PR is approved: the not-offered conflict line drops its "Approve" step. */
+  approved: boolean;
+  offerUpdate: boolean;
+  offerResolve: boolean;
+  /** Why Update branch holds; undefined = enabled. */
+  updateHeldReason: string | undefined;
+  /** The promotion inputs are still loading: holds a resolve START with this reason. */
+  promotionSettlingReason: string | undefined;
+  onUpdateBranch: () => void;
+  onRetry: () => void;
+  /** The conflict preview is fetching. */
+  retryBusy: boolean;
+  resolve: LocalStripResolve | null;
+}): ReactNode {
+  const showResolve = arm === "conflicted" && offerResolve && resolve !== null;
+  const showResume = arm === "resume" && resolve !== null;
+  const showUpdate = offerUpdate && LOCAL_UPDATE_ARMS.has(arm);
+  const otherActionsShown = showResolve || showResume || showUpdate;
+  // Two rescues, one per box that can leave under focus; both land on the root,
+  // whose sentence is the new state.
+  const { hostRef: retryHostRef, retryRef } = useRetryFocusRescue(
+    arm === "failed",
+  );
+  const { hostRef: actionsHostRef, retryRef: actionsRef } =
+    useRetryFocusRescue(otherActionsShown);
+  const messageId = useId();
+  const noteId = useId();
+
+  if (arm === null) return null;
+
+  const Icon = LOCAL_ARM_ICON[arm];
+  const conflicted = arm === "conflicted";
+  // The long lines wrap rather than truncate: a clipped "Approve, then Merge…"
+  // would hide the very step the line exists to name, and a clipped "Conflicts
+  // with…" would read as a predicted conflict.
+  const wraps =
+    arm === "promotion-gap" ||
+    arm === "failed" ||
+    arm === "unchecked" ||
+    (conflicted && !offerResolve);
+  const message = LOCAL_ARM_MESSAGE[arm]({
+    base,
+    head,
+    behindBy,
+    promotionKind,
+    approved,
+    offerUpdate,
+    offerResolve,
+  });
+  const tone = conflicted ? "text-warning" : "text-muted-foreground";
+  const preparing = resolve?.preparing === true;
+  const resumeHeldReason = resolve?.heldReason;
+  // Resolve's START also waits on the promotion inputs; Continue and Discard act on
+  // a resolve that already exists, so only the caller's reason holds them.
+  const resolveStartHeld =
+    preparing ||
+    resumeHeldReason !== undefined ||
+    promotionSettlingReason !== undefined;
+  const resolveStartReason =
+    resumeHeldReason ?? (preparing ? PREPARING_LABEL : promotionSettlingReason);
+  // A held start shows its reason, never the notice.
+  const note =
+    showResolve && !showResume && !resolveStartHeld ? resolve?.note : undefined;
+  const resolveLabel = (() => {
+    switch (true) {
+      case showResume:
+        return "Continue resolving";
+      case preparing:
+        // The label carries the state; an unhidden spinner would name the button
+        // "Loading Preparing…".
+        return (
+          <>
+            <Spinner aria-hidden data-icon="inline-start" />
+            {PREPARING_LABEL}
+          </>
+        );
+      default:
+        return "Resolve conflicts";
+    }
+  })();
+
+  return (
+    <div
+      ref={(node) => {
+        retryHostRef(node);
+        actionsHostRef(node);
+      }}
+      // Named by its sentence, so it reads without focus; no live region, since
+      // one reused strip would re-announce on every PR switch.
+      role="group"
+      aria-labelledby={messageId}
+      tabIndex={-1}
+      className={cn(STRIP_ROOT_CLASS, "outline-none")}
+    >
+      {/* Distinct keys: `clipTitleFromText` sets `title` outside React, so a
+          reused text node would carry a stale tooltip into a wrapping arm. */}
+      {wraps ? (
+        // The first text line sits where a single-line arm's does: `py-1` centres
+        // a 16px line in the `min-h-6` row, and `mt-px` the 14px icon beside it.
+        <span
+          key="wrap"
+          className={cn(STRIP_LINE_CLASS, "items-start py-1", tone)}
+        >
+          <Icon aria-hidden className="mt-px size-3.5 shrink-0" />
+          <span id={messageId} className="min-w-0">
+            {message}
+          </span>
+        </span>
+      ) : (
+        <span key="line" className={cn(STRIP_LINE_CLASS, tone)}>
+          <Icon aria-hidden className="size-3.5 shrink-0" />
+          <span
+            id={messageId}
+            className="min-w-0 truncate"
+            onMouseEnter={clipTitleFromText}
+          >
+            {message}
+          </span>
+        </span>
+      )}
+
+      {arm === "failed" && (
+        <div ref={retryRef} className={STRIP_ACTIONS_CLASS}>
+          <DisabledReasonButton
+            variant="ghost"
+            size="xs"
+            disabled={retryBusy}
+            reason={CHECKING_MESSAGE}
+            onClick={onRetry}
+          >
+            Retry
+          </DisabledReasonButton>
+        </div>
+      )}
+
+      {otherActionsShown && (
+        <div ref={actionsRef} className={STRIP_ACTIONS_CLASS}>
+          {showResume && (
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              disabled={resumeHeldReason !== undefined}
+              reason={resumeHeldReason}
+              onClick={resolve?.onDiscard}
+            >
+              Discard
+            </DisabledReasonButton>
+          )}
+          {(showResolve || showResume) && (
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              disabled={
+                showResume ? resumeHeldReason !== undefined : resolveStartHeld
+              }
+              reason={showResume ? resumeHeldReason : resolveStartReason}
+              title={note}
+              aria-describedby={note === undefined ? undefined : noteId}
+              onClick={resolve?.onResolve}
+            >
+              {resolveLabel}
+            </DisabledReasonButton>
+          )}
+          {showUpdate && (
+            <DisabledReasonButton
+              variant="ghost"
+              size="xs"
+              disabled={updateHeldReason !== undefined}
+              reason={updateHeldReason}
+              title={updateOperation(base, head)}
+              onClick={onUpdateBranch}
+            >
+              <ArrowClockwiseIcon data-icon="inline-start" />
+              Update branch
+            </DisabledReasonButton>
+          )}
+          {/* Last, so no button moves when the notice comes and goes. */}
+          {note !== undefined && (
+            <span id={noteId} className="sr-only">
+              {note}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Last child so it wraps onto its own full-width row beneath the line. */}
+      {conflicted && <ConflictFileList files={conflictFiles} nameCount />}
     </div>
   );
 }

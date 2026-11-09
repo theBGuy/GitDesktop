@@ -1,12 +1,30 @@
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
+import { cn } from "@/lib/utils";
 import type { ConversationFeature } from "./useCollapsedSections";
 import type { ConversationPreset } from "./useRemoteListFilter";
+
+/** The scope row's compact arm (ConversationListPanel): tighter padding, and a
+ *  segment's `shortLabel` shown in place of its label, which stays sr-only so
+ *  the button's name never changes. Spelled out again in RepoLensSwitcher on
+ *  purpose: Tailwind only generates from complete literals, and both
+ *  COMPACT_PAD copies must stay identical. */
+const COMPACT_PAD =
+  "@max-[316px]/gd-prhead:group-has-data-[slot=lens-switch]/scope:px-1";
+const FULL_LABEL =
+  "@max-[316px]/gd-prhead:group-has-data-[slot=lens-switch]/scope:sr-only";
+const SHORT_LABEL =
+  "hidden @max-[316px]/gd-prhead:group-has-data-[slot=lens-switch]/scope:inline";
 
 /** The segments each panel offers, with the semantics on the `title` so the
  *  one-word labels never have to carry them alone. */
 const SEGMENTS: Record<
   ConversationFeature,
-  { value: ConversationPreset; label: string; title: string }[]
+  {
+    value: ConversationPreset;
+    label: string;
+    title: string;
+    shortLabel?: string;
+  }[]
 > = {
   pulls: [
     { value: "all", label: "All", title: "Show every pull request" },
@@ -18,6 +36,7 @@ const SEGMENTS: Record<
     {
       value: "needs-review",
       label: "Needs review",
+      shortLabel: "Review",
       title: "Assigned or review-requested, grouped by your review",
     },
   ],
@@ -96,14 +115,23 @@ export function ConversationPresetSwitcher({
           key={s.value}
           variant={pressed === s.value ? "secondary" : "ghost"}
           size="xs"
-          className="px-1.5"
+          className={cn("px-1.5", COMPACT_PAD, s.shortLabel && "relative")}
           aria-pressed={pressed === s.value}
           title={s.title}
           disabled={!!heldReason}
           reason={heldReason}
           onClick={() => onPreset(s.value)}
         >
-          {s.label}
+          {s.shortLabel ? (
+            <>
+              <span className={FULL_LABEL}>{s.label}</span>
+              <span aria-hidden className={SHORT_LABEL}>
+                {s.shortLabel}
+              </span>
+            </>
+          ) : (
+            s.label
+          )}
         </DisabledReasonButton>
       ))}
     </div>

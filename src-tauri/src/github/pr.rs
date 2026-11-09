@@ -6127,17 +6127,24 @@ pub async fn reviewer_candidates(
     repo_path: &str,
     number: Option<u64>,
     lens: Option<&str>,
-) -> AppResult<Vec<crate::forge::model::ForgeUserRef>> {
-    let logins =
+) -> AppResult<crate::forge::model::ForgeUserList> {
+    let (logins, truncated) =
         crate::github::issue::gh_assignable_users(repo_path.to_string(), lens.map(str::to_string))
             .await?;
     let exclude = match number {
         Some(n) => pr_author_login(repo_path, n, lens).await.unwrap_or_default(),
         None => current_login(repo_path).await.unwrap_or_default(),
     };
-    let mut out: Vec<crate::forge::model::ForgeUserRef> = logins
+    Ok(reviewer_list_from(logins, &exclude, truncated))
+}
+
+fn reviewer_list_from(
+    logins: Vec<String>,
+    exclude: &str,
+    truncated: bool,
+) -> crate::forge::model::ForgeUserList {
+    let refs = logins
         .into_iter()
-        .filter(|l| !l.is_empty() && *l != exclude)
         .map(|l| crate::forge::model::ForgeUserRef {
             id: l.clone(),
             label: l,
@@ -6146,8 +6153,12 @@ pub async fn reviewer_candidates(
             is_bot: false,
         })
         .collect();
-    out.sort_by_key(|a| a.label.to_lowercase());
-    Ok(out)
+    crate::forge::model::ForgeUserList::build(
+        refs,
+        exclude,
+        truncated,
+        crate::forge::USER_LIST_CEILING,
+    )
 }
 
 const PR_REACTIONS_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ reactionGroups{ content viewerHasReacted reactors{ totalCount } } comments(first:100){ nodes{ id reactionGroups{ content viewerHasReacted reactors{ totalCount } } } } } } }";
@@ -8231,6 +8242,18 @@ mod tests {
     use crate::github::test_support::{
         gh_output, ANSWERED_STDERR, HELD_REST_STDERR, NOT_FOUND_STDERR,
     };
+
+    #[test]
+    fn forge_user_list_github_reviewers_drop_the_excluded_login() {
+        let list = super::reviewer_list_from(vec!["me".into(), "amy".into()], "me", false);
+        let ids: Vec<&str> = list.users.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, ["amy"]);
+        assert_eq!(list.ceiling, crate::forge::USER_LIST_CEILING);
+        // An unresolved author (empty exclude) drops nobody, as before.
+        let kept = super::reviewer_list_from(vec!["me".into()], "", true);
+        assert_eq!(kept.users.len(), 1);
+    }
+
     #[test]
     fn graphql_reset_requires_current_bounded_exhaustion() {
         let now = 1_800_000_000;

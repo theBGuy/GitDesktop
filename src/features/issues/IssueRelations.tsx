@@ -6,7 +6,7 @@ import {
   PlusIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { type Ref, useState } from "react";
+import { type Ref, useEffect, useState } from "react";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,6 +30,7 @@ import {
   offlinePendingMessage,
   refreshFailed,
 } from "@/features/conversations/remote-section-state";
+import { clipTitleFromText } from "@/lib/clip-title";
 import {
   pendingIssueWrite,
   useAddSubIssue,
@@ -51,6 +52,7 @@ import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { CreateIssueDialog } from "./CreateIssueDialog";
+import { issuePickerStatus } from "./issue-picker-status";
 
 /** Open/closed glyph for a related issue, so state isn't conveyed by text alone. */
 export function StateIcon({ state }: { state: string }) {
@@ -278,37 +280,67 @@ export function IssuePicker({
       return !exclude.has(i.number);
     },
   );
+  const status = issuePickerStatus([open, closed], candidates.length);
+  // The region mounts empty and takes its text an effect later: a live region
+  // inserted together with its text (a cached failure at open) isn't announced.
+  const partial = status.partial ?? "";
+  const [announced, setAnnounced] = useState("");
+  useEffect(() => setAnnounced(partial), [partial]);
   return (
-    <Combobox
-      items={candidates}
-      itemToStringLabel={(i: IssueInfo) => `#${i.number} ${i.title}`}
-      value={null}
-      // The input disables while pending, but a popup already open could still
-      // pick; a held pick would start a second write.
-      onValueChange={(item: IssueInfo | null) =>
-        item && !pending && onPick(item.number)
-      }
-      openOnInputClick
-    >
-      <ComboboxInput
-        autoFocus
-        className="w-full"
-        placeholder="Search issues by # or title"
-        disabled={pending}
-      />
-      <ComboboxContent>
-        <ComboboxEmpty>No matching issues.</ComboboxEmpty>
-        <ComboboxList>
-          {(item: IssueInfo) => (
-            <ComboboxItem key={item.number} value={item}>
-              <StateIcon state={item.state} />
-              <span className="text-muted-foreground">#{item.number}</span>
-              <span className="truncate">{item.title}</span>
-            </ComboboxItem>
+    <>
+      <Combobox
+        items={candidates}
+        itemToStringLabel={(i: IssueInfo) => `#${i.number} ${i.title}`}
+        value={null}
+        // The input disables while pending, but a popup already open could still
+        // pick; a held pick would start a second write.
+        onValueChange={(item: IssueInfo | null) =>
+          item && !pending && onPick(item.number)
+        }
+        openOnInputClick
+      >
+        <ComboboxInput
+          autoFocus
+          className="w-full"
+          placeholder="Search issues by # or title"
+          disabled={pending}
+        />
+        <ComboboxContent>
+          {status.partial && (
+            <p
+              aria-hidden="true"
+              className="px-2 py-1.5 text-[11px] text-muted-foreground"
+            >
+              {status.partial}
+            </p>
           )}
-        </ComboboxList>
-      </ComboboxContent>
-    </Combobox>
+          <ComboboxEmpty>{status.empty}</ComboboxEmpty>
+          <ComboboxList>
+            {(item: IssueInfo) => (
+              <ComboboxItem key={item.number} value={item}>
+                <StateIcon state={item.state} />
+                <span className="shrink-0 text-muted-foreground">
+                  #{item.number}
+                </span>
+                <span className="truncate" onMouseEnter={clipTitleFromText}>
+                  {item.title}
+                </span>
+              </ComboboxItem>
+            )}
+          </ComboboxList>
+        </ComboboxContent>
+      </Combobox>
+      {/* Mounted before the partial line arrives and outside the listbox, so
+          the change is announced. */}
+      <span
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+      >
+        {announced}
+      </span>
+    </>
   );
 }
 

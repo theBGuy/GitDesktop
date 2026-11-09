@@ -5,6 +5,7 @@ import {
 } from "@phosphor-icons/react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Fragment, type ReactNode, useState } from "react";
+import { DetailTitleRow } from "@/components/detail-title-row";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { HeldSwitch } from "@/components/held-switch";
 import { Button } from "@/components/ui/button";
@@ -1142,9 +1143,10 @@ export function IssueLoadingFrame({
       {/* The loaded header's rows, class for class: the title row wraps
           around the same actions, and the meta row is its avatar's 24px. */}
       <header className="space-y-2 border-b px-4 py-3">
-        <div className="flex flex-wrap items-start gap-2">
-          <div className="min-w-0 flex-auto text-sm font-medium break-words">
-            {title === undefined ? (
+        <DetailTitleRow
+          headingAs="div"
+          heading={
+            title === undefined ? (
               <Skeleton
                 aria-hidden
                 className="inline-block h-4 w-80 max-w-full align-middle"
@@ -1156,10 +1158,11 @@ export function IssueLoadingFrame({
                   #{number}
                 </span>
               </>
-            )}
-          </div>
+            )
+          }
+        >
           {actions}
-        </div>
+        </DetailTitleRow>
         <div aria-hidden className="flex flex-wrap items-center gap-2">
           <Skeleton className="h-5 w-12" />
           <Skeleton className="size-6 rounded-full" />

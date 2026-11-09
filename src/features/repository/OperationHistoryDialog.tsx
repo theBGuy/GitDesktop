@@ -38,6 +38,7 @@ const OP_META: Record<string, { name: string; Icon: IconType }> = {
   rewrite_commits: { name: "Edit history", Icon: PencilSimpleIcon },
   rebase_edit: { name: "Interactive rebase", Icon: GitBranchIcon },
   pull_rebase_drop: { name: "Pull — dropped commits", Icon: ScissorsIcon },
+  update_local_pr_head: { name: "Local PR branch update", Icon: GitMergeIcon },
 };
 
 /** Status → glyph + word + tone. Meaning is carried by the shape AND the word,
@@ -139,9 +140,10 @@ export function OperationHistoryDialog({
         ) : list.length === 0 ? (
           <p className="flex-1 px-2 py-8 text-center text-xs text-muted-foreground">
             No operations recorded yet. GitDesktop journals risky operations
-            here: local PR merges, cherry-picks, history edits, interactive
-            rebases, and a rebase pull that drops commits. Each is recorded with
-            the state it started from, so you can trace or recover it.
+            here: local PR merges and branch updates, cherry-picks, history
+            edits, interactive rebases, and a rebase pull that drops commits.
+            Each is recorded with the state it started from, so you can trace or
+            recover it.
           </p>
         ) : (
           <ScrollArea className="min-h-0 flex-1 border">

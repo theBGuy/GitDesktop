@@ -737,6 +737,42 @@ pub struct ForgeUserRef {
     pub is_bot: bool,
 }
 
+/// A page-walked user list, whether the walk stopped at its ceiling with users possibly
+/// left unread, and that ceiling. Consumers key "the list is cut" on `truncated`, never
+/// on `users.len()`: dedupe and the reviewer exclusion make the length unreliable.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeUserList {
+    pub users: Vec<ForgeUserRef>,
+    pub truncated: bool,
+    /// The most users this provider's walk reads; always present, whatever `truncated` says.
+    pub ceiling: usize,
+}
+
+impl ForgeUserList {
+    /// Dedupes by exact id (first wins), drops empty ids and `exclude_id`, then sorts by
+    /// lowercased label with the id as tiebreak. Pure.
+    pub fn build(
+        refs: Vec<ForgeUserRef>,
+        exclude_id: &str,
+        truncated: bool,
+        ceiling: usize,
+    ) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let mut users: Vec<ForgeUserRef> = refs
+            .into_iter()
+            .filter(|u| seen.insert(u.id.clone()))
+            .filter(|u| !u.id.is_empty() && u.id != exclude_id)
+            .collect();
+        users.sort_by_cached_key(|u| (u.label.to_lowercase(), u.id.clone()));
+        Self {
+            users,
+            truncated,
+            ceiling,
+        }
+    }
+}
+
 /// One activity-timeline event on a merge/pull request or an issue, a tagged union
 /// keyed on `kind` (camelCase). The backend maps a GitHub `timelineItems`
 /// `__typename` (or a GitLab/Bitbucket event) onto a variant; an unclassifiable node
@@ -1055,6 +1091,96 @@ pub struct ProviderFeatures {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user(id: &str, label: &str) -> ForgeUserRef {
+        ForgeUserRef {
+            id: id.into(),
+            label: label.into(),
+            avatar_url: String::new(),
+            is_bot: false,
+        }
+    }
+
+    #[test]
+    fn forge_user_list_serializes_exact_camel_case_keys() {
+        let value = serde_json::to_value(ForgeUserList {
+            users: vec![user("u1", "amy")],
+            truncated: false,
+            ceiling: 1000,
+        })
+        .expect("serializes");
+        let top: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(top, ["ceiling", "truncated", "users"].into_iter().collect());
+        assert!(value["ceiling"].is_u64());
+        assert_eq!(value["ceiling"], 1000);
+        assert_eq!(value["truncated"], false);
+        let row = value["users"][0].as_object().expect("user object");
+        let keys: std::collections::BTreeSet<&str> = row.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["avatarUrl", "id", "isBot", "label"].into_iter().collect()
+        );
+        assert!(!row.contains_key("avatar_url") && !row.contains_key("is_bot"));
+    }
+
+    #[test]
+    fn forge_user_list_build_dedupes_excludes_and_sorts() {
+        // S-SORT: the fixture TS `compareUsers` sorts too.
+        let sorted = ForgeUserList::build(
+            vec![
+                user("u2", "bob"),
+                user("u9", "Amy"),
+                user("u1", "amy"),
+                user("u3", "Zed"),
+            ],
+            "",
+            false,
+            1000,
+        );
+        let ids: Vec<&str> = sorted.users.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, ["u1", "u9", "u2", "u3"]);
+
+        // Dedupe first (first wins), case-different ids are different users, empty ids
+        // and every copy of the excluded id go.
+        let built = ForgeUserList::build(
+            vec![
+                user("amy", "first"),
+                user("Amy", "other"),
+                user("amy", "second"),
+                user("", "nobody"),
+                user("me", "me"),
+                user("me", "me again"),
+            ],
+            "me",
+            true,
+            500,
+        );
+        let pairs: Vec<(&str, &str)> = built
+            .users
+            .iter()
+            .map(|u| (u.id.as_str(), u.label.as_str()))
+            .collect();
+        assert_eq!(pairs, [("amy", "first"), ("Amy", "other")]);
+        assert!(built.truncated);
+        assert_eq!(built.ceiling, 500);
+
+        // An empty exclude id drops only the empty ids; ceiling and flag pass through.
+        let kept = ForgeUserList::build(vec![user("me", "me"), user("", "x")], "", false, 1000);
+        assert_eq!(kept.users.len(), 1);
+        assert!(!kept.truncated);
+        assert_eq!(kept.ceiling, 1000);
+
+        // The other two ceiling and flag pairs pass through unchanged too.
+        for (truncated, ceiling) in [(true, 1000), (false, 500)] {
+            let list = ForgeUserList::build(vec![user("me", "me")], "", truncated, ceiling);
+            assert_eq!((list.truncated, list.ceiling), (truncated, ceiling));
+        }
+    }
 
     /// The clone browser and Explore key off these exact wire names; a TS mirror that
     /// misses `ownedNamespaces` reads `undefined` silently, so pin the whole shape.

@@ -7,6 +7,8 @@ import {
   ComboboxItem,
   ComboboxList,
 } from "@/components/ui/combobox";
+import { issuePickerStatus } from "@/features/issues/issue-picker-status";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { useJiraIssues } from "@/lib/jira/queries";
 import type { JiraLink } from "@/lib/jira/store";
 import type { JiraIssueInfo } from "@/lib/jira/types";
@@ -43,6 +45,8 @@ export function JiraIssuePicker({
 }) {
   const issues = useJiraIssues(repoPath, link, "all");
   const candidates = (issues.data ?? []).filter((i) => !exclude.has(i.key));
+  // One read, so `partial` is always null: no partial line or announcer here.
+  const status = issuePickerStatus([issues], candidates.length);
   return (
     <Combobox
       items={candidates}
@@ -58,15 +62,17 @@ export function JiraIssuePicker({
         disabled={pending}
       />
       <ComboboxContent>
-        <ComboboxEmpty>No matching issues.</ComboboxEmpty>
+        <ComboboxEmpty>{status.empty}</ComboboxEmpty>
         <ComboboxList>
           {(item: JiraIssueInfo) => (
             <ComboboxItem key={item.key} value={item}>
               <JiraStatusIcon statusCategory={item.statusCategory} />
-              <span className="font-mono text-muted-foreground">
+              <span className="shrink-0 font-mono text-muted-foreground">
                 {item.key}
               </span>
-              <span className="truncate">{item.summary}</span>
+              <span className="truncate" onMouseEnter={clipTitleFromText}>
+                {item.summary}
+              </span>
             </ComboboxItem>
           )}
         </ComboboxList>

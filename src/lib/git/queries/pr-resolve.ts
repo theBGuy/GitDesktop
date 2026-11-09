@@ -1,10 +1,22 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type MutationCache,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import {
+  type LocalPr,
+  openPendingUpdate,
+  type PendingUpdate,
+  updateLocalPr,
+} from "@/lib/pulls/local";
+import { errorMessage } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import type { RemoteLens } from "../types";
-import { useRepoMutation } from "./internal";
+import { useMutationCacheSnapshot, useRepoMutation } from "./internal";
 import { prChecksRecheck } from "./pr-actions";
-import { localPrWriteKey, prWriteKey } from "./pr-writes";
+import { LOCAL_PR_WRITES_KEY, localPrWriteKey, prWriteKey } from "./pr-writes";
 import { recheckRunsAfterPush } from "./push-writes";
+import { oplogCheckOptions } from "./stashes";
 
 /** Merge a local PR in an isolated worktree. Keyed so the view's hold reads the
  *  cache, which outlives the view's own mount. */
@@ -183,6 +195,12 @@ export function useFindRemotePrResolve(
   });
 }
 
+/** Every conflict prediction of `repo`, whatever its branches: the prefix
+ *  {@link useConflictPreview} keys under, and the one a local-PR update re-reads
+ *  before it settles. */
+export const conflictPreviewKey = (repo: string) =>
+  ["repo", repo, "conflict-preview"] as const;
+
 /** Pre-merge conflict prediction for a local PR's `base`/`head`, keyed under the
  *  repo so merge mutations invalidate it. Gate with `enabled` (skip while the tree
  *  has tracked changes or the PR can't merge). */
@@ -193,10 +211,326 @@ export function useConflictPreview(
   enabled: boolean,
 ) {
   return useQuery({
-    queryKey: ["repo", repo, "conflict-preview", base, head] as const,
+    queryKey: [...conflictPreviewKey(repo), base, head] as const,
     queryFn: () => api.gitConflictPreview(repo, base, head),
     enabled: enabled && base !== "" && head !== "",
     staleTime: 15_000,
     networkMode: "always",
   });
+}
+
+export type LocalPrUpdateStartVars = { id: string; base: string; head: string };
+export type LocalPrUpdateFinishVars = {
+  id: string;
+  base: string;
+  head: string;
+  worktreePath: string;
+  worktreeId: string;
+  opId: string;
+  journalRepo: string;
+};
+/** `id: null` when no record is left to clear (its pull request was deleted). */
+export type LocalPrUpdateDiscardVars = {
+  id: string | null;
+  head: string;
+  worktreePath: string;
+  worktreeId: string;
+  opId: string;
+  journalRepo: string;
+};
+/** A start's result. `recordError`: the head moved but clearing the approval on the
+ *  record failed, with that failure's message. */
+export type LocalPrUpdateResult =
+  | { status: "updated"; approvalCleared: boolean; recordError: string | null }
+  | { status: "conflicts"; worktreeId: string };
+export type LocalPrUpdateFinishResult = {
+  status: "updated";
+  approvalCleared: boolean;
+};
+export type LocalPrDiscardResult =
+  | { status: "discarded" }
+  | { status: "updated"; approvalCleared: boolean };
+
+export const UPDATE_NOT_OPEN_MESSAGE =
+  "This pull request is no longer open, so the update was discarded.";
+export const UPDATE_ALREADY_UNFINISHED_MESSAGE =
+  "This pull request already has an unfinished conflict resolution, so the new one was discarded.";
+
+/** `cur` carrying `update`, or `cur` itself when the fresh record is no longer open
+ *  or already has an unfinished update. A malformed stored field is inert, so a real
+ *  start overwrites it. Named in the networkMode guard's local `set` family, so the
+ *  start's mutationFn may call it bare. */
+function setPendingUpdate(cur: LocalPr, update: PendingUpdate): LocalPr {
+  return cur.status === "open" && openPendingUpdate(cur) === undefined
+    ? { ...cur, pendingUpdate: update }
+    : cur;
+}
+
+/** Clears the approval on the fresh record after a clean update moved `head`. The
+ *  branch already moved, so a failed write is reported by its message beside it,
+ *  never thrown. Named in the networkMode guard's local `set` family, so the
+ *  start's mutationFn may call it bare. */
+async function setApprovalClearedAfterUpdate(
+  repo: string,
+  id: string,
+): Promise<{ approvalCleared: boolean; recordError: string | null }> {
+  let approvalCleared = false as boolean;
+  try {
+    await updateLocalPr(repo, id, (cur) => {
+      approvalCleared = cur.approved;
+      return cur.approved ? { ...cur, approved: false } : cur;
+    });
+    return { approvalCleared, recordError: null };
+  } catch (e) {
+    return { approvalCleared: false, recordError: errorMessage(e) };
+  }
+}
+
+// Each update mutationFn below writes the record ITSELF and then awaits the re-read of
+// `recordKey` (the caller's `localPrKey(repo)`) before it returns or rethrows: the
+// mutation stays pending, and every hold that reads it stays up, until the list on
+// screen shows the write. Callers add no invalidation of their own. Inside a
+// mutationFn only `api.` callees and `updateLocalPr` are called bare, the names the
+// networkMode guard classifies.
+
+/** Starts resolving a local PR's predicted conflicts: merges `base` INTO `head` in an
+ *  isolated worktree. A clean merge moves `head` at once and clears the approval; a
+ *  conflicted one is recorded as the PR's `pendingUpdate`, unless the fresh record is
+ *  no longer open or already has one, in which case the new worktree is discarded and
+ *  the start rejects. */
+export function useStartLocalPrUpdate(
+  repo: string,
+  recordKey: readonly unknown[],
+) {
+  const queryClient = useQueryClient();
+  const previewKey = conflictPreviewKey(repo);
+  const journalKey = oplogCheckOptions(repo).queryKey;
+  return useRepoMutation(
+    repo,
+    async ({
+      id,
+      base,
+      head,
+    }: LocalPrUpdateStartVars): Promise<LocalPrUpdateResult> => {
+      // Every path the command ran on re-reads the journal check before settling:
+      // the recovery banner holds this op's entry back only while a start runs, so
+      // a check read mid-start must not outlive it.
+      const rejournal = () =>
+        queryClient
+          .invalidateQueries({ queryKey: journalKey })
+          .catch(() => undefined);
+      const outcome = await api
+        .gitUpdateLocalPrHead(repo, base, head)
+        .catch(async (e: unknown) => {
+          await rejournal();
+          throw e;
+        });
+      const reread = (preview: boolean) =>
+        Promise.all([
+          queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined),
+          preview
+            ? queryClient
+                .invalidateQueries({ queryKey: previewKey })
+                .catch(() => undefined)
+            : undefined,
+          rejournal(),
+        ]);
+      if (outcome.status === "updated") {
+        const cleared = await setApprovalClearedAfterUpdate(repo, id);
+        await reread(true);
+        return { status: "updated", ...cleared };
+      }
+      const { worktreePath, worktreeId, opId, journalRepo } = outcome;
+      if (!worktreePath || !worktreeId) {
+        await rejournal();
+        throw new Error("Update paused on conflicts but returned no worktree");
+      }
+      const update: PendingUpdate = {
+        base,
+        head,
+        worktreePath,
+        worktreeId,
+        opId,
+        journalRepo,
+        startedAt: new Date().toISOString(),
+      };
+      let refusal = null as unknown;
+      try {
+        const written = await updateLocalPr(repo, id, (cur) =>
+          setPendingUpdate(cur, update),
+        );
+        if (written.pendingUpdate !== update)
+          refusal = new Error(
+            written.status === "open"
+              ? UPDATE_ALREADY_UNFINISHED_MESSAGE
+              : UPDATE_NOT_OPEN_MESSAGE,
+          );
+      } catch (e) {
+        refusal = e;
+      }
+      if (refusal !== null) {
+        await api
+          .gitDiscardLocalPrUpdate(
+            repo,
+            head,
+            worktreePath,
+            worktreeId,
+            opId,
+            journalRepo,
+          )
+          .catch(() => undefined);
+        await reread(false);
+        throw refusal;
+      }
+      await reread(false);
+      return { status: "conflicts", worktreeId };
+    },
+    {
+      // Local git and app-data write — never park it offline.
+      networkMode: "always",
+      identity: localPrWriteKey("update-resolve", repo),
+    },
+  );
+}
+
+/** Finishes a paused update: commits the resolution and moves `head` to it, then
+ *  clears the record's field (only when it still names this worktree) and its
+ *  approval. Never touches `status` or `mergedAt`: the PR stays open. A record write
+ *  that fails rejects the mutation, since the record would still name a consumed
+ *  worktree. */
+export function useFinishLocalPrUpdate(
+  repo: string,
+  recordKey: readonly unknown[],
+) {
+  const queryClient = useQueryClient();
+  const previewKey = conflictPreviewKey(repo);
+  return useRepoMutation(
+    repo,
+    async (
+      vars: LocalPrUpdateFinishVars,
+    ): Promise<LocalPrUpdateFinishResult> => {
+      const outcome = await api.gitFinishLocalPrUpdate(
+        repo,
+        vars.base,
+        vars.head,
+        vars.worktreePath,
+        vars.worktreeId,
+        vars.opId,
+        vars.journalRepo,
+      );
+      if (outcome.status !== "updated")
+        throw new Error(
+          `Couldn't finish this update; ${vars.head} was not updated.`,
+        );
+      try {
+        let approvalCleared = false as boolean;
+        await updateLocalPr(repo, vars.id, (cur) => {
+          approvalCleared = cur.approved;
+          return {
+            ...cur,
+            approved: false,
+            pendingUpdate:
+              cur.pendingUpdate?.worktreeId === vars.worktreeId
+                ? undefined
+                : cur.pendingUpdate,
+          };
+        });
+        return { status: "updated", approvalCleared };
+      } finally {
+        await Promise.all([
+          queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined),
+          queryClient
+            .invalidateQueries({ queryKey: previewKey })
+            .catch(() => undefined),
+        ]);
+      }
+    },
+    {
+      // Local git and app-data write — never park it offline.
+      networkMode: "always",
+      identity: localPrWriteKey("finish-update", repo),
+    },
+  );
+}
+
+/** Discards a paused update: removes its worktree and clears the record's field when
+ *  it still names that worktree (`id: null` writes no record). The command answers
+ *  `updated` when the update had in fact landed; the approval is then cleared as a
+ *  finish would. Moves no branch, so only local queries are invalidated. */
+export function useDiscardLocalPrUpdate(
+  repo: string,
+  recordKey: readonly unknown[],
+) {
+  const queryClient = useQueryClient();
+  const previewKey = conflictPreviewKey(repo);
+  return useRepoMutation(
+    repo,
+    async (vars: LocalPrUpdateDiscardVars): Promise<LocalPrDiscardResult> => {
+      const outcome = await api.gitDiscardLocalPrUpdate(
+        repo,
+        vars.head,
+        vars.worktreePath,
+        vars.worktreeId,
+        vars.opId,
+        vars.journalRepo,
+      );
+      const landed = outcome.status === "updated";
+      try {
+        let approvalCleared = false as boolean;
+        if (vars.id !== null)
+          await updateLocalPr(repo, vars.id, (cur) => {
+            if (cur.pendingUpdate?.worktreeId !== vars.worktreeId) return cur;
+            approvalCleared = landed && cur.approved;
+            return {
+              ...cur,
+              pendingUpdate: undefined,
+              approved: landed ? false : cur.approved,
+            };
+          });
+        return landed
+          ? { status: "updated", approvalCleared }
+          : { status: "discarded" };
+      } finally {
+        await Promise.all([
+          queryClient
+            .invalidateQueries({ queryKey: recordKey })
+            .catch(() => undefined),
+          // A landed update moved the head, which the strip's prediction reads.
+          landed
+            ? queryClient
+                .invalidateQueries({ queryKey: previewKey })
+                .catch(() => undefined)
+            : undefined,
+        ]);
+      }
+    },
+    {
+      // Local git and app-data write — never park it offline.
+      networkMode: "always",
+      localOnly: true,
+      identity: localPrWriteKey("discard-update", repo),
+    },
+  );
+}
+
+/** Filter prefix for every local-PR update start, under any checkout key. */
+export const LOCAL_PR_UPDATE_START_KEY = [
+  ...LOCAL_PR_WRITES_KEY,
+  "update-resolve",
+] as const;
+
+const anyUpdateStarting = (cache: MutationCache) =>
+  cache.findAll({
+    mutationKey: LOCAL_PR_UPDATE_START_KEY,
+    status: "pending",
+  }).length > 0;
+
+/** Whether ANY local-PR update start is in flight in this window, under any checkout
+ *  key: the sweep's freshness gate and the recovery banner read it. */
+export function useAnyLocalPrUpdateStarting(): boolean {
+  return useMutationCacheSnapshot(anyUpdateStarting, false);
 }

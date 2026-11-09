@@ -26,11 +26,13 @@ export interface OpLogEntry {
     | "cherry_pick_onto"
     | "rewrite_commits"
     | "rebase_edit"
-    | "pull_rebase_drop";
+    | "pull_rebase_drop"
+    | "update_local_pr_head";
   /** Human label, e.g. "Squash-merge feature → main". */
   label: string;
-  /** "paused" = handed to you mid-op (a stopped cherry-pick or a conflicted rebase
-   *  pull), neither in-flight nor finished. "concluded" = that op ended outside the
+  /** "paused" = handed to you mid-op (a stopped cherry-pick, a conflicted rebase
+   *  pull, or a local PR update paused on conflicts), neither in-flight nor
+   *  finished. "concluded" = that op ended outside the
    *  app, so the journal knows only that it is over (no finish time). */
   status: "pending" | "done" | "failed" | "dismissed" | "paused" | "concluded";
   /** ISO timestamp the op started. */

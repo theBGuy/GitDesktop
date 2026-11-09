@@ -767,8 +767,10 @@ async function fireTimeWorktreeRefusal(
 }
 
 /** The local-PR writes that move a branch inside the worktree holding it:
- *  "Update from…" merges into its head there, and a local-PR merge (or its
- *  finish) fast-forwards its base there. */
+ *  "Update from…" merges into its head there, a conflict-resolving update's
+ *  start (clean) or finish fast-forwards its head there, and a local-PR merge
+ *  (or its finish) fast-forwards its base there. Discarding an update moves no
+ *  branch, so it has no entry. */
 const HOLDER_WRITES: Partial<
   Record<
     LocalPrWriteKind,
@@ -776,6 +778,16 @@ const HOLDER_WRITES: Partial<
   >
 > = {
   "update-from": {
+    moves: "head",
+    onBranch: CLEANUP_UPDATE_ON_BRANCH_REASON,
+    inWorktree: CLEANUP_UPDATE_IN_WORKTREE_REASON,
+  },
+  "update-resolve": {
+    moves: "head",
+    onBranch: CLEANUP_UPDATE_ON_BRANCH_REASON,
+    inWorktree: CLEANUP_UPDATE_IN_WORKTREE_REASON,
+  },
+  "finish-update": {
     moves: "head",
     onBranch: CLEANUP_UPDATE_ON_BRANCH_REASON,
     inWorktree: CLEANUP_UPDATE_IN_WORKTREE_REASON,

@@ -45,6 +45,21 @@ export interface PendingMerge {
   startedAt: string;
 }
 
+/** A local PR whose base is being merged INTO its head to resolve conflicts, paused in
+ *  an isolated worktree. A field of its own, never `pendingMerge`: a build that predates
+ *  it ignores it, so it can never finish this worktree into the base. */
+export interface PendingUpdate {
+  base: string;
+  head: string;
+  worktreePath: string;
+  worktreeId: string;
+  /** The journal entry the finish reads its stale-tip anchor from; never null. */
+  opId: string;
+  /** The checkout path that entry is filed under (the journal is keyed per checkout). */
+  journalRepo: string;
+  startedAt: string;
+}
+
 export interface LocalPr {
   id: string;
   title: string;
@@ -68,6 +83,36 @@ export interface LocalPr {
    *  worktree); cleared by setting `undefined`, which JSON omits. Absent on PRs
    *  stored before it existed. */
   pendingMerge?: PendingMerge;
+  /** Set while a conflict-resolving update of this PR's branch is unfinished. Meaningful
+   *  only while the PR is open: read it through {@link openPendingUpdate}. */
+  pendingUpdate?: PendingUpdate;
+}
+
+const PENDING_UPDATE_FIELDS = [
+  "base",
+  "head",
+  "worktreePath",
+  "worktreeId",
+  "opId",
+  "journalRepo",
+  "startedAt",
+] as const satisfies readonly (keyof PendingUpdate)[];
+
+/** The PR's unfinished update, or undefined when it has none, is not open, or the stored
+ *  field is malformed (any of its seven fields is not a non-empty string). */
+export function openPendingUpdate(
+  pr: LocalPr | undefined,
+): PendingUpdate | undefined {
+  if (pr?.status !== "open") return undefined;
+  // The stored record is untrusted JSON (the MCP server and older builds write it too).
+  const raw: unknown = pr.pendingUpdate;
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const fields = raw as Record<string, unknown>;
+  return PENDING_UPDATE_FIELDS.every(
+    (key) => typeof fields[key] === "string" && fields[key] !== "",
+  )
+    ? (raw as PendingUpdate)
+    : undefined;
 }
 
 // Personal app-data, keyed by the repo's worktree-stable identity — never written

@@ -173,13 +173,13 @@ const REFSPEC_ALLOWLIST = [
     file: "git/ops.rs",
     fn: "branch_tip",
     rationale:
-      "private helper reading a branch tip (never a refspec); both callers (merge_local_pr, finalize_base via its own callers) validate base with validate_branch_name",
+      "private helper reading a branch tip (never a refspec); its validating callers (merge_local_pr, finish_local_pr_merge, update_local_pr_head, finish_local_pr_update) gate every branch it reads with validate_branch_name",
   },
   {
     file: "git/ops.rs",
-    fn: "finalize_base",
+    fn: "finalize_branch",
     rationale:
-      "private helper; both callers (merge_local_pr, finish_local_pr_merge) validate base with validate_branch_name",
+      "private helper; its four callers (merge_local_pr, finish_local_pr_merge, update_local_pr_head, finish_local_pr_update) validate the target branch with validate_branch_name",
   },
   {
     file: "git/ops.rs",
@@ -1235,6 +1235,11 @@ export const MERGE_GUARD_ALLOWLIST = [
   {
     file: "git/ops.rs",
     fn: "merge_local_pr",
+    rationale: "fresh resolve worktree, with no user's ignored files",
+  },
+  {
+    file: "git/ops.rs",
+    fn: "update_local_pr_head",
     rationale: "fresh resolve worktree, with no user's ignored files",
   },
   {

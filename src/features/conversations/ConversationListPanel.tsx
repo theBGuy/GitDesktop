@@ -832,8 +832,13 @@ export function ConversationListPanel<
         </div>
         {/* Both scope controls render null on providers/repos that can't offer
             them, so this row must strip itself when empty — keep them BARE
-            children: a wrapper element would defeat `empty:hidden`. */}
-        <div className="mt-1 flex flex-wrap items-center gap-1 empty:hidden">
+            children: a wrapper element would defeat `empty:hidden`.
+            With the Fork/Upstream pair, the five segments need 309.2px at
+            px-1.5 (7.2px per glyph); below a 316px header (headroom for font
+            load and rounding) the switchers' compact arm drops them to px-1 and
+            shows Needs review as Review, 246px at the 271px floor. CSS-only,
+            keyed on `group/scope` here and the lens switch's data-slot. */}
+        <div className="group/scope mt-1 flex flex-wrap items-center gap-1 empty:hidden">
           {presetControl}
           {lensControl}
         </div>

@@ -6,6 +6,13 @@ import {
   useRemoteSlug,
   useSetRepoLens,
 } from "@/lib/repo-lens/queries";
+import { cn } from "@/lib/utils";
+
+/** Tighter segment padding on the scope row's compact arm (ConversationListPanel).
+ *  Spelled out again in ConversationPresetSwitcher on purpose: Tailwind only
+ *  generates from complete literals, and both copies must stay identical. */
+const COMPACT_PAD =
+  "@max-[316px]/gd-prhead:group-has-data-[slot=lens-switch]/scope:px-1";
 
 /**
  * The per-repo Fork | Upstream lens switch, shared by the Pull Requests and
@@ -43,7 +50,7 @@ export function RepoLensSwitcher({ repoPath }: { repoPath: string }) {
     // ml-auto: flush-right on the scope row so Upstream's edge lines up with the
     // filter funnel's on the row above (this root div is the row's own child —
     // ConversationListPanel can't wrap it without defeating its `empty:hidden`).
-    <div className="ml-auto flex items-center gap-1">
+    <div data-slot="lens-switch" className="ml-auto flex items-center gap-1">
       {/* One element type in both arms, so a focused button survives the
           settle (a waiting-only wrapper would remount it). */}
       {buttons.map((b) => (
@@ -51,7 +58,7 @@ export function RepoLensSwitcher({ repoPath }: { repoPath: string }) {
           key={b.value}
           variant={pressed === b.value ? "secondary" : "ghost"}
           size="xs"
-          className="px-1.5"
+          className={cn("px-1.5", COMPACT_PAD)}
           aria-pressed={pressed === b.value}
           title={b.slug ?? undefined}
           disabled={waiting}

@@ -13,6 +13,7 @@ import {
   XIcon,
 } from "@phosphor-icons/react";
 import { useRef, useState } from "react";
+import { DetailTitleRow } from "@/components/detail-title-row";
 import { DisabledReasonButton } from "@/components/disabled-reason-button";
 import { Markdown } from "@/components/markdown/markdown";
 import { usePanelPortalContainer } from "@/components/panel-portal";
@@ -269,13 +270,7 @@ export function LocalIssueView({
   return (
     <div className="flex h-full flex-col">
       <header className="space-y-2 border-b px-4 py-3">
-        {/* `flex-auto`, not `flex-1`: a basis-0 title never triggers the wrap, so
-            the actions would stay put and the title collapse instead. Growing also
-            replaces the spacer that used to right-align them. */}
-        <div className="flex flex-wrap items-start gap-2">
-          <h2 className="min-w-0 flex-auto text-sm font-medium break-words">
-            {issue.title}
-          </h2>
+        <DetailTitleRow heading={issue.title}>
           <PlanIssueButton title={issue.title} body={issue.body} />
           {isOpen && (
             <SolveIssueButton
@@ -302,7 +297,7 @@ export function LocalIssueView({
             {issue.status}
           </Badge>
           {issue.archived && <Badge variant="secondary">archived</Badge>}
-        </div>
+        </DetailTitleRow>
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             local · opened <RelativeTime date={issue.createdAt} />

@@ -61,13 +61,14 @@ pub struct OpLogEntry {
     /// uuid v4.
     pub id: String,
     /// Machine key: `"merge_local_pr"` | `"cherry_pick_onto"` | `"rewrite_commits"` |
-    /// `"rebase_edit"` | `"pull_rebase_drop"`.
+    /// `"rebase_edit"` | `"pull_rebase_drop"` | `"update_local_pr_head"`.
     pub op: String,
     /// Human summary, e.g. `"Squash-merge feature → main"`.
     pub label: String,
     /// `"pending"` | `"done"` | `"failed"` | `"dismissed"` | `"paused"` | `"concluded"`.
     /// `"paused"` = handed to the user mid-op (a stopped cherry-pick or the rebase
-    /// of a decided pull drop — see [`PAUSABLE_OPS`]), so it is neither in-flight
+    /// of a decided pull drop, both [`PAUSABLE_OPS`], or a local PR's branch update
+    /// stopped on conflicts in its resolve worktree), so it is neither in-flight
     /// nor finished until they continue or abort it; `"concluded"` = that op ended
     /// outside the app, so the journal knows only that it is over (see
     /// [`conclude_stale_pauses`]).
@@ -279,7 +280,7 @@ fn insert_pending(repo: &str, entry: &OpLogEntry) -> AppResult<()> {
 
 /// Drop oldest evictable entries until `list.len() <= HISTORY_CAP`. An unfinished
 /// entry is never evicted — `"pending"` may be an in-flight op, and `"paused"` is a
-/// live handle [`close_paused_pick`] still needs — so the cap is a soft ceiling that
+/// live handle its op's close still needs — so the cap is a soft ceiling that
 /// a burst of concurrent unfinished ops can legitimately exceed. `"concluded"` is
 /// deliberately OUTSIDE that set: a pick that ended outside the app is over, so its
 /// record ages out like any other finished one.
@@ -366,9 +367,9 @@ const CHERRY_PICK_ONTO: &str = "cherry_pick_onto";
 /// rebase stops on a conflict.
 const PULL_REBASE_DROP: &str = "pull_rebase_drop";
 
-/// Every op whose record can sit `"paused"`. Each is retired only against ITS OWN
-/// live-op signal ([`LiveOps::is_live`]): a rebase in progress says nothing about a
-/// stopped pick, and vice versa.
+/// Every op whose `"paused"` record the stale-pause check can retire. Each is retired
+/// only against ITS OWN live-op signal ([`LiveOps::is_live`]): a rebase in progress
+/// says nothing about a stopped pick, and vice versa.
 const PAUSABLE_OPS: [&str; 2] = [CHERRY_PICK_ONTO, PULL_REBASE_DROP];
 
 /// What the stale-pause verdict knows about ops still in flight, one pair per
@@ -666,7 +667,7 @@ pub async fn finish(repo: &str, id: &Option<String>, error: Option<String>) {
 
 /// Best-effort: if `id` is `Some`, flip that entry to `"paused"` — the op did not
 /// end, it was handed to the user to resolve, so it is neither a failure nor a
-/// recovery candidate until [`close_paused_op`] closes it. Swallow+log like
+/// recovery candidate until its op closes it. Swallow+log like
 /// [`finish`].
 pub(crate) async fn pause(repo: &str, id: &Option<String>) {
     let Some(id) = id else {

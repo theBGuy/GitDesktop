@@ -53,6 +53,7 @@ import {
   REVIEW_MODES,
   type ReviewMode,
 } from "@/lib/ai/types";
+import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
 import { useForgeStatus } from "@/lib/git/queries";
 import { quickTransition } from "@/lib/motion";
@@ -606,7 +607,12 @@ export function PrReviewPanel({
               <ComboboxList>
                 {(item: string) => (
                   <ComboboxItem key={item} value={item}>
-                    <span className="truncate font-mono">{item}</span>
+                    <span
+                      className="truncate font-mono"
+                      onMouseEnter={clipTitleFromText}
+                    >
+                      {item}
+                    </span>
                   </ComboboxItem>
                 )}
               </ComboboxList>

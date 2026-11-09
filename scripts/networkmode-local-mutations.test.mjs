@@ -153,6 +153,9 @@ const LOCAL_CALLEES = [
   "gitMergeLocalPr",
   "gitFinishLocalPrMerge",
   "gitAbortLocalPrMerge",
+  "gitUpdateLocalPrHead",
+  "gitFinishLocalPrUpdate",
+  "gitDiscardLocalPrUpdate",
   "gitAbortRemotePrResolve",
   // Stashes.
   "gitStashAll",

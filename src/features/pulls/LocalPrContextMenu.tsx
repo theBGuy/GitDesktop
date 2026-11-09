@@ -16,10 +16,10 @@ import { toastError } from "@/lib/toast";
 /**
  * Right-click record-management for a local PR row: Archive/Unarchive and a
  * confirmed Delete. Record management lives on the PR record (its list row), not
- * the merge footer — the footer is just the merge decision. Wraps the row button
- * so selection + arrow-key nav still work; menu-item clicks `stopPropagation` so
- * they don't bubble through the React tree to re-select the host row (the
- * portaled-menu-click-bubbles gotcha).
+ * the footer, which approves, merges, closes or publishes the PR. Wraps the row
+ * button so selection + arrow-key nav still work; menu-item clicks
+ * `stopPropagation` so they don't bubble through the React tree to re-select the
+ * host row (the portaled-menu-click-bubbles gotcha).
  */
 export function LocalPrContextMenu({
   repoPath,

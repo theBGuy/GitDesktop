@@ -470,12 +470,17 @@ export function releaseWriteTag(vars: unknown): string | null {
   return typeof tag === "string" ? tag : null;
 }
 
-/** The local-PR writes whose in-flight state a local PR view holds its controls on. */
+/** The local-PR git writes whose in-flight state a local PR view holds its controls
+ *  on: the into-base merge and its finish / abort, "Update from…", and the
+ *  conflict-resolving update of a PR's head with its finish / discard. */
 export type LocalPrWriteKind =
   | "merge"
   | "update-from"
   | "finish-merge"
-  | "abort-merge";
+  | "abort-merge"
+  | "update-resolve"
+  | "finish-update"
+  | "discard-update";
 
 /** Filter prefix for EVERY local-PR write ({@link localPrWriteKey}); disjoint from
  *  {@link PR_WRITES_KEY}, so neither aggregate sees the other's writes. */
@@ -497,9 +502,12 @@ export interface PendingLocalPrWrite {
 const LOCAL_HEAD_FIELD: Record<LocalPrWriteKind, string> = {
   merge: "head",
   "update-from": "branch",
-  // Neither carries a head: finish names only its base, abort no branch at all.
+  // These two carry no head: finish-merge names only its base, abort no branch.
   "finish-merge": "head",
   "abort-merge": "head",
+  "update-resolve": "head",
+  "finish-update": "head",
+  "discard-update": "head",
 };
 
 /** Reads a local-PR write's variables, which the cache filter sees as `unknown`. A
