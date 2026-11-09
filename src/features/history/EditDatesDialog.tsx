@@ -69,6 +69,10 @@ export interface EditDatesTarget {
 }
 
 const UNREADABLE = "This commit's dates can't be read here.";
+const BRANCH_SWITCHED_HOLD =
+  "The checked-out branch changed while this was open. Close and reopen to edit the new one.";
+const HEAD_MOVED_HOLD =
+  "The latest commit changed while this was open. Close and reopen to edit the new one.";
 
 /** Only status's HEAD and its branch pin, so working-tree polls don't
  *  re-render the dialog. */
@@ -254,11 +258,13 @@ function EditDatesForm({
     : null;
 
   const submitting = amendDates.isPending;
-  const headMoved =
-    shown !== null &&
-    statusHead != null &&
-    (statusHead.oid !== shown.expectedHead ||
-      statusHead.pin !== shown.expectedBranch);
+  // Branch first, as the backend's pin refusals are ordered.
+  const headMovedReason = ((): string | null => {
+    if (shown === null || statusHead == null) return null;
+    if (statusHead.pin !== shown.expectedBranch) return BRANCH_SWITCHED_HOLD;
+    if (statusHead.oid !== shown.expectedHead) return HEAD_MOVED_HOLD;
+    return null;
+  })();
   const opInProgress = Boolean(
     opState.data?.merging ||
       opState.data?.rebasing ||
@@ -295,8 +301,8 @@ function EditDatesForm({
         return "Reading this commit's dates…";
       case original === null:
         return UNREADABLE;
-      case headMoved:
-        return "The latest commit changed while this was open. Close and reopen to edit the new one.";
+      case headMovedReason !== null:
+        return headMovedReason;
       case opInProgress:
         return "Finish the operation in Changes first.";
       case unresolved:
@@ -353,12 +359,13 @@ function EditDatesForm({
     const cached = queryClient.getQueryData<RepoStatus>(
       repoStatusOptions(repoPath).queryKey,
     )?.branch;
-    if (
-      cached &&
-      (cached.oid !== t.expectedHead ||
-        headBranchPin(cached) !== t.expectedBranch)
-    ) {
-      // Mirrors the backend's head-moved refusal; the dialog stays open.
+    // Mirrors the backend's pin refusals in their order, branch first; the
+    // dialog stays open.
+    if (cached && headBranchPin(cached) !== t.expectedBranch) {
+      toast.error("The checked-out branch changed — no dates were changed.");
+      return;
+    }
+    if (cached && cached.oid !== t.expectedHead) {
       toast.error("The latest commit changed — no dates were changed.");
       return;
     }

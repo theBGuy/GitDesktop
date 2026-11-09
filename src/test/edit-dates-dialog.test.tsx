@@ -416,6 +416,19 @@ describe("Edit dates dialog", () => {
     expect(gitAmendCommitDates).not.toHaveBeenCalled();
   });
 
+  it("holds with the branch reason once status reports another branch at the same tip", async () => {
+    vi.mocked(gitStatus).mockResolvedValue(status({ name: "feature" }));
+    renderHost();
+    await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        "The checked-out branch changed while this was open. Close and reopen to edit the new one.",
+      ),
+    );
+    await userEvent.click(primary());
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+  });
+
   it("refuses when the repo switched before the press", async () => {
     renderHost();
     await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
@@ -792,6 +805,28 @@ describe("Edit dates dialog against HEAD's parent", () => {
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith(
         "The latest commit changed — no dates were changed.",
+      ),
+    );
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  // Control: toast the head-moved sentence for any pin change; this goes red.
+  it("names the branch switch when the prompt saw the same tip on another branch", async () => {
+    withParent(parentAt("2026-11-07T20:00:00+01:00"));
+    vi.mocked(toast.error).mockClear();
+    const { client } = renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await userEvent.click(primary());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    act(() => {
+      client.setQueryData(repoKeys.status(REPO), status({ name: "feature" }));
+    });
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "The checked-out branch changed — no dates were changed.",
       ),
     );
     expect(gitAmendCommitDates).not.toHaveBeenCalled();
