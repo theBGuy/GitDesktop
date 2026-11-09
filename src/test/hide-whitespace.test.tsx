@@ -758,6 +758,8 @@ describe("the setting", () => {
     held[0]?.resolve({ ...stored, diffHideWhitespace: true });
     // The settings chain lands writes in flip order: drain the success first.
     await new Promise((r) => setTimeout(r, 0));
+    // The older success keeps the newer flip's optimistic value cached.
+    expect(cached(client)).toBe(false);
     held[1]?.reject(new Error("second"));
     await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(cached(client)).toBe(true));

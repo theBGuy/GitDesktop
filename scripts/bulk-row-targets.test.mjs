@@ -435,11 +435,11 @@ function folderRouteProblems(text) {
   )
     problems.push("the cursor's discardable count keeps conflicted files");
   if (
-    !/\bstashable: shown\.filter\(\(e\) => !staysOutOfStash\(e\)\)\.length,/.test(
+    !/\bstashable: shown\.filter\(\(e\) => canStash\(e, untrackedPaths\)\)\.length,/.test(
       masked,
     )
   )
-    problems.push("the cursor's stashable count keeps reserved names");
+    problems.push("the cursor's stashable count keeps rows a stash leaves");
   // The mask blanks "unstaged": a staged cursor must never enable Discard.
   if (
     !text.includes(
@@ -664,7 +664,7 @@ test("folder route pin mutation controls go red", () => {
     ),
     mutate(
       text,
-      "stashable: shown.filter((e) => !staysOutOfStash(e)).length,",
+      "stashable: shown.filter((e) => canStash(e, untrackedPaths)).length,",
       "stashable: shown.length,",
     ),
   ];
@@ -914,8 +914,7 @@ test("confirm pin mutation controls go red", () => {
     "        // A new stash buries the recorded backup, so a refused stash leaves its\n" +
     '        // offer; git\'s "No local changes to save" also resolves and clears it.\n' +
     `        ${CLEAR_OFFER}\n`;
-  const pathsTargets =
-    "    const targets = stashScope.entries.map((e) => e.path);";
+  const pathsTargets = "    const stashed = stashScope.entries.filter((e) =>";
   const stashFinish =
     "    const confirming = stashScope;\n    const gen = selectionGen.current;\n    const finish = () => {";
   const clearIfUnchanged =
@@ -1168,25 +1167,66 @@ test("selection generation pin mutation controls go red", () => {
 });
 
 // Untracked Windows-reserved names stay out of a path stash (the backend drops
-// them), so every panel-side Stash count leaves them out: the menu's counts
-// and the success toast. The menu's labels are pinned by
-// src/test/changes-context-menu.test.tsx, the confirm's copy and the rule itself
-// by scripts/changes-confirm-copy.test.mjs.
+// them) and git stash saves no submodule row whose worktree is still a gitlink,
+// so every panel-side Stash count leaves both out through `canStash`: the
+// menu's counts and the success toast. Each reads one set of untracked paths
+// (a staged submodule deletion stashes with the file that took its path): the
+// live one, or the one the confirm's scope captured. The menu's labels are
+// pinned by src/test/changes-context-menu.test.tsx, the confirm's copy and the
+// rules themselves by scripts/changes-confirm-copy.test.mjs.
+const CAN_STASH_BODY =
+  "!staysOutOfStash(entry) &&\n    !submoduleStaysOutOfStash(entry, untrackedPaths) &&\n    !embeddedRepoStaysOutOfStash(entry)";
+const STASHED_FILTER =
+  "const stashed = stashScope.entries.filter((e) =>\n      canStash(e, stashScope.untrackedPaths ?? new Set()),\n    );";
+const STASH_PATHSPEC =
+  "const matched = await stashPaths.mutateAsync(\n        stashed.map((e) => literalPathspec(e.path)),\n      );";
+const STASH_FILE_REFUSAL =
+  "if (\n                        submoduleStaysOutOfStash(entry, untrackedPaths) ||\n                        embeddedRepoStaysOutOfStash(entry)\n                      )\n                        return;";
 const STASH_PANEL_PINS = [
   [
-    "const stashablePathCount = bulk.pathEntries.filter(\n    (e) => !staysOutOfStash(e),\n  ).length;",
-    "stashablePathCount doesn't leave reserved names out",
+    CAN_STASH_BODY,
+    "canStash doesn't leave reserved names, submodule rows and embedded repositories out",
+  ],
+  [
+    "() => untrackedPathsOf(status.data?.entries ?? []),",
+    "the panel's untracked paths aren't the live entries'",
+  ],
+  [
+    "const stashablePathCount = bulk.pathEntries.filter((e) =>\n    canStash(e, untrackedPaths),\n  ).length;",
+    "stashablePathCount doesn't leave unstashable rows out",
   ],
   [
     "stashablePathCount={stashablePathCount}",
     "the menu's stashablePathCount is not the panel's",
   ],
   [
-    "stashableCount: shown.filter((e) => !staysOutOfStash(e)).length,",
-    "folderCounts.stashableCount doesn't leave reserved names out",
+    "untrackedPaths={untrackedPaths}",
+    "the menu's untracked paths are not the panel's",
   ],
   [
-    "const stashed = stashScope.entries.filter((e) => !staysOutOfStash(e));\n        toast.success(\n          stashed.length === 1\n            ? `Stashed ${stashed[0].path}`\n            : `Stashed ${stashed.length} files`,\n        );",
+    "stashableCount: shown.filter((e) => canStash(e, untrackedPaths)).length,",
+    "folderCounts.stashableCount doesn't leave unstashable rows out",
+  ],
+  [
+    "split: bulk.splitPaths.length > 0,\n        untrackedPaths,",
+    "the selection's stash scope doesn't capture the untracked paths",
+  ],
+  [
+    "split: rows.splitPaths.length > 0,\n      untrackedPaths,",
+    "the folder's stash scope doesn't capture the untracked paths",
+  ],
+  [
+    `${STASH_FILE_REFUSAL}\n                      setStashScope({\n                        kind: "files",\n                        entries: [entry],\n                        repo: repoPath,\n                        untrackedPaths,`,
+    "the file Stash's refusal or scope reads another set of untracked paths",
+  ],
+  [
+    STASHED_FILTER,
+    "the stash's paths and toast don't read what the stash saves",
+  ],
+  // A pathspec naming a staged submodule deletion stashes the deletion too.
+  [STASH_PATHSPEC, "the stash IPC's path list isn't the filtered set"],
+  [
+    "toast.success(\n          stashed.length === 1\n            ? `Stashed ${stashed[0].path}`\n            : `Stashed ${stashed.length} files`,\n        );",
     "the stash toast doesn't count what was stashed",
   ],
 ];
@@ -1199,7 +1239,7 @@ function stashCountProblems(panel) {
   return problems;
 }
 
-test("every panel-side Stash count leaves untracked reserved names out", () => {
+test("every panel-side Stash count leaves reserved names and submodule rows out", () => {
   assert.deepEqual(stashCountProblems(source(PANEL)), []);
 });
 
@@ -1208,18 +1248,75 @@ test("stash count pin mutation controls go red", () => {
   const panelMutants = [
     mutate(
       panel,
-      "const stashablePathCount = bulk.pathEntries.filter(\n    (e) => !staysOutOfStash(e),\n  ).length;",
-      "const stashablePathCount = bulk.pathEntries.length;",
+      CAN_STASH_BODY,
+      "!staysOutOfStash(entry) &&\n    !submoduleStaysOutOfStash(entry, untrackedPaths)",
     ),
     mutate(
       panel,
-      "const stashed = stashScope.entries.filter((e) => !staysOutOfStash(e));",
-      "const stashed = stashScope.entries;",
+      CAN_STASH_BODY,
+      "!staysOutOfStash(entry) &&\n    !embeddedRepoStaysOutOfStash(entry)",
     ),
     mutate(
       panel,
-      "stashableCount: shown.filter((e) => !staysOutOfStash(e)).length,",
+      CAN_STASH_BODY,
+      "!submoduleStaysOutOfStash(entry, untrackedPaths) &&\n    !embeddedRepoStaysOutOfStash(entry)",
+    ),
+    // The stash sends every scope path again, filtered or not.
+    mutate(panel, STASHED_FILTER, "const stashed = stashScope.entries;"),
+    mutate(
+      panel,
+      "stashed.map((e) => literalPathspec(e.path)),",
+      "stashScope.entries.map((e) => literalPathspec(e.path)),",
+    ),
+    mutate(
+      panel,
+      STASH_FILE_REFUSAL,
+      "if (submoduleStaysOutOfStash(entry, untrackedPaths))\n                        return;",
+    ),
+    mutate(
+      panel,
+      "() => untrackedPathsOf(status.data?.entries ?? []),",
+      "() => new Set<string>(),",
+    ),
+    mutate(
+      panel,
+      "bulk.pathEntries.filter((e) =>\n    canStash(e, untrackedPaths),\n  ).length;",
+      "bulk.pathEntries.length;",
+    ),
+    mutate(
+      panel,
+      "canStash(e, stashScope.untrackedPaths ?? new Set()),",
+      "canStash(e, untrackedPaths),",
+    ),
+    mutate(
+      panel,
+      "stashableCount: shown.filter((e) => canStash(e, untrackedPaths)).length,",
       "stashableCount: shown.length,",
+    ),
+    mutate(
+      panel,
+      "untrackedPaths={untrackedPaths}",
+      "untrackedPaths={new Set()}",
+    ),
+    mutate(
+      panel,
+      "split: bulk.splitPaths.length > 0,\n        untrackedPaths,",
+      "split: bulk.splitPaths.length > 0,",
+    ),
+    mutate(
+      panel,
+      "split: rows.splitPaths.length > 0,\n      untrackedPaths,",
+      "split: rows.splitPaths.length > 0,",
+    ),
+    mutate(
+      panel,
+      "submoduleStaysOutOfStash(entry, untrackedPaths) ||\n                        embeddedRepoStaysOutOfStash(entry)",
+      "submoduleStaysOutOfStash(entry, new Set()) ||\n                        embeddedRepoStaysOutOfStash(entry)",
+    ),
+    mutate(
+      panel,
+      "repo: repoPath,\n                        untrackedPaths,",
+      "repo: repoPath,",
     ),
     mutate(
       panel,

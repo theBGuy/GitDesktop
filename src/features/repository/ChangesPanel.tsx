@@ -111,8 +111,11 @@ import {
   type ChangeActionScope,
   confirmEntries,
   discardConfirmCopy,
+  embeddedRepoStaysOutOfStash,
   stashConfirmCopy,
   staysOutOfStash,
+  submoduleStaysOutOfStash,
+  untrackedPathsOf,
 } from "./changes-confirm-copy";
 import { type MarkerFlag, markerStagePrompt } from "./conflict-confirms";
 import { FileRow, MARKER_CHECK_PENDING } from "./FileRow";
@@ -173,6 +176,21 @@ function canStage(entry: FileEntry): boolean {
   return (
     reservedDeviceName(entry.path) === null &&
     !submoduleStageBlocked(entry, false)
+  );
+}
+
+/** Whether a stash saves this row: every Stash count, pathspec and success
+ *  toast reads it, so a reserved-name, submodule or embedded-repository row
+ *  never counts as stashed or reaches git. `untrackedPaths` is
+ *  `untrackedPathsOf` the live entries. */
+function canStash(
+  entry: FileEntry,
+  untrackedPaths: ReadonlySet<string>,
+): boolean {
+  return (
+    !staysOutOfStash(entry) &&
+    !submoduleStaysOutOfStash(entry, untrackedPaths) &&
+    !embeddedRepoStaysOutOfStash(entry)
   );
 }
 
@@ -811,8 +829,12 @@ export function ChangesPanel({
   const bulk = bulkRowTargets(selectedKeys, entries);
   const stageableSelected = bulk.unstagedRows.filter(canStage);
   const selectedDiscard = excludeConflicted(discardReach(bulk.unstagedRows));
-  const stashablePathCount = bulk.pathEntries.filter(
-    (e) => !staysOutOfStash(e),
+  const untrackedPaths = useMemo(
+    () => untrackedPathsOf(status.data?.entries ?? []),
+    [status.data?.entries],
+  );
+  const stashablePathCount = bulk.pathEntries.filter((e) =>
+    canStash(e, untrackedPaths),
   ).length;
   // Any unmerged entry makes git refuse every path stash, so Stash waits.
   const anyConflicted = conflictedPaths.length > 0;
@@ -2233,9 +2255,15 @@ export function ChangesPanel({
       discardable: staged
         ? 0
         : discardReach(shown).filter((e) => !isConflictedEntry(e)).length,
-      stashable: shown.filter((e) => !staysOutOfStash(e)).length,
+      stashable: shown.filter((e) => canStash(e, untrackedPaths)).length,
     };
-  }, [treeMode, activeFolderKey, stagedEntries, unstagedEntries]);
+  }, [
+    treeMode,
+    activeFolderKey,
+    stagedEntries,
+    unstagedEntries,
+    untrackedPaths,
+  ]);
 
   // The menu's counts for a right-clicked folder, from the same live lists, so
   // a poll while the menu is open updates them. Hidden = same-side files under
@@ -2263,9 +2291,9 @@ export function ChangesPanel({
       discardBlockedCount: staged
         ? 0
         : shown.filter(submoduleDiscardBlocked).length,
-      stashableCount: shown.filter((e) => !staysOutOfStash(e)).length,
+      stashableCount: shown.filter((e) => canStash(e, untrackedPaths)).length,
     };
-  }, [menuTarget, entries, stagedEntries, unstagedEntries]);
+  }, [menuTarget, entries, stagedEntries, unstagedEntries, untrackedPaths]);
 
   // Bulk stage/unstage act only on the selected rows of their own side: a file
   // with staged and unstaged edits keeps the side the user didn't select.
@@ -2309,12 +2337,23 @@ export function ChangesPanel({
   }
 
   function requestStashSelected() {
+    const submodules = bulk.pathEntries.filter((e) =>
+      submoduleStaysOutOfStash(e, untrackedPaths),
+    ).length;
+    const embedded = bulk.pathEntries.filter(
+      embeddedRepoStaysOutOfStash,
+    ).length;
     if (bulk.pathEntries.length > 0)
       setStashScope({
         kind: "files",
         entries: bulk.pathEntries,
         repo: repoPath,
         split: bulk.splitPaths.length > 0,
+        untrackedPaths,
+        leftAlone:
+          submodules > 0 || embedded > 0
+            ? { hidden: 0, conflicted: 0, submodules, embedded }
+            : undefined,
       });
   }
 
@@ -2369,14 +2408,24 @@ export function ChangesPanel({
   ) {
     if (refuseIfSwitched(repo, "nothing was stashed")) return;
     const { rows, hidden } = folderActionTargets(section, dir);
+    const submodules = rows.pathEntries.filter((e) =>
+      submoduleStaysOutOfStash(e, untrackedPaths),
+    ).length;
+    const embedded = rows.pathEntries.filter(
+      embeddedRepoStaysOutOfStash,
+    ).length;
     if (rows.pathEntries.length === 0) return;
     setStashScope({
       kind: "files",
       entries: rows.pathEntries,
       repo,
       split: rows.splitPaths.length > 0,
+      untrackedPaths,
       folder: dir,
-      leftAlone: hidden > 0 ? { hidden, conflicted: 0 } : undefined,
+      leftAlone:
+        hidden > 0 || submodules > 0 || embedded > 0
+          ? { hidden, conflicted: 0, submodules, embedded }
+          : undefined,
     });
   }
 
@@ -2521,18 +2570,26 @@ export function ChangesPanel({
       }
       return;
     }
-    const targets = stashScope.entries.map((e) => e.path);
+    // Only rows the stash saves reach git: a pathspec naming a staged submodule
+    // deletion carries that deletion into the stash too (measured).
+    const stashed = stashScope.entries.filter((e) =>
+      canStash(e, stashScope.untrackedPaths ?? new Set()),
+    );
+    if (stashed.length === 0) {
+      toast.info("Nothing to stash");
+      finish();
+      return;
+    }
     try {
       // Literal pathspecs so a `[slug]`-style path can't sweep a sibling's work
       // into the stash.
       const matched = await stashPaths.mutateAsync(
-        targets.map(literalPathspec),
+        stashed.map((e) => literalPathspec(e.path)),
       );
       // `matched` is false when the paths matched nothing, so no stash exists to
       // report — the selection no longer had changes when git ran.
       if (matched) {
         useStashReapplyMarker.getState().clearFor(stashScope.repo);
-        const stashed = stashScope.entries.filter((e) => !staysOutOfStash(e));
         toast.success(
           stashed.length === 1
             ? `Stashed ${stashed[0].path}`
@@ -3104,6 +3161,7 @@ export function ChangesPanel({
                   }
                   pathCount={bulk.pathEntries.length}
                   stashablePathCount={stashablePathCount}
+                  untrackedPaths={untrackedPaths}
                   trackedPathCount={bulk.trackedPathEntries.length}
                   discardableCount={selectedDiscard.targets.length}
                   anyConflicted={anyConflicted}
@@ -3155,17 +3213,27 @@ export function ChangesPanel({
                       });
                     },
                     openSubmodule,
-                    stashFile: (entry, staged) =>
+                    stashFile: (entry, staged) => {
+                      // The item is disabled on submodule, embedded-repository
+                      // and reserved-name rows. This refuses the first two; a
+                      // reserved-name row's confirm says it stays out.
+                      if (
+                        submoduleStaysOutOfStash(entry, untrackedPaths) ||
+                        embeddedRepoStaysOutOfStash(entry)
+                      )
+                        return;
                       setStashScope({
                         kind: "files",
                         entries: [entry],
                         repo: repoPath,
+                        untrackedPaths,
                         split:
                           bulkRowTargets(
                             new Set([keyOf(entry.path, staged)]),
                             entries,
                           ).splitPaths.length > 0,
-                      }),
+                      });
+                    },
                     viewHistory: setHistoryPath,
                     blame: setBlamePath,
                     ignore: (pattern, label) => void ignoreOne(pattern, label),

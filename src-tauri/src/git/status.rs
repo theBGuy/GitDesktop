@@ -425,8 +425,10 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
                 // 1 XY sub mH mI mW hH hI path
                 let mut fields = token.splitn(9, ' ');
                 let xy = fields.nth(1).unwrap_or("..");
-                let sub = submodule_change(fields.next().unwrap_or(""));
-                let path = fields.nth(5).unwrap_or("");
+                let sub_field = fields.next().unwrap_or("");
+                let mw = fields.nth(2).unwrap_or("");
+                let sub = submodule_change(sub_field, mw);
+                let path = fields.nth(2).unwrap_or("");
                 if path.is_empty() {
                     continue;
                 }
@@ -436,8 +438,10 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
                 // 2 XY sub mH mI mW hH hI Xscore path  (NUL)  origPath
                 let mut fields = token.splitn(10, ' ');
                 let xy = fields.nth(1).unwrap_or("..");
-                let sub = submodule_change(fields.next().unwrap_or(""));
-                let path = fields.nth(6).unwrap_or("");
+                let sub_field = fields.next().unwrap_or("");
+                let mw = fields.nth(2).unwrap_or("");
+                let sub = submodule_change(sub_field, mw);
+                let path = fields.nth(3).unwrap_or("");
                 let orig = tokens.next().map(|s| s.to_string());
                 if path.is_empty() {
                     continue;
@@ -447,8 +451,10 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
             Some('u') => {
                 // u XY sub m1 m2 m3 mW h1 h2 h3 path
                 let mut fields = token.splitn(11, ' ');
-                let sub = submodule_change(fields.nth(2).unwrap_or(""));
-                let path = fields.nth(7).unwrap_or("");
+                let sub_field = fields.nth(2).unwrap_or("");
+                let mw = fields.nth(3).unwrap_or("");
+                let sub = submodule_change(sub_field, mw);
+                let path = fields.nth(3).unwrap_or("");
                 if path.is_empty() {
                     continue;
                 }
@@ -501,13 +507,15 @@ fn entry_from_xy(
 }
 
 /// Porcelain v2's submodule field: `S<c><m><u>` on a submodule record, `N...` on any
-/// other; a missing flag character reads false.
-fn submodule_change(field: &str) -> Option<SubmoduleChange> {
+/// other; a missing flag character reads false. `mw` is the record's worktree mode,
+/// which alone tells a typechange's direction (both directions carry `T` and the token).
+fn submodule_change(field: &str, mw: &str) -> Option<SubmoduleChange> {
     let flags = field.strip_prefix('S')?.as_bytes();
     Some(SubmoduleChange {
         commit_changed: flags.first() == Some(&b'C'),
         tracked_modified: flags.get(1) == Some(&b'M'),
         untracked: flags.get(2) == Some(&b'U'),
+        worktree_is_gitlink: mw == "160000",
     })
 }
 
@@ -621,11 +629,21 @@ mod tests {
         assert_eq!(s.entries[1].path, "app.js");
     }
 
+    /// A submodule token over a gitlink worktree (`mW == 160000`).
     fn flags(c: bool, m: bool, u: bool) -> Option<SubmoduleChange> {
         Some(SubmoduleChange {
             commit_changed: c,
             tracked_modified: m,
             untracked: u,
+            worktree_is_gitlink: true,
+        })
+    }
+
+    /// The same token over a worktree that is no gitlink: a file, or nothing (`000000`).
+    fn off_gitlink(c: bool, m: bool, u: bool) -> Option<SubmoduleChange> {
+        flags(c, m, u).map(|s| SubmoduleChange {
+            worktree_is_gitlink: false,
+            ..s
         })
     }
 
@@ -662,12 +680,12 @@ mod tests {
             (
                 "1 D. S... 160000 000000 000000 e69de29 0000000 s_deleted".to_string(),
                 "s_deleted",
-                flags(false, false, false),
+                off_gitlink(false, false, false),
             ),
             (
                 "1 .D S... 160000 160000 000000 e69de29 e69de29 s_gone".to_string(),
                 "s_gone",
-                flags(false, false, false),
+                off_gitlink(false, false, false),
             ),
             (
                 "1 M. S... 160000 160000 160000 e69de29 4b825dc s_staged".to_string(),
@@ -682,12 +700,23 @@ mod tests {
             (
                 "1 .T S... 160000 160000 100644 e69de29 e69de29 s_file".to_string(),
                 "s_file",
-                flags(false, false, false),
+                off_gitlink(false, false, false),
             ),
             (
                 "1 .T SC.. 100644 100644 160000 e69de29 e69de29 was_file".to_string(),
                 "was_file",
                 flags(true, false, false),
+            ),
+            // A staged typechange's direction rides the modes too: file -> submodule, then back.
+            (
+                "1 T. S... 100644 160000 160000 e69de29 e69de29 became_sub".to_string(),
+                "became_sub",
+                flags(false, false, false),
+            ),
+            (
+                "1 T. S... 160000 100644 100644 e69de29 e69de29 became_file".to_string(),
+                "became_file",
+                off_gitlink(false, false, false),
             ),
             (
                 "1 A. S... 000000 160000 160000 0000000 e69de29 newsub".to_string(),
@@ -726,15 +755,24 @@ mod tests {
                 (Some(Modified), Some(Modified)),
                 (None, Some(Typechange)),
                 (None, Some(Typechange)),
+                (Some(Typechange), None),
+                (Some(Typechange), None),
                 (Some(Added), None),
                 (None, Some(Modified)),
             ]
         );
         // A token cut short reads its missing flags as false.
-        assert_eq!(submodule_change("SC"), flags(true, false, false));
-        assert_eq!(submodule_change("S"), flags(false, false, false));
-        assert_eq!(submodule_change("N..."), None);
-        assert_eq!(submodule_change(""), None);
+        assert_eq!(submodule_change("SC", "160000"), flags(true, false, false));
+        assert_eq!(submodule_change("S", "160000"), flags(false, false, false));
+        assert_eq!(submodule_change("N...", "160000"), None);
+        assert_eq!(submodule_change("", "160000"), None);
+        // Only the gitlink mode reads as one; a missing mode does not.
+        for mw in ["", "100755", "120000"] {
+            assert_eq!(
+                submodule_change("S...", mw),
+                off_gitlink(false, false, false)
+            );
+        }
     }
 
     #[test]
@@ -753,6 +791,15 @@ mod tests {
         assert_eq!(s.entries[1].path, "libs/my dep");
         assert_eq!(s.entries[1].submodule, flags(false, true, true));
         assert_eq!(s.entries[2].path, "plain.txt");
+        // The unmerged record's worktree mode is its seventh field.
+        let file_side = z(&[
+            "u UU S... 160000 160000 160000 100644 e69de29 4b825dc 8ab686e sub",
+            "",
+        ]);
+        assert_eq!(
+            parse_status_v2(&file_side).entries[0].submodule,
+            off_gitlink(false, false, false)
+        );
         assert_eq!(s.entries[2].submodule, None);
     }
 
@@ -771,7 +818,7 @@ mod tests {
         assert_eq!(s.entries[0].submodule, None);
         assert_eq!(s.entries[1].path, "new.txt");
         assert_eq!(s.entries[1].submodule, None);
-        assert_eq!(s.entries[2].submodule, flags(false, false, false));
+        assert_eq!(s.entries[2].submodule, off_gitlink(false, false, false));
         assert_eq!(s.entries[3].path, "sub/");
         assert_eq!(s.entries[3].unstaged, Some(ChangeKind::Untracked));
         assert_eq!(s.entries[3].submodule, None);
@@ -813,10 +860,20 @@ mod tests {
         let sub = serde_json::to_value(&s.entries[1]).unwrap();
         assert_eq!(
             sub["submodule"],
-            serde_json::json!({ "commitChanged": true, "trackedModified": false, "untracked": true })
+            serde_json::json!({
+                "commitChanged": true,
+                "trackedModified": false,
+                "untracked": true,
+                "worktreeIsGitlink": true,
+            })
         );
         let text = sub.to_string();
-        for snake in ["commit_changed", "tracked_modified", "orig_path"] {
+        for snake in [
+            "commit_changed",
+            "tracked_modified",
+            "worktree_is_gitlink",
+            "orig_path",
+        ] {
             assert!(!text.contains(snake), "{snake}");
         }
     }

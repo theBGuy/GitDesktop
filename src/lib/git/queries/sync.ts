@@ -202,11 +202,13 @@ export function useSubmodules(repo: string) {
 /** One side of a submodule row in Changes. The key MUST stay a child of
  *  {@link repoKeys.status}: every staging-class mutation invalidates that prefix.
  *  It polls on its own, since a commit inside the submodule leaves the parent's
- *  status record unchanged; an errored read stops polling until a retry. */
+ *  status record unchanged; an errored read stops polling until a retry.
+ *  `origPath` is a staged rename's old path (the row's `origPath`). */
 export function useSubmoduleChanges(
   repo: string,
   path: string,
   staged: boolean,
+  origPath?: string,
 ) {
   return useQuery({
     queryKey: [
@@ -214,8 +216,9 @@ export function useSubmoduleChanges(
       "submodule-changes",
       path,
       staged,
+      origPath ?? null,
     ] as const,
-    queryFn: () => api.gitSubmoduleChanges(repo, path, staged),
+    queryFn: () => api.gitSubmoduleChanges(repo, path, staged, origPath),
     // A local read: react-query's default "online" mode would park it offline.
     networkMode: "always",
     refetchInterval: (query) => (query.state.status === "error" ? false : 5000),

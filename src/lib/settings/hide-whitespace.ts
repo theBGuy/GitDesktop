@@ -45,8 +45,8 @@ export function useSetHideWhitespace(): (next: boolean) => void {
       diffHideWhitespace: next,
     });
     // Only the field: the cached snapshot's other fields can be older than disk.
-    // A rejection restores synchronously (no refetch), so the gear's focus
-    // hand-off rides the same commit.
+    // A rejection restores synchronously, so the gear's focus hand-off rides the
+    // same commit; any owed settings refetch lands disk's value, which it matches.
     void save
       .mutateAsync({ diffHideWhitespace: next })
       .then(

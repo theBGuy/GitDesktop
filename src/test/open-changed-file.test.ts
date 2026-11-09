@@ -8,14 +8,18 @@ import {
   openChangedFileAction,
   runOpenChangedFile,
 } from "@/features/repository/open-changed-file";
+import { claimRepoOpen } from "@/features/repository/useOpenRepoByPath";
 import {
   openWithDefault,
   openWithProgram,
+  type PathKind,
+  pathKind,
   revealInExplorer,
 } from "@/lib/git/api";
-import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import { conflictSides } from "@/lib/git/conflict";
 import type { ChangeKind, FileEntry } from "@/lib/git/types";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
+import { useUiStore } from "@/lib/stores/ui";
 import { toastError } from "@/lib/toast";
 import { unmockedCommands } from "./setup";
 
@@ -37,7 +41,9 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   openWithProgram: vi.fn(async () => undefined),
   openWithDefault: vi.fn(async () => undefined),
   revealInExplorer: vi.fn(async () => undefined),
+  pathKind: vi.fn(),
 }));
+// The probe no longer reads the conflict sides; mocked so a call is visible.
 vi.mock("@/lib/git/conflict", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
   conflictSides: vi.fn(),
@@ -58,15 +64,18 @@ beforeEach(() => {
   vi.mocked(openWithProgram).mockImplementation(async () => undefined);
   vi.mocked(openWithDefault).mockImplementation(async () => undefined);
   vi.mocked(revealInExplorer).mockImplementation(async () => undefined);
+  vi.mocked(pathKind).mockReset();
 });
 
 afterAll(() => {
   expect(unmockedCommands).toEqual([]);
 });
 
-/** A probe answer: only `workingExists` is read. */
-const sides = (workingExists: boolean) =>
-  ({ workingExists }) as unknown as ConflictSides;
+/** Neither probe ran: the existence probe nor the old conflict-sides read. */
+function expectNoProbe() {
+  expect(pathKind).not.toHaveBeenCalled();
+  expect(conflictSides).not.toHaveBeenCalled();
+}
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -276,7 +285,7 @@ describe("L7: an untracked folder (git's trailing-slash path)", () => {
     expect(revealInExplorer).toHaveBeenCalledExactlyOnceWith("C:\\repo\\sub");
     expectNoLaunch();
     expect(openSub).not.toHaveBeenCalled();
-    expect(conflictSides).not.toHaveBeenCalled();
+    expectNoProbe();
     expect(toast.info).not.toHaveBeenCalled();
   });
 
@@ -342,7 +351,7 @@ describe("runOpenChangedFile", () => {
     await runOpenChangedFile(DEFAULT_ARM, REPO, openSub);
     expect(openWithDefault).toHaveBeenCalledExactlyOnceWith("C:\\repo\\a.ts");
     expect(openWithProgram).not.toHaveBeenCalled();
-    expect(conflictSides).not.toHaveBeenCalled();
+    expectNoProbe();
     expect(refuseIfSwitched).not.toHaveBeenCalled();
   });
 
@@ -357,25 +366,29 @@ describe("runOpenChangedFile", () => {
       expect(toast.info).toHaveBeenCalledExactlyOnceWith(
         deletedNothingToOpen("gone.ts"),
       );
-      expect(conflictSides).not.toHaveBeenCalled();
+      expectNoProbe();
       expectNoLaunch();
     }
   });
 
-  it("A3: a probe-class open launches when the file is there, toasts when it is gone, opens on a failed probe", async () => {
+  it("A3: a probe-class open launches a file or link, toasts when it is gone, reveals a folder, opens on a failed probe", async () => {
     for (const e of PROBE_CLASS) {
       const action = decide(e, { editorPath: EDITOR });
       const abs = `C:\\repo\\${e.path}`;
 
-      vi.clearAllMocks();
-      vi.mocked(conflictSides).mockResolvedValueOnce(sides(true));
-      await runOpenChangedFile(action, REPO, openSub);
-      expect(conflictSides).toHaveBeenCalledExactlyOnceWith(REPO, e.path, []);
-      expect(openWithProgram).toHaveBeenCalledExactlyOnceWith(EDITOR, abs);
-      expect(toast.info).not.toHaveBeenCalled();
+      for (const kind of ["file", "symlink"] as const) {
+        vi.clearAllMocks();
+        vi.mocked(pathKind).mockResolvedValueOnce(kind);
+        await runOpenChangedFile(action, REPO, openSub);
+        expect(pathKind).toHaveBeenCalledExactlyOnceWith(REPO, e.path);
+        expect(conflictSides).not.toHaveBeenCalled();
+        expect(openWithProgram).toHaveBeenCalledExactlyOnceWith(EDITOR, abs);
+        expect(toast.info).not.toHaveBeenCalled();
+        expect(revealInExplorer).not.toHaveBeenCalled();
+      }
 
       vi.clearAllMocks();
-      vi.mocked(conflictSides).mockResolvedValueOnce(sides(false));
+      vi.mocked(pathKind).mockResolvedValueOnce("missing");
       await runOpenChangedFile(action, REPO, openSub);
       expect(toast.info).toHaveBeenCalledExactlyOnceWith(
         deletedNothingToOpen(e.path),
@@ -383,32 +396,34 @@ describe("runOpenChangedFile", () => {
       expectNoLaunch();
 
       vi.clearAllMocks();
-      vi.mocked(conflictSides).mockRejectedValueOnce(new Error("refused"));
+      vi.mocked(pathKind).mockResolvedValueOnce("dir");
+      await runOpenChangedFile(action, REPO, openSub);
+      expect(revealInExplorer).toHaveBeenCalledExactlyOnceWith(abs);
+      expectNoLaunch();
+      expect(toast.info).not.toHaveBeenCalled();
+
+      vi.clearAllMocks();
+      vi.mocked(pathKind).mockRejectedValueOnce(new Error("refused"));
       await runOpenChangedFile(decide(e), REPO, openSub);
       expect(openWithDefault).toHaveBeenCalledExactlyOnceWith(abs);
       expect(toast.info).not.toHaveBeenCalled();
+      expect(openSub).not.toHaveBeenCalled();
     }
   });
 
   it("A3: a repo switch during the probe opens nothing, in every outcome, on both probe arms", async () => {
     for (const e of PROBE_CLASS) {
       const action = decide(e, { editorPath: EDITOR });
-      for (const answer of ["exists", "rejects", "gone"] as const) {
+      for (const answer of ["file", "dir", "rejects", "missing"] as const) {
         const label = `${e.path} ${answer}`;
         vi.clearAllMocks();
         vi.mocked(refuseIfSwitched).mockReturnValueOnce(true);
         if (answer === "rejects")
-          vi.mocked(conflictSides).mockRejectedValueOnce(new Error("x"));
-        else
-          vi.mocked(conflictSides).mockResolvedValueOnce(
-            sides(answer === "exists"),
-          );
+          vi.mocked(pathKind).mockRejectedValueOnce(new Error("x"));
+        else vi.mocked(pathKind).mockResolvedValueOnce(answer);
         await runOpenChangedFile(action, REPO, openSub);
-        expect(conflictSides, label).toHaveBeenCalledExactlyOnceWith(
-          REPO,
-          e.path,
-          [],
-        );
+        expect(pathKind, label).toHaveBeenCalledExactlyOnceWith(REPO, e.path);
+        expect(revealInExplorer, label).not.toHaveBeenCalled();
         expect(refuseIfSwitched, label).toHaveBeenCalledExactlyOnceWith(
           REPO,
           "the file didn't open",
@@ -423,8 +438,8 @@ describe("runOpenChangedFile", () => {
 
   it("A3: a repeat while the probe is pending is dropped; one after it settles probes again", async () => {
     const action = decide(PROBE_CLASS[1]);
-    const held = deferred<ConflictSides>();
-    vi.mocked(conflictSides).mockReturnValueOnce(held.promise);
+    const held = deferred<PathKind>();
+    vi.mocked(pathKind).mockReturnValueOnce(held.promise);
     const first = runOpenChangedFile(action, REPO, openSub);
     await runOpenChangedFile(action, REPO, openSub);
     await runOpenChangedFile(
@@ -432,23 +447,23 @@ describe("runOpenChangedFile", () => {
       REPO,
       openSub,
     );
-    expect(conflictSides).toHaveBeenCalledTimes(1);
+    expect(pathKind).toHaveBeenCalledTimes(1);
     expectNoLaunch();
-    held.resolve(sides(true));
+    held.resolve("file");
     await first;
     expect(openWithDefault).toHaveBeenCalledTimes(1);
 
-    vi.mocked(conflictSides).mockResolvedValueOnce(sides(true));
+    vi.mocked(pathKind).mockResolvedValueOnce("file");
     await runOpenChangedFile(action, REPO, openSub);
-    expect(conflictSides).toHaveBeenCalledTimes(2);
+    expect(pathKind).toHaveBeenCalledTimes(2);
     expect(openWithDefault).toHaveBeenCalledTimes(2);
   });
 
   it("A3: the in-flight drop is per repo and path", async () => {
-    const held = deferred<ConflictSides>();
-    vi.mocked(conflictSides)
+    const held = deferred<PathKind>();
+    vi.mocked(pathKind)
       .mockReturnValueOnce(held.promise)
-      .mockResolvedValue(sides(true));
+      .mockResolvedValue("file");
     const first = runOpenChangedFile(decide(PROBE_CLASS[1]), REPO, openSub);
     await runOpenChangedFile(decide(PROBE_CLASS[0]), REPO, openSub);
     await runOpenChangedFile(
@@ -456,8 +471,8 @@ describe("runOpenChangedFile", () => {
       "/home/u/repo",
       openSub,
     );
-    expect(conflictSides).toHaveBeenCalledTimes(3);
-    held.resolve(sides(true));
+    expect(pathKind).toHaveBeenCalledTimes(3);
+    held.resolve("file");
     await first;
     expect(openWithDefault).toHaveBeenCalledTimes(3);
   });
@@ -468,21 +483,17 @@ describe("runOpenChangedFile", () => {
       const row = entry("moved.ts", "deleted", null);
       const list = [row];
       const action = decide(row);
-      const held = deferred<ConflictSides>();
-      vi.mocked(conflictSides).mockReturnValueOnce(held.promise);
+      const held = deferred<PathKind>();
+      vi.mocked(pathKind).mockReturnValueOnce(held.promise);
       const run = runOpenChangedFile(action, REPO, openSub);
       // The row is renamed and the list emptied while the probe is out.
       row.path = "elsewhere.ts";
       row.staged = null;
       row.unstaged = "modified";
       list.length = 0;
-      held.resolve(sides(exists));
+      held.resolve(exists ? "file" : "missing");
       await run;
-      expect(conflictSides).toHaveBeenCalledExactlyOnceWith(
-        REPO,
-        "moved.ts",
-        [],
-      );
+      expect(pathKind).toHaveBeenCalledExactlyOnceWith(REPO, "moved.ts");
       if (exists) {
         expect(openWithDefault).toHaveBeenCalledExactlyOnceWith(
           "C:\\repo\\moved.ts",
@@ -519,7 +530,14 @@ describe("runOpenChangedFile", () => {
 });
 
 // Submodule rows, spelled as status.rs emits the measured records.
-const NONE = { commitChanged: false, trackedModified: false, untracked: false };
+const NONE = {
+  commitChanged: false,
+  trackedModified: false,
+  untracked: false,
+  worktreeIsGitlink: true,
+};
+/** The same token where the worktree holds a file, or nothing (a deletion). */
+const OFF_GITLINK = { ...NONE, worktreeIsGitlink: false };
 const sub = (
   staged: ChangeKind | null,
   unstaged: ChangeKind | null,
@@ -536,6 +554,7 @@ const SUBMODULE_ROWS: [string, FileEntry][] = [
       commitChanged: true,
       trackedModified: true,
       untracked: true,
+      worktreeIsGitlink: true,
     }),
   ],
   ["M. (row 12, 7b)", sub("modified", null)],
@@ -545,24 +564,47 @@ const SUBMODULE_ROWS: [string, FileEntry][] = [
   ],
   ["A. (row 17)", sub("added", null)],
   ["UU (row 14)", sub(null, "conflicted")],
-  ["D. after git rm (row 8)", sub("deleted", null, NONE, "sub")],
-  ["D. after rm --cached (row 8b)", sub("deleted", null, NONE, "sub")],
-  ["T with a file (row 16)", sub(null, "typechange")],
+  ["D. after git rm (row 8)", sub("deleted", null, OFF_GITLINK, "sub")],
+  ["D. after rm --cached (row 8b)", sub("deleted", null, OFF_GITLINK, "sub")],
+  ["T with a file (row 16)", sub(null, "typechange", OFF_GITLINK)],
+  ["T. with a file", sub("typechange", null, OFF_GITLINK)],
   [
     "T with a repo (row 16b)",
     sub(null, "typechange", { ...NONE, commitChanged: true }),
   ],
+  ["T. with a repo", sub("typechange", null)],
 ];
 
 describe("submodule rows", () => {
   it.each(SUBMODULE_ROWS)(
-    "%s opens the submodule, never probes",
+    "%s opens the submodule, its file fallback never probing",
     (_n, entry) => {
       for (const editorPath of ["", EDITOR]) {
         const base = { entry, repoPath: REPO, editorPath, windows: true };
+        const absolutePath = `C:\\repo\\${entry.path.replaceAll("/", "\\")}`;
         expect(openChangedFileAction(base)).toEqual({
           kind: "submodule",
           relPath: entry.path,
+          asFile:
+            editorPath === ""
+              ? {
+                  kind: "default",
+                  relPath: entry.path,
+                  absolutePath,
+                  probeWorkingFile: false,
+                }
+              : {
+                  kind: "editor",
+                  program: EDITOR,
+                  relPath: entry.path,
+                  absolutePath,
+                  probeWorkingFile: false,
+                },
+          // A file sits on disk only where the worktree mode left the gitlink
+          // and the row is no deletion.
+          typechange:
+            entry.submodule?.worktreeIsGitlink === false &&
+            entry.staged !== "deleted",
         });
         for (const via of ["editor", "default"] as const) {
           const action = openChangedFileAction({ ...base, via });
@@ -603,26 +645,186 @@ describe("submodule rows", () => {
     ).toBe("folder");
   });
 
+  const SUB_ARM = decide(sub(null, "modified", { ...NONE, untracked: true }));
+  const SUB_ABS = "C:\\repo\\vendor\\sub";
+  const SUB_ROW_SELECTED = {
+    path: "vendor/sub",
+    staged: false,
+    untracked: false,
+  };
+
   it("fileMenuOpens hints the submodule item and offers no file opens", () => {
-    expect(fileMenuOpens({ kind: "submodule", relPath: "vendor/sub" })).toEqual(
-      {
-        showFileOpens: false,
-        hintOn: "submodule",
-      },
-    );
+    expect(fileMenuOpens(SUB_ARM)).toEqual({
+      showFileOpens: false,
+      hintOn: "submodule",
+    });
   });
 
-  it("the executor hands the path to the opener and nothing else", async () => {
-    await runOpenChangedFile(
-      { kind: "submodule", relPath: "vendor/sub" },
-      REPO,
-      openSub,
+  it("fileMenuOpens offers a typechange row's file opens, hinting the double-click's program", () => {
+    for (const row of [
+      sub(null, "typechange", OFF_GITLINK),
+      sub("typechange", null, OFF_GITLINK),
+    ]) {
+      expect(fileMenuOpens(decide(row))).toEqual({
+        showFileOpens: true,
+        hintOn: "default",
+      });
+      expect(fileMenuOpens(decide(row, { editorPath: EDITOR }))).toEqual({
+        showFileOpens: true,
+        hintOn: "editor",
+      });
+    }
+    // A file that became a submodule keeps a gitlink worktree: Open submodule.
+    for (const row of [sub(null, "typechange"), sub("typechange", null)])
+      for (const editorPath of ["", EDITOR])
+        expect(fileMenuOpens(decide(row, { editorPath }))).toEqual({
+          showFileOpens: false,
+          hintOn: "submodule",
+        });
+  });
+
+  it("a file that became a submodule double-clicks into the submodule", async () => {
+    vi.clearAllMocks();
+    vi.mocked(pathKind).mockResolvedValueOnce("dir");
+    await runOpenChangedFile(decide(sub(null, "typechange")), REPO, openSub);
+    expect(openSub).toHaveBeenCalledExactlyOnceWith("vendor/sub");
+    expectNoLaunch();
+  });
+
+  it("the executor opens a folder (or an unprobed path) as the submodule, and nothing else", async () => {
+    for (const answer of ["dir", "rejects"] as const) {
+      vi.clearAllMocks();
+      if (answer === "rejects")
+        vi.mocked(pathKind).mockRejectedValueOnce(new Error("x"));
+      else vi.mocked(pathKind).mockResolvedValueOnce(answer);
+      await runOpenChangedFile(SUB_ARM, REPO, openSub);
+      expect(pathKind, answer).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        "vendor/sub",
+      );
+      expect(openSub, answer).toHaveBeenCalledExactlyOnceWith("vendor/sub");
+      expect(conflictSides).not.toHaveBeenCalled();
+      expectNoLaunch();
+      expect(toast.info).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a file (or link) that replaced the submodule opens as a file, through its program", async () => {
+    // Row 16: `T` keeps the submodule token over a regular file on disk.
+    const replaced = sub(null, "typechange", OFF_GITLINK);
+    for (const kind of ["file", "symlink"] as const) {
+      vi.clearAllMocks();
+      vi.mocked(pathKind).mockResolvedValueOnce(kind);
+      await runOpenChangedFile(decide(replaced), REPO, openSub);
+      expect(openWithDefault, kind).toHaveBeenCalledExactlyOnceWith(SUB_ABS);
+      expect(openSub, kind).not.toHaveBeenCalled();
+
+      vi.clearAllMocks();
+      vi.mocked(pathKind).mockResolvedValueOnce(kind);
+      await runOpenChangedFile(
+        decide(replaced, { editorPath: EDITOR }),
+        REPO,
+        openSub,
+      );
+      expect(openWithProgram, kind).toHaveBeenCalledExactlyOnceWith(
+        EDITOR,
+        SUB_ABS,
+      );
+      expect(openWithDefault).not.toHaveBeenCalled();
+      expect(openSub, kind).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a missing submodule path refuses with the deleted note", async () => {
+    vi.mocked(pathKind).mockResolvedValueOnce("missing");
+    await runOpenChangedFile(SUB_ARM, REPO, openSub);
+    expect(toast.info).toHaveBeenCalledExactlyOnceWith(
+      deletedNothingToOpen("vendor/sub"),
     );
+    expect(openSub).not.toHaveBeenCalled();
+    expectNoLaunch();
+  });
+
+  it("a repo switch during the probe opens nothing, saying so for the submodule", async () => {
+    for (const answer of ["dir", "file", "missing"] as const) {
+      vi.clearAllMocks();
+      vi.mocked(refuseIfSwitched).mockReturnValueOnce(true);
+      vi.mocked(pathKind).mockResolvedValueOnce(answer);
+      await runOpenChangedFile(SUB_ARM, REPO, openSub);
+      expect(refuseIfSwitched, answer).toHaveBeenCalledExactlyOnceWith(
+        REPO,
+        "the submodule didn't open",
+        "while checking the submodule",
+      );
+      expect(openSub, answer).not.toHaveBeenCalled();
+      expectNoLaunch();
+      expect(toast.info, answer).not.toHaveBeenCalled();
+    }
+  });
+
+  it("a second double-click on the same row during the probe opens the submodule once", async () => {
+    const held = deferred<PathKind>();
+    vi.mocked(pathKind).mockReturnValueOnce(held.promise);
+    const first = runOpenChangedFile(SUB_ARM, REPO, openSub);
+    // The second click re-selects the row (an epoch bump), then double-clicks.
+    useUiStore.getState().selectFile(SUB_ROW_SELECTED);
+    await runOpenChangedFile(SUB_ARM, REPO, openSub);
+    held.resolve("dir");
+    await first;
+    expect(pathKind).toHaveBeenCalledTimes(1);
+    expect(openSub).toHaveBeenCalledExactlyOnceWith("vendor/sub");
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("a click on another row during the probe retires the open", async () => {
+    useUiStore.getState().selectFile(SUB_ROW_SELECTED);
+    const held = deferred<PathKind>();
+    vi.mocked(pathKind).mockReturnValueOnce(held.promise);
+    const run = runOpenChangedFile(SUB_ARM, REPO, openSub);
+    useUiStore
+      .getState()
+      .selectFile({ path: "a.ts", staged: false, untracked: false });
+    held.resolve("dir");
+    await run;
+    expect(openSub).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("a later double-click on another submodule row wins while both probes are pending", async () => {
+    const a = deferred<PathKind>();
+    const b = deferred<PathKind>();
+    vi.mocked(pathKind)
+      .mockReturnValueOnce(a.promise)
+      .mockReturnValueOnce(b.promise);
+    const other = decide(sub(null, "modified", NONE, "vendor/other"));
+    const first = runOpenChangedFile(SUB_ARM, REPO, openSub);
+    const second = runOpenChangedFile(other, REPO, openSub);
+    a.resolve("dir");
+    await first;
+    b.resolve("dir");
+    await second;
+    expect(openSub).toHaveBeenCalledExactlyOnceWith("vendor/other");
+  });
+
+  it("a newer open claimed during the probe wins: the submodule is not opened", async () => {
+    const held = deferred<PathKind>();
+    vi.mocked(pathKind).mockReturnValueOnce(held.promise);
+    const run = runOpenChangedFile(SUB_ARM, REPO, openSub);
+    claimRepoOpen();
+    held.resolve("dir");
+    await run;
+    expect(openSub).not.toHaveBeenCalled();
+    expect(toast.info).not.toHaveBeenCalled();
+  });
+
+  it("a repeat while the submodule probe is pending is dropped", async () => {
+    const held = deferred<PathKind>();
+    vi.mocked(pathKind).mockReturnValueOnce(held.promise);
+    const first = runOpenChangedFile(SUB_ARM, REPO, openSub);
+    await runOpenChangedFile(SUB_ARM, REPO, openSub);
+    expect(pathKind).toHaveBeenCalledTimes(1);
+    held.resolve("dir");
+    await first;
     expect(openSub).toHaveBeenCalledTimes(1);
-    expect(openSub).toHaveBeenCalledWith("vendor/sub");
-    expect(conflictSides).not.toHaveBeenCalled();
-    expect(openWithProgram).not.toHaveBeenCalled();
-    expect(openWithDefault).not.toHaveBeenCalled();
-    expect(refuseIfSwitched).not.toHaveBeenCalled();
   });
 });

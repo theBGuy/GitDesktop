@@ -60,6 +60,9 @@ export type AppError =
       remote: string;
       remoteBranch: string;
     }
+  /** `open_with_default` refused a file whose default action would run it;
+   *  `name` is its file name. */
+  | { kind: "defaultOpenRefused"; message: string; name: string }
   | { kind: PlainErrorKind; message: string };
 
 export function isAppError(e: unknown): e is AppError {

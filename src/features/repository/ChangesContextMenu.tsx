@@ -28,7 +28,11 @@ import {
 } from "@/lib/settings/queries";
 import { toastError } from "@/lib/toast";
 import { canUntrack, isConflictedEntry } from "./bulk-row-targets";
-import { staysOutOfStash } from "./changes-confirm-copy";
+import {
+  embeddedRepoStaysOutOfStash,
+  staysOutOfStash,
+  submoduleStaysOutOfStash,
+} from "./changes-confirm-copy";
 import {
   fileMenuOpens,
   hintSlots,
@@ -36,6 +40,7 @@ import {
   runOpenChangedFile,
 } from "./open-changed-file";
 import {
+  repoReplacedFile,
   submoduleDiscardBlocked,
   submoduleStageBlocked,
 } from "./submodule-row";
@@ -122,9 +127,20 @@ const DISCARD_BLOCKED_HINT: Partial<Record<string, string>> = {
   modified: " (open the submodule to discard)",
   typechange: " (not available when a submodule and a file swap places)",
 };
+/** Why Stash is off on a row `submoduleStaysOutOfStash` names: only changes
+ *  inside a submodule stash there; a pointer, an addition or a deletion can't. */
+const SUBMODULE_INSIDE_STASH_HINT = " (open the submodule to stash)";
+const SUBMODULE_COMMIT_STASH_HINT = " (a submodule's commit can't be stashed)";
+/** An untracked folder holding its own repository: a stash saves none of it. */
+const EMBEDDED_STASH_HINT = " (an embedded repository can't be stashed)";
+/** A selection or folder Stash when none of its files can go: the menu holds
+ *  counts, not rows, so the label names every cause. */
+const NOTHING_TO_STASH_LABEL =
+  "Nothing to stash (submodules, embedded repositories and reserved names stay out of a stash)";
 
-/** A Stash label counts the files that go: untracked Windows-reserved names
- *  stay behind, so a target holding any takes the "N of M" form, like Stage. */
+/** A Stash label counts the files that go: untracked Windows-reserved names,
+ *  embedded repositories and the submodule rows git stash doesn't save stay
+ *  behind, so a target holding any takes the "N of M" form, like Stage. */
 function stashLabel(stashable: number, total: number): string {
   return stashable === total
     ? `Stash ${total} change${total === 1 ? "" : "s"}…`
@@ -161,6 +177,7 @@ export function ChangesContextMenuItems({
   noneStageableLabel,
   pathCount,
   stashablePathCount,
+  untrackedPaths,
   trackedPathCount,
   discardableCount,
   anyConflicted,
@@ -185,8 +202,12 @@ export function ChangesContextMenuItems({
   noneStageableLabel: string;
   /** Distinct selected files (Stash, Ignore, Exclude from AI act per file). */
   pathCount: number;
-  /** Of those, the ones a Stash takes: minus untracked Windows-reserved names. */
+  /** Of those, the ones a Stash takes: minus untracked Windows-reserved names,
+   *  embedded repositories and the submodule rows a path stash doesn't save. */
   stashablePathCount: number;
+  /** The panel's `untrackedPathsOf` its live entries: a staged submodule
+   *  deletion whose path holds an untracked file stashes with it. */
+  untrackedPaths: ReadonlySet<string>;
   /** Distinct selected files `canUntrack` accepts (Untrack). */
   trackedPathCount: number;
   /** Selected unstaged rows Discard sends: minus the conflicted ones and the
@@ -262,14 +283,16 @@ export function ChangesContextMenuItems({
                 : `Discard ${discardable} of ${files} changes…`}
             </ContextMenuItem>
           )}
-          {stashable > 0 && (
+          {files > 0 && (
             <ContextMenuItem
               className={MENU_HELD_ROW_CLASS}
-              disabled={anyConflicted}
+              disabled={anyConflicted || stashable === 0}
               aria-describedby={hidden > 0 ? noteId : undefined}
               onClick={actions.stashFolder}
             >
-              {`${stashLabel(stashable, files)}${anyConflicted ? CONFLICT_HINT : ""}`}
+              {stashable === 0
+                ? NOTHING_TO_STASH_LABEL
+                : `${stashLabel(stashable, files)}${anyConflicted ? CONFLICT_HINT : ""}`}
             </ContextMenuItem>
           )}
           {hidden > 0 && (
@@ -323,9 +346,9 @@ export function ChangesContextMenuItems({
   const { entry, staged } = target;
   if (inSelection && rowCount > 1) {
     // Each item counts the selected rows (or files) it acts on and hides at
-    // zero; the clicked side's verb leads. Stage stays visible but disabled
-    // when no selected unstaged row can be staged (reserved names, submodules
-    // with nothing to stage), its label naming why.
+    // zero; the clicked side's verb leads. Stage and Stash stay visible but
+    // disabled when nothing selected can go (reserved names, submodules), their
+    // labels naming why.
     const unstageItem = stagedRowCount > 0 && (
       <ContextMenuItem onClick={actions.unstageSelected}>
         {`Unstage ${stagedRowCount} file${stagedRowCount === 1 ? "" : "s"}`}
@@ -355,13 +378,15 @@ export function ChangesContextMenuItems({
               : `Discard ${discardableCount} of ${unstagedRowCount} changes…`}
           </ContextMenuItem>
         )}
-        {stashablePathCount > 0 && (
+        {pathCount > 0 && (
           <ContextMenuItem
             className={MENU_HELD_ROW_CLASS}
-            disabled={anyConflicted}
+            disabled={anyConflicted || stashablePathCount === 0}
             onClick={actions.stashSelected}
           >
-            {`${stashLabel(stashablePathCount, pathCount)}${anyConflicted ? CONFLICT_HINT : ""}`}
+            {stashablePathCount === 0
+              ? NOTHING_TO_STASH_LABEL
+              : `${stashLabel(stashablePathCount, pathCount)}${anyConflicted ? CONFLICT_HINT : ""}`}
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
@@ -402,9 +427,25 @@ export function ChangesContextMenuItems({
     stageHint = SUBMODULE_STAGE_HINT;
   const discardHint = DISCARD_BLOCKED_HINT[entry.unstaged ?? "none"] ?? "";
   const discardBlocked = submoduleDiscardBlocked(entry);
-  // The path stash leaves this file in place, so stashing it alone would stash
-  // nothing.
-  const stashBlocked = staysOutOfStash(entry);
+  // The stash leaves this row in place, so stashing it alone would stash
+  // nothing. The reserved name outranks the others and the submodule outranks
+  // the conflicts: resolving them wouldn't make this row stashable.
+  let stashHint = "";
+  if (staysOutOfStash(entry)) stashHint = RESERVED_HINT;
+  else if (embeddedRepoStaysOutOfStash(entry)) stashHint = EMBEDDED_STASH_HINT;
+  // Files changed inside stash from the submodule, whether or not its commit
+  // moved; a pointer, an addition or a deletion alone has nothing to stash. A
+  // typechange record carries no inner flags, so a repository that replaced a
+  // file always gets the inside hint: its own changes stash from inside it.
+  else if (submoduleStaysOutOfStash(entry, untrackedPaths))
+    stashHint =
+      repoReplacedFile(entry) ||
+      (entry.unstaged === "modified" &&
+        (entry.submodule?.trackedModified || entry.submodule?.untracked))
+        ? SUBMODULE_INSIDE_STASH_HINT
+        : SUBMODULE_COMMIT_STASH_HINT;
+  const stashBlocked = stashHint !== "";
+  if (!stashBlocked && anyConflicted) stashHint = CONFLICT_HINT;
   // The double-click's decision: a worktree deletion, a submodule row and an
   // untracked folder row offer no file Open items, and the item a double-click
   // runs carries the hint.
@@ -450,9 +491,7 @@ export function ChangesContextMenuItems({
         onClick={() => actions.stashFile(entry, staged)}
       >
         Stash change…
-        {/* The reserved name outranks the conflicts: resolving them wouldn't
-            make this file stashable. */}
-        {stashBlocked ? RESERVED_HINT : anyConflicted ? CONFLICT_HINT : ""}
+        {stashHint}
       </ContextMenuItem>
       {hasHistory && (
         <>

@@ -232,8 +232,9 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
 
   // The palette's open lives with the pane, not the list: the pane stays
   // mounted while the sidebar is collapsed, the list's panel does not. It acts
-  // on the file whose diff is shown, never the multi-selection, through the
-  // decision the row's double-click shares.
+  // on the selected row (the user's intent, which the painted slot can lag
+  // during a hold), never the multi-selection, through the decision the row's
+  // double-click shares.
   const settings = useSettings();
   const editorPath = (settings.data?.externalEditor ?? "").trim();
   const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
@@ -249,15 +250,15 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
       openSubmodule,
     );
   }
-  const shownEntry = selectedFile
+  const selectedEntry = selectedFile
     ? (rowEntry(entries, selectedFile.path, selectedFile.staged) ?? null)
     : null;
   useHotkeyAction(
     "open-changed-file",
     () => {
-      if (shownEntry) openRow(shownEntry);
+      if (selectedEntry) openRow(selectedEntry);
     },
-    shownEntry !== null,
+    selectedEntry !== null,
   );
 
   return (
@@ -265,14 +266,22 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
       {(view) => {
         if (view.kind === "file") {
           // A gitlink has no text diff: the pane lists commits and files.
-          if (view.file.submodule)
+          // A staged rename's HEAD gitlink sits at its old path; a copy's source
+          // stays where it was, so a copy forwards no old path.
+          if (view.file.submodule) {
+            const row =
+              view.file.staged && view.repo === repoPath
+                ? rowEntry(entries, view.file.path, true)
+                : undefined;
             return (
               <SubmoduleChangesPane
                 repoPath={view.repo}
                 path={view.file.path}
                 staged={view.file.staged}
+                origPath={row?.staged === "renamed" ? row.origPath : undefined}
               />
             );
+          }
           return (
             <WorkingTreeDiff
               repoPath={view.repo}

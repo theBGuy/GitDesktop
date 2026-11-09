@@ -47,6 +47,10 @@ pub struct SubmoduleChange {
     pub commit_changed: bool,
     pub tracked_modified: bool,
     pub untracked: bool,
+    /// The record's worktree mode is a gitlink (`mW == 160000`): true on an ordinary
+    /// submodule row and on a file that became a submodule; false when a file now sits
+    /// where the gitlink was, and on a deletion, staged or not (`000000`: no file either).
+    pub worktree_is_gitlink: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

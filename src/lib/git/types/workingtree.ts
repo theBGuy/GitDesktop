@@ -14,6 +14,10 @@ export interface SubmoduleChange {
   commitChanged: boolean;
   trackedModified: boolean;
   untracked: boolean;
+  /** The record's worktree mode is a gitlink: true on an ordinary submodule row
+   *  and on a file that became a submodule; false when a file now sits where the
+   *  gitlink was, and on a deletion (no file there either). */
+  worktreeIsGitlink: boolean;
 }
 
 export interface FileEntry {

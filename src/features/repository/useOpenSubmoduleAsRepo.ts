@@ -8,11 +8,12 @@ import { toastError } from "@/lib/toast";
 import { sameRepoRoot } from "./submodule-row";
 import { claimRepoOpen, useOpenRepoByPath } from "./useOpenRepoByPath";
 
-/** Resolves true only once the open was handed to useOpenRepoByPath. Resolves
- *  false, having toasted, when the folder is no repository of its own (the
+/** Resolves true once useOpenRepoByPath requested the switch, which Settings'
+ *  "Keep editing" over unsaved edits can still cancel. Resolves false, having
+ *  toasted, when the folder is no repository of its own (the
  *  toast names the submodule-relative path) or the probe failed some other
- *  way; and false with NO toast when a newer open or navigation retired the
- *  press while the probe ran. */
+ *  way; false with NO toast when a newer open or navigation retired the
+ *  press while the probe ran; and false when the open itself didn't land. */
 export function useOpenSubmoduleAsRepo(
   repoPath: string,
 ): (subPath: string) => Promise<boolean> {
@@ -47,8 +48,7 @@ export function useOpenSubmoduleAsRepo(
       }
       // A submodule is an independent repository that nothing else in the app
       // can reach, so it earns a recents row like any other opened repo.
-      await openByPath(full, "picker", stillCurrent);
-      return true;
+      return await openByPath(full, "picker", stillCurrent);
     },
     [repoPath, openByPath],
   );

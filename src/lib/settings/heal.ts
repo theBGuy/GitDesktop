@@ -509,6 +509,16 @@ export function healLoadedSettings(
 export interface SettingsSeedClient {
   setQueryData(queryKey: readonly unknown[], data: AppSettings): unknown;
   invalidateQueries(filters: { queryKey: readonly unknown[] }): Promise<void>;
+  getQueryCache(): {
+    find(filters: { queryKey: readonly unknown[]; exact: true }): unknown;
+    subscribe(
+      listener: (event: {
+        type: string;
+        query: unknown;
+        action?: { type: string; manual?: boolean };
+      }) => void,
+    ): () => void;
+  };
 }
 
 /** What a settings write's `onMutate` hands its `onSuccess`. */
@@ -521,30 +531,89 @@ export interface SettingsSeedContext {
  *  setBitbucketTokenExpiresAt, raw persistRepoOwners calls) don't stamp it and rely
  *  on their call sites' invalidate. */
 let started = 0;
+/** Writes started whose success or failure hasn't run yet. */
+const unsettled = new Set<number>();
+/** True while a superseded success's re-read is still owed. */
+let reconcileOwed = false;
+/** Bumped by each superseded success, so a re-read retires only the debts owed
+ *  when it started. */
+let owedGen = 0;
+
+/** Retires this write from {@link unsettled}; true when a newer write is still
+ *  unsettled. */
+function settleAndCheckNewer(ctx: SettingsSeedContext | undefined): boolean {
+  const seq = ctx?.seq ?? 0;
+  unsettled.delete(seq);
+  for (const s of unsettled) if (s > seq) return true;
+  return false;
+}
 
 /**
  * Every settings mutation's callbacks. `onMutate` stamps the write's start
- * synchronously; `onSuccess` seeds the cache with the write's committed (healed)
- * snapshot unless a newer settings write has started since, whose optimistic patch
- * or own seed must win. The invalidate follows in the same synchronous block: its
- * `cancelRefetch` drops an older in-flight read that would land pre-write data
- * over the seed, its refetch reconciles a skipped seed, and returning its promise
- * holds `mutateAsync` until that refetch settles.
+ * synchronously. A success superseded by a newer settings write never seeds and
+ * owes a re-read instead, since the unserialized read could land over a newer
+ * write's optimistic patch. Every settle, success or failure, pays an owed re-read
+ * (unreturned) once no write newer than itself is unsettled, and the debt stands
+ * until a re-read actually lands, so the next settle pays again. The latest write
+ * seeds its committed (healed) snapshot, then invalidates in the same synchronous
+ * block: `cancelRefetch` drops an older in-flight read that would land pre-write
+ * data over the seed, and returning its promise holds `mutateAsync` until that
+ * refetch settles.
  */
 export function settingsSeedCallbacks(
   client: SettingsSeedClient,
   key: readonly unknown[],
 ) {
+  const payOwedUnlessNewer = (newer: boolean) => {
+    if (!reconcileOwed || newer) return;
+    const cache = client.getQueryCache();
+    const query = cache.find({ queryKey: key, exact: true });
+    if (query === undefined) {
+      reconcileOwed = false;
+      return;
+    }
+    // Only a FETCHED success retires the debt: the invalidate resolves just
+    // the same when a cancel (a whitespace flip's) reverts the read to the old
+    // data or the read fails, and a patch's `manual` success is no read.
+    const paying = owedGen;
+    const stop = cache.subscribe((event) => {
+      if (event.query !== query || event.type !== "updated") return;
+      if (event.action?.type === "success" && !event.action.manual) {
+        if (owedGen === paying) reconcileOwed = false;
+        stop();
+      }
+    });
+    // Not returned: a failed write's rollback must not wait behind the read.
+    void client.invalidateQueries({ queryKey: key }).finally(stop);
+  };
   return {
-    onMutate: (): SettingsSeedContext => ({ seq: ++started }),
+    onMutate: (): SettingsSeedContext => {
+      const seq = ++started;
+      unsettled.add(seq);
+      return { seq };
+    },
     onSuccess: (
       committed: AppSettings | null,
       _variables: unknown,
       ctx: SettingsSeedContext | undefined,
     ) => {
-      if (committed && ctx?.seq === started)
-        client.setQueryData(key, committed);
+      const newer = settleAndCheckNewer(ctx);
+      if (ctx?.seq !== started) {
+        owedGen++;
+        reconcileOwed = true;
+        payOwedUnlessNewer(newer);
+        return;
+      }
+      reconcileOwed = false;
+      if (committed) client.setQueryData(key, committed);
       return client.invalidateQueries({ queryKey: key });
+    },
+    onError: (
+      _error: unknown,
+      _variables: unknown,
+      ctx: SettingsSeedContext | undefined,
+    ) => {
+      payOwedUnlessNewer(settleAndCheckNewer(ctx));
     },
   };
 }

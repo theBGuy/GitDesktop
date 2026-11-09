@@ -68,6 +68,10 @@ export const claimRepoOpen = openClaims.claim;
  *  open or any navigation arrives. */
 export const repoOpenWatermark = openClaims.watermark;
 
+/** Claims an open at its REQUEST; the check fails only once a newer open is
+ *  claimed, whatever navigation happens meanwhile. */
+export const claimRepoOpenOrder = openClaims.claimOrder;
+
 // The store's cross-repo landings hold on this (src/lib can't import it). Below
 // `openClaims`, which it closes over; the module-level client is the app's.
 registerRepoShellWarmup((root) => {

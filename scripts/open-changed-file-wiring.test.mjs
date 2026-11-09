@@ -2,7 +2,7 @@
 // `open-changed-file` once, palette-only, in the Changes category, and
 // DiffViewer (the diff pane, mounted under <main> while the sidebar is
 // collapsed, which hides ChangesPanel) is the one site that registers it,
-// enabled exactly while the shown file resolves to a live entry on its side
+// enabled exactly while the selected row resolves to a live entry on its side
 // (`rowEntry`, hasSide's side test). Its `openRow` and the row double-click's
 // in ChangesPanel both go through the shared decision.
 //
@@ -143,8 +143,8 @@ function panelFailures(source) {
   return failures;
 }
 
-/** Ways DiffViewer's palette registration drifts: once, gated on the shown
- *  file's entry on its own side, running the shared openRow. */
+/** Ways DiffViewer's palette registration drifts: once, gated on the selected
+ *  row's entry on its own side, running the shared openRow. */
 function viewerFailures(source) {
   const masked = maskNonCode(source, true);
   const flat = (from, to) => masked.slice(from, to).replace(/\s+/g, " ").trim();
@@ -159,17 +159,17 @@ function viewerFailures(source) {
   const [args] = calls;
   if (args.length !== 3) failures.push(`${args.length} arguments, want 3`);
   else {
-    if (!/\bopenRow\(shownEntry\)/.test(flat(...args[1])))
-      failures.push("the run does not call openRow(shownEntry)");
-    if (flat(...args[2]) !== "shownEntry !== null")
-      failures.push("the gate is not shownEntry !== null");
+    if (!/\bopenRow\(selectedEntry\)/.test(flat(...args[1])))
+      failures.push("the run does not call openRow(selectedEntry)");
+    if (flat(...args[2]) !== "selectedEntry !== null")
+      failures.push("the gate is not selectedEntry !== null");
   }
   if (
-    !/const shownEntry = selectedFile \? \(rowEntry\(entries, selectedFile\.path, selectedFile\.staged\) \?\? null\) : null;/.test(
+    !/const selectedEntry = selectedFile \? \(rowEntry\(entries, selectedFile\.path, selectedFile\.staged\) \?\? null\) : null;/.test(
       flatAll,
     )
   )
-    failures.push("shownEntry: the shown file's entry on its own side");
+    failures.push("selectedEntry: the selected row's entry on its own side");
   if (
     !/\bconst selectedFile = useUiStore\(\(s\) => s\.selectedFile\);/.test(
       flatAll,
@@ -247,7 +247,7 @@ test("ChangesPanel: double-click runs openRow, and the panel registers no palett
   assert.deepEqual(panelFailures(PANEL), []);
 });
 
-test("DiffViewer: one registration, gated on the shown entry, running openRow", () => {
+test("DiffViewer: one registration, gated on the selected entry, running openRow", () => {
   assert.deepEqual(viewerFailures(VIEWER), []);
 });
 
@@ -271,7 +271,7 @@ function mutate(text, from, to) {
 test("negative controls: registry drift fails", () => {
   const entry = `  {
     id: "${ACTION}",
-    label: "Open file in external editor",
+    label: "Open changed file",
     category: "Changes",`;
   assert.notDeepEqual(
     registryFailures(mutate(REGISTRY, entry, `${entry}\n  },\n${entry}`)),
@@ -308,9 +308,9 @@ test("negative controls: registry drift fails", () => {
 const REGISTRATION = `  useHotkeyAction(
     "${ACTION}",
     () => {
-      if (shownEntry) openRow(shownEntry);
+      if (selectedEntry) openRow(selectedEntry);
     },
-    shownEntry !== null,
+    selectedEntry !== null,
   );
 `;
 
@@ -353,10 +353,10 @@ test("negative controls: ChangesPanel drift fails", () => {
 
 test("negative controls: DiffViewer drift fails", () => {
   const mutants = [
-    ["    shownEntry !== null,\n  );", "    true,\n  );"],
+    ["    selectedEntry !== null,\n  );", "    true,\n  );"],
     [
-      "if (shownEntry) openRow(shownEntry);",
-      "if (shownEntry) void shownEntry;",
+      "if (selectedEntry) openRow(selectedEntry);",
+      "if (selectedEntry) void selectedEntry;",
     ],
     [
       "rowEntry(entries, selectedFile.path, selectedFile.staged)",

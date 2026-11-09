@@ -751,13 +751,15 @@ const SUBMODULE_REASON_CAP: usize = 300;
 
 /// What one side of a submodule row changed, for the Changes pane. Read-only and
 /// lock-free; every git run is sequential, so the command future stays small.
+/// `orig_path` is a staged rename's old path, where HEAD still records the gitlink.
 #[tauri::command]
 pub async fn git_submodule_changes(
     repo_path: String,
     path: String,
     staged: bool,
+    orig_path: Option<String>,
 ) -> AppResult<SubmoduleChanges> {
-    git_submodule_changes_core(&repo_path, &path, staged).await
+    git_submodule_changes_core(&repo_path, &path, staged, orig_path.as_deref()).await
 }
 
 /// Only a refused path and a failed parent gitlink read are errors; every
@@ -766,12 +768,18 @@ pub(crate) async fn git_submodule_changes_core(
     repo_path: &str,
     path: &str,
     staged: bool,
+    orig_path: Option<&str>,
 ) -> AppResult<SubmoduleChanges> {
     validate_repo_relative(path, "submodule path")?;
+    if let Some(orig) = orig_path {
+        validate_repo_relative(orig, "submodule path")?;
+    }
     let spec = crate::git::pathspec::literal(path);
     let index_sha = index_gitlink(repo_path, path, &spec).await?;
     let tree_sha = if staged {
-        head_gitlink(repo_path, path, &spec).await?
+        let head_path = orig_path.unwrap_or(path);
+        let head_spec = crate::git::pathspec::literal(head_path);
+        head_gitlink(repo_path, head_path, &head_spec).await?
     } else {
         None
     };
@@ -800,7 +808,7 @@ pub(crate) async fn git_submodule_changes_core(
     let worktree = Path::new(repo_path).join(path);
     (changes.checkout, changes.reason) =
         checkout_from_probe(std::fs::symlink_metadata(&worktree), || {
-            worktree.join(".git").exists()
+            worktree.join(".git").try_exists()
         });
     let dir = worktree.to_string_lossy().into_owned();
     if changes.checkout == SubmoduleCheckout::Ok {
@@ -854,10 +862,10 @@ pub(crate) async fn git_submodule_changes_core(
 /// The checkout state from an lstat of the gitlink path's final component (an
 /// intermediate junction is still traversed): git run through a link reads the
 /// link's target, a repository outside the parent. Only NotFound is missing; any
-/// other failure is unreadable with its message.
+/// other failure, the `.git` probe's included, is unreadable with its message.
 fn checkout_from_probe(
     probe: std::io::Result<std::fs::Metadata>,
-    has_git: impl FnOnce() -> bool,
+    has_git: impl FnOnce() -> std::io::Result<bool>,
 ) -> (SubmoduleCheckout, Option<String>) {
     match probe {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (SubmoduleCheckout::Missing, None),
@@ -867,8 +875,14 @@ fn checkout_from_probe(
         ),
         // An lstat reports a link (a junction too) as not a directory.
         Ok(meta) if !meta.is_dir() => (SubmoduleCheckout::Replaced, None),
-        Ok(_) if !has_git() => (SubmoduleCheckout::NotInitialized, None),
-        Ok(_) => (SubmoduleCheckout::Ok, None),
+        Ok(_) => match has_git() {
+            Ok(true) => (SubmoduleCheckout::Ok, None),
+            Ok(false) => (SubmoduleCheckout::NotInitialized, None),
+            Err(e) => (
+                SubmoduleCheckout::Unreadable,
+                Some(format!("couldn't read the submodule's .git: {e}")),
+            ),
+        },
     }
 }
 
@@ -1337,7 +1351,7 @@ mod tests {
     }
 
     async fn changes(host: &str, staged: bool) -> SubmoduleChanges {
-        git_submodule_changes_core(host, "libs/dep", staged)
+        git_submodule_changes_core(host, "libs/dep", staged, None)
             .await
             .expect("submodule changes")
     }
@@ -1473,7 +1487,7 @@ mod tests {
         std::fs::create_dir_all(&plain).unwrap();
         let plain = plain.to_string_lossy().into_owned();
         for staged in [false, true] {
-            let result = git_submodule_changes_core(&plain, "libs/dep", staged).await;
+            let result = git_submodule_changes_core(&plain, "libs/dep", staged, None).await;
             assert!(
                 matches!(result, Err(AppError::Git { .. })),
                 "{staged}: {result:?}"
@@ -1486,7 +1500,7 @@ mod tests {
         let (_dir, host, _dep) = host_with_submodule("changes-badindex").await;
         std::fs::write(Path::new(&host).join(".git/index"), b"not an index").unwrap();
         for staged in [false, true] {
-            let result = git_submodule_changes_core(&host, "libs/dep", staged).await;
+            let result = git_submodule_changes_core(&host, "libs/dep", staged, None).await;
             assert!(
                 matches!(result, Err(AppError::Git { .. })),
                 "{staged}: {result:?}"
@@ -1510,7 +1524,7 @@ mod tests {
             assert!(crate::git::history::unborn_head(&host).await.unwrap());
             return;
         }
-        let result = git_submodule_changes_core(&host, "libs/dep", true).await;
+        let result = git_submodule_changes_core(&host, "libs/dep", true, None).await;
         assert!(result.is_err(), "{result:?}");
         assert!(
             matches!(
@@ -1602,6 +1616,60 @@ mod tests {
         assert!(c.ahead.is_empty() && c.behind.is_empty());
         assert_eq!((c.ahead_count, c.behind_count), (0, 0));
         assert!(c.files.is_empty());
+    }
+
+    /// The `.git` probe over a real folder. Tested set: present, absent, and an
+    /// injected PermissionDenied/Other (a real denied `.git` needs an ACL edit, so
+    /// the error arrives through the closure seam instead).
+    #[test]
+    fn changes_git_probe_errors_read_unreadable_not_uninitialized() {
+        use std::io::{Error, ErrorKind};
+        let dir = temp("changes-gitprobe");
+        let folder = || std::fs::symlink_metadata(dir.path());
+        assert_eq!(
+            checkout_from_probe(folder(), || Ok(true)),
+            (SubmoduleCheckout::Ok, None)
+        );
+        assert_eq!(
+            checkout_from_probe(folder(), || Ok(false)),
+            (SubmoduleCheckout::NotInitialized, None)
+        );
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            let (checkout, reason) = checkout_from_probe(folder(), || Err(Error::from(kind)));
+            assert_eq!(checkout, SubmoduleCheckout::Unreadable, "{kind:?}");
+            assert!(!reason.expect("a reason").trim().is_empty(), "{kind:?}");
+        }
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let no_git = || panic!("a non-folder never looks for .git");
+        assert_eq!(
+            checkout_from_probe(std::fs::symlink_metadata(&file), no_git),
+            (SubmoduleCheckout::Replaced, None)
+        );
+    }
+
+    /// A staged `git mv` of the submodule: HEAD records the gitlink at the OLD path,
+    /// so the staged side reads it there, never "the next commit adds this submodule".
+    #[tokio::test]
+    async fn changes_staged_rename_reads_head_gitlink_at_the_orig_path() {
+        let (_dir, host, _dep) = host_with_submodule("changes-rename").await;
+        let recorded = git(&sub_dir(&host), &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        git(&host, &["mv", "libs/dep", "libs/moved"]).await;
+        let c = git_submodule_changes_core(&host, "libs/moved", true, Some("libs/dep"))
+            .await
+            .expect("submodule changes");
+        assert_eq!(c.path, "libs/moved");
+        assert_eq!(c.checkout, SubmoduleCheckout::Ok);
+        assert_eq!(c.from_sha.as_deref(), Some(recorded.as_str()));
+        assert_eq!(c.to_sha.as_deref(), Some(recorded.as_str()));
+        // The control: without the old path, HEAD has no gitlink at the new one.
+        let bare = git_submodule_changes_core(&host, "libs/moved", true, None)
+            .await
+            .expect("submodule changes");
+        assert_eq!(bare.from_sha, None);
     }
 
     #[test]
@@ -1701,10 +1769,15 @@ mod tests {
         let dir = temp("changes-refuse");
         let repo = dir.path().to_string_lossy().into_owned();
         for bad in ["../x", "-x", "C:/x"] {
-            let err = git_submodule_changes_core(&repo, bad, false).await;
+            let err = git_submodule_changes_core(&repo, bad, false, None).await;
             assert!(
                 matches!(err, Err(AppError::InvalidArgument(_))),
                 "{bad}: {err:?}"
+            );
+            let err = git_submodule_changes_core(&repo, "libs/dep", true, Some(bad)).await;
+            assert!(
+                matches!(err, Err(AppError::InvalidArgument(_))),
+                "orig {bad}: {err:?}"
             );
         }
     }

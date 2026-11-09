@@ -60,10 +60,17 @@ export const gitSubmoduleSetBranch = (
 ) => invoke<void>("git_submodule_set_branch", { repoPath, path, branch });
 
 /** One side of a submodule row: the commits between its two gitlinks and, on the
- *  unstaged side, the files changed inside. Read-only. */
+ *  unstaged side, the files changed inside. Read-only. `origPath` is a staged
+ *  rename's old path, where HEAD still records the gitlink. */
 export const gitSubmoduleChanges = (
   repoPath: string,
   path: string,
   staged: boolean,
+  origPath?: string,
 ) =>
-  invoke<SubmoduleChanges>("git_submodule_changes", { repoPath, path, staged });
+  invoke<SubmoduleChanges>("git_submodule_changes", {
+    repoPath,
+    path,
+    staged,
+    origPath: origPath ?? null,
+  });

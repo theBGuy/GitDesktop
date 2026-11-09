@@ -74,12 +74,15 @@ export function SubmoduleChangesPane({
   repoPath,
   path,
   staged,
+  origPath,
 }: {
   repoPath: string;
   path: string;
   staged: boolean;
+  /** A staged rename's old path, where HEAD still records the gitlink. */
+  origPath?: string;
 }) {
-  const changes = useSubmoduleChanges(repoPath, path, staged);
+  const changes = useSubmoduleChanges(repoPath, path, staged, origPath);
   useReportPaneSettled(!changes.isPending);
   const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
   // A failed poll keeps the loaded content under a notice; only a read with
@@ -175,7 +178,11 @@ export function SubmoduleChangesPane({
     );
   }
   return shell(
-    <SubmoduleChangesBody data={data} onRetry={() => void changes.refetch()} />,
+    <SubmoduleChangesBody
+      data={data}
+      origPath={origPath}
+      onRetry={() => void changes.refetch()}
+    />,
   );
 }
 
@@ -183,9 +190,12 @@ export function SubmoduleChangesPane({
  *  host for the `unreadable` Retry, so it stays mounted across that state. */
 function SubmoduleChangesBody({
   data,
+  origPath,
   onRetry,
 }: {
   data: SubmoduleChanges;
+  /** A staged rename's old path, which the stage line names. */
+  origPath: string | undefined;
   onRetry: () => void;
 }) {
   const unreadable = data.checkout === "unreadable";
@@ -233,9 +243,10 @@ function SubmoduleChangesBody({
     );
   if (data.files.length > 0)
     sections.push(<FilesSection key="files" data={data} />);
-  const stageLine =
-    STAGE_LINES.find(([applies]) => applies(data, pairDiffers))?.[1]?.(data) ??
-    null;
+  const stageSentence = STAGE_LINES.find(([applies]) =>
+    applies(data, pairDiffers),
+  )?.[1];
+  const stageLine = stageSentence?.(data, origPath) ?? null;
 
   return (
     <div
@@ -300,10 +311,11 @@ const theseFiles = (d: SubmoduleChanges) =>
   d.filesTotal === 1 ? "this file" : "these files";
 
 /** The stage line: the FIRST row whose test passes; a null sentence says
- *  nothing. `differs` = both shas present and different. */
+ *  nothing. `differs` = both shas present and different; `origPath` is a
+ *  staged rename's old path. */
 const STAGE_LINES: readonly [
   (d: SubmoduleChanges, differs: boolean) => boolean,
-  ((d: SubmoduleChanges) => string) | null,
+  ((d: SubmoduleChanges, origPath: string | undefined) => string) | null,
 ][] = [
   [
     (d) => d.staged && d.toSha === null,
@@ -315,7 +327,10 @@ const STAGE_LINES: readonly [
   ],
   [
     (d) => d.staged,
-    (d) => `The next commit records this submodule at ${short(d.toSha)}.`,
+    (d, origPath) =>
+      origPath === undefined
+        ? `The next commit records this submodule at ${short(d.toSha)}.`
+        : `The next commit records this submodule at ${short(d.toSha)}, moved from ${origPath}.`,
   ],
   [
     (d) => d.checkout === "replaced",
@@ -424,8 +439,13 @@ function FilesSection({ data }: { data: SubmoduleChanges }) {
       <ul aria-labelledby={headingId} className="flex flex-col gap-0.5">
         {data.files.map((f, i) => {
           const badge = KIND_BADGE[kinds[i]];
+          // One path can be listed twice: a staged deletion and an untracked
+          // file of the same name are separate status records.
           return (
-            <li key={f.path} className="flex min-w-0 items-center gap-2">
+            <li
+              key={`${f.staged ?? ""}:${f.unstaged ?? ""}:${f.path}`}
+              className="flex min-w-0 items-center gap-2"
+            >
               <span
                 aria-hidden
                 className={`w-3 shrink-0 font-semibold ${badge.className}`}

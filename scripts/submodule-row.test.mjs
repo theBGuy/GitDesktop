@@ -52,6 +52,12 @@ const sub = (token, kinds, path = "vendor/sub") => ({
     untracked: token[3] === "U",
   },
 });
+/** `MT SC..`: a staged change under an unstaged typechange; `worktreeIsGitlink`
+ *  tells a repository in the file's place from a file in the gitlink's. */
+const replacedOverEdit = (worktreeIsGitlink) => {
+  const entry = sub("SC..", { staged: "modified", unstaged: "typechange" });
+  return { ...entry, submodule: { ...entry.submodule, worktreeIsGitlink } };
+};
 const file = (path, unstaged = "modified") => ({
   path,
   staged: null,
@@ -163,6 +169,33 @@ const ROWS = [
     sub("SC..", { unstaged: "typechange" }),
     false,
     "",
+    false,
+    true,
+  ],
+  // A repository replaced the file over a staged edit: the index still holds
+  // a plain file, so the staged row has no submodule words.
+  [
+    "MT SC.. repository over a staged file edit, staged",
+    replacedOverEdit(true),
+    true,
+    "",
+    false,
+    true,
+  ],
+  [
+    "MT SC.. repository over a staged file edit, unstaged",
+    replacedOverEdit(true),
+    false,
+    "",
+    false,
+    true,
+  ],
+  // The other direction: a file over a moved pointer, whose index is a gitlink.
+  [
+    "MT SC.. file over a staged pointer move, staged",
+    replacedOverEdit(false),
+    true,
+    "commit changed",
     false,
     true,
   ],

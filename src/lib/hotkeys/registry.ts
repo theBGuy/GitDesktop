@@ -996,7 +996,7 @@ export const ACTIONS = [
   },
   {
     id: "open-changed-file",
-    label: "Open file in external editor",
+    label: "Open changed file",
     category: "Changes",
     // Palette-only: the pointer route is a double-click on the file's row.
     defaultBinding: null,

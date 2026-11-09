@@ -32,6 +32,7 @@ function token(t: string): SubmoduleChange {
     commitChanged: t[1] === "C",
     trackedModified: t[2] === "M",
     untracked: t[3] === "U",
+    worktreeIsGitlink: true,
   };
 }
 

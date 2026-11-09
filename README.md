@@ -135,8 +135,9 @@ context, image diffing with each side's dimensions and file size, and a size
 change shown for other binary files (`1.2 MB → 725 KB · 486 KB smaller (−40%)`),
 GitHub and Bitbucket pull requests included. A non-image binary file with
 unstaged changes (in your working copy or an agent session's) opens in its
-default program, or shows in Explorer, right from its diff; for a deleted
-file, Explorer opens the nearest folder that still exists.
+default program (a file your system would run instead is refused), or shows
+in Explorer, right from its diff; for a deleted file, Explorer opens the
+nearest folder that still exists.
 Hide whitespace changes in any local diff to read a re-indented file by the
 lines whose content changed.
 Filter the changes list by path or category, and read a file's `+added -deleted`

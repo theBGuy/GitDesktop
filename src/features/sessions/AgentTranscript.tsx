@@ -35,6 +35,7 @@ import { presentError } from "@/lib/error-summary";
 import {
   classifyHeaderOnlyDiff,
   headerOnlyMessage,
+  modeChangeMessage,
 } from "@/lib/git/diff-split";
 import { useSessionFileDiff } from "@/lib/git/queries";
 import type { FileDiff } from "@/lib/git/types";
@@ -277,9 +278,12 @@ function InlineDiff({
   // Ahead of the empty and header-only arms, which under `-w` would say nothing
   // changed.
   if (diff.data.whitespaceOnly) {
+    const headerOnly = classifyHeaderOnlyDiff(diff.data.text);
+    const modeLine =
+      headerOnly?.kind === "mode" ? modeChangeMessage(headerOnly) : null;
     return shell(
       <InlineNote>
-        {WHITESPACE_ONLY_MESSAGE}.{" "}
+        {WHITESPACE_ONLY_MESSAGE}. {modeLine !== null && <>{modeLine}. </>}
         <button
           type="button"
           onClick={(e) => {

@@ -722,6 +722,7 @@ pub fn run() {
             fsops::delete_repo_folder,
             fsops::reveal_in_explorer,
             fsops::open_with_default,
+            fsops::path_kind,
             fsops::open_nearest_folder,
             fsops::open_in_terminal,
             fsops::open_with_program,

@@ -37,7 +37,7 @@ vi.mock("sonner", () => ({
   toast: { info: vi.fn(), error: vi.fn(), success: vi.fn() },
 }));
 const { openByPath } = vi.hoisted(() => ({
-  openByPath: vi.fn(async () => undefined),
+  openByPath: vi.fn(async (..._args: unknown[]) => true),
 }));
 vi.mock("@/features/repository/useOpenRepoByPath", async (importOriginal) => {
   const real =
@@ -96,6 +96,13 @@ describe("useOpenSubmoduleAsRepo", () => {
       claim.mock.results[0].value,
     );
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("13: an open that does not land resolves false", async () => {
+    vi.mocked(validateRepo).mockResolvedValue(info("C:\\r\\vendor\\sub"));
+    openByPath.mockResolvedValueOnce(false);
+    expect(await hook()(SUB)).toBe(false);
+    expect(openByPath).toHaveBeenCalledTimes(1);
   });
 
   it("13: drops trailing separators off the repository path", async () => {
@@ -196,6 +203,14 @@ describe("SubmodulesDialog's Open as repository", () => {
     const onOpenChange = await pressOpen();
     expect(openByPath).toHaveBeenCalledTimes(1);
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("13: stays open when the open itself fails", async () => {
+    vi.mocked(validateRepo).mockResolvedValue(info("C:\\r\\vendor\\sub"));
+    openByPath.mockResolvedValueOnce(false);
+    const onOpenChange = await pressOpen();
+    expect(openByPath).toHaveBeenCalledTimes(1);
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 
   it("13: stays open after a failed probe and after the walk-up", async () => {

@@ -12,11 +12,19 @@ export const SUBMODULE_NOTHING_TO_STAGE =
 
 /** The row's "what changed", where line counts sit on other rows. The status
  *  token carries no direction, so a moved pointer is "commit changed"; only the
- *  pane names the direction. */
+ *  pane names the direction. A repository that replaced a file over a staged
+ *  edit (`MT SC..`) keeps a plain FILE in the index, so its staged row says
+ *  what a file row's words say: nothing. */
 export function submoduleWords(entry: FileEntry, staged: boolean): string {
   const sub = entry.submodule;
   if (sub === undefined) return "";
   if ((staged ? entry.staged : entry.unstaged) !== "modified") return "";
+  if (
+    staged &&
+    sub.worktreeIsGitlink === true &&
+    entry.unstaged === "typechange"
+  )
+    return "";
   if (staged) return "commit changed";
   const words: string[] = [];
   if (sub.commitChanged) words.push("commit changed");
@@ -42,9 +50,34 @@ export function submoduleStageBlocked(
   );
 }
 
-/** `git restore` on a gitlink restores nothing on a modified row, and on a
- *  typechange row it either does nothing or deletes the file in its place;
- *  `FileEntry` can't tell those two apart, so neither offers Discard. */
+/** Whether a FILE now sits where the submodule's gitlink was (status's
+ *  `worktreeIsGitlink` false, the row no deletion): the row's open, menu and
+ *  stash treat it as that file. A file that became a submodule reads false. */
+export function submoduleFileOnDisk(entry: FileEntry): boolean {
+  return (
+    entry.submodule?.worktreeIsGitlink === false &&
+    entry.staged !== "deleted" &&
+    entry.unstaged !== "deleted"
+  );
+}
+
+/** A nested repository now sits where a tracked FILE was, unstaged
+ *  (`1 .T SC.. 100644 100644 160000`) or staged (`1 T. S... 100644 160000
+ *  160000`). `git reset --hard --no-recurse-submodules HEAD` and
+ *  `git stash push -u` both delete that repository, its `.git` and commits
+ *  included (measured, git 2.51.1, both shapes). */
+export function repoReplacedFile(entry: FileEntry): boolean {
+  return (
+    entry.submodule?.worktreeIsGitlink === true &&
+    (entry.unstaged === "typechange" || entry.staged === "typechange")
+  );
+}
+
+/** `git restore` on a gitlink restores nothing on a modified row. On a
+ *  typechange row it loses data either way: when a repository replaced the
+ *  file it brings the file back and deletes that repository (measured), and
+ *  when a file replaced the submodule it deletes that file outright without
+ *  bringing the submodule's checkout back, so neither direction offers Discard. */
 export function submoduleDiscardBlocked(entry: FileEntry): boolean {
   return (
     entry.submodule !== undefined &&

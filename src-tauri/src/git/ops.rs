@@ -1933,7 +1933,14 @@ pub(crate) async fn git_discard_all_core(state: &AppState, repo_path: String) ->
     .code
         == 0;
     if head_exists {
-        run_git(Some(&top), &["reset", "--hard", "HEAD"], DEFAULT_TIMEOUT).await?;
+        // The confirm promises registered submodules keep their inner files; `submodule.recurse`
+        // would make the reset wipe them.
+        run_git(
+            Some(&top),
+            &["reset", "--hard", "--no-recurse-submodules", "HEAD"],
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -18956,6 +18963,43 @@ detached
             );
             assert!(!listed.contains(&name.to_string()), "{name} is not listed");
         }
+    }
+
+    /// Under `submodule.recurse=true` a plain `reset --hard` also resets every
+    /// submodule's working tree; discard-all must leave a submodule's inner edits alone.
+    #[tokio::test]
+    async fn discard_all_keeps_submodule_inner_edits_under_submodule_recurse() {
+        let (_inner_dir, inner) = setup_repo("discard-all-sub-inner").await;
+        let (dir, repo) = setup_repo("discard-all-sub-parent").await;
+        let url = inner.replace('\\', "/");
+        git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &url,
+                "sub",
+            ],
+        )
+        .await;
+        git(&repo, &["commit", "-m", "add sub"]).await;
+        git(&repo, &["config", "submodule.recurse", "true"]).await;
+        std::fs::write(dir.path().join("a.txt"), b"dirty\n").unwrap();
+        std::fs::write(dir.path().join("sub/a.txt"), b"inner edit\n").unwrap();
+
+        git_discard_all_core(&AppState::default(), repo)
+            .await
+            .expect("discard-all runs");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("sub/a.txt")).unwrap(),
+            b"inner edit\n"
+        );
+        let parent_file = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+        assert_eq!(parent_file.trim_end(), "v0");
     }
 
     /// Discard-all is one compound: the untracked sweep must run INSIDE the hold,

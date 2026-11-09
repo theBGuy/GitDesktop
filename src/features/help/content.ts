@@ -161,8 +161,10 @@ where line counts sit on other rows: *commit changed*, *modified files*, *untrac
 Selecting it lists the commits the submodule moved across (from the commit your repo
 records to the checked-out one, or to the staged one on the staged row); its unstaged row
 also lists the uncommitted files inside, read-only. Staging the row records the commit the
-submodule points at. **Open submodule** (or a double-click on the row) opens it as its own
-repository, where you stage and commit what's inside.
+submodule points at; a stash can't save a submodule's commit or the files inside it, so its
+row stays out of **Stash change** and you stash from inside it. **Open submodule** (or a
+double-click on the row) opens it as its own repository, where you stage, commit and stash
+what's inside.
 
 - **Update** checks a submodule out at the commit your repo records, initializing it and
   any nested submodules on the way; **Update all** in the footer does the whole set.
@@ -498,12 +500,14 @@ the last list up, with a line above it saying it couldn't refresh.
   move between files, and the next {{key:tab}} reaches that row's stage button.
   **Stage all** and **Unstage all** do the whole list.
 - Double-click a file to open it in your external editor (set in **Settings**), or in
-  its default program when none is set. A renamed file opens under its new name. A file
-  deleted from your working tree has nothing to open, and a short message says so. The
-  command palette's **Open file in external editor** opens the file you're viewing. A
-  file's {{secondaryclick}} menu marks the item a double-click runs, and leaves its Open
-  items out for a deletion you haven't staged yet. A submodule opens as its own
-  repository instead, and an untracked folder shows in your file manager.
+  its default program when none is set. A file your system would run rather than open
+  (a script, an installer, a shortcut) is refused with a note, and **Show in Explorer**
+  is a click away. A renamed file opens under its new name. A file deleted from your
+  working tree has nothing to open, and a short message says so. The command palette's
+  **Open changed file** opens the file you're viewing. A file's {{secondaryclick}} menu
+  marks the item a double-click runs, and leaves its Open items out for a deletion you
+  haven't staged yet. A submodule opens as its own repository instead, and an untracked
+  folder shows in your file manager.
 - A changed submodule's row is tagged **Submodule**, and selecting it lists its commits
   and the files changed inside in place of a diff (see *Submodules*). A submodule whose
   commit hasn't changed has nothing to stage: its **+** says to commit inside the
@@ -597,7 +601,10 @@ the last list up, with a line above it saying it couldn't refresh.
   palette ({{kbd:command-palette}}). Tracked files go back to the last commit, and untracked
   files move to the **recycle bin**, so they stay recoverable. It runs as one operation
   on the snapshot it took when you confirmed, so nothing staged or written midway is
-  swept away without a recycle-bin copy. On a large working tree that can take a while,
+  swept away without a recycle-bin copy. Two things get no copy: a new file with a
+  Windows-reserved device name (below), and a repository that replaced a tracked file,
+  which Git deletes outright, commits included — the confirm says so whenever one is
+  present. On a large working tree that can take a while,
   and another GitDesktop action started meanwhile waits for it: if the discard is still
   going after ten seconds, that action stops with *A discard is still running — try
   again when it finishes.* rather than landing partway through. On Windows, if any new
@@ -625,11 +632,11 @@ the last list up, with a line above it saying it couldn't refresh.
   A screen reader always hears the exact counts. A changed file mode gets its own line.
   GitHub and Bitbucket pull requests show sizes too; on GitHub.com that includes files
   your clone doesn't have. A non-image binary file with unstaged changes (in your
-  working tree or an agent session's) also offers **Open with default program** and
-  **Show in Explorer**; for a deleted one, **Show in Explorer** opens the nearest
-  folder that still exists. When a non-image binary file and a symbolic link trade
-  places, local diffs show both the binary side's size line and the link's text, as
-  do pull requests where a link became a binary file.
+  working tree or an agent session's) also offers **Open with default program** (a file
+  your system would run instead is refused) and **Show in Explorer**; for a deleted one,
+  **Show in Explorer** opens the nearest folder that still exists. When a non-image
+  binary file and a symbolic link trade places, local diffs show both the binary side's
+  size line and the link's text, as do pull requests where a link became a binary file.
 - **Markdown preview** — markdown and MDX diffs add a **Raw / Preview** toggle to the
   diff toolbar. **Preview** renders the file's new version as formatted prose
   (headings, tables, highlighted code fences), so a docs change reads the way it will

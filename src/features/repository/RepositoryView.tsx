@@ -122,6 +122,10 @@ import { WorktreeRemovalBanner } from "./WorktreeRemovalBanner";
 // from an installed release — matching the tray tooltip set in `tray.rs`.
 const APP_TITLE = import.meta.env.DEV ? "GitDesktop (Dev)" : "GitDesktop";
 
+// The vendored popup pins its width to the anchor and clips overflow-x, so a
+// long rebound shortcut label would clip; size to content within the viewport.
+const SECONDARY_MENU_CLASS = "w-auto max-w-(--available-width) min-w-44";
+
 // The Insights board pulls in Recharts; lazy-load it so that chunk stays off
 // the boot path and only loads once the user first opens the Insights tab.
 const InsightsBoard = lazy(() =>
@@ -321,7 +325,11 @@ function SidebarRail({
             />
           )}
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" side="right" className="min-w-44">
+        <DropdownMenuContent
+          align="start"
+          side="right"
+          className={SECONDARY_MENU_CLASS}
+        >
           {secondaryTabs.map(({ tab, label, binding }) => (
             <DropdownMenuItem
               key={tab}
@@ -848,7 +856,10 @@ export function RepositoryView() {
                     </span>
                     <CaretDownIcon data-icon="inline-end" />
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="min-w-44">
+                  <DropdownMenuContent
+                    align="end"
+                    className={SECONDARY_MENU_CLASS}
+                  >
                     {secondaryTabs.map(({ tab, label, binding }) => (
                       <DropdownMenuItem
                         key={tab}

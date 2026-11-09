@@ -21,9 +21,10 @@ import {
   getSecret,
   openWithDefault,
   openWithProgram,
+  pathKind,
   revealInExplorer,
 } from "@/lib/git/api";
-import { type ConflictSides, conflictSides } from "@/lib/git/conflict";
+import { conflictSides } from "@/lib/git/conflict";
 import type { FileEntry } from "@/lib/git/types";
 import { isWindows } from "@/lib/hotkeys/binding";
 import { type AppSettings, loadSettings } from "@/lib/settings/api";
@@ -50,6 +51,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   revealInExplorer: vi.fn(async () => undefined),
   openWithProgram: vi.fn(async () => undefined),
   openWithDefault: vi.fn(async () => undefined),
+  pathKind: vi.fn(async () => "dir"),
 }));
 vi.mock("@/lib/git/conflict", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/conflict")>()),
@@ -151,6 +153,7 @@ async function openMenu({ settings, secret = SECRET, ...props }: Case) {
             stageableCount={1}
             pathCount={1}
             stashablePathCount={1}
+            untrackedPaths={new Set()}
             trackedPathCount={1}
             discardableCount={1}
             anyConflicted={false}
@@ -477,7 +480,7 @@ describe("multi-select menu", () => {
     expect(labels(none.menu).some((l) => l.startsWith("Discard"))).toBe(false);
   });
 
-  it("B4: Stash counts the files it takes, hides at none, waits on conflicts", async () => {
+  it("B4: Stash counts the files it takes, says why at none, waits on conflicts", async () => {
     const some = await openMenu({ ...BULK, target: row(modified) });
     expectHeld(item(some.menu, "Stash 1 of 8 changes…"));
     cleanup();
@@ -493,7 +496,13 @@ describe("multi-select menu", () => {
       stashablePathCount: 0,
       target: row(modified),
     });
-    expect(labels(none.menu).some((l) => l.startsWith("Stash"))).toBe(false);
+    await expectBlocked(
+      none.user,
+      item(
+        none.menu,
+        "Nothing to stash (submodules, embedded repositories and reserved names stay out of a stash)",
+      ),
+    );
     cleanup();
     const conflicted = await openMenu({
       ...BULK,
@@ -719,7 +728,7 @@ describe("folder menu", () => {
     }
   });
 
-  it("FD3: Stash counts the files it takes, hides at none, waits on conflicts", async () => {
+  it("FD3: Stash counts the files it takes, says why at none, waits on conflicts", async () => {
     const some = await openMenu({
       target: folder(),
       folderCounts: counts({ stashableCount: 2 }),
@@ -731,6 +740,13 @@ describe("folder menu", () => {
       folderCounts: counts({ stashableCount: 0 }),
     });
     expect(labels(none.menu).some((l) => l.startsWith("Stash"))).toBe(false);
+    await expectBlocked(
+      none.user,
+      item(
+        none.menu,
+        "Nothing to stash (submodules, embedded repositories and reserved names stay out of a stash)",
+      ),
+    );
     cleanup();
     const conflicted = await openMenu({
       target: folder(),
@@ -1106,10 +1122,10 @@ describe("file menu: Open items gate on the open decision", () => {
         ],
       ] as const)
         for (const workingExists of [false, true]) {
-          vi.mocked(conflictSides).mockReset();
-          vi.mocked(conflictSides).mockResolvedValue({
-            workingExists,
-          } as unknown as ConflictSides);
+          vi.mocked(pathKind).mockClear();
+          vi.mocked(pathKind).mockResolvedValueOnce(
+            workingExists ? "file" : "missing",
+          );
           vi.mocked(openWithProgram).mockClear();
           vi.mocked(openWithDefault).mockClear();
           info.mockClear();
@@ -1120,12 +1136,9 @@ describe("file menu: Open items gate on the open decision", () => {
           expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toHaveLength(2);
           await user.click(item(menu, label));
           await vi.waitFor(() =>
-            expect(conflictSides).toHaveBeenCalledExactlyOnceWith(
-              "C:\\repo",
-              path,
-              [],
-            ),
+            expect(pathKind).toHaveBeenCalledExactlyOnceWith("C:\\repo", path),
           );
+          expect(conflictSides).not.toHaveBeenCalled();
           if (workingExists) await vi.waitFor(launched);
           else {
             await vi.waitFor(() =>
@@ -1157,14 +1170,28 @@ describe("file menu: Open items gate on the open decision", () => {
 });
 
 /** An unstaged `.M` submodule record of the given kind (all token flags off
- *  but `untracked`, the #634 shape). */
-const subRow = (unstaged: FileEntry["unstaged"], commitChanged = false) =>
+ *  but `untracked`, the #634 shape). Its worktree is a gitlink only while it
+ *  is modified: a typechange here is a file on disk, a deletion nothing. */
+const subRow = (
+  unstaged: FileEntry["unstaged"],
+  commitChanged = false,
+  worktreeIsGitlink = unstaged === "modified",
+) =>
   row({
     path: "vendor/sub",
     staged: null,
     unstaged,
-    submodule: { commitChanged, trackedModified: false, untracked: true },
+    submodule: {
+      commitChanged,
+      trackedModified: false,
+      untracked: true,
+      worktreeIsGitlink,
+    },
   });
+
+const INSIDE_STASH_HINT = "Stash change… (open the submodule to stash)";
+const COMMIT_STASH_HINT =
+  "Stash change… (a submodule's commit can't be stashed)";
 
 describe("file menu: submodule rows", () => {
   beforeEach(() => {
@@ -1191,8 +1218,11 @@ describe("file menu: submodule rows", () => {
       expect(within(menu).queryByText("Open in VS Code")).toBeNull();
       expect(within(menu).queryByText("Open with default program")).toBeNull();
       await user.click(open);
-      expect(actions.openSubmodule).toHaveBeenCalledExactlyOnceWith(
-        "vendor/sub",
+      // The folder is probed first (mocked "dir"), then opened as a submodule.
+      await vi.waitFor(() =>
+        expect(actions.openSubmodule).toHaveBeenCalledExactlyOnceWith(
+          "vendor/sub",
+        ),
       );
       expect(conflictSides).not.toHaveBeenCalled();
       expect(openWithProgram).not.toHaveBeenCalled();
@@ -1284,6 +1314,162 @@ describe("file menu: submodule rows", () => {
       await expectBlocked(dir.user, item(dir.menu, label));
       cleanup();
     }
+  });
+
+  it("SM7: Stash is off with its reason on every submodule row, conflicts or not", async () => {
+    const stagedPointer = row(
+      {
+        path: "vendor/sub",
+        staged: "modified",
+        unstaged: null,
+        submodule: {
+          commitChanged: true,
+          trackedModified: false,
+          untracked: false,
+          worktreeIsGitlink: true,
+        },
+      },
+      true,
+    );
+    const movedWithEdits = row({
+      path: "vendor/sub",
+      staged: null,
+      unstaged: "modified",
+      submodule: {
+        commitChanged: true,
+        trackedModified: true,
+        untracked: false,
+        worktreeIsGitlink: true,
+      },
+    });
+    const pointerOnly = row({
+      path: "vendor/sub",
+      staged: null,
+      unstaged: "modified",
+      submodule: {
+        commitChanged: true,
+        trackedModified: false,
+        untracked: false,
+        worktreeIsGitlink: true,
+      },
+    });
+    // A repository that replaced a file: git reports no inner flags on a
+    // typechange record, unstaged (`.T SC..`) or staged (`T. S...`).
+    const replaced = (staged: boolean) =>
+      row(
+        {
+          path: "vendor/sub",
+          staged: staged ? "typechange" : null,
+          unstaged: staged ? null : "typechange",
+          submodule: {
+            commitChanged: !staged,
+            trackedModified: false,
+            untracked: false,
+            worktreeIsGitlink: true,
+          },
+        },
+        staged,
+      );
+    // Changes inside a submodule stash from within it, whether or not its
+    // commit moved, and so do a replacing repository's; a pointer move alone
+    // or a deletion can't be stashed at all.
+    for (const [target, label] of [
+      [subRow("modified"), INSIDE_STASH_HINT],
+      [subRow("modified", true), INSIDE_STASH_HINT],
+      [movedWithEdits, INSIDE_STASH_HINT],
+      [pointerOnly, COMMIT_STASH_HINT],
+      [subRow("deleted"), COMMIT_STASH_HINT],
+      [subRow("typechange", false, true), INSIDE_STASH_HINT],
+      [replaced(false), INSIDE_STASH_HINT],
+      [replaced(true), INSIDE_STASH_HINT],
+      [stagedPointer, COMMIT_STASH_HINT],
+    ] as const)
+      for (const anyConflicted of [false, true]) {
+        const { user, menu } = await openMenu({ target, anyConflicted });
+        await expectBlocked(user, item(menu, label));
+        cleanup();
+      }
+  });
+
+  it("SM10: a file that became a submodule keeps Open submodule and no file opens", async () => {
+    for (const settings of [EDITOR_SET, {}]) {
+      const { menu } = await openMenu({
+        target: subRow("typechange", false, true),
+        settings,
+      });
+      expectHint(item(menu, "Open submodule"));
+      expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toEqual([]);
+      expect(within(menu).queryByText("Open in VS Code")).toBeNull();
+      expect(within(menu).queryByText("Open with default program")).toBeNull();
+      cleanup();
+    }
+  });
+
+  it("SM11: an embedded repository's row stays out of Stash with its reason", async () => {
+    const embedded = row({
+      path: "vendor/inner/",
+      staged: null,
+      unstaged: "untracked",
+    });
+    const { user, menu } = await openMenu({ target: embedded });
+    await expectBlocked(
+      user,
+      item(menu, "Stash change… (an embedded repository can't be stashed)"),
+    );
+  });
+
+  it("SM8: a submodule swapped for a file offers the file opens and Stash, never Open submodule", async () => {
+    for (const settings of [EDITOR_SET, {}]) {
+      const { user, menu } = await openMenu({
+        target: subRow("typechange"),
+        settings,
+      });
+      expect(labels(menu).some((l) => l.startsWith("Open submodule"))).toBe(
+        false,
+      );
+      const byDefault = item(menu, "Open with default program");
+      if (settings === EDITOR_SET) expectHint(item(menu, "Open in VS Code"));
+      else expectHint(byDefault);
+      expect(within(menu).getAllByText("Double-click")).toHaveLength(1);
+      const stash = item(menu, "Stash change…");
+      expectDisabled(stash, false);
+      await user.click(stash);
+      expectOnly("stashFile");
+      clearActions();
+      cleanup();
+    }
+  });
+
+  it("SM9: a staged submodule deletion stashes when a file took its path, and stays out alone", async () => {
+    const deletion = row(
+      {
+        path: "vendor/sub",
+        staged: "deleted",
+        unstaged: null,
+        submodule: {
+          commitChanged: false,
+          trackedModified: false,
+          untracked: false,
+          worktreeIsGitlink: false,
+        },
+      },
+      true,
+    );
+    const paired = await openMenu({
+      target: deletion,
+      untrackedPaths: new Set(["vendor/sub"]),
+    });
+    const stash = item(paired.menu, "Stash change…");
+    expectDisabled(stash, false);
+    await paired.user.click(stash);
+    expectOnly("stashFile");
+    clearActions();
+    cleanup();
+    const alone = await openMenu({
+      target: deletion,
+      untrackedPaths: new Set(["vendor/other"]),
+    });
+    await expectBlocked(alone.user, item(alone.menu, COMMIT_STASH_HINT));
   });
 
   it("SM6: Discard leaves the withheld submodule rows out of its count", async () => {

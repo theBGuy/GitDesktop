@@ -108,6 +108,7 @@ function client() {
 function renderPane(
   data: SubmoduleChanges | Error,
   staged = data instanceof Error ? false : data.staged,
+  origPath?: string,
 ) {
   if (data instanceof Error)
     vi.mocked(gitSubmoduleChanges).mockRejectedValue(data);
@@ -115,7 +116,12 @@ function renderPane(
   const c = client();
   render(
     <QueryClientProvider client={c}>
-      <SubmoduleChangesPane repoPath="/repo" path={PATH} staged={staged} />
+      <SubmoduleChangesPane
+        repoPath="/repo"
+        path={PATH}
+        staged={staged}
+        origPath={origPath}
+      />
     </QueryClientProvider>,
   );
   return c;
@@ -391,6 +397,7 @@ describe("SubmoduleChangesPane sections and stage lines", () => {
               commitChanged: true,
               trackedModified: false,
               untracked: false,
+              worktreeIsGitlink: true,
             },
           },
         ],
@@ -399,6 +406,33 @@ describe("SubmoduleChangesPane sections and stage lines", () => {
     );
     expect(await screen.findByText("Uncommitted changes inside")).toBeTruthy();
     expect(screen.getByText("Submodule")).toBeTruthy();
+  });
+
+  it("one path listed twice (a staged deletion and an untracked file) keeps both rows", async () => {
+    const errors = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      renderPane(
+        payload({
+          files: [
+            { path: "f.txt", staged: "deleted", unstaged: null },
+            { path: "f.txt", staged: null, unstaged: "untracked" },
+          ],
+          filesTotal: 2,
+        }),
+      );
+      expect(
+        await screen.findByText("Uncommitted changes inside"),
+      ).toBeTruthy();
+      expect(screen.getAllByText("f.txt")).toHaveLength(2);
+      const keyWarnings = errors.mock.calls.filter((args) =>
+        args.some((a) => String(a).includes("same key")),
+      );
+      expect(keyWarnings).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("new commits with dirty files: both sections and line 9", async () => {
@@ -470,6 +504,23 @@ describe("SubmoduleChangesPane sections and stage lines", () => {
     ]);
   });
 
+  it("a staged rename's stage line names the move", async () => {
+    renderPane(
+      payload({
+        staged: true,
+        fromSha: A,
+        ahead: commits(1, "h"),
+        aheadCount: 1,
+      }),
+      true,
+      "vendor/old",
+    );
+    await screen.findByText("New commits · aaaaaaa → bbbbbbb");
+    expect(stageLines()).toEqual([
+      "The next commit records this submodule at bbbbbbb, moved from vendor/old.",
+    ]);
+  });
+
   it("long subjects and paths render as text", async () => {
     const subject = "s".repeat(90);
     renderPane(
@@ -527,6 +578,7 @@ describe("DiffViewer dispatch (criterion 10)", () => {
       commitChanged: false,
       trackedModified: false,
       untracked: true,
+      worktreeIsGitlink: true,
     },
   };
   const status = (entries: FileEntry[]) =>
@@ -535,7 +587,7 @@ describe("DiffViewer dispatch (criterion 10)", () => {
       entries,
     }) as unknown as RepoStatus;
 
-  function renderViewer(entries: FileEntry[], path: string) {
+  function renderViewer(entries: FileEntry[], path: string, staged = false) {
     vi.mocked(gitStatus).mockResolvedValue(status(entries));
     vi.mocked(gitDiffFile).mockResolvedValue({
       filePath: path,
@@ -551,7 +603,7 @@ describe("DiffViewer dispatch (criterion 10)", () => {
     // no app writer produces.
     c.setQueryData(repoKeys.status("/repo"), status(entries));
     useUiStore.setState({
-      selectedFile: { path, staged: false, untracked: false },
+      selectedFile: { path, staged, untracked: false },
     });
     render(
       <QueryClientProvider client={c}>
@@ -564,7 +616,86 @@ describe("DiffViewer dispatch (criterion 10)", () => {
   it("a submodule row mounts the pane and never reads a text diff", async () => {
     renderViewer([SUBMODULE_ROW], PATH);
     expect(await screen.findByText("Untracked files inside")).toBeTruthy();
-    expect(gitSubmoduleChanges).toHaveBeenCalledWith("/repo", PATH, false);
+    expect(gitSubmoduleChanges).toHaveBeenCalledWith(
+      "/repo",
+      PATH,
+      false,
+      undefined,
+    );
+    expect(gitDiffFile).not.toHaveBeenCalled();
+  });
+
+  it("a staged rename reads with its old path, where HEAD records the gitlink", async () => {
+    const moved = "vendor/moved";
+    renderViewer(
+      [
+        {
+          path: moved,
+          staged: "renamed",
+          unstaged: null,
+          origPath: PATH,
+          submodule: {
+            commitChanged: false,
+            trackedModified: false,
+            untracked: false,
+            worktreeIsGitlink: true,
+          },
+        },
+      ],
+      moved,
+      true,
+    );
+    await waitFor(() =>
+      expect(gitSubmoduleChanges).toHaveBeenCalledWith(
+        "/repo",
+        moved,
+        true,
+        PATH,
+      ),
+    );
+    expect(gitSubmoduleChanges).not.toHaveBeenCalledWith(
+      "/repo",
+      moved,
+      true,
+      undefined,
+    );
+    expect(gitDiffFile).not.toHaveBeenCalled();
+  });
+
+  it("a staged copy reads with no old path: its source stays where it was", async () => {
+    const copy = "vendor/copy";
+    renderViewer(
+      [
+        {
+          path: copy,
+          staged: "copied",
+          unstaged: null,
+          origPath: PATH,
+          submodule: {
+            commitChanged: false,
+            trackedModified: false,
+            untracked: false,
+            worktreeIsGitlink: true,
+          },
+        },
+      ],
+      copy,
+      true,
+    );
+    await waitFor(() =>
+      expect(gitSubmoduleChanges).toHaveBeenCalledWith(
+        "/repo",
+        copy,
+        true,
+        undefined,
+      ),
+    );
+    expect(gitSubmoduleChanges).not.toHaveBeenCalledWith(
+      "/repo",
+      copy,
+      true,
+      PATH,
+    );
     expect(gitDiffFile).not.toHaveBeenCalled();
   });
 
