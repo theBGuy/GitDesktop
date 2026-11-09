@@ -44,12 +44,22 @@ export const capabilities: Capability[] = [
   {
     group: "Diffs & staging",
     label:
+      "Hide whitespace changes in any local diff, so re-indented code shows only the lines whose content changed",
+  },
+  {
+    group: "Diffs & staging",
+    label:
       "Line, hunk & file staging — drag the line numbers or use a keybind; one drag picks up added and removed lines together in unified or split view, with Shift to take one side; files that aren't UTF-8 text stage and discard as a whole",
   },
   {
     group: "Diffs & staging",
     label:
       "Space on a focused file stages or unstages it — staging the last change in the file you're viewing opens the next file in the list (the one above it, at the end of a section), and unstaging works the same way in Staged",
+  },
+  {
+    group: "Diffs & staging",
+    label:
+      "Double-click a changed file to open it in your editor, or its default program",
   },
   {
     group: "Diffs & staging",
@@ -573,6 +583,11 @@ export const capabilities: Capability[] = [
     label:
       "Submodule manager — add, remove, update & track branches, edit URLs, open as repo",
     highlight: true,
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Changed submodules say what changed in the Changes list, with the commits and uncommitted files listed in place of a diff",
   },
   {
     group: "Repository & workspace",

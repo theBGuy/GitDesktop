@@ -1,6 +1,8 @@
 // The Changes panel's Discard and Stash confirm copy. Its suite loads it through
 // the src hooks with no node_modules, so it imports nothing beyond the
-// reserved-name and bulk-row-targets modules.
+// reserved-name and bulk-row-targets modules. The whole-tree bodies end with a
+// submodule note while any submodule row is modified on either side (a moved
+// commit or only dirty files inside), since both commands leave those in place.
 
 import {
   pathHasReservedComponent,
@@ -23,9 +25,9 @@ export type ChangeActionScope =
       split?: boolean;
       /** Set only by the folder routes: the dialog names this directory. */
       folder?: string;
-      /** Captured at request: files the action leaves alone, omitted when both
-       *  are 0. `conflicted` is Discard-only; the folder Stash passes 0. */
-      leftAlone?: { hidden: number; conflicted: number };
+      /** Captured at request: rows the action leaves alone, omitted when all
+       *  are 0. `conflicted` and `submodules` are Discard-only. */
+      leftAlone?: { hidden: number; conflicted: number; submodules?: number };
     }
   | { kind: "all"; repo: string }
   | null;
@@ -54,14 +56,55 @@ const RESERVED_DISCARD_NOTE =
 const RESERVED_STASH_NOTE =
   ' New files with Windows-reserved names (like "nul") can\'t be stashed and stay in your working tree.';
 
+/** Whether a whole-tree Discard or Stash leaves this submodule row in place:
+ *  both keep a moved checkout and its uncommitted files (measured), so any
+ *  submodule row modified on either side gets the note, dirty files alone too. */
+export function submoduleStaysPut(entry: FileEntry): boolean {
+  return (
+    entry.submodule !== undefined &&
+    (entry.unstaged === "modified" || entry.staged === "modified")
+  );
+}
+
+/** Appended to the whole-tree confirms, after any reserved-name note. */
+const SUBMODULE_DISCARD_NOTE =
+  " Submodules keep the commit they have checked out and any uncommitted files inside. Open a submodule to discard its uncommitted files.";
+const SUBMODULE_STASH_NOTE =
+  " Submodules keep the commit they have checked out and any uncommitted files inside. Open a submodule to stash its uncommitted files.";
+
+/** The whole-tree confirms' entries: the live repo's only while the dialog's
+ *  repo is the live one, so a dialog left open across a switch describes no
+ *  other repo's files. */
+export function confirmEntries(
+  scopeRepo: string | undefined,
+  liveRepo: string,
+  liveEntries: readonly FileEntry[],
+): readonly FileEntry[] {
+  return scopeRepo === liveRepo ? liveEntries : [];
+}
+
+/** Withheld submodule rows: Discard never sends one (`submoduleDiscardBlocked`),
+ *  whether inner changes or a submodule and a file swapped places. */
+function submodulesLeftSentence(n: number): string {
+  if (n === 0) return "";
+  return n === 1
+    ? "1 submodule is left as it is."
+    : `${n} submodules are left as they are.`;
+}
+
 /** What the action leaves alone, as " <sentence>" or "". */
 function leftAloneOf(scope: ChangeActionScope): string {
   const left =
     scope?.kind === "files"
-      ? leftAloneSentence(
-          scope.leftAlone?.hidden ?? 0,
-          scope.leftAlone?.conflicted ?? 0,
-        )
+      ? [
+          leftAloneSentence(
+            scope.leftAlone?.hidden ?? 0,
+            scope.leftAlone?.conflicted ?? 0,
+          ),
+          submodulesLeftSentence(scope.leftAlone?.submodules ?? 0),
+        ]
+          .filter((s) => s !== "")
+          .join(" ")
       : "";
   return left ? ` ${left}` : "";
 }
@@ -88,10 +131,13 @@ export function discardConfirmCopy(
   ).some((e) => e.unstaged === "untracked" && isReservedName(e));
   const discardFolder = scope?.kind === "files" ? scope.folder : undefined;
   const discardLeft = leftAloneOf(scope);
+  const discardSubmoduleNote = repoEntries.some(submoduleStaysPut)
+    ? SUBMODULE_DISCARD_NOTE
+    : "";
   const body = ((): string => {
     switch (true) {
       case scope?.kind === "all":
-        return `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
+        return `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}${discardSubmoduleNote}`;
       // One target takes the file wording below, even from a folder.
       case discardFolder !== undefined && discardFiles.length >= 2:
         return `Changes to ${discardFiles.length} files in ${discardFolder} will be discarded. Tracked files are restored and untracked files move to the recycle bin.${discardLeft} This cannot be undone.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`;
@@ -114,8 +160,12 @@ export function discardConfirmCopy(
   return { title, body };
 }
 
-/** The Stash confirm's title and body. */
-export function stashConfirmCopy(scope: ChangeActionScope): {
+/** The Stash confirm's title and body. `repoEntries` is the whole tree, which
+ *  the "all" arm's reserved-name sweep reads, as `discardConfirmCopy` does. */
+export function stashConfirmCopy(
+  scope: ChangeActionScope,
+  repoEntries: readonly FileEntry[],
+): {
   title: string;
   body: string;
 } {
@@ -136,13 +186,21 @@ export function stashConfirmCopy(scope: ChangeActionScope): {
   const stashReservedNote = stashFiles.some(staysOutOfStash)
     ? RESERVED_STASH_NOTE
     : "";
+  // A whole-tree stash leaves the same files behind, so its note sweeps the
+  // repo, and so does its submodule note (after it), as Discard all's does.
+  const stashAllReservedNote = repoEntries.some(staysOutOfStash)
+    ? RESERVED_STASH_NOTE
+    : "";
+  const stashAllSubmoduleNote = repoEntries.some(submoduleStaysPut)
+    ? SUBMODULE_STASH_NOTE
+    : "";
   const stashFolder = scope?.kind === "files" ? scope.folder : undefined;
   // The file, folder and selection Stash items never offer a path stash with
   // nothing stashable; `stashN === 0` stays as the fallback for any route that
-  // still opens one. (Stash all explains a reserved-only tree itself.)
+  // still opens one. A reserved-only tree's Stash all is refused by the backend.
   const body =
     scope?.kind === "all"
-      ? 'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.'
+      ? `Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.${stashAllReservedNote}${stashAllSubmoduleNote}`
       : stashN === 0
         ? `Nothing will be stashed.${stashReservedNote}`
         : stashFolder !== undefined

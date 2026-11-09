@@ -332,8 +332,9 @@ function panelProblems(text) {
       problems.push(`the path-based ${gone} is back`);
   // (p2) discard scopes the selected unstaged rows only, conflicted ones left
   // out: git refuses the whole restore after the untracked ones are recycled.
+  // The submodule rows Discard withholds drop first (submodule-row.test.mjs).
   if (
-    !/\bconst selectedDiscard = excludeConflicted\(bulk\.unstagedRows\);/.test(
+    !/\bconst selectedDiscard = excludeConflicted\(discardReach\(bulk\.unstagedRows\)\);/.test(
       masked,
     )
   )
@@ -384,7 +385,11 @@ function folderRouteProblems(text) {
   if (excludes !== 2)
     problems.push(`ChangesPanel calls excludeConflicted ${excludes} times`);
   for (const [fn, mustRe, banned] of [
-    ["requestDiscardFolder", /\bexcludeConflicted\(rows\.unstagedRows\)/, null],
+    [
+      "requestDiscardFolder",
+      /\bexcludeConflicted\(\s*discardReach\(rows\.unstagedRows\),?\s*\)/,
+      null,
+    ],
     [
       "requestStashFolder",
       /\bentries:\s*rows\.pathEntries,/,
@@ -424,7 +429,7 @@ function folderRouteProblems(text) {
   }
   // Discard's palette count leaves conflicted files out; Stash's keeps them.
   if (
-    !/\bdiscardable: staged\s*\?\s*0\s*:\s*shown\.filter\(\(e\) => !isConflictedEntry\(e\)\)\.length,/.test(
+    !/\bdiscardable: staged\s*\?\s*0\s*:\s*discardReach\(shown\)\.filter\(\(e\) => !isConflictedEntry\(e\)\)\.length,/.test(
       masked,
     )
   )
@@ -517,9 +522,10 @@ function targetProblems(text) {
       "stageSelected",
       [
         /\bif \(stageableSelected\.length === 0\) return;/,
-        /\bstageGuarded\(stageableSelected\)/,
+        // The raw rows only count the submodules the stage leaves behind.
+        /\bstageSkippingSubmodules\(stageableSelected, bulk\.unstagedRows\)/,
       ],
-      [],
+      ["unstagedRows"],
     ),
     ...handlerProblems(
       masked,
@@ -605,13 +611,13 @@ test("folder route pin mutation controls go red", () => {
     // Refusing only after the targets resolved mixes two repos' state.
     mutate(
       mutate(text, discardRefuse, ""),
-      "    const { targets, conflicted } = excludeConflicted(rows.unstagedRows);\n",
-      `    const { targets, conflicted } = excludeConflicted(rows.unstagedRows);\n${discardRefuse}`,
+      "    const { targets, conflicted } = excludeConflicted(\n      discardReach(rows.unstagedRows),\n    );\n",
+      `    const { targets, conflicted } = excludeConflicted(\n      discardReach(rows.unstagedRows),\n    );\n${discardRefuse}`,
     ),
     mutate(
       text,
-      "const { targets, conflicted } = excludeConflicted(rows.unstagedRows);",
-      "const { targets, conflicted } = { targets: rows.unstagedRows, conflicted: [] };",
+      "const { targets, conflicted } = excludeConflicted(\n      discardReach(rows.unstagedRows),\n    );",
+      "const { targets, conflicted } = {\n      targets: discardReach(rows.unstagedRows),\n      conflicted: [],\n    };",
     ),
     // Stash must not exclude: git refuses the whole stash anyway.
     mutate(
@@ -638,8 +644,8 @@ test("folder route pin mutation controls go red", () => {
     ),
     mutate(
       text,
-      ": shown.filter((e) => !isConflictedEntry(e)).length,",
-      ": shown.length,",
+      ": discardReach(shown).filter((e) => !isConflictedEntry(e)).length,",
+      ": discardReach(shown).length,",
     ),
     mutate(
       text,
@@ -682,8 +688,8 @@ test("panel pin mutation controls go red", () => {
     ),
     mutate(
       text,
-      "const selectedDiscard = excludeConflicted(bulk.unstagedRows);",
-      "const selectedDiscard = { targets: bulk.unstagedRows, conflicted: [] };",
+      "const selectedDiscard = excludeConflicted(discardReach(bulk.unstagedRows));",
+      "const selectedDiscard = {\n    targets: discardReach(bulk.unstagedRows),\n    conflicted: [],\n  };",
     ),
     mutate(
       text,
@@ -781,8 +787,8 @@ test("target pin mutation controls go red", () => {
     ),
     mutate(
       text,
-      "stageGuarded(stageableSelected)",
-      "stageGuarded(bulk.unstagedRows)",
+      "stageSkippingSubmodules(stageableSelected, bulk.unstagedRows)",
+      "stageSkippingSubmodules(bulk.unstagedRows, bulk.unstagedRows)",
     ),
     // The MM cross-side unstage: a path-level list unstages unselected sides.
     mutate(

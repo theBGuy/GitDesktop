@@ -15,7 +15,14 @@ export const gitStashFileDiff = (
   repoPath: string,
   index: number,
   filePath: string,
-) => invoke<FileDiff>("git_stash_file_diff", { repoPath, index, filePath });
+  ignoreWhitespace = false,
+) =>
+  invoke<FileDiff>("git_stash_file_diff", {
+    repoPath,
+    index,
+    filePath,
+    ignoreWhitespace,
+  });
 
 export const gitStashApply = (repoPath: string, index: number, pop: boolean) =>
   invoke<void>("git_stash_apply", { repoPath, index, pop });
@@ -54,8 +61,14 @@ export const gitOrphanedStashFileDiff = (
   repoPath: string,
   sha: string,
   filePath: string,
+  ignoreWhitespace = false,
 ) =>
-  invoke<FileDiff>("git_orphaned_stash_file_diff", { repoPath, sha, filePath });
+  invoke<FileDiff>("git_orphaned_stash_file_diff", {
+    repoPath,
+    sha,
+    filePath,
+    ignoreWhitespace,
+  });
 
 export const gitRestoreOrphaned = (repoPath: string, sha: string) =>
   invoke<void>("git_restore_orphaned", { repoPath, sha });

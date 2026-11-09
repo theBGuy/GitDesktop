@@ -381,6 +381,10 @@ export interface AppSettings {
    *  like theme; the window may apply a lower level when the monitor cannot fit it. */
   zoom: number;
   diffViewMode: (typeof DIFF_VIEW_MODES)[number];
+  /** Hide whitespace-only changes in every local diff view (`git diff -w`).
+   *  Applied outside the bulk settings form (apply-on-change), like
+   *  diffViewMode. */
+  diffHideWhitespace: boolean;
   /** Changes panel layout: flat list or compacted directory tree. Applied outside
    *  the bulk settings form (apply-on-change), like diffViewMode. */
   changesViewMode: (typeof CHANGES_VIEW_MODES)[number];

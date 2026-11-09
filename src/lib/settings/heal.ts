@@ -198,6 +198,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   theme: "system",
   zoom: ZOOM_DEFAULT,
   diffViewMode: "unified",
+  diffHideWhitespace: false,
   changesViewMode: "list",
   editHistoryOrder: "newest-first",
   collapsedConversationSections: [],
@@ -431,6 +432,9 @@ function healEnumerated(settings: AppSettings): AppSettings {
       DIFF_VIEW_MODES,
       DEFAULT_SETTINGS.diffViewMode,
     ),
+    // Only a real `true` counts: a truthy junk value would silently turn
+    // staging off in the Changes diff.
+    diffHideWhitespace: settings.diffHideWhitespace === true,
     changesViewMode: pick(
       settings.changesViewMode,
       CHANGES_VIEW_MODES,

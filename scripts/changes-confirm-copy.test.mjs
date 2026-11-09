@@ -6,18 +6,29 @@
 // The rules the table covers: the left-alone sentence goes before " This
 // cannot be undone." in tracked arms and is appended in untracked ones; a
 // one-target folder Discard takes the single-file wording; the reserved-name
-// notes come after "This cannot be undone."; the whole-tree Discard sweeps the
-// repo's entries, not its scope, for reserved names; and the Stash count and
-// note ride the any-component rule the backend's path stash excludes on.
+// notes come after "This cannot be undone."; the whole-tree Discard and Stash
+// sweep the repo's entries, not their scope, for reserved names; and the Stash
+// count and note ride the any-component rule the backend's stash excludes on.
+// The whole-tree bodies end with a submodule note, after any reserved-name
+// note, while the repo holds a submodule whose staged or unstaged kind is
+// `modified` (the states both commands leave in place); a files scope never
+// takes it.
+//
+// It also pins the copy's single source: no other src file spells either
+// whole-tree body lead, and BranchSwitcher's whole-tree dialogs and
+// ChangesPanel's own confirms read the live entries only while their repo is
+// the live one (both through `confirmEntries`).
 //
 // The reserved-name module decides on `navigator.platform`, so the suite poses
 // as Windows before its first import. Imported through the shared src hooks
 // (dynamic, so they are registered before the module links); mutants load from
 // memory under the module's own URL plus a query, so nothing is written to disk.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
+import { join, relative } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { installSrcHooks } from "./lib/src-import-hooks.mjs";
 
 const MODULE_URL = new URL(
@@ -77,9 +88,29 @@ const files = (entries, extra = {}) => ({
   ...extra,
 });
 const ALL = { kind: "all", repo: "C:/r" };
+/** A submodule record: `token` is porcelain v2's `S<c><m><u>`. */
+const submodule = (path, token, kinds) => ({
+  path,
+  staged: null,
+  unstaged: null,
+  ...kinds,
+  submodule: {
+    commitChanged: token[1] === "C",
+    trackedModified: token[2] === "M",
+    untracked: token[3] === "U",
+  },
+});
 
 const RESERVED_DISCARD = ` Files with Windows-reserved names (like "nul") skip the recycle bin and are deleted permanently.`;
 const RESERVED_STASH = ` New files with Windows-reserved names (like "nul") can't be stashed and stay in your working tree.`;
+const SUBMODULE_DISCARD =
+  " Submodules keep the commit they have checked out and any uncommitted files inside. Open a submodule to discard its uncommitted files.";
+const SUBMODULE_STASH =
+  " Submodules keep the commit they have checked out and any uncommitted files inside. Open a submodule to stash its uncommitted files.";
+const DISCARD_ALL =
+  "All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.";
+const STASH_ALL =
+  'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.';
 
 // [name, entries (the repo's), discard scope, stash scope, discard, stash,
 //  discard title, stash title]
@@ -100,6 +131,26 @@ const TABLE = [
     ALL,
     ALL,
     `All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.${RESERVED_DISCARD}`,
+    `Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.${RESERVED_STASH}`,
+    "Discard all changes?",
+    "Stash all changes?",
+  ],
+  [
+    "whole tree with an untracked file under a reserved directory",
+    [tracked("a.ts"), untracked("con/x.txt")],
+    ALL,
+    ALL,
+    "All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.",
+    `Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.${RESERVED_STASH}`,
+    "Discard all changes?",
+    "Stash all changes?",
+  ],
+  [
+    "whole tree with a tracked reserved name",
+    [tracked("docs/nul.txt")],
+    ALL,
+    ALL,
+    "All uncommitted changes are discarded: tracked files reset to the last commit, untracked files move to the recycle bin.",
     'Sets your working tree back to the last commit and saves all uncommitted changes — including untracked files — to the stash. "Pop latest stash" restores them.',
     "Discard all changes?",
     "Stash all changes?",
@@ -215,6 +266,105 @@ const TABLE = [
     "Discard all changes?",
     "Stash 0 changes?",
   ],
+  [
+    "whole tree, an untracked-only submodule beside a tracked file",
+    [
+      tracked("a.ts"),
+      submodule("vendor/sub", "S..U", { unstaged: "modified" }),
+    ],
+    ALL,
+    ALL,
+    `${DISCARD_ALL}${SUBMODULE_DISCARD}`,
+    `${STASH_ALL}${SUBMODULE_STASH}`,
+    "Discard all changes?",
+    "Stash all changes?",
+  ],
+  [
+    "whole tree, a submodule with only a staged pointer",
+    [submodule("vendor/sub", "S...", { staged: "modified" })],
+    ALL,
+    ALL,
+    `${DISCARD_ALL}${SUBMODULE_DISCARD}`,
+    `${STASH_ALL}${SUBMODULE_STASH}`,
+    "Discard all changes?",
+    "Stash all changes?",
+  ],
+  [
+    "whole tree, a reserved untracked file and a dirty submodule",
+    [
+      untracked("nul"),
+      submodule("vendor/sub", "S.M.", { unstaged: "modified" }),
+    ],
+    ALL,
+    ALL,
+    `${DISCARD_ALL}${RESERVED_DISCARD}${SUBMODULE_DISCARD}`,
+    `${STASH_ALL}${RESERVED_STASH}${SUBMODULE_STASH}`,
+    "Discard all changes?",
+    "Stash all changes?",
+  ],
+  [
+    "whole tree whose only submodule row is a removed folder",
+    [submodule("vendor/sub", "S...", { unstaged: "deleted" })],
+    ALL,
+    ALL,
+    DISCARD_ALL,
+    STASH_ALL,
+    "Discard all changes?",
+    "Stash all changes?",
+  ],
+  [
+    "a selection holding a dirty submodule takes no submodule note",
+    [submodule("vendor/sub", "S.M.", { unstaged: "modified" })],
+    files([
+      tracked("a.ts"),
+      submodule("vendor/sub", "S.M.", { unstaged: "modified" }),
+    ]),
+    files([
+      tracked("a.ts"),
+      submodule("vendor/sub", "S.M.", { unstaged: "modified" }),
+    ]),
+    "Changes to 2 files will be discarded — tracked files are restored and untracked files moved to the recycle bin. This cannot be undone.",
+    '2 selected files are saved to the stash and removed from your working tree. "Pop latest stash" restores them.',
+    "Discard 2 changes?",
+    "Stash 2 changes?",
+  ],
+  [
+    "a selection that withholds a submodule beside a conflicted file",
+    [],
+    files([tracked("a.ts"), untracked("b.ts")], {
+      leftAlone: { hidden: 0, conflicted: 1, submodules: 1 },
+    }),
+    files([tracked("a.ts")]),
+    "Changes to 2 files will be discarded — tracked files are restored and untracked files moved to the recycle bin. 1 conflicted file is left as it is. 1 submodule is left as it is. This cannot be undone.",
+    'a.ts is saved to the stash and removed from your working tree. "Pop latest stash" restores it.',
+    "Discard 2 changes?",
+    "Stash change?",
+  ],
+  [
+    "a folder that withholds two submodules and hides a file",
+    [],
+    files([tracked("src/a.ts"), tracked("src/b.ts")], {
+      folder: "src",
+      leftAlone: { hidden: 1, conflicted: 0, submodules: 2 },
+    }),
+    ALL,
+    "Changes to 2 files in src will be discarded. Tracked files are restored and untracked files move to the recycle bin. 1 file hidden by the filter is left as it is. 2 submodules are left as they are. This cannot be undone.",
+    STASH_ALL,
+    "Discard 2 changes?",
+    "Stash all changes?",
+  ],
+  [
+    "one untracked file and a withheld submodule only",
+    [],
+    files([untracked("new.ts")], {
+      leftAlone: { hidden: 0, conflicted: 0, submodules: 1 },
+    }),
+    files([untracked("new.ts")]),
+    "new.ts is untracked — it will be moved to the recycle bin. 1 submodule is left as it is.",
+    'new.ts is saved to the stash and removed from your working tree. "Pop latest stash" restores it.',
+    "Discard changes?",
+    "Stash change?",
+  ],
 ];
 
 /** Every way `mod` disagrees with the table (empty = the shipped copy). */
@@ -223,7 +373,7 @@ function tableFailures(mod) {
   for (const row of TABLE) {
     const [name, entries, discardScope, stashScope, ...want] = row;
     const discard = mod.discardConfirmCopy(discardScope, entries);
-    const stash = mod.stashConfirmCopy(stashScope);
+    const stash = mod.stashConfirmCopy(stashScope, entries);
     const got = [discard.body, stash.body, discard.title, stash.title];
     for (const [i, part] of [
       "discard body",
@@ -308,7 +458,12 @@ test("negative controls: a mutant of each copy rule fails the table", async () =
     // "all" sweeps the whole tree for reserved names.
     ['scope?.kind === "all" ? repoEntries : discardFiles', "discardFiles"],
     // The stash count and note ride the any-component rule; every files arm
-    // appends the note (the whole-tree arm never does).
+    // appends the note, and the whole-tree arm sweeps the repo's entries.
+    ["repoEntries.some(staysOutOfStash)", "repoEntries.some(isReservedName)"],
+    [
+      "restores them.${stashAllReservedNote}${stashAllSubmoduleNote}`",
+      "restores them.${stashAllSubmoduleNote}`",
+    ],
     [
       "const stashN = stashFiles.filter((e) => !staysOutOfStash(e)).length;",
       "const stashN = stashFiles.length;",
@@ -356,6 +511,35 @@ test("negative controls: a mutant of each copy rule fails the table", async () =
       '\' Files with Windows-reserved names (like "nul") skip the recycle bin',
       '\' Files with reserved names (like "nul") skip the recycle bin',
     ],
+    // The whole-tree submodule notes: present, after the reserved note, and
+    // keyed on a submodule whose staged or unstaged kind is modified.
+    [
+      '.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}${discardSubmoduleNote}`',
+      '.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`',
+    ],
+    [
+      "restores them.${stashAllReservedNote}${stashAllSubmoduleNote}`",
+      "restores them.${stashAllReservedNote}`",
+    ],
+    [
+      '.${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}${discardSubmoduleNote}`',
+      '.${discardSubmoduleNote}${discardHasReserved ? RESERVED_DISCARD_NOTE : ""}`',
+    ],
+    [
+      '(entry.unstaged === "modified" || entry.staged === "modified")',
+      'entry.unstaged === "modified"',
+    ],
+    ["entry.submodule !== undefined &&\n    (entry", "(entry"],
+    // Withheld submodule rows join the left-alone sentence, each count its own.
+    [
+      "submodulesLeftSentence(scope.leftAlone?.submodules ?? 0)",
+      "submodulesLeftSentence(0)",
+    ],
+    ['"1 submodule is left as it is."', '"1 submodule is skipped."'],
+    [
+      "`${n} submodules are left as they are.`",
+      "`${n} submodule are left as they are.`",
+    ],
   ];
   for (const [from, to] of mutations) {
     const mutant = await importMutated(from, to);
@@ -381,5 +565,191 @@ test("negative controls: a drifted stash-exclude rule fails its rows", async () 
   ]) {
     const mutant = await importMutated(from, to);
     assert.notDeepEqual(ruleFailures(mutant), [], `mutant survived: ${to}`);
+  }
+});
+
+const SRC_DIR = new URL("../src/", import.meta.url);
+const COPY_FILE = "features/repository/changes-confirm-copy.ts";
+const WHOLE_TREE_LEADS = [
+  "All uncommitted changes are discarded",
+  "Sets your working tree back to the last commit",
+];
+
+/** Every src `.ts`/`.tsx` file as `{ path, text }`, path relative to src/. */
+function srcFiles() {
+  return readdirSync(SRC_DIR, { recursive: true, withFileTypes: true })
+    .filter((d) => d.isFile() && /\.tsx?$/.test(d.name))
+    .map((d) => {
+      const full = join(d.parentPath, d.name);
+      return {
+        path: relative(fileURLToPath(SRC_DIR), full).replaceAll("\\", "/"),
+        text: readFileSync(full, "utf8"),
+      };
+    });
+}
+
+/** Files other than the copy module that spell a whole-tree body lead. */
+function twinSpellers(files) {
+  return files
+    .filter((f) => f.path !== COPY_FILE)
+    .filter((f) => WHOLE_TREE_LEADS.some((lead) => f.text.includes(lead)))
+    .map((f) => f.path);
+}
+
+test("only changes-confirm-copy.ts spells the whole-tree body leads", () => {
+  const files = srcFiles();
+  assert.ok(files.length > 100, `src walk read ${files.length} files`);
+  assert.ok(
+    files.some((f) => f.path === COPY_FILE),
+    "the walk reaches the copy module",
+  );
+  assert.deepEqual(twinSpellers(files), []);
+});
+
+test("negative control: a twin of a whole-tree lead is caught", () => {
+  for (const lead of WHOLE_TREE_LEADS)
+    assert.deepEqual(
+      twinSpellers([
+        { path: COPY_FILE, text: lead },
+        { path: "features/x/Fake.tsx", text: `body="${lead}."` },
+      ]),
+      ["features/x/Fake.tsx"],
+    );
+});
+
+const BRANCH_SWITCHER = readFileSync(
+  new URL("../src/features/repository/BranchSwitcher.tsx", import.meta.url),
+  "utf8",
+).replace(/\r\n/g, "\n");
+
+/** The ConfirmDialog element opened by `open={<state> !== null}`. */
+function dialogBlock(text, state) {
+  const start = text.indexOf(`open={${state} !== null}`);
+  if (start < 0) return null;
+  return text.slice(
+    text.lastIndexOf("<ConfirmDialog", start),
+    text.indexOf("/>", start),
+  );
+}
+
+/** Ways BranchSwitcher's whole-tree dialogs drift from the shared copy. */
+function branchSwitcherWiringFailures(text) {
+  const failures = [];
+  const count = (needle) => text.split(needle).length - 1;
+  if (
+    !/const entriesFor = \(repo: string\) =>\s*confirmEntries\(repo, repoPath, status\.data\?\.entries \?\? \[\]\);/.test(
+      text,
+    )
+  )
+    failures.push("entriesFor: live entries only for the live repo");
+  for (const [fn, state, copy] of [
+    ["discardConfirmCopy", "discardAllIn", "discardAllCopy"],
+    ["stashConfirmCopy", "stashAllIn", "stashAllCopy"],
+  ]) {
+    if (count(`${fn}(`) !== 1) failures.push(`${fn}: exactly one call`);
+    const call = new RegExp(
+      `const ${copy} = ${fn}\\(\\s*\\{ kind: "all", repo: ${state} \\?\\? repoPath \\},\\s*entriesFor\\(${state} \\?\\? repoPath\\),?\\s*\\);`,
+    );
+    if (!call.test(text)) failures.push(`${fn}: whole-tree scope + entriesFor`);
+    const block = dialogBlock(text, state);
+    if (block === null) {
+      failures.push(`${state}: dialog not found`);
+      continue;
+    }
+    if (!block.includes(`title={${copy}.title}`))
+      failures.push(`${state}: title from the module`);
+    if (!block.includes(`body={${copy}.body}`))
+      failures.push(`${state}: body from the module`);
+    if (/\b(title|body)=(["']|\{\s*["'`])/.test(block))
+      failures.push(`${state}: a literal title or body`);
+  }
+  return failures;
+}
+
+test("BranchSwitcher's whole-tree dialogs render the shared copy", () => {
+  assert.deepEqual(branchSwitcherWiringFailures(BRANCH_SWITCHER), []);
+});
+
+test("negative controls: BranchSwitcher wiring drift fails", () => {
+  const guard = "confirmEntries(repo, repoPath, status.data?.entries ?? []);";
+  assert.equal(BRANCH_SWITCHER.split(guard).length, 2, "guard anchor once");
+  assert.notDeepEqual(
+    branchSwitcherWiringFailures(
+      BRANCH_SWITCHER.replace(guard, () => "status.data?.entries ?? [];"),
+    ),
+    [],
+  );
+  const body = "body={stashAllCopy.body}";
+  assert.equal(BRANCH_SWITCHER.split(body).length, 2, "body anchor once");
+  assert.notDeepEqual(
+    branchSwitcherWiringFailures(
+      BRANCH_SWITCHER.replace(
+        body,
+        () =>
+          `body={'Sets your working tree back to the last commit and saves all uncommitted changes.'}`,
+      ),
+    ),
+    [],
+  );
+});
+
+test("confirmEntries passes the live entries only for the live repo", async () => {
+  const live = [tracked("a.ts")];
+  const rows = (mod) => [
+    mod.confirmEntries("C:/r", "C:/r", live),
+    mod.confirmEntries("C:/other", "C:/r", live),
+    mod.confirmEntries(undefined, "C:/r", live),
+  ];
+  assert.deepEqual(rows(real), [live, [], []]);
+  const mutant = await importMutated(
+    "return scopeRepo === liveRepo ? liveEntries : [];",
+    "return liveEntries;",
+  );
+  assert.notDeepEqual(rows(mutant), [live, [], []]);
+});
+
+const CHANGES_PANEL = readFileSync(
+  new URL("../src/features/repository/ChangesPanel.tsx", import.meta.url),
+  "utf8",
+).replace(/\r\n/g, "\n");
+
+/** Ways ChangesPanel's own Discard and Stash confirms drift from describing
+ *  the live repo's entries only while their scope's repo is the live one. */
+function changesPanelWiringFailures(text) {
+  const failures = [];
+  const count = (needle) => text.split(needle).length - 1;
+  if (!text.includes("const entries = status.data?.entries ?? [];"))
+    failures.push("entries: the live status");
+  for (const [fn, scope] of [
+    ["discardConfirmCopy", "shownDiscardScope"],
+    ["stashConfirmCopy", "shownStashScope"],
+  ]) {
+    if (count(`${fn}(`) !== 1) failures.push(`${fn}: exactly one call`);
+    const call = new RegExp(
+      `${fn}\\(\\s*${scope},\\s*confirmEntries\\(${scope}\\?\\.repo, repoPath, entries\\),?\\s*\\)`,
+    );
+    if (!call.test(text)) failures.push(`${fn}: guarded live entries`);
+  }
+  return failures;
+}
+
+test("ChangesPanel's confirms read the live entries only for their own repo", () => {
+  assert.deepEqual(changesPanelWiringFailures(CHANGES_PANEL), []);
+});
+
+test("negative controls: ChangesPanel confirm wiring drift fails", () => {
+  for (const scope of ["shownDiscardScope", "shownStashScope"]) {
+    const guarded = `confirmEntries(${scope}?.repo, repoPath, entries)`;
+    assert.equal(
+      CHANGES_PANEL.split(guarded).length,
+      2,
+      `${scope} anchor once`,
+    );
+    for (const to of ["entries", "[]"])
+      assert.notDeepEqual(
+        changesPanelWiringFailures(CHANGES_PANEL.replace(guarded, () => to)),
+        [],
+        `${scope} -> ${to}`,
+      );
   }
 });

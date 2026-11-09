@@ -986,6 +986,21 @@ export const ACTIONS = [
     // revs is on screen (the toolbar's Raw ⇄ Preview control).
     defaultBinding: null,
   },
+  {
+    id: "toggle-hide-whitespace",
+    // Two-way on purpose: a palette row can't show the mode it would flip.
+    label: "Show or hide whitespace changes",
+    category: "Changes",
+    // Palette-only: live only while a local diff is on screen.
+    defaultBinding: null,
+  },
+  {
+    id: "open-changed-file",
+    label: "Open file in external editor",
+    category: "Changes",
+    // Palette-only: the pointer route is a double-click on the file's row.
+    defaultBinding: null,
+  },
 
   // Agent (only live on the Agent tab, which exists when AI features are on)
   {

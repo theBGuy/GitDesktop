@@ -40,12 +40,14 @@ export const gitBranchFileDiff = (
   base: string,
   compare: string,
   filePath: string,
+  ignoreWhitespace = false,
 ) =>
   invoke<FileDiff>("git_branch_file_diff", {
     repoPath,
     base,
     compare,
     filePath,
+    ignoreWhitespace,
   });
 
 /** The fork point of two refs, plus the rev the compare side resolved to. The

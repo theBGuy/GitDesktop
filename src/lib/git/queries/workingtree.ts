@@ -6,6 +6,7 @@ import {
   REPO_SHELL_GC_TIME,
   REPO_SHELL_WARM_STALE_MS,
 } from "@/lib/query-cache-times";
+import { useHideWhitespace } from "@/lib/settings/hide-whitespace";
 import { isAppError } from "@/lib/tauri/invoke";
 import * as api from "../api";
 import {
@@ -15,6 +16,7 @@ import {
 } from "../conflict";
 import { literalPathspec } from "../glob";
 import type { RemoteLens, RepoOp, UnignoreRule } from "../types";
+import { readViewDiff } from "../whitespace-diff";
 import { repoKeys } from "./core";
 import { useRepoMutation, workingTreeKeys } from "./internal";
 
@@ -72,21 +74,27 @@ export function useFileDiff(
   repo: string,
   file: { path: string; staged: boolean; untracked: boolean } | null,
 ) {
+  const hide = useHideWhitespace();
   return useQuery({
     // `untracked` is in the key so the untracked→tracked flip (after staging part
     // of a new file) subscribes to a fresh query — the `--no-index` "all new"
     // diff and the normal remainder diff must not share a cache entry, or an
-    // invalidation race could leave the stale all-lines view on screen.
+    // invalidation race could leave the stale all-lines view on screen. The
+    // whitespace mode keys last, and its answer carries the mode it was read in.
     queryKey: [
       ...repoKeys.diff(repo, file?.path ?? "", file?.staged ?? false),
       file?.untracked ?? false,
+      hide,
     ] as const,
     queryFn: () =>
-      api.gitDiffFile(
-        repo,
-        file?.path ?? "",
-        file?.staged ?? false,
-        file?.untracked ?? false,
+      readViewDiff(hide, (iw) =>
+        api.gitDiffFile(
+          repo,
+          file?.path ?? "",
+          file?.staged ?? false,
+          file?.untracked ?? false,
+          iw,
+        ),
       ),
     enabled: file !== null,
     // Local reads must not park on react-query's default "online" mode offline;
@@ -109,9 +117,18 @@ export function useSessionFileDiff(
   enabled: boolean,
   live: boolean,
 ) {
+  const hide = useHideWhitespace();
   return useQuery({
-    queryKey: [...repoKeys.diff(repo, filePath, false), "session-base", base],
-    queryFn: () => api.gitSessionFileDiff(repo, filePath, base),
+    queryKey: [
+      ...repoKeys.diff(repo, filePath, false),
+      "session-base",
+      base,
+      hide,
+    ],
+    queryFn: () =>
+      readViewDiff(hide, (iw) =>
+        api.gitSessionFileDiff(repo, filePath, base, iw),
+      ),
     enabled: enabled && Boolean(repo && filePath && base),
     // An errored read stops polling: each poll would flip `isFetching` and
     // remount the failure notice and its Retry. Retry, invalidation and focus

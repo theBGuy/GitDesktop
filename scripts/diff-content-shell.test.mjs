@@ -202,6 +202,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
         : (returns.find((r) => r > imageAt && r !== typechangeAt) ?? -1),
       true,
     ],
+    ["whitespace-only", armReturn(/\bif\s*\(\s*whitespaceOnly\s*\)/), true],
     ["empty", armReturn(/\bif\s*\(\s*emptyDiff\s*\)/), true],
     ["header-only", headerOnlyAt, true],
     ["text", headerOnlyAt >= 0 && textAt > headerOnlyAt ? textAt : -1, true],
@@ -210,7 +211,7 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     arms.every(([, at]) => at >= 0) &&
       new Set(arms.map(([, at]) => at)).size === arms.length &&
       returns.length === arms.length,
-    "every DiffContent return is one of the nine named arms",
+    "every DiffContent return is one of the ten named arms",
   );
   for (const [name, at, data] of arms) {
     if (at < 0) continue;
@@ -566,12 +567,13 @@ export function diffShellViolations(surfaceRaw, imageRaw, rowRaw) {
     ],
     [
       // The lazy run stops at the picker wrapper's own close, so the capture
-      // span wraps both the picker and Unified/Split.
+      // span wraps the picker, the view-options gear and Unified/Split, in
+      // that order (the gear must be inside it for the whitespace-only rescue).
       captureAt(
-        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*<DiffModeToggle\b[^>]*\/>\s*<\/span>`,
+        String.raw`${CONTENTS}\{\/\*[\s\S]*?\*\/\}\s*(?<child><span\s+ref=\{langWrapRef\})[\s\S]*?<\/span>\s*\{whitespaceControl\s*&&\s*\(?\s*<DiffViewOptionsMenu\b[^>]*\/>\s*\)?\s*\}\s*<DiffModeToggle\b[^>]*\/>\s*<\/span>`,
         "<span",
       ),
-      "the language picker and mode toggle render inside a capture node",
+      "the language picker, the view-options gear and the mode toggle render inside a capture node, in that order",
     ],
     [
       captureAt(
@@ -1006,7 +1008,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       '<span aria-hidden ref={captureHeldRef} className="hidden shrink-0 @2xl/diff-pane:inline">',
     ),
     image,
-    "the language picker and mode toggle render inside a capture node",
+    "the language picker, the view-options gear and the mode toggle render inside a capture node, in that order",
   );
   // The record written from outside its two writers, by any right-hand side.
   caught(
@@ -1043,6 +1045,11 @@ test("diff shell: negative controls trip the pin named beside them", () => {
     ["image", "        </div>,\n        notice,\n", "        </div>,\n"],
     [
       "binary placeholder",
+      `      )${NOTICE_TAIL}  // Ahead of the empty and header-only arms`,
+      "      ),\n    );\n  }\n  // Ahead of the empty and header-only arms",
+    ],
+    [
+      "whitespace-only",
       `      )${NOTICE_TAIL}  if (emptyDiff)`,
       "      ),\n    );\n  }\n  if (emptyDiff)",
     ],
@@ -1094,7 +1101,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       image,
       `the ${arm} arm passes the shell no notice`,
     );
-  // A tenth arm the pins above don't name.
+  // An eleventh arm the pins above don't name.
   caught(
     swap(
       surface,
@@ -1102,7 +1109,7 @@ test("diff shell: negative controls trip the pin named beside them", () => {
       "  if (narrowPane) return shell(null);\n  if (emptyDiff) {\n",
     ),
     image,
-    "every DiffContent return is one of the nine named arms",
+    "every DiffContent return is one of the ten named arms",
   );
   // The typechange arm returning outside the shell, or dropping its notice.
   caught(

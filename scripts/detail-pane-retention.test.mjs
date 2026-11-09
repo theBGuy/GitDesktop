@@ -184,6 +184,17 @@ const SITES = [
       },
     },
   },
+  {
+    file: "src/features/repository/SubmoduleChangesPane.tsx",
+    component: "SubmoduleChangesPane",
+    read: "changes",
+    noun: "submodule",
+    noticeNoun: "this submodule",
+    stale: "changes.isPlaceholderData",
+    shell: "notice",
+    // Inside the Changes pane's slot, where the list lands focus itself.
+    frameEffect: false,
+  },
 ];
 
 /** Fills the single-read defaults: the ladder, the failure flag and the rescue

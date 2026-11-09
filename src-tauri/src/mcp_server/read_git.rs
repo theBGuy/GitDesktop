@@ -775,10 +775,14 @@ mod tests {
         let paths: Vec<_> = entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(paths, ["c.txt", "b.txt", "a.txt"]);
 
-        let d =
-            crate::git::history::git_commit_file_diff(repo.clone(), sha.clone(), "c.txt".into())
-                .await
-                .unwrap();
+        let d = crate::git::history::git_commit_file_diff(
+            repo.clone(),
+            sha.clone(),
+            "c.txt".into(),
+            None,
+        )
+        .await
+        .unwrap();
         assert!(d.text.starts_with("diff --git "), "{}", d.text);
         assert_eq!(d.old_path.as_deref(), Some("b.txt"));
 

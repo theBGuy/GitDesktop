@@ -8,11 +8,21 @@ export type ChangeKind =
   | "conflicted"
   | "untracked";
 
+/** What porcelain v2's submodule token says changed inside a submodule. It carries
+ *  no direction for the commit: a rewound pointer reads the same as new commits. */
+export interface SubmoduleChange {
+  commitChanged: boolean;
+  trackedModified: boolean;
+  untracked: boolean;
+}
+
 export interface FileEntry {
   path: string;
   origPath?: string;
   staged: ChangeKind | null;
   unstaged: ChangeKind | null;
+  /** Present exactly on a submodule row; the backend omits it on every other. */
+  submodule?: SubmoduleChange;
 }
 
 export interface FileDiff {
@@ -30,6 +40,12 @@ export interface FileDiff {
    *  `oldPath ?? filePath`; backend diffs omit it for non-renames and hand-built
    *  diffs (PR patches) omit it entirely. */
   oldPath?: string;
+  /** Set by the query layer, never by the backend: this text came from a `-w`
+   *  read, so its hunks are display-only and no patch may be built from it. */
+  whitespaceHidden?: boolean;
+  /** Set by the query layer: the `-w` read showed no hunk while the plain read
+   *  did. */
+  whitespaceOnly?: boolean;
 }
 
 /** Byte sizes of a binary diff's sides; null = unknown. */

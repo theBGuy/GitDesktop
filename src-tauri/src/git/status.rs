@@ -10,7 +10,7 @@ use crate::git::remote::{
     UPSTREAM_TRACKING_FORMAT,
 };
 use crate::git::runner::{run_git, DEFAULT_TIMEOUT};
-use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus};
+use crate::git::types::{BranchHead, ChangeKind, FileEntry, RepoStatus, SubmoduleChange};
 use crate::state::AppState;
 
 /// Core of [`git_status`], callable outside a Tauri context (e.g. the Tier-3 MCP
@@ -425,26 +425,30 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
                 // 1 XY sub mH mI mW hH hI path
                 let mut fields = token.splitn(9, ' ');
                 let xy = fields.nth(1).unwrap_or("..");
-                let path = fields.nth(6).unwrap_or("");
+                let sub = submodule_change(fields.next().unwrap_or(""));
+                let path = fields.nth(5).unwrap_or("");
                 if path.is_empty() {
                     continue;
                 }
-                entries.push(entry_from_xy(xy, path, None));
+                entries.push(entry_from_xy(xy, path, None, sub));
             }
             Some('2') => {
                 // 2 XY sub mH mI mW hH hI Xscore path  (NUL)  origPath
                 let mut fields = token.splitn(10, ' ');
                 let xy = fields.nth(1).unwrap_or("..");
-                let path = fields.nth(7).unwrap_or("");
+                let sub = submodule_change(fields.next().unwrap_or(""));
+                let path = fields.nth(6).unwrap_or("");
                 let orig = tokens.next().map(|s| s.to_string());
                 if path.is_empty() {
                     continue;
                 }
-                entries.push(entry_from_xy(xy, path, orig));
+                entries.push(entry_from_xy(xy, path, orig, sub));
             }
             Some('u') => {
                 // u XY sub m1 m2 m3 mW h1 h2 h3 path
-                let path = token.splitn(11, ' ').nth(10).unwrap_or("");
+                let mut fields = token.splitn(11, ' ');
+                let sub = submodule_change(fields.nth(2).unwrap_or(""));
+                let path = fields.nth(7).unwrap_or("");
                 if path.is_empty() {
                     continue;
                 }
@@ -453,6 +457,7 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
                     orig_path: None,
                     staged: None,
                     unstaged: Some(ChangeKind::Conflicted),
+                    submodule: sub,
                 });
             }
             Some('?') => {
@@ -465,6 +470,7 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
                     orig_path: None,
                     staged: None,
                     unstaged: Some(ChangeKind::Untracked),
+                    submodule: None,
                 });
             }
             _ => {} // '!' ignored entries and anything unknown
@@ -476,7 +482,12 @@ pub fn parse_status_v2(text: &str) -> RepoStatus {
     RepoStatus { branch, entries }
 }
 
-fn entry_from_xy(xy: &str, path: &str, orig_path: Option<String>) -> FileEntry {
+fn entry_from_xy(
+    xy: &str,
+    path: &str,
+    orig_path: Option<String>,
+    submodule: Option<SubmoduleChange>,
+) -> FileEntry {
     let mut chars = xy.chars();
     let x = chars.next().unwrap_or('.');
     let y = chars.next().unwrap_or('.');
@@ -485,7 +496,19 @@ fn entry_from_xy(xy: &str, path: &str, orig_path: Option<String>) -> FileEntry {
         orig_path,
         staged: change_kind(x),
         unstaged: change_kind(y),
+        submodule,
     }
+}
+
+/// Porcelain v2's submodule field: `S<c><m><u>` on a submodule record, `N...` on any
+/// other; a missing flag character reads false.
+fn submodule_change(field: &str) -> Option<SubmoduleChange> {
+    let flags = field.strip_prefix('S')?.as_bytes();
+    Some(SubmoduleChange {
+        commit_changed: flags.first() == Some(&b'C'),
+        tracked_modified: flags.get(1) == Some(&b'M'),
+        untracked: flags.get(2) == Some(&b'U'),
+    })
 }
 
 #[cfg(test)]
@@ -596,6 +619,206 @@ mod tests {
         assert_eq!(s.entries[0].orig_path.as_deref(), Some("util.js"));
         assert_eq!(s.entries[0].staged, Some(ChangeKind::Renamed));
         assert_eq!(s.entries[1].path, "app.js");
+    }
+
+    fn flags(c: bool, m: bool, u: bool) -> Option<SubmoduleChange> {
+        Some(SubmoduleChange {
+            commit_changed: c,
+            tracked_modified: m,
+            untracked: u,
+        })
+    }
+
+    /// The measured git 2.51.1 records (shas shortened): each row's token, XY and path.
+    #[test]
+    fn submodule_token_parses_on_ordinary_records() {
+        let g = "160000 160000 160000 e69de29 e69de29";
+        let rows = [
+            (
+                format!("1 .M S..U {g} s_untracked"),
+                "s_untracked",
+                flags(false, false, true),
+            ),
+            (
+                format!("1 .M S.M. {g} s_modified"),
+                "s_modified",
+                flags(false, true, false),
+            ),
+            (
+                format!("1 .M SC.. {g} s_newcommits"),
+                "s_newcommits",
+                flags(true, false, false),
+            ),
+            (
+                format!("1 .M SCMU {g} s_all"),
+                "s_all",
+                flags(true, true, true),
+            ),
+            (
+                format!("1 .M SC.. {g} s_rewound"),
+                "s_rewound",
+                flags(true, false, false),
+            ),
+            (
+                "1 D. S... 160000 000000 000000 e69de29 0000000 s_deleted".to_string(),
+                "s_deleted",
+                flags(false, false, false),
+            ),
+            (
+                "1 .D S... 160000 160000 000000 e69de29 e69de29 s_gone".to_string(),
+                "s_gone",
+                flags(false, false, false),
+            ),
+            (
+                "1 M. S... 160000 160000 160000 e69de29 4b825dc s_staged".to_string(),
+                "s_staged",
+                flags(false, false, false),
+            ),
+            (
+                "1 MM SC.U 160000 160000 160000 e69de29 4b825dc s_stagedmore".to_string(),
+                "s_stagedmore",
+                flags(true, false, true),
+            ),
+            (
+                "1 .T S... 160000 160000 100644 e69de29 e69de29 s_file".to_string(),
+                "s_file",
+                flags(false, false, false),
+            ),
+            (
+                "1 .T SC.. 100644 100644 160000 e69de29 e69de29 was_file".to_string(),
+                "was_file",
+                flags(true, false, false),
+            ),
+            (
+                "1 A. S... 000000 160000 160000 0000000 e69de29 newsub".to_string(),
+                "newsub",
+                flags(false, false, false),
+            ),
+            // The path is the splitn remainder, spaces included.
+            (
+                format!("1 .M S..U {g} libs/my dep"),
+                "libs/my dep",
+                flags(false, false, true),
+            ),
+        ];
+        let mut parts: Vec<&str> = vec!["# branch.head main"];
+        parts.extend(rows.iter().map(|(record, _, _)| record.as_str()));
+        parts.push("");
+        let s = parse_status_v2(&z(&parts));
+        assert_eq!(s.entries.len(), rows.len());
+        for (entry, (record, path, sub)) in s.entries.iter().zip(&rows) {
+            assert_eq!(entry.path, *path, "{record}");
+            assert_eq!(entry.submodule, *sub, "{record}");
+        }
+        let kinds: Vec<_> = s.entries.iter().map(|e| (e.staged, e.unstaged)).collect();
+        use ChangeKind::*;
+        assert_eq!(
+            kinds,
+            [
+                (None, Some(Modified)),
+                (None, Some(Modified)),
+                (None, Some(Modified)),
+                (None, Some(Modified)),
+                (None, Some(Modified)),
+                (Some(Deleted), None),
+                (None, Some(Deleted)),
+                (Some(Modified), None),
+                (Some(Modified), Some(Modified)),
+                (None, Some(Typechange)),
+                (None, Some(Typechange)),
+                (Some(Added), None),
+                (None, Some(Modified)),
+            ]
+        );
+        // A token cut short reads its missing flags as false.
+        assert_eq!(submodule_change("SC"), flags(true, false, false));
+        assert_eq!(submodule_change("S"), flags(false, false, false));
+        assert_eq!(submodule_change("N..."), None);
+        assert_eq!(submodule_change(""), None);
+    }
+
+    #[test]
+    fn submodule_token_parses_on_unmerged_records() {
+        let text = z(&[
+            "u UU S... 160000 160000 160000 160000 e69de29 4b825dc 8ab686e sub",
+            "u UU S.MU 160000 160000 160000 160000 e69de29 4b825dc 8ab686e libs/my dep",
+            "u UU N... 100644 100644 100644 100644 e69de29 4b825dc 8ab686e plain.txt",
+            "",
+        ]);
+        let s = parse_status_v2(&text);
+        assert_eq!(s.entries.len(), 3);
+        assert_eq!(s.entries[0].path, "sub");
+        assert_eq!(s.entries[0].unstaged, Some(ChangeKind::Conflicted));
+        assert_eq!(s.entries[0].submodule, flags(false, false, false));
+        assert_eq!(s.entries[1].path, "libs/my dep");
+        assert_eq!(s.entries[1].submodule, flags(false, true, true));
+        assert_eq!(s.entries[2].path, "plain.txt");
+        assert_eq!(s.entries[2].submodule, None);
+    }
+
+    #[test]
+    fn submodule_token_absent_for_plain_files_and_untracked() {
+        let text = z(&[
+            "1 .M N... 100644 100644 100644 e69de29 e69de29 app.js",
+            "? new.txt",
+            // `git rm --cached sub` leaves the kept folder as its own untracked record.
+            "1 D. S... 160000 000000 000000 e69de29 0000000 sub",
+            "? sub/",
+            "",
+        ]);
+        let s = parse_status_v2(&text);
+        assert_eq!(s.entries.len(), 4);
+        assert_eq!(s.entries[0].submodule, None);
+        assert_eq!(s.entries[1].path, "new.txt");
+        assert_eq!(s.entries[1].submodule, None);
+        assert_eq!(s.entries[2].submodule, flags(false, false, false));
+        assert_eq!(s.entries[3].path, "sub/");
+        assert_eq!(s.entries[3].unstaged, Some(ChangeKind::Untracked));
+        assert_eq!(s.entries[3].submodule, None);
+    }
+
+    #[test]
+    fn submodule_token_rides_a_rename_record() {
+        let text = z(&[
+            "2 R. S... 160000 160000 160000 e69de29 e69de29 R100 libs/new dep",
+            "libs/old",
+            "1 .M N... 100644 100644 100644 e69de29 e69de29 app.js",
+            "",
+        ]);
+        let s = parse_status_v2(&text);
+        assert_eq!(s.entries.len(), 2);
+        assert_eq!(s.entries[0].path, "libs/new dep");
+        assert_eq!(s.entries[0].orig_path.as_deref(), Some("libs/old"));
+        assert_eq!(s.entries[0].staged, Some(ChangeKind::Renamed));
+        assert_eq!(s.entries[0].submodule, flags(false, false, false));
+        assert_eq!(s.entries[1].path, "app.js");
+        assert_eq!(s.entries[1].submodule, None);
+    }
+
+    /// The TS mirror's `submodule?` is optional: absent on a plain row, camelCase on a
+    /// submodule row, never a snake_case spelling.
+    #[test]
+    fn submodule_wire_shape_omits_absent_field() {
+        let text = z(&[
+            "1 .M N... 100644 100644 100644 e69de29 e69de29 app.js",
+            "1 .M SC.U 160000 160000 160000 e69de29 e69de29 libs/dep",
+            "",
+        ]);
+        let s = parse_status_v2(&text);
+        let plain = serde_json::to_value(&s.entries[0]).unwrap();
+        let plain = plain.as_object().unwrap();
+        let mut keys: Vec<&str> = plain.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["path", "staged", "unstaged"]);
+        let sub = serde_json::to_value(&s.entries[1]).unwrap();
+        assert_eq!(
+            sub["submodule"],
+            serde_json::json!({ "commitChanged": true, "trackedModified": false, "untracked": true })
+        );
+        let text = sub.to_string();
+        for snake in ["commit_changed", "tracked_modified", "orig_path"] {
+            assert!(!text.contains(snake), "{snake}");
+        }
     }
 
     #[test]

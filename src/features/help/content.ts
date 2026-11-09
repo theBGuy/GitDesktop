@@ -84,10 +84,10 @@ an **Open Recent** list of your last ten repos, with **Settings…** in the
 
 Once a repo is open you land on the **Changes** tab. The header's tab rail holds the
 three primary views — **Changes**, **History**, and **Pull Requests** — and a
-**More ▾** menu holds the rest: **Compare**, {{ai}}**Agent**, {{/ai}}**Issues**,
-**Projects**, **Code TODOs**, **Discussions**, **Actions**, **Findings**, **Tags**,
-**Tasks**, and **Insights**. The More button shows the active secondary tab's name, so the
-rail always says where you are.
+**More ▾** menu holds the rest: **Actions**, {{ai}}**Agent**, {{/ai}}**Code TODOs**,
+**Compare**, **Discussions**, **Findings**, **Insights**, **Issues**, **Projects**,
+**Tags**, and **Tasks**, each showing its shortcut when it has one. The More button shows
+the active secondary tab's name, so the rail always says where you are.
 
 The lists those tabs open (changes, commits, pull requests) fill the **sidebar** down
 the left. It narrows as you narrow the window, and collapses to a strip of tab icons:
@@ -155,6 +155,13 @@ references. Each row shows the submodule's folder, the commit it's checked out a
 and a status badge — **Up to date**, **Not initialized**, **Modified**, or **Conflict**.
 Arrow keys move between rows and Enter runs the row's button, which reads **Initialize**
 for a submodule that has never been checked out and **Update** for the rest.
+
+A submodule with changes appears in **Changes** tagged **Submodule**, with what changed
+where line counts sit on other rows: *commit changed*, *modified files*, *untracked files*.
+Selecting it lists the commits between the commit your repo records and the one checked
+out, and the uncommitted files inside, read-only. Staging the row records the commit the
+submodule points at. **Open submodule** (or a double-click on the row) opens it as its own
+repository, where you stage and commit what's inside.
 
 - **Update** checks a submodule out at the commit your repo records, initializing it and
   any nested submodules on the way; **Update all** in the footer does the whole set.
@@ -489,6 +496,17 @@ the last list up, with a line above it saying it couldn't refresh.
   In the list, {{key:tab}} stops on the file you're on, {{key:up}} and {{key:down}}
   move between files, and the next {{key:tab}} reaches that row's stage button.
   **Stage all** and **Unstage all** do the whole list.
+- Double-click a file to open it in your external editor (set in **Settings**), or in
+  its default program when none is set. A renamed file opens under its new name. A file
+  deleted from your working tree has nothing to open, and a short message says so. The
+  command palette's **Open file in external editor** opens the file you're viewing. The
+  file's {{secondaryclick}} menu marks the item a double-click runs, and leaves its Open
+  items out for a file deleted from your working tree. A submodule opens as its own
+  repository instead, and an untracked folder shows in your file manager.
+- A changed submodule's row is tagged **Submodule**, and selecting it lists its commits
+  and the files changed inside in place of a diff (see *Submodules*). A submodule whose
+  commit hasn't changed has nothing to stage: its **+** says to commit inside the
+  submodule first.
 - When the file you're viewing has nothing left to stage, the next file in
   **Changes** opens in its place (the one above it, at the end of a section),
   whether you staged it whole or line by line. Files the filter hides, files in
@@ -633,6 +651,17 @@ the last list up, with a line above it saying it couldn't refresh.
 - **Split renders as unified** while the pane is too narrow for two readable columns;
   hover the **Split** button and it says so. Your preference is kept either way, so
   widening the pane brings the split view back.
+- **Hide whitespace changes** — the gear in the diff toolbar hides changes that only
+  touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
+  content changed. It applies to every local diff (the working tree, commit details, a
+  file's history, branch compare, stashes and an agent session's changes) and stays on
+  until you turn it off; a dot on the gear marks it. While it is on, hunks and lines
+  can't be staged, unstaged or discarded from the Changes diff, and the note above the
+  diff offers **Show whitespace**; whole files still stage from their rows. A file whose
+  only changes are whitespace says so. The line counts in file lists keep counting
+  whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
+  the command palette (palette-only by default — bind a key in **Settings → Keyboard**)
+  flips it too. Diffs of pull requests on a forge always show whitespace.
 - **The file list beside a diff collapses** to a thin strip, handing the diff the whole
   pane. Use the caret above the list, or *Collapse or expand the diff file list*
   (palette-only by default — bind a key in Settings); a pane too narrow to hold both

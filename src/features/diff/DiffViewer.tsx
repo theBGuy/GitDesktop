@@ -33,11 +33,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
+import {
+  isConflictedEntry,
+  rowEntry,
+} from "@/features/repository/bulk-row-targets";
 import { ConflictFileView } from "@/features/repository/ConflictFileView";
 import { ConflictResolveView } from "@/features/repository/ConflictResolveView";
+import {
+  openChangedFileAction,
+  runOpenChangedFile,
+} from "@/features/repository/open-changed-file";
 import { statusReadFailed } from "@/features/repository/StatusReadError";
+import { SubmoduleChangesPane } from "@/features/repository/SubmoduleChangesPane";
+import {
+  rememberSubmoduleVerdicts,
+  type SubmoduleVerdicts,
+  submoduleVerdict,
+} from "@/features/repository/submodule-row";
 import { useWalkSelfHeal } from "@/features/repository/use-walk-self-heal";
+import { useOpenSubmoduleAsRepo } from "@/features/repository/useOpenSubmoduleAsRepo";
 import { clipTitleFromText } from "@/lib/clip-title";
 import type { SelectedLine } from "@/lib/git/api";
 import {
@@ -54,12 +68,18 @@ import {
   useFileDiff,
   useRepoStatus,
 } from "@/lib/git/queries";
+import type { FileEntry } from "@/lib/git/types";
 import {
   bindingToAriaKeyshortcuts,
   formatBinding,
   isMac,
+  isWindows,
 } from "@/lib/hotkeys/binding";
 import { useEffectiveBindings, useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import {
+  useHideWhitespace,
+  useSetHideWhitespace,
+} from "@/lib/settings/hide-whitespace";
 import { useSaveSettings, useSettings } from "@/lib/settings/queries";
 import { useConflictResolve } from "@/lib/stores/conflict-resolve";
 import type { SelectedFile } from "@/lib/stores/ui";
@@ -88,6 +108,7 @@ import {
   type DiffContentRevs,
   DiffModeToggle,
   DiffSurface,
+  DiffViewOptionsMenu,
   useFileContent,
   useModeLineAnchor,
   useShikiRouting,
@@ -140,6 +161,14 @@ import {
   useFocusOnControlsSwap,
   useHiddenTriggerFocus,
 } from "./use-hidden-trigger-focus";
+import {
+  SHOW_WHITESPACE_LABEL,
+  WHITESPACE_ANNOUNCEMENT,
+  WHITESPACE_HUNK_REASON,
+  WHITESPACE_REFUSAL,
+  WHITESPACE_STRIP_COPY,
+  whitespaceWritesOff,
+} from "./whitespace-mode";
 
 /** Working-tree diff for the file selected in the changes panel. */
 export function DiffViewer({ repoPath }: { repoPath: string }) {
@@ -177,16 +206,73 @@ export function DiffViewer({ repoPath }: { repoPath: string }) {
     : undefined;
   const isConflicted =
     liveEntry?.unstaged === "conflicted" || liveEntry?.staged === "conflicted";
-  const target = paneTarget(repoPath, file, isConflicted);
+  // Whether the row is a submodule, from its own record, else as last seen for
+  // that (repo, side, path): remembered for the LIVE selection too, so a row
+  // that leaves status before the deferred render never mounts a text diff.
+  const entries = status.data?.entries ?? [];
+  const keyOf = (repo: string, f: SelectedFile) =>
+    `${repo}:${f.staged}:${f.path}`;
+  const recordOf = (f: SelectedFile) => rowEntry(entries, f.path, f.staged);
+  const [verdicts, setVerdicts] = useState<SubmoduleVerdicts>(() => new Map());
+  const remembered = rememberSubmoduleVerdicts(verdicts, [
+    ...(selectedFile
+      ? [{ key: keyOf(repoPath, selectedFile), record: recordOf(selectedFile) }]
+      : []),
+    ...(file ? [{ key: keyOf(repoPath, file), record: recordOf(file) }] : []),
+  ]);
+  if (remembered !== verdicts) setVerdicts(remembered);
+  const submodule =
+    file !== null &&
+    submoduleVerdict(remembered, keyOf(repoPath, file), recordOf(file));
+  const target = paneTarget(repoPath, file, isConflicted, submodule);
 
   // The last settled view stays painted while a newly selected file prepares
   // out of sight, clipped over it, so a click swaps the pane once.
   const slots = useFileSlots(target);
 
+  // The palette's open lives with the pane, not the list: the pane stays
+  // mounted while the sidebar is collapsed, the list's panel does not. It acts
+  // on the file whose diff is shown, never the multi-selection, through the
+  // decision the row's double-click shares.
+  const settings = useSettings();
+  const editorPath = (settings.data?.externalEditor ?? "").trim();
+  const openSubmodule = useOpenSubmoduleAsRepo(repoPath);
+  function openRow(entry: FileEntry) {
+    void runOpenChangedFile(
+      openChangedFileAction({
+        entry,
+        repoPath,
+        editorPath,
+        windows: isWindows,
+      }),
+      repoPath,
+      openSubmodule,
+    );
+  }
+  const shownEntry = selectedFile
+    ? (rowEntry(entries, selectedFile.path, selectedFile.staged) ?? null)
+    : null;
+  useHotkeyAction(
+    "open-changed-file",
+    () => {
+      if (shownEntry) openRow(shownEntry);
+    },
+    shownEntry !== null,
+  );
+
   return (
     <FileSlots slots={slots} target={target} busy={slots.holding}>
       {(view) => {
         if (view.kind === "file") {
+          // A gitlink has no text diff: the pane lists commits and files.
+          if (view.file.submodule)
+            return (
+              <SubmoduleChangesPane
+                repoPath={view.repo}
+                path={view.file.path}
+                staged={view.file.staged}
+              />
+            );
           return (
             <WorkingTreeDiff
               repoPath={view.repo}
@@ -228,10 +314,13 @@ function paneTarget(
   repoPath: string,
   file: SelectedFile | null,
   conflicted: boolean,
-): PaneView<SelectedFile> {
+  submodule: boolean,
+): PaneView<SelectedFile & { submodule: boolean }> {
   if (file === null) return { kind: "placeholder" };
   if (conflicted) return { kind: "conflict", key: file.path };
-  return filePaneView(repoPath, file);
+  // The verdict rides the slot's file, so a submodule row keeps the file slot
+  // and its two-slot hold.
+  return filePaneView(repoPath, { ...file, submodule });
 }
 
 type HunkActionKind = "stage" | "unstage" | "discard";
@@ -440,6 +529,8 @@ function WorkingTreeDiff({
   const discardUntracked = useDiscardUntrackedLines(repoPath);
   const settings = useSettings();
   const saveSettings = useSaveSettings();
+  const hideWhitespace = useHideWhitespace();
+  const setHideWhitespace = useSetHideWhitespace();
   const isDark = useIsDark();
   // Split needs a legible column count per side; under it this pane renders
   // unified without ever writing the preference back (`null` = not yet
@@ -645,6 +736,10 @@ function WorkingTreeDiff({
   // The fire-time belt reads this, never a handler's own `diff.data`: every
   // handler below closes over a render where the flag may still have been false.
   const liveDiffRef = useLatestRef(diff.data);
+  // Hidden whitespace turns every write off: the setting for the read on its
+  // way, the data's own mark for the diff on screen. The belts read both refs.
+  const whitespaceOff = hideWhitespace || whitespaceWritesOff(diff.data);
+  const hideWhitespaceRef = useLatestRef(hideWhitespace);
 
   // A truncated parse could cut a hunk in half — never offer to apply one.
   // Untracked text files line-stage too: `git apply --cached` of a subset of a
@@ -755,6 +850,10 @@ function WorkingTreeDiff({
     if (!hunkWritesAllowed(live)) {
       if (live?.undecodable === true)
         toast.info(UNDECODABLE_NOTE_COPY[stagingSide]);
+      return;
+    }
+    if (whitespaceWritesOff(liveDiffRef.current) || hideWhitespaceRef.current) {
+      toast.info(WHITESPACE_REFUSAL[kind]);
       return;
     }
     writingRef.current = true;
@@ -898,6 +997,11 @@ function WorkingTreeDiff({
       return;
     }
     if (writingRef.current) return;
+    // Ahead of the stale-text check, so a press after a flip names the reason.
+    if (whitespaceWritesOff(liveDiffRef.current) || hideWhitespaceRef.current) {
+      toast.info(WHITESPACE_REFUSAL[kind]);
+      return;
+    }
     // A hunk from a stale display would patch lines the user never saw.
     if (forText !== (diff.data?.text ?? "")) {
       toast.info(STALE_HUNK_ACTION[kind]);
@@ -939,6 +1043,9 @@ function WorkingTreeDiff({
   // that held focus: land on the sink. A cold load's first hunk view swaps in
   // from nothing too, so focus that was on <body> then lands there as well.
   useFocusOnControlsSwap(shownView !== null, focusSink);
+  // A flip that re-renders in place (the other mode's diff still cached) takes
+  // the strip or the selection bar out from under focus.
+  useFocusOnControlsSwap(whitespaceOff, focusSink);
   // A confirm pending when the slot is held is dropped, not just hidden: a
   // retarget back to this file must never reopen it.
   if (!interactive && discard !== null) setDiscard(null);
@@ -950,7 +1057,12 @@ function WorkingTreeDiff({
     "stage-selected-lines",
     () =>
       applySelection({ cached: true, reverse: file.staged }, hotkeyPress(true)),
-    interactive && hunkMode && selection !== null && !busy && discard === null,
+    interactive &&
+      hunkMode &&
+      selection !== null &&
+      !busy &&
+      discard === null &&
+      !whitespaceOff,
   );
   useHotkeyAction(
     "clear-line-selection",
@@ -960,7 +1072,12 @@ function WorkingTreeDiff({
         press === null ? null : { ...press, settled: true };
       clearSelection();
     },
-    interactive && hunkMode && selection !== null && !busy && discard === null,
+    interactive &&
+      hunkMode &&
+      selection !== null &&
+      !busy &&
+      discard === null &&
+      !whitespaceOff,
   );
   // Only this toolbar's own arm registers: while no hunk view is shown, the
   // fallback DiffSurface below renders the picker and registers for itself,
@@ -985,6 +1102,13 @@ function WorkingTreeDiff({
     () => setMdView((v) => (v === "raw" ? "preview" : "raw")),
     interactive && canPreview && selection === null && discard === null,
   );
+  // This toolbar's own registration, like the picker's: with no hunk view
+  // shown, the fallback DiffSurface answers for itself.
+  useHotkeyAction(
+    "toggle-hide-whitespace",
+    () => setHideWhitespace(!hideWhitespace),
+    interactive && shownView !== null && discard === null,
+  );
   // Any Discard confirm's `run` captured line numbers (or a hunk) at open
   // time — close it the moment the diff text moves on from the text it was
   // opened against (a refetch while the dialog is up), whichever arm opened it.
@@ -998,6 +1122,49 @@ function WorkingTreeDiff({
   // guards above never fire for it; leaving hunk mode clears both here.
   if (!hunkMode && selectionState !== null) setSelectionState(null);
   if (!hunkMode && discard !== null) setDiscard(null);
+  // A file with no whitespace changes keeps byte-identical text across a flip,
+  // so the text-keyed guards never drop a selection or confirm made before it.
+  if (whitespaceOff && selectionState !== null) setSelectionState(null);
+  if (whitespaceOff && discard !== null) setDiscard(null);
+  // A flip announces once, through the status span, after the staging arm is
+  // on screen: armed by a change of the LOADED setting (never its first load
+  // or a mount), worded from the live value, dropped when the answer lands on
+  // the fallback arm.
+  const loadedHide =
+    settings.data === undefined
+      ? undefined
+      : settings.data.diffHideWhitespace === true;
+  const [announcementArmed, setAnnouncementArmed] = useState(false);
+  const [modeAnnouncement, setModeAnnouncement] = useState("");
+  const prevLoadedHide = useRef(loadedHide);
+  useEffect(() => {
+    const prev = prevLoadedHide.current;
+    prevLoadedHide.current = loadedHide;
+    if (prev !== undefined && loadedHide !== undefined && prev !== loadedHide)
+      setAnnouncementArmed(true);
+  }, [loadedHide]);
+  const stagingShown = shownView !== null;
+  // The status span remounts with the arm after a reload, and a live region
+  // that appears already holding its text is often not spoken: the text lands
+  // two frames after the span, worded from the setting at that moment.
+  useEffect(() => {
+    if (!announcementArmed || !stagingShown) return;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        setModeAnnouncement(
+          hideWhitespaceRef.current
+            ? WHITESPACE_ANNOUNCEMENT.hidden
+            : WHITESPACE_ANNOUNCEMENT.shown,
+        );
+        setAnnouncementArmed(false);
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [announcementArmed, stagingShown]);
+  if (announcementArmed && diff.data !== undefined && shownView === null)
+    setAnnouncementArmed(false);
+  if (shownView === null && modeAnnouncement !== "") setModeAnnouncement("");
+  if (selection !== null && modeAnnouncement !== "") setModeAnnouncement("");
   // The selection bar's rescue lands once its write settled (a Clear at its
   // press) and the bar is gone, on the pane's sink under the landing rule. A
   // mid-write liveText drift or hunk-mode exit leaves focus on <body> until the
@@ -1198,6 +1365,7 @@ function WorkingTreeDiff({
                       }}
                     />
                   </span>
+                  <DiffViewOptionsMenu onToggle={setHideWhitespace} />
                   <DiffModeToggle splitDisabled={narrowPane} />
                 </>
               )}
@@ -1209,8 +1377,24 @@ function WorkingTreeDiff({
           visible count above is deliberately not the live region, which would
           announce the same text twice. */}
       <span role="status" aria-live="polite" className="sr-only">
-        {selectionCountText}
+        {selectionCountText || modeAnnouncement}
       </span>
+      {whitespaceOff && !previewOn && (
+        <InfoNote
+          className="shrink-0"
+          action={
+            <button
+              type="button"
+              onClick={() => setHideWhitespace(false)}
+              className="shrink-0 font-medium whitespace-nowrap underline underline-offset-2 hover:no-underline"
+            >
+              {SHOW_WHITESPACE_LABEL}
+            </button>
+          }
+        >
+          {WHITESPACE_STRIP_COPY[stagingSide]}
+        </InfoNote>
+      )}
       <div
         ref={scrollPaneRef}
         className="ph-no-capture min-h-0 flex-1 overflow-auto"
@@ -1240,7 +1424,7 @@ function WorkingTreeDiff({
           <>
             {/* The drag-the-line-numbers hint is about the staging gutter, so
                 it stays out of Preview, which has no line numbers at all. */}
-            {(settings.data?.showLineStageHint ?? true) && (
+            {!whitespaceOff && (settings.data?.showLineStageHint ?? true) && (
               <InfoNote
                 action={
                   <button
@@ -1287,6 +1471,7 @@ function WorkingTreeDiff({
               staged={file.staged}
               busy={busy}
               frozen={kept}
+              whitespaceOff={whitespaceOff}
               selection={selection}
               onSelect={(lines, forText) =>
                 setSelectionState(lines === null ? null : { lines, forText })
@@ -1641,6 +1826,8 @@ interface HunkActionProps {
   busy: boolean;
   /** The displayed diff trails the text the pane was given. */
   trailing: boolean;
+  /** Whitespace is hidden: every write is off, with its own reason. */
+  whitespaceOff: boolean;
   onHunkAction: (
     hunk: DiffHunk,
     kind: HunkActionKind,
@@ -1659,16 +1846,20 @@ function HunkActionButtons({
   staged,
   busy,
   trailing,
+  whitespaceOff,
   onHunkAction,
 }: HunkActionProps) {
   const rangeId = useId();
-  const held = busy || trailing;
+  const held = busy || trailing || whitespaceOff;
+  const reasonFor = (kind: HunkActionKind) =>
+    whitespaceOff ? WHITESPACE_HUNK_REASON[kind] : UPDATING_DIFF_REASON;
   // A refresh's trail delays the held look, so a fast one never blinks it; the
   // vendored Button transitions everything with no reduced-motion arm, hence
   // the explicit duration. Accepted: ARIA_DISABLED_CLASS drops pointer events
   // at once, so a click in that first 100 ms does nothing, and the stale text
   // would refuse it anyway.
-  const heldLook = trailing && !busy && "delay-100 motion-reduce:duration-0";
+  const heldLook =
+    trailing && !busy && !whitespaceOff && "delay-100 motion-reduce:duration-0";
   const fire = (kind: HunkActionKind) => (e: ReactMouseEvent<HTMLElement>) => {
     // The second click of a double-click is ignored: the hold releases within
     // a double-click's interval, by which time the NEXT hunk's button can sit
@@ -1695,7 +1886,7 @@ function HunkActionButtons({
         size="xs"
         className={heldLook || undefined}
         disabled={held}
-        reason={UPDATING_DIFF_REASON}
+        reason={reasonFor(staged ? "unstage" : "stage")}
         aria-describedby={rangeId}
         data-hunk-primary={index}
         onKeyDown={swallowRepeatedActivation}
@@ -1709,7 +1900,7 @@ function HunkActionButtons({
           size="xs"
           className={cn("text-destructive", heldLook)}
           disabled={held}
-          reason={UPDATING_DIFF_REASON}
+          reason={reasonFor("discard")}
           aria-describedby={rangeId}
           data-hunk-secondary={index}
           onKeyDown={swallowRepeatedActivation}
@@ -1778,6 +1969,7 @@ function StagingDiffView({
   staged,
   busy,
   frozen,
+  whitespaceOff,
   selection,
   onSelect,
   onHunkAction,
@@ -1801,6 +1993,8 @@ function StagingDiffView({
   busy: boolean;
   /** The parent is keeping this view up past its data: never rebuild it. */
   frozen: boolean;
+  /** Whitespace is hidden: no hunk or line write and no line selection. */
+  whitespaceOff: boolean;
   selection: SelectedLine[] | null;
   onSelect: (lines: SelectedLine[] | null, forText: string) => void;
   onHunkAction: (
@@ -2163,6 +2357,7 @@ function StagingDiffView({
               staged={staged}
               busy={busy}
               trailing={trailing}
+              whitespaceOff={whitespaceOff}
               onHunkAction={onDisplayedHunkAction}
             />
           )}
@@ -2176,6 +2371,7 @@ function StagingDiffView({
       staged,
       busy,
       trailing,
+      whitespaceOff,
       onDisplayedHunkAction,
     ],
   );
@@ -2183,6 +2379,11 @@ function StagingDiffView({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !diffFile) return;
+    // No line selection while whitespace is hidden: nothing could apply it.
+    if (whitespaceOff) {
+      paintLines(container, [], split);
+      return;
+    }
     // The drag's two anchor rows. The library's range is pinned to the side the
     // drag started on and its end sticks at the last row bearing a number there,
     // so the end anchor is tracked below instead. Effect-scoped: the drag dies
@@ -2322,7 +2523,7 @@ function StagingDiffView({
       container.removeEventListener("mouseover", onMouseOver);
       manager.destroy();
     };
-  }, [diffFile, split, shownText, changed]);
+  }, [diffFile, split, shownText, changed, whitespaceOff]);
 
   // Paint the committed selection from state (incl. cleared → []).
   useEffect(() => {
@@ -2720,6 +2921,7 @@ function StagingDiffView({
               staged={staged}
               busy={busy}
               trailing={trailing}
+              whitespaceOff={whitespaceOff}
               onHunkAction={onDisplayedHunkAction}
             />
           )}
@@ -2757,6 +2959,7 @@ function StagingDiffView({
               staged={staged}
               busy={busy}
               trailing={trailing}
+              whitespaceOff={whitespaceOff}
               onHunkAction={onDisplayedHunkAction}
             />
           </div>

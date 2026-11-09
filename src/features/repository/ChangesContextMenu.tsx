@@ -6,16 +6,13 @@ import {
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuSub,
   ContextMenuSubContent,
   ContextMenuSubTrigger,
 } from "@/components/ui/context-menu";
 import { copyText } from "@/lib/clipboard";
-import {
-  openWithDefault,
-  openWithProgram,
-  revealInExplorer,
-} from "@/lib/git/api";
+import { revealInExplorer } from "@/lib/git/api";
 import {
   aiExcludePatternLinesForPath,
   globLiteralPath,
@@ -32,6 +29,16 @@ import {
 import { toastError } from "@/lib/toast";
 import { canUntrack, isConflictedEntry } from "./bulk-row-targets";
 import { staysOutOfStash } from "./changes-confirm-copy";
+import {
+  fileMenuOpens,
+  hintSlots,
+  openChangedFileAction,
+  runOpenChangedFile,
+} from "./open-changed-file";
+import {
+  submoduleDiscardBlocked,
+  submoduleStageBlocked,
+} from "./submodule-row";
 
 /** What the one shared context menu acts on, set on right-click. */
 export type MenuTarget =
@@ -54,10 +61,14 @@ export interface FolderMenuCounts {
   fileCount: number;
   /** Of those, the ones staging can reach (Changes section only). */
   stageableCount: number;
+  /** Stage's label when `stageableCount` is 0, naming why. */
+  noneStageableLabel: string;
   /** Same-side files under the folder that the filter hides. */
   hiddenCount: number;
   /** Shown files that are conflicted: Discard leaves them alone. */
   conflictedCount: number;
+  /** Shown submodule rows Discard leaves alone (nothing it could restore). */
+  discardBlockedCount: number;
   /** Shown files a Stash takes: untracked Windows-reserved names stay behind. */
   stashableCount: number;
 }
@@ -96,12 +107,21 @@ export interface ChangesMenuActions {
    *  `/`-separated twin a `\`-holding path needs to be hidden on Windows. */
   aiExclude: (patterns: string[], label: string) => void;
   aiExcludeSelected: () => void;
+  /** The function useOpenSubmoduleAsRepo returns. */
+  openSubmodule: (subPath: string) => Promise<boolean>;
 }
 
 /** A disabled menu item can't carry a tooltip, so the reason rides its label. */
 const RESERVED_HINT = " (Windows-reserved name)";
 /** Git refuses every path stash while any file is conflicted. */
 const CONFLICT_HINT = " (resolve conflicts first)";
+/** A submodule whose commit hasn't moved: `git add` records nothing. */
+const SUBMODULE_STAGE_HINT = " (commit inside the submodule first)";
+/** Why Discard is off on a submodule row, by its unstaged kind. */
+const DISCARD_BLOCKED_HINT: Partial<Record<string, string>> = {
+  modified: " (open the submodule to discard)",
+  typechange: " (not available when a submodule and a file swap places)",
+};
 
 /** A Stash label counts the files that go: untracked Windows-reserved names
  *  stay behind, so a target holding any takes the "N of M" form, like Stage. */
@@ -138,6 +158,7 @@ export function ChangesContextMenuItems({
   stagedRowCount,
   unstagedRowCount,
   stageableCount,
+  noneStageableLabel,
   pathCount,
   stashablePathCount,
   trackedPathCount,
@@ -157,15 +178,19 @@ export function ChangesContextMenuItems({
   /** Selected unstaged rows (Stage, Discard). */
   unstagedRowCount: number;
   /** Selected unstaged rows staging can actually reach: minus the
-   *  Windows-reserved device names `git add` refuses. */
+   *  Windows-reserved device names `git add` refuses and the submodules
+   *  with nothing to stage. */
   stageableCount: number;
+  /** Stage's label when `stageableCount` is 0, naming why. */
+  noneStageableLabel: string;
   /** Distinct selected files (Stash, Ignore, Exclude from AI act per file). */
   pathCount: number;
   /** Of those, the ones a Stash takes: minus untracked Windows-reserved names. */
   stashablePathCount: number;
   /** Distinct selected files `canUntrack` accepts (Untrack). */
   trackedPathCount: number;
-  /** Selected unstaged rows Discard sends: minus the conflicted ones. */
+  /** Selected unstaged rows Discard sends: minus the conflicted ones and the
+   *  submodule rows it can't restore. */
   discardableCount: number;
   /** Whether any file in the repository is conflicted; every Stash item
    *  disables while one is. */
@@ -197,14 +222,16 @@ export function ChangesContextMenuItems({
     const hidden = folderCounts?.hiddenCount ?? 0;
     const discardable = staged
       ? 0
-      : files - (folderCounts?.conflictedCount ?? 0);
+      : files -
+        (folderCounts?.conflictedCount ?? 0) -
+        (folderCounts?.discardBlockedCount ?? 0);
     const plural = files === 1 ? "" : "s";
     const verb = staged ? "unstage" : "stage";
     let label: string;
     if (files === 0 && hidden > 0) label = `No visible files to ${verb}`;
     else if (files === 0) label = `Nothing to ${verb} in this folder`;
     else if (staged) label = `Unstage ${files} file${plural}`;
-    else if (stageable === 0) label = "Stage files (Windows-reserved names)";
+    else if (stageable === 0) label = folderCounts?.noneStageableLabel ?? "";
     else if (stageable < files) label = `Stage ${stageable} of ${files} files`;
     else label = `Stage ${files} file${plural}`;
     const absoluteFolder = absoluteOf(target.path);
@@ -297,7 +324,8 @@ export function ChangesContextMenuItems({
   if (inSelection && rowCount > 1) {
     // Each item counts the selected rows (or files) it acts on and hides at
     // zero; the clicked side's verb leads. Stage stays visible but disabled
-    // when every selected unstaged row is a Windows-reserved name.
+    // when no selected unstaged row can be staged (reserved names, submodules
+    // with nothing to stage), its label naming why.
     const unstageItem = stagedRowCount > 0 && (
       <ContextMenuItem onClick={actions.unstageSelected}>
         {`Unstage ${stagedRowCount} file${stagedRowCount === 1 ? "" : "s"}`}
@@ -310,7 +338,7 @@ export function ChangesContextMenuItems({
         onClick={actions.stageSelected}
       >
         {stageableCount === 0
-          ? "Stage files (Windows-reserved names)"
+          ? noneStageableLabel
           : stageableCount < unstagedRowCount
             ? `Stage ${stageableCount} of ${unstagedRowCount} files`
             : `Stage ${stageableCount} file${stageableCount === 1 ? "" : "s"}`}
@@ -366,10 +394,29 @@ export function ChangesContextMenuItems({
   // history.
   const hasHistory = untrackable || entry.staged === "deleted";
   // Only staging reads the working-tree file, so only it hits the device.
-  const stageBlocked = !staged && reservedDeviceName(entry.path) !== null;
+  // A reserved name outranks the submodule reason, as on the row.
+  let stageHint = "";
+  if (!staged && reservedDeviceName(entry.path) !== null)
+    stageHint = RESERVED_HINT;
+  else if (submoduleStageBlocked(entry, staged))
+    stageHint = SUBMODULE_STAGE_HINT;
+  const discardHint = DISCARD_BLOCKED_HINT[entry.unstaged ?? "none"] ?? "";
+  const discardBlocked = submoduleDiscardBlocked(entry);
   // The path stash leaves this file in place, so stashing it alone would stash
   // nothing.
   const stashBlocked = staysOutOfStash(entry);
+  // The double-click's decision: a worktree deletion offers no Open item, and
+  // the item a double-click runs carries the hint.
+  const openInput = { entry, repoPath, editorPath, windows: isWindows };
+  const action = openChangedFileAction(openInput);
+  const { showFileOpens, hintOn } = fileMenuOpens(action);
+  const slots = hintSlots(hintOn);
+  // A pointer gesture, not a key: kept out of the item's accessible name.
+  const doubleClickHint = (
+    <ContextMenuShortcut aria-hidden className="tracking-normal">
+      Double-click
+    </ContextMenuShortcut>
+  );
   return (
     <>
       {isConflictedEntry(entry) && aiEnabled && reviewConfigured && (
@@ -381,15 +428,19 @@ export function ChangesContextMenuItems({
         </>
       )}
       <ContextMenuItem
-        disabled={stageBlocked}
+        disabled={stageHint !== ""}
         onClick={() => actions.toggle(entry, staged)}
       >
         {staged ? "Unstage file" : "Stage file"}
-        {stageBlocked ? RESERVED_HINT : ""}
+        {stageHint}
       </ContextMenuItem>
       {!staged && (
-        <ContextMenuItem onClick={() => actions.discardFile(entry)}>
+        <ContextMenuItem
+          disabled={discardBlocked}
+          onClick={() => actions.discardFile(entry)}
+        >
           Discard changes…
+          {discardBlocked ? discardHint : ""}
         </ContextMenuItem>
       )}
       <ContextMenuItem
@@ -558,25 +609,55 @@ export function ChangesContextMenuItems({
         Copy relative file path
       </ContextMenuItem>
       <ContextMenuSeparator />
+      {slots.submodule && (
+        <ContextMenuItem
+          onClick={() =>
+            void runOpenChangedFile(action, repoPath, actions.openSubmodule)
+          }
+        >
+          Open submodule
+          {doubleClickHint}
+        </ContextMenuItem>
+      )}
+      {/* A folder row reveals the folder itself, not a path ending in a
+          separator. */}
       <ContextMenuItem
-        onClick={() => revealInExplorer(absolutePath).catch(onError)}
+        onClick={() =>
+          revealInExplorer(
+            action.kind === "folder" ? action.absolutePath : absolutePath,
+          ).catch(onError)
+        }
       >
         Show in Explorer
       </ContextMenuItem>
-      {editorPath && (
+      {showFileOpens && editorPath && (
         <ContextMenuItem
           onClick={() =>
-            openWithProgram(editorPath, absolutePath).catch(onError)
+            void runOpenChangedFile(
+              openChangedFileAction({ ...openInput, via: "editor" }),
+              repoPath,
+              actions.openSubmodule,
+            )
           }
         >
           Open in {editorName}
+          {slots.editor && doubleClickHint}
         </ContextMenuItem>
       )}
-      <ContextMenuItem
-        onClick={() => openWithDefault(absolutePath).catch(onError)}
-      >
-        Open with default program
-      </ContextMenuItem>
+      {showFileOpens && (
+        <ContextMenuItem
+          onClick={() =>
+            void runOpenChangedFile(
+              openChangedFileAction({ ...openInput, via: "default" }),
+              repoPath,
+              actions.openSubmodule,
+            )
+          }
+        >
+          Open with default program
+          {slots.default && doubleClickHint}
+        </ContextMenuItem>
+      )}
     </>
   );
 }

@@ -1,0 +1,1 @@
+- Selecting a submodule in Changes shows the uncommitted and untracked files inside it.
