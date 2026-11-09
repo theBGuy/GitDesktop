@@ -3,8 +3,8 @@ import * as api from "../api";
 import { repoKeys } from "./core";
 import { repoStatusPoll } from "./status";
 
-/** The refs stamp read. `retry: false` because the next poll is the retry: an
- *  over-cap repo's Err must cost one bounded listing per poll, not two. */
+/** The refs stamp read. `retry: false` because the next poll is the retry: a
+ *  read that keeps failing costs one attempt per poll, never a retry ladder. */
 export function refsStampOptions(repo: string) {
   return {
     queryKey: repoKeys.refsStamp(repo),

@@ -819,20 +819,30 @@ pub(crate) async fn op_continue(state: &AppState, repo_path: &str, op: &str) -> 
         holder_label(subcommand_of(&args)),
     )
     .await?;
+    let git_dir = if op == "rebase" {
+        absolute_git_dir(repo_path).await
+    } else {
+        None
+    };
+    let continue_timeout = if op == "rebase" {
+        rebase_continue_timeout(git_dir.as_deref())
+    } else {
+        DEFAULT_TIMEOUT
+    };
     // Raw: a `--continue` refused over unresolved paths reports `<path>: needs
     // merge` on STDOUT with stderr empty (measured, git 2.51.1), which a
     // stderr-only error renders as "git exited with code 1".
-    let out = run_git_raw_index_retry(repo_path, &args, DEFAULT_TIMEOUT).await?;
+    let out = run_git_raw_index_retry(repo_path, &args, continue_timeout).await?;
     let out = if op == "rebase" && out.code != 0 {
         // This includes terminal-started rebases continued here: git's own advice
         // for this stop is the same commit-and-continue recovery.
-        if let Some(git_dir) = absolute_git_dir(repo_path).await {
+        if let Some(git_dir) = git_dir {
             recover_empty_folds(
                 repo_path,
                 &git_dir,
                 Ok(out),
                 &args,
-                DEFAULT_TIMEOUT,
+                continue_timeout,
                 |args, timeout| async move {
                     let args: Vec<_> = args.iter().map(String::as_str).collect();
                     run_git_raw_index_retry(repo_path, &args, timeout).await
@@ -5895,7 +5905,8 @@ pub(crate) async fn rebase_edit(
 /// The edit route's first `rebase --continue` budget: one `DEFAULT_TIMEOUT` plus one per
 /// exec line the todo carries before its first `edit` line (a step with a composed
 /// message or any date), since an exec killed mid-run has already left the todo. An edit
-/// step's own exec runs after its pause, on the banner's continue.
+/// step's own exec runs after its pause, on the banner's continue, which budgets the
+/// execs left in the todo the same way ([`rebase_continue_timeout`]).
 fn edit_first_continue_timeout(steps: &[RewriteStep]) -> std::time::Duration {
     let execs = steps
         .iter()
@@ -5903,6 +5914,24 @@ fn edit_first_continue_timeout(steps: &[RewriteStep]) -> std::time::Duration {
         .filter(|s| step_has_message(s) || step_has_date(s))
         .count() as u32;
     DEFAULT_TIMEOUT + DEFAULT_TIMEOUT * execs
+}
+
+/// A stopped rebase's `--continue` budget: one `DEFAULT_TIMEOUT` plus one per exec line
+/// left in `rebase-merge/git-rebase-todo`. An unreadable or absent todo (an apply-backend
+/// rebase, an unresolved git dir) gets the flat budget, never an unbounded one.
+fn rebase_continue_timeout(git_dir: Option<&Path>) -> std::time::Duration {
+    let execs = git_dir
+        .and_then(|dir| std::fs::read_to_string(dir.join("rebase-merge/git-rebase-todo")).ok())
+        .map_or(0, |todo| todo_exec_lines(&todo));
+    DEFAULT_TIMEOUT + DEFAULT_TIMEOUT * execs
+}
+
+/// The exec lines of a rebase todo, by their command word (`exec` or its short `x`), so
+/// a `#` comment that mentions one isn't counted.
+fn todo_exec_lines(todo: &str) -> u32 {
+    todo.lines()
+        .filter(|l| matches!(l.split_whitespace().next(), Some("exec" | "x")))
+        .count() as u32
 }
 
 /// [`rebase_edit`] with an injectable timeout for the plan's continue and each
@@ -13314,6 +13343,25 @@ mod tests {
         let mid = [message.clone(), edit.clone(), dates.clone()];
         assert_eq!(budget(&mid), DEFAULT_TIMEOUT * 2);
         assert_eq!(budget(&[edit, message, dates, plain]), DEFAULT_TIMEOUT);
+    }
+
+    /// The banner's continue budgets the execs left in the todo, and an absent todo
+    /// gets the flat budget.
+    #[test]
+    fn banner_continue_budget_counts_the_execs_left_in_the_todo() {
+        let git_dir = tempfile::tempdir().unwrap();
+        let budget = || rebase_continue_timeout(Some(git_dir.path()));
+        assert_eq!(budget(), DEFAULT_TIMEOUT, "no todo");
+        assert_eq!(rebase_continue_timeout(None), DEFAULT_TIMEOUT, "no git dir");
+        let merge = git_dir.path().join("rebase-merge");
+        std::fs::create_dir(&merge).unwrap();
+        std::fs::write(
+            merge.join("git-rebase-todo"),
+            "exec sh 'd/dates-1.sh'\npick a1\n  exec  true\n# exec sh 'd/x.sh'\n\
+             pick b2 exec \nx true\n",
+        )
+        .unwrap();
+        assert_eq!(budget(), DEFAULT_TIMEOUT * 4);
     }
 
     /// The two date lines are positional: a body line shaped like a raw date stays in

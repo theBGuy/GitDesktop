@@ -357,8 +357,11 @@ function EditDatesForm({
       cached &&
       (cached.oid !== t.expectedHead ||
         headBranchPin(cached) !== t.expectedBranch)
-    )
+    ) {
+      // Mirrors the backend's head-moved refusal; the dialog stays open.
+      toast.error("The latest commit changed — no dates were changed.");
       return;
+    }
     const refusal = liveGate.current.refusal();
     if (refusal !== null) {
       toast.error(refusal);

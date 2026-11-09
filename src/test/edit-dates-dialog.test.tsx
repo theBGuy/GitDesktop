@@ -775,4 +775,26 @@ describe("Edit dates dialog against HEAD's parent", () => {
     );
     expect(gitAmendCommitDates).not.toHaveBeenCalled();
   });
+
+  // Control: drop the toast in `run()`'s cached-HEAD check; this goes red.
+  it("says why when HEAD moved while the prompt was open", async () => {
+    withParent(parentAt("2026-11-07T20:00:00+01:00"));
+    vi.mocked(toast.error).mockClear();
+    const { client } = renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await userEvent.click(primary());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    act(() => {
+      client.setQueryData(repoKeys.status(REPO), status({ oid: NEW_HASH }));
+    });
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        "The latest commit changed — no dates were changed.",
+      ),
+    );
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
 });

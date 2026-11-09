@@ -412,7 +412,7 @@ describe("the ref-derived reads follow the refs stamp", () => {
   });
 
   it("an errored stamp fires nothing and throws nothing", async () => {
-    vi.mocked(gitRefsStamp).mockRejectedValue(new Error("over the cap"));
+    vi.mocked(gitRefsStamp).mockRejectedValue(new Error("stamp read failed"));
     // Never loaded, so only the seed rule keeps the first stamp from re-reading it.
     vi.mocked(gitBranches).mockRejectedValue(new Error("for-each-ref failed"));
     await mount();
@@ -428,7 +428,7 @@ describe("the ref-derived reads follow the refs stamp", () => {
     // The first answer after the failures seeds; a failure after it keeps it.
     vi.mocked(gitRefsStamp).mockResolvedValue("f1:a");
     await reading(STAMP);
-    vi.mocked(gitRefsStamp).mockRejectedValue(new Error("over the cap"));
+    vi.mocked(gitRefsStamp).mockRejectedValue(new Error("stamp read failed"));
     await reading(STAMP);
     vi.mocked(gitRefsStamp).mockResolvedValue("f1:a");
     await reading(STAMP);

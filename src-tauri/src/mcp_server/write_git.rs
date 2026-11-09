@@ -2927,6 +2927,9 @@ mod tests {
         assert!(!refs.to_ascii_lowercase().contains("gd/session/"));
 
         git(&work, &["checkout", "-q", "--detach"]).await;
+        // The push itself may fail for a non-guard reason (no branch to publish), so the
+        // guard's own verdict is asserted directly.
+        assert!(ensure_head_not_session_branch(&work).await.is_ok());
         if let Err(error) = h
             .push(Parameters(PushArgs {
                 branch: None,

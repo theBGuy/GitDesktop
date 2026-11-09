@@ -137,8 +137,9 @@ const REFS_STAMP_LOOSE_CAP: usize = 2_000;
 /// Cost per call: one `read_dir` per directory under the two roots, one stat per loose
 /// ref, one for packed-refs and one per sentinel; bounded at [`REFS_STAMP_LOOSE_CAP`]
 /// loose entries, sentinels not counted (about 35-50 ms there, an estimate
-/// extrapolated from a 5002-ref measurement). Over the cap it lists at most cap + 1
-/// entries and errs, every call.
+/// extrapolated from a 5002-ref measurement). Over the cap the walk stops at cap + 1
+/// entries and the call takes the `g1:` arm below instead, sentinels included: one
+/// `git for-each-ref` per call until the refs are packed.
 ///
 /// Cannot see:
 /// 1. refs outside the two namespaces (tags, the stash, notes, per-worktree refs,
@@ -153,14 +154,12 @@ const REFS_STAMP_LOOSE_CAP: usize = 2_000;
 /// 4. changes that move no ref (`branch --set-upstream-to`, FETCH_HEAD, config);
 /// 5. a symlinked ref file (skipped) and anything under a symlinked or junction
 ///    directory below the roots (never followed);
-/// 6. anything while over the cap, operation sentinels included (it errs every call
-///    until the refs are packed, so no stop or abort is seen there either);
-/// 7. a loose ref or directory whose name isn't valid Unicode: `to_string_lossy`
+/// 6. a loose ref or directory whose name isn't valid Unicode: `to_string_lossy`
 ///    folds it to a spelling that normally matches no file, so it counts toward the
 ///    cap but its stat and its listing both miss, and nothing under such a directory
 ///    is listed;
-/// 8. a change to a symlinked packed-refs file's target alone: the link is stat-ed;
-/// 9. the sentinels of a checkout whose admin dir [`resolve_git_admin_dir`] can't read
+/// 7. a change to a symlinked packed-refs file's target alone: the link is stat-ed;
+/// 8. the sentinels of a checkout whose admin dir [`resolve_git_admin_dir`] can't read
 ///    (a repo path below the tree root).
 ///
 /// A symlinked `refs`, `refs/heads` or `refs/remotes` root is followed like a
@@ -172,7 +171,7 @@ const REFS_STAMP_LOOSE_CAP: usize = 2_000;
 /// A reftable repo, or any layout the walk can't resolve and verify (the common dir
 /// must be a directory holding `HEAD`), costs one `git for-each-ref` instead. That
 /// `g1:` stamp still covers the sentinels whenever [`resolve_git_admin_dir`] reads the
-/// checkout's admin dir (a reftable repo), and loses them with it otherwise (item 9);
+/// checkout's admin dir (a reftable repo), and loses them with it otherwise (item 8);
 /// a failed run is an Err, never a defaulted stamp.
 ///
 /// [`resolve_git_admin_dir`]: crate::git::ops::resolve_git_admin_dir
@@ -193,8 +192,9 @@ pub async fn git_refs_stamp(repo_path: String) -> AppResult<String> {
     .await
     .map_err(|e| crate::error::AppError::Io(std::io::Error::other(e.to_string())))?;
     let sentinels = sentinels?;
-    if let Some(stamp) = walked {
-        return stamp;
+    // A walk over the cap answers `None` and takes the git arm, like an unverified layout.
+    if let Some(stamp) = walked.transpose()?.flatten() {
+        return Ok(stamp);
     }
     let out = run_git(
         Some(&repo_path),
@@ -271,21 +271,16 @@ fn refs_stamp_common_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
 /// The files-backend stamp: stat data of the loose refs under refs/heads and
 /// refs/remotes plus packed-refs, hashed with the caller's sentinel stamps. Not async,
 /// so it can't spawn git. Lists at most `cap + 1` entries (files and directories;
-/// skipped names don't count) before it errs. A root or subdirectory that is absent or
-/// vanished mid-walk, or a file gone since its listing, is skipped; every other I/O
-/// error is an Err, never a partial stamp.
+/// skipped names don't count), then answers `None`. A root or subdirectory that is
+/// absent or vanished mid-walk, or a file gone since its listing, is skipped; every
+/// other I/O error is an Err, never a partial stamp.
 fn files_refs_stamp(
     common: &std::path::Path,
     cap: usize,
     sentinels: &Option<Vec<StatStamp>>,
-) -> AppResult<String> {
+) -> AppResult<Option<String>> {
     use std::hash::{Hash, Hasher};
     use std::io::ErrorKind::NotFound;
-    let over_cap = || {
-        crate::error::AppError::Command(format!(
-            "more than {cap} loose refs; the refs stamp stops there."
-        ))
-    };
     let mut listed = 0usize;
     let mut files: Vec<String> = Vec::new();
     let mut dirs = vec!["refs/heads".to_string(), "refs/remotes".to_string()];
@@ -319,7 +314,7 @@ fn files_refs_stamp(
             }
             listed += 1;
             if listed > cap {
-                return Err(over_cap());
+                return Ok(None);
             }
         }
     }
@@ -332,7 +327,7 @@ fn files_refs_stamp(
     }
     stat_stamp(&common.join("packed-refs"))?.hash(&mut hasher);
     sentinels.hash(&mut hasher);
-    Ok(format!("f1:{:016x}", hasher.finish()))
+    Ok(Some(format!("f1:{:016x}", hasher.finish())))
 }
 
 /// Paged commit history. When `search` is set, searches the whole history by
@@ -1431,7 +1426,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refs_stamp_errs_over_the_cap_and_falls_back_on_unverified_layouts() {
+    async fn refs_stamp_walk_yields_over_the_cap_and_falls_back_on_unverified_layouts() {
         let (dir, repo) = stamp_repo("refs-stamp-cap").await;
         for name in ["a", "b", "c"] {
             git(&repo, &["branch", name]).await;
@@ -1441,7 +1436,7 @@ mod tests {
         let common = refs_stamp_common_dir(Path::new(&repo)).unwrap();
         // The current branch, a, b, c, then `origin/` and `origin/x`: six entries; the
         // lock file doesn't count.
-        let at_cap = files_refs_stamp(&common, 6, &None).unwrap();
+        let at_cap = files_refs_stamp(&common, 6, &None).unwrap().unwrap();
         assert!(
             at_cap.len() == 19
                 && at_cap.starts_with("f1:")
@@ -1449,11 +1444,10 @@ mod tests {
             "{at_cap}"
         );
         for cap in [5, 2] {
-            let e = files_refs_stamp(&common, cap, &None).unwrap_err();
-            let want = format!("more than {cap} loose refs; the refs stamp stops there.");
-            assert!(
-                matches!(&e, crate::error::AppError::Command(m) if *m == want),
-                "{e:?}"
+            assert_eq!(
+                files_refs_stamp(&common, cap, &None).unwrap(),
+                None,
+                "{cap}"
             );
         }
 
@@ -1475,6 +1469,49 @@ mod tests {
         assert!(refs_stamp_common_dir(headless.path()).is_none());
         let r = git_refs_stamp(headless.path().to_string_lossy().into_owned()).await;
         assert!(not_f1(&r), "no HEAD: {r:?}");
+    }
+
+    /// Over the real cap the stamp comes from git, and still moves on a branch create
+    /// and on a stop and abort that move no ref (the sentinels).
+    #[tokio::test]
+    async fn refs_stamp_over_the_cap_answers_from_git_with_the_sentinels() {
+        let (dir, repo) = stamp_repo("refs-stamp-over-cap").await;
+        let main = git_out(&repo, &["symbolic-ref", "--short", "HEAD"]).await;
+        git(&repo, &["checkout", "-q", "-b", "side"]).await;
+        std::fs::write(dir.path().join("x.txt"), "x\n").unwrap();
+        git(&repo, &["add", "x.txt"]).await;
+        git(&repo, &["commit", "-q", "-m", "side x"]).await;
+        let pick = git_out(&repo, &["rev-parse", "HEAD"]).await;
+        git(&repo, &["checkout", "-q", &main]).await;
+        git(&repo, &["checkout", "-q", "side", "--", "x.txt"]).await;
+        git(&repo, &["commit", "-q", "-m", "main x"]).await;
+        let head = git_out(&repo, &["rev-parse", "HEAD"]).await;
+        let bulk = dir.path().join(".git/refs/remotes/bulk");
+        std::fs::create_dir_all(&bulk).unwrap();
+        for i in 0..REFS_STAMP_LOOSE_CAP {
+            std::fs::write(bulk.join(format!("r{i}")), format!("{head}\n")).unwrap();
+        }
+        let common = refs_stamp_common_dir(Path::new(&repo)).unwrap();
+        let walked = files_refs_stamp(&common, REFS_STAMP_LOOSE_CAP, &None).unwrap();
+        assert_eq!(walked, None, "the fixture is over the cap");
+
+        let stamp = || git_refs_stamp(repo.clone());
+        let idle = stamp().await.unwrap();
+        assert!(idle.starts_with("g1:") && idle.len() == 19, "{idle}");
+        assert_eq!(stamp().await.unwrap(), idle, "no ref changed");
+        git(&repo, &["branch", "new"]).await;
+        let branched = stamp().await.unwrap();
+        assert_ne!(branched, idle, "a branch create");
+
+        let out = run_git_raw(Some(&repo), &["cherry-pick", &pick], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        assert_ne!(out.code, 0, "the pick stops empty");
+        let stopped = stamp().await.unwrap();
+        assert_ne!(stopped, branched, "a stop");
+        assert_eq!(stamp().await.unwrap(), stopped, "stable while stopped");
+        git(&repo, &["cherry-pick", "--abort"]).await;
+        assert_ne!(stamp().await.unwrap(), stopped, "--abort");
     }
 
     #[tokio::test]

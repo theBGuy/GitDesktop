@@ -73,9 +73,7 @@ function fnv1a32(text: string, offset: number): string {
  *  order; null while status is pending. A stop or exit that changes no entry
  *  (`--quit`, a pick stopped on a commit that became empty) is the refs
  *  stamp's to see: it covers the operation sentinels. Unseen by both: a stop
- *  plus its abort inside one poll, which leaves nothing to heal. A repo whose
- *  stamp read fails every poll (over its loose-ref cap) loses the stamp's
- *  half, so those entry-less stops and exits go unseen there. */
+ *  plus its abort inside one poll, which leaves nothing to heal. */
 export function statusContentSignature(
   entries:
     | readonly {
