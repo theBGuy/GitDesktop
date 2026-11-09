@@ -116,27 +116,34 @@ pub(crate) async fn read_unless_unborn(
 const REFS_STAMP_LOOSE_CAP: usize = 2_000;
 
 /// An opaque stamp that changes whenever a ref under refs/heads or refs/remotes of the
-/// COMMON git dir changes, loose or packed, so every worktree of a repo shares it. The
-/// caller compares it only with its own previous reading and never parses it: `f1:` +
-/// 16 hex from the filesystem walk, `g1:` + 16 hex from the git fallback.
+/// COMMON git dir changes, loose or packed, and whenever one of this worktree's
+/// [`OP_SENTINELS`] appears, changes or vanishes. So an operation's start, its stop
+/// (even one that moves no HEAD and no index entry, like a pick left empty) and its
+/// `--quit` or `--abort` all move it, and worktrees of one repo share it while none
+/// has an operation in flight. The caller compares it only with its own previous
+/// reading and never parses it: `f1:` + 16 hex from the filesystem walk, `g1:` + 16
+/// hex from the git fallback.
 ///
-/// Built from stat data only: each loose ref's relative path, size and mtime, and
-/// packed-refs's size and mtime. No ref file is opened and no git process is spawned
-/// on the files backend. git writes a ref through a lockfile rename, so a real write
-/// is a new file with a new mtime: it sees every create, delete and rewrite of a loose
-/// ref (sibling worktrees, outside fetches and pushes, `branch -f`, the default
-/// branch's tip) and every packed-refs rewrite that changes its size or mtime.
-/// May fire with no ref value moved: pack-refs / gc, a `refs/remotes/*/HEAD` rewrite,
-/// a same-value `update-ref`, and every in-app commit or branch move.
+/// Built from stat data only: each loose ref's relative path, size and mtime,
+/// packed-refs's size and mtime, and each sentinel's existence, size and mtime. No ref
+/// or sentinel file is opened and no git process is spawned on the files backend. git
+/// writes a ref through a lockfile rename, so a real write is a new file with a new
+/// mtime: it sees every create, delete and rewrite of a loose ref (sibling worktrees,
+/// outside fetches and pushes, `branch -f`, the default branch's tip) and every
+/// packed-refs rewrite that changes its size or mtime. May fire with no ref value
+/// moved: pack-refs / gc, a `refs/remotes/*/HEAD` rewrite, a same-value `update-ref`,
+/// every in-app commit or branch move, and each step of a rebase or bisect.
 ///
 /// Cost per call: one `read_dir` per directory under the two roots, one stat per loose
-/// ref and one for packed-refs; bounded at [`REFS_STAMP_LOOSE_CAP`] entries (about
-/// 35-50 ms there, an estimate extrapolated from a 5002-ref measurement). Over the cap
-/// it lists at most cap + 1 entries and errs, every call.
+/// ref, one for packed-refs and one per sentinel; bounded at [`REFS_STAMP_LOOSE_CAP`]
+/// loose entries, sentinels not counted (about 35-50 ms there, an estimate
+/// extrapolated from a 5002-ref measurement). Over the cap it lists at most cap + 1
+/// entries and errs, every call.
 ///
 /// Cannot see:
 /// 1. refs outside the two namespaces (tags, the stash, notes, per-worktree refs,
-///    HEAD itself: a commit on a detached HEAD moves no watched ref);
+///    HEAD itself: a commit on a detached HEAD moves no watched ref), and an operation
+///    that starts and stops between two reads, which leaves no sentinel at either;
 /// 2. a rewrite keeping a file's size AND mtime value, i.e. a second same-size write
 ///    inside one filesystem timestamp tick (FAT/exFAT 2 s, HFS+ 1 s; on NTFS
 ///    back-to-back in-process rewrites repeated an mtime 1321 times in 2000, spawned
@@ -146,28 +153,46 @@ const REFS_STAMP_LOOSE_CAP: usize = 2_000;
 /// 4. changes that move no ref (`branch --set-upstream-to`, FETCH_HEAD, config);
 /// 5. a symlinked ref file (skipped) and anything under a symlinked or junction
 ///    directory below the roots (never followed);
-/// 6. anything while over the cap (it errs until the refs are packed);
+/// 6. anything while over the cap, operation sentinels included (it errs every call
+///    until the refs are packed, so no stop or abort is seen there either);
 /// 7. a loose ref or directory whose name isn't valid Unicode: `to_string_lossy`
-///    folds it to a spelling no file has, so it counts toward the cap but its stat
-///    and its listing both miss, and nothing under such a directory is listed;
-/// 8. a change to a symlinked packed-refs file's target alone: the link is stat-ed.
+///    folds it to a spelling that normally matches no file, so it counts toward the
+///    cap but its stat and its listing both miss, and nothing under such a directory
+///    is listed;
+/// 8. a change to a symlinked packed-refs file's target alone: the link is stat-ed;
+/// 9. the sentinels of a checkout whose admin dir [`resolve_git_admin_dir`] can't read
+///    (a repo path below the tree root).
 ///
 /// A symlinked `refs`, `refs/heads` or `refs/remotes` root is followed like a
 /// directory. The stamp is a refresh hint: a miss leaves ref-derived reads stale until
-/// the next stamp move or refresh, never a wrong write.
+/// the next stamp move or refresh, and so can the holds built on them (the unpushed
+/// reads behind the pushed-commit warning in Edit history and Edit dates). The
+/// backend's HEAD and branch pins are read at write time, so they stay exact.
 ///
 /// A reftable repo, or any layout the walk can't resolve and verify (the common dir
-/// must be a directory holding `HEAD`), costs one `git for-each-ref` instead; a failed
-/// run is an Err, never a defaulted stamp.
+/// must be a directory holding `HEAD`), costs one `git for-each-ref` instead. That
+/// `g1:` stamp still covers the sentinels whenever [`resolve_git_admin_dir`] reads the
+/// checkout's admin dir (a reftable repo), and loses them with it otherwise (item 9);
+/// a failed run is an Err, never a defaulted stamp.
+///
+/// [`resolve_git_admin_dir`]: crate::git::ops::resolve_git_admin_dir
 #[tauri::command]
 pub async fn git_refs_stamp(repo_path: String) -> AppResult<String> {
     let root = std::path::PathBuf::from(&repo_path);
-    // The resolver's reads ride the same blocking task as the walk.
-    let walked = tauri::async_runtime::spawn_blocking(move || {
-        refs_stamp_common_dir(&root).map(|common| files_refs_stamp(&common, REFS_STAMP_LOOSE_CAP))
+    // The resolvers' reads ride the same blocking task as the walk.
+    let (walked, sentinels) = tauri::async_runtime::spawn_blocking(move || {
+        let sentinels = crate::git::ops::resolve_git_admin_dir(&root)
+            .map(|admin| op_sentinel_stamps(&admin))
+            .transpose();
+        let walked = sentinels.as_ref().ok().and_then(|sentinels| {
+            refs_stamp_common_dir(&root)
+                .map(|common| files_refs_stamp(&common, REFS_STAMP_LOOSE_CAP, sentinels))
+        });
+        (walked, sentinels)
     })
     .await
     .map_err(|e| crate::error::AppError::Io(std::io::Error::other(e.to_string())))?;
+    let sentinels = sentinels?;
     if let Some(stamp) = walked {
         return stamp;
     }
@@ -184,7 +209,46 @@ pub async fn git_refs_stamp(repo_path: String) -> AppResult<String> {
     .await?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hasher::write(&mut hasher, &out.stdout);
+    std::hash::Hash::hash(&sentinels, &mut hasher);
     Ok(format!("g1:{:016x}", std::hash::Hasher::finish(&hasher)))
+}
+
+/// The per-worktree operation markers the refs stamp stats, read in the worktree's
+/// own git dir (never the common dir, which holds the main checkout's): the files and
+/// directories [`op_state_at`](crate::git::ops::op_state_at) reads, plus BISECT_LOG.
+const OP_SENTINELS: [&str; 7] = [
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "rebase-merge",
+    "rebase-apply",
+    "sequencer",
+];
+
+/// One entry's size and mtime, links not followed; `None` when it is absent.
+type StatStamp = Option<(u64, u128)>;
+
+fn stat_stamp(path: &std::path::Path) -> std::io::Result<StatStamp> {
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    // A pre-epoch mtime is a value like any other, not an error.
+    let nanos = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    Ok(Some((meta.len(), nanos)))
+}
+
+/// [`stat_stamp`] of each [`OP_SENTINELS`] entry under `admin`, in that order.
+fn op_sentinel_stamps(admin: &std::path::Path) -> std::io::Result<Vec<StatStamp>> {
+    OP_SENTINELS
+        .iter()
+        .map(|name| stat_stamp(&admin.join(name)))
+        .collect()
 }
 
 /// The common git dir behind a checkout, read off the filesystem as git does (the
@@ -205,12 +269,16 @@ fn refs_stamp_common_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
 }
 
 /// The files-backend stamp: stat data of the loose refs under refs/heads and
-/// refs/remotes plus packed-refs. Not async, so it can't spawn git. Lists at most
-/// `cap + 1` entries (files and directories; skipped names don't count) before it
-/// errs. A root or subdirectory that is absent or vanished mid-walk, or a file gone
-/// since its listing, is skipped; every other I/O error is an Err, never a partial
-/// stamp.
-fn files_refs_stamp(common: &std::path::Path, cap: usize) -> AppResult<String> {
+/// refs/remotes plus packed-refs, hashed with the caller's sentinel stamps. Not async,
+/// so it can't spawn git. Lists at most `cap + 1` entries (files and directories;
+/// skipped names don't count) before it errs. A root or subdirectory that is absent or
+/// vanished mid-walk, or a file gone since its listing, is skipped; every other I/O
+/// error is an Err, never a partial stamp.
+fn files_refs_stamp(
+    common: &std::path::Path,
+    cap: usize,
+    sentinels: &Option<Vec<StatStamp>>,
+) -> AppResult<String> {
     use std::hash::{Hash, Hasher};
     use std::io::ErrorKind::NotFound;
     let over_cap = || {
@@ -256,26 +324,14 @@ fn files_refs_stamp(common: &std::path::Path, cap: usize) -> AppResult<String> {
         }
     }
     files.sort_unstable();
-    let stamp = |path: &std::path::Path| -> std::io::Result<Option<(u64, u128)>> {
-        let meta = match std::fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        // A pre-epoch mtime is a value like any other, not an error.
-        let nanos = meta
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        Ok(Some((meta.len(), nanos)))
-    };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for rel in &files {
-        if let Some(stat) = stamp(&common.join(rel))? {
+        if let Some(stat) = stat_stamp(&common.join(rel))? {
             (rel, stat).hash(&mut hasher);
         }
     }
-    stamp(&common.join("packed-refs"))?.hash(&mut hasher);
+    stat_stamp(&common.join("packed-refs"))?.hash(&mut hasher);
+    sentinels.hash(&mut hasher);
     Ok(format!("f1:{:016x}", hasher.finish()))
 }
 
@@ -1278,6 +1334,76 @@ mod tests {
         assert_eq!(files_stamp(&repo).await, after_main);
     }
 
+    /// A stop that moves no HEAD and no index entry (a pick left empty), its `--quit`
+    /// and its `--abort` each move the stamp, read in the stopping worktree's own git
+    /// dir: a linked worktree's stop leaves the main checkout's stamp alone.
+    #[tokio::test]
+    async fn refs_stamp_follows_operation_stops_quits_and_aborts() {
+        async fn head_and_index(repo: &str) -> [String; 3] {
+            [
+                git_out(repo, &["rev-parse", "HEAD"]).await,
+                git_out(repo, &["ls-files", "-s"]).await,
+                git_out(repo, &["status", "--porcelain"]).await,
+            ]
+        }
+        /// Picks `commit` onto a HEAD that already holds its change, so git stops
+        /// with the pick empty.
+        async fn empty_pick_stop(repo: &str, commit: &str) {
+            let out = run_git_raw(Some(repo), &["cherry-pick", commit], DEFAULT_TIMEOUT)
+                .await
+                .unwrap();
+            assert_ne!(out.code, 0, "the pick stops");
+            let admin = crate::git::ops::resolve_git_admin_dir(Path::new(repo)).unwrap();
+            assert!(admin.join("CHERRY_PICK_HEAD").exists(), "stopped mid-pick");
+        }
+
+        let (dir, repo) = stamp_repo("refs-stamp-ops").await;
+        let main = git_out(&repo, &["symbolic-ref", "--short", "HEAD"]).await;
+        git(&repo, &["checkout", "-q", "-b", "side"]).await;
+        std::fs::write(dir.path().join("x.txt"), "x\n").unwrap();
+        git(&repo, &["add", "x.txt"]).await;
+        git(&repo, &["commit", "-q", "-m", "side x"]).await;
+        let pick = git_out(&repo, &["rev-parse", "HEAD"]).await;
+        git(&repo, &["checkout", "-q", &main]).await;
+        std::fs::write(dir.path().join("x.txt"), "x\n").unwrap();
+        git(&repo, &["add", "x.txt"]).await;
+        git(&repo, &["commit", "-q", "-m", "main x"]).await;
+        let (_wt_dir, wt_parent) = temp_repo("refs-stamp-ops-wt");
+        let wt = Path::new(&wt_parent)
+            .join("wt")
+            .to_string_lossy()
+            .into_owned();
+        git(&repo, &["worktree", "add", "-q", "-b", "wtb", &wt]).await;
+
+        let tree = head_and_index(&repo).await;
+        let idle = files_stamp(&repo).await;
+        empty_pick_stop(&repo, &pick).await;
+        assert_eq!(
+            head_and_index(&repo).await,
+            tree,
+            "the stop moved nothing else"
+        );
+        let stopped = files_stamp(&repo).await;
+        assert_ne!(stopped, idle, "a stop");
+        assert_eq!(files_stamp(&repo).await, stopped, "stable while stopped");
+        git(&repo, &["cherry-pick", "--quit"]).await;
+        let quit = files_stamp(&repo).await;
+        assert_ne!(quit, stopped, "--quit");
+
+        empty_pick_stop(&repo, &pick).await;
+        let stopped = files_stamp(&repo).await;
+        assert_ne!(stopped, quit, "a second stop");
+        git(&repo, &["cherry-pick", "--abort"]).await;
+        let aborted = files_stamp(&repo).await;
+        assert_ne!(aborted, stopped, "--abort");
+        assert_eq!(head_and_index(&repo).await, tree);
+
+        let wt_idle = files_stamp(&wt).await;
+        empty_pick_stop(&wt, &pick).await;
+        assert_ne!(files_stamp(&wt).await, wt_idle, "the worktree's own stop");
+        assert_eq!(files_stamp(&repo).await, aborted, "not the main checkout's");
+    }
+
     /// The filesystem resolver agrees with git's own common dir (the oracle state.rs's
     /// twin resolver is pinned to), in the main checkout and a linked worktree.
     #[tokio::test]
@@ -1315,7 +1441,7 @@ mod tests {
         let common = refs_stamp_common_dir(Path::new(&repo)).unwrap();
         // The current branch, a, b, c, then `origin/` and `origin/x`: six entries; the
         // lock file doesn't count.
-        let at_cap = files_refs_stamp(&common, 6).unwrap();
+        let at_cap = files_refs_stamp(&common, 6, &None).unwrap();
         assert!(
             at_cap.len() == 19
                 && at_cap.starts_with("f1:")
@@ -1323,7 +1449,7 @@ mod tests {
             "{at_cap}"
         );
         for cap in [5, 2] {
-            let e = files_refs_stamp(&common, cap).unwrap_err();
+            let e = files_refs_stamp(&common, cap, &None).unwrap_err();
             let want = format!("more than {cap} loose refs; the refs stamp stops there.");
             assert!(
                 matches!(&e, crate::error::AppError::Command(m) if *m == want),

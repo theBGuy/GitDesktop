@@ -219,10 +219,18 @@ const REF_READS = [
   [...repoKeys.rewriteStatus(REPO), "main"],
   remoteBranchesOptions(REPO).queryKey,
   repoKeys.compare(REPO, "main", "feature"),
+  ["repo", REPO, "divergence", "main"],
+  ["repo", REPO, "merge-preview", "feature", "merge"],
+  ["repo", REPO, "local-pr-merge-states", []],
+  ["repo", REPO, "commit", HASH_PARENT, "on-remote"],
 ] as const;
 
+/** A commit read beside the on-remote verdict that no ref move changes. */
+const COMMIT_READ = ["repo", REPO, "commit", HASH_PARENT, "details"] as const;
+
 function seedRefReads() {
-  for (const key of REF_READS) client.setQueryData(key, {}, { updatedAt: 1 });
+  for (const key of [...REF_READS, COMMIT_READ])
+    client.setQueryData(key, {}, { updatedAt: 1 });
 }
 
 function invalidated(key: readonly unknown[]) {
@@ -308,6 +316,26 @@ describe("op state follows status content with HEAD held", () => {
     await settle(OP);
     expect(client.getQueryData(OP)).toEqual(IDLE);
   });
+
+  // Control: drop `refsChanged` from the op-state arm of statusLogAction; the
+  // stopped pick is never re-read.
+  it("re-reads once when only the refs stamp moves, never again on the same stamp", async () => {
+    await mount();
+    expect(gitOpState).toHaveBeenCalledTimes(1);
+    // A pick stopped on a commit that became empty: no entry changes, no HEAD
+    // move, but its sentinel moves the stamp.
+    vi.mocked(gitOpState).mockResolvedValue({ ...IDLE, cherryPicking: true });
+    vi.mocked(gitRefsStamp).mockResolvedValue("f1:b");
+    await reading(STAMP);
+    await waitFor(() => expect(gitOpState).toHaveBeenCalledTimes(2));
+    await settle(OP);
+    expect(client.getQueryData(OP)).toEqual({ ...IDLE, cherryPicking: true });
+
+    await reading(STAMP);
+    await reading(STATUS);
+    await reading(STAMP);
+    expect(gitOpState).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("the ref-derived reads follow the refs stamp", () => {
@@ -325,12 +353,11 @@ describe("the ref-derived reads follow the refs stamp", () => {
     await reading(STAMP);
     await waitFor(() => expect(gitBranches).toHaveBeenCalledTimes(2));
     for (const key of REF_READS) expect(invalidated(key)).toBe(true);
+    expect(invalidated(COMMIT_READ)).toBe(false);
     await settle(BRANCHES);
 
     await reading(STAMP);
     expect(gitBranches).toHaveBeenCalledTimes(2);
-    // HEAD held: the side keys never fired.
-    expect(gitOpState).toHaveBeenCalledTimes(1);
   });
 
   it("fetches a ref-derived read once when HEAD and the stamp move in the same tick", async () => {
@@ -346,20 +373,42 @@ describe("the ref-derived reads follow the refs stamp", () => {
     expect(gitBranches).toHaveBeenCalledTimes(2);
   });
 
-  it("skips a read refreshed after the previous stamp reading", async () => {
-    await mount();
-    seedRefReads();
-    // An in-app fetch's own refresh, then a status reading that changes nothing.
+  // Control: feed the ref set the previous stamp reading's time; the count
+  // refreshed between the two readings keeps its pre-push answer.
+  it("re-reads a count refreshed between the previous stamp reading and the move", async () => {
+    serveStatus(NO_UPSTREAM);
+    await mount({ count: true });
+    // The count's own recheck after the previous stamp reading, then a push
+    // from a terminal moves refs/remotes.
     vi.setSystemTime(Date.now() + 1000);
-    await client.refetchQueries({ queryKey: BRANCHES, exact: true });
-    expect(gitBranches).toHaveBeenCalledTimes(2);
-    await reading(STATUS);
+    await client.refetchQueries({ queryKey: COUNT, exact: true });
+    const base = calls(gitUnpushedCount);
 
     vi.mocked(gitRefsStamp).mockResolvedValue("f1:b");
     await reading(STAMP);
-    // The older seeded reads are re-read, so the sync acted on the move.
-    for (const key of REF_READS) expect(invalidated(key)).toBe(true);
-    expect(gitBranches).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(calls(gitUnpushedCount)).toBe(base + 1));
+    await settle(COUNT);
+    expect(calls(gitUnpushedCount)).toBe(base + 1);
+  });
+
+  it("leaves a count still fetching when the stamp moves to land on its own", async () => {
+    serveStatus(NO_UPSTREAM);
+    await mount({ count: true });
+    const inFlight = deferred<UnpushedCount>();
+    vi.mocked(gitUnpushedCount).mockImplementationOnce(() => inFlight.promise);
+    vi.setSystemTime(Date.now() + 1000);
+    void client.refetchQueries({ queryKey: COUNT, exact: true });
+    await waitFor(() =>
+      expect(client.getQueryState(COUNT)?.fetchStatus).toBe("fetching"),
+    );
+    const base = calls(gitUnpushedCount);
+
+    vi.mocked(gitRefsStamp).mockResolvedValue("f1:b");
+    await reading(STAMP);
+    expect(calls(gitUnpushedCount)).toBe(base);
+    inFlight.resolve(counted(HASH_HEAD));
+    await settle(COUNT);
+    expect(calls(gitUnpushedCount)).toBe(base);
   });
 
   it("an errored stamp fires nothing and throws nothing", async () => {

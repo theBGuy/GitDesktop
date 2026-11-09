@@ -1113,12 +1113,23 @@ test("observeSeeded: seeds once, keeps through a missing value", () => {
 
 test("statusLogAction: the ref set, op state and the log's failure gate", () => {
   const settled = { logHead: "N" };
-  assert.deepEqual(sync({ ...settled, refsChanged: true }), [
-    "refresh-ref-set",
-  ]);
+  assert.deepEqual(
+    sync({ ...settled, refsChanged: true }),
+    ["refresh-op-state", "refresh-ref-set"],
+    "the stamp covers the operation sentinels",
+  );
   assert.deepEqual(sync({ ...settled, contentChanged: true }), [
     "refresh-op-state",
   ]);
+  assert.deepEqual(
+    sync({ ...settled, refsChanged: true, contentChanged: true }),
+    ["refresh-op-state", "refresh-ref-set"],
+  );
+  assert.deepEqual(
+    sync({ ...settled, refsChanged: true, oidChanged: true }),
+    ["refresh-head-set", "refresh-ref-set", "refresh-side-keys"],
+    "an oid change already re-reads op state on a stamp move too",
+  );
   assert.deepEqual(
     sync({ ...settled, contentChanged: true, oidChanged: true }),
     ["refresh-head-set", "refresh-side-keys"],
@@ -1132,7 +1143,7 @@ test("statusLogAction: the ref set, op state and the log's failure gate", () => 
       statusAt: 50_000,
       refsChanged: true,
     }),
-    ["refresh-ref-set"],
+    ["refresh-op-state", "refresh-ref-set"],
     "the ref set re-reads the count itself",
   );
   assert.deepEqual(

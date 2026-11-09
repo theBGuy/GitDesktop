@@ -5,7 +5,7 @@ import {
   MagnifyingGlassIcon,
   TagIcon,
 } from "@phosphor-icons/react";
-import { useQueryClient } from "@tanstack/react-query";
+import { type Query, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type MouseEvent,
@@ -139,7 +139,11 @@ import {
 } from "./commit-confirms";
 import { EditDatesDialog, type EditDatesTarget } from "./EditDatesDialog";
 import { EditHistoryDialog } from "./EditHistoryDialog";
-import { type EditDatesHold, editDatesRoute } from "./edit-dates-route";
+import {
+  type EditDatesHold,
+  editDatesRoute,
+  RESOLVE_CONFLICTS_HINT,
+} from "./edit-dates-route";
 import {
   advanceSnapshot,
   arrowCount,
@@ -262,7 +266,7 @@ const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
   "mid-pick": " (finish or abort the cherry-pick or revert first)",
   "mid-merge": " (finish or abort the merge first)",
   "unpushed-unchecked": UNPUSHED_UNCHECKED_HINT,
-  unresolved: " (resolve the conflicts first)",
+  unresolved: RESOLVE_CONFLICTS_HINT,
 };
 
 /** Cherry-pick to branch's menu-row reason per hold. Loading and unreadable
@@ -313,8 +317,6 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
   // The previous status reading's time: the last one where an old oid still held.
   const lastStatusAt = useRef(0);
   const lastStamp = useRef<string | null>(null);
-  // The previous stamp reading's time: the last one where the old stamp held.
-  const lastStampAt = useRef(0);
   // A hash, never the entries: a ref must not hold a second copy of a large status.
   const lastContent = useRef<string | null>(null);
   const headOid = head?.oid;
@@ -331,8 +333,6 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
       lastStatusAt.current = statusAt;
       const stampSeen = observeSeeded(lastStamp.current, stamp.data);
       lastStamp.current = stampSeen.next;
-      const prevStampAt = lastStampAt.current;
-      lastStampAt.current = stampAt;
       // An unchanged status reading carries the content already signed.
       const contentSeen =
         statusAt === prevStatusAt
@@ -408,27 +408,39 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
       }
       if (actions.has("refresh-ref-set")) {
         // The reads that follow refs/heads or refs/remotes other than through
-        // HEAD, each re-read only when it predates the last reading that held the
-        // old stamp, so an in-app fetch's own refresh and a read the head set
-        // just started are not fetched twice. The compare PREFIX is hand-spelled
-        // as headMoveAftermathKeys spells it: repoKeys holds only full keys.
+        // HEAD: branches, rewrite status, remote branches, the unpushed count,
+        // compare, divergence, merge previews, local-PR merge states and each
+        // commit's on-remote verdict. Each is re-read unless it landed after the
+        // stamp reading that saw the move (an in-app fetch's refresh settling
+        // after it) or is fetching now (one the head set just started). The
+        // prefixes are hand-spelled as headMoveAftermathKeys spells them.
+        const refStale = (q: Query) =>
+          preMoveStale({
+            fetchStatus: q.state.fetchStatus,
+            dataUpdatedAt: q.state.dataUpdatedAt,
+            prevStatusAt: stampAt,
+          });
         for (const key of [
           repoKeys.branches(repoPath),
           repoKeys.rewriteStatus(repoPath),
           remoteBranchesOptions(repoPath).queryKey,
           repoKeys.unpushedCount(repoPath),
           ["repo", repoPath, "compare"],
+          ["repo", repoPath, "divergence"],
+          ["repo", repoPath, "merge-preview"],
+          ["repo", repoPath, "local-pr-merge-states"],
         ] as const) {
           void queryClient.invalidateQueries({
             queryKey: key,
-            predicate: (q) =>
-              preMoveStale({
-                fetchStatus: q.state.fetchStatus,
-                dataUpdatedAt: q.state.dataUpdatedAt,
-                prevStatusAt: prevStampAt,
-              }),
+            predicate: refStale,
           });
         }
+        // commitOnRemoteOptions keys the verdict under its sha, beside commit
+        // reads no ref move changes.
+        void queryClient.invalidateQueries({
+          queryKey: ["repo", repoPath, "commit"],
+          predicate: (q) => q.queryKey[4] === "on-remote" && refStale(q),
+        });
       }
       if (actions.has("refresh-op-state")) {
         // No predicate: a read in flight when the entries changed may hold the
@@ -803,6 +815,22 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // keystroke). Computed before the early returns to satisfy the rules of hooks;
   // harmlessly empty while the log is still loading.
   const commits = useMemo(() => log.data?.pages.flat() ?? [], [log.data]);
+  // The selection and anchor keep no commit a new log answer stopped listing,
+  // whichever route rewrote it, pruned in the render that lands the answer.
+  // Only ids the previous answer listed go: a search hit outside the loaded
+  // pages stays.
+  const [prunedFor, setPrunedFor] = useState(commits);
+  if (prunedFor !== commits) {
+    setPrunedFor(commits);
+    const listed = new Set(commits.map((c) => c.hash));
+    const dropped = new Set(
+      prunedFor.filter((c) => !listed.has(c.hash)).map((c) => c.hash),
+    );
+    if ([...selected].some((h) => dropped.has(h))) {
+      setSelected(new Set([...selected].filter((h) => !dropped.has(h))));
+    }
+    if (anchorHash !== null && dropped.has(anchorHash)) setAnchorHash(null);
+  }
   const searchCommits = useMemo(
     () => search.data?.pages.flat() ?? [],
     [search.data],
@@ -839,14 +867,33 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   const visibleCommits = searchActive ? searchRows : filteredCommits;
   // A commit Edit dates rewrote takes focus on its row: the dialog's close
   // lands it when the row is already rendered, else this does once the
-  // refetched log shows it, unless focus moved on meanwhile.
-  const landDatesRow = useRef<string | null>(null);
+  // refetched log shows it. Armed only by a change that closed the dialog,
+  // tagged with its repo, and dropped once focus is found anywhere but the
+  // body, the closing dialog, or the commit detail's focus host (which takes
+  // focus from the body when the selection moves), so it never fires later on
+  // a replay or re-render.
+  const landDatesRow = useRef<{ repo: string; hash: string } | null>(null);
   const datesRowEl = (hash: string) =>
     scrollEl?.querySelector<HTMLElement>(`[data-hash="${CSS.escape(hash)}"]`) ??
     null;
   useEffect(() => {
-    const want = landDatesRow.current;
-    if (want === null || document.activeElement !== document.body) return;
+    const want = landDatesRow.current?.hash;
+    if (want === undefined) return;
+    if (landDatesRow.current?.repo !== repoPath) {
+      landDatesRow.current = null;
+      return;
+    }
+    const active = document.activeElement;
+    if (
+      active !== null &&
+      active !== document.body &&
+      !active.matches("[data-commit-detail-focus-host]")
+    ) {
+      if (active.closest("[data-edit-dates-dialog]") === null) {
+        landDatesRow.current = null;
+      }
+      return;
+    }
     if (!visibleCommits.some((c) => c.hash === want)) return;
     const row = scrollEl?.querySelector<HTMLElement>(
       `[data-hash="${CSS.escape(want)}"]`,
@@ -854,7 +901,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     if (!row) return;
     landDatesRow.current = null;
     row.focus();
-  }, [visibleCommits, scrollEl]);
+  }, [visibleCommits, scrollEl, repoPath]);
   // Squash gating needs the selection's positions in REAL history (not the
   // filtered view), so index against `commits`.
   const selectedIndices = useMemo(
@@ -979,12 +1026,16 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     view.hasNextPage,
   );
   const editableHashes = editCommits.map((c) => c.hash);
+  // Unmerged entries with no stopped operation: the backend refuses the undo
+  // and a date change.
+  const undoUnresolved = (status.data?.entries ?? []).some(isConflictedEntry);
   const editDatesRouteOf = (hash: string) =>
     editDatesRoute({
       hash,
       index: commits.findIndex((c) => c.hash === hash),
       headOid: head?.oid,
       opInProgress,
+      unresolved: undoUnresolved,
       viewAgreed: agreed,
       unpushedCount: view.count,
       editable: editableHashes,
@@ -1038,8 +1089,6 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     agreed,
   });
   const canUndo = Boolean(lastCommit && head) && undoPushed === null;
-  // Unmerged entries with no stopped operation: the backend refuses the undo.
-  const undoUnresolved = (status.data?.entries ?? []).some(isConflictedEntry);
 
   async function undoLast() {
     if (!lastCommit || !head) return;
@@ -1495,6 +1544,21 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     setSelected(new Set(visibleCommits.slice(a, b + 1).map((c) => c.hash)));
   }
 
+  // Shift extends from the anchor, else from the row the highlight rule paints
+  // while nothing is multi-selected (the store's commit, which a rewrite moves
+  // onto its new id).
+  const rangeFrom = () =>
+    visibleCommits.findIndex(
+      (c) =>
+        c.hash ===
+        (anchorHash ?? (selected.size === 0 ? selectedCommitHash : null)),
+    );
+  // A range the fallback started keeps its row as the anchor, so the next Shift
+  // step extends the range instead of collapsing it to one row.
+  const pinFallbackAnchor = (from: number) => {
+    if (anchorHash === null) setAnchorHash(visibleCommits[from].hash);
+  };
+
   function onRowClick(e: React.MouseEvent, index: number, hash: string) {
     // Keep the diff panel on the clicked commit regardless of modifiers.
     selectCommit(hash);
@@ -1504,9 +1568,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       setAnchorHash(null);
       return;
     }
-    const from = visibleCommits.findIndex((c) => c.hash === anchorHash);
+    const from = rangeFrom();
     if (e.shiftKey && from !== -1) {
       selectRange(from, index);
+      pinFallbackAnchor(from);
     } else if (e.ctrlKey || e.metaKey) {
       const next = new Set(selected);
       if (next.has(hash)) {
@@ -1537,7 +1602,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     }
   }
 
-  // Arrow keys walk the history selection; Shift extends it from the anchor.
+  // Arrow keys walk the history selection; Shift extends it from the anchor,
+  // else the highlighted row.
   const onListKeyDown = listKeyboardNav({
     items: visibleCommits,
     activeIndex: visibleCommits.findIndex((c) => c.hash === selectedCommitHash),
@@ -1545,9 +1611,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     rowAttr: "data-hash",
     onActivate: (commit, to, shift) => {
       selectCommit(commit.hash);
-      const from = visibleCommits.findIndex((c) => c.hash === anchorHash);
+      const from = rangeFrom();
       if (shift && from !== -1) {
         selectRange(from, to);
+        pinFallbackAnchor(from);
       } else {
         setSelected(new Set([commit.hash]));
         setAnchorHash(commit.hash);
@@ -1829,6 +1896,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     const editDatesRow = editDatesRouteOf(commit.hash);
     const editDatesHints: Record<EditDatesHold, string> = {
       op: OP_IN_PROGRESS_HINT,
+      unresolved: RESOLVE_CONFLICTS_HINT,
       refreshing: refreshingHint,
       "head-sync": HISTORY_REFRESHING_HINT,
       pushed: ALREADY_PUSHED_HINT,
@@ -2326,17 +2394,25 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         key={`edit-dates:${repoPath}`}
         repoPath={repoPath}
         target={editDates}
-        onClose={() => setEditDates((t) => (t === editDates ? null : t))}
+        adoptSelection
+        onClose={() => {
+          setEditDates((t) => (t === editDates ? null : t));
+        }}
         landFocus={() => {
           const want = landDatesRow.current;
-          const row = want === null ? null : datesRowEl(want);
+          const row =
+            want === null || want.repo !== repoPath
+              ? null
+              : datesRowEl(want.hash);
           if (row !== null) landDatesRow.current = null;
           return row;
         }}
-        onDatesChanged={(oldHash, newHash) => {
+        onDatesChanged={(oldHash, newHash, closed) => {
           // The old id is gone: the panel's own selection keeps no trace of it.
           if (useUiStore.getState().repoPath !== repoPath) return;
-          landDatesRow.current = newHash;
+          landDatesRow.current = closed
+            ? { repo: repoPath, hash: newHash }
+            : null;
           setSelected((s) => {
             if (!s.has(oldHash)) return s;
             const next = new Set(s);

@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CommitDetailView } from "@/features/history/CommitDetailView";
@@ -7,6 +13,7 @@ import {
   AMEND_HOLD_HINT,
   OP_IN_PROGRESS_HINT,
 } from "@/features/history/commit-confirms";
+import { RESOLVE_CONFLICTS_HINT } from "@/features/history/edit-dates-route";
 import {
   commitOnRemote,
   forgeCommitComments,
@@ -75,7 +82,11 @@ const summary = (hash: string): CommitSummary => ({
 
 /** Serves a status naming `head` as HEAD on `main`, under a log topped by
  *  `logTop` (agreeing by default). */
-function serveHead(head: string, logTop = head) {
+function serveHead(
+  head: string,
+  logTop = head,
+  entries: RepoStatus["entries"] = [],
+) {
   vi.mocked(gitLog).mockResolvedValue([summary(logTop), summary(`c${logTop}`)]);
   vi.mocked(gitStatus).mockResolvedValue({
     branch: {
@@ -93,7 +104,7 @@ function serveHead(head: string, logTop = head) {
       pushRemote: null,
       pushBranch: null,
     },
-    entries: [],
+    entries,
   } satisfies RepoStatus);
 }
 
@@ -116,15 +127,16 @@ beforeEach(() => {
   vi.mocked(forgeCommitComments).mockResolvedValue([]);
   vi.mocked(readRepoBranchRules).mockResolvedValue(null);
   vi.mocked(ghCommitAuthorAvatars).mockResolvedValue([]);
-  vi.mocked(gitCommitDetails).mockResolvedValue({
-    hash: HASH,
+  // Answers for the commit asked, so the dialog's read of HEAD's parent lands.
+  vi.mocked(gitCommitDetails).mockImplementation(async (_repo, hash) => ({
+    hash,
     subject: "the subject",
     body: "",
     author: "Ada",
     authorEmail: "ada@example.com",
     date: "2026-01-01T10:00:00Z",
     committerDate: "2026-01-01T10:00:00Z",
-  });
+  }));
   vi.mocked(gitCommitFiles).mockResolvedValue([]);
   vi.mocked(gitCommitFileDiff).mockImplementation(never);
   vi.mocked(gitOpState).mockResolvedValue({
@@ -135,7 +147,11 @@ beforeEach(() => {
     editPaused: false,
     rebaseStop: null,
   });
-  useUiStore.setState({ repoPath: REPO, selectedCommitHash: null });
+  useUiStore.setState({
+    repoPath: REPO,
+    selectedCommitHash: null,
+    repoTab: "history",
+  });
 });
 
 afterEach(() => {
@@ -236,6 +252,19 @@ describe("CommitDetailView Edit dates…", () => {
     expect(item).toHaveAttribute("aria-disabled", "true");
   });
 
+  // Control: drop the History-tab arm of the row hint; Compare's view points at
+  // a History row that isn't on screen.
+  it("off HEAD outside the History tab gives the general reason for History's selection", async () => {
+    serveHead(OTHER);
+    useUiStore.setState({ selectedCommitHash: HASH, repoTab: "compare" });
+    const item = await editDatesItem((i) =>
+      expect(i).toHaveTextContent(
+        /^Edit dates… \(only the latest commit, or an unpushed commit in History\)$/,
+      ),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+  });
+
   // Control: drop the trigger's landing in landFocus; focus falls elsewhere.
   it("after Change dates selects the rewritten commit and focuses Commit actions", async () => {
     const NEW = "0123456789".repeat(4);
@@ -262,6 +291,143 @@ describe("CommitDetailView Edit dates…", () => {
     );
   });
 
+  describe("the deferred landing on Commit actions", () => {
+    const NEW = "0123456789".repeat(4);
+    /** A commit whose details fail: the error arm unmounts the trigger. */
+    const GONE = `d${HASH.slice(1)}`;
+    let settle: (v: string) => void = () => undefined;
+
+    beforeEach(() => {
+      serveHead(HASH);
+      useUiStore.setState({ selectedCommitHash: HASH });
+      vi.mocked(gitCommitDetails).mockImplementation(async (_repo, hash) => {
+        if (hash === GONE) throw new Error("gone");
+        return {
+          hash,
+          subject: "the subject",
+          body: "",
+          author: "Ada",
+          authorEmail: "ada@example.com",
+          date: "2026-01-01T10:00:00Z",
+          committerDate: "2026-01-01T10:00:00Z",
+        };
+      });
+      vi.mocked(gitAmendCommitDates).mockImplementation(
+        () =>
+          new Promise<string>((r) => {
+            settle = r;
+          }),
+      );
+    });
+
+    function view(client: QueryClient, hash: string, repo = REPO) {
+      return (
+        <QueryClientProvider client={client}>
+          <button type="button">Elsewhere</button>
+          <CommitDetailView repoPath={repo} hash={hash} />
+        </QueryClientProvider>
+      );
+    }
+
+    /** Opens Edit dates, sends a change, and leaves it pending. */
+    async function pendingChange(client: QueryClient) {
+      const utils = render(view(client, HASH));
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Commit actions" }),
+      );
+      const item = await screen.findByRole("menuitem", {
+        name: /^Edit dates…/,
+      });
+      await waitFor(() =>
+        expect(item).not.toHaveAttribute("aria-disabled", "true"),
+      );
+      await userEvent.click(item);
+      const field = await screen.findByLabelText("Author date");
+      await userEvent.clear(field);
+      await userEvent.type(field, "2026-01-02 10:00:00 +00:00");
+      await userEvent.click(
+        screen.getByRole("button", { name: /Change dates/ }),
+      );
+      await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalled());
+      return utils;
+    }
+
+    // Control: arm the landing whatever `closed` says; the trigger's next
+    // render takes focus from the body.
+    it("arms nothing for a change that lands after Esc dismissed the dialog", async () => {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      await pendingChange(client);
+      await userEvent.keyboard("{Escape}");
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull(),
+      );
+      // On the body, where a deferred landing would take it.
+      (document.activeElement as HTMLElement).blur();
+      settle(NEW);
+      await waitFor(() =>
+        expect(useUiStore.getState().selectedCommitHash).toBe(NEW),
+      );
+      await act(() => new Promise((r) => setTimeout(r, 20)));
+      expect(
+        screen.getByRole("button", { name: "Commit actions" }),
+      ).not.toHaveFocus();
+    });
+
+    // Control: drop the ref callback's clear; the render after focus returns
+    // to the body takes it.
+    it("drops the landing once focus moved to another control", async () => {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const { rerender } = await pendingChange(client);
+      // The view leaves its content arm, taking the dialog with it, so the
+      // change's close finds no trigger to land on.
+      rerender(view(client, GONE));
+      await screen.findByText("Could not load this commit");
+      settle(NEW);
+      await waitFor(() =>
+        expect(useUiStore.getState().selectedCommitHash).toBe(NEW),
+      );
+      screen.getByRole("button", { name: "Elsewhere" }).focus();
+      rerender(view(client, HASH));
+      const first = await screen.findByRole("button", {
+        name: "Commit actions",
+      });
+      expect(first).not.toHaveFocus();
+      // Focus back on the body; the next render re-runs the trigger's ref.
+      (document.activeElement as HTMLElement).blur();
+      rerender(view(client, HASH));
+      await act(() => new Promise((r) => setTimeout(r, 20)));
+      expect(
+        screen.getByRole("button", { name: "Commit actions" }),
+      ).not.toHaveFocus();
+    });
+
+    // Control: drop the ref callback's repo check; the other repo's trigger
+    // takes focus from the body.
+    it("drops the landing when the same view mounts its trigger for another repo", async () => {
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const { rerender } = await pendingChange(client);
+      rerender(view(client, GONE));
+      await screen.findByText("Could not load this commit");
+      settle(NEW);
+      await waitFor(() =>
+        expect(useUiStore.getState().selectedCommitHash).toBe(NEW),
+      );
+      (document.activeElement as HTMLElement).blur();
+      rerender(view(client, HASH, "/other"));
+      await screen.findByRole("button", { name: "Commit actions" });
+      await act(() => new Promise((r) => setTimeout(r, 20)));
+      expect(
+        screen.getByRole("button", { name: "Commit actions" }),
+      ).not.toHaveFocus();
+    });
+  });
+
   it("holds HEAD with History's reason while an operation is in progress", async () => {
     serveHead(HASH);
     vi.mocked(gitOpState).mockResolvedValue({
@@ -274,6 +440,18 @@ describe("CommitDetailView Edit dates…", () => {
     });
     const item = await editDatesItem((i) =>
       expect(i).toHaveTextContent(`Edit dates…${OP_IN_PROGRESS_HINT}`),
+    );
+    expect(item).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(item);
+    expect(screen.queryByRole("dialog", { name: "Edit dates" })).toBeNull();
+  });
+
+  it("holds HEAD with Undo's reason on unmerged entries", async () => {
+    serveHead(HASH, HASH, [
+      { path: "a.txt", staged: "conflicted", unstaged: null },
+    ]);
+    const item = await editDatesItem((i) =>
+      expect(i).toHaveTextContent(`Edit dates…${RESOLVE_CONFLICTS_HINT}`),
     );
     expect(item).toHaveAttribute("aria-disabled", "true");
     await userEvent.click(item);

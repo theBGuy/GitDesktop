@@ -13,7 +13,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { replacesTypedMessage } from "../src/features/history/commit-confirms.ts";
+import {
+  datesBeforeParentConfirm,
+  replacesTypedMessage,
+} from "../src/features/history/commit-confirms.ts";
 
 const MODULE = join(
   resolve(dirname(fileURLToPath(import.meta.url)), ".."),
@@ -87,4 +90,22 @@ test("negative control: a fully trimmed body comparison misses the indentation c
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The unread-parent sentence names the commit each dialog changes: Edit
+// history its oldest planned commit, the HEAD dialog its one commit.
+test("the unread-parent prompt names whose parent went unread", () => {
+  assert.equal(
+    datesBeforeParentConfirm(0, "Rewrite history", "oldest").body,
+    "The oldest commit's parent date couldn't be read, so its new date may fall before its parent's. Git allows this; views sorted by date would list the two out of order.",
+  );
+  assert.equal(
+    datesBeforeParentConfirm(0, "Change dates", "this").body,
+    "This commit's parent date couldn't be read, so its new date may fall before its parent's. Git allows this; views sorted by date would list the two out of order.",
+  );
+  assert.equal(
+    datesBeforeParentConfirm(2, "Rewrite history").body,
+    "2 commits will be dated before their parents. Git allows this; views sorted by date will list them out of order.",
+    "no unread sentence without a subject",
+  );
 });

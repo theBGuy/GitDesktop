@@ -174,6 +174,12 @@ async function setSquash(
     screen.getByRole("button", { name: `Action for ${c.subject}` }),
   );
   await user.click(await screen.findByRole("menuitem", { name: /^Squash/ }));
+  // The menu's explicit return focus lands on the row a microtask after the
+  // popup unmounts, whatever took focus meanwhile.
+  await waitFor(() => {
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(rowOf(c)).toHaveFocus();
+  });
 }
 
 /** Runs `settings` through the real writer over the in-memory store. */

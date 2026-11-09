@@ -82,7 +82,11 @@ import {
 import { useLatestRef } from "@/lib/use-latest-ref";
 import { cn } from "@/lib/utils";
 import { CommitDateField, SameAsAuthorCheckbox } from "./CommitDateField";
-import { datesBeforeParentConfirm } from "./commit-confirms";
+import {
+  beforeParentNote,
+  datesBeforeParentConfirm,
+  PARENT_DATE_PENDING,
+} from "./commit-confirms";
 import {
   commitDateFromIso,
   DATE_FORMAT_HINT,
@@ -96,6 +100,7 @@ import {
   readCommitDate,
   resolveDates,
   rowDateLabel,
+  sameCommitDate,
   sameUnreachableNote,
   UNREADABLE_DATE_TEXT,
 } from "./commit-date";
@@ -172,6 +177,28 @@ const DATE_HOLD_REASON: Record<DateHold, string> = {
   unreadable: "This commit's dates can't be read",
   fold: "A squashed or fixed-up commit takes its dates from the commit it combines into.",
   dropped: "A removed commit has no dates to change.",
+};
+/** A row's date button text when the read failed and the listed date doesn't
+ *  parse either. */
+const DATE_FAILED_TEXT = "Date not loaded";
+
+/** A planned commit flagged against its parent: dated before it, or (only the
+ *  oldest, on a failed base read) re-dated while the parent's date is unread. */
+type ParentFlag = {
+  hash: string;
+  parentHash: string;
+  parentDate: CommitDate | null;
+};
+type ParentFlagKind = "before" | "unread";
+const parentFlagKind = (flag: ParentFlag): ParentFlagKind =>
+  flag.parentDate === null ? "unread" : "before";
+const PARENT_FLAG_LABEL: Record<ParentFlagKind, string> = {
+  before: "before parent",
+  unread: "parent date unread",
+};
+const PARENT_FLAG_NAME: Record<ParentFlagKind, string> = {
+  before: ", dated before its parent",
+  unread: ", parent's date unread",
 };
 const EDIT_PAUSE_DATES_NOTE =
   "This commit pauses for amending. These dates are applied when you continue and replace any set during the pause. If you split the commit there, they land on the last new commit.";
@@ -423,7 +450,7 @@ function RowDatesEditor({
   draft: DateDraft;
   isEdit: boolean;
   changed: boolean;
-  parent: { parentHash: string; parentDate: CommitDate } | undefined;
+  parent: ParentFlag | undefined;
   nowMs: number;
   heldReason: string | null;
   onDraft: (next: DateDraft) => void;
@@ -437,7 +464,12 @@ function RowDatesEditor({
   const sameNote = sameUnreachableNote(original, resolved);
   if (parent !== undefined) {
     warnings.push(
-      `Earlier than its parent ${parent.parentHash.slice(0, 7)} (${rowDateLabel(parent.parentDate, nowMs)}). Git allows this; views sorted by date will list the two out of order.`,
+      beforeParentNote(
+        parent.parentHash,
+        parent.parentDate === null
+          ? null
+          : rowDateLabel(parent.parentDate, nowMs),
+      ),
     );
   }
   const hasError =
@@ -505,6 +537,7 @@ function RowDatesEditor({
           nowMs={nowMs}
           note={committerNote}
           heldReason={heldReason}
+          reserveReset
         />
       )}
       {warnings.map((w) => (
@@ -524,9 +557,16 @@ function RowDatesEditor({
   );
 }
 
+/** Whose offset the strip assumes when none is typed: it applies the offset of
+ *  the commit its text was filled from to every selected commit. */
+const stripOffsetNote = (seedHash: string) =>
+  `the offset of ${seedHash.slice(0, 7)}, the commit this strip was filled from`;
+
 /** The shared editor for a multi-selection's dates, seeded once when it
  *  appears. Its draft holds texts and the offsets an omitted one falls back to. */
 interface StripDraft {
+  /** The commit the strip was filled from, whose offsets are the fallbacks. */
+  seedHash: string;
   author: string;
   same: boolean;
   committer: string;
@@ -606,7 +646,7 @@ function SelectionStrip({
         date={author.ok ? author.date : null}
         error={author.ok ? null : author.error}
         nowMs={nowMs}
-        offsetNote="the current offset"
+        offsetNote={stripOffsetNote(draft.seedHash)}
         heldReason={heldReason}
         trailing={
           <DisabledReasonButton
@@ -635,7 +675,7 @@ function SelectionStrip({
           date={committer.ok ? committer.date : null}
           error={committer.ok ? null : committer.error}
           nowMs={nowMs}
-          offsetNote="the current offset"
+          offsetNote={stripOffsetNote(draft.seedHash)}
           heldReason={heldReason}
         />
       )}
@@ -692,8 +732,8 @@ export function EditHistoryDialog({
   const busy = rewrite.isPending || rebaseEdit.isPending;
   const setRepoTab = useUiStore((s) => s.setRepoTab);
   const messages = useUnpushedMessages(repoPath, base, open);
-  // The base's author date judges the oldest planned commit; until it reads
-  // (or when it fails) that one pair is simply not judged.
+  // The base's author date judges the oldest planned commit: a dated plan is
+  // held while it reads, and a failed read asks instead of judging.
   const baseDetails = useCommitDetails(
     repoPath,
     commits.length > 0 && base !== "" ? base : null,
@@ -924,20 +964,46 @@ export function EditHistoryDialog({
   // Before-parent: judged on the compiled plan, from the rows' original
   // author dates and the base's (placeholder-guarded: the details read keeps
   // the previous commit's answer while the next loads).
+  // A row whose committer date alone is unreadable still has a readable author
+  // date, so its children are compared against it.
   const originalAuthor: Record<string, CommitDate> = {};
   for (const [hash, info] of dateInfo) {
     if (info.kind === "ok") originalAuthor[hash] = info.original.author;
+    else if (info.kind === "unreadable" && info.author !== null) {
+      originalAuthor[hash] = info.author;
+    }
   }
-  const baseAuthor =
-    !baseDetails.isPlaceholderData && baseDetails.data?.hash === base
-      ? commitDateFromIso(baseDetails.data.date)
-      : null;
+  const baseRead = ((): "none" | "pending" | "unread" | CommitDate => {
+    if (commits.length === 0 || base === "") return "none";
+    if (!baseDetails.isPlaceholderData && baseDetails.data?.hash === base) {
+      return commitDateFromIso(baseDetails.data.date) ?? "unread";
+    }
+    return baseDetails.isError ? "unread" : "pending";
+  })();
   const beforeParent = beforeParentSteps({
     steps: plan.steps,
     originalAuthor,
-    base: baseAuthor === null ? null : { hash: base, author: baseAuthor },
+    base:
+      typeof baseRead === "string" ? null : { hash: base, author: baseRead },
   });
-  const beforeParentOf = new Map(beforeParent.map((b) => [b.hash, b]));
+  // Unread base: the oldest step is flagged whenever its author date is edited,
+  // the condition under which a readable base would have been compared.
+  const oldest = plan.steps.at(0);
+  const oldestOriginal =
+    oldest === undefined ? undefined : originalAuthor[oldest.hashes[0]];
+  const parentUnread =
+    baseRead === "unread" &&
+    oldest?.authorDate !== undefined &&
+    oldestOriginal !== undefined &&
+    !sameCommitDate(oldest.authorDate, oldestOriginal);
+  const parentFlags: ParentFlag[] =
+    parentUnread && oldest !== undefined
+      ? [
+          { hash: oldest.hashes[0], parentHash: base, parentDate: null },
+          ...beforeParent,
+        ]
+      : beforeParent;
+  const parentFlagOf = new Map(parentFlags.map((b) => [b.hash, b]));
 
   // Display order; each displayed row maps back to its data index through
   // `displayIndex`, which `plan.views` and the moves index by.
@@ -959,6 +1025,7 @@ export function EditHistoryDialog({
     if (info?.kind === "ok") {
       const { planned } = info.resolved;
       setStrip({
+        seedHash: seedRow.hash,
         author: formatCommitDate(planned.author ?? info.original.author),
         same: info.resolved.same,
         committer: formatCommitDate(
@@ -996,6 +1063,8 @@ export function EditHistoryDialog({
         return "Couldn't load commit messages and dates.";
       case needsRead && !rowsRead:
         return "Loading commit messages and dates…";
+      case plan.datedCount > 0 && baseRead === "pending":
+        return PARENT_DATE_PENDING;
       default:
         return null;
     }
@@ -1385,13 +1454,19 @@ export function EditHistoryDialog({
       toast.info(PROMOTION_BLOCKS_CHECKOUT);
       return;
     }
-    if (beforeParent.length > 0) {
+    if (parentFlags.length > 0) {
       // One confirm for the whole plan. A commit set that changed under
       // the prompt drops the run, and a promote that started under it refuses.
       const asked = reseedNonce;
       const ok = await useConfirm
         .getState()
-        .ask(datesBeforeParentConfirm(beforeParent.length, primaryLabel));
+        .ask(
+          datesBeforeParentConfirm(
+            beforeParent.length,
+            primaryLabel,
+            parentUnread ? "oldest" : null,
+          ),
+        );
       if (!ok || liveKeyRef.current !== asked) return;
       if (promotionBlocksCheckout(repoPath)) {
         toast.info(PROMOTION_BLOCKS_CHECKOUT);
@@ -1612,7 +1687,7 @@ export function EditHistoryDialog({
               ok !== null && structural === null && openDates.has(row.hash);
             const editorId = `${idBase}-dates-${row.hash}`;
             const changed = row.dates !== undefined;
-            const flagged = beforeParentOf.get(row.hash);
+            const flagged = parentFlagOf.get(row.hash);
             // The label falls back to the listed date while the read has none
             // for this row: display only, never a value to send.
             const shownDate = (() => {
@@ -1624,8 +1699,21 @@ export function EditHistoryDialog({
               }
               return commitDateFromIso(listedDateOf.get(row.hash) ?? "");
             })();
+            // With no date to show, the button's visible text (unreadable,
+            // failed, or a loading skeleton) is what its name carries.
+            const dateText = (() => {
+              if (info?.kind === "unreadable") return UNREADABLE_DATE_TEXT;
+              if (info?.kind === "none" && info.hold === "failed") {
+                return DATE_FAILED_TEXT;
+              }
+              return null;
+            })();
             const dateName = (() => {
-              if (shownDate === null) return `Dates for ${row.subject}`;
+              if (shownDate === null) {
+                return dateText === null
+                  ? `Dates for ${row.subject}`
+                  : `Dates for ${row.subject}: ${dateText}`;
+              }
               const full = formatCommitDate(shownDate);
               if (changed && ok !== null) {
                 return `Dates for ${row.subject}: ${full}, was ${formatCommitDate(ok.original.author)}`;
@@ -1637,7 +1725,7 @@ export function EditHistoryDialog({
                 key={row.hash}
                 role="listitem"
                 {...nav.rowProps(row)}
-                aria-label={`${ACTION_LABEL.get(row.action)} ${row.hash.slice(0, 7)} ${row.subject}${foldState}${flagged !== undefined ? ", dated before its parent" : ""}${changed ? ", dates changed" : ""}${isSelected ? ", selected" : ""}`}
+                aria-label={`${ACTION_LABEL.get(row.action)} ${row.hash.slice(0, 7)} ${row.subject}${foldState}${flagged !== undefined ? PARENT_FLAG_NAME[parentFlagKind(flagged)] : ""}${changed ? ", dates changed" : ""}${isSelected ? ", selected" : ""}`}
                 aria-keyshortcuts={ROW_KEYSHORTCUTS}
                 className={cn(
                   "border-b outline-none last:border-b-0 focus-visible:bg-muted/40 focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset data-[dropped=true]:bg-muted/30",
@@ -1680,10 +1768,21 @@ export function EditHistoryDialog({
                         align="start"
                         className="w-64"
                         // Back to the row, so the next arrow walks the list
-                        // instead of reopening the menu from its trigger.
-                        finalFocus={() =>
-                          findRow(listRef.current, row.hash) ?? true
-                        }
+                        // instead of reopening the menu from its trigger. Base
+                        // UI runs an explicit target after the exit animation
+                        // without checking where focus went, so focus already
+                        // moved to another element (a click on another row) stays.
+                        finalFocus={() => {
+                          const active = document.activeElement;
+                          if (
+                            active !== null &&
+                            active !== document.body &&
+                            active.closest('[role="menu"]') === null
+                          ) {
+                            return false;
+                          }
+                          return findRow(listRef.current, row.hash) ?? true;
+                        }}
                       >
                         {ACTIONS.map((a) => {
                           const heldItem = isFold(a.value) && target === null;
@@ -1783,7 +1882,7 @@ export function EditHistoryDialog({
                   {flagged !== undefined && (
                     <span className="flex shrink-0 items-center gap-1 text-[11px] text-warning">
                       <WarningIcon aria-hidden className="size-3" />
-                      before parent
+                      {PARENT_FLAG_LABEL[parentFlagKind(flagged)]}
                     </span>
                   )}
                   <span data-row-control="" className="contents">
@@ -1816,8 +1915,7 @@ export function EditHistoryDialog({
                       {(() => {
                         if (shownDate !== null)
                           return rowDateLabel(shownDate, nowMs);
-                        if (info?.kind === "unreadable")
-                          return UNREADABLE_DATE_TEXT;
+                        if (dateText !== null) return dateText;
                         return <Skeleton className="h-3 w-16" />;
                       })()}
                     </DisabledReasonButton>
@@ -1987,6 +2085,11 @@ export function EditHistoryDialog({
                       {beforeParent.length > 0 && (
                         <span className="text-warning">
                           {` · ${beforeParent.length} dated before ${beforeParent.length === 1 ? "its parent" : "their parents"}`}
+                        </span>
+                      )}
+                      {parentUnread && (
+                        <span className="text-warning">
+                          {" · oldest commit's parent date unread"}
                         </span>
                       )}
                       {plan.hasEdit && (

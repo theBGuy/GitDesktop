@@ -64,20 +64,21 @@ const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // A pasted `git log` header label, stripped before either grammar is tried.
 const LABEL_RE = /^(?:Date|AuthorDate|CommitDate):[ \t]+/;
-// Date, then `T`/`t` or spaces, then HH:MM[:SS], then an optional offset (`Z`,
-// `±HH:MM` or `±HHMM`) that spaces may precede. `git log --date=iso` and
-// `--date=iso-strict` output both fit.
+// Date, then `T`/`t` or spaces or tabs, then HH:MM[:SS], then an optional offset
+// (`Z`, `±HH:MM` or `±HHMM`) that spaces or tabs may precede. `git log
+// --date=iso` and `--date=iso-strict` output both fit.
 const INPUT_RE =
-  /^(\d{4})-(\d{2})-(\d{2})(?:[Tt]| +)(\d{2}):(\d{2})(?::(\d{2}))?(?: *([Zz]|[+-]\d{2}:?\d{2}))?$/;
+  /^(\d{4})-(\d{2})-(\d{2})(?:[Tt]|[ \t]+)(\d{2}):(\d{2})(?::(\d{2}))?(?:[ \t]*([Zz]|[+-]\d{2}:?\d{2}))?$/;
 // git's default format: optional weekday, month name, day, HH:MM:SS, year, then
-// an optional `±HHMM`/`±HH:MM` offset, fields split by spaces. Names are
+// an optional `±HHMM`/`±HH:MM` offset, fields split by spaces or tabs. Names are
 // English 3-letter abbreviations in any case; the weekday is not checked
 // against the date.
 const DEFAULT_RE =
   /^(?:([A-Za-z]{3})[ \t]+)?([A-Za-z]{3})[ \t]+(\d{1,2})[ \t]+(\d{2}):(\d{2}):(\d{2})[ \t]+(\d{4})(?:[ \t]+([+-]\d{2}:?\d{2}))?$/;
 const WEEKDAY_NAMES = WEEKDAYS.map((w) => w.toLowerCase());
 const MONTH_NAMES = MONTHS.map((m) => m.slice(0, 3).toLowerCase());
-// What git's %aI/%cI print. The offset is not range-checked: git stores `+15:00`.
+// What git's %aI/%cI print. The offset's hours are not range-checked (git
+// stores `+15:00`); its minutes are, in commitDateFromIso.
 const ISO_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(Z|[+-]\d{2}:\d{2})$/;
 

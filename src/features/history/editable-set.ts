@@ -70,11 +70,12 @@ function fnv1a32(text: string, offset: number): string {
  *  branch or oid, which `refresh-side-keys` already follows), so the sync can
  *  re-read op state when a stop or abort from a terminal moves no HEAD.
  *  `<entry count>:<64-bit hash>` over the triples sorted by path in code-unit
- *  order; null while status is pending. Unseen by design (no op-state poll;
- *  each heals on refocus, a tab show or a menu open): any `--quit` (index and
- *  tree kept, so no entry changes), a stop that changes no entry and moves no
- *  HEAD (a pick stopped on a commit that became empty), and a stop plus its
- *  abort inside one 5 s status poll (which needs no heal). */
+ *  order; null while status is pending. A stop or exit that changes no entry
+ *  (`--quit`, a pick stopped on a commit that became empty) is the refs
+ *  stamp's to see: it covers the operation sentinels. Unseen by both: a stop
+ *  plus its abort inside one poll, which leaves nothing to heal. A repo whose
+ *  stamp read fails every poll (over its loose-ref cap) loses the stamp's
+ *  half, so those entry-less stops and exits go unseen there. */
 export function statusContentSignature(
   entries:
     | readonly {
@@ -172,8 +173,9 @@ export const NO_UPSTREAM_COUNT_RECHECK_MS = 30_000;
  *    families; the caller re-reads only the ones {@link preMoveStale} passes.
  *  - 'refresh-ref-set': the refs stamp moved; the caller re-reads only the
  *    ref-derived reads {@link preMoveStale} passes.
- *  - 'refresh-op-state': status's entries changed with the oid held (a stop or
- *    abort from a terminal moves no HEAD); an oid change already covers it.
+ *  - 'refresh-op-state': status's entries or the refs stamp changed with the oid
+ *    held (a stop or abort from a terminal moves no HEAD, and the stamp covers
+ *    the operation sentinels); an oid change already covers it.
  *  - 'refetch-log': a non-null oid (an unborn repo's settled-empty log must
  *    never refetch per poll), heads differ, the log has data, the LOG is the
  *    stale side (its last success AND last failure both predate the status
@@ -186,10 +188,11 @@ export const NO_UPSTREAM_COUNT_RECHECK_MS = 30_000;
  *    than the status reading, or on a basis the status branch contradicts
  *    ({@link countBasisAgrees}); never while the count is fetching (a read
  *    slower than one poll must land), nor beside 'refresh-side-keys' or
- *    'refresh-ref-set'. The one accepted slip: any count refreshed since the
- *    previous stamp reading is skipped by the ref set's {@link preMoveStale} and
- *    suppressed for 'refresh-count' in the same run; it heals on the next
- *    status reading.
+ *    'refresh-ref-set', whose caller re-reads every count that didn't land
+ *    after the stamp reading that saw the move. What it skips is a count still
+ *    fetching, which lands on its own; one that started before the move can
+ *    still hold the old remotes until the next stamp move or this arm's
+ *    recheck.
  *  Null when nothing fires. */
 export function statusLogAction(args: {
   oid: string | null | undefined;
@@ -219,7 +222,7 @@ export function statusLogAction(args: {
     actions.add("refresh-head-set");
   }
   if (args.refsChanged) actions.add("refresh-ref-set");
-  if (args.contentChanged && !args.oidChanged) {
+  if ((args.contentChanged || args.refsChanged) && !args.oidChanged) {
     actions.add("refresh-op-state");
   }
   if (

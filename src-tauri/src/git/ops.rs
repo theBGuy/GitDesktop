@@ -6110,9 +6110,9 @@ const REBASE_DIR_EXISTS: &str = "It seems that there is already a rebase-merge d
 /// older git ignores instead of refusing. `--no-autosquash` and `--no-rebase-merges`
 /// keep git's own fallback todo a plain pick list, which the missing-commits check
 /// compares ours against; `--no-verify` skips the pre-rebase hook. post-checkout fires
-/// at the start; post-rewrite fires at the finish, with the scripts mapping rewords
-/// on both routes and fold groups on the replay route; on the edit route git's
-/// native folds also fire their own `post-rewrite amend`.
+/// at the start; post-rewrite fires at the finish, with the scripts mapping rewords and
+/// date changes on both routes and fold groups on the replay route; on the edit route
+/// git's native folds also fire their own `post-rewrite amend`.
 const REBASE_START_ARGS: [&str; 22] = [
     "-c",
     "core.editor=true",
@@ -6159,7 +6159,8 @@ enum TodoRoute {
     /// that commits once (an intermediate fold can net empty, a leader's change can
     /// already be present, and an inline exec line is length-limited). Only those
     /// commits and a reword's amend run the commit hooks (pre-commit, commit-msg); a
-    /// plain pick runs none.
+    /// plain pick runs neither, though a non-fast-forward one runs prepare-commit-msg
+    /// (measured, git 2.51.1).
     Replay,
     /// The resumable rebase: `edit` stops, native `fixup` folds, and amends skip the
     /// commit hooks.
@@ -6254,12 +6255,24 @@ fn rebase_todo(
         // One amend per step, so each step keeps one rewritten-list repoint; a step with
         // neither a message nor a date gets no script at all.
         let amend = || {
-            let name = match (&message_file, dates.any()) {
-                (Some(_), _) => format!("reword-{i}.sh"),
-                (None, true) => format!("dates-{i}.sh"),
+            let original = sh_quote(&shell_path(&dir.join(format!("msg-{i}"))));
+            let object = sh_quote(&shell_path(&dir.join(format!("commit-{i}"))));
+            let (name, message) = match (&message_file, dates.any()) {
+                (Some(file), _) => (format!("reword-{i}.sh"), AmendMessage::Composed(file)),
+                (None, true) if route == TodoRoute::Edit && step.edit => {
+                    (format!("dates-{i}.sh"), AmendMessage::Head)
+                }
+                (None, true) => (
+                    format!("dates-{i}.sh"),
+                    AmendMessage::Original {
+                        commit: leader,
+                        object: &object,
+                        file: &original,
+                    },
+                ),
                 (None, false) => return None,
             };
-            let body = amend_script(&git, message_file.as_deref(), route, &dates);
+            let body = amend_script(&git, message, route, &dates);
             Some((dir.join(name), body))
         };
         match route {
@@ -6484,27 +6497,82 @@ fn group_script(
     script
 }
 
+/// Runs one git command with every hook off. `--no-verify` skips only pre-commit and
+/// commit-msg, so prepare-commit-msg would still rewrite a message kept verbatim; git
+/// never finds a hook under `/dev/null`, a non-directory on Unix that Git for Windows
+/// maps to `NUL` (measured on 2.51.1: no hook runs, nothing is printed).
+const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+
+/// Where one step's amend takes its message from.
+#[derive(Debug, Clone, Copy)]
+enum AmendMessage<'a> {
+    /// The step's composed message file (a reword).
+    Composed(&'a str),
+    /// The picked commit's own message, which the script copies from `commit` into
+    /// `file` first (through the raw object saved at `object`): a non-fast-forward pick
+    /// runs prepare-commit-msg, so HEAD's message can already differ from the commit the
+    /// user dated.
+    Original {
+        commit: &'a str,
+        object: &'a str,
+        file: &'a str,
+    },
+    /// HEAD's message as it stands: an `edit` stop, where the user may have reworded
+    /// by hand at the pause.
+    Head,
+}
+
 /// The LF-only amend for one step (a reword, a date change, or both), run after its
 /// pick or the edit route's native fixups. It repoints the pre-amend commit's
 /// rewritten-list lines at the amended one, so notes and the rebase finish reach it
-/// (the amend emits no post-rewrite). Only a replay reword runs the commit hooks (a
-/// dates-only amend skips them like a pick; the edit route's must not stall a resumed
-/// rebase), `--allow-empty` lets an empty commit take its dates, and `mv` replaces
-/// `sed -i`, which GNU and BSD spell differently.
-fn amend_script(
-    git: &str,
-    message_file: Option<&str>,
-    route: TodoRoute,
-    dates: &DateArgs,
-) -> String {
-    let verify = match (route, message_file) {
-        (TodoRoute::Replay, Some(_)) => "",
-        _ => " --no-verify",
+/// (the amend emits no post-rewrite). Only a replay reword runs the commit hooks: an
+/// edit-route reword skips them with `--no-verify` so a resumed rebase can't stall, and a
+/// dates-only amend runs with [`NO_HOOKS`] and `--cleanup=verbatim` so its message keeps
+/// its bytes. That covers the amended commit only: the commits replayed above it go
+/// through git's normal pick, hooks included. `--allow-empty` lets an empty commit take
+/// its dates, `--allow-empty-message` an empty message, and `mv` replaces `sed -i`,
+/// which GNU and BSD spell differently.
+fn amend_script(git: &str, message: AmendMessage, route: TodoRoute, dates: &DateArgs) -> String {
+    let (hooks, verify) = match (route, message) {
+        (TodoRoute::Replay, AmendMessage::Composed(_)) => (String::new(), ""),
+        (TodoRoute::Edit, AmendMessage::Composed(_)) => (String::new(), " --no-verify"),
+        (_, AmendMessage::Original { .. } | AmendMessage::Head) => {
+            (format!(" {}", NO_HOOKS.join(" ")), "")
+        }
     };
-    let source = match message_file {
-        Some(file) if dates.any() => format!("-F {file} --allow-empty"),
-        Some(file) => format!("-F {file}"),
-        None => "--no-edit --cleanup=verbatim --allow-empty".to_string(),
+    const KEEP: &str = "--cleanup=verbatim --allow-empty --allow-empty-message";
+    let (copy, source) = match message {
+        AmendMessage::Composed(file) if dates.any() => {
+            (String::new(), format!("-F {file} --allow-empty"))
+        }
+        AmendMessage::Composed(file) => (String::new(), format!("-F {file}")),
+        // The object's bytes after its first blank line: `%B` re-encodes to
+        // i18n.logOutputEncoding, and Git for Windows' sed drops CRs, while `cat` copies
+        // the rest unchanged. The amend writes the repo's current i18n.commitEncoding
+        // header, so an original whose `encoding` header differs is relabeled or, under
+        // UTF-8, has its bytes converted (measured, git 2.51.1).
+        //
+        // The ident guard: a pick the user skipped from a terminal leaves HEAD on the
+        // previous commit, which this amend would otherwise rewrite. It compares author
+        // email and raw date as `log` reads them, since a non-fast-forward pick re-encodes
+        // the name (measured, git 2.51.1); two commits sharing both still pass. The Head
+        // and Composed arms stay unguarded, so a skipped `edit` row or reword still amends
+        // the previous commit: a split at an edit pause legitimately changes the author.
+        AmendMessage::Original {
+            commit,
+            object,
+            file,
+        } => (
+            format!(
+                "{git} cat-file commit {commit} > {object}\n\
+                 ident() {{ {git} log -1 --no-show-signature --date=raw --format=%ae%n%ad \"$1\"; }}\n\
+                 if [ \"$(ident {commit})\" != \"$(ident HEAD)\" ]; \
+                 then echo 'HEAD is not {commit}, so its dates were not changed' >&2; exit 1; fi\n\
+                 {{ while IFS= read -r l && [ -n \"$l\" ]; do :; done; cat; }} < {object} > {file}\n"
+            ),
+            format!("-F {file} {KEEP}"),
+        ),
+        AmendMessage::Head => (String::new(), format!("--no-edit {KEEP}")),
     };
     let DateArgs {
         committer_prefix: committer,
@@ -6512,8 +6580,8 @@ fn amend_script(
     } = dates;
     format!(
         "set -e\n\
-         pre=$({git} rev-parse HEAD)\n\
-         {committer}{git} commit --amend{verify} --no-post-rewrite {source}{author}\n\
+         {copy}pre=$({git} rev-parse HEAD)\n\
+         {committer}{git}{hooks} commit --amend{verify} --no-post-rewrite {source}{author}\n\
          new=$({git} rev-parse HEAD)\n\
          list=$({git} rev-parse --git-path rebase-merge/rewritten-list)\n\
          if [ -f \"$list\" ]; then sed \"s/ $pre\\$/ $new/\" \"$list\" > \"$list.gd-tmp\" \
@@ -7208,8 +7276,9 @@ pub async fn git_amend_commit_dates(
 
 /// Testable core of [`git_amend_commit_dates`]. `--only` with no pathspec amends from
 /// HEAD's own tree, so staged, unstaged and untracked changes stay where they are; the
-/// message keeps its bytes (`--cleanup=verbatim`), an empty HEAD can take dates
-/// (`--allow-empty`), and the hooks are skipped like a plain pick. One atomic amend, so
+/// message keeps its bytes (`--cleanup=verbatim`), an empty HEAD or an empty message
+/// can take dates (`--allow-empty`, `--allow-empty-message`), and no hook runs
+/// ([`NO_HOOKS`]). One atomic amend, so
 /// no oplog entry: the reflog keeps the old commit. Another process moving HEAD between
 /// the pin checks and the spawn is out of reach of this process's hold.
 pub(crate) async fn amend_commit_dates_core(
@@ -7256,15 +7325,16 @@ pub(crate) async fn amend_commit_dates_core(
 
     let author_arg = author_date.map(|d| format!("--date={}", git_date_arg(d)));
     let committer_env = committer_date.map(git_date_arg);
-    let mut args = vec![
+    let mut args = NO_HOOKS.to_vec();
+    args.extend([
         "commit",
         "--amend",
         "--only",
         "--no-edit",
-        "--no-verify",
         "--cleanup=verbatim",
         "--allow-empty",
-    ];
+        "--allow-empty-message",
+    ]);
     args.extend(author_arg.as_deref());
     let envs: Vec<(&str, &str)> = committer_env
         .as_deref()
@@ -13130,27 +13200,53 @@ mod tests {
     fn amend_script_shapes_per_step_kind() {
         let none = DateArgs::of(&RewriteStep::default());
         let both = DateArgs::of(&dated("a", Some(date(1, 330)), Some(date(2, -480))));
+        let composed = AmendMessage::Composed("'m'");
+        let original = AmendMessage::Original {
+            commit: "a",
+            object: "'c'",
+            file: "'o'",
+        };
         assert_eq!(
-            amend_script("git", Some("'m'"), TodoRoute::Replay, &none),
+            amend_script("git", composed, TodoRoute::Replay, &none),
             "set -e\npre=$(git rev-parse HEAD)\ngit commit --amend --no-post-rewrite -F 'm'\nnew=$(git rev-parse HEAD)\nlist=$(git rev-parse --git-path rebase-merge/rewritten-list)\nif [ -f \"$list\" ]; then sed \"s/ $pre\\$/ $new/\" \"$list\" > \"$list.gd-tmp\" && mv \"$list.gd-tmp\" \"$list\"; fi\n"
         );
-        let line = |route, file| {
-            amend_script("git", file, route, &both)
+        let amend_line = |route, message| {
+            amend_script("git", message, route, &both)
                 .lines()
-                .nth(2)
+                .find(|l| l.contains("commit --amend"))
                 .unwrap()
                 .to_string()
         };
+        for route in [TodoRoute::Replay, TodoRoute::Edit] {
+            assert_eq!(
+                amend_line(route, original),
+                "GIT_COMMITTER_DATE='@2 -0800' git -c core.hooksPath=/dev/null commit --amend --no-post-rewrite -F 'o' --cleanup=verbatim --allow-empty --allow-empty-message --date='@1 +0530'"
+            );
+            assert_eq!(
+                amend_line(route, AmendMessage::Head),
+                "GIT_COMMITTER_DATE='@2 -0800' git -c core.hooksPath=/dev/null commit --amend --no-post-rewrite --no-edit --cleanup=verbatim --allow-empty --allow-empty-message --date='@1 +0530'"
+            );
+        }
         assert_eq!(
-            line(TodoRoute::Replay, None),
-            "GIT_COMMITTER_DATE='@2 -0800' git commit --amend --no-verify --no-post-rewrite --no-edit --cleanup=verbatim --allow-empty --date='@1 +0530'"
+            amend_script("git", original, TodoRoute::Replay, &both)
+                .lines()
+                .skip(1)
+                .take(4)
+                .collect::<Vec<_>>(),
+            [
+                "git cat-file commit a > 'c'",
+                "ident() { git log -1 --no-show-signature --date=raw --format=%ae%n%ad \"$1\"; }",
+                "if [ \"$(ident a)\" != \"$(ident HEAD)\" ]; then echo 'HEAD is not a, so its dates were not changed' >&2; exit 1; fi",
+                "{ while IFS= read -r l && [ -n \"$l\" ]; do :; done; cat; } < 'c' > 'o'"
+            ],
+            "HEAD is checked against the dated commit, then its message copied, before the amend"
         );
         assert_eq!(
-            line(TodoRoute::Replay, Some("'m'")),
+            amend_line(TodoRoute::Replay, composed),
             "GIT_COMMITTER_DATE='@2 -0800' git commit --amend --no-post-rewrite -F 'm' --allow-empty --date='@1 +0530'"
         );
         assert_eq!(
-            line(TodoRoute::Edit, Some("'m'")),
+            amend_line(TodoRoute::Edit, composed),
             "GIT_COMMITTER_DATE='@2 -0800' git commit --amend --no-verify --no-post-rewrite -F 'm' --allow-empty --date='@1 +0530'"
         );
         let (todo, files) = rebase_todo(
@@ -13162,6 +13258,33 @@ mod tests {
         );
         assert_eq!(todo, "break\npick a1\nexec sh 'd/dates-0.sh'\n");
         assert_eq!(files.len(), 1);
+        assert!(
+            files[0].1.contains("cat-file commit a1 > 'd/commit-0'")
+                && files[0].1.contains("< 'd/commit-0' > 'd/msg-0'"),
+            "{}",
+            files[0].1
+        );
+        // Only an `edit` stop keeps HEAD's message, which the user may have reworded.
+        let stop = RewriteStep {
+            edit: true,
+            ..dated("e1", Some(date(1, 0)), None)
+        };
+        let (_, files) = rebase_todo(
+            TodoRoute::Edit,
+            &[stop, dated("p1", Some(date(1, 0)), None)],
+            &[],
+            Path::new("d"),
+            "git",
+        );
+        let scripts: Vec<_> = files.iter().map(|(_, b)| b.as_str()).collect();
+        assert_eq!(scripts.len(), 2);
+        assert!(scripts[0].contains("--no-edit") && !scripts[0].contains("cat-file"));
+        assert!(
+            scripts[1].contains("cat-file commit p1 > 'd/commit-1'")
+                && scripts[1].contains("< 'd/commit-1' > 'd/msg-1'"),
+            "{}",
+            scripts[1]
+        );
     }
 
     #[test]
@@ -13847,6 +13970,371 @@ mod tests {
         let tip = rev(&repo, "HEAD").await;
         let pin = head_branch(&repo).await;
         amend_dates(&repo, &tip, Some(&pin), d, None).await.unwrap();
+    }
+
+    /// A prepare-commit-msg hook leaves a dates-only amend's message byte-identical on
+    /// the replay, edit and HEAD routes, and still runs on a replay reword.
+    #[tokio::test]
+    async fn dates_only_amends_skip_prepare_commit_msg() {
+        let (dir, repo) = setup_repo("dates-prepare-msg").await;
+        let base = rev(&repo, "HEAD").await;
+        commit_file(&repo, dir.path(), "1.txt", "1\n", "one").await;
+        let c1 = rev(&repo, "HEAD").await;
+        // Pinned locally, so a host-wide core.hooksPath can't hide the hook.
+        let hooks = dir.path().join(".git/hooks");
+        let hooks = hooks.to_string_lossy().replace('\\', "/");
+        git(&repo, &["config", "core.hooksPath", &hooks]).await;
+        write_hook(
+            &repo,
+            "prepare-commit-msg",
+            "printf 'Hooked: yes\\n' >> \"$1\"",
+        );
+        let body = |r: &'static str| {
+            let repo = repo.clone();
+            async move { git(&repo, &["log", "-1", "--format=%B", r]).await }
+        };
+        let original = body("HEAD").await;
+        let state = AppState::default();
+
+        let d = Some(date(1767949200, 0));
+        rewrite_commits(&state, &repo, &base, &[dated(&c1, d, d)], &[])
+            .await
+            .unwrap();
+        assert_eq!(body("HEAD").await, original, "replay dates-only");
+
+        let tip = rev(&repo, "HEAD").await;
+        let e = Some(date(1767949300, 0));
+        rebase_edit(
+            &state,
+            repo.clone(),
+            base.clone(),
+            vec![dated(&tip, e, e)],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body("HEAD").await, original, "edit dates-only");
+
+        let tip = rev(&repo, "HEAD").await;
+        let pin = head_branch(&repo).await;
+        let f = Some(date(1767949400, 0));
+        amend_dates(&repo, &tip, Some(&pin), f, f).await.unwrap();
+        assert_eq!(body("HEAD").await, original, "HEAD dates-only");
+
+        let tip = rev(&repo, "HEAD").await;
+        let reword = RewriteStep {
+            message: Some("reworded".into()),
+            ..dated(&tip, d, d)
+        };
+        rewrite_commits(&state, &repo, &base, &[reword], &[])
+            .await
+            .unwrap();
+        assert!(
+            body("HEAD").await.contains("Hooked: yes"),
+            "a replay reword still runs the hook"
+        );
+    }
+
+    /// A commit's message exactly as its object stores it.
+    async fn raw_message(repo: &str, r: &str) -> String {
+        let object = git(repo, &["cat-file", "commit", r]).await;
+        let (_, message) = object.split_once("\n\n").unwrap_or((&object, ""));
+        message.to_string()
+    }
+
+    /// A dated commit whose own pick is not a fast-forward (its parent was dated too)
+    /// keeps its message byte for byte, though git's sequencer ran prepare-commit-msg
+    /// on that pick; a reword in the same repo still runs the hook.
+    #[tokio::test]
+    async fn dated_non_fast_forward_picks_keep_their_original_message() {
+        for replay in [true, false] {
+            let (_dir, repo) = setup_repo(&format!("dates-nonff-{replay}")).await;
+            let base = rev(&repo, "HEAD").await;
+            let a = commit_at(
+                &repo,
+                Some("a.txt"),
+                "A subject\n\nA body",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            let b = commit_at(
+                &repo,
+                Some("b.txt"),
+                "B subject",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            let originals = [raw_message(&repo, &a).await, raw_message(&repo, &b).await];
+            let hooks = Path::new(&repo).join(".git/hooks");
+            let hooks = hooks.to_string_lossy().replace('\\', "/");
+            git(&repo, &["config", "core.hooksPath", &hooks]).await;
+            write_hook(
+                &repo,
+                "prepare-commit-msg",
+                "printf 'Hooked: yes\\n' >> \"$1\"",
+            );
+            let d = Some(date(1767949200, 0));
+            let steps = vec![dated(&a, d, d), dated(&b, d, d)];
+            let state = AppState::default();
+            if replay {
+                rewrite_commits(&state, &repo, &base, &steps, &[])
+                    .await
+                    .unwrap();
+            } else {
+                rebase_edit(&state, repo.clone(), base.clone(), steps, None)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                [
+                    raw_message(&repo, "HEAD~1").await,
+                    raw_message(&repo, "HEAD").await
+                ],
+                originals,
+                "replay={replay}"
+            );
+            for r in ["HEAD", "HEAD~1"] {
+                assert_eq!(
+                    raw_dates(&repo, r).await,
+                    "1767949200 +0000|1767949200 +0000",
+                    "replay={replay} {r}: the dates still land"
+                );
+            }
+
+            if replay {
+                let tip = rev(&repo, "HEAD").await;
+                let parent = rev(&repo, "HEAD~1").await;
+                let reword = RewriteStep {
+                    message: Some("reworded".into()),
+                    ..dated(&tip, d, d)
+                };
+                rewrite_commits(&state, &repo, &parent, &[reword], &[])
+                    .await
+                    .unwrap();
+                assert!(
+                    raw_message(&repo, "HEAD").await.contains("Hooked: yes"),
+                    "a replay reword still runs the hook"
+                );
+            }
+        }
+    }
+
+    /// A dated pick the user skips from a terminal leaves HEAD on the commit before it;
+    /// the step's amend then refuses instead of rewriting that commit, and the rebase
+    /// stops on the failed exec with the reason.
+    #[tokio::test]
+    async fn a_skipped_dated_pick_leaves_the_previous_commit_alone() {
+        let (_dir, repo) = setup_repo("dates-skipped-pick").await;
+        let base = rev(&repo, "HEAD").await;
+        let one = commit_at(
+            &repo,
+            Some("a.txt"),
+            "one",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        let two = commit_at(
+            &repo,
+            Some("a.txt"),
+            "two",
+            FIXTURE_AUTHOR,
+            FIXTURE_COMMITTER,
+        )
+        .await;
+        let d = Some(date(1767949200, 0));
+        // "two"'s patch (one→two) can't apply onto v0 once "one" is dropped.
+        rebase_edit(
+            &AppState::default(),
+            repo.clone(),
+            base.clone(),
+            vec![dated(&two, d, d)],
+            Some(vec![one]),
+        )
+        .await
+        .unwrap();
+        assert!(rebasing(&repo).await, "stopped on the conflict");
+        let skip = run_git_raw(Some(&repo), &["rebase", "--skip"], DEFAULT_TIMEOUT)
+            .await
+            .unwrap();
+        let text = skip.full_failure_text();
+        assert_ne!(skip.code, 0, "{text}");
+        assert!(text.contains(&format!("HEAD is not {two}")), "{text}");
+        assert_eq!(
+            rev(&repo, "HEAD").await,
+            base,
+            "the previous commit is untouched"
+        );
+        assert!(rebasing(&repo).await, "left for the banner");
+    }
+
+    /// A Latin-1 commit with a non-ASCII author name, whose pick is not a fast-forward,
+    /// still takes its dates on both routes: that pick re-encodes the author header,
+    /// which the skipped-pick guard must not read as a different commit.
+    #[tokio::test]
+    async fn a_reencoded_non_fast_forward_pick_still_takes_its_dates() {
+        for replay in [true, false] {
+            let (dir, repo) = setup_repo(&format!("dates-reencoded-{replay}")).await;
+            let base = rev(&repo, "HEAD").await;
+            let one = commit_at(
+                &repo,
+                Some("a.txt"),
+                "one",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            commit_at(
+                &repo,
+                Some("b.txt"),
+                "two",
+                FIXTURE_AUTHOR,
+                FIXTURE_COMMITTER,
+            )
+            .await;
+            let tree = rev(&repo, "HEAD^{tree}").await;
+            let mut object = format!("tree {tree}\nparent {one}\n").into_bytes();
+            object.extend_from_slice(
+                b"author Ren\xe9 <r@e.x> 978307200 +0100\n\
+                  committer Ren\xe9 <r@e.x> 978393600 -0500\n\
+                  encoding ISO-8859-1\n\ncaf\xe9\n",
+            );
+            let file = dir.path().join(".git/fixture-latin1");
+            std::fs::write(&file, &object).unwrap();
+            let file = file.to_string_lossy().into_owned();
+            let latin1 = git(&repo, &["hash-object", "-t", "commit", "-w", &file]).await;
+            let latin1 = latin1.trim().to_string();
+            git(&repo, &["reset", "-q", "--hard", &latin1]).await;
+
+            let d = Some(date(1767949200, 0));
+            let steps = vec![dated(&one, d, d), dated(&latin1, d, d)];
+            let state = AppState::default();
+            if replay {
+                rewrite_commits(&state, &repo, &base, &steps, &[])
+                    .await
+                    .unwrap();
+            } else {
+                rebase_edit(&state, repo.clone(), base.clone(), steps, None)
+                    .await
+                    .unwrap();
+            }
+            assert!(!rebasing(&repo).await, "replay={replay}: finished");
+            for r in ["HEAD", "HEAD~1"] {
+                assert_eq!(
+                    raw_dates(&repo, r).await,
+                    "1767949200 +0000|1767949200 +0000",
+                    "replay={replay} {r}: the dates land"
+                );
+            }
+        }
+    }
+
+    /// An empty message takes new dates on the replay and HEAD routes and stays empty.
+    #[tokio::test]
+    async fn an_empty_message_takes_dates_and_stays_empty() {
+        let (_dir, repo) = setup_repo("dates-empty-message").await;
+        let base = rev(&repo, "HEAD").await;
+        let out = run_git_raw(
+            Some(&repo),
+            &["commit", "--allow-empty", "--allow-empty-message", "-m", ""],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.code, 0, "{}", out.full_failure_text());
+        assert_eq!(raw_message(&repo, "HEAD").await, "");
+        let c = rev(&repo, "HEAD").await;
+
+        let d = Some(date(1767949200, 0));
+        rewrite_commits(&AppState::default(), &repo, &base, &[dated(&c, d, d)], &[])
+            .await
+            .unwrap();
+        assert_eq!(raw_message(&repo, "HEAD").await, "", "replay");
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1767949200 +0000|1767949200 +0000"
+        );
+
+        let tip = rev(&repo, "HEAD").await;
+        let pin = head_branch(&repo).await;
+        let e = Some(date(1767949300, 0));
+        amend_dates(&repo, &tip, Some(&pin), e, e).await.unwrap();
+        assert_eq!(raw_message(&repo, "HEAD").await, "", "HEAD");
+        assert_eq!(
+            raw_dates(&repo, "HEAD").await,
+            "1767949300 +0000|1767949300 +0000"
+        );
+    }
+
+    /// A commit object's raw bytes, split into its headers (through the last header's
+    /// newline) and its message.
+    async fn raw_object_parts(repo: &str, r: &str) -> (Vec<u8>, Vec<u8>) {
+        let object = run_git(Some(repo), &["cat-file", "commit", r], DEFAULT_TIMEOUT)
+            .await
+            .unwrap()
+            .stdout;
+        let at = object.windows(2).position(|w| w == b"\n\n").unwrap();
+        (object[..=at].to_vec(), object[at + 2..].to_vec())
+    }
+
+    /// Dates-only edits on both routes keep each message's bytes and its `encoding`
+    /// header when i18n.logOutputEncoding differs from i18n.commitEncoding, CRs and a
+    /// missing final newline included.
+    #[tokio::test]
+    async fn dated_messages_keep_their_bytes_under_differing_encodings() {
+        const LATIN1: &[u8] = b"caf\xe9\n";
+        const CRLF: &[u8] = b"subj\r\n\r\nbody";
+        const HEADER: &[u8] = b"\nencoding ISO-8859-1\n";
+        let has_header = |headers: &[u8]| headers.windows(HEADER.len()).any(|w| w == HEADER);
+        for replay in [true, false] {
+            let (dir, repo) = setup_repo(&format!("dates-encoding-{replay}")).await;
+            let base = rev(&repo, "HEAD").await;
+            git(&repo, &["config", "i18n.commitEncoding", "ISO-8859-1"]).await;
+            git(&repo, &["config", "i18n.logOutputEncoding", "UTF-8"]).await;
+            let mut commits = Vec::new();
+            for (i, message) in [LATIN1, CRLF].into_iter().enumerate() {
+                std::fs::write(dir.path().join(format!("f{i}.txt")), "x\n").unwrap();
+                let file = dir.path().join(format!(".git/fixture-msg-{i}"));
+                std::fs::write(&file, message).unwrap();
+                let file = file.to_string_lossy().into_owned();
+                git(&repo, &["add", "."]).await;
+                let out = run_git_raw(
+                    Some(&repo),
+                    &["commit", "--cleanup=verbatim", "-F", &file],
+                    DEFAULT_TIMEOUT,
+                )
+                .await
+                .unwrap();
+                assert_eq!(out.code, 0, "{}", out.full_failure_text());
+                let (headers, body) = raw_object_parts(&repo, "HEAD").await;
+                assert!(has_header(&headers) && body == message, "fixture {i}");
+                commits.push(rev(&repo, "HEAD").await);
+            }
+            let d = Some(date(1767949200, 0));
+            let steps = vec![dated(&commits[0], d, d), dated(&commits[1], d, d)];
+            let state = AppState::default();
+            if replay {
+                rewrite_commits(&state, &repo, &base, &steps, &[])
+                    .await
+                    .unwrap();
+            } else {
+                rebase_edit(&state, repo.clone(), base.clone(), steps, None)
+                    .await
+                    .unwrap();
+            }
+            for (r, message) in [("HEAD~1", LATIN1), ("HEAD", CRLF)] {
+                let (headers, body) = raw_object_parts(&repo, r).await;
+                assert_eq!(body, message, "replay={replay} {r}");
+                assert!(has_header(&headers), "replay={replay} {r}: encoding header");
+                assert_eq!(
+                    raw_dates(&repo, r).await,
+                    "1767949200 +0000|1767949200 +0000",
+                    "replay={replay} {r}: the dates still land"
+                );
+            }
+        }
     }
 
     /// An out-of-range step date refuses before the scratch dir is written.

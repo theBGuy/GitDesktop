@@ -755,7 +755,8 @@ the failed part's line when one shows.
   **Same as author date** is ticked when the commit's two dates are the same; untick
   it to set the committer date on its own. Years run from 1970 to 2099 and offsets
   from -12:00 to +14:00. A date in the future, or an author date later than the
-  committer date, is flagged and allowed.
+  committer date, is flagged and allowed. An author date earlier than the parent
+  commit's is flagged too, and the dialog asks once before changing it.
 - **Revert** — create a new commit that undoes a commit's changes. It asks first, and
   says that history keeps both commits. Reverting or cherry-picking a merge commit asks
   which of its parents counts as the mainline instead, with Parent 1 (the usual choice)
@@ -802,13 +803,17 @@ the failed part's line when one shows.
   asks once before going ahead. Rewritten commits you leave alone keep their author
   date, and Git stamps their committer date with the time of the rewrite. On a row set
   to **edit**, its dates are applied after the pause and replace any set by hand
-  during it. A change of dates alone skips commit hooks; a reword with dates runs them
-  as a reword does. A "Result" count shows what you'll end up with. Reworded and
-  squashed commits keep their original author; a squash keeps its first commit's
-  author. With no **edit**, it applies all at once — a conflict rolls it back. If
-  you choose **edit**, it starts a rebase that **pauses** at that commit — amend it in the
-  **Changes** tab (stage and commit/amend as usual), then **Continue** from the banner
-  there. A quick **Squash N commits…** is also on the context menu when you select adjacent
+  during it. Changing only a commit's dates runs no hooks of its own and keeps its
+  message. Git still runs its pick hooks when the rewrite has to move that commit, and a
+  failing hook stops the rewrite; a row set to **edit** keeps what its pause leaves, a
+  hook's trailer included. A reword with dates runs hooks as a reword does, and the
+  commits replayed above an edited one are picked as usual, hooks included. A
+  "Result" count shows what you'll end up with. Reworded and squashed commits keep
+  their original author; a squash keeps its first commit's author. With no **edit**,
+  it applies all at once — a conflict rolls it back. If you choose **edit**, it starts
+  a rebase that **pauses** at that commit — amend it in the **Changes** tab (stage
+  and commit/amend as usual), then **Continue** from the banner there. A quick
+  **Squash N commits…** is also on the context menu when you select adjacent
   commits; both it and **Edit history** wait while a merge, rebase, cherry-pick or revert
   is in progress, and the menu says to finish the operation in **Changes** first. When
   there's nothing to edit (every commit is pushed, or in a repository with no remote
@@ -3598,7 +3603,8 @@ lease), delete a remote branch, drop a stash (by the sha that list stashes repor
 a tag, and drop commits on a guarded rebase pull. Agent-session branches
 (\`gd/session/*\`) are refused by the branch-mutating tools; push and force-push refuse
 one, whether named or checked out, and it can't be a pull request's head. An in-flight
-agent session is never broken, and its branch stays on this computer.
+agent session is never broken: these tools, and Push or Publish in the app, never
+publish its branch.
 
 The server also exposes GitDesktop's own **AI generation recipes** (always on, no flag):
 \`generate_commit_message\`, \`generate_pr_description\`, and \`generate_branch_name\` each hand
@@ -3961,7 +3967,7 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - {{key:up}} / {{key:down}} navigate every list — files, commits, branches, PRs, stack
   members, runs, sessions, and the side rails (Settings, Repository settings, and this
   guide). {{key:shift+up}} / {{key:shift+down}} extends a selection in History.
-  **Enter** opens the highlighted item; **Esc** closes dialogs and menus.
+  {{key:enter}} opens the highlighted item; {{key:escape}} closes dialogs and menus.
 - **Tabs:** {{kbd:tab-changes}} Changes · {{kbd:tab-history}} History ·
   {{kbd:tab-compare}} Compare · {{kbd:tab-pulls}} Pull Requests · {{kbd:tab-actions}}
   Actions · {{kbd:tab-issues}} Issues · {{kbd:tab-discussions}} Discussions ·

@@ -300,9 +300,10 @@ apart.
   already on the branch's upstream. For older unpushed commits, each row in
   *Edit history* shows its date and edits it in place, alongside reword,
   squash and reorder, and selecting several rows sets one date on all of
-  them. Dates are typed (one pasted from `git log` works) or picked, keep
-  the commit's own UTC offset unless you type another, and a commit that
-  would end up dated before its parent is flagged and confirmed first.
+  them. Dates are typed (one pasted from `git log` works) or picked. A
+  commit's own date editor keeps its UTC offset unless you type another,
+  and one date set on several rows gives them all one offset. A commit
+  that would end up dated before its parent is flagged and confirmed first.
 - **Recover lost work** ⭐: a stash browser whose scan (via `git fsck`) finds
   orphaned and dangling stashes, uncommitted work a `git stash` saved but
   that fell out of `git stash list` (dropped, or abandoned by an interrupted

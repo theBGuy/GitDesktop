@@ -175,6 +175,25 @@ async function loaded() {
   await waitFor(() => expect(held(dateButton(C))).toBe(false));
 }
 
+/** Picks a row's action from its menu and waits out the close: the menu's
+ *  explicit return focus lands on the row a microtask after the popup
+ *  unmounts, whatever took focus meanwhile, so a gesture made before it
+ *  settles would be retargeted (a later Shift+click ranges from this row). */
+async function pickAction(
+  user: ReturnType<typeof userEvent.setup>,
+  c: CommitSummary,
+  name: RegExp,
+) {
+  await user.click(
+    screen.getByRole("button", { name: `Action for ${c.subject}` }),
+  );
+  await user.click(await screen.findByRole("menuitem", { name }));
+  await waitFor(() => {
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(rowOf(c)).toHaveFocus();
+  });
+}
+
 async function typeInto(
   user: ReturnType<typeof userEvent.setup>,
   field: HTMLElement,
@@ -328,10 +347,8 @@ describe("multi-select", () => {
   it("holds fold members and dropped rows and reports them skipped", async () => {
     const { user } = renderDialog();
     await loaded();
-    await user.click(screen.getByRole("button", { name: "Action for Second" }));
-    await user.click(await screen.findByRole("menuitem", { name: /^Fixup/ }));
-    await user.click(screen.getByRole("button", { name: "Action for Third" }));
-    await user.click(await screen.findByRole("menuitem", { name: /^Drop/ }));
+    await pickAction(user, B, /^Fixup/);
+    await pickAction(user, C, /^Drop/);
     await waitFor(() => expect(held(dateButton(B))).toBe(true));
     expect(dateButton(B)).toHaveAccessibleDescription(
       "A squashed or fixed-up commit takes its dates from the commit it combines into.",
@@ -363,8 +380,7 @@ describe("multi-select", () => {
     await user.click(subjectOf(B));
     await user.keyboard("{/Control}");
     expect(isSelected(B)).toBe(false);
-    await user.click(screen.getByRole("button", { name: "Action for Second" }));
-    await user.click(await screen.findByRole("menuitem", { name: /^Reword/ }));
+    await pickAction(user, B, /^Reword/);
     const message = await screen.findByLabelText("Message for Second");
     expect(message).toBeEnabled();
     await user.type(message, "!");
@@ -376,8 +392,7 @@ describe("multi-select", () => {
   it("seeds the strip from the first selected row when focus lands on a fold member", async () => {
     const { user } = renderDialog();
     await loaded();
-    await user.click(screen.getByRole("button", { name: "Action for Second" }));
-    await user.click(await screen.findByRole("menuitem", { name: /^Fixup/ }));
+    await pickAction(user, B, /^Fixup/);
     await user.click(subjectOf(D));
     await user.keyboard("{Shift>}");
     await user.click(subjectOf(B));
@@ -385,6 +400,25 @@ describe("multi-select", () => {
     expect(rowOf(B)).toHaveFocus();
     expect(screen.getByLabelText("Date for all 2")).toHaveValue(
       "2026-11-04 10:00:00 +01:00",
+    );
+  });
+
+  // Control: render the note without the seed row's id.
+  it("names the seed row's id when an offset-less strip date borrows its offset", async () => {
+    const { user } = renderDialog();
+    await loaded();
+    await pickAction(user, B, /^Fixup/);
+    await user.click(subjectOf(D));
+    await user.keyboard("{Shift>}");
+    await user.click(subjectOf(B));
+    await user.keyboard("{/Shift}");
+    await typeInto(
+      user,
+      screen.getByLabelText("Date for all 2"),
+      "2026-11-06 08:00:00",
+    );
+    expect(strip()?.textContent).toContain(
+      `(the offset of ${D.hash.slice(0, 7)}, the commit this strip was filled from)`,
     );
   });
 });
@@ -437,6 +471,27 @@ describe("before parent", () => {
     expect(rowOf(C).getAttribute("aria-label")).toMatch(/Third$/);
   });
 
+  // Control: take only fully readable rows into originalAuthor; B goes
+  // unflagged and the rewrite runs without a prompt.
+  it("compares against a parent whose committer date alone is unreadable", async () => {
+    vi.mocked(gitUnpushedMessages).mockResolvedValue(
+      unpushed({ [A.hash]: { committerDate: null } }),
+    );
+    const { user } = await datedBeforeParent();
+    expect(within(rowOf(B)).getByText("before parent")).toBeInTheDocument();
+    expect(footer()).toContain("1 dated before its parent");
+    vi.mocked(gitRewriteCommits).mockResolvedValue(undefined);
+    await user.click(primary());
+    await waitFor(() =>
+      expect(useConfirm.getState().request?.title).toBe(
+        "Rewrite with out-of-order dates?",
+      ),
+    );
+    act(() => useConfirm.getState().answer(false));
+    await act(() => Promise.resolve());
+    expect(gitRewriteCommits).not.toHaveBeenCalled();
+  });
+
   // Control: remove the check after the confirm; the rewrite runs.
   it("refuses when a promotion starts while the prompt is open", async () => {
     const info = vi.spyOn(toast, "info");
@@ -453,7 +508,108 @@ describe("before parent", () => {
   });
 });
 
+describe("the parent's date read", () => {
+  async function dated(c: CommitSummary, text: string) {
+    const r = renderDialog();
+    await loaded();
+    await r.user.click(dateButton(c));
+    await typeInto(r.user, screen.getByLabelText("Author date"), text);
+    return r;
+  }
+
+  // Control: drop the pending case from the primary's reasons; the primary is
+  // live and the rewrite runs unjudged.
+  it("holds the primary while the parent's date is still reading", async () => {
+    vi.mocked(gitCommitDetails).mockReturnValue(
+      new Promise<never>(() => undefined),
+    );
+    await dated(C, "2026-11-03 11:00:00 +01:00");
+    expect(held(primary())).toBe(true);
+    expect(primary()).toHaveAccessibleDescription("Reading the parent's date…");
+  });
+
+  // Control: ask only on `beforeParent`; the rewrite runs without a prompt.
+  it("asks once, with the unread wording, when the oldest row is re-dated over a failed read", async () => {
+    vi.mocked(gitCommitDetails).mockRejectedValue(new Error("boom"));
+    const { user } = await dated(A, "2026-11-01 11:00:00 +01:00");
+    await waitFor(() =>
+      expect(
+        within(rowOf(A)).getByText("parent date unread"),
+      ).toBeInTheDocument(),
+    );
+    expect(footer()).toContain("oldest commit's parent date unread");
+    expect(footer()).not.toContain("dated before");
+    expect(rowOf(A).getAttribute("aria-label")).toMatch(
+      /First, parent's date unread, dates changed$/,
+    );
+    expect(held(primary())).toBe(false);
+    vi.mocked(gitRewriteCommits).mockResolvedValue(undefined);
+
+    await user.click(primary());
+    await waitFor(() =>
+      expect(useConfirm.getState().request?.title).toBe(
+        "Rewrite without checking the parent's date?",
+      ),
+    );
+    expect(useConfirm.getState().request?.body).toContain(
+      "The oldest commit's parent date couldn't be read",
+    );
+    act(() => useConfirm.getState().answer(false));
+    await act(() => Promise.resolve());
+    expect(useConfirm.getState().request).toBeNull();
+    expect(gitRewriteCommits).not.toHaveBeenCalled();
+
+    await user.click(primary());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() => expect(gitRewriteCommits).toHaveBeenCalledTimes(1));
+  });
+
+  it("asks nothing over a failed read when the oldest row keeps its date", async () => {
+    vi.mocked(gitCommitDetails).mockRejectedValue(new Error("boom"));
+    const { user } = await dated(C, "2026-11-03 11:00:00 +01:00");
+    await waitFor(() => expect(held(primary())).toBe(false));
+    expect(footer()).not.toContain("parent date unread");
+    vi.mocked(gitRewriteCommits).mockResolvedValue(undefined);
+    await user.click(primary());
+    await waitFor(() => expect(gitRewriteCommits).toHaveBeenCalledTimes(1));
+    expect(useConfirm.getState().request).toBeNull();
+  });
+});
+
+describe("focus after a row's menu", () => {
+  // Control: return the menu's row from finalFocus unconditionally; focus is
+  // pulled back to C after the exit.
+  it("leaves focus on a row focused before the menu's return lands", async () => {
+    const { user } = renderDialog();
+    await loaded();
+    await user.click(
+      screen.getByRole("button", { name: `Action for ${C.subject}` }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: /^Drop/ }));
+    act(() => rowOf(B).focus());
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
+    await act(() => new Promise((r) => setTimeout(r, 50)));
+    expect(rowOf(B)).toHaveFocus();
+  });
+});
+
 describe("read states", () => {
+  // Control: drop the failed arm of the button text; the Skeleton stays.
+  it("names a failed row with no listed date by its visible text", async () => {
+    vi.mocked(gitUnpushedMessages).mockRejectedValue(new Error("boom"));
+    renderDialog({
+      commits: COMMITS.map((c) => (c === B ? { ...B, date: "" } : c)),
+    });
+    await waitFor(() =>
+      expect(dateButton(B)).toHaveAccessibleName(
+        "Dates for Second: Date not loaded",
+      ),
+    );
+    expect(dateButton(B)).toHaveTextContent("Date not loaded");
+    expect(dateButton(B).querySelector('[data-slot="skeleton"]')).toBeNull();
+  });
+
   it("holds the date buttons while the read is pending", async () => {
     vi.mocked(gitUnpushedMessages).mockReturnValue(
       new Promise<never>(() => undefined),

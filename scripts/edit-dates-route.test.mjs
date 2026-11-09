@@ -14,6 +14,7 @@ const base = {
   index: 1,
   headOid: HEAD,
   opInProgress: false,
+  unresolved: false,
   viewAgreed: true,
   unpushedCount: 3,
   editable: [HEAD, B],
@@ -27,6 +28,26 @@ test("an operation in progress holds every row, HEAD included", () => {
     hold: "op",
   });
   assert.deepEqual(route({ hash: HEAD, index: 0, opInProgress: true }), {
+    kind: "held",
+    hold: "op",
+  });
+});
+
+test("unmerged entries hold every row after an operation in progress", () => {
+  assert.deepEqual(route({ hash: HEAD, index: 0, unresolved: true }), {
+    kind: "held",
+    hold: "unresolved",
+  });
+  assert.deepEqual(route({ unresolved: true }), {
+    kind: "held",
+    hold: "unresolved",
+  });
+  // Ahead of the HEAD and view holds, behind the operation.
+  assert.deepEqual(route({ hash: C, index: 0, unresolved: true }), {
+    kind: "held",
+    hold: "unresolved",
+  });
+  assert.deepEqual(route({ unresolved: true, opInProgress: true }), {
     kind: "held",
     hold: "op",
   });

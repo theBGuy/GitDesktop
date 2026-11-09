@@ -5,14 +5,20 @@
  * loads it under Node's type stripping; it takes primitives only.
  */
 
-/** `head-sync`: the log and status disagree on HEAD, which no count read
- *  settles, or the row isn't in the loaded log; `refreshing`: the log and the unpushed count disagree. */
+/** `unresolved`: status lists unmerged entries with no operation stopped;
+ *  `head-sync`: the log and status disagree on HEAD, which no count read
+ *  settles, or the row isn't in the loaded log; `refreshing`: the log and the
+ *  unpushed count disagree. */
 export type EditDatesHold =
   | "op"
+  | "unresolved"
   | "head-sync"
   | "refreshing"
   | "pushed"
   | "out-of-range";
+
+/** The menu-row reason for unmerged entries, shared by Undo and Edit dates. */
+export const RESOLVE_CONFLICTS_HINT = " (resolve the conflicts first)";
 
 export type EditDatesRoute =
   | { kind: "head" }
@@ -26,6 +32,8 @@ export function editDatesRoute(input: {
   /** Status's HEAD. */
   headOid: string | null | undefined;
   opInProgress: boolean;
+  /** Whether status lists unmerged entries (a stash pop that conflicted). */
+  unresolved: boolean;
   /** Whether the log and the unpushed count agree (HistoryPanel's `agreed`). */
   viewAgreed: boolean;
   unpushedCount: number;
@@ -35,6 +43,7 @@ export function editDatesRoute(input: {
   const { hash, index, headOid } = input;
   // The order the backend refuses in: an operation in progress outranks HEAD.
   if (input.opInProgress) return { kind: "held", hold: "op" };
+  if (input.unresolved) return { kind: "held", hold: "unresolved" };
   if (index === 0 && hash === headOid) return { kind: "head" };
   // The log and status disagree on HEAD, or the row left the log: what this
   // commit is stays unknown until they agree again.

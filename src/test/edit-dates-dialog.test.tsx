@@ -21,11 +21,14 @@ import {
 import {
   gitAmendCommitDates,
   gitCommitDetails,
+  gitCommitRecordsParent,
+  gitLog,
   gitOpState,
   gitStatus,
 } from "@/lib/git/api";
 import { repoKeys } from "@/lib/git/queries";
-import type { CommitDetails, RepoStatus } from "@/lib/git/types";
+import type { CommitDetails, CommitSummary, RepoStatus } from "@/lib/git/types";
+import { useConfirm } from "@/lib/stores/confirm";
 import { useUiStore } from "@/lib/stores/ui";
 
 const flags = vi.hoisted(() => ({ rulesSettling: false, blocked: false }));
@@ -34,6 +37,8 @@ vi.mock("@/lib/git/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/git/api")>()),
   gitStatus: vi.fn(),
   gitCommitDetails: vi.fn(),
+  gitCommitRecordsParent: vi.fn(),
+  gitLog: vi.fn(),
   gitOpState: vi.fn(),
   gitAmendCommitDates: vi.fn(),
 }));
@@ -93,6 +98,18 @@ const details = (over: Partial<CommitDetails> = {}): CommitDetails => ({
   date: "2026-11-07T23:58:04+01:00",
   committerDate: "2026-11-07T23:58:04+01:00",
   ...over,
+});
+
+const PARENT = "fedcba9876".repeat(4);
+
+const logRow = (hash: string, isMerge = false): CommitSummary => ({
+  hash,
+  subject: "a commit",
+  author: "Ann",
+  authorEmail: "ann@example.com",
+  date: "2026-11-07T20:00:00+01:00",
+  tags: [],
+  isMerge,
 });
 
 const opIdle = {
@@ -166,7 +183,13 @@ beforeEach(() => {
   onDatesChanged.mockReset();
   vi.mocked(gitStatus).mockReset().mockResolvedValue(status());
   vi.mocked(gitCommitDetails).mockReset().mockResolvedValue(details());
+  // A lone root commit by default: no parent, so nothing is judged.
+  vi.mocked(gitLog)
+    .mockReset()
+    .mockResolvedValue([logRow(HASH)]);
+  vi.mocked(gitCommitRecordsParent).mockReset().mockResolvedValue(false);
   vi.mocked(gitOpState).mockReset().mockResolvedValue(opIdle);
+  useConfirm.setState({ request: null, requestHold: null });
   vi.mocked(gitAmendCommitDates).mockReset().mockResolvedValue(NEW_HASH);
   vi.mocked(toast.success).mockReset();
   useUiStore.setState({ repoPath: REPO, selectedCommitHash: HASH });
@@ -283,8 +306,67 @@ describe("Edit dates dialog", () => {
     );
     expect(useUiStore.getState().selectedCommitHash).toBe(NEW_HASH);
     expect(onDatesChanged).toHaveBeenCalledTimes(1);
-    expect(onDatesChanged).toHaveBeenCalledWith(HASH, NEW_HASH);
+    expect(onDatesChanged).toHaveBeenCalledWith(HASH, NEW_HASH, true);
   });
+
+  // Control: report `true` whatever liveTarget says; the dismissed case reads
+  // as closed by the change.
+  it("reports a change that lands after Esc as not closing the dialog", async () => {
+    let settle: (v: string) => void = () => undefined;
+    vi.mocked(gitAmendCommitDates).mockImplementation(
+      () =>
+        new Promise<string>((r) => {
+          settle = r;
+        }),
+    );
+    renderHost();
+    await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
+    await userEvent.click(primary());
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalled());
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.getByTestId("open").textContent).toBe("false"),
+    );
+    settle(NEW_HASH);
+    await waitFor(() =>
+      expect(onDatesChanged).toHaveBeenCalledWith(HASH, NEW_HASH, false),
+    );
+  });
+
+  // Control: drop the `adoptSelection &&` guard; the null selection becomes
+  // the rewrite.
+  it.each([
+    [false, null],
+    [true, NEW_HASH],
+  ])(
+    "with no store selection and adoptSelection=%s selects %s",
+    async (adopt, want) => {
+      useUiStore.setState({ repoPath: REPO, selectedCommitHash: null });
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      render(
+        <QueryClientProvider client={client}>
+          <EditDatesDialog
+            repoPath={REPO}
+            target={{
+              hash: HASH,
+              repo: REPO,
+              expectedHead: HASH,
+              expectedBranch: "main",
+            }}
+            onClose={() => undefined}
+            onDatesChanged={onDatesChanged}
+            adoptSelection={adopt}
+          />
+        </QueryClientProvider>,
+      );
+      await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
+      await userEvent.click(primary());
+      await waitFor(() => expect(onDatesChanged).toHaveBeenCalled());
+      expect(useUiStore.getState().selectedCommitHash).toBe(want);
+    },
+  );
 
   it("does not prune or report when the repo changed under the await", async () => {
     let settle: (v: string) => void = () => undefined;
@@ -343,6 +425,26 @@ describe("Edit dates dialog", () => {
       ).not.toHaveLength(0),
     );
     expect(primary()).toHaveAttribute("aria-disabled", "true");
+  });
+
+  // Control: drop the `unresolved` arm of holdReason; the button goes live.
+  it("holds on unmerged entries with no operation stopped", async () => {
+    // A `git stash pop` that conflicted: no operation, an unmerged path.
+    vi.mocked(gitStatus).mockResolvedValue({
+      ...status(),
+      entries: [{ path: "a.txt", staged: null, unstaged: "conflicted" }],
+    });
+    const { client } = renderHost();
+    await detailsSettled(client);
+    await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
+    await waitFor(() =>
+      expect(
+        screen.getAllByText("Resolve the conflicts first."),
+      ).not.toHaveLength(0),
+    );
+    expect(primary()).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(primary());
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
   });
 
   it("picks a date and a time into the typed field, keeping its offset", async () => {
@@ -437,7 +539,7 @@ describe("Edit dates dialog", () => {
     await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
     await userEvent.click(primary());
     await waitFor(() =>
-      expect(onDatesChanged).toHaveBeenCalledWith(HASH, NEW_HASH),
+      expect(onDatesChanged).toHaveBeenCalledWith(HASH, NEW_HASH, true),
     );
     expect(useUiStore.getState().selectedCommitHash).toBe(other);
   });
@@ -483,7 +585,7 @@ describe("Edit dates dialog", () => {
     renderHost();
     await authorField();
     const box = screen.getByRole("checkbox", { name: /same as author date/i });
-    expect(box).toHaveAccessibleName("Committer date: Same as author date");
+    expect(box).toHaveAccessibleName("Same as author date (committer date)");
     expect(box).not.toBeChecked();
     await userEvent.click(box);
     expect(
@@ -494,5 +596,163 @@ describe("Edit dates dialog", () => {
     await waitFor(() =>
       expect(primary()).toHaveAccessibleDescription("Change a date first."),
     );
+  });
+});
+
+// Negative control (run once, reverted): skipping the ask in `run()` sends the
+// earlier-than-parent dates with no prompt, failing the first case.
+describe("Edit dates dialog against HEAD's parent", () => {
+  /** HEAD over PARENT, its parent's details answered by `parent`. */
+  function withParent(parent: () => Promise<CommitDetails>) {
+    vi.mocked(gitLog).mockResolvedValue([logRow(HASH), logRow(PARENT)]);
+    vi.mocked(gitCommitDetails).mockImplementation((_repo, hash) =>
+      hash === PARENT ? parent() : Promise.resolve(details()),
+    );
+  }
+  const parentAt = (date: string) => () =>
+    Promise.resolve(details({ hash: PARENT, date, committerDate: date }));
+  const EARLIER = "2026-11-07 19:00:00 +01:00";
+
+  it("warns and asks once before dating HEAD earlier than its parent", async () => {
+    withParent(parentAt("2026-11-07T20:00:00+01:00"));
+    renderHost();
+    await retype(await authorField(), EARLIER);
+    expect(
+      await screen.findByText(/^Earlier than its parent fedcba9 \(/),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+
+    await userEvent.click(primary());
+    await waitFor(() =>
+      expect(useConfirm.getState().request?.title).toBe(
+        "Rewrite with out-of-order dates?",
+      ),
+    );
+    expect(useConfirm.getState().request?.confirmLabel).toBe("Change dates");
+    act(() => useConfirm.getState().answer(false));
+    await act(() => Promise.resolve());
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+    expect(screen.getByTestId("open").textContent).toBe("true");
+
+    await userEvent.click(primary());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalledTimes(1));
+  });
+
+  it("sends a date after the parent's without asking", async () => {
+    withParent(parentAt("2026-11-07T20:00:00+01:00"));
+    renderHost();
+    await retype(await authorField(), "2026-11-07 21:00:00 +01:00");
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await userEvent.click(primary());
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalledTimes(1));
+    expect(useConfirm.getState().request).toBeNull();
+  });
+
+  it("reads no parent for a root commit and asks nothing", async () => {
+    renderHost();
+    await retype(await authorField(), EARLIER);
+    await userEvent.click(primary());
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalledTimes(1));
+    expect(useConfirm.getState().request).toBeNull();
+    for (const [, hash] of vi.mocked(gitCommitDetails).mock.calls)
+      expect(hash).toBe(HASH);
+  });
+
+  it("holds while the parent's date is read", async () => {
+    withParent(() => new Promise<never>(() => undefined));
+    renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        "Reading the parent's date…",
+      ),
+    );
+    expect(primary()).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("asks with the unread wording when the parent's read fails", async () => {
+    withParent(() => Promise.reject(new Error("read boom")));
+    renderHost();
+    await retype(await authorField(), EARLIER);
+    expect(
+      await screen.findByText(
+        "The date of its parent fedcba9 couldn't be read, so this date can't be checked against it.",
+      ),
+    ).toBeInTheDocument();
+    await userEvent.click(primary());
+    await waitFor(() =>
+      expect(useConfirm.getState().request?.title).toBe(
+        "Rewrite without checking the parent's date?",
+      ),
+    );
+    expect(useConfirm.getState().request?.body).toBe(
+      "This commit's parent date couldn't be read, so its new date may fall before its parent's. Git allows this; views sorted by date would list the two out of order.",
+    );
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalledTimes(1));
+  });
+
+  // Control: read a lone commit as parentless; the change is sent unasked.
+  it("asks with the unread wording at a shallow clone's boundary", async () => {
+    vi.mocked(gitCommitRecordsParent).mockResolvedValue(true);
+    renderHost();
+    await retype(await authorField(), EARLIER);
+    expect(
+      await screen.findByText(
+        "The date of its parent couldn't be read, so this date can't be checked against it.",
+      ),
+    ).toBeInTheDocument();
+    await userEvent.click(primary());
+    await waitFor(() =>
+      expect(useConfirm.getState().request?.title).toBe(
+        "Rewrite without checking the parent's date?",
+      ),
+    );
+    expect(gitCommitRecordsParent).toHaveBeenCalledWith(REPO, HASH);
+    act(() => useConfirm.getState().answer(false));
+    await act(() => Promise.resolve());
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
+  });
+
+  it("holds while a lone commit's parent record is read", async () => {
+    vi.mocked(gitCommitRecordsParent).mockReturnValue(
+      new Promise<never>(() => undefined),
+    );
+    renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() =>
+      expect(primary()).toHaveAccessibleDescription(
+        "Reading the parent's date…",
+      ),
+    );
+  });
+
+  // Control: read the press's `gate` after the await; the change is sent.
+  it("refuses with the gate's reason when HEAD became protected during the prompt", async () => {
+    flags.blocked = true;
+    withParent(parentAt("2026-11-07T20:00:00+01:00"));
+    vi.mocked(toast.error).mockClear();
+    const { client } = renderHost();
+    await retype(await authorField(), EARLIER);
+    await waitFor(() => expect(primary()).not.toHaveAttribute("aria-disabled"));
+    await userEvent.click(primary());
+    await waitFor(() => expect(useConfirm.getState().request).not.toBeNull());
+    // HEAD reaches its upstream while the prompt is open: now a protected
+    // force push.
+    act(() => {
+      client.setQueryData(repoKeys.status(REPO), status({ ahead: 0 }));
+    });
+    expect(
+      await screen.findAllByText(/^main is protected: force-pushing/),
+    ).not.toHaveLength(0);
+    act(() => useConfirm.getState().answer(true));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringMatching(/^main is protected: force-pushing/),
+      ),
+    );
+    expect(gitAmendCommitDates).not.toHaveBeenCalled();
   });
 });

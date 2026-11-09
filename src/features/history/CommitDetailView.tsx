@@ -56,6 +56,7 @@ import {
   useCommitLineAnchors,
 } from "@/features/pulls/CommitComments";
 import { usePrCapabilities } from "@/features/pulls/usePrCapabilities";
+import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { copyText } from "@/lib/clipboard";
@@ -112,6 +113,7 @@ import {
   revertCommitConfirm,
 } from "./commit-confirms";
 import { EditDatesDialog, type EditDatesTarget } from "./EditDatesDialog";
+import { RESOLVE_CONFLICTS_HINT } from "./edit-dates-route";
 import { headAgrees } from "./editable-set";
 import { FileRowActions } from "./FileRowActions";
 import { MergeParentDialog, type MergePickTarget } from "./HistoryDialogs";
@@ -143,13 +145,18 @@ function MetaSeparator({ className }: { className?: string }) {
 }
 
 /** Edit dates' reason off HEAD where History's route isn't live for this
- *  commit (it isn't History's selection, or no History panel is showing). */
+ *  commit and no History row is known to explain it: the commit isn't
+ *  History's selection, or this view is shown outside the History tab. */
 const EDIT_DATES_ELSEWHERE_HINT =
   " (only the latest commit, or an unpushed commit in History)";
 
-/** Edit dates' reason off HEAD for History's own selection while History
- *  holds the route: the commit's row there says why. */
+/** Edit dates' reason off HEAD for History's own selection, shown in the
+ *  History tab, while History holds the route: the commit's row there says
+ *  why. */
 const EDIT_DATES_HISTORY_ROW_HINT = " (see its row in History)";
+
+/** Unmerged entries with no operation stopped: Edit dates refuses. */
+const selectUnresolved = (s: RepoStatus) => s.entries.some(isConflictedEntry);
 
 /** Module-level so the selector's identity is stable; structural sharing keeps
  *  an equal result stable too, so working-tree edits in the polled status don't
@@ -377,6 +384,9 @@ export function CommitDetailView({
   const [editDates, setEditDates] = useState<EditDatesTarget | null>(null);
   const datesRouteLive = useAvailableActions().has("edit-commit-dates");
   const storeSelectedHash = useUiStore((s) => s.selectedCommitHash);
+  // Compare and a local pull request host this view too; there, History's
+  // row isn't on screen to explain a held route.
+  const inHistoryTab = useUiStore((s) => s.repoTab === "history");
   // Edit dates holds through a merge/rebase/cherry-pick/revert, as History's
   // row does. Fetched only while the actions menu is open; otherwise it serves
   // whatever the cache holds. A pending or failed read holds nothing (the
@@ -392,6 +402,13 @@ export function CommitDetailView({
       opState?.cherryPicking ||
       opState?.reverting,
   );
+  // From the status read `head` already observes, so it adds no fetch.
+  const unresolved =
+    useQuery({
+      ...repoStatusOptions(repoPath),
+      select: selectUnresolved,
+    }).data === true;
+  const datesHeld = opInProgress || unresolved;
   const checkoutCommit = useCheckoutCommit(repoPath);
   const revertCommit = useRevertCommit(repoPath);
   const cherryPick = useCherryPick(repoPath);
@@ -413,21 +430,36 @@ export function CommitDetailView({
   const datesViaHistory = datesRouteLive && storeSelectedHash === hash;
   // After Edit dates changes the commit, focus lands on the actions trigger:
   // the dialog's close lands it when the trigger is mounted, else the
-  // trigger's ref does once the rewritten commit's view renders it.
+  // trigger's ref does once the rewritten commit's view renders it. The landing
+  // is stamped with its repo: this instance survives a repo switch, and a
+  // trigger mounted for another repo is not the one the change was made from.
   const actionsTrigger = useRef<HTMLButtonElement | null>(null);
-  const landOnActions = useRef(false);
+  const landOnActions = useRef<{ repo: string } | null>(null);
   const actionsTriggerRef = (node: HTMLButtonElement | null) => {
     actionsTrigger.current = node;
-    if (node === null || !landOnActions.current) return;
+    if (node === null || landOnActions.current === null) return;
+    if (landOnActions.current.repo !== repoPath) {
+      landOnActions.current = null;
+      return;
+    }
+    // Focus on the body or a container of the trigger (the view's focus
+    // host) is focus nobody placed. Containment, not identity: this ref runs
+    // before the host's own ref re-attaches in the same commit.
     const active = document.activeElement;
-    if (active !== document.body && active !== focusHost.current) return;
-    landOnActions.current = false;
+    if (active !== null && !active.contains(node)) {
+      // Focus still in the closing dialog is landed by its close; anywhere
+      // else the user moved on, and a later mount must not take focus back.
+      if (active.closest("[data-edit-dates-dialog]") === null)
+        landOnActions.current = null;
+      return;
+    }
+    landOnActions.current = null;
     node.focus();
   };
   const onError = (e: unknown) => toastError(e);
 
   function openEditDates() {
-    if (opInProgress) return;
+    if (datesHeld) return;
     if (!isHead) {
       dispatchAction("edit-commit-dates");
       return;
@@ -494,6 +526,8 @@ export function CommitDetailView({
         focusHost.current = node;
       }}
       tabIndex={-1}
+      // History's rewritten-row landing treats focus here as an app move.
+      data-commit-detail-focus-host=""
       className="flex h-full flex-col outline-none"
     >
       {content}
@@ -816,7 +850,7 @@ export function CommitDetailView({
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className={MENU_HELD_ROW_CLASS}
-                      disabled={opInProgress || (!isHead && !datesViaHistory)}
+                      disabled={datesHeld || (!isHead && !datesViaHistory)}
                       onClick={openEditDates}
                     >
                       Edit dates…
@@ -826,6 +860,8 @@ export function CommitDetailView({
                         switch (true) {
                           case opInProgress:
                             return OP_IN_PROGRESS_HINT;
+                          case unresolved:
+                            return RESOLVE_CONFLICTS_HINT;
                           case isHead || datesViaHistory:
                             return null;
                           case log.data === undefined && refreshFailed(log):
@@ -834,7 +870,9 @@ export function CommitDetailView({
                             isLatest ||
                             hash === head?.oid:
                             return AMEND_HOLD_HINT.refreshing;
-                          case storeSelectedHash === hash && !datesRouteLive:
+                          case storeSelectedHash === hash &&
+                            inHistoryTab &&
+                            !datesRouteLive:
                             return EDIT_DATES_HISTORY_ROW_HINT;
                           default:
                             return EDIT_DATES_ELSEWHERE_HINT;
@@ -1010,13 +1048,19 @@ export function CommitDetailView({
           repoPath={repoPath}
           target={editDates}
           onClose={() => setEditDates((t) => (t === editDates ? null : t))}
-          onDatesChanged={() => {
-            landOnActions.current = true;
+          // A change landing after the dialog was dismissed arms nothing.
+          onDatesChanged={(_old, _new, closed) => {
+            landOnActions.current = closed ? { repo: repoPath } : null;
           }}
           landFocus={() => {
             const trigger = actionsTrigger.current;
-            if (!landOnActions.current || !trigger?.isConnected) return null;
-            landOnActions.current = false;
+            if (
+              landOnActions.current?.repo !== repoPath ||
+              !trigger?.isConnected
+            ) {
+              return null;
+            }
+            landOnActions.current = null;
             return trigger;
           }}
         />

@@ -213,8 +213,8 @@ export function compilePlan(
  * construction. A pair is judged only when a date edit takes part in it (the
  * child's or the parent's planned author date differs from its original), so a
  * pure reorder or an inversion that already exists is not flagged. A step whose
- * leader has no original author date (unread, unreadable) is not judged, nor is
- * the oldest step while `base` is null.
+ * leader has no original author date (unread, or no readable author date) is
+ * not judged, nor is the oldest step while `base` is null.
  */
 export function beforeParentSteps({
   steps,

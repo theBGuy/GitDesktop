@@ -629,7 +629,10 @@ test("StatusLogSync re-reads the HEAD-move set through preMoveStale", () => {
 
 const REFS_STAMP = "src/lib/git/queries/refs-stamp.ts";
 const REF_SET =
-  '[repoKeys.branches(repoPath),repoKeys.rewriteStatus(repoPath),remoteBranchesOptions(repoPath).queryKey,repoKeys.unpushedCount(repoPath),["repo",repoPath,"compare"],]';
+  '[repoKeys.branches(repoPath),repoKeys.rewriteStatus(repoPath),remoteBranchesOptions(repoPath).queryKey,repoKeys.unpushedCount(repoPath),["repo",repoPath,"compare"],["repo",repoPath,"divergence"],["repo",repoPath,"merge-preview"],["repo",repoPath,"local-pr-merge-states"],]';
+/** The on-remote verdict's invalidation: keyed under its sha, so it filters. */
+const ON_REMOTE =
+  'voidqueryClient.invalidateQueries({queryKey:["repo",repoPath,"commit"],predicate:(q)=>q.queryKey[4]==="on-remote"&&refStale(q),});';
 const flat = (s) => s.replace(/\s+/g, "");
 
 /** {@link mutate} confined to StatusLogSync's source. */
@@ -655,10 +658,6 @@ function checkRefSync(panel, stamp) {
   ).text;
   if (!body.includes("useRefsStamp(repoPath)"))
     problems.push("StatusLogSync doesn't observe useRefsStamp(repoPath)");
-  const capture = body.indexOf("const prevStampAt = lastStampAt.current;");
-  const advance = body.indexOf("lastStampAt.current = stampAt;");
-  if (capture < 0 || advance < 0 || advance < capture)
-    problems.push("prevStampAt isn't captured before lastStampAt advances");
   const order = [
     "refresh-side-keys",
     "refresh-head-set",
@@ -676,12 +675,19 @@ function checkRefSync(panel, stamp) {
       : "(no key list)";
     if (list !== REF_SET)
       problems.push(`refresh-ref-set re-reads ${list}, not ${REF_SET}`);
+    // The cutoff is the stamp reading that SAW the move, so a read refreshed
+    // between the two stamp readings is re-read too.
     if (
-      !/invalidateQueries\(\{\s*queryKey: key,\s*predicate: \(q\) =>\s*preMoveStale\(\{[^}]*prevStatusAt: prevStampAt,?\s*\}\)/.test(
+      !/const refStale = \(q: Query\) =>\s*preMoveStale\(\{[^}]*prevStatusAt: stampAt,?\s*\}\);/.test(
+        block,
+      ) ||
+      !/invalidateQueries\(\{\s*queryKey: key,\s*predicate: refStale,?\s*\}\)/.test(
         block,
       )
     )
-      problems.push("refresh-ref-set doesn't gate on preMoveStale fed prevStampAt");
+      problems.push("refresh-ref-set doesn't gate on preMoveStale fed stampAt");
+    if (!flat(block).includes(ON_REMOTE))
+      problems.push("refresh-ref-set doesn't re-read the on-remote verdicts");
   }
   const opAt = body.indexOf('actions.has("refresh-op-state")');
   if (opAt >= 0) {
@@ -726,12 +732,24 @@ test("StatusLogSync follows the refs stamp and status's content", () => {
       mutate(panel, "useRefsStamp(repoPath)", "useRefsStamp(otherPath)"),
     ],
     [
-      "prevStampAt read after the advance",
-      mutate(panel, "const prevStampAt = lastStampAt.current;"),
+      "the ref set fed a fixed time",
+      mutate(panel, "prevStatusAt: stampAt,", "prevStatusAt: 0,"),
     ],
     [
       "a ref-set family dropped",
       mutate(panel, "remoteBranchesOptions(repoPath).queryKey,"),
+    ],
+    [
+      "the merge-preview family dropped",
+      mutate(panel, '["repo", repoPath, "merge-preview"],'),
+    ],
+    [
+      "the on-remote verdicts dropped",
+      mutate(panel, 'q.queryKey[4] === "on-remote" && refStale(q)', "false"),
+    ],
+    [
+      "the on-remote verdicts re-read while fetching",
+      mutate(panel, 'q.queryKey[4] === "on-remote" && refStale(q)', 'q.queryKey[4] === "on-remote"'),
     ],
     [
       "the compare prefix misspelled",
@@ -739,7 +757,7 @@ test("StatusLogSync follows the refs stamp and status's content", () => {
     ],
     [
       "the ref set fed the status time",
-      mutate(panel, "prevStatusAt: prevStampAt,", "prevStatusAt,"),
+      mutate(panel, "prevStatusAt: stampAt,", "prevStatusAt,"),
     ],
     [
       "op state gated on preMoveStale",

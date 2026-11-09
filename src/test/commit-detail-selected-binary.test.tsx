@@ -199,6 +199,7 @@ beforeEach(() => {
   vi.mocked(gitLog).mockResolvedValue([]);
   vi.mocked(gitStatus).mockResolvedValue({
     branch: null,
+    entries: [],
   } as unknown as RepoStatus);
 });
 

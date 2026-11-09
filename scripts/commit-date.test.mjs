@@ -220,6 +220,19 @@ test("git's default date format reads, with or without weekday and label", () =>
   assert.deepEqual(assumed.date, want);
 });
 
+// Negative control (run once, reverted): INPUT_RE's separators back to ` +`
+// sends the tab cases to the shape error.
+test("the ISO-like form takes tabs where it takes spaces", () => {
+  const want = d(utc(2026, 11, 1, 3, 30, 0), 330);
+  for (const text of [
+    "2026-11-01\t09:00:00 +05:30",
+    "2026-11-01 09:00:00\t+05:30",
+    "Date:\t2026-11-01\t09:00:00\t+0530",
+  ]) {
+    assert.deepEqual(ok(text).date, want, text);
+  }
+});
+
 test("git's default format runs the same rules in the same order", () => {
   for (const bad of [
     "Mon Foo 9 00:28:33 2026 -0500",

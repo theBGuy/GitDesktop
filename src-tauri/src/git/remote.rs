@@ -128,6 +128,22 @@ pub(crate) async fn run_git_mutating_with_creds(
     sub: &[&str],
     timeout: Duration,
 ) -> AppResult<GitOutput> {
+    run_git_mutating_with_creds_checked(state, repo_path, cred, sub, timeout, false).await
+}
+
+/// [`run_git_mutating_with_creds`], refusing a gd/session/ HEAD right before each
+/// spawn when `recheck_session_head` is set: an argv that resolves HEAD at spawn (an
+/// argv naming no branch: a bare or forced push, or a publish to `HEAD`) would
+/// otherwise publish a branch checked out during the credential and lock waits. A
+/// checkout between that read and git's own is out of reach.
+async fn run_git_mutating_with_creds_checked(
+    state: &AppState,
+    repo_path: &str,
+    cred: &[String],
+    sub: &[&str],
+    timeout: Duration,
+    recheck_session_head: bool,
+) -> AppResult<GitOutput> {
     let tracked = push_upstream_branch(sub);
     let domain = state.network_lock(repo_path).await;
     #[cfg(test)]
@@ -139,13 +155,19 @@ pub(crate) async fn run_git_mutating_with_creds(
     )
     .await?;
 
+    let spawn = || async move {
+        if recheck_session_head {
+            refuse_session_head(repo_path).await?;
+        }
+        run_git_with_creds_once(repo_path, cred, sub, timeout).await
+    };
     // index.lock contention from an external tool (editor, other client) is
     // transient — retry once. Expressed here rather than via `run_git_mutating`
     // because the injection half must stay lock-free.
-    let mut out = run_git_with_creds_once(repo_path, cred, sub, timeout).await?;
+    let mut out = spawn().await?;
     if out.code != 0 && out.stderr.contains("index.lock") {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        out = run_git_with_creds_once(repo_path, cred, sub, timeout).await?;
+        out = spawn().await?;
     }
     drop(guard);
     if out.code != 0 {
@@ -1012,6 +1034,15 @@ pub(crate) fn refuse_publishing_session_branch(name: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// HEAD's branch (`None` when detached), refused when it is a gd/session/ branch.
+async fn refuse_session_head(repo_path: &str) -> AppResult<Option<String>> {
+    let head = crate::git::branches::current_branch_name(repo_path).await?;
+    if let Some(b) = &head {
+        refuse_publishing_session_branch(b)?;
+    }
+    Ok(head)
+}
+
 #[allow(clippy::too_many_arguments)] // existing push inputs plus the caller's policy
 async fn git_push_with_policy(
     state: &AppState,
@@ -1044,12 +1075,10 @@ async fn git_push_with_policy(
                     "remote requires an explicit branch".to_string(),
                 ));
             }
-            // Bare and force pushes resolve HEAD after the repo-lock wait, so a branch
-            // switch can race this check; pinning them would change push.default semantics.
-            let head = crate::git::branches::current_branch_name(&repo_path).await?;
-            if let Some(b) = &head {
-                refuse_publishing_session_branch(b)?;
-            }
+            // Bare and force pushes resolve HEAD at spawn, after the credential and lock
+            // waits, so the spawn re-checks too; pinning them would change push.default
+            // semantics. This early read is the fast failure.
+            let head = refuse_session_head(&repo_path).await?;
             if set_upstream && crate::git::branches::head_is_unborn(&repo_path).await? {
                 return Err(crate::git::branches::unborn_head_error());
             }
@@ -1167,7 +1196,10 @@ async fn git_push_with_policy(
     };
     let cred = crate::forge::credential_config_for_remote(&repo_path, &cred_remote).await?;
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    match run_git_mutating_with_creds(state, &repo_path, &cred, &argv, NETWORK_TIMEOUT).await {
+    // Only an argv naming no branch resolves HEAD at spawn; a pinned publish doesn't.
+    let recheck = branch.is_none() && head_branch.is_none();
+    let (repo, timeout) = (repo_path.as_str(), NETWORK_TIMEOUT);
+    match run_git_mutating_with_creds_checked(state, repo, &cred, &argv, timeout, recheck).await {
         Ok(_) => Ok(PushGuard::LeaseAndIncludes),
         Err(AppError::Git { stderr, .. })
             if argv.contains(&FORCE_IF_INCLUDES) && is_unknown_push_option(&stderr) =>
@@ -1176,7 +1208,8 @@ async fn git_push_with_policy(
             // rejected while parsing argv, before any network I/O, so this retry
             // can't push twice; it degrades to the lease alone.
             let retry = without_force_if_includes(&argv);
-            run_git_mutating_with_creds(state, &repo_path, &cred, &retry, NETWORK_TIMEOUT).await?;
+            run_git_mutating_with_creds_checked(state, repo, &cred, &retry, timeout, recheck)
+                .await?;
             Ok(PushGuard::LeaseOnlyOldGit)
         }
         Err(AppError::Git { code, stderr })
@@ -1198,7 +1231,8 @@ async fn git_push_with_policy(
                 return Err(AppError::Git { code, stderr });
             }
             let retry = without_force_if_includes(&argv);
-            run_git_mutating_with_creds(state, &repo_path, &cred, &retry, NETWORK_TIMEOUT).await?;
+            run_git_mutating_with_creds_checked(state, repo, &cred, &retry, timeout, recheck)
+                .await?;
             Ok(PushGuard::LeaseOnlyNoReflog)
         }
         // Only the bare HEAD push reaches git's push.default=simple name check: every
@@ -2922,6 +2956,64 @@ mod tests {
             .await
             .to_ascii_lowercase()
             .contains("gd/session/"));
+    }
+
+    /// A bare or force HEAD push re-reads HEAD after its lock wait: a switch to a
+    /// session branch while it queues refuses the push, and nothing is published.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_head_push_rechecks_session_publish_at_spawn() {
+        use crate::git::runner::acquire_repo_lock;
+        let (_guard, base, _origin, _url) = seeded_origin("session-publish-queued").await;
+        let work = base.join("work").to_string_lossy().into_owned();
+        run(&work, &["config", "push.autoSetupRemote", "true"]).await;
+        run(&work, &["branch", "gd/session/x"]).await;
+        for force in [false, true] {
+            run(&work, &["switch", "-q", "-C", "pressed"]).await;
+            let state = std::sync::Arc::new(AppState::default());
+            let domain = state.network_lock(&work).await;
+            let held = acquire_repo_lock(&domain, Duration::ZERO, "a fetch")
+                .await
+                .expect("the network domain is free");
+            let (queued_tx, queued_rx) = tokio::sync::oneshot::channel::<()>();
+            let queued_tx = std::sync::Mutex::new(Some(queued_tx));
+            let queued: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::new(move || {
+                if let Some(tx) = queued_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+            });
+            let push = tokio::spawn({
+                let (state, work) = (std::sync::Arc::clone(&state), work.clone());
+                let run = async move {
+                    if force {
+                        super::git_force_push_head_core(&state, work).await
+                    } else {
+                        git_push_core(&state, work, false, false, None, None, None).await
+                    }
+                };
+                NETWORK_LOCK_WAIT_HOOK.scope(queued, run)
+            });
+            // Past the early check; the push waits on the domain the test holds.
+            queued_rx.await.expect("the push reached the network lock");
+            run(&work, &["switch", "-q", "gd/session/x"]).await;
+            drop(held);
+            let result = tokio::time::timeout(Duration::from_secs(60), push)
+                .await
+                .expect("the push finishes once the domain frees")
+                .unwrap();
+            match result.expect_err("a session HEAD at spawn must not publish") {
+                AppError::InvalidArgument(message) => assert_eq!(
+                    message,
+                    "\"gd/session/x\" is in gd/session/, which is reserved for agent sessions, so GitDesktop won't push or publish it.",
+                    "force={force}"
+                ),
+                other => panic!("force={force}: expected the publishing refusal, got {other:?}"),
+            }
+            let pushed = run(&work, &["ls-remote", "origin"]).await;
+            assert!(
+                !pushed.contains("gd/session/") && !pushed.contains("pressed"),
+                "force={force}: {pushed}"
+            );
+        }
     }
 
     #[tokio::test]

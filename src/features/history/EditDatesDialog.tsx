@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Spinner } from "@/components/ui/spinner";
+import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { clipTitleFromText } from "@/lib/clip-title";
 import { headBranchPin } from "@/lib/git/api";
@@ -23,9 +24,12 @@ import {
   repoStatusPoll,
   useAmendCommitDates,
   useCommitDetails,
+  useCommitRecordsParent,
+  useLog,
   useOpState,
 } from "@/lib/git/queries";
-import type { RepoStatus } from "@/lib/git/types";
+import type { CommitDate, RepoStatus } from "@/lib/git/types";
+import { useConfirm } from "@/lib/stores/confirm";
 import { refuseIfSwitched } from "@/lib/stores/notifications";
 import { useUiStore } from "@/lib/stores/ui";
 import { promotionBlocksCheckout } from "@/lib/stores/worktree-removal";
@@ -34,6 +38,11 @@ import { useLatestRef } from "@/lib/use-latest-ref";
 import { useRetained } from "@/lib/use-retained";
 import { useSeedOnOpen } from "@/lib/use-seed-on-open";
 import { CommitDateField, SameAsAuthorCheckbox } from "./CommitDateField";
+import {
+  beforeParentNote,
+  datesBeforeParentConfirm,
+  PARENT_DATE_PENDING,
+} from "./commit-confirms";
 import {
   commitDateFromIso,
   DATE_FORMAT_HINT,
@@ -44,6 +53,8 @@ import {
   inEditableRange,
   OUT_OF_RANGE_NOTE,
   resolveDates,
+  rowDateLabel,
+  sameCommitDate,
   sameUnreachableNote,
 } from "./commit-date";
 import { useForcePushGate } from "./useAmendCommit";
@@ -64,6 +75,14 @@ const UNREADABLE = "This commit's dates can't be read here.";
 const selectHeadPin = (s: RepoStatus) =>
   s.branch ? { oid: s.branch.oid, pin: headBranchPin(s.branch) } : null;
 
+/** Unmerged entries with no operation stopped (a stash pop that conflicted):
+ *  the backend refuses the change. */
+const selectUnresolved = (s: RepoStatus) => s.entries.some(isConflictedEntry);
+
+const UNRESOLVED_REASON = "Resolve the conflicts first.";
+
+const PRIMARY_LABEL = "Change dates";
+
 /**
  * Changes HEAD's author and committer dates and nothing else. Its host
  * keys it per repo, so a switch remounts it closed; the submit's continuation
@@ -75,16 +94,23 @@ export function EditDatesDialog({
   onClose,
   onDatesChanged,
   landFocus,
+  adoptSelection = false,
 }: {
   repoPath: string;
   target: EditDatesTarget | null;
   onClose: () => void;
-  /** Runs after a successful change while the repo is still the target's. */
-  onDatesChanged?: (oldHash: string, newHash: string) => void;
+  /** Runs after a successful change while the repo is still the target's.
+   *  `closed` is false when the dialog was dismissed or moved on before the
+   *  change landed, so a host arms no focus landing for it. */
+  onDatesChanged?: (oldHash: string, newHash: string, closed: boolean) => void;
   /** Where focus lands when a change closes the dialog: the commit it acted
    *  on is gone, so the default return target may be too. Null leaves focus
    *  alone for the host to place once its target renders. */
   landFocus?: () => HTMLElement | null;
+  /** Set by the History panel only: History's selection may have been pruned
+   *  to none under the await, and the rewrite then becomes it. Elsewhere that
+   *  selection isn't what the user sees, so only the old commit's is moved. */
+  adoptSelection?: boolean;
 }) {
   const open = target !== null && target.repo === repoPath;
   // The content stays on the target through the close fade.
@@ -101,6 +127,9 @@ export function EditDatesDialog({
           fade, so a host's target that rendered meanwhile is found. */}
       <DialogContent
         className="sm:max-w-lg"
+        // Lets a host's deferred landing tell focus still in this closing
+        // dialog from focus the user moved elsewhere.
+        data-edit-dates-dialog=""
         finalFocus={() => {
           if (!closedByChange.current) return true;
           closedByChange.current = false;
@@ -119,6 +148,7 @@ export function EditDatesDialog({
               if (landFocus !== undefined) closedByChange.current = true;
             }}
             onDatesChanged={onDatesChanged}
+            adoptSelection={adoptSelection}
           />
         )}
       </DialogContent>
@@ -134,6 +164,7 @@ function EditDatesForm({
   onClose,
   onChangeClose,
   onDatesChanged,
+  adoptSelection,
 }: {
   repoPath: string;
   target: EditDatesTarget | null;
@@ -141,18 +172,61 @@ function EditDatesForm({
   open: boolean;
   onClose: () => void;
   onChangeClose: () => void;
-  onDatesChanged?: (oldHash: string, newHash: string) => void;
+  onDatesChanged?: (oldHash: string, newHash: string, closed: boolean) => void;
+  adoptSelection: boolean;
 }) {
   const queryClient = useQueryClient();
   const liveTarget = useLatestRef(target);
   const details = useCommitDetails(repoPath, shown?.hash ?? null);
+  // HEAD's parent judges a new author date. The log walks HEAD's ancestry, so a
+  // single-parent HEAD's next row is its parent; a merge has no one parent to
+  // judge against. Undefined = unknown.
+  const log = useLog(repoPath);
+  const rows = log.data?.pages[0];
+  const top = rows?.[0];
+  // A lone loaded commit is a true root or a shallow clone's boundary, whose
+  // parent exists unfetched; its raw header tells the two apart, as History's
+  // undo gate reads it.
+  const lone = top?.hash === shown.hash && !top.isMerge && rows?.length === 1;
+  const recordsParent = useCommitRecordsParent(repoPath, shown.hash, lone);
+  const parentHash = ((): string | null | undefined => {
+    if (top?.hash !== shown.hash) return undefined;
+    if (top.isMerge || lone) return null;
+    return rows?.[1]?.hash ?? null;
+  })();
+  const parentDetails = useCommitDetails(repoPath, parentHash ?? null);
+  const parentRead = ((): "none" | "pending" | "unread" | CommitDate => {
+    if (parentHash === null && lone) {
+      if (recordsParent.data === false) return "none";
+      return recordsParent.data === true || recordsParent.isError
+        ? "unread"
+        : "pending";
+    }
+    if (parentHash === null) return "none";
+    if (parentHash === undefined) return log.isError ? "unread" : "pending";
+    // The details read serves the previous commit as a placeholder.
+    if (
+      !parentDetails.isPlaceholderData &&
+      parentDetails.data?.hash === parentHash
+    )
+      return commitDateFromIso(parentDetails.data.date) ?? "unread";
+    return parentDetails.isError ? "unread" : "pending";
+  })();
   const opState = useOpState(repoPath);
   const statusHead = useQuery({
     ...repoStatusOptions(repoPath),
     ...repoStatusPoll,
     select: selectHeadPin,
   }).data;
+  const unresolved =
+    useQuery({
+      ...repoStatusOptions(repoPath),
+      ...repoStatusPoll,
+      select: selectUnresolved,
+    }).data === true;
   const gate = useForcePushGate(repoPath);
+  // run() reads the gate after awaiting a prompt, when the press's render is stale.
+  const liveGate = useLatestRef(gate);
   const amendDates = useAmendCommitDates(repoPath);
   const nowMs = useRelativeNow();
   const [draft, setDraft] = useState<DateDraft | undefined>(undefined);
@@ -194,6 +268,22 @@ function EditDatesForm({
   const hasError =
     resolved !== null &&
     (resolved.authorError !== null || resolved.committerError !== null);
+  // Judged only when the author date changes, as Edit history judges a pair
+  // only when a date edit takes part in it.
+  const plannedAuthor = resolved?.planned.author ?? null;
+  const authorEdited =
+    original !== null &&
+    plannedAuthor !== null &&
+    !sameCommitDate(plannedAuthor, original.author);
+  // Null = nothing to flag; a null `label` = the parent's date is unread.
+  const parentFlag = ((): { label: string | null } | null => {
+    if (!authorEdited || hasError || plannedAuthor === null) return null;
+    if (parentRead === "unread") return { label: null };
+    if (typeof parentRead === "string") return null;
+    return plannedAuthor.epochSeconds < parentRead.epochSeconds
+      ? { label: rowDateLabel(parentRead, nowMs) }
+      : null;
+  })();
   const refusal = gate.refusal();
   const holdReason = ((): string | null => {
     switch (true) {
@@ -209,12 +299,16 @@ function EditDatesForm({
         return "The latest commit changed while this was open. Close and reopen to edit the new one.";
       case opInProgress:
         return "Finish the operation in Changes first.";
+      case unresolved:
+        return UNRESOLVED_REASON;
       case refusal !== null:
         return refusal;
       case hasError:
         return FIX_DATE_FIRST;
       case !resolved?.changed:
         return "Change a date first.";
+      case authorEdited && parentRead === "pending":
+        return PARENT_DATE_PENDING;
       default:
         return null;
     }
@@ -235,6 +329,21 @@ function EditDatesForm({
   async function run() {
     const t = target;
     if (t === null || t.repo !== repoPath || resolved === null) return;
+    if (parentFlag !== null) {
+      // Asked first, so every check below reads the state after the prompt; a
+      // dialog closed or retargeted under it drops the change.
+      const unread = parentFlag.label === null;
+      const ok = await useConfirm
+        .getState()
+        .ask(
+          datesBeforeParentConfirm(
+            unread ? 0 : 1,
+            PRIMARY_LABEL,
+            unread ? "this" : null,
+          ),
+        );
+      if (!ok || liveTarget.current !== t) return;
+    }
     if (refuseIfSwitched(t.repo, "no dates were changed")) {
       onClose();
       return;
@@ -250,7 +359,7 @@ function EditDatesForm({
         headBranchPin(cached) !== t.expectedBranch)
     )
       return;
-    const refusal = gate.refusal();
+    const refusal = liveGate.current.refusal();
     if (refusal !== null) {
       toast.error(refusal);
       return;
@@ -279,7 +388,8 @@ function EditDatesForm({
     );
     const live = useUiStore.getState();
     if (live.repoPath !== t.repo) return;
-    if (liveTarget.current === t) {
+    const closed = liveTarget.current === t;
+    if (closed) {
       onChangeClose();
       onClose();
     }
@@ -288,11 +398,12 @@ function EditDatesForm({
     // would retire that intent; otherwise the gone commit is pruned.
     if (
       live.interactionEpoch === requestEpoch &&
-      (live.selectedCommitHash === oldHash || live.selectedCommitHash === null)
+      (live.selectedCommitHash === oldHash ||
+        (adoptSelection && live.selectedCommitHash === null))
     )
       live.selectCommit(newHash);
     else if (live.selectedCommitHash === oldHash) live.clearSelectedCommit();
-    onDatesChanged?.(oldHash, newHash);
+    onDatesChanged?.(oldHash, newHash, closed);
   }
 
   function onSubmit(e: FormEvent) {
@@ -304,6 +415,8 @@ function EditDatesForm({
 
   const warnings =
     resolved !== null ? dateWarnings(resolved.planned, nowMs) : [];
+  if (parentFlag !== null)
+    warnings.push(beforeParentNote(parentHash ?? null, parentFlag.label));
   const sameNote =
     original !== null && resolved !== null
       ? sameUnreachableNote(original, resolved)
@@ -391,6 +504,7 @@ function EditDatesForm({
             nowMs={nowMs}
             note={committerNote}
             heldReason={fieldHold}
+            reserveReset
           />
         )}
         {warnings.map((w) => (
@@ -460,7 +574,7 @@ function EditDatesForm({
           reason={holdReason}
         >
           {submitting && <Spinner data-icon="inline-start" />}
-          Change dates
+          {PRIMARY_LABEL}
         </DisabledReasonButton>
       </DialogFooter>
     </form>

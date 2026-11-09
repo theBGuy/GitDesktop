@@ -56,6 +56,7 @@ export function CommitDateField({
   note,
   heldReason,
   onReset,
+  reserveReset = false,
   trailing,
 }: {
   label: string;
@@ -75,6 +76,10 @@ export function CommitDateField({
   heldReason: string | null;
   /** No prop, no Reset button. */
   onReset?: () => void;
+  /** Keeps an empty Reset-wide slot where this field has no Reset, so its
+   *  input lines up with a field above it that has one. */
+  reserveReset?: boolean;
+  /** Rendered after Now in place of Reset. */
   trailing?: ReactNode;
 }) {
   const inputId = useId();
@@ -135,16 +140,25 @@ export function CommitDateField({
   })();
 
   return (
-    <div className="space-y-1">
+    <div className="@container/date-field space-y-1">
       <div className="flex items-center gap-2">
         <Label htmlFor={inputId} className="w-28 shrink-0 text-xs font-normal">
           {label}
         </Label>
-        {/* The input never narrows below a whole canonical date at its own
-            font (25 monospace characters plus padding), so the value never
-            opens scrolled; the hosts size their dialogs to fit the row. */}
+        {/* Where the row has room, the input never narrows below a whole
+            canonical date (25 characters at the input's font, plus padding),
+            so the value never opens scrolled; a narrower host, such as Edit
+            history's inline editor at the window's minimum width, lets it
+            shrink instead, so the buttons never clip. A trailing action is
+            wider than Reset, so that row needs more room for the floor. */}
         <span
-          className={cn("flex-1", held && "cursor-not-allowed")}
+          className={cn(
+            "min-w-0 flex-1 font-mono text-xs",
+            trailing === undefined
+              ? "@min-[30rem]/date-field:min-w-[calc(25ch+1.5rem)]"
+              : "@min-[33rem]/date-field:min-w-[calc(25ch+1.5rem)]",
+            held && "cursor-not-allowed",
+          )}
           title={heldReason ?? undefined}
         >
           <Input
@@ -158,7 +172,7 @@ export function CommitDateField({
             aria-describedby={held ? `${lineId} ${reasonId}` : lineId}
             className={cn(
               ARIA_DISABLED_CLASS,
-              "h-7 min-w-[calc(25ch+1.5rem)] font-mono text-xs tabular-nums",
+              "h-7 font-mono text-xs tabular-nums",
             )}
             onChange={(e) => onChange(e.target.value)}
             onBlur={() => {
@@ -218,9 +232,7 @@ export function CommitDateField({
             Reset
           </DisabledReasonButton>
         ) : (
-          // A field without Reset keeps its slot, so its input lines up with
-          // and matches the author field above it.
-          trailing === undefined && (
+          reserveReset && (
             <span
               aria-hidden
               className={cn(
@@ -309,7 +321,7 @@ export function SameAsAuthorCheckbox({
         checked={checked}
         readOnly={held}
         aria-disabled={held || undefined}
-        aria-label="Committer date: Same as author date"
+        aria-label="Same as author date (committer date)"
         aria-describedby={held ? reasonId : undefined}
         onCheckedChange={(c) => {
           if (!held) onChange(c === true);
