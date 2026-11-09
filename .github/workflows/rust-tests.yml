@@ -86,7 +86,7 @@ jobs:
   #            in `.rs` files, via `.github/scripts/canonicalize-rust.py`.
   gate:
     name: gate (skip if this Rust content already passed)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
@@ -301,7 +301,7 @@ jobs:
       matrix:
         platform:
           - windows-2025
-          - ubuntu-24.04
+          - ubuntu-26.04
           - macos-26
     runs-on: ${{ matrix.platform }}
     steps:
@@ -318,7 +318,7 @@ jobs:
           workspaces: "./src-tauri -> target"
 
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-24.04'
+        if: matrix.platform == 'ubuntu-26.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
