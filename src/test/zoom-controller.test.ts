@@ -2748,10 +2748,12 @@ describe("monitor pass pins", () => {
     tauri.currentMonitor.mockResolvedValue(monitor(3440, 1400));
     await start();
     expect(getZoomState()).toEqual({ level: 2, max: 2, saved: 2 });
+    expect(tauri.setZoom).toHaveBeenLastCalledWith(2);
     expect(minSizes().at(-1)).toEqual([1136, 1000]);
     tauri.currentMonitor.mockResolvedValue(monitor(1366, 728));
     await pass(focusEvents(true));
     expect(getZoomState()).toEqual({ level: 1.25, max: 1.25, saved: 2 });
+    expect(tauri.setZoom).toHaveBeenLastCalledWith(1.25);
     expect(minSizes().at(-1)).toEqual([710, 625]);
     expect(__zoomWorkAreaForTests()).toEqual({
       x: 0,

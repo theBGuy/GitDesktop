@@ -501,7 +501,7 @@ async function monitorPass(seq: number): Promise<void> {
   }
   // A failed or empty read still counts as an answer, so the deferred min size
   // applies; it keeps the last max (never a defaulted lower clamp) until the
-  // next move, resize or scale change reads again.
+  // next move, resize, scale change or window focus reads again.
   const max = monitor
     ? maxZoomForArea(
         monitor.workArea.size.width / monitor.scaleFactor - frame.width,
@@ -702,7 +702,7 @@ export function initZoom(): void {
         scheduleMonitor();
       }),
     () => getCurrentWindow().onScaleChanged(scheduleMonitor),
-    // No OS event reports a work-area change (taskbar, resolution), so gaining
+    // Tauri exposes no work-area-change event (taskbar, resolution), so gaining
     // focus re-reads the display.
     () =>
       getCurrentWindow().onFocusChanged(({ payload }) => {

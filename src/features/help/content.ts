@@ -3944,7 +3944,7 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
 - **Pull requests:** {{kbd:create-pr}} create pull request.
 - **Zoom:** {{kbd:app-zoom-in}} zoom in · {{kbd:app-zoom-out}} zoom out ·
   {{kbd:app-zoom-reset}} reset · {{key:mod}}+scroll zooms too, except over the
-  changed-files, history and project lists, where it scrolls.
+  changed-files, project and (outside a search) history lists, where it scrolls.
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
