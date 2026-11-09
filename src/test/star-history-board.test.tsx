@@ -37,6 +37,7 @@ import {
   forgeRepoDelete,
   forgeRepoSetStar,
   forgeRepoSetVisibility,
+  forgeRepoStarStatus,
   forgeStarRepo,
   forgeStatus,
   ghCommunityInsights,
@@ -54,6 +55,7 @@ import {
   starHistorySeries,
   useDeleteRepo,
   useForkRepo,
+  useRepoStarStatus,
   useSetRemoteUrl,
   useSetRepoStar,
   useSetVisibility,
@@ -91,6 +93,7 @@ vi.mock("@/lib/git/api", async (importOriginal) => {
     forgeRepoDelete: vi.fn(),
     forgeRepoSetVisibility: vi.fn(),
     forgeStarRepo: vi.fn(),
+    forgeRepoStarStatus: vi.fn(),
   };
 });
 
@@ -2467,5 +2470,35 @@ describe("Star history: keyed by repo and series", () => {
     );
     expect(client.getQueryState(starStatus(MENU))?.isInvalidated).toBe(true);
     expect(client.getQueryState(starStatus(OTHER))?.isInvalidated).toBe(false);
+  });
+
+  it("an Explore star over a star status in flight reads it again once it lands", async () => {
+    vi.mocked(forgeStarRepo).mockResolvedValue(undefined as never);
+    let landStale: (starred: boolean) => void = () => undefined;
+    vi.mocked(forgeRepoStarStatus)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            landStale = resolve;
+          }),
+      )
+      .mockResolvedValue(true);
+    const { client } = renderBoard();
+    await waitFor(() => expect(tableRows()).toBe(52));
+    const status = hookOn(client, () => useRepoStarStatus(REPO, true));
+    await waitFor(() => expect(forgeRepoStarStatus).toHaveBeenCalledTimes(1));
+    const star = hookOn(client, () => useStarRepo());
+    await act(() =>
+      star.current.mutateAsync({
+        provider: "github",
+        owner: "owner",
+        name: "repo",
+        star: true,
+      }),
+    );
+    // The read sent before the star lands its pre-star answer.
+    await act(async () => landStale(false));
+    await waitFor(() => expect(forgeRepoStarStatus).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(status.current.data).toBe(true));
   });
 });

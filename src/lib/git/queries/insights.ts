@@ -427,9 +427,7 @@ export async function invalidateStarHistoryForSlug(
         repoKeys.communityInsights(repo),
       ),
       // useRepoStarStatus's key (repo-access.ts).
-      queryClient.invalidateQueries({
-        queryKey: ["repo", repo, "star-status"],
-      }),
+      invalidateKeyHealingStraddles(queryClient, ["repo", repo, "star-status"]),
     ]),
   ]);
 }
