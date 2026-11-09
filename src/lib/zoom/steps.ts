@@ -10,7 +10,7 @@ export const ZOOM_MIN = 0.8;
 export const ZOOM_HARD_MAX = 2;
 /** The smallest viewport (CSS px at 100%) every surface still lays out in,
  *  measured; the window floor scales with the zoom from this. */
-export const ZOOM_LAYOUT_FLOOR = { width: 568, height: 500 } as const;
+const ZOOM_LAYOUT_FLOOR = { width: 568, height: 500 } as const;
 
 /** tauri.conf.json's minWidth/minHeight, which no zoom level goes below. */
 const WINDOW_MIN = { width: 640, height: 600 } as const;

@@ -48,12 +48,14 @@ const tauri = vi.hoisted(() => {
     onMoved: vi.fn(),
     onResized: vi.fn(),
     onScaleChanged: vi.fn(),
+    onFocusChanged: vi.fn(),
     currentMonitor: vi.fn(),
     moved: [] as Array<() => void>,
     // The move and resize callbacks apart, as well as in `moved`.
     windowMoved: [] as Array<() => void>,
     resized: [] as Array<() => void>,
     scaled: [] as Array<() => void>,
+    focused: [] as Array<(event: { payload: boolean }) => void>,
   };
 });
 
@@ -149,6 +151,9 @@ function key(init: KeyboardEventInit) {
 }
 
 const level = () => getZoomState().level;
+/** The focus callbacks as `pass` callbacks, each firing `payload`. */
+const focusEvents = (payload: boolean) =>
+  tauri.focused.map((cb) => () => cb({ payload }));
 const minSizes = () =>
   tauri.setMinSize.mock.calls.map(([s]) => [s.width, s.height]);
 
@@ -191,6 +196,7 @@ beforeEach(() => {
   tauri.windowMoved = [];
   tauri.resized = [];
   tauri.scaled = [];
+  tauri.focused = [];
   tauri.setZoom.mockResolvedValue(undefined);
   tauri.setMinSize.mockResolvedValue(undefined);
   tauri.setSize.mockResolvedValue(undefined);
@@ -217,6 +223,12 @@ beforeEach(() => {
     tauri.scaled.push(cb);
     return () => undefined;
   });
+  tauri.onFocusChanged.mockImplementation(
+    async (cb: (event: { payload: boolean }) => void) => {
+      tauri.focused.push(cb);
+      return () => undefined;
+    },
+  );
   tauri.currentMonitor.mockResolvedValue(monitor(3840, 2160));
   vi.mocked(loadSettings).mockResolvedValue(settings());
   vi.mocked(saveSettingsPatch).mockImplementation(async (patch) =>
@@ -243,6 +255,7 @@ describe("zoom actions", () => {
       tauri.onMoved,
       tauri.onResized,
       tauri.onScaleChanged,
+      tauri.onFocusChanged,
     ]) {
       expect(listen).toHaveBeenCalledTimes(1);
     }
@@ -258,6 +271,21 @@ describe("zoom actions", () => {
     expect(level()).toBe(1);
     __resetZoomForTests();
     expect(hasLiveHandler("app-zoom-in")).toBe(false);
+  });
+
+  it("starts without a focus listener API", async () => {
+    const onFocusChanged = tauri.onFocusChanged;
+    Reflect.deleteProperty(tauri, "onFocusChanged");
+    try {
+      tauri.currentMonitor.mockResolvedValue(monitor(900, 700));
+      await start();
+      expect(getZoomState().max).toBe(1.25);
+      expect(tauri.moved).toHaveLength(2);
+      dispatchAction("app-zoom-in");
+      expect(level()).toBe(1.1);
+    } finally {
+      tauri.onFocusChanged = onFocusChanged;
+    }
   });
 });
 
@@ -1625,6 +1653,12 @@ describe("geometry reconciler", () => {
     expect([grown?.width, grown?.height]).toEqual([710, 625]);
   });
 
+  it("leaves a size read standing when the window gains focus during it", async () => {
+    await enlargeDuringRead(() => focusEvents(true));
+    const [grown] = tauri.setSize.mock.calls.at(-1) ?? [];
+    expect([grown?.width, grown?.height]).toEqual([710, 625]);
+  });
+
   it("owes no move after a resize skips a re-armed grow", async () => {
     // A parked 800×700 window overflowing the right edge meets the raise;
     // a snap-back leaves it 700×600 with nothing owed, and the user enlarges
@@ -2704,6 +2738,53 @@ describe("monitor pass pins", () => {
     tauri.currentMonitor.mockResolvedValue(monitor(900, 700));
     await pass(tauri.scaled);
     expect(getZoomState().max).toBe(1.25);
+  });
+
+  it("re-reads a work area that shrank without a window event on focus", async () => {
+    localStorage.setItem("gd-zoom", "2");
+    vi.mocked(loadSettings).mockResolvedValue(settings({ zoom: 2 }));
+    tauri.innerSize.mockResolvedValue(tauri.size(1400, 1100));
+    tauri.outerSize.mockResolvedValue(tauri.size(1416, 1139));
+    tauri.currentMonitor.mockResolvedValue(monitor(3440, 1400));
+    await start();
+    expect(getZoomState()).toEqual({ level: 2, max: 2, saved: 2 });
+    expect(minSizes().at(-1)).toEqual([1136, 1000]);
+    tauri.currentMonitor.mockResolvedValue(monitor(1366, 728));
+    await pass(focusEvents(true));
+    expect(getZoomState()).toEqual({ level: 1.25, max: 1.25, saved: 2 });
+    expect(minSizes().at(-1)).toEqual([710, 625]);
+    expect(__zoomWorkAreaForTests()).toEqual({
+      x: 0,
+      y: 0,
+      width: 1366,
+      height: 728,
+    });
+  });
+
+  it("reads nothing when the window loses focus", async () => {
+    await start();
+    const reads = tauri.currentMonitor.mock.calls.length;
+    await pass(focusEvents(false));
+    expect(tauri.currentMonitor).toHaveBeenCalledTimes(reads);
+    // NEGATIVE CONTROL: gaining focus reads the monitor once.
+    await pass(focusEvents(true));
+    expect(tauri.currentMonitor).toHaveBeenCalledTimes(reads + 1);
+  });
+
+  it("writes no geometry on focus while the display is unchanged", async () => {
+    tauri.currentMonitor.mockResolvedValue(monitor(1920, 1040));
+    await start();
+    setZoomLevel(1.25, "action");
+    await flush();
+    const reads = tauri.currentMonitor.mock.calls.length;
+    tauri.setMinSize.mockClear();
+    tauri.setSize.mockClear();
+    tauri.setPosition.mockClear();
+    await pass(focusEvents(true));
+    expect(tauri.currentMonitor).toHaveBeenCalledTimes(reads + 1);
+    expect(tauri.setMinSize).not.toHaveBeenCalled();
+    expect(tauri.setSize).not.toHaveBeenCalled();
+    expect(tauri.setPosition).not.toHaveBeenCalled();
   });
 
   it("never lands the max of a maximized pass a newer pass overtook", async () => {

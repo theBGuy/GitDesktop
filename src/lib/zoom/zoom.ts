@@ -702,6 +702,12 @@ export function initZoom(): void {
         scheduleMonitor();
       }),
     () => getCurrentWindow().onScaleChanged(scheduleMonitor),
+    // No OS event reports a work-area change (taskbar, resolution), so gaining
+    // focus re-reads the display.
+    () =>
+      getCurrentWindow().onFocusChanged(({ payload }) => {
+        if (payload) scheduleMonitor();
+      }),
   ]) {
     void tauri(listen).then((unlisten) => {
       if (!unlisten) return;

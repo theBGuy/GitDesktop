@@ -3999,9 +3999,9 @@ Sections:
   display fits): step it with the − and + buttons, and **Reset** returns to 100%.
   {{kbd:app-zoom-in}} zooms in, {{kbd:app-zoom-out}} zooms out, {{kbd:app-zoom-reset}}
   resets, and {{key:mod}}+scroll zooms as well. Over a list where
-  {{key:mod}}+click picks several items (changed files, history, project boards
-  and tables), {{key:mod}}+scroll scrolls the list instead, so you can keep adding
-  to a selection. While *Zoom in* keeps its default
+  {{key:mod}}+click picks several items (changed files, history outside a search,
+  project boards, tables and roadmaps), {{key:mod}}+scroll scrolls the list
+  instead, so you can keep adding to a selection. While *Zoom in* keeps its default
   shortcut, the plus key ({{key:mod++}}, numpad included) zooms in too, unless you
   bind that key to another action.
 {{ai}}- **AI** — providers, models, keys, instructions, and agent-session defaults: the
