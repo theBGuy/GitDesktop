@@ -8,6 +8,7 @@ import { REVIEW_EFFORTS } from "@/lib/ai/review-effort";
 import { REVIEW_TIMEOUTS } from "@/lib/ai/review-timeout";
 import type { AiSettings } from "@/lib/ai/types";
 import type { ThemeSetting } from "@/lib/theme";
+import { healZoom, ZOOM_DEFAULT } from "@/lib/zoom/steps";
 import type {
   AppSettings,
   ChannelPrefs,
@@ -195,6 +196,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   mcpServers: [],
   recentRepos: [],
   theme: "system",
+  zoom: ZOOM_DEFAULT,
   diffViewMode: "unified",
   changesViewMode: "list",
   editHistoryOrder: "newest-first",
@@ -423,6 +425,7 @@ function healEnumerated(settings: AppSettings): AppSettings {
       DEFAULT_SETTINGS.autoFetchInterval,
     ),
     theme: pick(settings.theme, THEMES, DEFAULT_SETTINGS.theme),
+    zoom: healZoom(settings.zoom),
     diffViewMode: pick(
       settings.diffViewMode,
       DIFF_VIEW_MODES,

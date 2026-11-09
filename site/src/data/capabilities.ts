@@ -629,11 +629,16 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Narrow windows & split-screen layouts — down to 640px, with a collapsible sidebar and diff file list",
+      "Narrow windows & split-screen layouts — down to 640px at 100% zoom, with a collapsible sidebar and diff file list",
   },
   {
     group: "Repository & workspace",
     label: "Themes — System, Light, Dark & a softer Slate",
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Interface zoom — 80–200% (capped to what your display fits), from the keyboard, Ctrl/⌘+scroll or a Settings stepper with one-press Reset",
   },
 
   // — Admin & settings —

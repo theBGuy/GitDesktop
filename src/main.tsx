@@ -16,6 +16,7 @@ import { loadSettings } from "@/lib/settings/api";
 import { commitTheme, initTheme } from "@/lib/theme";
 import { subscribeToastClearance, toastClearance } from "@/lib/toast-clearance";
 import { useIsDark } from "@/lib/use-is-dark";
+import { initZoom } from "@/lib/zoom/zoom";
 import App from "./App.tsx";
 import "./App.css";
 // Position is load-bearing: the vendored diff-view CSS must be imported plain
@@ -30,6 +31,9 @@ import "@git-diff-view/react/styles/diff-view.css";
 // reading a localStorage mirror synchronously so a saved override doesn't flash
 // through the OS default; the authoritative store value reconciles below.
 initTheme();
+// Same idiom for the GUI zoom: its mirror applies now, and it reconciles
+// against the settings store itself.
+initZoom();
 
 // Boot analytics after settings load — never blocks the render. Session replay
 // stays off unless the user opted in (recordReplay).

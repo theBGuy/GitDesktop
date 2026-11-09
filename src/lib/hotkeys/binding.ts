@@ -211,6 +211,12 @@ export function hasChordModifier(e: {
   return e.ctrlKey || e.metaKey || e.altKey;
 }
 
+/** Whether a wheel event holds the platform "mod": the wheel twin of
+ *  eventToBinding's mod mapping (Ctrl or Meta, on every platform). */
+export function isModWheel(e: WheelEvent): boolean {
+  return e.ctrlKey || e.metaKey;
+}
+
 /** Bindings that only preventDefault when a dispatch actually RAN. Space is the
  *  one bindable key whose native job is pressing the focused control, so
  *  consuming it for a registered-but-disabled handler would eat button presses,

@@ -189,9 +189,9 @@ contributors, language makeup, activity, traffic), open **Insights** from the me
 
 The app remembers each window's **position and size** across launches, including which
 monitor it was on. Your layout is saved as you arrange the window, so an unexpected
-shutdown doesn't lose it. The window goes down to a narrow, split-screen width, so
-GitDesktop can sit beside your editor on half a screen. See **Settings → About** for
-the current coordinates.`,
+shutdown doesn't lose it. The window goes down to a narrow, split-screen width (the
+floor grows with your interface zoom), so GitDesktop can sit beside your editor on
+half a screen. See **Settings → About** for the current coordinates.`,
   },
   {
     id: "explore",
@@ -3942,6 +3942,9 @@ bindings (formatted for your platform) — rebind any of them in **Settings → 
   stage/unstage the selected diff lines · {{kbd:undo-commit}} undo last commit ·
   {{kbd:next-conflict}} / {{kbd:previous-conflict}} next / previous conflict.
 - **Pull requests:** {{kbd:create-pr}} create pull request.
+- **Zoom:** {{kbd:app-zoom-in}} zoom in · {{kbd:app-zoom-out}} zoom out ·
+  {{kbd:app-zoom-reset}} reset · {{key:mod}}+scroll zooms too, except over the
+  changed-files, project and (outside a search) history lists, where it scrolls.
 {{ai}}- **Agent:** {{kbd:agent-toggle-terminal}} toggle the session terminal.
 {{/ai}}
 Every shortcut is **rebindable** in **Settings → Keyboard**: click a binding, press a new
@@ -3991,7 +3994,16 @@ Sections:
   before discarding them.
 - **Appearance** — pick a theme: **System** (follows your OS's light/dark setting),
   **Light**, **Dark**, or **Slate** (a softer, blue-gray dark). Applies as you pick it,
-  and *Cycle theme* in the command palette steps through them.
+  and *Cycle theme* in the command palette steps through them. **Interface zoom**
+  scales the whole app, diffs included, from 80% up to 200% (capped to what your
+  display fits): step it with the − and + buttons, and **Reset** returns to 100%.
+  {{kbd:app-zoom-in}} zooms in, {{kbd:app-zoom-out}} zooms out, {{kbd:app-zoom-reset}}
+  resets, and {{key:mod}}+scroll zooms as well. Over a list where
+  {{key:mod}}+click picks several items (changed files, history outside a search,
+  project boards, tables and roadmaps), {{key:mod}}+scroll scrolls the list
+  instead, so you can keep adding to a selection. While *Zoom in* keeps its default
+  shortcut, the plus key ({{key:mod++}}, numpad included) zooms in too, unless you
+  bind that key to another action.
 {{ai}}- **AI** — providers, models, keys, instructions, and agent-session defaults: the
   default agent, isolation (worktree / container), and the container image.
 - **Slash commands** — manage built-in and custom agent commands.
