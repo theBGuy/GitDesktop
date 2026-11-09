@@ -316,6 +316,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          # rust-cache keys on the OS family, not the image: without this a
+          # 24.04-built cache serves the 26.04 leg unchanged.
+          key: ${{ matrix.platform }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-26.04'
