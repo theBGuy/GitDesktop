@@ -28,16 +28,17 @@ beforeEach(() => {
   vi.mocked(loadSettings).mockImplementation(async () =>
     structuredClone(stored),
   );
-  vi.mocked(useZoom).mockReturnValue({ level: 1, max: 2 });
+  vi.mocked(useZoom).mockReturnValue({ level: 1, max: 2, saved: 1 });
   vi.mocked(stepZoom).mockClear();
   vi.mocked(resetZoom).mockClear();
 });
 
+/** The saved level defaults to the applied one, as on a display that fits it. */
 async function renderSection(
-  zoom = { level: 1, max: 2 },
+  zoom: { level: number; max: number; saved?: number } = { level: 1, max: 2 },
   hotkeys: AppSettings["hotkeys"] = {},
 ) {
-  vi.mocked(useZoom).mockReturnValue(zoom);
+  vi.mocked(useZoom).mockReturnValue({ saved: zoom.level, ...zoom });
   stored.hotkeys = hotkeys;
   // A non-default theme marks the settings read as landed (the hint reads
   // the registry defaults until it does).
@@ -123,12 +124,22 @@ describe("Settings → Appearance interface zoom", () => {
     expect(reasonOf(zoomIn())).toBe("Maximum zoom (200%)");
   });
 
-  it("keeps zoom out live when a clamped level blocks Reset", async () => {
-    const user = await renderSection({ level: 1, max: 1 });
-    expect(reset()).toHaveAttribute("aria-disabled", "true");
+  it("keeps Reset live for a clamped saved level, as Ctrl+0 does", async () => {
+    const user = await renderSection({ level: 1, max: 1, saved: 1.5 });
+    expect(reset()).not.toHaveAttribute("aria-disabled");
     expect(zoomIn()).toHaveAttribute("aria-disabled", "true");
+    await user.click(reset());
+    expect(resetZoom).toHaveBeenCalledWith("settings");
     await user.click(zoomOut());
     expect(stepZoom).toHaveBeenCalledWith(-1, "settings");
+  });
+
+  it("blocks Reset on a display capped at 100% once both levels are there", async () => {
+    const user = await renderSection({ level: 1, max: 1, saved: 1 });
+    expect(reset()).toHaveAttribute("aria-disabled", "true");
+    expect(reasonOf(reset())).toBe("Already at 100%");
+    await user.click(reset());
+    expect(resetZoom).not.toHaveBeenCalled();
   });
 
   it.each([

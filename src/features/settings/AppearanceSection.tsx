@@ -89,14 +89,15 @@ export function AppearanceSection() {
 /**
  * Apply-on-change like the theme: it drives the zoom controller with the
  * "settings" source, which shows no zoom toast, and renders the APPLIED level
- * alone (a saved level the display can't fit reads as its clamped value).
+ * (a saved level the display can't fit reads as its clamped value). Reset
+ * stays live while either level is off 100%, as Ctrl+0 does.
  */
 function InterfaceZoomRow() {
-  const { level, max } = useZoom();
+  const { level, max, saved } = useZoom();
   const labelId = useId();
   const atMin = level <= ZOOM_MIN;
   const atMax = level >= max;
-  const atDefault = level === ZOOM_DEFAULT;
+  const atDefault = level === ZOOM_DEFAULT && saved === ZOOM_DEFAULT;
   const maxReason =
     max < ZOOM_HARD_MAX
       ? "Maximum zoom for this display"

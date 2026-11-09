@@ -1965,6 +1965,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
             <div
               ref={setScrollEl}
               className="min-h-0 flex-1 overflow-y-auto"
+              data-multiselect={searchActive ? undefined : ""}
               onKeyDown={onListKeyDown}
               onContextMenuCapture={handleCommitContextMenu}
             />

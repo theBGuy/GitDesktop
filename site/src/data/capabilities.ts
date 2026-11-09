@@ -628,7 +628,7 @@ export const capabilities: Capability[] = [
   {
     group: "Repository & workspace",
     label:
-      "Interface zoom — 80–200%, from the keyboard, Ctrl/⌘+scroll or a Settings stepper with one-press Reset",
+      "Interface zoom — 80–200% (capped to what your display fits), from the keyboard, Ctrl/⌘+scroll or a Settings stepper with one-press Reset",
   },
 
   // — Admin & settings —
