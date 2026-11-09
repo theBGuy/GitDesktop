@@ -5,7 +5,8 @@ import * as api from "../api";
 import { primeCommitAuthorIndex } from "../commit-avatar";
 import type { ForgeRepoWriteAccess, RemoteLens } from "../types";
 import { useForgeStatus } from "./accounts";
-import { repoKeys } from "./core";
+import { invalidateKeyHealingStraddles, repoKeys } from "./core";
+import { cachedStarSeries, invalidateStarHistory } from "./insights";
 import { useRepoMutation } from "./internal";
 
 export function useForkRepo(repo: string) {
@@ -13,9 +14,10 @@ export function useForkRepo(repo: string) {
     repo,
     (contributeToParent: boolean) => api.ghRepoFork(repo, contributeToParent),
     // `invalidate` replaces the default, so the repo subtree is named again
-    // alongside the own-repos list the new fork joins. GitHub by construction:
-    // the GitLab and Bitbucket menu arms open the host's fork page instead, so
-    // only GitHub reaches this gh-backed command.
+    // (on every settle: its forge status moves star history to the fork's
+    // series) alongside the own-repos list the new fork joins. GitHub by
+    // construction: the GitLab and Bitbucket menu arms open the host's fork page
+    // instead, so only GitHub reaches this gh-backed command.
     { invalidate: [repoKeys.all(repo), ["forge-repos", "github"]] },
   );
 }
@@ -34,18 +36,33 @@ export function useSetRepoStar(repo: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (starred: boolean) => api.forgeRepoSetStar(repo, starred),
-    // The key is built HERE, at mutate time, and the settle callbacks read it back
-    // from the context, so the rollback names the repo the write fired on whatever
-    // render it settles through.
+    // The keys and the star series are read HERE, at mutate time, and the settle
+    // callbacks read them back from the context, so the rollback and the refresh
+    // name the repository the write fired on, whatever origin or render it
+    // settles through.
     onMutate: async (starred: boolean) => {
       const key = ["repo", repo, "star-status"] as const;
+      const series = cachedStarSeries(queryClient, repo);
       await queryClient.cancelQueries({ queryKey: key });
       const previous = queryClient.getQueryData<boolean>(key);
       queryClient.setQueryData<boolean>(key, starred);
-      return { previous, key };
+      return {
+        previous,
+        key,
+        repo,
+        series,
+        community: repoKeys.communityInsights(repo),
+      };
     },
     onError: (_e, _starred, ctx) => {
       if (ctx) queryClient.setQueryData(ctx.key, ctx.previous);
+    },
+    // A landed toggle moves the count both Insights cards show; the whole-repo
+    // write settle skips star history, so this is its one refresh, of every
+    // cached read of the toggled series, each healed over a read in flight.
+    onSuccess: (_d, _starred, ctx) => {
+      void invalidateStarHistory(queryClient, ctx.repo, ctx.series);
+      void invalidateKeyHealingStraddles(queryClient, ctx.community);
     },
     onSettled: (_d, _e, _starred, ctx) =>
       ctx && queryClient.invalidateQueries({ queryKey: ctx.key }),

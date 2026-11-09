@@ -14,7 +14,7 @@ import { reloadReviewNotes } from "@/lib/review-notes/store";
 import { useUiStore } from "@/lib/stores/ui";
 import * as api from "../api";
 import type { BranchRewriteStatus } from "../types";
-import { repoKeys } from "./core";
+import { repoKeys, settlesOnRepoWrite } from "./core";
 import { useRepoMutation } from "./internal";
 import { localPrWriteKey } from "./pr-writes";
 import { recheckListsLater } from "./push-writes";
@@ -340,7 +340,10 @@ export function useUpdateBranchFrom(repo: string) {
           data.holder,
           data.holder.replace(/\//g, "\\"),
         ]))
-          void queryClient.invalidateQueries({ queryKey: repoKeys.all(key) });
+          void queryClient.invalidateQueries({
+            queryKey: repoKeys.all(key),
+            predicate: settlesOnRepoWrite,
+          });
       },
     },
   );

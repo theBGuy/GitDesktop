@@ -1,12 +1,25 @@
-import { type ReactNode, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { DiffStat } from "@/components/diff-stat";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DegradedListNotice } from "@/features/conversations/ConversationListPanel";
+import {
+  DegradedListNotice,
+  useRetryFocusRescue,
+} from "@/features/conversations/ConversationListPanel";
 import { offlinePendingMessage } from "@/features/conversations/remote-section-state";
 import { presentError } from "@/lib/error-summary";
 import {
   forgeFeatureReady,
+  retryStarHistory,
+  starHistorySeries,
   useCodeFrequency,
   useCommitActivity,
   useCommunityInsights,
@@ -16,6 +29,9 @@ import {
   usePunchCard,
   useRepoDependencies,
   useRepoTraffic,
+  useRetireParkedStarPage,
+  useRetireParkedStarRefresh,
+  useStarHistory,
 } from "@/lib/git/queries";
 import type { ContributorChurn } from "@/lib/git/types";
 import { useWorkflowRuns } from "@/lib/github/actions";
@@ -45,6 +61,13 @@ import {
 } from "./LinkOutsCard";
 import { PunchCard, PunchCardSkeleton } from "./PunchCard";
 import { Empty, fmt, InsightCard } from "./primitives";
+import { StarHistoryCard } from "./StarHistoryCard";
+import {
+  STAR_UNAVAILABLE_TEXT,
+  starCardState,
+  starHeaderSlot,
+  starSpanHeld,
+} from "./star-history";
 import { TrafficCard } from "./TrafficCard";
 
 const WINDOW_WEEKS = 52;
@@ -140,6 +163,7 @@ type CardId =
   | "runs"
   | "forkActivity"
   | "community"
+  | "starHistory"
   | "traffic"
   | "dependencies";
 
@@ -153,6 +177,7 @@ const CARD_NOUN: Record<CardId, string> = {
   runs: "workflow runs",
   forkActivity: "fork activity",
   community: "community insights",
+  starHistory: "star history",
   traffic: "traffic",
   dependencies: "dependencies",
 };
@@ -195,8 +220,9 @@ function durationMinutes(start: string, end: string): number {
 
 /**
  * The wide Insights board: the local-git graphs (commit activity, code
- * frequency, contributors, punch card) over a trailing window, plus a GitHub
- * Actions duration/success trend and a community-health card. All local data is
+ * frequency, contributors, punch card) over a trailing window, plus the hosted
+ * cards: the CI duration/success trend, fork activity, and the GitHub-only
+ * community health, star history, traffic and dependencies. All local data is
  * computed from the clone (works offline, on private repos, with no token).
  */
 export function InsightsBoard({
@@ -215,6 +241,21 @@ export function InsightsBoard({
   const [lastErrors, setLastErrors] = useState<CardErrorMemory>({});
   const [retryRepo, setRetryRepo] = useState(repoPath);
   const [previousRepo, setPreviousRepo] = useState<string | null>(null);
+  // The star read (`starReadId`: repo and series) whose All-time span stays
+  // drawn while a Retry resumes it (starSpanHeld); any other read, or the
+  // window, holds none.
+  const [starSpanRead, setStarSpanRead] = useState<string | null>(null);
+  // The star read whose window has drawn, so a resumed page keeps it drawn.
+  const [starWindowRead, setStarWindowRead] = useState<string | null>(null);
+  // A failed older page's Retry while it runs: the read (repo and series) and
+  // the page it asks.
+  const [starRetry, setStarRetry] = useState<{
+    repo: string;
+    series: string | null;
+    page: number;
+  } | null>(null);
+  const starBodyRef = useRef<HTMLDivElement>(null);
+  const starHost = useRef<HTMLElement | null>(null);
   const repoChanged = retryRepo !== repoPath;
   if (repoChanged) {
     setRetryRepo(repoPath);
@@ -259,6 +300,9 @@ export function InsightsBoard({
   const community = useCommunityInsights(repoPath, canGhOnly);
   const traffic = useRepoTraffic(repoPath, canGhOnly);
   const dependencies = useRepoDependencies(repoPath, canGhOnly);
+  const starSeries = starHistorySeries(gh.data);
+  const starHistory = useStarHistory(repoPath, starSeries, canGhOnly);
+  const starReadId = JSON.stringify([repoPath, starSeries]);
   const forkActivity = useForkActivity(repoPath, canForks);
   const runs = useWorkflowRuns(repoPath, canGh, active);
 
@@ -283,6 +327,126 @@ export function InsightsBoard({
     ...CARD_NOUN,
     runs: isGitLab || isBitbucket ? "pipelines" : CARD_NOUN.runs,
   };
+
+  const starSpanHere = starSpanRead === starReadId;
+  const star = starCardState(
+    {
+      data: starHistory.data,
+      hasNextPage: starHistory.hasNextPage,
+      isError: starHistory.isError,
+      isPaused: starHistory.isPaused,
+      isFetching: starHistory.isFetching,
+      retryingPage:
+        starRetry?.repo === repoPath && starRetry.series === starSeries
+          ? starRetry.page
+          : null,
+    },
+    allTime,
+    starSpanHere,
+    starWindowRead === starReadId,
+  );
+  const queryClient = useQueryClient();
+  const { fetchNextPage: fetchStarPage } = starHistory;
+  // A marker's Retry (a failed refresh outranks it: retryStarHistory) holds the
+  // partial line on the page it asks until that page answers.
+  const retryStars = () => {
+    const page = starHistory.isError ? undefined : star.marker?.page;
+    const token =
+      page === undefined ? null : { repo: repoPath, series: starSeries, page };
+    if (token) setStarRetry(token);
+    return retryStarHistory(
+      queryClient,
+      repoPath,
+      starSeries,
+      starHistory,
+    ).finally(() => {
+      if (token) setStarRetry((t) => (t === token ? null : t));
+    });
+  };
+  // A failed older page is a success to the read (a marker): the board counts
+  // it only while the shown view needs that page (All time, or a short
+  // window). A failed refresh is the read's error and always counts.
+  const starPageFailed = star.marker !== null && star.pageDemand;
+  const starRead: CardRead = {
+    data: starHistory.data,
+    error: starHistory.error ?? (starPageFailed ? star.marker?.reason : null),
+    isError: starHistory.isError || starPageFailed,
+    isPaused: starHistory.isPaused,
+    isFetching: starHistory.isFetching,
+    isPlaceholderData: starHistory.isPlaceholderData,
+    errorUpdatedAt: starHistory.errorUpdatedAt,
+    dataUpdatedAt: starHistory.dataUpdatedAt,
+    refetch: retryStars,
+  };
+  // The star slot's gate, which its Retry rescue reads too.
+  const starSlotGate = canGhOnly || forgeDetecting;
+  const starShown = starSlotGate && cardBody(starRead, isRetrying) === "data";
+  // The summary's owed weeks, a marker's included: a parked marker Retry keeps
+  // the span it showed.
+  const starSpanNext = starSpanHeld(
+    allTime,
+    star.summary.hasMore,
+    star.partial,
+    starSpanHere,
+  )
+    ? starReadId
+    : null;
+  if (starSpanNext !== starSpanRead) setStarSpanRead(starSpanNext);
+  if (
+    starShown &&
+    star.summary.view === "window" &&
+    !star.awaitingWindow &&
+    starWindowRead !== starReadId
+  )
+    setStarWindowRead(starReadId);
+  // A read that lost its data (collected, or a cold reload) loads afresh, so
+  // its first window waits for 52 weeks again.
+  if (starHistory.data === undefined && starWindowRead === starReadId)
+    setStarWindowRead(null);
+  // The page driver lives here, declared after useStarHistory: the hook moves
+  // its observer to a switched repo in an effect, which must run first, or a
+  // returning repo's page goes to the old one. Hidden tabs defer it; it never
+  // awaits, and `cancelRefetch: false` joins a page already in flight. Keyed
+  // on the repo, the series and the pages loaded, so each landed page (or a
+  // series flip at the same count) asks for the next even when a batched render
+  // never showed the fetch in flight.
+  // Gated on `canGhOnly` too: the slot also shows while the forge is being
+  // detected, when the read is disabled but fetchNextPage would still run.
+  const starDriveFor =
+    canGhOnly && starShown && star.wantsPage && !starHistory.isFetching
+      ? `${repoPath}#${starSeries}#${star.summary.pages.length}`
+      : null;
+  useEffect(() => {
+    if (starDriveFor !== null) void fetchStarPage({ cancelRefetch: false });
+  }, [starDriveFor, fetchStarPage]);
+  useRetireParkedStarPage(
+    repoPath,
+    starSeries,
+    canGhOnly && starShown && star.pageDemand,
+  );
+  useRetireParkedStarRefresh(repoPath, starSeries, canGhOnly && starShown);
+  const starRescue = useRetryFocusRescue(
+    starShown && star.partialLine !== null,
+  );
+  const { hostRef: rescueHostRef } = starRescue;
+  const starHostRef = useCallback(
+    (node: HTMLElement | null) => {
+      rescueHostRef(node);
+      starHost.current = node;
+    },
+    [rescueHostRef],
+  );
+  // A drive that starts with no press (a reconnect, a background refresh)
+  // turns the body inert under focus: move it to the header host while it is
+  // still inside the body, before the browser drops it to <body>.
+  const starInert = starShown && star.stale;
+  useLayoutEffect(() => {
+    if (!starInert) return;
+    const active = document.activeElement;
+    if (active !== null && starBodyRef.current?.contains(active))
+      starHost.current?.focus({ preventScroll: true });
+  }, [starInert]);
+  const starSlot = starHeaderSlot(star.summary);
   // The cards on screen with a read of their own, in board order: the notice
   // quotes the first failure in this order.
   const cardReads: (readonly [CardId, CardRead])[] = [
@@ -297,6 +461,7 @@ export function InsightsBoard({
     ...(canGhOnly
       ? ([
           ["community", community],
+          ["starHistory", starRead],
           ["traffic", traffic],
           ["dependencies", dependencies],
         ] as const)
@@ -531,6 +696,51 @@ export function InsightsBoard({
                 )
               ) : (
                 <CommunityCard data={community.data} />
+              )}
+            </InsightCard>
+          )}
+
+          {starSlotGate && (
+            <InsightCard
+              title="Star history"
+              bodyClassName={CARD_BODY.chart}
+              stale={starInert}
+              bodyRef={starBodyRef}
+              action={
+                // Always mounted, outside the dimmed body: where focus lands
+                // when the partial line's Retry leaves, or the body goes inert.
+                <span
+                  ref={starHostRef}
+                  tabIndex={-1}
+                  // A group, since a generic span can't carry a name: one name
+                  // in both states, apart from the card's, so focus rescued
+                  // here announces something even while the slot is empty.
+                  role="group"
+                  aria-label="Star history summary"
+                  className="text-[11px] text-muted-foreground tabular-nums outline-none"
+                >
+                  {starSlot.kind === "none" ? null : starSlot.text}
+                </span>
+              }
+            >
+              {canGhOnly && starSeries === null ? (
+                // A GitHub repo whose status names no host or repository has no
+                // series to read, so its disabled read would never leave loading.
+                <Empty>{STAR_UNAVAILABLE_TEXT}</Empty>
+              ) : starHistory.data === undefined || !starShown ? (
+                unloadedCard(
+                  starRead,
+                  isRetrying,
+                  noun.starHistory,
+                  <ChartSkeleton />,
+                )
+              ) : (
+                <StarHistoryCard
+                  key={repoPath}
+                  state={star}
+                  onRetry={() => void starRead.refetch()}
+                  retryRef={starRescue.retryRef}
+                />
               )}
             </InsightCard>
           )}

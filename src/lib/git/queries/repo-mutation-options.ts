@@ -20,14 +20,42 @@ export interface RepoMutationKeys {
   invalidateAfter: QueryKeys;
 }
 
+/** The segments after `["repo", repo]` that key a repo's star history, ahead
+ *  of the series it reads; `repoKeys.starHistory` (core.ts) builds its key. */
+export const STAR_HISTORY_SEGMENTS = ["insights", "starHistory"] as const;
+
+/** Whether a whole-repo write settle refreshes this read: all but star
+ *  history, whose refetch re-walks every loaded page. Its key follows the
+ *  forge status's series, and the writes that move its stars (Star/Unstar,
+ *  delete, visibility) settle it themselves. Repo-agnostic, since the settle's
+ *  key already names the repo: one stable function, so `union` dedupes it by
+ *  identity. */
+export function settlesOnRepoWrite(query: {
+  queryKey: readonly unknown[];
+}): boolean {
+  return !(
+    query.queryKey[2] === STAR_HISTORY_SEGMENTS[0] &&
+    query.queryKey[3] === STAR_HISTORY_SEGMENTS[1]
+  );
+}
+
+/** A bare `["repo", repo]` entry: the whole-repo default and its spellings. */
+function isWholeRepoKey(key: readonly unknown[]): boolean {
+  return key.length === 2 && key[0] === "repo";
+}
+
 function filtersOf(entry: InvalidationEntry): {
   queryKey: readonly unknown[];
   predicate?: (query: Query) => boolean;
 } {
   // `Array.isArray` doesn't narrow a readonly array out of a union.
-  return Array.isArray(entry)
-    ? { queryKey: entry }
-    : (entry as Exclude<InvalidationEntry, readonly unknown[]>);
+  if (!Array.isArray(entry))
+    return entry as Exclude<InvalidationEntry, readonly unknown[]>;
+  // A whole-repo key skips the reads no write moves. Predicate entries pass as
+  // they are: localOnly's `isLocalRepoQuery` already skips star history.
+  return isWholeRepoKey(entry)
+    ? { queryKey: entry, predicate: settlesOnRepoWrite }
+    : { queryKey: entry };
 }
 
 /** Both lists in order, each entry once: keys compare by their JSON form, a filter

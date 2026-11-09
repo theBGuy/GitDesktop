@@ -15,7 +15,7 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart";
 import type { CodeFreqPoint, TrafficPoint, WeekCount } from "@/lib/git/types";
-import { ChartFigure, fmt } from "./primitives";
+import { ChartFigure, fmt, useCardTitle, useChartLabel } from "./primitives";
 
 /** "2025-07" → "W7"; the year still shows in the tooltip/table. */
 function weekTick(week: string): string {
@@ -29,30 +29,59 @@ const compact = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 });
 
-function DataTable({
+/** Each row's key: `${first cell}` for its first occurrence, then
+ *  `${first cell}#${n}` for the nth, the suffix bumped past any key already
+ *  taken (a first cell can itself read "a#2"). */
+function rowKeys(rows: (string | number)[][]): string[] {
+  const seen = new Map<string, number>();
+  const used = new Set<string>();
+  return rows.map((r) => {
+    const first = String(r[0]);
+    let n = seen.get(first) ?? 0;
+    let key: string;
+    do {
+      n++;
+      key = n === 1 ? first : `${first}#${n}`;
+    } while (used.has(key));
+    seen.set(first, n);
+    used.add(key);
+    return key;
+  });
+}
+
+/** Named "<card title> data" inside a card; unnamed outside one. */
+export function DataTable({
   headers,
   rows,
 }: {
   headers: string[];
   rows: (string | number)[][];
 }) {
+  const keys = rowKeys(rows);
+  const card = useCardTitle();
   return (
-    <table className="w-full border-collapse text-left tabular-nums">
+    <table
+      aria-label={card && `${card.title} data`}
+      className="w-full border-collapse text-left tabular-nums"
+    >
       <thead>
         <tr className="text-muted-foreground">
-          {headers.map((h) => (
-            <th key={h} className="border-b py-1 pr-3 font-medium">
+          {headers.map((h, i) => (
+            <th key={`${h}-${i}`} className="border-b py-1 pr-3 font-medium">
               {h}
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
-          <tr key={String(r[0])}>
+        {rows.map((r, rowIndex) => (
+          // A first cell can repeat (two workflows' run numbers), so a repeat
+          // carries its occurrence; a unique cell keeps its key when rows
+          // prepend (older star pages), so React keeps its row.
+          <tr key={keys[rowIndex]}>
             {r.map((cell, i) => (
               <td
-                key={headers[i] ?? i}
+                key={`${headers[i]}-${i}`}
                 className="border-b border-border/50 py-1 pr-3"
               >
                 {cell}
@@ -70,6 +99,7 @@ const commitConfig = {
 } satisfies ChartConfig;
 
 export function CommitActivityChart({ data }: { data: WeekCount[] }) {
+  const chartLabel = useChartLabel();
   const total = data.reduce((n, d) => n + d.commits, 0);
   return (
     <ChartFigure
@@ -82,7 +112,12 @@ export function CommitActivityChart({ data }: { data: WeekCount[] }) {
       }
     >
       <ChartContainer config={commitConfig} className="aspect-auto h-40 w-full">
-        <BarChart data={data} accessibilityLayer margin={{ left: 4, right: 8 }}>
+        <BarChart
+          data={data}
+          accessibilityLayer
+          aria-label={chartLabel}
+          margin={{ left: 4, right: 8 }}
+        >
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="week"
@@ -113,6 +148,7 @@ const codeFreqConfig = {
 } satisfies ChartConfig;
 
 export function CodeFrequencyChart({ data }: { data: CodeFreqPoint[] }) {
+  const chartLabel = useChartLabel();
   // Deletions plotted negative so they mirror below the zero line — the meaning
   // is carried by position + labels, not by color alone.
   const chartData = data.map((d) => ({
@@ -136,7 +172,12 @@ export function CodeFrequencyChart({ data }: { data: CodeFreqPoint[] }) {
         config={codeFreqConfig}
         className="aspect-auto h-40 w-full"
       >
-        <AreaChart data={chartData} accessibilityLayer margin={{ right: 8 }}>
+        <AreaChart
+          data={chartData}
+          accessibilityLayer
+          aria-label={chartLabel}
+          margin={{ right: 8 }}
+        >
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="week"
@@ -200,6 +241,7 @@ export interface RunDurationPoint {
 }
 
 export function ActionsDurationChart({ data }: { data: RunDurationPoint[] }) {
+  const chartLabel = useChartLabel();
   return (
     <ChartFigure
       caption="Run duration (start → finish) for the most recent runs, oldest first."
@@ -214,7 +256,12 @@ export function ActionsDurationChart({ data }: { data: RunDurationPoint[] }) {
         config={actionsConfig}
         className="aspect-auto h-40 w-full"
       >
-        <BarChart data={data} accessibilityLayer margin={{ left: 4, right: 8 }}>
+        <BarChart
+          data={data}
+          accessibilityLayer
+          aria-label={chartLabel}
+          margin={{ left: 4, right: 8 }}
+        >
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="run"
@@ -296,6 +343,7 @@ export function TrafficChart({
   clones: TrafficPoint[];
 }) {
   const data = mergeTraffic(views, clones);
+  const chartLabel = useChartLabel();
   return (
     <ChartFigure
       caption="Daily views and git clones over the last 14 days (hover for unique counts)."
@@ -316,7 +364,12 @@ export function TrafficChart({
         config={trafficConfig}
         className="aspect-auto h-36 w-full"
       >
-        <AreaChart data={data} accessibilityLayer margin={{ right: 8 }}>
+        <AreaChart
+          data={data}
+          accessibilityLayer
+          aria-label={chartLabel}
+          margin={{ right: 8 }}
+        >
           <CartesianGrid vertical={false} />
           <XAxis
             dataKey="timestamp"

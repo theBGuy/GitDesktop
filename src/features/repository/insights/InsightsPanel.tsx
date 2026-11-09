@@ -23,8 +23,8 @@ import {
   DateValue,
   fmt,
   LanguageMakeup,
-  SectionTitle,
   Stat,
+  TitledSection,
 } from "./primitives";
 
 /**
@@ -150,8 +150,7 @@ export function InsightsPanel({
     // A flex gap, not space-y: the hidden comparison's sr-only root stays a
     // child, and space-y would give the section above it a trailing margin.
     <div className="flex flex-col gap-5">
-      <section>
-        <SectionTitle>Overview</SectionTitle>
+      <TitledSection title="Overview">
         <dl className="grid grid-cols-1 gap-x-8">
           <Stat label="Commits">{fmt(data.commitCount)}</Stat>
           <Stat label="Contributors">
@@ -178,16 +177,14 @@ export function InsightsPanel({
             <DateValue date={data.lastCommitDate} />
           </Stat>
         </dl>
-      </section>
+      </TitledSection>
 
-      <section>
-        <SectionTitle>Code makeup</SectionTitle>
+      <TitledSection title="Code makeup">
         <LanguageMakeup languages={data.languages} />
-      </section>
+      </TitledSection>
 
       {data.topContributors.length > 0 && (
-        <section>
-          <SectionTitle>Top contributors</SectionTitle>
+        <TitledSection title="Top contributors">
           <ul className="space-y-0.5">
             {data.topContributors.map((c) => (
               <li
@@ -201,7 +198,7 @@ export function InsightsPanel({
               </li>
             ))}
           </ul>
-        </section>
+        </TitledSection>
       )}
 
       <BranchComparisonSection
@@ -258,13 +255,16 @@ function BranchComparisonSection({
         {announcement}
       </div>
       {shown && (
-        <section>
-          <SectionTitle>
-            <span className="font-mono">{currentBranch}</span>{" "}
-            <span className="font-normal text-muted-foreground">
-              vs {base ?? "the default branch"}
-            </span>
-          </SectionTitle>
+        <TitledSection
+          title={
+            <>
+              <span className="font-mono">{currentBranch}</span>{" "}
+              <span className="font-normal text-muted-foreground">
+                vs {base ?? "the default branch"}
+              </span>
+            </>
+          }
+        >
           <DegradedListNotice
             noun="the comparison"
             degraded={
@@ -341,7 +341,7 @@ function BranchComparisonSection({
           ) : (
             <Skeleton className="h-16 w-full" />
           )}
-        </section>
+        </TitledSection>
       )}
     </div>
   );

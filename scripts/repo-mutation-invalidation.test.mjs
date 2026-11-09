@@ -27,8 +27,13 @@ try {
 } catch (e) {
   if (process.env.GD_EXPECT_DEPS) throw e;
 }
-const { QueryClient, MutationObserver, onlineManager, repoMutationCallbacks } =
-  deps ?? {};
+const {
+  QueryClient,
+  MutationObserver,
+  onlineManager,
+  repoMutationCallbacks,
+  settlesOnRepoWrite,
+} = deps ?? {};
 
 const NEEDS_DEPS =
   "needs node_modules — an installed run with GD_EXPECT_DEPS enforces this";
@@ -302,6 +307,37 @@ test("the union keeps a filter entry once per key and predicate", async (t) => {
   await sleep(0);
   assert.deepEqual(
     seen.map((f) => f.predicate ?? "plain"),
-    [other, "plain", local],
+    [other, settlesOnRepoWrite, local],
+  );
+});
+
+test("a bare whole-repo entry settles through the star-skipping filter, once", async (t) => {
+  if (!deps) return t.skip(NEEDS_DEPS);
+  const qc = new QueryClient();
+  const seen = [];
+  qc.invalidateQueries = (filters) => {
+    seen.push(filters);
+    return Promise.resolve();
+  };
+  const keys = {
+    invalidate: [["repo", "C:/a"], ["repo", "C:/a", "status"], ["forge-repos"]],
+    invalidateAfter: [],
+  };
+  const settle = repoMutationCallbacks(qc, keys, false, () => {});
+  // The captured context names the same bare key: one filter, by identity.
+  settle.onSettled("ok", null, undefined, keys);
+  await sleep(0);
+  assert.deepEqual(seen, [
+    { queryKey: ["repo", "C:/a"], predicate: settlesOnRepoWrite },
+    { queryKey: ["repo", "C:/a", "status"] },
+    { queryKey: ["forge-repos"] },
+  ]);
+  const star = {
+    queryKey: ["repo", "C:/a", "insights", "starHistory", "o/a"],
+  };
+  assert.equal(settlesOnRepoWrite(star), false);
+  assert.equal(
+    settlesOnRepoWrite({ queryKey: ["repo", "C:/a", "insights", "community"] }),
+    true,
   );
 });
