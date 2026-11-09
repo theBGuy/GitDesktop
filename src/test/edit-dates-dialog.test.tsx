@@ -309,6 +309,26 @@ describe("Edit dates dialog", () => {
     expect(onDatesChanged).toHaveBeenCalledWith(HASH, NEW_HASH, true);
   });
 
+  // Control: land through selectCommit; the landing advances the epoch.
+  it("lands the rewrite without advancing the interaction epoch", async () => {
+    let settle: (v: string) => void = () => undefined;
+    vi.mocked(gitAmendCommitDates).mockImplementation(
+      () =>
+        new Promise<string>((r) => {
+          settle = r;
+        }),
+    );
+    renderHost();
+    await retype(await authorField(), "2026-11-08 10:00:00 +01:00");
+    await userEvent.click(primary());
+    await waitFor(() => expect(gitAmendCommitDates).toHaveBeenCalled());
+    const before = useUiStore.getState().interactionEpoch;
+    settle(NEW_HASH);
+    await waitFor(() => expect(onDatesChanged).toHaveBeenCalled());
+    expect(useUiStore.getState().selectedCommitHash).toBe(NEW_HASH);
+    expect(useUiStore.getState().interactionEpoch).toBe(before);
+  });
+
   // Control: report `true` whatever liveTarget says; the dismissed case reads
   // as closed by the change.
   it("reports a change that lands after Esc as not closing the dialog", async () => {

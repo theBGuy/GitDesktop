@@ -394,14 +394,14 @@ function EditDatesForm({
       onClose();
     }
     // The rewrite takes the old commit's place in the selection only while
-    // nothing newer was asked since the press, since selectCommit's late bump
-    // would retire that intent; otherwise the gone commit is pruned.
+    // nothing newer was asked since the press: a later pick or navigation owns
+    // the selection, and the gone commit is only pruned.
     if (
       live.interactionEpoch === requestEpoch &&
       (live.selectedCommitHash === oldHash ||
         (adoptSelection && live.selectedCommitHash === null))
     )
-      live.selectCommit(newHash);
+      live.landSelectedCommit(newHash);
     else if (live.selectedCommitHash === oldHash) live.clearSelectedCommit();
     onDatesChanged?.(oldHash, newHash, closed);
   }
