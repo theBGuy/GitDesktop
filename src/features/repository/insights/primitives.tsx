@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { createContext, use, useId } from "react";
 import { RelativeTime } from "@/components/relative-time";
 import type { LanguageStat } from "@/lib/git/types";
 import { cn, PLACEHOLDER_FADE } from "@/lib/utils";
@@ -79,8 +79,36 @@ export function Stat({
   );
 }
 
-export function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className="mb-1 text-xs font-semibold">{children}</h3>;
+export function SectionTitle({
+  id,
+  children,
+}: {
+  id?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <h3 id={id} className="mb-1 text-xs font-semibold">
+      {children}
+    </h3>
+  );
+}
+
+/** A titled block (a sidebar section, a card's sub-list), a group named by
+ *  its heading: a group, not a region, so the panel adds no landmarks. */
+export function TitledSection({
+  title,
+  children,
+}: {
+  title: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const titleId = useId();
+  return (
+    <section role="group" aria-labelledby={titleId}>
+      <SectionTitle id={titleId}>{title}</SectionTitle>
+      {children}
+    </section>
+  );
 }
 
 /** An insight card's "nothing to show" line — shared so a card that decides its own
@@ -94,15 +122,36 @@ export function Empty({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** A bordered card for an Insights board panel. The body is a flex column, so
- *  a `bodyClassName` height holds the card at one size across its loading,
- *  empty and loaded arms; `stale` dims it while a placeholder (another
- *  window's data) stands in. */
+/** The enclosing card's title and its id, which name the card's figures,
+ *  chart surfaces and data tables. */
+const CardTitleContext = createContext<
+  { id: string; title: string } | undefined
+>(undefined);
+
+/** The enclosing card's title, or undefined outside a card. */
+export function useCardTitle(): { id: string; title: string } | undefined {
+  return use(CardTitleContext);
+}
+
+/** A chart surface's name inside a card, "<card title> chart": the card's group
+ *  and figure already carry the bare title. Undefined outside a card. */
+export function useChartLabel(): string | undefined {
+  const card = use(CardTitleContext);
+  return card && `${card.title} chart`;
+}
+
+/** A bordered card for an Insights board panel, a group named by its title
+ *  (a group, not a region: a board of cards would be a long landmark list).
+ *  The body is a flex column, so a `bodyClassName` height holds the card at
+ *  one size across its loading, empty and loaded arms; `stale` dims it and
+ *  puts it out of reach while its content is being replaced (another window's
+ *  placeholder, or older weeks loading under the drawn curve). */
 export function InsightCard({
   title,
   action,
   className,
   bodyClassName,
+  bodyRef,
   stale = false,
   children,
 }: {
@@ -110,21 +159,28 @@ export function InsightCard({
   action?: React.ReactNode;
   className?: string;
   bodyClassName?: string;
+  bodyRef?: React.Ref<HTMLDivElement>;
   stale?: boolean;
   children: React.ReactNode;
 }) {
+  const titleId = useId();
   return (
     <section
+      role="group"
+      aria-labelledby={titleId}
       aria-busy={stale || undefined}
       className={cn("space-y-2 border bg-card p-3", className)}
     >
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold">{title}</h3>
+        <h3 id={titleId} className="text-xs font-semibold">
+          {title}
+        </h3>
         {action}
       </div>
       <div
-        // A placeholder drives rendering only: the other window's grid, tables
-        // and announcements stay out of reach until the data is current.
+        ref={bodyRef}
+        // Content being replaced drives rendering only: its grid, tables and
+        // announcements stay out of reach until what replaces it lands.
         inert={stale}
         className={cn(
           "flex flex-col",
@@ -133,15 +189,18 @@ export function InsightCard({
           bodyClassName,
         )}
       >
-        {children}
+        <CardTitleContext value={{ id: titleId, title }}>
+          {children}
+        </CardTitleContext>
       </div>
     </section>
   );
 }
 
 /**
- * Wraps a chart as an accessible `<figure>`: a one-line caption summary and a
- * native `<details>` data-table fallback (the screen-reader path; the Recharts
+ * Wraps a chart as an accessible `<figure>`: named by its card's title (by
+ * its caption outside a card), a one-line caption summary, and a native
+ * `<details>` data-table fallback (the screen-reader path; the Recharts
  * charts also enable `accessibilityLayer` for keyboard point traversal).
  */
 export function ChartFigure({
@@ -154,8 +213,15 @@ export function ChartFigure({
   children: React.ReactNode;
 }) {
   const id = useId();
+  const titleId = use(CardTitleContext)?.id;
   return (
-    <figure aria-describedby={id} className="space-y-2">
+    <figure
+      // In a card the title names it and the caption describes it; outside
+      // one the caption names it, so it describes nothing more.
+      aria-labelledby={titleId ?? id}
+      aria-describedby={titleId === undefined ? undefined : id}
+      className="space-y-2"
+    >
       {children}
       <figcaption id={id} className="text-[11px] text-muted-foreground">
         {caption}

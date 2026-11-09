@@ -11,6 +11,7 @@ import { COLD_START_NO_GH } from "@/lib/test-mode";
 import * as api from "../api";
 import type { ForgeProvider, ForgeSearchList, MyWorkSources } from "../types";
 import { keepPreviousDataForRepo } from "./core";
+import { invalidateStarHistoryForSlug } from "./insights";
 import { useMutationCacheSnapshot } from "./internal";
 import {
   type ForkByNameVars,
@@ -230,7 +231,8 @@ export function useRepoStarred(
 
 /** Star / unstar a repo, optimistically flipping the starred-query cache with exact-key
  *  snapshot/rollback. The key is derived from the args at mutate time so a mid-flight
- *  repo switch never corrupts another repo's cache. */
+ *  repo switch never corrupts another repo's cache. A landed GitHub star also
+ *  refreshes any open checkout's star history, Community and star status. */
 export function useStarRepo() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -245,10 +247,16 @@ export function useStarRepo() {
       await queryClient.cancelQueries({ queryKey: key });
       const prev = queryClient.getQueryData<boolean>(key);
       queryClient.setQueryData<boolean>(key, args.star);
-      return { prev, key };
+      const slug =
+        args.provider === "github" ? `${args.owner}/${args.name}` : null;
+      return { prev, key, slug };
     },
     onError: (_e, _args, ctx) => {
       if (ctx?.prev !== undefined) queryClient.setQueryData(ctx.key, ctx.prev);
+    },
+    onSuccess: (_d, _args, ctx) => {
+      if (ctx.slug !== null)
+        void invalidateStarHistoryForSlug(queryClient, ctx.slug);
     },
     onSettled: (_d, _e, args) =>
       void queryClient.invalidateQueries({

@@ -5,10 +5,10 @@
 // baseline and Automations-draft writes, the footer- and bar-hide focus rules,
 // both screens' prompt dismissal at unmount, the failed write's arm, the
 // Automations panel's own Discard prompt and draft registration, the toaster's
-// offset props and its ban on the wrapper-overriding props, and the clearance
-// module's import-free shape. Each scan must pass the real source and go red
-// under every mutation listed with it, so a scan that can't fail on those edits
-// fails here instead.
+// ban on the wrapper-overriding props (its offsets and theme ride along), and
+// the clearance module's import-free shape. Each scan must pass the real source
+// and go red under every mutation listed with it, so a scan that can't fail on
+// those edits fails here instead.
 //
 // `save-reset.ts` is runtime-import-free, so this suite imports it straight from
 // `src/` under Node's type stripping and runs in the no-install `guards` job.
@@ -861,7 +861,7 @@ test("applyDiscard clears the staged buffer and resets the MCP baseline", () => 
   );
 });
 
-test("the toaster takes only offset props, so the wrapper's class survives", () => {
+test("the toaster takes no wrapper-overriding props, so the wrapper's class survives", () => {
   pin(toasterProblems, source(MAIN), (s) =>
     s.replace("closeButton\n", "closeButton\n      toastOptions={{}}\n"),
   );

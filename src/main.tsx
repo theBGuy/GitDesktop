@@ -15,6 +15,7 @@ import { queryClient } from "@/lib/query-client";
 import { loadSettings } from "@/lib/settings/api";
 import { commitTheme, initTheme } from "@/lib/theme";
 import { subscribeToastClearance, toastClearance } from "@/lib/toast-clearance";
+import { useIsDark } from "@/lib/use-is-dark";
 import { initZoom } from "@/lib/zoom/zoom";
 import App from "./App.tsx";
 import "./App.css";
@@ -56,17 +57,21 @@ window.addEventListener("unhandledrejection", (e) => {
   trackCaughtError(e.reason, false);
 });
 
-// Beyond position and closeButton, only the offset props ride along: the
-// wrapper spreads caller props last, so toastOptions would drop its cn-toast
+// Beyond position and closeButton, only theme and the offset props ride along:
+// the wrapper spreads caller props last, so toastOptions would drop its cn-toast
 // class, className its toaster group class, and style its CSS variables.
-// Unlifted, sonner keeps its own default offset.
+// theme carries the app's resolved theme, since next-themes has no provider
+// here and the wrapper alone would follow the OS scheme. Unlifted, sonner
+// keeps its own default offset.
 function AppToaster() {
+  const isDark = useIsDark();
   const lift = useSyncExternalStore(subscribeToastClearance, toastClearance);
   const offset = lift > 0 ? { bottom: lift } : undefined;
   return (
     <Toaster
       position="bottom-right"
       closeButton
+      theme={isDark ? "dark" : "light"}
       offset={offset}
       mobileOffset={offset}
     />

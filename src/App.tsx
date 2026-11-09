@@ -35,6 +35,7 @@ import {
 } from "@/lib/git/queries";
 import { useHotkeyAction, useHotkeysListener } from "@/lib/hotkeys/hotkeys";
 import { useModalGateOpen } from "@/lib/hotkeys/modal-gate";
+import "@/lib/last-checkout/subscribe";
 import { MCP_WRITABLE_STORES } from "@/lib/mcp-writable-stores";
 import {
   notificationsDraftOutOfSync,

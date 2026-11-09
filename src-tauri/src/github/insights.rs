@@ -6,7 +6,10 @@ use crate::error::{AppError, AppResult};
 use crate::forge::session::{classify_gh_failure, GhFailure};
 use crate::github::gh_failure_reason;
 use crate::github::repo_meta::repo_object;
-use crate::github::runner::{run_gh_raw, GhOutput, GH_NETWORK_TIMEOUT, GH_TIMEOUT};
+use crate::github::runner::{
+    gh_host_for_repo, run_gh_cached_get_raw, run_gh_raw, split_response, GhOutput,
+    GH_NETWORK_TIMEOUT, GH_TIMEOUT,
+};
 
 /// Community-health profile + social counts for the Insights tab. Read-only and
 /// tolerant: a repo without a GitHub remote (or with the dependency/community
@@ -525,6 +528,257 @@ fn repo_dependencies_outcome(result: AppResult<GhOutput>) -> AppResult<RepoDepen
         deps.packages = all;
     }
     Ok(deps)
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StarHistoryPage {
+    /// On page 1 only: false for not-found or any answered failure (a denial, a 401,
+    /// an un-worded exit, a 5xx outside 500/502/503/504); weeks is empty. Rate limits
+    /// and transport-worded failures (incl. 500/502/503/504) are errors.
+    pub available: bool,
+    /// newest first; unreadable entries dropped; days dropped
+    pub weeks: Vec<StarWeek>,
+    /// Page number from Link rel="next"; None on the last page.
+    pub next_page: Option<u32>,
+    /// Page number from Link rel="last"; None when GitHub sent no Link header
+    /// OR on the real last page (its Link carries only prev + first).
+    pub last_page: Option<u32>,
+    /// Live `stargazers_count` from `repos/{slug}`, fetched only when page == 1.
+    pub stargazers_count: Option<u32>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct StarWeek {
+    pub week: i64,
+    pub total: u32,
+}
+
+/// `host` and `slug` are the series the frontend's read is keyed by: one series reads
+/// one repository on one host, pages and count alike, and origin's gh host is checked
+/// against it on every page rather than trusted to it.
+#[tauri::command]
+pub async fn gh_star_history_page(
+    repo_path: String,
+    page: u32,
+    slug: String,
+    host: String,
+) -> AppResult<StarHistoryPage> {
+    validate_star_page(page)?;
+    validate_star_slug(&slug)?;
+    validate_star_host(&host)?;
+    let pin = gh_host_for_repo(&repo_path).await;
+    let (history_args, count_args) = star_reads(pin.as_deref(), &host, &slug, page)?;
+    let args: Vec<&str> = history_args.iter().map(String::as_str).collect();
+    if let Some(count_args) = count_args {
+        let count_args: Vec<&str> = count_args.iter().map(String::as_str).collect();
+        // The conditional layer, never the repos/{slug} memo: that memo keys on
+        // origin's host, and its writers evict origin's spelling of the slug.
+        let (history, count) = tokio::join!(
+            run_gh_raw(Some(&repo_path), &args, GH_TIMEOUT),
+            run_gh_cached_get_raw(Some(&repo_path), &count_args, GH_TIMEOUT),
+        );
+        star_history_outcome(history, Some(count), page)
+    } else {
+        let history = run_gh_raw(Some(&repo_path), &args, GH_TIMEOUT).await;
+        star_history_outcome(history, None, page)
+    }
+}
+
+fn validate_star_page(page: u32) -> AppResult<()> {
+    if !(1..=100).contains(&page) {
+        return Err(AppError::InvalidArgument(format!(
+            "star history page {page} is out of 1..=100"
+        )));
+    }
+    Ok(())
+}
+
+/// An IPC-supplied slug reaches a `repos/{slug}` endpoint, so it passes the same
+/// owner/repo grammar origin slugs do (exactly one `/`), refused otherwise.
+fn validate_star_slug(slug: &str) -> AppResult<()> {
+    if slug.matches('/').count() != 1 || !crate::github::valid_github_slug(slug) {
+        return Err(AppError::InvalidArgument(format!(
+            "star history slug {slug:?} isn't a GitHub owner/repo"
+        )));
+    }
+    Ok(())
+}
+
+/// The series' host is compared against origin's gh host, so it passes the gate written
+/// for `--hostname` argv, plus the leading-`-` refusal that keeps it from reading as a flag.
+fn validate_star_host(host: &str) -> AppResult<()> {
+    if host.starts_with('-') || !crate::forge::is_safe_authority(host) {
+        return Err(AppError::InvalidArgument(format!(
+            "star history host {host:?} isn't a host name"
+        )));
+    }
+    Ok(())
+}
+
+/// The reads for one page of a series. Both run against origin's pinned gh host spelled
+/// in full, port included (gh keys its logins by port), and only while that pin's bare
+/// host IS the series host, so an origin moved to another host never reads into the
+/// series. No pin admits only github.com: no ambient enterprise token goes to a host the
+/// user holds no stored login for. The count rides page 1 only.
+fn star_reads(
+    pin: Option<&str>,
+    host: &str,
+    slug: &str,
+    page: u32,
+) -> AppResult<([String; 5], Option<[String; 4]>)> {
+    let authority = match pin {
+        Some(pin) if star_bare_host(pin).eq_ignore_ascii_case(host) => pin,
+        None if host.eq_ignore_ascii_case("github.com") => "github.com",
+        _ => {
+            return Err(crate::github::gh_unreadable(
+                "the star history",
+                format!("gh holds no login on {host} for this repository's origin."),
+            ))
+        }
+    };
+    let count = (page == 1).then(|| star_count_args(authority, slug));
+    Ok((star_history_args(authority, slug, page), count))
+}
+
+/// An authority's host without its port, split the way `forge::remote_host` splits one:
+/// a bracketed IPv6 literal keeps its span, otherwise the first `:` opens the port.
+fn star_bare_host(authority: &str) -> &str {
+    crate::forge::bracketed_split(authority).map_or_else(
+        || authority.split(':').next().unwrap_or(authority),
+        |(span, _)| span,
+    )
+}
+
+/// An explicit `--hostname` outranks run_gh's `GH_HOST` pin to origin's login host.
+/// Paged manually with -i: slurp closes a valid-looking array over a later-page failure.
+fn star_history_args(host: &str, slug: &str, page: u32) -> [String; 5] {
+    [
+        "api".into(),
+        "-i".into(),
+        "--hostname".into(),
+        host.into(),
+        format!("repos/{slug}/stargazers/history?per_page=30&page={page}"),
+    ]
+}
+
+fn star_count_args(host: &str, slug: &str) -> [String; 4] {
+    [
+        "api".into(),
+        "--hostname".into(),
+        host.into(),
+        format!("repos/{slug}"),
+    ]
+}
+
+// Mirror security_findings::parse_link_next locally; next pages must be consecutive and addressable.
+fn star_link_pages(headers: &str, page: u32) -> AppResult<(Option<u32>, Option<u32>)> {
+    let mut next = None;
+    let mut last = None;
+    for line in headers.lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("link") {
+            continue;
+        }
+        for part in value.split(',') {
+            let is_next = part.contains("rel=\"next\"");
+            let is_last = part.contains("rel=\"last\"");
+            if !is_next && !is_last {
+                continue;
+            }
+            let number = part
+                .split_once('<')
+                .and_then(|(_, rest)| rest.split_once('>'))
+                .and_then(|(url, _)| url.split_once('?'))
+                .and_then(|(_, query)| query.split('&').find_map(|p| p.strip_prefix("page=")))
+                .and_then(|value| value.parse::<u32>().ok());
+            if is_next {
+                let number =
+                    number.filter(|&next| page.checked_add(1) == Some(next) && next <= 100);
+                next = Some(number.ok_or_else(|| {
+                    crate::github::gh_unreadable(
+                        "the star history",
+                        "Link next page must be readable, consecutive, and at most 100".into(),
+                    )
+                })?);
+            }
+            if is_last {
+                last = number;
+            }
+        }
+    }
+    Ok((next, last))
+}
+
+fn stargazers_count_outcome(out: AppResult<GhOutput>) -> AppResult<Option<u32>> {
+    let out = out?;
+    if out.code != 0 {
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::RateLimited | GhFailure::Transport => {
+                Err(AppError::Gh(gh_failure_reason(&out)))
+            }
+            GhFailure::NotFound | GhFailure::Answered => Ok(None),
+        };
+    }
+    let v: serde_json::Value = serde_json::from_str(&out.stdout_lossy())
+        .map_err(|e| crate::github::gh_unreadable("the repository", e.to_string()))?;
+    Ok(v["stargazers_count"]
+        .as_u64()
+        .and_then(|count| u32::try_from(count).ok()))
+}
+
+fn star_history_outcome(
+    out: AppResult<GhOutput>,
+    count: Option<AppResult<GhOutput>>,
+    page: u32,
+) -> AppResult<StarHistoryPage> {
+    let out = out?;
+    if out.code != 0 {
+        return match classify_gh_failure(&out.stderr) {
+            GhFailure::NotFound | GhFailure::Answered if page == 1 => Ok(StarHistoryPage {
+                available: false,
+                ..Default::default()
+            }),
+            _ => Err(AppError::Gh(gh_failure_reason(&out))),
+        };
+    }
+    let stdout = out.stdout_lossy();
+    let (headers, body) = split_response(&stdout);
+    let v: serde_json::Value = serde_json::from_str(body.trim())
+        .map_err(|e| crate::github::gh_unreadable("the star history", e.to_string()))?;
+    let items = v.as_array().ok_or_else(|| {
+        crate::github::gh_unreadable("the star history", "expected an array of weeks".into())
+    })?;
+    let weeks: Vec<_> = items
+        .iter()
+        .filter_map(|item| {
+            Some(StarWeek {
+                week: item["week"].as_i64()?,
+                total: u32::try_from(item["total"].as_u64()?).ok()?,
+            })
+        })
+        .collect();
+    if !items.is_empty() && weeks.is_empty() {
+        return Err(crate::github::gh_unreadable(
+            "the star history",
+            "no readable weeks".into(),
+        ));
+    }
+    let (next_page, last_page) = star_link_pages(headers, page)?;
+    let stargazers_count = if page == 1 {
+        count.map(stargazers_count_outcome).transpose()?.flatten()
+    } else {
+        None
+    };
+    Ok(StarHistoryPage {
+        available: true,
+        weeks,
+        next_page,
+        last_page,
+        stargazers_count,
+    })
 }
 
 #[cfg(test)]
@@ -1085,5 +1339,625 @@ mod tests {
             }
         }
         assert!(repo_stats_outcome(Err(crate::error::AppError::Timeout(30))).is_err());
+    }
+
+    #[test]
+    fn star_page_bounds() {
+        for page in [0, 101, u32::MAX] {
+            assert!(matches!(
+                validate_star_page(page),
+                Err(AppError::InvalidArgument(_))
+            ));
+        }
+        assert!(validate_star_page(1).is_ok());
+        assert!(validate_star_page(100).is_ok());
+    }
+
+    #[test]
+    fn star_history_slug_must_be_one_owner_repo_pair() {
+        for slug in [
+            "",
+            "owner",
+            "owner/",
+            "/repo",
+            "a/b/c",
+            "../repo",
+            "owner/..",
+            "-owner/repo",
+            "owner/{branch}",
+            "owner/repo?page=2",
+            "owner/repo#x",
+            "own er/repo",
+        ] {
+            assert!(
+                matches!(validate_star_slug(slug), Err(AppError::InvalidArgument(_))),
+                "{slug:?}"
+            );
+        }
+        for slug in ["owner/repo", "Owner-1/repo.js", "o/_r"] {
+            assert!(validate_star_slug(slug).is_ok(), "{slug:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn star_history_refuses_a_bad_slug_before_any_read() {
+        for (slug, host) in [("a/b/c", "github.com"), ("a/b", "-x"), ("a/b", "h/x")] {
+            let error = gh_star_history_page("C:/no-such-repo".into(), 1, slug.into(), host.into())
+                .await
+                .expect_err("a bad series must be refused");
+            assert!(matches!(error, AppError::InvalidArgument(_)), "{error}");
+        }
+    }
+
+    #[test]
+    fn star_history_host_must_be_one_host_name() {
+        for host in [
+            "", "-x", "-x:1", ":1", "h:", "a:b:c", "h:abc", "h/x", "h x", "h\tx", "h?x", "h@x",
+            "h{x}", "[]", "[zz]",
+        ] {
+            assert!(
+                matches!(validate_star_host(host), Err(AppError::InvalidArgument(_))),
+                "{host:?}"
+            );
+        }
+        for host in [
+            "github.com",
+            "ghe.acme.co:8443",
+            "GHE-1.acme.io",
+            "[2001:db8::1]",
+            "[::1]:8443",
+        ] {
+            assert!(validate_star_host(host).is_ok(), "{host:?}");
+        }
+    }
+
+    #[test]
+    fn star_history_reads_pin_the_full_login_authority() {
+        let (history, count) =
+            star_reads(Some("ghes.example.com:8443"), "ghes.example.com", "o/r", 1).unwrap();
+        assert_eq!(
+            history,
+            [
+                "api",
+                "-i",
+                "--hostname",
+                "ghes.example.com:8443",
+                "repos/o/r/stargazers/history?per_page=30&page=1",
+            ]
+        );
+        let count = count.expect("page 1 reads the count");
+        assert_eq!(
+            count,
+            ["api", "--hostname", "ghes.example.com:8443", "repos/o/r"]
+        );
+        // The count stays a conditional GET: revalidated, never served stale.
+        let count: Vec<&str> = count.iter().map(String::as_str).collect();
+        assert!(!crate::github::runner::bypasses(&count));
+
+        let (history, count) = star_reads(Some("[::1]:8443"), "[::1]", "o/r", 2).unwrap();
+        assert_eq!(history[3], "[::1]:8443");
+        assert!(count.is_none());
+        for pin in [None, Some("github.com")] {
+            let (history, count) = star_reads(pin, "github.com", "o/r", 1).unwrap();
+            assert_eq!(history[3], "github.com");
+            assert_eq!(count.unwrap()[2], "github.com");
+        }
+    }
+
+    #[test]
+    fn star_history_refuses_a_series_off_origins_login_host() {
+        for (pin, host) in [
+            (Some("ghe.other.io"), "ghe.acme.io"),
+            (Some("ghe.acme.io:8443"), "ghe.other.io"),
+            (Some("github.com"), "ghe.acme.io"),
+            (Some("ghe.acme.io"), "github.com"),
+            (None, "ghe.acme.io"),
+        ] {
+            let error = star_reads(pin, host, "o/r", 1).expect_err("a host flip must refuse");
+            assert!(
+                matches!(&error, AppError::Gh(message) if message.starts_with("Couldn't read the star history")),
+                "{pin:?} {host}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn star_history_held_reason_is_verbatim() {
+        let error = star_history_outcome(gh_output(1, "", HELD_REST_STDERR), None, 1)
+            .expect_err("held reads must reject without headers");
+        assert!(matches!(error, AppError::Gh(message) if message == HELD_REST_STDERR));
+    }
+
+    #[test]
+    fn star_history_transport_failure_rejects() {
+        let error = star_history_outcome(gh_output(1, "", "connection failed"), None, 1)
+            .expect_err("transport failures must reject");
+        assert!(matches!(error, AppError::Gh(message) if message == "connection failed"));
+    }
+
+    #[test]
+    fn star_history_not_found_on_first_page_discards_count() {
+        let result = star_history_outcome(
+            gh_output(1, "", NOT_FOUND_STDERR),
+            Some(gh_output(0, r#"{"stargazers_count":246}"#, "")),
+            1,
+        )
+        .unwrap();
+        assert_eq!(result, StarHistoryPage::default());
+    }
+
+    #[test]
+    fn star_history_not_found_on_later_page_rejects() {
+        let error = star_history_outcome(gh_output(1, "", NOT_FOUND_STDERR), None, 2)
+            .expect_err("a later missing page is a failed read");
+        assert!(matches!(error, AppError::Gh(message) if message == NOT_FOUND_STDERR));
+    }
+
+    #[test]
+    fn star_history_http_failure_headers_do_not_override_stderr() {
+        let stdout = "HTTP/2.0 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"message\":\"Not Found\"}";
+        let stderr = "gh: Not Found (HTTP 404)";
+        assert_eq!(
+            star_history_outcome(gh_output(1, stdout, stderr), None, 1).unwrap(),
+            StarHistoryPage::default()
+        );
+        let error = star_history_outcome(gh_output(1, stdout, stderr), None, 2)
+            .expect_err("a later HTTP 404 must reject");
+        assert!(matches!(error, AppError::Gh(message) if message == stderr));
+    }
+
+    #[test]
+    fn star_history_denial_is_unavailable_only_on_first_page() {
+        assert_eq!(
+            star_history_outcome(gh_output(1, "", ANSWERED_STDERR), None, 1).unwrap(),
+            StarHistoryPage::default()
+        );
+        let error = star_history_outcome(gh_output(1, "", ANSWERED_STDERR), None, 2)
+            .expect_err("a later denial must reject");
+        assert!(matches!(error, AppError::Gh(message) if message == ANSWERED_STDERR));
+    }
+
+    #[test]
+    fn star_history_unworded_5xx_is_unavailable_only_on_first_page() {
+        let stderr = "HTTP 501: Not Implemented";
+        assert_eq!(
+            star_history_outcome(gh_output(1, "", stderr), None, 1).unwrap(),
+            StarHistoryPage::default()
+        );
+        let error = star_history_outcome(gh_output(1, "", stderr), None, 2)
+            .expect_err("a later HTTP 501 must reject");
+        assert!(matches!(error, AppError::Gh(message) if message == stderr));
+        // A transport-worded 5xx is an error on page 1 too.
+        star_history_outcome(gh_output(1, "", "HTTP 503: Service Unavailable"), None, 1)
+            .expect_err("an HTTP 503 must reject");
+    }
+
+    #[test]
+    fn star_history_rejects_unreadable_and_wrong_shape_bodies() {
+        for body in ["garbage", "", "{}", "null", "7"] {
+            let error = star_history_outcome(gh_output(0, body, ""), None, 1)
+                .expect_err("unreadable history must reject");
+            assert!(
+                matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the star history"))
+            );
+        }
+    }
+
+    #[test]
+    fn star_history_empty_page_without_link_is_available() {
+        for body in ["[]", "HTTP/2.0 200 OK\r\n\r\n[]"] {
+            assert_eq!(
+                star_history_outcome(gh_output(0, body, ""), None, 1).unwrap(),
+                StarHistoryPage {
+                    available: true,
+                    ..Default::default()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn star_history_distinguishes_empty_unreadable_and_mixed_weeks() {
+        let error = star_history_outcome(
+            gh_output(0, r#"[{"week":"bad"},{"week":1.5},{"total":3},7]"#, ""),
+            None,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Gh(message)
+                if message == "Couldn't read the star history from GitHub.\nno readable weeks"
+        ));
+
+        let empty = star_history_outcome(gh_output(0, "[]", ""), None, 1).unwrap();
+        assert!(empty.available && empty.weeks.is_empty());
+
+        let mixed = star_history_outcome(
+            gh_output(0, r#"[{"week":"bad"},{"week":1761436800,"total":2},7]"#, ""),
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(mixed.available);
+        assert_eq!(
+            mixed.weeks,
+            vec![StarWeek {
+                week: 1761436800,
+                total: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn star_history_next_and_last_pages_with_live_count() {
+        let body = "HTTP/2.0 200 OK\r\nLink: <https://api.github.com/repositories/123456789/stargazers/history?per_page=30&page=2>; rel=\"next\", <https://api.github.com/repositories/123456789/stargazers/history?per_page=30&page=13>; rel=\"last\"\r\n\r\n[{\"week\":1761436800,\"total\":12,\"days\":[0,2,4,0,3,2,1]},{\"week\":1760832000,\"total\":0,\"days\":[0,0,0,0,0,0,0]}]";
+        let result = star_history_outcome(
+            gh_output(0, body, ""),
+            Some(gh_output(0, r#"{"stargazers_count":246}"#, "")),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            StarHistoryPage {
+                available: true,
+                weeks: vec![
+                    StarWeek {
+                        week: 1761436800,
+                        total: 12,
+                    },
+                    StarWeek {
+                        week: 1760832000,
+                        total: 0,
+                    },
+                ],
+                next_page: Some(2),
+                last_page: Some(13),
+                stargazers_count: Some(246),
+            }
+        );
+    }
+
+    #[test]
+    fn star_history_real_last_page_has_neither_next_nor_last() {
+        let body = "HTTP/2.0 200 OK\r\nLink: <https://api.github.com/repositories/123456789/stargazers/history?per_page=30&page=12>; rel=\"prev\", <https://api.github.com/repositories/123456789/stargazers/history?per_page=30&page=1>; rel=\"first\"\r\n\r\n[{\"week\":1761436800,\"total\":3,\"days\":[0,1,0,0,2,0,0]}]";
+        let result = star_history_outcome(gh_output(0, body, ""), None, 13).unwrap();
+        assert_eq!(
+            result,
+            StarHistoryPage {
+                available: true,
+                weeks: vec![StarWeek {
+                    week: 1761436800,
+                    total: 3,
+                }],
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn star_history_past_last_page_keeps_last_link() {
+        let body = "HTTP/2.0 200 OK\r\nLink: <https://api.github.com/repositories/123456789/stargazers/history?page=13&per_page=30>; rel=\"prev\", <https://api.github.com/repositories/123456789/stargazers/history?page=13&per_page=30>; rel=\"last\", <https://api.github.com/repositories/123456789/stargazers/history?page=1&per_page=30>; rel=\"first\"\r\n\r\n[]";
+        let result = star_history_outcome(gh_output(0, body, ""), None, 14).unwrap();
+        assert_eq!(
+            result,
+            StarHistoryPage {
+                available: true,
+                last_page: Some(13),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn star_history_single_page_and_tolerant_entries_keep_order() {
+        let single = "HTTP/2.0 200 OK\r\n\r\n[{\"week\":1761436800,\"total\":246,\"days\":[246,0,0,0,0,0,0]}]";
+        assert_eq!(
+            star_history_outcome(gh_output(0, single, ""), None, 1).unwrap(),
+            StarHistoryPage {
+                available: true,
+                weeks: vec![StarWeek {
+                    week: 1761436800,
+                    total: 246,
+                }],
+                ..Default::default()
+            }
+        );
+        let body = r#"[{"total":3,"days":[]},{"week":1761436800,"total":0},7,{"week":1760832000,"total":2,"days":"ignored"},{"week":"bad"}]"#;
+        let result = star_history_outcome(gh_output(0, body, ""), None, 1).unwrap();
+        assert_eq!(
+            result.weeks,
+            vec![
+                StarWeek {
+                    week: 1761436800,
+                    total: 0,
+                },
+                StarWeek {
+                    week: 1760832000,
+                    total: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn star_history_drops_bad_totals_and_keeps_measured_entries_in_order() {
+        for bad in [
+            r#"{"week":2}"#,
+            r#"{"week":2,"total":-1}"#,
+            r#"{"week":2,"total":1.5}"#,
+            r#"{"week":2,"total":"2"}"#,
+            r#"{"week":2,"total":null}"#,
+        ] {
+            let body = format!(r#"[{{"week":3,"total":0}},{bad},{{"week":1,"total":2}}]"#);
+            let result = star_history_outcome(gh_output(0, &body, ""), None, 1).unwrap();
+            assert!(result.available);
+            assert_eq!(
+                result.weeks,
+                vec![
+                    StarWeek { week: 3, total: 0 },
+                    StarWeek { week: 1, total: 2 }
+                ],
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn star_history_drops_a_total_past_u32() {
+        let body = format!(
+            r#"[{{"week":3,"total":{}}},{{"week":2,"total":{}}}]"#,
+            u32::MAX,
+            u64::from(u32::MAX) + 1
+        );
+        let result = star_history_outcome(gh_output(0, &body, ""), None, 1).unwrap();
+        assert_eq!(
+            result.weeks,
+            vec![StarWeek {
+                week: 3,
+                total: u32::MAX
+            }]
+        );
+    }
+
+    #[test]
+    fn star_history_rejects_all_bad_totals() {
+        let body = r#"[{"week":3},{"week":2,"total":-1},{"week":1,"total":1.5}]"#;
+        let error = star_history_outcome(gh_output(0, body, ""), None, 1).unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::Gh(message)
+                if message == "Couldn't read the star history from GitHub.\nno readable weeks"
+        ));
+    }
+
+    #[test]
+    fn stargazers_count_is_optional_and_checked() {
+        assert_eq!(
+            stargazers_count_outcome(gh_output(0, r#"{"stargazers_count":246}"#, "")).unwrap(),
+            Some(246)
+        );
+        for body in [
+            "{}",
+            r#"{"stargazers_count":null}"#,
+            r#"{"stargazers_count":"246"}"#,
+            r#"{"stargazers_count":-1}"#,
+            r#"{"stargazers_count":1.5}"#,
+            r#"{"stargazers_count":4294967296}"#,
+        ] {
+            assert_eq!(
+                stargazers_count_outcome(gh_output(0, body, "")).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn stargazers_count_denials_are_soft_missing() {
+        for stderr in [NOT_FOUND_STDERR, ANSWERED_STDERR] {
+            assert_eq!(
+                stargazers_count_outcome(gh_output(1, "", stderr)).unwrap(),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn stargazers_count_transient_failures_reject_verbatim() {
+        for stderr in [HELD_REST_STDERR, "connection failed"] {
+            let error = stargazers_count_outcome(gh_output(1, "", stderr))
+                .expect_err("transient count failures must reject");
+            assert!(matches!(error, AppError::Gh(message) if message == stderr));
+        }
+    }
+
+    #[test]
+    fn stargazers_count_unreadable_body_rejects() {
+        for body in ["garbage", ""] {
+            let error = stargazers_count_outcome(gh_output(0, body, ""))
+                .expect_err("unreadable count must reject");
+            assert!(
+                matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the repository"))
+            );
+        }
+    }
+
+    #[test]
+    fn star_history_precedes_count_outcome() {
+        assert_eq!(
+            star_history_outcome(
+                gh_output(1, "", NOT_FOUND_STDERR),
+                Some(gh_output(1, "", HELD_REST_STDERR)),
+                1,
+            )
+            .unwrap(),
+            StarHistoryPage::default()
+        );
+        for count in [
+            gh_output(1, "", HELD_REST_STDERR),
+            gh_output(1, "", "connection failed"),
+            gh_output(0, "garbage", ""),
+            Err(AppError::Timeout(30)),
+        ] {
+            assert!(star_history_outcome(gh_output(0, "[]", ""), Some(count), 1).is_err());
+        }
+        for count in [gh_output(0, "{}", ""), gh_output(1, "", NOT_FOUND_STDERR)] {
+            let result = star_history_outcome(gh_output(0, "[]", ""), Some(count), 1).unwrap();
+            assert!(result.available);
+            assert_eq!(result.stargazers_count, None);
+        }
+        let error = star_history_outcome(
+            gh_output(1, "", "connection failed"),
+            Some(gh_output(1, "", HELD_REST_STDERR)),
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(error, AppError::Gh(message) if message == "connection failed"));
+        let error = star_history_outcome(
+            gh_output(0, "garbage", ""),
+            Some(gh_output(1, "", HELD_REST_STDERR)),
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the star history"))
+        );
+    }
+
+    #[test]
+    fn star_history_runner_errors_propagate() {
+        assert!(matches!(
+            star_history_outcome(Err(AppError::GhNotFound), None, 1),
+            Err(AppError::GhNotFound)
+        ));
+        assert!(matches!(
+            star_history_outcome(Err(AppError::Timeout(30)), None, 1),
+            Err(AppError::Timeout(30))
+        ));
+        assert!(matches!(
+            stargazers_count_outcome(Err(AppError::Timeout(30))),
+            Err(AppError::Timeout(30))
+        ));
+    }
+
+    #[test]
+    fn star_history_later_pages_have_no_count() {
+        for count in [
+            None,
+            Some(gh_output(0, r#"{"stargazers_count":246}"#, "")),
+            Some(Err(AppError::Timeout(30))),
+        ] {
+            let result = star_history_outcome(gh_output(0, "[]", ""), count, 2).unwrap();
+            assert!(result.available);
+            assert_eq!(result.stargazers_count, None);
+        }
+    }
+
+    #[test]
+    fn star_links_accept_numeric_repository_urls_and_header_case() {
+        for name in ["Link", "LINK", "link"] {
+            for query in ["per_page=30&page=2", "page=2&per_page=30"] {
+                let headers = format!(
+                    "HTTP/2.0 200 OK\r\n{name}: <https://api.github.com/repositories/123456789/stargazers/history?{query}>; rel=\"next\", <https://api.github.com/repositories/123456789/stargazers/history?page=13&per_page=30>; rel=\"last\"\r\n"
+                );
+                assert_eq!(star_link_pages(&headers, 1).unwrap(), (Some(2), Some(13)));
+            }
+        }
+    }
+
+    #[test]
+    fn star_links_without_next_are_complete() {
+        for headers in [
+            "",
+            "HTTP/2.0 200 OK\r\nContent-Type: application/json",
+            "Link: <https://api.github.com/repositories/123/stargazers/history?page=12>; rel=\"prev\", <https://api.github.com/repositories/123/stargazers/history?page=1>; rel=\"first\"",
+        ] {
+            assert_eq!(star_link_pages(headers, 13).unwrap(), (None, None));
+        }
+    }
+
+    #[test]
+    fn star_links_reject_non_integer_next() {
+        let headers = "Link: <https://api.github.com/repositories/123/stargazers/history?page=bad>; rel=\"next\"";
+        assert!(star_link_pages(headers, 1).is_err());
+    }
+
+    #[test]
+    fn star_links_reject_missing_next_page() {
+        for headers in [
+            "Link: <https://api.github.com/repositories/123/stargazers/history?per_page=30>; rel=\"next\"",
+            "Link: malformed; rel=\"next\"",
+        ] {
+            assert!(star_link_pages(headers, 1).is_err());
+        }
+    }
+
+    #[test]
+    fn star_links_reject_non_advancing_next() {
+        for next in [0, 1, 2] {
+            let headers = format!("Link: <https://api.github.com/repositories/123/stargazers/history?page={next}>; rel=\"next\"");
+            assert!(star_link_pages(&headers, 2).is_err());
+        }
+    }
+
+    #[test]
+    fn star_links_reject_next_beyond_cap() {
+        let headers = "Link: <https://api.github.com/repositories/123/stargazers/history?page=101>; rel=\"next\"";
+        assert!(star_link_pages(headers, 100).is_err());
+        let body = format!("HTTP/2.0 200 OK\r\n{headers}\r\n\r\n[]");
+        let error = star_history_outcome(gh_output(0, &body, ""), None, 100).unwrap_err();
+        assert!(
+            matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the star history"))
+        );
+    }
+
+    #[test]
+    fn star_links_reject_skipped_pages() {
+        let headers = "Link: <https://api.github.com/repositories/123/stargazers/history?page=5>; rel=\"next\"";
+        let error = star_link_pages(headers, 2).unwrap_err();
+        assert!(
+            matches!(error, AppError::Gh(message) if message.starts_with("Couldn't read the star history"))
+        );
+    }
+
+    #[test]
+    fn star_links_unreadable_last_is_optional() {
+        for query in ["page=bad", "per_page=30"] {
+            let headers = format!("Link: <https://api.github.com/repositories/123/stargazers/history?{query}>; rel=\"last\"");
+            assert_eq!(star_link_pages(&headers, 1).unwrap(), (None, None));
+        }
+    }
+
+    #[test]
+    fn star_history_wire_shape() {
+        let value = serde_json::to_value(StarHistoryPage {
+            available: true,
+            weeks: vec![StarWeek {
+                week: 1761436800,
+                total: 12,
+            }],
+            next_page: Some(2),
+            last_page: Some(13),
+            stargazers_count: Some(246),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "available": true,
+                "weeks": [{"week": 1761436800, "total": 12}],
+                "nextPage": 2,
+                "lastPage": 13,
+                "stargazersCount": 246
+            })
+        );
+        for key in ["next_page", "last_page", "stargazers_count"] {
+            assert!(value.get(key).is_none());
+        }
+        assert_eq!(
+            serde_json::to_value(StarWeek { week: 1, total: 2 }).unwrap(),
+            serde_json::json!({"week": 1, "total": 2})
+        );
     }
 }

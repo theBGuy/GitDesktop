@@ -1,6 +1,7 @@
 import type { Store } from "@tauri-apps/plugin-store";
 import { invoke } from "@/lib/tauri/invoke";
 import { ttlMemo } from "./identity-memo";
+import { normPath } from "./path";
 
 // A repository's *worktree-stable identity key*: the absolute path of its common
 // git directory (`git rev-parse --git-common-dir`), which is identical for the
@@ -21,6 +22,9 @@ import { ttlMemo } from "./identity-memo";
  *  hitting the memo instead of minting a git spawn apiece. */
 export const IDENTITY_TTL_MS = 300_000;
 
+const resolveIdentity = (repoPath: string) =>
+  invoke<string>("git_repo_identity", { repoPath });
+
 /** The memo itself is mechanics ({@link ttlMemo}, unit-tested there); this module
  *  owns the policy. Ages come off the monotonic clock, never `Date.now()`: an NTP
  *  correction or a user clock change would otherwise make a fresh entry look
@@ -29,7 +33,7 @@ export const IDENTITY_TTL_MS = 300_000;
  *  fallback for a live-but-unresolvable repo included — callers keep treating
  *  `identity === repoPath` as "no identity". */
 const memo = ttlMemo({
-  resolve: (repoPath) => invoke<string>("git_repo_identity", { repoPath }),
+  resolve: resolveIdentity,
   ttlMs: IDENTITY_TTL_MS,
   now: () => performance.now(),
 });
@@ -44,6 +48,13 @@ const memo = ttlMemo({
  *  error take {@link settledIdentityWithin} explicitly. */
 export function repoIdentityStrict(repoPath: string): Promise<string> {
   return memo.get(repoPath);
+}
+
+/** For a check that must not trust an answer the memo may have issued before the
+ *  path changed hands. Never reads or writes the memo, so every other surface keeps
+ *  its TTL window. Rejects as the resolver does. */
+export function repoIdentityUnmemoized(repoPath: string): Promise<string> {
+  return resolveIdentity(repoPath);
 }
 
 /** The identity this session learned for `repoPath`, at any age, or undefined when
@@ -74,6 +85,18 @@ export function settledIdentityWithin(
   maxAgeMs: number,
 ): string | undefined {
   return memo.within(repoPath, maxAgeMs);
+}
+
+/** Whether an answer settled for `path` within {@link IDENTITY_TTL_MS} differs
+ *  from `identity` under normPath, the raw-path no-identity fallback included. The
+ *  recents click's veto and the row hint's read this one predicate so they can't
+ *  drift on it; the click still checks more than the hint can see. */
+export function identityContradictsWithin(
+  path: string,
+  identity: string,
+): boolean {
+  const known = settledIdentityWithin(path, IDENTITY_TTL_MS);
+  return known !== undefined && normPath(known) !== normPath(identity);
 }
 
 /** {@link repoIdentityStrict} for callers with nowhere to put a failure: never

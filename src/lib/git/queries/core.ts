@@ -11,7 +11,15 @@ import * as api from "../api";
 import { repoIdentityQueryOptions } from "../repo-identity-query";
 import type { RemoteLens } from "../types";
 import { projectItemsRepoKey } from "./board-writes";
+import {
+  STAR_HISTORY_SEGMENTS,
+  settlesOnRepoWrite,
+} from "./repo-mutation-options";
 import { createStraddleHealer, readStraddlesSettle } from "./write-settle";
+
+// Defined in the import-free repo-mutation-options.ts, which its Node test loads
+// bare; exported here beside the keys every whole-repo settle passes it with.
+export { settlesOnRepoWrite };
 
 /** A repo's worktree-stable identity key (its common git dir), for keying
  *  per-repo app-data the same across the main checkout and every worktree. Null or
@@ -125,6 +133,13 @@ export const repoKeys = {
       | readonly ["issue" | "pr", RemoteLens, number]
       | readonly ["discussion", number],
   ) => ["repo", repo, ...entity, "reactions"] as const,
+  // The two Insights reads a star toggle moves (`useSetRepoStar`).
+  communityInsights: (repo: string) =>
+    ["repo", repo, "insights", "community"] as const,
+  // Ends in the series it reads, host and slug (`starHistorySeries`), so one
+  // series never holds two repositories' pages.
+  starHistory: (repo: string, series: string | null) =>
+    ["repo", repo, ...STAR_HISTORY_SEGMENTS, series] as const,
 };
 
 /** The one healer every whole-repo settle shares, so its already-watched set spans
@@ -145,6 +160,14 @@ const straddleHealer = createStraddleHealer<Query>();
  *
  * Board reads are left alone: that family settles through its own cancel
  * discipline (`invalidateProjectBoards`) and owed-read bookkeeping.
+ *
+ * Star history is skipped outright, healer included, since a refetch re-walks
+ * every loaded page. Its key ends in the series it reads, so a write that re-points
+ * origin (fork, an origin set-url) moves it to a fresh series through the forge
+ * status this settle refreshes; Star/Unstar, delete and visibility settle every
+ * cached series of it themselves (insights.ts). An out-of-band origin edit
+ * (terminal, MCP), or a sibling checkout of the writing one, moves once its own
+ * forge status next refreshes; until then it reads the old series, whole.
  */
 export function invalidateRepoAfterWrite(
   queryClient: QueryClient,
@@ -155,8 +178,42 @@ export function invalidateRepoAfterWrite(
   const straddling = queryClient.getQueryCache().findAll({
     queryKey,
     predicate: (query) =>
-      readStraddlesSettle(query) && !partialMatchKey(query.queryKey, boards),
+      readStraddlesSettle(query) &&
+      settlesOnRepoWrite(query) &&
+      !partialMatchKey(query.queryKey, boards),
   });
+  healStraddlers(queryClient, straddling);
+  return queryClient.invalidateQueries({
+    queryKey,
+    predicate: settlesOnRepoWrite,
+  });
+}
+
+/** One key's settle with the whole-repo settle's straddle heal: a read of
+ *  `queryKey` in flight that would land after this invalidation with pre-write
+ *  data is invalidated again once it lands, never cancelled (see
+ *  {@link invalidateRepoAfterWrite}). A static read in flight straddles too,
+ *  active or not: this invalidation only marks it, so the fetch it is already
+ *  running lands as the answer, and the heal's invalidation refetches it once the
+ *  landing has made it non-static. */
+export function invalidateKeyHealingStraddles(
+  queryClient: QueryClient,
+  queryKey: readonly unknown[],
+): Promise<void> {
+  healStraddlers(
+    queryClient,
+    queryClient.getQueryCache().findAll({
+      queryKey,
+      exact: true,
+      predicate: (query) =>
+        readStraddlesSettle(query) ||
+        (query.state.fetchStatus === "fetching" && query.isStatic()),
+    }),
+  );
+  return queryClient.invalidateQueries({ queryKey, exact: true });
+}
+
+function healStraddlers(queryClient: QueryClient, reads: readonly Query[]) {
   straddleHealer.watch(
     {
       subscribe: (listener) => queryClient.getQueryCache().subscribe(listener),
@@ -166,9 +223,8 @@ export function invalidateRepoAfterWrite(
           exact: true,
         }),
     },
-    straddling,
+    reads,
   );
-  return queryClient.invalidateQueries({ queryKey });
 }
 
 export function useGitInstalled() {

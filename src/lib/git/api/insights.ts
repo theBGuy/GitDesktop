@@ -45,6 +45,42 @@ export const ghRepoTraffic = (repoPath: string) =>
 export const ghRepoDependencies = (repoPath: string) =>
   invoke<RepoDependencies>("gh_repo_dependencies", { repoPath });
 
+/** One week of GitHub's star history: its Sunday 00:00 UTC epoch in seconds (a
+ *  calendar-date label, not an instant) and the stars gained that week. */
+export interface StarWeek {
+  week: number;
+  total: number;
+}
+
+/** One page of star history, newest week first and dense back to the repo's
+ *  first week. `available` is false only on page 1, when GitHub answered
+ *  not-found or denied. `lastPage` is null without a Link header and on the
+ *  real last page, so only page 1's counts the pages; `stargazersCount` comes
+ *  on page 1 only. */
+export interface StarHistoryPage {
+  available: boolean;
+  weeks: StarWeek[];
+  nextPage: number | null;
+  lastPage: number | null;
+  stargazersCount: number | null;
+}
+
+/** `slug` (`owner/repo`) and `host` name the repository the page is read from
+ *  (the backend never resolves origin itself), so every page of one series
+ *  reads one repository on one host. */
+export const ghStarHistoryPage = (
+  repoPath: string,
+  page: number,
+  slug: string,
+  host: string,
+) =>
+  invoke<StarHistoryPage>("gh_star_history_page", {
+    repoPath,
+    page,
+    slug,
+    host,
+  });
+
 export const forgeForkActivity = (repoPath: string) =>
   invoke<ForgeForkActivity>("forge_fork_activity", { repoPath });
 

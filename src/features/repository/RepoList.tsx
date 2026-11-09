@@ -5,10 +5,12 @@ import {
   GitForkIcon,
   GlobeSimpleIcon,
   LockSimpleIcon,
+  TreeStructureIcon,
 } from "@phosphor-icons/react";
 import { useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
+import { MENU_HELD_ROW_CLASS } from "@/components/menu-held-row";
 import { PathText } from "@/components/path-text";
 import { ProviderIcon } from "@/components/provider-icon";
 import {
@@ -42,8 +44,9 @@ import {
   OPEN_IN_BROWSER,
   providerLabel,
 } from "@/lib/git/types";
-import { hasChordModifier } from "@/lib/hotkeys/binding";
+import { formatBinding, hasChordModifier } from "@/lib/hotkeys/binding";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
+import { useReopenHint } from "@/lib/last-checkout/hint";
 import {
   persistRepoVisibility,
   type RecentRepo,
@@ -72,6 +75,25 @@ const REPO_LISTBOX_ID = "repo-list-listbox";
  *  unique key (already the row's `data-repo-path`). */
 const repoOptionId = (path: string) =>
   `repo-list-${path.replace(/[^\w-]/g, "_")}`;
+/** The id of a hinted row's escape description. encodeURIComponent is injective
+ *  and emits no whitespace, so two paths never share one (repoOptionId's
+ *  sanitizing can collide) and the value is a single valid IDREF. */
+const reopenDescId = (path: string) =>
+  `repo-reopen-desc-${encodeURIComponent(path)}`;
+
+/** Kept out of the option's name: the name says where a plain open lands, the
+ *  description how to land on the main workspace instead. */
+const REOPEN_ESCAPE_DESC = `${formatBinding("shift+enter")} opens the main workspace`;
+const reopenTitle = (name: string) =>
+  `Opens in worktree ${name}. ${formatBinding("shift+enter")} or ${formatBinding("shift")}+click opens the main workspace.`;
+
+/** Inset from the row's leading edge for a keyboard-opened menu's anchor, so the
+ *  popup hangs beside the row rather than off the viewport edge. */
+const MENU_KEY_ANCHOR_INSET_PX = 12;
+
+/** A last-resort bound on the Menu key's follow-up `contextmenu` canceller, for
+ *  a keyup that never arrives; a key held past it disarms too. */
+const MENU_KEY_FOLLOW_UP_BOUND_MS = 10_000;
 
 // Paths whose visibility probe has already been attempted this app session, so
 // a failing probe (e.g. a signed-out provider) is retried at most once per
@@ -156,6 +178,23 @@ export function RepoList({
   const [frozenOrder, setFrozenOrder] = useState<string[] | null>(null);
   // The repo the one shared context menu acts on, set on right-click.
   const [menuRepo, setMenuRepo] = useState<RecentRepo | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  // True from the menu's open until its close animation completes, so the
+  // fading popup keeps its items too.
+  const [menuShown, setMenuShown] = useState(false);
+  // Held for the menu's lifetime, so the escape item can't unmount under the
+  // pointer and shift the items below it. A row that left recents (menuRepo is
+  // never cleared) asks about nothing, keeping no worktree-list observer alive.
+  const menuHint = useReopenHint(
+    menuRepo &&
+      recents.some(
+        (r) => frozenPathKey(r.path) === frozenPathKey(menuRepo.path),
+      )
+      ? menuRepo.path
+      : "",
+    currentPath ?? null,
+    menuShown,
+  );
   const listRef = useRef<HTMLDivElement>(null);
   const filterInputRef = useRef<HTMLInputElement>(null);
 
@@ -326,19 +365,95 @@ export function RepoList({
       ?.scrollIntoView({ block: "nearest" });
   }, [active, highlightedPath]);
 
-  async function handleOpen(path: string) {
+  // The one route into `open`; the guard backs up the disabled rows and escape
+  // item while an open is in flight.
+  async function handleOpen(path: string, opts?: { preferMain?: boolean }) {
+    if (openingPath !== null) return;
     setOpeningPath(path);
     setFrozenOrder(ordered.map((r) => frozenPathKey(r.path)));
     try {
-      if (!(await open(path))) setFrozenOrder(null);
+      if (
+        !(await open(path, "recent", undefined, {
+          preferMain: opts?.preferMain === true,
+        }))
+      )
+        setFrozenOrder(null);
       onOpened?.();
     } finally {
       setOpeningPath(null);
     }
   }
 
+  /**
+   * Opens the highlighted row's context menu from the keyboard. A real
+   * `contextmenu` event is the only route: Base UI anchors the popup solely
+   * from such an event, and handleContextMenu reads the row off its target.
+   * Found through the highlight marker, never an id: repoOptionId can collide.
+   */
+  function openHighlightedRowMenu() {
+    const menuTarget = listRef.current?.querySelector(
+      '[data-highlighted="true"] [role="option"]',
+    );
+    if (!menuTarget) return;
+    const rect = menuTarget.getBoundingClientRect();
+    menuTarget.dispatchEvent(
+      new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: Math.round(rect.left + MENU_KEY_ANCHOR_INSET_PX),
+        clientY: Math.round(rect.top + rect.height / 2),
+      }),
+    );
+  }
+
+  // WebView2 follows the Menu key's keyup with a trusted `contextmenu` that would
+  // stack its native menu over ours: cancel that one (never stop it), armed until
+  // it fires, a task after the keyup, a window blur, or the last-resort bound.
+  const disarmMenuKeyFollowUp = useRef<(() => void) | null>(null);
+  useEffect(() => () => disarmMenuKeyFollowUp.current?.(), []);
+
+  function armMenuKeyFollowUp() {
+    disarmMenuKeyFollowUp.current?.();
+    let afterKeyUp: number | undefined;
+    let bound: number | undefined;
+    const onContextMenu = (ev: Event) => {
+      ev.preventDefault();
+      disarm();
+    };
+    const onKeyUp = (ev: KeyboardEvent) => {
+      if (ev.key === "ContextMenu") afterKeyUp ??= window.setTimeout(disarm, 0);
+    };
+    const disarm = () => {
+      document.removeEventListener("contextmenu", onContextMenu, true);
+      document.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", disarm);
+      window.clearTimeout(afterKeyUp);
+      window.clearTimeout(bound);
+      if (disarmMenuKeyFollowUp.current === disarm)
+        disarmMenuKeyFollowUp.current = null;
+    };
+    document.addEventListener("contextmenu", onContextMenu, true);
+    document.addEventListener("keyup", onKeyUp, true);
+    // A keyup that lands in another window would otherwise leave it armed.
+    window.addEventListener("blur", disarm);
+    bound = window.setTimeout(disarm, MENU_KEY_FOLLOW_UP_BOUND_MS);
+    disarmMenuKeyFollowUp.current = disarm;
+  }
+
   function handleKeyDown(e: React.KeyboardEvent) {
     if (hasChordModifier(e)) return;
+    // The menu keys land here while focus is in the filter, where they would
+    // open the input's edit menu, which stays reachable with no highlighted
+    // row. A Tab-focused row gets the native contextmenu Base UI handles.
+    if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+      if (highlightedPath !== null) {
+        e.preventDefault();
+        openHighlightedRowMenu();
+        if (e.key === "ContextMenu") armMenuKeyFollowUp();
+      }
+      return;
+    }
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setHighlight(
@@ -358,7 +473,8 @@ export function RepoList({
       // cursor. With no filter and no arrowing nothing is marked, so an
       // accidental keypress never opens a repo.
       const target = visible[active];
-      if (target && !openingPath) handleOpen(target.path);
+      if (target && !openingPath)
+        handleOpen(target.path, { preferMain: e.shiftKey });
     }
   }
 
@@ -419,7 +535,15 @@ export function RepoList({
         />
       </div>
       <ScrollArea className={LIST_VIEWPORT_CLASS} ref={listRef}>
-        <ContextMenu>
+        <ContextMenu
+          onOpenChange={(isOpen) => {
+            setMenuOpen(isOpen);
+            if (isOpen) setMenuShown(true);
+          }}
+          onOpenChangeComplete={(isOpen) => {
+            if (!isOpen) setMenuShown(false);
+          }}
+        >
           <ContextMenuTrigger
             render={
               <div
@@ -463,6 +587,12 @@ export function RepoList({
                 terminalCommand={settings.data?.terminalCommand}
                 onAlias={onAliasRepo}
                 onRemove={onRemoveRepo}
+                openMainWorkspace={
+                  menuHint && menuRepo
+                    ? () => handleOpen(menuRepo.path, { preferMain: true })
+                    : null
+                }
+                busy={menuOpen && openingPath !== null}
               />
             )}
           </ContextMenuContent>
@@ -476,7 +606,7 @@ interface RepoRowsProps {
   currentPath: string | null;
   highlightedPath: string | null;
   openingPath: string | null;
-  onOpen: (path: string) => void;
+  onOpen: (path: string, opts?: { preferMain?: boolean }) => void;
   /** Resolves a row's forge provider (shared with the context menu). */
   providerOf: (r: RecentRepo) => ForgeProvider | null;
   /** Resolves a row's origin-remote host, or undefined when local-only. */
@@ -537,6 +667,9 @@ function RepoRow({
   const badge = visibilityBadge(repo.visibility);
   // Name the upstream when we know it, so the glyph's meaning isn't shape-only.
   const forkLabel = repo.forkParent ? `Fork of ${repo.forkParent}` : "Fork";
+  // Held while an open is in flight, so an earlier landing's late record write
+  // can't reflow the row under the spinner.
+  const hint = useReopenHint(repo.path, currentPath, openingPath !== null);
 
   return (
     <div
@@ -557,7 +690,12 @@ function RepoRow({
         role="option"
         aria-selected={highlighted}
         className="flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left"
-        onClick={() => onOpen(repo.path)}
+        aria-describedby={hint ? reopenDescId(repo.path) : undefined}
+        onClick={(e) => onOpen(repo.path, { preferMain: e.shiftKey })}
+        // Shift+click is the main-workspace escape; keep it from selecting text.
+        onMouseDown={(e) => {
+          if (e.shiftKey) e.preventDefault();
+        }}
         disabled={openingPath !== null}
       >
         <LeadingGlyph opening={opening} provider={provider} host={host} />
@@ -572,6 +710,20 @@ function RepoRow({
             path={repo.path}
             className="text-[11px] text-muted-foreground"
           />
+          {hint && (
+            <span
+              className="flex min-w-0 items-center gap-1 text-[10px] leading-tight text-muted-foreground"
+              title={reopenTitle(hint.name)}
+            >
+              <TreeStructureIcon
+                className="size-3 shrink-0"
+                weight="bold"
+                aria-hidden
+              />
+              <span className="sr-only">opens in worktree </span>
+              <span className="min-w-0 truncate">{hint.name}</span>
+            </span>
+          )}
         </span>
         {repo.isFork && (
           <span
@@ -594,6 +746,13 @@ function RepoRow({
           </span>
         )}
       </button>
+      {/* `hidden`, not sr-only: a describedby reference still reads it, and it
+          stays out of the listbox's browse-mode content. */}
+      {hint && (
+        <span id={reopenDescId(repo.path)} hidden>
+          {REOPEN_ESCAPE_DESC}
+        </span>
+      )}
     </div>
   );
 }
@@ -663,6 +822,8 @@ function RepoMenuItems({
   terminalCommand,
   onAlias,
   onRemove,
+  openMainWorkspace,
+  busy,
 }: {
   repo: RecentRepo;
   owner: string | null;
@@ -675,9 +836,28 @@ function RepoMenuItems({
   terminalCommand?: string;
   onAlias: (repo: RecentRepo) => void;
   onRemove: (repo: RecentRepo) => void;
+  /** The main-workspace escape for a hinted row; null renders no item. */
+  openMainWorkspace: (() => void) | null;
+  /** An open is in flight while the menu is open; the escape item holds with
+   *  its reason, and a closing menu keeps the label the user clicked. */
+  busy: boolean;
 }) {
   return (
     <>
+      {openMainWorkspace && (
+        <>
+          <ContextMenuItem
+            className={MENU_HELD_ROW_CLASS}
+            disabled={busy}
+            onClick={openMainWorkspace}
+          >
+            {/* A disabled item's tooltip never shows, so the reason rides the
+                label. */}
+            Open in main workspace{busy && " (a repository is opening)"}
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+        </>
+      )}
       <ContextMenuItem onClick={() => onAlias(repo)}>
         {repo.alias ? "Change alias…" : "Create alias…"}
       </ContextMenuItem>

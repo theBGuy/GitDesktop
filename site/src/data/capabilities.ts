@@ -498,6 +498,11 @@ export const capabilities: Capability[] = [
   {
     group: "CI, tags & releases",
     label:
+      "Star history — a GitHub repo's stars week by week, over a year or all time",
+  },
+  {
+    group: "CI, tags & releases",
+    label:
       "Findings tab — GitHub Dependabot/scanning alerts & advisories; GitLab SAST, secrets & code quality; Bitbucket Code Insights",
     highlight: true,
   },
@@ -552,6 +557,11 @@ export const capabilities: Capability[] = [
     group: "Repository & workspace",
     label:
       "Open a branch's worktree from its row in the branch list, with the worktree actions on the branch's context menu",
+  },
+  {
+    group: "Repository & workspace",
+    label:
+      "Reopen a repository in the worktree you left it from, with the worktree named on its row and Shift-click to open the main workspace",
   },
   {
     group: "Repository & workspace",
