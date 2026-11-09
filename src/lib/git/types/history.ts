@@ -29,7 +29,13 @@ export interface CommitDetails {
   body: string;
   author: string;
   authorEmail: string;
+  /** Author date, strict ISO 8601 (%aI). */
   date: string;
+  /**
+   * Committer date, strict ISO 8601 (%cI); always present. May differ from
+   * `date` after a rewrite, a cherry-pick or an applied patch.
+   */
+  committerDate: string;
 }
 
 /** One line of `git blame`: its content plus the commit that last changed it. */
@@ -81,6 +87,13 @@ export interface CommitAuthor {
   email: string;
 }
 
+/** A commit timestamp as git records it: seconds since the Unix epoch plus the
+ *  UTC offset in minutes (east positive). Mirrors the Rust `CommitDate`. */
+export interface CommitDate {
+  epochSeconds: number;
+  offsetMinutes: number;
+}
+
 /** One resulting commit in a history rewrite (multi-hash = squash). */
 export interface RewriteStep {
   hashes: string[];
@@ -88,4 +101,9 @@ export interface RewriteStep {
   /** Pause at this commit (interactive-rebase path only; the replay engine
    *  ignores it). */
   edit?: boolean;
+  /** The commit's new dates; omitted = no change (git keeps the author date and
+   *  stamps the committer date with the time of the rewrite). A fold group's
+   *  dates apply to the one commit the group makes. */
+  authorDate?: CommitDate;
+  committerDate?: CommitDate;
 }

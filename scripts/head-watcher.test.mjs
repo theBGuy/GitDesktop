@@ -319,6 +319,7 @@ const UNDO_TWINS = [
   "UNDO_MID_PICK",
   "UNDO_MID_MERGE",
   "UNDO_DETACHED_ROOT",
+  "UNDO_UNRESOLVED",
 ];
 
 function checkUndoTwin(rust, panel, name) {
@@ -540,6 +541,19 @@ function withoutBlock(src, anchor) {
   return src.slice(0, at) + src.slice(src.indexOf(block, at) + block.length);
 }
 
+/** {@link mutate} confined to the `if (anchor) { … }` block. */
+function mutateInBlock(src, anchor, snippet, replacement) {
+  const at = src.indexOf(`if (${anchor})`);
+  assert.ok(at >= 0, `control premise: ${anchor} present`);
+  const block = balanced(src, src.indexOf("{", at));
+  const start = src.indexOf(block, at);
+  return (
+    src.slice(0, start) +
+    mutate(block, snippet, replacement) +
+    src.slice(start + block.length)
+  );
+}
+
 test("headMoveAftermathKeys is the HEAD-move set; the commit set composes it", () => {
   const wt = read(WORKINGTREE);
   const core = read(CORE);
@@ -569,14 +583,23 @@ test("StatusLogSync re-reads the HEAD-move set through preMoveStale", () => {
     "control: the refresh-head-set block removed",
   );
   assert.notDeepEqual(
-    checkStatusLogSync(mutate(panel, "predicate: (q) =>", "_: (q) =>"), core),
+    checkStatusLogSync(
+      mutateInBlock(
+        panel,
+        'actions.has("refresh-head-set")',
+        "predicate: (q) =>",
+        "_: (q) =>",
+      ),
+      core,
+    ),
     [],
     "control: the predicate dropped",
   );
   assert.notDeepEqual(
     checkStatusLogSync(
-      mutate(
+      mutateInBlock(
         panel,
+        'actions.has("refresh-head-set")',
         "repoKeys.rewriteStatus(repoPath),",
         "repoKeys.log(repoPath),",
       ),
@@ -585,6 +608,199 @@ test("StatusLogSync re-reads the HEAD-move set through preMoveStale", () => {
     [],
     "control: the rewrite-status family swapped out",
   );
+  assert.notDeepEqual(
+    checkStatusLogSync(mutate(panel, "prevStatusAt,", "prevStatusAt: 0,"), core),
+    [],
+    "control: the head-set predicate fed another time",
+  );
+  assert.notDeepEqual(
+    checkStatusLogSync(
+      mutate(
+        panel,
+        "...headMoveAftermathKeys(repoPath),",
+        "...headMoveAftermathKeys(repoPath), repoKeys.log(repoPath),",
+      ),
+      core,
+    ),
+    [],
+    "control: a family added to the head set",
+  );
+});
+
+const REFS_STAMP = "src/lib/git/queries/refs-stamp.ts";
+const REF_SET =
+  '[repoKeys.branches(repoPath),repoKeys.rewriteStatus(repoPath),remoteBranchesOptions(repoPath).queryKey,repoKeys.unpushedCount(repoPath),["repo",repoPath,"compare"],["repo",repoPath,"divergence"],["repo",repoPath,"merge-preview"],["repo",repoPath,"local-pr-merge-states"],]';
+/** The on-remote verdict's invalidation: keyed under its sha, so it filters. */
+const ON_REMOTE =
+  'voidqueryClient.invalidateQueries({queryKey:["repo",repoPath,"commit"],predicate:(q)=>q.queryKey[4]==="on-remote"&&refStale(q),});';
+const flat = (s) => s.replace(/\s+/g, "");
+
+/** {@link mutate} confined to StatusLogSync's source. */
+function mutateInSync(panel, snippet, replacement) {
+  const at = panel.indexOf("export function StatusLogSync(");
+  const end = panel.indexOf("function undoMidOpOf(", at);
+  assert.ok(at >= 0 && end > at, "control premise: StatusLogSync located");
+  return (
+    panel.slice(0, at) +
+    mutate(panel.slice(at, end), snippet, replacement) +
+    panel.slice(end)
+  );
+}
+
+/** The refs-stamp and status-content arms of StatusLogSync; empty = pinned. */
+function checkRefSync(panel, stamp) {
+  const problems = [];
+  const body = blockAfter(
+    panel,
+    "export function StatusLogSync(",
+    "{",
+    ") {",
+  ).text;
+  if (!body.includes("useRefsStamp(repoPath)"))
+    problems.push("StatusLogSync doesn't observe useRefsStamp(repoPath)");
+  const order = [
+    "refresh-side-keys",
+    "refresh-head-set",
+    "refresh-ref-set",
+    "refresh-op-state",
+    "refresh-count",
+  ].map((a) => body.indexOf(`actions.has("${a}")`));
+  if (order.some((i, n) => i < 0 || (n > 0 && i <= order[n - 1])))
+    problems.push(`handler arms out of order: ${order}`);
+  const refAt = body.indexOf('actions.has("refresh-ref-set")');
+  if (refAt >= 0) {
+    const block = balanced(body, body.indexOf("{", refAt));
+    const list = block.includes("for (const key of")
+      ? flat(blockAfter(block, "for (const key of", "[").text)
+      : "(no key list)";
+    if (list !== REF_SET)
+      problems.push(`refresh-ref-set re-reads ${list}, not ${REF_SET}`);
+    // The cutoff is the stamp reading that SAW the move, so a read refreshed
+    // between the two stamp readings is re-read too.
+    if (
+      !/const refStale = \(q: Query\) =>\s*preMoveStale\(\{[^}]*prevStatusAt: stampAt,?\s*\}\);/.test(
+        block,
+      ) ||
+      !/invalidateQueries\(\{\s*queryKey: key,\s*predicate: refStale,?\s*\}\)/.test(
+        block,
+      )
+    )
+      problems.push("refresh-ref-set doesn't gate on preMoveStale fed stampAt");
+    if (!flat(block).includes(ON_REMOTE))
+      problems.push("refresh-ref-set doesn't re-read the on-remote verdicts");
+  }
+  const opAt = body.indexOf('actions.has("refresh-op-state")');
+  if (opAt >= 0) {
+    const block = balanced(body, body.indexOf("{", opAt))
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("//"))
+      .join("\n");
+    if (
+      flat(block) !==
+      "{voidqueryClient.invalidateQueries({queryKey:repoKeys.opState(repoPath),});}"
+    )
+      problems.push(
+        "refresh-op-state must invalidate repoKeys.opState with no predicate or cancelRefetch",
+      );
+  }
+  if (
+    !flat(body).includes(
+      "},[headOid,log.dataUpdatedAt,status.dataUpdatedAt,stamp.dataUpdatedAt]);",
+    )
+  )
+    problems.push(
+      "the sync effect's deps aren't [headOid, log, status, stamp dataUpdatedAt]",
+    );
+  const opts = flat(stamp);
+  for (const need of [
+    "...repoStatusPoll,",
+    'networkMode:"always"asconst,',
+    "retry:falseasconst,",
+  ]) {
+    if (!opts.includes(need)) problems.push(`${REFS_STAMP} lacks ${need}`);
+  }
+  return problems;
+}
+
+test("StatusLogSync follows the refs stamp and status's content", () => {
+  const panel = read(PANEL);
+  const stamp = read(REFS_STAMP);
+  assert.deepEqual(checkRefSync(panel, stamp), []);
+  for (const [label, src] of [
+    [
+      "the stamp observer removed",
+      mutate(panel, "useRefsStamp(repoPath)", "useRefsStamp(otherPath)"),
+    ],
+    [
+      "the ref set fed a fixed time",
+      mutate(panel, "prevStatusAt: stampAt,", "prevStatusAt: 0,"),
+    ],
+    [
+      "a ref-set family dropped",
+      mutate(panel, "remoteBranchesOptions(repoPath).queryKey,"),
+    ],
+    [
+      "the merge-preview family dropped",
+      mutate(panel, '["repo", repoPath, "merge-preview"],'),
+    ],
+    [
+      "the on-remote verdicts dropped",
+      mutate(panel, 'q.queryKey[4] === "on-remote" && refStale(q)', "false"),
+    ],
+    [
+      "the on-remote verdicts re-read while fetching",
+      mutate(panel, 'q.queryKey[4] === "on-remote" && refStale(q)', 'q.queryKey[4] === "on-remote"'),
+    ],
+    [
+      "the compare prefix misspelled",
+      mutate(panel, '["repo", repoPath, "compare"],', '["repo", repoPath, "comparisons"],'),
+    ],
+    [
+      "the ref set fed the status time",
+      mutate(panel, "prevStatusAt: stampAt,", "prevStatusAt,"),
+    ],
+    [
+      "op state gated on preMoveStale",
+      mutateInSync(
+        panel,
+        "queryKey: repoKeys.opState(repoPath),",
+        "queryKey: repoKeys.opState(repoPath), predicate: () => true,",
+      ),
+    ],
+    [
+      "op state joins the in-flight read",
+      mutateInSync(
+        panel,
+        "queryKey: repoKeys.opState(repoPath),",
+        "queryKey: repoKeys.opState(repoPath), cancelRefetch: false,",
+      ),
+    ],
+    [
+      "the stamp dropped from the deps",
+      mutate(panel, "status.dataUpdatedAt, stamp.dataUpdatedAt]", "status.dataUpdatedAt]"),
+    ],
+    [
+      "the ref set moved after op state",
+      mutate(
+        mutate(panel, 'actions.has("refresh-ref-set")', 'actions.has("ref-set-moved")'),
+        'actions.has("refresh-count")',
+        'actions.has("refresh-ref-set")',
+      ),
+    ],
+  ]) {
+    assert.notDeepEqual(checkRefSync(src, stamp), [], `control: ${label}`);
+  }
+  for (const [label, snippet] of [
+    ["the status poll dropped", "...repoStatusPoll,"],
+    ["networkMode dropped", 'networkMode: "always" as const,'],
+    ["retry left on", "retry: false as const,"],
+  ]) {
+    assert.notDeepEqual(
+      checkRefSync(panel, mutate(stamp, snippet)),
+      [],
+      `control: ${label}`,
+    );
+  }
 });
 
 test("the records-parent key has one builder", () => {
@@ -876,7 +1092,7 @@ for (const name of UNDO_TWINS) {
     assert.notDeepEqual(
       checkUndoTwin(
         rust,
-        mutate(panel, `"${tsSentence}"`, `"${tsSentence.replace("—", "-")}"`),
+        mutate(panel, `"${tsSentence}"`, `"${tsSentence.replace(/[—;]/, "-")}"`),
         name,
       ),
       [],

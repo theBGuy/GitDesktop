@@ -143,6 +143,15 @@ export const AMEND_HOLD_HINT: Record<
 export const UNPUSHED_UNCHECKED_HINT =
   " (couldn't check which commits are pushed)";
 
+/** The one spelling of a pushed commit's menu-row reason: Undo's and Edit
+ *  dates' rows both say it. */
+export const ALREADY_PUSHED_HINT = " (already pushed)";
+
+/** Edit dates on an unpushed commit that Edit history's range doesn't cover
+ *  (past its cap, or below a merge). */
+export const EDIT_DATES_OUT_OF_RANGE_HINT =
+  " (Edit history can't reach this commit)";
+
 /** Menu-row reason while a merge/rebase/cherry-pick/revert is mid-flight —
  *  Edit history, Squash and Cherry-pick to branch all say it. */
 export const OP_IN_PROGRESS_HINT = " (finish the operation in Changes first)";
@@ -157,6 +166,69 @@ export const UNDO_ROOT_COMMIT_CONFIRM = {
   confirmLabel: "Undo first commit",
   confirmVariant: "destructive",
 } as const;
+
+/** Which commit's parent went unread: Edit history's oldest planned commit, or
+ *  the one commit the HEAD dialog changes. */
+export type UnreadParentSubject = "oldest" | "this";
+
+const UNREAD_PARENT_SUBJECT: Record<UnreadParentSubject, string> = {
+  oldest: "The oldest commit's",
+  this: "This commit's",
+};
+
+/** The one prompt, in Edit history and the HEAD Edit dates dialog alike, for a
+ *  change that dates commits before their parents, or re-dates a commit whose
+ *  parent's date couldn't be read (`unreadParent` names which). It warns and
+ *  never blocks: git stores such dates as given. `confirmLabel` is the footer
+ *  button's own label. */
+export const datesBeforeParentConfirm = (
+  count: number,
+  confirmLabel: string,
+  unreadParent: UnreadParentSubject | null = null,
+) => {
+  const lines: string[] = [];
+  if (count === 1) lines.push("1 commit will be dated before its parent.");
+  if (count > 1) {
+    lines.push(`${count} commits will be dated before their parents.`);
+  }
+  if (unreadParent !== null) {
+    lines.push(
+      `${UNREAD_PARENT_SUBJECT[unreadParent]} parent date couldn't be read, so its new date may fall before its parent's.`,
+    );
+  }
+  lines.push(
+    count > 0
+      ? "Git allows this; views sorted by date will list them out of order."
+      : "Git allows this; views sorted by date would list the two out of order.",
+  );
+  return {
+    title:
+      count > 0
+        ? "Rewrite with out-of-order dates?"
+        : "Rewrite without checking the parent's date?",
+    body: lines.join(" "),
+    confirmLabel,
+    confirmVariant: "default",
+  } as const;
+};
+
+/** A date editor's primary hold while a re-dated commit waits on its parent's
+ *  date, which decides whether it asks `datesBeforeParentConfirm`. */
+export const PARENT_DATE_PENDING = "Reading the parent's date…";
+
+/** The inline line under a commit whose new author date falls before its
+ *  parent's (`parentLabel` is that date as shown), or whose parent's date
+ *  couldn't be read (`parentLabel` null; `parentHash` null when even the
+ *  parent's id is unknown). */
+export const beforeParentNote = (
+  parentHash: string | null,
+  parentLabel: string | null,
+) => {
+  const parent = parentHash === null ? "" : ` ${parentHash.slice(0, 7)}`;
+  return parentLabel === null
+    ? `The date of its parent${parent} couldn't be read, so this date can't be checked against it.`
+    : `Earlier than its parent${parent} (${parentLabel}). Git allows this; views sorted by date will list the two out of order.`;
+};
 
 /** The routes that write a commit's message into the commit box over whatever
  *  the user typed there. */

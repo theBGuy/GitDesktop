@@ -850,6 +850,7 @@ const MARKER_SITES = [
     "src/features/projects/BoardColumn.tsx",
     "aria-multiselectable={items.length === 0 ? undefined : true}",
   ],
+  ["src/features/history/EditHistoryDialog.tsx", 'data-multiselect=""'],
 ];
 
 /** Each marker site whose file can't be read or lacks its marker; `readSite`

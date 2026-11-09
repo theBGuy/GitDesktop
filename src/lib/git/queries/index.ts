@@ -20,6 +20,7 @@ export * from "./pr-write";
 export * from "./pr-writes";
 export * from "./projects";
 export * from "./prs";
+export * from "./refs-stamp";
 export * from "./remotes";
 export * from "./repo-access";
 export * from "./repo-config";

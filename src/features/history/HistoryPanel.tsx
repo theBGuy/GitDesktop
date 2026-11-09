@@ -5,7 +5,7 @@ import {
   MagnifyingGlassIcon,
   TagIcon,
 } from "@phosphor-icons/react";
-import { useQueryClient } from "@tanstack/react-query";
+import { type Query, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   type MouseEvent,
@@ -52,6 +52,7 @@ import {
   splitInfiniteFailure,
 } from "@/features/conversations/remote-section-state";
 import { useCommitCommentsGate } from "@/features/pulls/CommitComments";
+import { isConflictedEntry } from "@/features/repository/bulk-row-targets";
 import { PROMOTION_BLOCKS_CHECKOUT } from "@/features/repository/checkout-copy";
 import { refuseWhilePublishing } from "@/features/repository/PublishPendingBanner";
 import { branchNamePlaceholder } from "@/lib/ai/branch-prefixes";
@@ -65,7 +66,9 @@ import {
   isShaPrefixQuery,
   isShortHexQuery,
   opStateOptions,
+  remoteBranchesOptions,
   repoKeys,
+  repoStatusOptions,
   useBranches,
   useCheckoutCommit,
   useCherryPick,
@@ -81,6 +84,7 @@ import {
   usePendingTagPushes,
   usePrefetchCommit,
   usePushTag,
+  useRefsStamp,
   useRepoStatus,
   useRevertCommit,
   useUndoCommit,
@@ -91,6 +95,7 @@ import type {
   CommitDetails,
   CommitSummary,
   RepoOpState,
+  RepoStatus,
   RewriteStep,
 } from "@/lib/git/types";
 import { useHotkeyAction } from "@/lib/hotkeys/hotkeys";
@@ -115,12 +120,14 @@ import { useRetained } from "@/lib/use-retained";
 import { cn } from "@/lib/utils";
 import { CommitContextMenuItems } from "./CommitContextMenu";
 import {
+  ALREADY_PUSHED_HINT,
   AMEND_HOLD_HINT,
   CHERRY_PICK_ALREADY_APPLIED,
   CHERRY_PICK_ALREADY_APPLIED_SHORT,
   checkoutCommitConfirm,
   checkoutCommitSuccessToast,
   cherryPickCommitConfirm,
+  EDIT_DATES_OUT_OF_RANGE_HINT,
   HISTORY_REFRESHING_HINT,
   OP_IN_PROGRESS_HINT,
   RANGE_MERGE_ITEM_REASON,
@@ -130,7 +137,13 @@ import {
   UNDO_ROOT_COMMIT_CONFIRM,
   UNPUSHED_UNCHECKED_HINT,
 } from "./commit-confirms";
+import { EditDatesDialog, type EditDatesTarget } from "./EditDatesDialog";
 import { EditHistoryDialog } from "./EditHistoryDialog";
+import {
+  type EditDatesHold,
+  editDatesRoute,
+  RESOLVE_CONFLICTS_HINT,
+} from "./edit-dates-route";
 import {
   advanceSnapshot,
   arrowCount,
@@ -142,12 +155,16 @@ import {
   isNoUpstream,
   notAdjacentSquashHint,
   observeHeadOid,
+  observeSeeded,
   preMoveStale,
   resolveUnpushedView,
   type SquashHold,
   squashGate,
+  statusContentSignature,
   statusLogAction,
+  type UndoPushedHold,
   type UnpushedSnapshot,
+  undoPushedHold,
   viewAgrees,
 } from "./editable-set";
 import {
@@ -199,6 +216,18 @@ const UNDO_MID_MERGE =
  *  STEP: commit.rs's `UNDO_MID_PICK` is the backend's copy of this exact sentence. */
 const UNDO_MID_PICK =
   "A cherry-pick or revert is in progress — finish or abort it first; nothing was undone.";
+/** The refusal for an undo over unmerged entries with no stopped operation.
+ *  KEEP IN STEP: commit.rs's `UNDO_UNRESOLVED` is the backend's copy of this
+ *  exact sentence. */
+const UNDO_UNRESOLVED = "Resolve the conflicts first; nothing was undone.";
+/** Why the shortcut undid nothing while the pushed-commit check is unread or
+ *  not yet agreeing with the log. Frontend-only: the backend reads no count. */
+const UNDO_PUSHED_REFRESHING =
+  "Still checking which commits are pushed — try again in a moment.";
+/** Why the shortcut undid nothing while the pushed-commit check has failed.
+ *  Fixed copy: a failed count refetching with no data carries no error. */
+const UNDO_PUSHED_UNCHECKED =
+  "Couldn't check which commits are pushed; nothing was undone.";
 
 /** Why undo is withheld at the oldest commit a depth-limited clone holds: its
  *  parent was never fetched, so there is nothing to soft-reset to. KEEP IN
@@ -220,12 +249,14 @@ type HeadRowHold =
   | "parent-unread"
   | "already-at"
   | "mid-pick"
-  | "mid-merge";
+  | "mid-merge"
+  | "unpushed-unchecked"
+  | "unresolved";
 const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
   refreshing: HISTORY_REFRESHING_HINT,
   "not-latest": AMEND_HOLD_HINT["not-latest"],
   undoing: " (undoing…)",
-  "already-pushed": " (already pushed)",
+  "already-pushed": ALREADY_PUSHED_HINT,
   "detached-root": UNDO_DETACHED_ROOT_HINT,
   "shallow-boundary": " (its parent commit isn't in this shallow clone)",
   // The menu twin of the shortcut's "Still checking the latest commit" toast.
@@ -234,6 +265,8 @@ const HEAD_ROW_HOLD_HINT: Record<HeadRowHold, string> = {
   "already-at": " (already at this commit)",
   "mid-pick": " (finish or abort the cherry-pick or revert first)",
   "mid-merge": " (finish or abort the merge first)",
+  "unpushed-unchecked": UNPUSHED_UNCHECKED_HINT,
+  unresolved: RESOLVE_CONFLICTS_HINT,
 };
 
 /** Cherry-pick to branch's menu-row reason per hold. Loading and unreadable
@@ -259,13 +292,15 @@ const SQUASH_HOLD_HINT: Record<
     " (clear the filter — a squash range must be adjacent in history)",
 };
 
-// Keeps the log and its side reads in step with status's HEAD: refetches the
-// log when status saw a new HEAD first, refreshes the side reads and the rest
-// of the HEAD-dependent families once per observed HEAD move (outside commits,
-// resets, checkouts and rebases, and in-app moves alike), and retries a
-// no-upstream count older than the log, the recheck interval, or a status
-// branch its basis contradicts. Its own observers keep the 5 s status poll from
-// re-rendering any panel.
+// Keeps the log and its side reads in step with status's HEAD and the refs
+// stamp: refetches the log when status saw a new HEAD first, refreshes the side
+// reads and the rest of the HEAD-dependent families once per observed HEAD move
+// (outside commits, resets, checkouts and rebases, and in-app moves alike), the
+// ref-derived reads once per observed stamp move (fetches, pushes and branch
+// moves made outside the app), op state once per status-content change with
+// HEAD held, and re-reads a no-upstream count taken on another head, errored,
+// past the recheck interval, or on a basis the status branch contradicts. Its
+// own observers keep the 5 s polls from re-rendering any panel.
 // RepositoryView mounts it outside every tab's <Activity>, keyed on the repo
 // to reset its last-seen oid: log readers on every tab rely on it, the commit
 // detail view's Amend gate and its "refreshing history" hint included.
@@ -273,6 +308,7 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
   const queryClient = useQueryClient();
   const log = useLog(repoPath);
   const status = useRepoStatus(repoPath);
+  const stamp = useRefsStamp(repoPath);
   const head = status.data?.branch;
   const noUpstream = isNoUpstream(head);
   const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
@@ -280,25 +316,49 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
   const lastOid = useRef<string | null>(null);
   // The previous status reading's time: the last one where an old oid still held.
   const lastStatusAt = useRef(0);
+  const lastStamp = useRef<string | null>(null);
+  // A hash, never the entries: a ref must not hold a second copy of a large status.
+  const lastContent = useRef<string | null>(null);
   const headOid = head?.oid;
   const onSync = useEffectEvent(
-    (oid: string | null | undefined, logAt: number, statusAt: number) => {
+    (
+      oid: string | null | undefined,
+      logAt: number,
+      statusAt: number,
+      stampAt: number,
+    ) => {
       const seen = observeHeadOid(lastOid.current, oid);
       lastOid.current = seen.next;
       const prevStatusAt = lastStatusAt.current;
       lastStatusAt.current = statusAt;
+      const stampSeen = observeSeeded(lastStamp.current, stamp.data);
+      lastStamp.current = stampSeen.next;
+      // An unchanged status reading carries the content already signed.
+      const contentSeen =
+        statusAt === prevStatusAt
+          ? { next: lastContent.current, changed: false }
+          : observeSeeded(
+              lastContent.current,
+              statusContentSignature(status.data?.entries),
+            );
+      lastContent.current = contentSeen.next;
       const actions = statusLogAction({
         oid,
         oidChanged: seen.changed,
+        refsChanged: stampSeen.changed,
+        contentChanged: contentSeen.changed,
         logHead: log.data?.pages[0]?.[0]?.hash,
         logHasData: log.data !== undefined,
         logIsFetching: log.isFetching,
         logAt,
+        logErrorAt: log.errorUpdatedAt,
         statusAt,
         noUpstream,
         countIsError: unpushedVsRemotes.isError,
         countIsFetching: unpushedVsRemotes.isFetching,
         countAt: unpushedVsRemotes.dataUpdatedAt,
+        countErrorAt: unpushedVsRemotes.errorUpdatedAt,
+        countHead: unpushedVsRemotes.data?.headOid,
         countBasis: unpushedVsRemotes.data?.basis,
         countDefault: unpushedVsRemotes.data?.defaultBranch,
         statusBranch: head?.name,
@@ -316,7 +376,7 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
         // These families don't heal through the log refetch: the dialog's
         // full-message read keys on a base that holds through the reseed,
         // opState gates Edit history against outside operations, and the
-        // no-upstream count carries no HEAD of its own.
+        // no-upstream count counted from the old HEAD.
         for (const key of [
           repoKeys.unpushedCount(repoPath),
           repoKeys.unpushedMessages(repoPath),
@@ -346,6 +406,49 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
           });
         }
       }
+      if (actions.has("refresh-ref-set")) {
+        // The reads that follow refs/heads or refs/remotes other than through
+        // HEAD: branches, rewrite status, remote branches, the unpushed count,
+        // compare, divergence, merge previews, local-PR merge states and each
+        // commit's on-remote verdict. Each is re-read unless it landed after the
+        // stamp reading that saw the move (an in-app fetch's refresh settling
+        // after it) or is fetching now (one the head set just started). The
+        // prefixes are hand-spelled as headMoveAftermathKeys spells them.
+        const refStale = (q: Query) =>
+          preMoveStale({
+            fetchStatus: q.state.fetchStatus,
+            dataUpdatedAt: q.state.dataUpdatedAt,
+            prevStatusAt: stampAt,
+          });
+        for (const key of [
+          repoKeys.branches(repoPath),
+          repoKeys.rewriteStatus(repoPath),
+          remoteBranchesOptions(repoPath).queryKey,
+          repoKeys.unpushedCount(repoPath),
+          ["repo", repoPath, "compare"],
+          ["repo", repoPath, "divergence"],
+          ["repo", repoPath, "merge-preview"],
+          ["repo", repoPath, "local-pr-merge-states"],
+        ] as const) {
+          void queryClient.invalidateQueries({
+            queryKey: key,
+            predicate: refStale,
+          });
+        }
+        // commitOnRemoteOptions keys the verdict under its sha, beside commit
+        // reads no ref move changes.
+        void queryClient.invalidateQueries({
+          queryKey: ["repo", repoPath, "commit"],
+          predicate: (q) => q.queryKey[4] === "on-remote" && refStale(q),
+        });
+      }
+      if (actions.has("refresh-op-state")) {
+        // No predicate: a read in flight when the entries changed may hold the
+        // answer from before the stop or abort, so it is cancelled and restarted.
+        void queryClient.invalidateQueries({
+          queryKey: repoKeys.opState(repoPath),
+        });
+      }
       if (actions.has("refresh-count")) {
         void queryClient.invalidateQueries({
           queryKey: repoKeys.unpushedCount(repoPath),
@@ -354,8 +457,13 @@ export function StatusLogSync({ repoPath }: { repoPath: string }) {
     },
   );
   useEffect(() => {
-    onSync(headOid, log.dataUpdatedAt, status.dataUpdatedAt);
-  }, [headOid, log.dataUpdatedAt, status.dataUpdatedAt]);
+    onSync(
+      headOid,
+      log.dataUpdatedAt,
+      status.dataUpdatedAt,
+      stamp.dataUpdatedAt,
+    );
+  }, [headOid, log.dataUpdatedAt, status.dataUpdatedAt, stamp.dataUpdatedAt]);
   return null;
 }
 
@@ -485,7 +593,12 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   } | null>(null);
   // Edit history's open session: an opener mints a token, and a close clears
   // only its own, so a late settle can't close a dialog reopened since.
-  const [editHistoryOpen, setEditHistoryOpen] = useState<object | null>(null);
+  // `datesFor` opens that commit's Dates editor (the Edit dates route).
+  const [editHistoryOpen, setEditHistoryOpen] = useState<{
+    datesFor?: string;
+  } | null>(null);
+  // HEAD's Edit dates dialog, pinned to the HEAD it opened on.
+  const [editDates, setEditDates] = useState<EditDatesTarget | null>(null);
   // The commit the one shared context menu acts on; its position is derived at
   // render, since the log can gain a top commit while the menu is open.
   const [menuTarget, setMenuTarget] = useState<{
@@ -500,6 +613,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     setEditHistoryOpen(null);
     setSquashCtx(null);
     setReset(null);
+    setEditDates(null);
     setDeleteTag(null);
     setPickOnto(null);
     setMergePick(null);
@@ -586,15 +700,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
 
   const { requestAmend, forcePushDialog } = useAmendWithConfirm(repoPath);
 
-  // GitHub Desktop-style undo: offered while the latest commit hasn't been
-  // pushed anywhere (no upstream, or we're ahead of it).
   const head = status.data?.branch;
   const lastCommit = log.data?.pages[0]?.[0];
-  const canUndo = Boolean(
-    lastCommit &&
-      head &&
-      (head.upstream === null || head.upstreamGone || head.ahead > 0),
-  );
   // A lone loaded commit: a true root or a depth-limited clone's boundary. The
   // log walks HEAD's ancestry and only stops paging once a page comes up short,
   // so one loaded commit with no next page has no parent the log can reach.
@@ -618,6 +725,370 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
   // A pending or failed opState read holds nothing, and the backend still
   // refuses.
   const undoMidOp = undoMidOpOf(opState.data);
+
+  // The confirm sits here rather than on the menu items, so the search menu and
+  // the single-commit menu can't diverge on whether they ask.
+  async function doCheckoutCommit(hash: string) {
+    const checkoutIn = repoPath;
+    if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(checkoutIn, "nothing was checked out")) return;
+    // Below the confirm: a promote can start while the prompt is open.
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
+    try {
+      await checkoutCommit.mutateAsync(hash);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(checkoutCommitSuccessToast(hash));
+  }
+
+  // A merge commit routes to the mainline-parent dialog instead of the confirm.
+  async function doRevertCommit(hash: string, isMerge: boolean) {
+    if (isMerge) {
+      setMergePick({ hash, op: "revert", repo: repoPath });
+      return;
+    }
+    const revertIn = repoPath;
+    if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
+    if (refuseIfSwitched(revertIn, "nothing was reverted")) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
+    void revertCommit.mutateAsync({ hash }).catch(onError);
+  }
+
+  // `alreadyApplied` is the one thing the two menus word differently.
+  async function doCherryPick(
+    hash: string,
+    alreadyApplied: string,
+    isMerge: boolean,
+  ) {
+    if (isMerge) {
+      setMergePick({ hash, op: "cherry-pick", alreadyApplied, repo: repoPath });
+      return;
+    }
+    const pickIn = repoPath;
+    const ok = await useConfirm
+      .getState()
+      .ask(cherryPickCommitConfirm(hash, currentBranch));
+    if (!ok || refuseIfSwitched(pickIn, "nothing was cherry-picked")) return;
+    if (promotionBlocksCheckout(repoPath)) {
+      toast.info(PROMOTION_BLOCKS_CHECKOUT);
+      return;
+    }
+    let applied: boolean;
+    try {
+      applied = await cherryPick.mutateAsync({ hash });
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    if (applied) {
+      toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
+    } else {
+      toast.info(alreadyApplied);
+    }
+  }
+
+  async function pushTagToOrigin(tag: string) {
+    if (pendingTagPush(tag) || refuseWhileOffline()) return;
+    if (refuseWhilePublishing(queryClient, repoPath)) return;
+    const pushedIn = repoPath;
+    try {
+      await pushTag.mutateAsync(tag);
+    } catch (e) {
+      onError(e);
+      return;
+    }
+    toast.success(`Pushed tag ${tag} to origin${landedIn(pushedIn).away}`);
+  }
+
+  useHotkeyAction("focus-filter", () => filterRef.current?.focus());
+
+  // Derived commit lists — memoized so the per-render .flat()/.filter()/.map()
+  // allocations don't churn (they feed the list + selection gating on every
+  // keystroke). Computed before the early returns to satisfy the rules of hooks;
+  // harmlessly empty while the log is still loading.
+  const commits = useMemo(() => log.data?.pages.flat() ?? [], [log.data]);
+  // The selection and anchor keep no commit a new log answer stopped listing,
+  // whichever route rewrote it, pruned in the render that lands the answer.
+  // Only ids the previous answer listed go: a search hit outside the loaded
+  // pages stays.
+  const [prunedFor, setPrunedFor] = useState(commits);
+  if (prunedFor !== commits) {
+    setPrunedFor(commits);
+    const listed = new Set(commits.map((c) => c.hash));
+    const dropped = new Set(
+      prunedFor.filter((c) => !listed.has(c.hash)).map((c) => c.hash),
+    );
+    if ([...selected].some((h) => dropped.has(h))) {
+      setSelected(new Set([...selected].filter((h) => !dropped.has(h))));
+    }
+    if (anchorHash !== null && dropped.has(anchorHash)) setAnchorHash(null);
+  }
+  const searchCommits = useMemo(
+    () => search.data?.pages.flat() ?? [],
+    [search.data],
+  );
+  // Client-side filter over the loaded pages (subject, author, or SHA).
+  const query = filterText.trim().toLowerCase();
+  const filteredCommits = useMemo(
+    () =>
+      query
+        ? commits.filter(
+            (c) =>
+              c.subject.toLowerCase().includes(query) ||
+              c.author.toLowerCase().includes(query) ||
+              c.hash.toLowerCase().startsWith(query),
+          )
+        : commits,
+    [commits, query],
+  );
+  // In search mode the list is whole-history matches: the SHA arm's on-branch
+  // hits lead, grep rows follow minus duplicates, and off-branch hits never
+  // become rows (they're notices above the list). Otherwise it's the
+  // (client-filtered) loaded pages.
+  const { rows: searchRows, offBranch: offBranchRows } = useMemo(
+    () => mergeSearchResults(shaLookup.data, searchCommits),
+    [shaLookup.data, searchCommits],
+  );
+  const offBranchShown = searchActive && offBranchRows.length > 0;
+  // One prefix length for every shown notice row, so their SHAs line up and
+  // stay distinct; the overflow rows show no SHA and don't count.
+  const offBranchNoticeRows = offBranchRows.slice(0, OFF_BRANCH_NOTICE_CAP);
+  const offBranchPrefixLen = distinctPrefixLength(
+    offBranchNoticeRows.map((c) => c.hash),
+  );
+  const visibleCommits = searchActive ? searchRows : filteredCommits;
+  // A commit Edit dates rewrote takes focus on its row: the dialog's close
+  // lands it when the row is already rendered, else this does once the
+  // refetched log shows it. Armed only by a change that closed the dialog,
+  // tagged with its repo, and dropped once focus is found anywhere but the
+  // body, the closing dialog, or the commit detail's focus host (which takes
+  // focus from the body when the selection moves), so it never fires later on
+  // a replay or re-render.
+  const landDatesRow = useRef<{ repo: string; hash: string } | null>(null);
+  const datesRowEl = (hash: string) =>
+    scrollEl?.querySelector<HTMLElement>(`[data-hash="${CSS.escape(hash)}"]`) ??
+    null;
+  useEffect(() => {
+    const want = landDatesRow.current?.hash;
+    if (want === undefined) return;
+    if (landDatesRow.current?.repo !== repoPath) {
+      landDatesRow.current = null;
+      return;
+    }
+    const active = document.activeElement;
+    if (
+      active !== null &&
+      active !== document.body &&
+      !active.matches("[data-commit-detail-focus-host]")
+    ) {
+      if (active.closest("[data-edit-dates-dialog]") === null) {
+        landDatesRow.current = null;
+      }
+      return;
+    }
+    if (!visibleCommits.some((c) => c.hash === want)) return;
+    const row = scrollEl?.querySelector<HTMLElement>(
+      `[data-hash="${CSS.escape(want)}"]`,
+    );
+    if (!row) return;
+    landDatesRow.current = null;
+    row.focus();
+  }, [visibleCommits, scrollEl, repoPath]);
+  // Squash gating needs the selection's positions in REAL history (not the
+  // filtered view), so index against `commits`.
+  const selectedIndices = useMemo(
+    () =>
+      commits
+        .map((c, i) => (selected.has(c.hash) ? i : -1))
+        .filter((i) => i >= 0),
+    [commits, selected],
+  );
+
+  // Commits not yet on the remote. Published branch → the top `ahead` commits
+  // (ahead of its upstream). Unpublished branch (no upstream) → count them
+  // against the remotes, NOT `commits.length`: the fork point and everything
+  // below it live on `origin/<base>` and are already published, so only the
+  // branch's own commits are unpushed. A repo with no configured remote and no
+  // resolving remote-tracking ref counts against its local default branch
+  // instead, and on that branch itself only the row arrows drop (`arrowCount`).
+  // (Queried only in the no-upstream case.)
+  // Drives both the rewrite gating below and the per-row "not pushed" marker.
+  // A gone upstream counts as no upstream so the `unpushedVsRemotes` fallback
+  // engages and the per-row "not pushed" markers reflect what's truly published.
+  const noUpstream = isNoUpstream(head);
+  const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
+  // The `?? 0` below never claims "all pushed" for a failed count read: an
+  // errored count fails `viewAgrees`, so the markers serve the last agreeing
+  // snapshot (or mark nothing) and squash / Edit history hold.
+  const unpushedCount = head
+    ? noUpstream
+      ? (unpushedVsRemotes.data?.count ?? 0)
+      : head.ahead
+    : 0;
+  // What the no-upstream count was taken against, read from the same answer as
+  // the count so the two always pair; null in upstream mode.
+  const countRead = head && noUpstream ? unpushedVsRemotes.data : undefined;
+  const unpushedBasis = countRead?.basis ?? null;
+  const unpushedDefault = countRead?.defaultBranch ?? null;
+  // The count (status's ahead, or the no-upstream count read) and the log's
+  // commits refetch apart: the unpushed consumers below read them only as a
+  // pair both vouched for — the log's head is status's HEAD, and a no-upstream
+  // count read is unerrored, counted from that same HEAD, and taken on the
+  // branch status reports (a same-tip switch moves no oid).
+  const agreed = viewAgrees({
+    logHead: commits[0]?.hash,
+    statusOid: head?.oid,
+    noUpstream,
+    countIsError: unpushedVsRemotes.isError,
+    countHead: unpushedVsRemotes.data?.headOid,
+    countBasis: unpushedVsRemotes.data?.basis,
+    countDefault: unpushedVsRemotes.data?.defaultBranch,
+    statusBranch: head?.name,
+  });
+  // The last agreeing unpushed view, advanced only on agreement so a
+  // mismatch window in which the log still starts at its head keeps serving
+  // the set both reads vouched for; null until the first agreement so a
+  // mismatched first render marks nothing. The render-time setState settles
+  // only because advanceSnapshot returns `prev` for an unchanged input.
+  const [snapshot, setSnapshot] =
+    useState<UnpushedSnapshot<CommitSummary> | null>(null);
+  const nextSnap = advanceSnapshot(
+    snapshot,
+    {
+      repo: repoPath,
+      branch: head?.name ?? null,
+      commits,
+      count: unpushedCount,
+      basis: unpushedBasis,
+      defaultBranch: unpushedDefault,
+      hasNextPage: log.hasNextPage,
+    },
+    agreed,
+  );
+  if (nextSnap !== snapshot) setSnapshot(nextSnap);
+  const view = resolveUnpushedView({
+    agreed,
+    repo: repoPath,
+    branch: head?.name ?? null,
+    statusOid: head?.oid,
+    liveAhead: head?.ahead ?? 0,
+    noUpstream,
+    commits,
+    count: unpushedCount,
+    basis: unpushedBasis,
+    defaultBranch: unpushedDefault,
+    hasNextPage: log.hasNextPage,
+    snapshot,
+  });
+  // The unpushed set (the top `view.count` of the gated view's HEAD-order
+  // commits), for squash gating. CommitList derives its own row markers from
+  // `view.commits` + `view.count`: this Set is fresh every render, and passing
+  // it would keep the compiler from caching the CommitList element.
+  const unpushedHashes = new Set(
+    view.commits.slice(0, view.count).map((c) => c.hash),
+  );
+
+  // Above the early returns below: the Edit dates hook must run on every
+  // render, and so must everything it reads. Everything here that reads `view`
+  // after deriveEditRange passes primitives or fresh arrays only.
+  // Hold Squash, Edit history and Cherry-pick to branch while a merge/rebase/
+  // cherry-pick/revert is mid-flight — a new rebase or pick would clobber the
+  // in-flight one's state (the banner drives it). The backend refuses too;
+  // this just keeps the actions from looking live.
+  const opInProgress = Boolean(
+    opState.data?.merging ||
+      opState.data?.rebasing ||
+      opState.data?.cherryPicking ||
+      opState.data?.reverting,
+  );
+  // A no-upstream count read that failed won't agree by waiting, so the hold
+  // names it rather than "refreshing" indefinitely, and keeps naming it through
+  // the retry each status poll fires.
+  const countUnchecked =
+    noUpstream && failedSinceLastSuccess(unpushedVsRemotes);
+  const refreshingHint = countUnchecked
+    ? UNPUSHED_UNCHECKED_HINT
+    : HISTORY_REFRESHING_HINT;
+  // Edit history: the top unpushed commits (capped), needing a base below them.
+  // Merge commits can't be replayed, so the range stops at the first one. One
+  // editable commit is enough (you can reword or drop a single commit).
+  const { editLen, editCommits, editBase } = deriveEditRange(
+    view.commits,
+    view.count,
+    view.hasNextPage,
+  );
+  const editableHashes = editCommits.map((c) => c.hash);
+  // Unmerged entries with no stopped operation: the backend refuses the undo
+  // and a date change.
+  const undoUnresolved = (status.data?.entries ?? []).some(isConflictedEntry);
+  const editDatesRouteOf = (hash: string) =>
+    editDatesRoute({
+      hash,
+      index: commits.findIndex((c) => c.hash === hash),
+      headOid: head?.oid,
+      opInProgress,
+      unresolved: undoUnresolved,
+      viewAgreed: agreed,
+      unpushedCount: view.count,
+      editable: editableHashes,
+    });
+  // HEAD opens the small dialog pinned to the cached status HEAD (no cached
+  // HEAD, nothing to pin, so nothing opens); an editable commit opens Edit
+  // history on its dates. The cache can name a newer HEAD than the rendered
+  // route saw, and a pin on it would amend a commit the dialog never showed.
+  function openEditDates(hash: string) {
+    const route = editDatesRouteOf(hash);
+    if (route.kind === "history") {
+      setEditHistoryOpen({ datesFor: hash });
+      return;
+    }
+    if (route.kind !== "head") return;
+    const shownHead = queryClient.getQueryData<RepoStatus>(
+      repoStatusOptions(repoPath).queryKey,
+    )?.branch;
+    if (!shownHead?.oid || shownHead.oid !== hash) return;
+    setEditDates({
+      hash,
+      repo: repoPath,
+      expectedHead: shownHead.oid,
+      expectedBranch: headBranchPin(shownHead),
+    });
+  }
+  const paletteDatesRoute =
+    selectedCommitHash === null
+      ? null
+      : editDatesRouteOf(selectedCommitHash).kind;
+  useHotkeyAction(
+    "edit-commit-dates",
+    () => {
+      if (selectedCommitHash !== null) openEditDates(selectedCommitHash);
+    },
+    (paletteDatesRoute === "head" || paletteDatesRoute === "history") &&
+      selected.size <= 1,
+  );
+
+  // GitHub Desktop-style undo: offered while the latest commit hasn't been
+  // pushed anywhere. An upstream branch reads `ahead`; with no upstream (or a
+  // gone one) the live count against the remotes decides, held while it is
+  // unread, failed, or not yet agreeing with the log.
+  const undoPushed: UndoPushedHold | null = undoPushedHold({
+    noUpstream,
+    ahead: head?.ahead ?? 0,
+    countLoaded: unpushedVsRemotes.data !== undefined,
+    countFailed: countUnchecked,
+    basis: unpushedBasis,
+    count: unpushedCount,
+    agreed,
+  });
+  const canUndo = Boolean(lastCommit && head) && undoPushed === null;
 
   async function undoLast() {
     if (!lastCommit || !head) return;
@@ -652,6 +1123,20 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         toast.info(midOp === "mid-pick" ? UNDO_MID_PICK : UNDO_MID_MERGE);
         return;
       }
+    }
+    // After the mid-op re-read, whose refusal outranks these (the backend's
+    // order), and ahead of every read and confirm.
+    if (undoUnresolved) {
+      toast.info(UNDO_UNRESOLVED);
+      return;
+    }
+    if (undoPushed === "unpushed-unchecked") {
+      toast.info(UNDO_PUSHED_UNCHECKED);
+      return;
+    }
+    if (undoPushed === "refreshing") {
+      toast.info(UNDO_PUSHED_REFRESHING);
+      return;
     }
     // The menu holds these arms; the shortcut and palette stay enabled and
     // explain by toast instead.
@@ -763,231 +1248,18 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     );
   }
 
-  // The confirm sits here rather than on the menu items, so the search menu and
-  // the single-commit menu can't diverge on whether they ask.
-  async function doCheckoutCommit(hash: string) {
-    const checkoutIn = repoPath;
-    if (!(await useConfirm.getState().ask(checkoutCommitConfirm(hash)))) return;
-    if (refuseIfSwitched(checkoutIn, "nothing was checked out")) return;
-    // Below the confirm: a promote can start while the prompt is open.
-    if (promotionBlocksCheckout(repoPath)) {
-      toast.info(PROMOTION_BLOCKS_CHECKOUT);
-      return;
-    }
-    try {
-      await checkoutCommit.mutateAsync(hash);
-    } catch (e) {
-      onError(e);
-      return;
-    }
-    toast.success(checkoutCommitSuccessToast(hash));
-  }
-
-  // A merge commit routes to the mainline-parent dialog instead of the confirm.
-  async function doRevertCommit(hash: string, isMerge: boolean) {
-    if (isMerge) {
-      setMergePick({ hash, op: "revert", repo: repoPath });
-      return;
-    }
-    const revertIn = repoPath;
-    if (!(await useConfirm.getState().ask(revertCommitConfirm(hash)))) return;
-    if (refuseIfSwitched(revertIn, "nothing was reverted")) return;
-    if (promotionBlocksCheckout(repoPath)) {
-      toast.info(PROMOTION_BLOCKS_CHECKOUT);
-      return;
-    }
-    void revertCommit.mutateAsync({ hash }).catch(onError);
-  }
-
-  // `alreadyApplied` is the one thing the two menus word differently.
-  async function doCherryPick(
-    hash: string,
-    alreadyApplied: string,
-    isMerge: boolean,
-  ) {
-    if (isMerge) {
-      setMergePick({ hash, op: "cherry-pick", alreadyApplied, repo: repoPath });
-      return;
-    }
-    const pickIn = repoPath;
-    const ok = await useConfirm
-      .getState()
-      .ask(cherryPickCommitConfirm(hash, currentBranch));
-    if (!ok || refuseIfSwitched(pickIn, "nothing was cherry-picked")) return;
-    if (promotionBlocksCheckout(repoPath)) {
-      toast.info(PROMOTION_BLOCKS_CHECKOUT);
-      return;
-    }
-    let applied: boolean;
-    try {
-      applied = await cherryPick.mutateAsync({ hash });
-    } catch (e) {
-      onError(e);
-      return;
-    }
-    if (applied) {
-      toast.success(`Cherry-picked ${hash.slice(0, 7)}`);
-    } else {
-      toast.info(alreadyApplied);
-    }
-  }
-
-  async function pushTagToOrigin(tag: string) {
-    if (pendingTagPush(tag) || refuseWhileOffline()) return;
-    if (refuseWhilePublishing(queryClient, repoPath)) return;
-    const pushedIn = repoPath;
-    try {
-      await pushTag.mutateAsync(tag);
-    } catch (e) {
-      onError(e);
-      return;
-    }
-    toast.success(`Pushed tag ${tag} to origin${landedIn(pushedIn).away}`);
-  }
-
   // The log can trail an outside commit (and push): undo only the HEAD status
-  // reports. A detached first commit stays enabled ON PURPOSE, unlike the menu:
-  // the palette hides disabled actions with no reason, so firing explains by
-  // toast, as promotionBlocksCheckout does.
+  // reports. Disabled only while already pushed; the transient pushed holds,
+  // unresolved conflicts and a detached first commit stay enabled ON PURPOSE,
+  // unlike the menu: the palette hides disabled actions with no reason, so
+  // firing explains by toast, as promotionBlocksCheckout does.
   useHotkeyAction(
     "undo-commit",
     undoLast,
-    canUndo && !undoCommit.isPending && lastCommit?.hash === head?.oid,
-  );
-  useHotkeyAction("focus-filter", () => filterRef.current?.focus());
-
-  // Derived commit lists — memoized so the per-render .flat()/.filter()/.map()
-  // allocations don't churn (they feed the list + selection gating on every
-  // keystroke). Computed before the early returns to satisfy the rules of hooks;
-  // harmlessly empty while the log is still loading.
-  const commits = useMemo(() => log.data?.pages.flat() ?? [], [log.data]);
-  const searchCommits = useMemo(
-    () => search.data?.pages.flat() ?? [],
-    [search.data],
-  );
-  // Client-side filter over the loaded pages (subject, author, or SHA).
-  const query = filterText.trim().toLowerCase();
-  const filteredCommits = useMemo(
-    () =>
-      query
-        ? commits.filter(
-            (c) =>
-              c.subject.toLowerCase().includes(query) ||
-              c.author.toLowerCase().includes(query) ||
-              c.hash.toLowerCase().startsWith(query),
-          )
-        : commits,
-    [commits, query],
-  );
-  // In search mode the list is whole-history matches: the SHA arm's on-branch
-  // hits lead, grep rows follow minus duplicates, and off-branch hits never
-  // become rows (they're notices above the list). Otherwise it's the
-  // (client-filtered) loaded pages.
-  const { rows: searchRows, offBranch: offBranchRows } = useMemo(
-    () => mergeSearchResults(shaLookup.data, searchCommits),
-    [shaLookup.data, searchCommits],
-  );
-  const offBranchShown = searchActive && offBranchRows.length > 0;
-  // One prefix length for every shown notice row, so their SHAs line up and
-  // stay distinct; the overflow rows show no SHA and don't count.
-  const offBranchNoticeRows = offBranchRows.slice(0, OFF_BRANCH_NOTICE_CAP);
-  const offBranchPrefixLen = distinctPrefixLength(
-    offBranchNoticeRows.map((c) => c.hash),
-  );
-  const visibleCommits = searchActive ? searchRows : filteredCommits;
-  // Squash gating needs the selection's positions in REAL history (not the
-  // filtered view), so index against `commits`.
-  const selectedIndices = useMemo(
-    () =>
-      commits
-        .map((c, i) => (selected.has(c.hash) ? i : -1))
-        .filter((i) => i >= 0),
-    [commits, selected],
-  );
-
-  // Commits not yet on the remote. Published branch → the top `ahead` commits
-  // (ahead of its upstream). Unpublished branch (no upstream) → count them
-  // against the remotes, NOT `commits.length`: the fork point and everything
-  // below it live on `origin/<base>` and are already published, so only the
-  // branch's own commits are unpushed. A repo with no configured remote and no
-  // resolving remote-tracking ref counts against its local default branch
-  // instead, and on that branch itself only the row arrows drop (`arrowCount`).
-  // (Queried only in the no-upstream case.)
-  // Drives both the rewrite gating below and the per-row "not pushed" marker.
-  // A gone upstream counts as no upstream so the `unpushedVsRemotes` fallback
-  // engages and the per-row "not pushed" markers reflect what's truly published.
-  const noUpstream = isNoUpstream(head);
-  const unpushedVsRemotes = useUnpushedCount(repoPath, noUpstream);
-  // The `?? 0` below never claims "all pushed" for a failed count read: an
-  // errored count fails `viewAgrees`, so the markers serve the last agreeing
-  // snapshot (or mark nothing) and squash / Edit history hold.
-  const unpushedCount = head
-    ? noUpstream
-      ? (unpushedVsRemotes.data?.count ?? 0)
-      : head.ahead
-    : 0;
-  // What the no-upstream count was taken against, read from the same answer as
-  // the count so the two always pair; null in upstream mode.
-  const countRead = head && noUpstream ? unpushedVsRemotes.data : undefined;
-  const unpushedBasis = countRead?.basis ?? null;
-  const unpushedDefault = countRead?.defaultBranch ?? null;
-  // The count (status's ahead, or the no-upstream count read) and the log's
-  // commits refetch apart: the unpushed consumers below read them only as a
-  // pair both vouched for — the log's head is status's HEAD, and a no-upstream
-  // count read is unerrored, at least as fresh as the log, and taken on the
-  // branch status reports (a same-tip switch moves no oid).
-  const agreed = viewAgrees({
-    logHead: commits[0]?.hash,
-    statusOid: head?.oid,
-    noUpstream,
-    countIsError: unpushedVsRemotes.isError,
-    countAt: unpushedVsRemotes.dataUpdatedAt,
-    logAt: log.dataUpdatedAt,
-    countBasis: unpushedVsRemotes.data?.basis,
-    countDefault: unpushedVsRemotes.data?.defaultBranch,
-    statusBranch: head?.name,
-  });
-  // The last agreeing unpushed view, advanced only on agreement so a
-  // mismatch window in which the log still starts at its head keeps serving
-  // the set both reads vouched for; null until the first agreement so a
-  // mismatched first render marks nothing. The render-time setState settles
-  // only because advanceSnapshot returns `prev` for an unchanged input.
-  const [snapshot, setSnapshot] =
-    useState<UnpushedSnapshot<CommitSummary> | null>(null);
-  const nextSnap = advanceSnapshot(
-    snapshot,
-    {
-      repo: repoPath,
-      branch: head?.name ?? null,
-      commits,
-      count: unpushedCount,
-      basis: unpushedBasis,
-      defaultBranch: unpushedDefault,
-      hasNextPage: log.hasNextPage,
-    },
-    agreed,
-  );
-  if (nextSnap !== snapshot) setSnapshot(nextSnap);
-  const view = resolveUnpushedView({
-    agreed,
-    repo: repoPath,
-    branch: head?.name ?? null,
-    statusOid: head?.oid,
-    liveAhead: head?.ahead ?? 0,
-    noUpstream,
-    commits,
-    count: unpushedCount,
-    basis: unpushedBasis,
-    defaultBranch: unpushedDefault,
-    hasNextPage: log.hasNextPage,
-    snapshot,
-  });
-  // The unpushed set (the top `view.count` of the gated view's HEAD-order
-  // commits), for squash gating. CommitList derives its own row markers from
-  // `view.commits` + `view.count`: this Set is fresh every render, and passing
-  // it would keep the compiler from caching the CommitList element.
-  const unpushedHashes = new Set(
-    view.commits.slice(0, view.count).map((c) => c.hash),
+    Boolean(lastCommit && head) &&
+      undoPushed !== "already-pushed" &&
+      !undoCommit.isPending &&
+      lastCommit?.hash === head?.oid,
   );
 
   // A failed read never stands in for an answer: "No commits yet" and "No
@@ -1272,6 +1544,21 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     setSelected(new Set(visibleCommits.slice(a, b + 1).map((c) => c.hash)));
   }
 
+  // Shift extends from the anchor, else from the row the highlight rule paints
+  // while nothing is multi-selected (the store's commit, which a rewrite moves
+  // onto its new id).
+  const rangeFrom = () =>
+    visibleCommits.findIndex(
+      (c) =>
+        c.hash ===
+        (anchorHash ?? (selected.size === 0 ? selectedCommitHash : null)),
+    );
+  // A range the fallback started keeps its row as the anchor, so the next Shift
+  // step extends the range instead of collapsing it to one row.
+  const pinFallbackAnchor = (from: number) => {
+    if (anchorHash === null) setAnchorHash(visibleCommits[from].hash);
+  };
+
   function onRowClick(e: React.MouseEvent, index: number, hash: string) {
     // Keep the diff panel on the clicked commit regardless of modifiers.
     selectCommit(hash);
@@ -1281,9 +1568,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       setAnchorHash(null);
       return;
     }
-    const from = visibleCommits.findIndex((c) => c.hash === anchorHash);
+    const from = rangeFrom();
     if (e.shiftKey && from !== -1) {
       selectRange(from, index);
+      pinFallbackAnchor(from);
     } else if (e.ctrlKey || e.metaKey) {
       const next = new Set(selected);
       if (next.has(hash)) {
@@ -1314,7 +1602,8 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     }
   }
 
-  // Arrow keys walk the history selection; Shift extends it from the anchor.
+  // Arrow keys walk the history selection; Shift extends it from the anchor,
+  // else the highlighted row.
   const onListKeyDown = listKeyboardNav({
     items: visibleCommits,
     activeIndex: visibleCommits.findIndex((c) => c.hash === selectedCommitHash),
@@ -1322,9 +1611,10 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     rowAttr: "data-hash",
     onActivate: (commit, to, shift) => {
       selectCommit(commit.hash);
-      const from = visibleCommits.findIndex((c) => c.hash === anchorHash);
+      const from = rangeFrom();
       if (shift && from !== -1) {
         selectRange(from, to);
+        pinFallbackAnchor(from);
       } else {
         setSelected(new Set([commit.hash]));
         setAnchorHash(commit.hash);
@@ -1344,17 +1634,6 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       .reverse();
   }
 
-  // Hold Squash, Edit history and Cherry-pick to branch while a merge/rebase/
-  // cherry-pick/revert is mid-flight — a new rebase or pick would clobber the
-  // in-flight one's state (the banner drives it). The backend refuses too;
-  // this just keeps the actions from looking live.
-  const opInProgress = Boolean(
-    opState.data?.merging ||
-      opState.data?.rebasing ||
-      opState.data?.cherryPicking ||
-      opState.data?.reverting,
-  );
-
   const { canSquash, hold: squashHold } = squashGate({
     selectedIndices,
     commits,
@@ -1363,14 +1642,6 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     agreed,
     opInProgress,
   });
-  // A no-upstream count read that failed won't agree by waiting, so the hold
-  // names it rather than "refreshing" indefinitely, and keeps naming it through
-  // the retry each status poll fires.
-  const countUnchecked =
-    noUpstream && failedSinceLastSuccess(unpushedVsRemotes);
-  const refreshingHint = countUnchecked
-    ? UNPUSHED_UNCHECKED_HINT
-    : HISTORY_REFRESHING_HINT;
   const squashHints: Record<SquashHold, string> = {
     ...SQUASH_HOLD_HINT,
     refreshing: refreshingHint,
@@ -1405,14 +1676,6 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
     });
   }
 
-  // Edit history: the top unpushed commits (capped), needing a base below them.
-  // Merge commits can't be replayed, so the range stops at the first one. One
-  // editable commit is enough (you can reword or drop a single commit).
-  const { editLen, editCommits, editBase } = deriveEditRange(
-    view.commits,
-    view.count,
-    view.hasNextPage,
-  );
   // Waits for agreement like squash: a mismatch may serve a set HEAD has
   // already moved past.
   const editHold = editHistoryHold({
@@ -1628,6 +1891,17 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       if (commit.hash === head?.oid) return "refreshing";
       return "not-latest";
     })();
+    // A pushed HEAD routes to its dialog, which warns; only other rows read
+    // "already pushed".
+    const editDatesRow = editDatesRouteOf(commit.hash);
+    const editDatesHints: Record<EditDatesHold, string> = {
+      op: OP_IN_PROGRESS_HINT,
+      unresolved: RESOLVE_CONFLICTS_HINT,
+      refreshing: refreshingHint,
+      "head-sync": HISTORY_REFRESHING_HINT,
+      pushed: ALREADY_PUSHED_HINT,
+      "out-of-range": EDIT_DATES_OUT_OF_RANGE_HINT,
+    };
     // In precedence order. A row that left the loaded log under the open menu
     // waits like a trailing log does; "already pushed" reads a loaded status
     // only (with no status, isHead is false and an earlier arm answers).
@@ -1643,10 +1917,11 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       // cherry-pick, revert or merge ahead of its other holds, the order the
       // backend refuses in.
       if (undoMidOp) return undoMidOp;
+      if (undoUnresolved) return "unresolved";
       if (isHead && headIsRoot && !rootKnown && !recordsParent.isError)
         return "checking-parent";
       if (undoCommit.isPending) return "undoing";
-      if (!canUndo) return "already-pushed";
+      if (!canUndo) return undoPushed ?? "already-pushed";
       if (isHead && detachedRoot) return "detached-root";
       if (shallowBoundary) return "shallow-boundary";
       if (
@@ -1678,8 +1953,17 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
         </ContextMenuItem>
         <ContextMenuItem
           className={MENU_HELD_ROW_CLASS}
+          disabled={editDatesRow.kind === "held"}
+          onClick={() => openEditDates(commit.hash)}
+        >
+          Edit dates…
+          {editDatesRow.kind === "held" && editDatesHints[editDatesRow.hold]}
+        </ContextMenuItem>
+        <ContextMenuItem
+          className={MENU_HELD_ROW_CLASS}
           disabled={
             undoMidOp !== null ||
+            undoUnresolved ||
             !isHead ||
             !canUndo ||
             undoCommit.isPending ||
@@ -2089,6 +2373,7 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
           repoPath={repoPath}
           base={editBase}
           commits={editCommits}
+          initialDatesFor={editHistoryOpen.datesFor}
           emptyNote={editHold ? editHistoryEmptyNotes[editHold] : ""}
           open
           onOpenChange={(o) => {
@@ -2105,6 +2390,38 @@ export function HistoryPanel({ repoPath }: { repoPath: string }) {
       )}
 
       <AmendForcePushDialog {...forcePushDialog} />
+      <EditDatesDialog
+        key={`edit-dates:${repoPath}`}
+        repoPath={repoPath}
+        target={editDates}
+        adoptSelection
+        onClose={() => {
+          setEditDates((t) => (t === editDates ? null : t));
+        }}
+        landFocus={() => {
+          const want = landDatesRow.current;
+          const row =
+            want === null || want.repo !== repoPath
+              ? null
+              : datesRowEl(want.hash);
+          if (row !== null) landDatesRow.current = null;
+          return row;
+        }}
+        onDatesChanged={(oldHash, newHash, closed) => {
+          // The old id is gone: the panel's own selection keeps no trace of it.
+          if (useUiStore.getState().repoPath !== repoPath) return;
+          landDatesRow.current = closed
+            ? { repo: repoPath, hash: newHash }
+            : null;
+          setSelected((s) => {
+            if (!s.has(oldHash)) return s;
+            const next = new Set(s);
+            next.delete(oldHash);
+            return next;
+          });
+          setAnchorHash((a) => (a === oldHash ? null : a));
+        }}
+      />
 
       {/* Keyed so a switch remounts these six closed (a deferred exit animation
           would play over the new repo); their session-scoped closes keep a
