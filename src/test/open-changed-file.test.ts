@@ -603,10 +603,10 @@ describe("submodule rows", () => {
     ).toBe("folder");
   });
 
-  it("fileMenuOpens hints the submodule item", () => {
+  it("fileMenuOpens hints the submodule item and offers no file opens", () => {
     expect(fileMenuOpens({ kind: "submodule", relPath: "vendor/sub" })).toEqual(
       {
-        showFileOpens: true,
+        showFileOpens: false,
         hintOn: "submodule",
       },
     );

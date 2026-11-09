@@ -318,8 +318,8 @@ commit your repo records or to the tip of the branch each one tracks
 tracked branch, and open one as its own repository. Adding, removing, and
 editing stage the change for you to commit, and the clone dialog can bring
 every submodule down with the repo. A changed submodule is tagged in Changes
-with what changed, and selecting it lists the commits between the recorded and
-checked-out commit and the uncommitted files inside, with **Open submodule**
+with what changed; selecting it lists the commits the submodule moved across,
+its unstaged row lists the uncommitted files inside, and **Open submodule** is
 one click away.
 
 ### Syncing and conflicts

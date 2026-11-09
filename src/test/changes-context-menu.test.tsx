@@ -1173,7 +1173,7 @@ describe("file menu: submodule rows", () => {
     vi.mocked(openWithDefault).mockClear();
   });
 
-  it("SM1: the hint sits on Open submodule, which opens the row's path", async () => {
+  it("SM1: the hint sits on Open submodule, which opens the row's path; no file opens", async () => {
     for (const settings of [EDITOR_SET, {}]) {
       const { user, menu } = await openMenu({
         target: subRow("modified"),
@@ -1186,9 +1186,10 @@ describe("file menu: submodule rows", () => {
         labels(menu).indexOf(open.textContent ?? ""),
       );
       expect(tail[1]).toBe("Show in Explorer");
-      expect(item(menu, "Open with default program")).toBeInTheDocument();
-      if (settings === EDITOR_SET)
-        expect(item(menu, "Open in VS Code")).toBeInTheDocument();
+      // A folder row never launches an editor, configured or not.
+      expect(labels(menu).filter((l) => OPEN_ITEM.test(l))).toEqual([]);
+      expect(within(menu).queryByText("Open in VS Code")).toBeNull();
+      expect(within(menu).queryByText("Open with default program")).toBeNull();
       await user.click(open);
       expect(actions.openSubmodule).toHaveBeenCalledExactlyOnceWith(
         "vendor/sub",

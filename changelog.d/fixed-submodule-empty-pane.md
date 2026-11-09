@@ -1,1 +1,2 @@
-- Selecting a submodule in Changes shows the uncommitted and untracked files inside it.
+- Selecting a changed submodule's unstaged row in Changes lists the uncommitted
+  files inside it.

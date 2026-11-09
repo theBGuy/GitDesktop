@@ -405,8 +405,9 @@ export function ChangesContextMenuItems({
   // The path stash leaves this file in place, so stashing it alone would stash
   // nothing.
   const stashBlocked = staysOutOfStash(entry);
-  // The double-click's decision: a worktree deletion offers no Open item, and
-  // the item a double-click runs carries the hint.
+  // The double-click's decision: a worktree deletion, a submodule row and an
+  // untracked folder row offer no file Open items, and the item a double-click
+  // runs carries the hint.
   const openInput = { entry, repoPath, editorPath, windows: isWindows };
   const action = openChangedFileAction(openInput);
   const { showFileOpens, hintOn } = fileMenuOpens(action);

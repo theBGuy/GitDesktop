@@ -2056,17 +2056,30 @@ export function DiffContent({
     () => (dataText === undefined ? null : classifyHeaderOnlyDiff(dataText)),
     [dataText],
   );
-  // The same path check as the toolbar's: another file's retained answer never
-  // shows this state under the path row of the file loading.
-  const whitespaceOnly =
+  const hideWhitespace = useHideWhitespace();
+  // A host keeping previous data retains the other mode's answer through the
+  // refetch after a flip, and it keeps painting: the two answers differ only in
+  // whitespace lines, so a flip never blanks a read-only host. The one stale
+  // case is a hunkless whitespace-only `-w` answer once the mode is off: its
+  // empty text would claim "No changes to show".
+  const modeStale =
+    whitespaceControl &&
+    !hideWhitespace &&
     data !== undefined &&
-    data.filePath === filePath &&
+    data.whitespaceOnly === true;
+  // Another file's retained answer, or the stale one above: none of it paints.
+  const retainedOther =
+    data !== undefined && (data.filePath !== filePath || modeStale);
+  const whitespaceOnly =
+    hideWhitespace &&
+    data !== undefined &&
+    !retainedOther &&
     data.whitespaceOnly === true;
   // A failed refresh keeps the diff, and its toolbar, on screen.
   const showsToolbar =
     !isPending &&
     data !== undefined &&
-    data.filePath === filePath &&
+    !retainedOther &&
     !data.isBinary &&
     !emptyDiff &&
     headerOnly === null &&
@@ -2176,7 +2189,6 @@ export function DiffContent({
   );
   // Every whitespace flip this pane owns goes through here: an open line
   // composer would unmount with the rebuilt view and lose its text.
-  const hideWhitespace = useHideWhitespace();
   const setHideWhitespaceRaw = useSetHideWhitespace();
   function flipWhitespace(next: boolean) {
     if (scrollerRef.current?.querySelector("[data-diff-line-widget]")) {
@@ -2197,10 +2209,7 @@ export function DiffContent({
   // final. The children report their own gates: ImagePanes its reads and image
   // decodes, MarkdownDocPreview its file read, RenderedDiff its inputs and
   // first row.
-  useReportPaneSettled(
-    !(isPending && !isPaused) &&
-      !(data !== undefined && data.filePath !== filePath),
-  );
+  useReportPaneSettled(!(isPending && !isPaused) && !retainedOther);
 
   // ~200px of unshrinkable text, so it shows only where the pane has the room;
   // the sr-only twin carries it at every width, and `aria-hidden` on the
@@ -2303,7 +2312,9 @@ export function DiffContent({
   // Every backend diff command echoes the requested path back verbatim, so a
   // mismatch means `data` is a stale placeholder from the previously selected
   // file's key. Re-scope this if the backend ever normalizes the path it returns.
-  if (data && data.filePath !== filePath) return shell(landing(null, true));
+  // A retained whitespace-only answer with the mode off (`modeStale`) lands
+  // here too.
+  if (retainedOther) return shell(landing(null, true));
   // Only a failure with nothing to show replaces the body: react-query keeps the
   // last good diff beside `isError`, and that stays up under a notice.
   if (!data) {

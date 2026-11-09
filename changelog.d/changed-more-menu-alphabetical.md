@@ -1,2 +1,2 @@
-- The **More** tab menu lists its tabs alphabetically, each with its keyboard shortcut
-  beside it.
+- The **More** tab menu lists its tabs alphabetically, each showing its keyboard
+  shortcut when it has one.

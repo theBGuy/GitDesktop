@@ -150,10 +150,17 @@ function changes(hide: boolean, answer: (iw: boolean) => FileDiff) {
   return { client, ...utils };
 }
 
+/** An answer stamped the way readViewDiff stamps one read under `hide`. */
+const stamped = (diff: FileDiff, hide: boolean): FileDiff => ({
+  ...diff,
+  whitespaceHidden: hide,
+});
+
 function SurfaceHarness({ keep = false }: { keep?: boolean }) {
+  const hide = stored.diffHideWhitespace === true;
   const diff = useQuery({
-    queryKey: ["surface", stored.diffHideWhitespace],
-    queryFn: async () => diffOf(TEXT),
+    queryKey: ["surface", hide],
+    queryFn: async () => stamped(diffOf(TEXT), hide),
     placeholderData: keep ? (prev) => prev : undefined,
   });
   return <DiffSurface filePath="x" diff={diff} />;
@@ -399,6 +406,80 @@ describe("the whitespace-only state", () => {
       screen.getByRole("button", { name: "Show whitespace" }),
     ).toBeTruthy();
   });
+  it("a retained whitespace-only -w answer with the mode off lands like another file's", () => {
+    const { container } = render(
+      <DiffContent
+        filePath="x"
+        data={only}
+        isPending={false}
+        isError={false}
+        whitespaceControl
+      />,
+      { wrapper: wrap(newClient(false)) },
+    );
+    expect(screen.queryByText(WHITESPACE_ONLY_MESSAGE)).toBeNull();
+    expect(screen.queryByText("No changes to show")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Show whitespace" }),
+    ).toBeNull();
+    expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
+  });
+  it("a retained plain answer keeps painting with the mode on", () => {
+    const { container } = render(
+      <DiffContent
+        filePath="x"
+        data={stamped(diffOf(TEXT), false)}
+        isPending={false}
+        isError={false}
+        whitespaceControl
+      />,
+      { wrapper: wrap(newClient(true)) },
+    );
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(container.textContent).toContain("target");
+  });
+  it("a retained -w answer with hunks keeps painting with the mode off", () => {
+    const { container } = render(
+      <DiffContent
+        filePath="x"
+        data={stamped(diffOf(TEXT), true)}
+        isPending={false}
+        isError={false}
+        whitespaceControl
+      />,
+      { wrapper: wrap(newClient(false)) },
+    );
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(container.textContent).toContain("target");
+  });
+  it("a whitespace host's UNSTAMPED answer renders normally with the mode on", () => {
+    const { container } = render(
+      <DiffContent
+        filePath="x"
+        data={diffOf(TEXT)}
+        isPending={false}
+        isError={false}
+        whitespaceControl
+      />,
+      { wrapper: wrap(newClient(true)) },
+    );
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(container.textContent).toContain("target");
+  });
+  // Whitespace-only with the mode off, so only the control gate keeps it from
+  // reading as stale.
+  it("a host without the control never lands a whitespace-only answer with the mode off", () => {
+    const { container } = render(
+      <DiffContent
+        filePath="x"
+        data={only}
+        isPending={false}
+        isError={false}
+      />,
+      { wrapper: wrap(newClient(false)) },
+    );
+    expect(container.querySelector('[aria-busy="true"]')).toBeNull();
+  });
 });
 
 describe("the announcement", () => {
@@ -615,6 +696,72 @@ describe("the setting", () => {
         ?.diffHideWhitespace,
     ).toBe(false);
   });
+
+  /** Holds each write until the test settles it, in flip order. */
+  function heldWrites() {
+    const held: {
+      resolve: (s: AppSettings) => void;
+      reject: (e: Error) => void;
+    }[] = [];
+    vi.mocked(saveSettingsPatch).mockImplementation(
+      () =>
+        new Promise<AppSettings>((resolve, reject) => {
+          held.push({ resolve, reject });
+        }),
+    );
+    return held;
+  }
+
+  const cached = (client: QueryClient) =>
+    client.getQueryData<AppSettings>(settingsKeys.settings)?.diffHideWhitespace;
+
+  it("the setter: two failing flips land the settled value without a refetch", async () => {
+    const client = newClient(false);
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const held = heldWrites();
+    const { result } = renderHook(() => useSetHideWhitespace(), {
+      wrapper: wrap(client),
+    });
+    result.current(true);
+    result.current(false);
+    await waitFor(() => expect(held).toHaveLength(2));
+    expect(cached(client)).toBe(false);
+
+    held[0]?.reject(new Error("first"));
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    // A stale rejection restores nothing.
+    expect(cached(client)).toBe(false);
+
+    held[1]?.reject(new Error("second"));
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(2));
+    // The settled value (disk's), never the first flip's optimistic `true`.
+    expect(cached(client)).toBe(false);
+    expect(
+      invalidate.mock.calls.some(
+        ([filters]) =>
+          JSON.stringify(filters?.queryKey) ===
+          JSON.stringify(settingsKeys.settings),
+      ),
+    ).toBe(false);
+  });
+
+  it("the setter: a successful write advances the settled value", async () => {
+    const client = newClient(false);
+    const held = heldWrites();
+    const { result } = renderHook(() => useSetHideWhitespace(), {
+      wrapper: wrap(client),
+    });
+    result.current(true);
+    result.current(false);
+    await waitFor(() => expect(held).toHaveLength(2));
+
+    held[0]?.resolve({ ...stored, diffHideWhitespace: true });
+    // The settings chain lands writes in flip order: drain the success first.
+    await new Promise((r) => setTimeout(r, 0));
+    held[1]?.reject(new Error("second"));
+    await waitFor(() => expect(toastError).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(cached(client)).toBe(true));
+  });
 });
 
 const viewOptions = () => screen.getByRole("button", { name: /View options/ });
@@ -702,7 +849,10 @@ describe("flipping on from the gear of a read-only host", () => {
       const client = newClient(false);
       if (seeded) client.setQueryData(["mode-surface", true], WS_ONLY);
       render(
-        <ModeHarness keep answer={(hide) => (hide ? WS_ONLY : diffOf(TEXT))} />,
+        <ModeHarness
+          keep
+          answer={(hide) => (hide ? WS_ONLY : stamped(diffOf(TEXT), false))}
+        />,
         { wrapper: wrap(client) },
       );
       await flipFromGear(user);
@@ -719,7 +869,10 @@ describe("flipping on from the gear of a read-only host", () => {
   it("without a placeholder, the toolbar's round trip keeps focus in the pane", async () => {
     const user = userEvent.setup();
     const { container } = render(
-      <ModeHarness keep={false} answer={() => diffOf(TEXT)} />,
+      <ModeHarness
+        keep={false}
+        answer={(hide) => stamped(diffOf(TEXT), hide)}
+      />,
       { wrapper: wrap(newClient(false)) },
     );
     await flipFromGear(user);

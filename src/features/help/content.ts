@@ -158,8 +158,9 @@ for a submodule that has never been checked out and **Update** for the rest.
 
 A submodule with changes appears in **Changes** tagged **Submodule**, with what changed
 where line counts sit on other rows: *commit changed*, *modified files*, *untracked files*.
-Selecting it lists the commits between the commit your repo records and the one checked
-out, and the uncommitted files inside, read-only. Staging the row records the commit the
+Selecting it lists the commits the submodule moved across (from the commit your repo
+records to the checked-out one, or to the staged one on the staged row); its unstaged row
+also lists the uncommitted files inside, read-only. Staging the row records the commit the
 submodule points at. **Open submodule** (or a double-click on the row) opens it as its own
 repository, where you stage and commit what's inside.
 
@@ -499,9 +500,9 @@ the last list up, with a line above it saying it couldn't refresh.
 - Double-click a file to open it in your external editor (set in **Settings**), or in
   its default program when none is set. A renamed file opens under its new name. A file
   deleted from your working tree has nothing to open, and a short message says so. The
-  command palette's **Open file in external editor** opens the file you're viewing. The
+  command palette's **Open file in external editor** opens the file you're viewing. A
   file's {{secondaryclick}} menu marks the item a double-click runs, and leaves its Open
-  items out for a file deleted from your working tree. A submodule opens as its own
+  items out for a deletion you haven't staged yet. A submodule opens as its own
   repository instead, and an untracked folder shows in your file manager.
 - A changed submodule's row is tagged **Submodule**, and selecting it lists its commits
   and the files changed inside in place of a diff (see *Submodules*). A submodule whose
@@ -653,11 +654,12 @@ the last list up, with a line above it saying it couldn't refresh.
   widening the pane brings the split view back.
 - **Hide whitespace changes** — the gear in the diff toolbar hides changes that only
   touch spaces, tabs or line endings, so a re-indented file shows only the lines whose
-  content changed. It applies to every local diff (the working tree, commit details, a
-  file's history, branch compare, stashes and an agent session's changes) and stays on
-  until you turn it off; a dot on the gear marks it. While it is on, hunks and lines
-  can't be staged, unstaged or discarded from the Changes diff, and the note above the
-  diff offers **Show whitespace**; whole files still stage from their rows. A file whose
+  content changed; an added or removed blank line still shows. It applies to every
+  local diff (the working tree, commit details, a file's history, branch compare,
+  stashes and an agent session's changes) and stays on until you turn it off; a dot
+  on the gear marks it. While it is on, hunks and lines can't be staged, unstaged or
+  discarded from the Changes diff, and the note above the diff offers **Show
+  whitespace**; whole files still stage from their rows. A file whose
   only changes are whitespace says so. The line counts in file lists keep counting
   whitespace changes. While a diff is on screen, *Show or hide whitespace changes* in
   the command palette (palette-only by default — bind a key in **Settings → Keyboard**)

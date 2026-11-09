@@ -107,8 +107,10 @@ export function fileMenuOpens(action: OpenChangedFileAction): {
     case "editor":
     case "default":
       return { showFileOpens: true, hintOn: action.kind };
+    // A folder row never launches an editor: Open submodule is its open item
+    // (Show in Explorer stays).
     case "submodule":
-      return { showFileOpens: true, hintOn: "submodule" };
+      return { showFileOpens: false, hintOn: "submodule" };
     default:
       return action satisfies never;
   }
@@ -133,7 +135,7 @@ export function hintSlots(
 }
 
 /** Probe-class opens in flight, keyed `${repoPath}\0${relPath}`: a repeat while
- *  one is pending is dropped, so a row never launches twice. */
+ *  one is pending is dropped, so a probing row never launches twice. */
 const probing = new Set<string>();
 
 function launch(
@@ -144,8 +146,9 @@ function launch(
   else void openWithDefault(action.absolutePath).catch(toastError);
 }
 
-/** Carries out an open. Its only effects are a toast or an external launch:
- *  it touches no selection, focus or store state, whenever it settles. */
+/** Carries out an open. Every arm but one only toasts or launches, touching no
+ *  selection, focus or store state; the exception is `submodule`, which hands
+ *  off to `openSubmodule` and so can switch repositories. */
 export async function runOpenChangedFile(
   action: OpenChangedFileAction,
   repoPath: string,

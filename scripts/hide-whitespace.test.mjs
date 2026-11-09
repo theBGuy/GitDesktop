@@ -104,7 +104,7 @@ test("hasHunk spots a hunk header at the start or after a newline only", () => {
   assert.equal(hasHunk(" @@ not a header"), false);
 });
 
-test("readViewDiff: five cases, with the reads each one makes", async () => {
+test("readViewDiff: six cases, with the reads each one makes", async () => {
   const run = async (hide, answers) => {
     const calls = [];
     const out = await readViewDiff(hide, async (iw) => {
@@ -117,9 +117,16 @@ test("readViewDiff: five cases, with the reads each one makes", async () => {
   const empty = { text: "", isBinary: false };
   const binary = { text: "Binary files differ\n", isBinary: true };
 
+  // The plain read is stamped too, so an unstamped answer never came through
+  // here; it never claims whitespace-only.
   let r = await run(false, { false: hunk });
   assert.deepEqual(r.calls, [false]);
-  assert.deepEqual(r.out, hunk);
+  assert.deepEqual(r.out, { ...hunk, whitespaceHidden: false });
+  assert.equal("whitespaceOnly" in r.out, false);
+
+  r = await run(false, { false: empty });
+  assert.deepEqual(r.calls, [false]);
+  assert.deepEqual(r.out, { ...empty, whitespaceHidden: false });
 
   r = await run(true, { true: hunk });
   assert.deepEqual(r.calls, [true]);
@@ -194,6 +201,9 @@ test("every whitespace copy table is total and non-empty", () => {
 
 const BELT =
   "if (whitespaceWritesOff(liveDiffRef.current) || hideWhitespaceRef.current)";
+// The belt's body: the toast and the `return` that makes it a refusal.
+const REFUSAL = "toast.info(WHITESPACE_REFUSAL[kind]);\n      return;\n    }";
+const TOAST_ONLY = "toast.info(WHITESPACE_REFUSAL[kind]);\n    }";
 
 function pinBelts(text) {
   const run = bodyOf(text, "async function runWrite(");
@@ -211,7 +221,7 @@ function pinBelts(text) {
     [
       "if (writingRef.current) return;",
       BELT,
-      "toast.info(WHITESPACE_REFUSAL[kind]);",
+      REFUSAL,
       "writingRef.current = true;",
       "setWrite(",
     ],
@@ -223,7 +233,7 @@ function pinBelts(text) {
     [
       "if (writingRef.current) return;",
       BELT,
-      "toast.info(WHITESPACE_REFUSAL[kind]);",
+      REFUSAL,
       'if (forText !== (diff.data?.text ?? "")) {',
       "setDiscard(",
     ],
@@ -242,6 +252,15 @@ test("the fire-time belts refuse before any write", () => {
     text.replace(run, () => run.replace(BELT, "if (false)")),
     "runWrite's belt removed",
   );
+  for (const anchor of ["async function runWrite(", "function onHunkAction("]) {
+    const body = bodyOf(text, anchor);
+    once(body, REFUSAL, `${anchor} refusal`);
+    red(
+      pinBelts,
+      text.replace(body, () => body.replace(REFUSAL, () => TOAST_ONLY)),
+      `${anchor} refusal's return removed`,
+    );
+  }
   const hunk = bodyOf(text, "function onHunkAction(");
   const belt = `    // Ahead of the stale-text check, so a press after a flip names the reason.\n    ${BELT} {\n      toast.info(WHITESPACE_REFUSAL[kind]);\n      return;\n    }\n`;
   const stale = `    if (forText !== (diff.data?.text ?? "")) {\n      toast.info(STALE_HUNK_ACTION[kind]);\n      return;\n    }\n`;

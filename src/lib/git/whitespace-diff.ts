@@ -6,8 +6,9 @@ export function hasHunk(text: string): boolean {
 }
 
 /**
- * Reads a view diff in the whitespace mode and stamps the answer with it, so
- * every gate and arm follows the diff on screen rather than the setting. A
+ * Reads a view diff in the whitespace mode and stamps the answer with it on
+ * both reads, so every gate and arm follows the diff on screen rather than the
+ * setting, and an unstamped answer is one that never came through here. A
  * hunkless `-w` answer gets a second, plain read: only that tells a file whose
  * changes were all whitespace from one with nothing to show.
  */
@@ -17,7 +18,7 @@ export async function readViewDiff<
   hide: boolean,
   read: (ignoreWhitespace: boolean) => Promise<T>,
 ): Promise<T & { whitespaceHidden?: boolean; whitespaceOnly?: boolean }> {
-  if (!hide) return read(false);
+  if (!hide) return { ...(await read(false)), whitespaceHidden: false };
   const hidden = await read(true);
   if (hidden.isBinary || hasHunk(hidden.text))
     return { ...hidden, whitespaceHidden: true };

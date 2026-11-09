@@ -431,7 +431,8 @@ function wiringProblems(panel, menu) {
     problems.push("discardBlockedCount isn't the shown withheld rows");
   if (!/-\s*\(folderCounts\?\.discardBlockedCount \?\? 0\);/.test(m))
     problems.push("the folder menu doesn't subtract discardBlockedCount");
-  // (5) one opener, handed to the double-click/palette executor and the menu.
+  // (5) ChangesPanel's one opener, handed to its double-click executor and the
+  // menu; DiffViewer's palette twin is pinned by open-changed-file-wiring.
   if (
     [...p.matchAll(/\buseOpenSubmoduleAsRepo\(/g)].length !== 1 ||
     !/\bconst openSubmodule = useOpenSubmoduleAsRepo\(repoPath\);/.test(p)

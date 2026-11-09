@@ -760,7 +760,7 @@ pub async fn git_submodule_changes(
     git_submodule_changes_core(&repo_path, &path, staged).await
 }
 
-/// Only a refused path and a parent read that could not run are errors; every
+/// Only a refused path and a failed parent gitlink read are errors; every
 /// checkout state, an unreadable submodule and an unwalkable range are data.
 pub(crate) async fn git_submodule_changes_core(
     repo_path: &str,
@@ -851,9 +851,10 @@ pub(crate) async fn git_submodule_changes_core(
     Ok(changes)
 }
 
-/// The checkout state from an lstat of the gitlink path: never followed, since git
-/// run through a link reads the link's target, a repository outside the parent.
-/// Only NotFound is missing; any other failure is unreadable with its message.
+/// The checkout state from an lstat of the gitlink path's final component (an
+/// intermediate junction is still traversed): git run through a link reads the
+/// link's target, a repository outside the parent. Only NotFound is missing; any
+/// other failure is unreadable with its message.
 fn checkout_from_probe(
     probe: std::io::Result<std::fs::Metadata>,
     has_git: impl FnOnce() -> bool,
@@ -884,17 +885,16 @@ fn submodule_status_args(staged: bool) -> [&'static str; 5] {
 }
 
 /// The index's stage-0 gitlink at exactly `path`; a pathspec naming a directory also
-/// lists the entries under it.
+/// lists the entries under it. A failed read (no repository, an unreadable index) is
+/// an Err carrying git's stderr, never None, which would read as "no gitlink here".
 async fn index_gitlink(repo_path: &str, path: &str, spec: &str) -> AppResult<Option<String>> {
     let out = run_git_raw(
         Some(repo_path),
         &["ls-files", "-s", "-z", "--", spec],
         DEFAULT_TIMEOUT,
     )
-    .await?;
-    if out.code != 0 {
-        return Ok(None);
-    }
+    .await?
+    .exit_verdict()?;
     // `<mode> <sha> <stage>\t<path>`
     Ok(out.stdout_lossy().split('\0').find_map(|record| {
         let (meta, rec_path) = record.split_once('\t')?;
@@ -904,17 +904,20 @@ async fn index_gitlink(repo_path: &str, path: &str, spec: &str) -> AppResult<Opt
     }))
 }
 
-/// HEAD's gitlink at exactly `path`; None on an unborn HEAD (exit 128).
+/// HEAD's gitlink at exactly `path`. None for a HEAD tree without one, or when the
+/// read failed and [`crate::git::history::unborn_head`] confirms HEAD is unborn; any
+/// other failure (a broken HEAD, no repository) is an Err, never a "before" of none.
+/// A broken HEAD errs on git 2.43+ only: older git reads it as unborn (Ok(None)).
 async fn head_gitlink(repo_path: &str, path: &str, spec: &str) -> AppResult<Option<String>> {
-    let out = run_git_raw(
-        Some(repo_path),
+    let Some(out) = crate::git::history::read_unless_unborn(
+        repo_path,
         &["ls-tree", "-z", "HEAD", "--", spec],
         DEFAULT_TIMEOUT,
     )
-    .await?;
-    if out.code != 0 {
+    .await?
+    else {
         return Ok(None);
-    }
+    };
     // `<mode> <type> <sha>\t<path>`
     Ok(out.stdout_lossy().split('\0').find_map(|record| {
         let (meta, rec_path) = record.split_once('\t')?;
@@ -1458,6 +1461,64 @@ mod tests {
         assert_eq!(c.checkout, SubmoduleCheckout::Missing);
         assert!(c.range_known);
         assert!(c.ahead.is_empty() && c.behind.is_empty());
+    }
+
+    /// Failed parent gitlink reads are errors, never a payload whose absent sha reads
+    /// as "the next commit adds/removes this submodule". The tested set: a folder that
+    /// is no repository, a garbage `.git/index`, and a branch ref holding garbage.
+    #[tokio::test]
+    async fn changes_errs_when_the_parent_is_not_a_repository() {
+        let dir = temp("changes-norepo");
+        let plain = dir.path().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        let plain = plain.to_string_lossy().into_owned();
+        for staged in [false, true] {
+            let result = git_submodule_changes_core(&plain, "libs/dep", staged).await;
+            assert!(
+                matches!(result, Err(AppError::Git { .. })),
+                "{staged}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn changes_errs_on_a_garbage_parent_index() {
+        let (_dir, host, _dep) = host_with_submodule("changes-badindex").await;
+        std::fs::write(Path::new(&host).join(".git/index"), b"not an index").unwrap();
+        for staged in [false, true] {
+            let result = git_submodule_changes_core(&host, "libs/dep", staged).await;
+            assert!(
+                matches!(result, Err(AppError::Git { .. })),
+                "{staged}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn changes_staged_side_errs_on_a_garbage_branch_ref() {
+        let (_dir, host, _dep) = host_with_submodule("changes-badhead").await;
+        std::fs::write(Path::new(&host).join(".git/refs/heads/main"), "garbage\n").unwrap();
+        // `show-ref --exists` arrived in git 2.43; older git reads this as unborn.
+        let exists = run_git_raw(
+            Some(&host),
+            &["show-ref", "--exists", "refs/heads/main"],
+            DEFAULT_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        if exists.code == 129 {
+            assert!(crate::git::history::unborn_head(&host).await.unwrap());
+            return;
+        }
+        let result = git_submodule_changes_core(&host, "libs/dep", true).await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            matches!(
+                crate::git::history::unborn_head(&host).await,
+                Err(AppError::Command(_))
+            ),
+            "the fixture must be a broken ref, not an unborn HEAD"
+        );
     }
 
     /// No checkout: no git runs in the folder, so the parent's own changes (which a
